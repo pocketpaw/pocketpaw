@@ -2129,7 +2129,60 @@ def _render_backend_summary(summary: dict | None) -> str:
     return f"configured — {base_url} (auth: {auth_type})"
 
 
-def _assemble_interaction(*, mcp: bool) -> str:
+# ---------------------------------------------------------------------------
+# Skill-pointer block — used when ``use_skill=True`` is passed to
+# ``_assemble_interaction``. This is the MVP path that replaces the
+# 17-tool LangChain edit surface with a single server-side merge
+# endpoint + a markdown skill the agent loads on demand.
+# ---------------------------------------------------------------------------
+
+_EDIT_SKILL_POINTER = """\
+<pocket-tools>
+You apply edits via a SINGLE server-side merge endpoint, not a granular
+tool surface. Before computing your patch, load the
+``pocketpaw-pocket-specialist`` skill (it's at
+``~/.claude/skills/pocketpaw-pocket-specialist/SKILL.md``) — it carries
+the rippleSpec shape reference, the four interactivity conventions
+(client-side push, value/label split, lowercase column ids,
+validate-push-clear-increment hygiene), and the exact ``curl``
+invocation for the merge endpoint.
+
+Two endpoints, no LangChain wrappers:
+
+  GET  /api/v1/pockets/<id>             read the existing pocket
+  POST /api/v1/pockets/<id>/spec/merge  apply a partial OR full spec
+
+Auth: the runtime sets ``POCKETPAW_WORKSPACE_ID`` and
+``POCKETPAW_USER_ID`` env vars on your subprocess. Use them with the
+``X-PocketPaw-Internal: true`` header — see the skill for the exact
+``curl`` lines. (If ``POCKETPAW_AUTH_COOKIE`` is set, that's the
+preferred path; the X-PocketPaw-Internal headers are the MVP fallback.)
+
+Hard rule: use ``{"merge": <partial>}`` whenever possible. Reach for
+``{"replace": <full spec>}`` only if you're rewriting more than ~50%
+of the existing spec. ``merge`` makes intent explicit and reduces the
+chance you silently drop something the user can see.
+
+The response shape:
+  {ok: true,  pocket_id, rippleSpec, warnings:[...]}   persisted
+  {ok: false, pocket_id, rippleSpec, warnings:[...]}   REJECTED — fix + retry
+
+Read the warnings array on every response. ``ok: false`` means the
+catalog or action-wiring gate blocked your spec — fix the field the
+warning names and retry. ``ok: true`` with warnings means the spec
+persisted but you should surface the warnings to the user.
+</pocket-tools>
+
+<edit-specialist-scope>
+You do NOT hold the granular set_node_prop / add_node / *_prop_array_item
+toolset. Every change goes through ONE merge call. The skill teaches
+you the conventions you'd otherwise forget — load it first, then
+compute the smallest merge patch that satisfies the intent.
+</edit-specialist-scope>
+"""
+
+
+def _assemble_interaction(*, mcp: bool, use_skill: bool = False) -> str:
     """Heavy interaction prompt — owned by the EDIT SPECIALIST. Contains
     the full mutation-strategy / design-rules block the specialist needs
     to perform granular edits. Not for the main chat agent.
@@ -2150,7 +2203,34 @@ def _assemble_interaction(*, mcp: bool) -> str:
     ``_WRITE_ACTIONS_EDIT_BLOCK`` is spliced in next (RFC 05 M2a) so the
     specialist knows it can author a ``rippleSpec.actions`` write-binding
     block via the ``set_action`` / ``remove_action`` ops, triggered by a
-    ``call_binding`` handler."""
+    ``call_binding`` handler.
+
+    When ``use_skill=True`` (2026-05-24 MVP — set via the
+    ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` env var by the runtime),
+    the prompt swaps the 17-tool catalog block AND the granular
+    mutation-strategy workflow block for a single pointer at the
+    ``pocketpaw-pocket-specialist`` bundled skill plus the new
+    ``POST /spec/merge`` endpoint. This is the path the captain is
+    A/B-testing against the LangChain surface; both coexist until the
+    skill path is proven on real chat traffic.
+    """
+    if use_skill:
+        parts = [
+            _SCOPE_BLOCK,
+            _CANVAS_BLOCK,
+            _EDIT_SKILL_POINTER,
+            _INTERACTIVE_DEFAULT_BLOCK,
+            _STATE_SOURCES_BLOCK,
+            # Live-data + write-action blocks stay — they describe the
+            # *content* of the spec, not the tool surface. The skill
+            # tells the agent how to emit them; these blocks tell the
+            # agent WHEN to.
+            _LIVE_DATA_SOURCES_EDIT_BLOCK,
+            _WRITE_ACTIONS_EDIT_BLOCK,
+            RIPPLE_DESIGN_RULES,
+            _CURRENT_POCKET_BLOCK_TEMPLATE,
+        ]
+        return "\n".join(parts) + "\n"
     parts = [
         _SCOPE_BLOCK,
         _CANVAS_BLOCK,
@@ -2324,6 +2404,12 @@ POCKET_INTERACTION_PROMPT_CLI = _assemble_interaction_main(mcp=False)
 # The edit specialist's prompt — heavy mutation rules + design block.
 POCKET_EDIT_SPECIALIST_PROMPT_MCP = _assemble_interaction(mcp=True)
 POCKET_EDIT_SPECIALIST_PROMPT_CLI = _assemble_interaction(mcp=False)
+# Skill-based variant — replaces the 17-tool catalog + granular workflow
+# block with a pointer at the ``pocketpaw-pocket-specialist`` skill plus
+# the new ``POST /spec/merge`` endpoint. Selected at runtime when the
+# ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` env var is truthy.
+POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL = _assemble_interaction(mcp=True, use_skill=True)
+POCKET_EDIT_SPECIALIST_PROMPT_CLI_SKILL = _assemble_interaction(mcp=False, use_skill=True)
 POCKET_SPECIALIST_PROMPT = _assemble_specialist()
 
 # Backward-compat aliases — older callers still import these names.
