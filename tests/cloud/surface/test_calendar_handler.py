@@ -1,21 +1,30 @@
 # tests/cloud/surface/test_calendar_handler.py — Calendar surface handler.
 #
-# Created: 2026-05-24 (feat/calendar-entity-surface, #1214) — three
-# guarantees:
-#   1. Happy path     — three mocked events render into a snapshot
-#                       block with one line per event; surface tag
-#                       always present.
-#   2. Empty path     — when the service returns no events, the handler
-#                       falls back to the Composio hint so the agent
-#                       still knows what tool to reach for.
-#   3. Failure path   — when the service raises, the handler still
-#                       returns a usable preamble (surface tag + hint),
-#                       never propagates the exception to the chat
-#                       router.
+# Updated: 2026-05-24 (feat/calendar-entity-surface, #1218) — split the
+# single empty test into two so the three rendering states (events
+# present / Composio on + empty / Composio off) are each pinned. Now
+# four guarantees:
+#   1. Happy path        — three mocked events render into a snapshot
+#                           block with one line per event; surface tag
+#                           always present.
+#   2. Empty + enabled   — when ``list_upcoming`` returns ``[]`` AND
+#                           Composio is enabled, the handler renders
+#                           the ``(no upcoming events)`` snapshot
+#                           rather than the hint — the agent needs to
+#                           tell "genuinely empty" apart from "no
+#                           integration".
+#   3. Empty + disabled  — when Composio is off, the hint stays —
+#                           agent learns the action name so it can
+#                           guide the user to connect.
+#   4. Failure path      — when the service raises, the handler still
+#                           returns a usable preamble (surface tag +
+#                           hint), never propagates the exception to
+#                           the chat router.
 #
-# The handler is mocked at its single dependency
-# (``calendar.service.list_upcoming``) so these tests don't need the
-# DB or any Composio plumbing. The service has its own test file.
+# The handler is mocked at its single hot dependency
+# (``calendar.service.list_upcoming``). For branches 2 and 3 we also
+# stub ``composio_service.is_enabled`` so the test doesn't depend on
+# environment Settings.
 
 from __future__ import annotations
 
@@ -111,30 +120,56 @@ async def test_handler_renders_time_of_day_for_timed_events(
 # ---------------------------------------------------------------------------
 
 
-async def test_handler_renders_hint_when_no_events(
+async def test_handler_renders_empty_snapshot_when_composio_enabled_but_no_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the service returns ``[]`` (Composio disabled, calendar
-    not connected, or just an empty calendar), the handler renders
-    the Composio hint so the agent still knows what tool to reach for.
-
-    Per the brief, the empty branch shows the hint — distinct from a
-    separate "no upcoming events" string. The hint covers both empty
-    and unavailable states with one message.
-    """
+    """Service returns ``[]`` AND Composio is on — the calendar is
+    genuinely empty. Render the ``(no upcoming events)`` snapshot so
+    the agent doesn't waste a turn telling the user to connect a
+    calendar that's already connected."""
 
     async def _fake(workspace_id: str, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
         return []
 
     from pocketpaw_ee.cloud.calendar import service as calendar_service
+    from pocketpaw_ee.cloud.composio import service as composio_service
 
     monkeypatch.setattr(calendar_service, "list_upcoming", _fake)
+    monkeypatch.setattr(composio_service, "is_enabled", lambda *a, **kw: True)
+
+    preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
+
+    assert '<surface kind="calendar"' in preamble
+    assert "(no upcoming events)" in preamble
+    # The hint is suppressed — Composio is wired up, no need to nudge.
+    assert "GOOGLECALENDAR_LIST_EVENTS" not in preamble
+
+
+async def test_handler_renders_hint_when_composio_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Service returns ``[]`` because Composio is off — the agent
+    needs the action-name hint so it can guide the user toward
+    connecting an integration. Distinct from the genuinely-empty
+    case above."""
+
+    async def _fake(workspace_id: str, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        return []
+
+    from pocketpaw_ee.cloud.calendar import service as calendar_service
+    from pocketpaw_ee.cloud.composio import service as composio_service
+
+    monkeypatch.setattr(calendar_service, "list_upcoming", _fake)
+    monkeypatch.setattr(composio_service, "is_enabled", lambda *a, **kw: False)
 
     preamble = await calendar_handler.build_preamble("ws_acme", "user_test", SurfaceMeta())
 
     assert '<surface kind="calendar"' in preamble
     assert "GOOGLECALENDAR_LIST_EVENTS" in preamble
     assert "Composio" in preamble
+    # The empty-snapshot string belongs to the enabled branch — confirm
+    # we didn't accidentally fall through both messages.
+    assert "(no upcoming events)" not in preamble
 
 
 # ---------------------------------------------------------------------------

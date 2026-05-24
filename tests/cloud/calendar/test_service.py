@@ -1,12 +1,22 @@
 # tests/cloud/calendar/test_service.py — Cloud calendar service.
 #
-# Created: 2026-05-24 (feat/calendar-entity-surface, #1214) — four
-# guarantees:
+# Updated: 2026-05-24 (feat/calendar-entity-surface, #1218) — added a
+# fifth guarantee: cross-workspace calls against the same mock
+# upstream payload tag each returned event with the requesting
+# workspace_id. Protects the tenancy invariant when the same Composio
+# response (in this contrived test) is read by two workspaces in
+# sequence — the wire dicts must carry their own workspace_id, not
+# leak whichever workspace happened to run first.
+#
+# Five guarantees:
 #   1. Composio disabled  → ``[]`` (no SDK touch, no error).
 #   2. Happy path         → events flow through with workspace tagging.
 #   3. Workspace required → empty workspace_id raises ``ValidationError``.
 #   4. Limit parameter    → caps the returned slice even when upstream
 #                            returns more rows than asked for.
+#   5. Cross-workspace    → two calls with different workspace_ids
+#                            against one upstream payload return wire
+#                            dicts each tagged with their own workspace.
 #
 # Tests monkeypatch the composio service boundary
 # (``is_enabled`` / ``_get_client`` / ``composio_user_id``) rather than
@@ -290,3 +300,56 @@ async def test_limit_caps_results_even_if_upstream_returns_more(
     # short-circuit when possible.
     _, kwargs = execute.call_args
     assert kwargs["arguments"] == {"maxResults": 3}
+
+
+# ---------------------------------------------------------------------------
+# Cross-workspace tenancy tagging
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_workspace_calls_tag_each_event_with_caller_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two consecutive calls — one from ``ws_a``, one from ``ws_b`` —
+    against the same mocked Composio response. Every returned event
+    must carry the requesting workspace_id, never the other's.
+
+    The shared payload is contrived — in production each workspace
+    would have its own Composio connection. The point of this test is
+    the tag-at-construction invariant: the domain object refuses to
+    be built without a workspace_id and stamps the caller's tag onto
+    every event before it crosses the service boundary."""
+    items = [
+        _google_event(
+            id="shared_ev_1",
+            summary="Shared Event 1",
+            start="2026-05-25T10:00:00-07:00",
+            end="2026-05-25T11:00:00-07:00",
+        ),
+        _google_event(
+            id="shared_ev_2",
+            summary="Shared Event 2",
+            start="2026-05-26T14:00:00-07:00",
+            end="2026-05-26T15:00:00-07:00",
+        ),
+    ]
+    _patch_composio(
+        monkeypatch,
+        enabled=True,
+        execute_return={"data": {"items": items}, "successful": True},
+    )
+
+    out_a = await calendar_service.list_upcoming("ws_a", "user_test", limit=10)
+    out_b = await calendar_service.list_upcoming("ws_b", "user_test", limit=10)
+
+    # Both calls see the same upstream rows.
+    assert {ev["id"] for ev in out_a} == {"shared_ev_1", "shared_ev_2"}
+    assert {ev["id"] for ev in out_b} == {"shared_ev_1", "shared_ev_2"}
+    # But every wire dict carries the requesting workspace_id —
+    # never the other workspace's tag.
+    assert all(ev["workspace_id"] == "ws_a" for ev in out_a)
+    assert all(ev["workspace_id"] == "ws_b" for ev in out_b)
+    # Sanity: no event from out_a ended up tagged with ws_b (would
+    # signal shared-state leak between calls).
+    assert all(ev["workspace_id"] != "ws_b" for ev in out_a)
+    assert all(ev["workspace_id"] != "ws_a" for ev in out_b)

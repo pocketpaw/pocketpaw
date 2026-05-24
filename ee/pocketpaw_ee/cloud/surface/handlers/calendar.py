@@ -1,19 +1,24 @@
 # calendar.py — /calendar surface preamble.
 #
-# Updated: 2026-05-24 (feat/calendar-entity-surface, #1214) — replaced
-# the static placeholder with a live read against
-# ``cloud.calendar.list_upcoming``. The handler now renders a
-# ``<calendar-snapshot count="N">`` block listing each upcoming event
-# compactly so the agent can quote them directly. Three rendering
-# branches:
+# Updated: 2026-05-24 (feat/calendar-entity-surface, #1218) — restored
+# the third rendering state so "Composio off" and "Composio on but no
+# events" no longer collapse to the same hint. Three distinct branches
+# now drive the snapshot block:
 #
 #   1. Events present — render one line per event ("- 10:30 AM ·
 #      Sync with Sarah") inside the snapshot block.
-#   2. No events (Composio enabled, calendar connected, just empty) —
-#      render "(no upcoming events)".
-#   3. Service raised or returned empty for any reason (Composio
-#      disabled, not connected, upstream error) — render the original
-#      Composio hint so the agent still knows the available tool.
+#   2. Composio enabled but no upcoming events — render
+#      ``<calendar-snapshot>(no upcoming events)</calendar-snapshot>``
+#      so the agent knows the integration works and the calendar is
+#      genuinely empty.
+#   3. Composio disabled OR the service raised — render the static
+#      hint pointing at GOOGLECALENDAR_LIST_EVENTS so the agent still
+#      discovers the action and the user can be guided to connect.
+#
+# We probe ``composio_service.is_enabled()`` from the handler (lazy
+# import, same as ``list_upcoming``) to split branches 2 and 3 without
+# changing the service signature — the brief calls this out as the
+# minimum-blast-radius split.
 #
 # Surface tag is always emitted so the agent always knows which route
 # the user is on, regardless of which branch above ran.
@@ -33,13 +38,18 @@ logger = logging.getLogger(__name__)
 # under the per-handler 1500-char soft cap even on dense calendars.
 LIST_LIMIT = 10
 
-# Static block emitted whenever no live data is available — Composio
-# disabled, calendar not connected, service errored. Mirrors the
-# pre-#1214 placeholder so the agent still discovers the action.
+# Static block emitted when Composio isn't configured or the service
+# raised. The hint surfaces the action name so the agent still
+# discovers what tool to reach for when the user asks.
 _COMPOSIO_HINT = (
     "<calendar-snapshot>(no live event feed wired — use "
     "GOOGLECALENDAR_LIST_EVENTS via Composio if available)</calendar-snapshot>"
 )
+
+# Distinct block for the "Composio is on, calendar is connected,
+# nothing on the schedule" case. Keeping this separate from the hint
+# lets the agent tell "no integration" apart from "genuinely empty".
+_EMPTY_SNAPSHOT = "<calendar-snapshot>(no upcoming events)</calendar-snapshot>"
 
 _SURFACE_TAG = '<surface kind="calendar" route="/calendar" />'
 
@@ -60,9 +70,20 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         return truncate_preamble(f"{_SURFACE_TAG}\n{_COMPOSIO_HINT}")
 
     if not events:
-        # No events AND no error — could be empty calendar or Composio
-        # disabled. Either way, fall back to the hint so the agent
-        # knows what tool to reach for if the user asks.
+        # No events AND no error. Two sub-states the agent needs to tell
+        # apart: Composio is on (calendar genuinely empty) vs Composio
+        # is off (no integration at all). Probe is_enabled() to pick.
+        # Lazy import mirrors the list_upcoming pattern above — keeps
+        # the cold-path cheap and the test monkeypatch surface clean.
+        try:
+            from pocketpaw_ee.cloud.composio import service as composio_service
+
+            composio_enabled = composio_service.is_enabled()
+        except Exception:
+            logger.debug("calendar_handler: is_enabled probe failed", exc_info=True)
+            composio_enabled = False
+        if composio_enabled:
+            return truncate_preamble(f"{_SURFACE_TAG}\n{_EMPTY_SNAPSHOT}")
         return truncate_preamble(f"{_SURFACE_TAG}\n{_COMPOSIO_HINT}")
 
     rows = [_format_event_line(ev) for ev in events[:LIST_LIMIT]]
