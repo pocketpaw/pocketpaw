@@ -241,6 +241,60 @@ async def list_for_pocket(ctx: RequestContext, pocket_id: str) -> list[DomainSes
     return [_to_domain(d) for d in docs]
 
 
+async def list_for_user(
+    workspace_id: str,
+    user_id: str,
+    limit: int | None = None,
+) -> list[dict]:
+    """Sessions in ``workspace_id`` owned by ``user_id``, newest first.
+
+    Wire-dict shape so callers outside the cloud entity (e.g. surface
+    preamble handlers) don't need to import the domain object. Field
+    names mirror :class:`DomainSession`. ``limit`` (when provided) caps
+    the returned slice; ``None`` returns the full set. Both the
+    workspace and owner filters are applied per the cloud entity
+    tenancy rule — no global reads.
+    """
+    query = (
+        _SessionDoc.find(
+            _SessionDoc.workspace == workspace_id,
+            _SessionDoc.owner == user_id,
+            _SessionDoc.deleted_at == None,  # noqa: E711
+        ).sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    docs = await query.to_list()
+    return [_to_wire_dict(d) for d in docs]
+
+
+def _to_wire_dict(doc: _SessionDoc) -> dict:
+    """Project a ``Session`` doc to a wire dict for cross-entity callers.
+
+    Mirrors :func:`_to_domain` field names so the two shapes stay in
+    lockstep — wire callers (surface handlers, downstream readers) get
+    the same fields a domain consumer would. Scoped helper, intentionally
+    local to ``list_for_user`` until a broader migration introduces a
+    ``Session`` Response DTO.
+    """
+    return {
+        "id": str(doc.id),
+        "sessionId": doc.sessionId,
+        "context_type": doc.context_type or "session",
+        "workspace": doc.workspace,
+        "owner": doc.owner,
+        "title": doc.title,
+        "pocket": doc.pocket,
+        "group": doc.group,
+        "agent": doc.agent,
+        "message_count": doc.messageCount,
+        "last_activity": doc.lastActivity,
+        "created_at": getattr(doc, "createdAt", None),
+        "deleted_at": doc.deleted_at,
+        "surface": getattr(doc, "surface", None),
+    }
+
+
 async def _fetch_owned(session_id: str, user_id: str) -> _SessionDoc:
     """Internal: fetch by ObjectId or sessionId; check owner; raise
     NotFound / Forbidden as needed. Used by both ``get`` and the
@@ -759,6 +813,7 @@ __all__ = [
     "list_by_agent",
     "list_for_owner",
     "list_for_pocket",
+    "list_for_user",
     "set_title",
     "set_title_if_default",
     "touch",
