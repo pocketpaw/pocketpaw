@@ -24,6 +24,11 @@ Changes: 2026-05-22 (#1174) — added the writable ``add_widget`` tool, its
 ``ADD_WIDGET_TOOL_ID`` allowlist id, manifest validation of the widget's
 rippleSpec ``spec`` subtree (skipped for ``type="native"`` widgets), and the
 ``_get_manifest_for_validation`` seam tests patch.
+Changes: 2026-05-24 — added ``update_widget`` MCP tool for in-place widget
+refresh. Same shape as ``add_widget`` — agent passes the widget id from
+``get_pocket`` and the fields to overwrite (usually ``spec`` with a fresh
+data series). Validates the new spec through the same manifest path
+``add_widget`` uses; the server version bumped to ``1.2.0``.
 """
 
 from __future__ import annotations
@@ -40,11 +45,13 @@ SERVER_NAME = "pocketpaw_pocket"
 GET_POCKET_TOOL_ID = f"mcp__{SERVER_NAME}__get_pocket"
 LIST_POCKETS_TOOL_ID = f"mcp__{SERVER_NAME}__list_pockets"
 ADD_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__add_widget"
+UPDATE_WIDGET_TOOL_ID = f"mcp__{SERVER_NAME}__update_widget"
 
 POCKET_TOOL_IDS = (
     GET_POCKET_TOOL_ID,
     LIST_POCKETS_TOOL_ID,
     ADD_WIDGET_TOOL_ID,
+    UPDATE_WIDGET_TOOL_ID,
 )
 
 # Widget ``type`` whose tiles carry no rippleSpec — the frontend renders them
@@ -191,6 +198,48 @@ async def _add_widget_handler(args: dict) -> dict:
     return _result_payload(await add_widget_for_agent(pocket_id, widget))
 
 
+async def _update_widget_handler(args: dict) -> dict:
+    """Patch fields on an existing widget tile — the in-place refresh path.
+
+    Validates a freshly-supplied ``spec`` against the renderer's manifest
+    the same way ``add_widget`` does; on failure nothing is persisted and
+    the agent gets a corrective error. ``type="native"`` skips validation.
+    """
+    pocket_id = args.get("pocket_id")
+    if not pocket_id or not isinstance(pocket_id, str):
+        return _error(
+            "update_widget requires a `pocket_id` — pass the id of the pocket "
+            "(the current home pocket) the widget belongs to."
+        )
+    widget_id = args.get("widget_id")
+    if not widget_id or not isinstance(widget_id, str):
+        return _error(
+            "update_widget requires a `widget_id` — pass the widget's id from "
+            "`get_pocket`'s widgets[] array."
+        )
+    fields = args.get("fields")
+    if not isinstance(fields, dict):
+        return _error(
+            "update_widget requires a `fields` object — the widget fields to "
+            "overwrite, usually `{spec: <new rippleSpec>}` for a refresh."
+        )
+
+    if fields.get("spec") is not None:
+        # Wrap the spec in a widget-shaped dict so the existing validator
+        # walks the same path ``add_widget`` does. ``type`` defaults to a
+        # non-native marker so validation runs; the caller can pass
+        # ``type:"native"`` to opt out.
+        validation_error = await _validate_widget_spec(
+            {"spec": fields["spec"], "type": fields.get("type", "spec")}
+        )
+        if validation_error is not None:
+            return _error(validation_error)
+
+    from pocketpaw_ee.cloud.pockets.agent_context import update_widget_for_agent
+
+    return _result_payload(await update_widget_for_agent(pocket_id, widget_id, fields))
+
+
 def build_pocket_context_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server, or None if the SDK is unavailable."""
     try:
@@ -262,10 +311,48 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
     async def add_widget(args):  # type: ignore[no-untyped-def]
         return await _add_widget_handler(args)
 
+    @tool(
+        "update_widget",
+        (
+            "Update an existing widget tile in place — use this to REFRESH a "
+            "widget's data (e.g., fetch latest sales numbers and rewrite the "
+            "chart's spec) without removing and re-adding. Args: `pocket_id` "
+            "(current home pocket), `widget_id` (from `get_pocket` widgets[]), "
+            "`fields` — object of widget fields to overwrite, usually "
+            "`{spec: <new spec>}`. Validation runs on the new spec the same "
+            "way `add_widget` does; an invalid spec is rejected. Use this "
+            "when the user says 'refresh', 'reload', 'update', 'show latest' "
+            "on an existing tile."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "description": "Id of the pocket holding the widget.",
+                },
+                "widget_id": {
+                    "type": "string",
+                    "description": "Id of the widget to update (from get_pocket widgets[]).",
+                },
+                "fields": {
+                    "type": "object",
+                    "description": (
+                        "Widget fields to overwrite. Usually "
+                        "{spec: <new rippleSpec>} for a refresh."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "widget_id", "fields"],
+        },
+    )
+    async def update_widget(args):  # type: ignore[no-untyped-def]
+        return await _update_widget_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.1.0",
-        tools=[get_pocket, list_pockets, add_widget],
+        version="1.2.0",
+        tools=[get_pocket, list_pockets, add_widget, update_widget],
     )
     return SERVER_NAME, server
 
@@ -276,5 +363,6 @@ __all__ = [
     "LIST_POCKETS_TOOL_ID",
     "POCKET_TOOL_IDS",
     "SERVER_NAME",
+    "UPDATE_WIDGET_TOOL_ID",
     "build_pocket_context_server",
 ]

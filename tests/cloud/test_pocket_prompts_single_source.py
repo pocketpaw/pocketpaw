@@ -179,6 +179,37 @@ def test_home_pocket_prompt_teaches_the_spec_first_workflow() -> None:
     assert "spec" in HOME_POCKET_PROMPT
 
 
+def test_home_prompt_teaches_refresh_workflow() -> None:
+    """The home agent has a third response path: REFRESH. It must call
+    ``update_widget`` (with the id from ``get_pocket``) instead of
+    ``add_widget`` again. The prompt also names ``WebSearch`` and
+    ``WebFetch`` as data sources so the agent knows where to pull fresh
+    numbers from before writing the new spec."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    body = HOME_POCKET_PROMPT.lower()
+    assert "refresh" in body
+    # The two tools the refresh workflow uses end-to-end.
+    assert "update_widget" in HOME_POCKET_PROMPT
+    assert "get_pocket" in HOME_POCKET_PROMPT
+    # The named data-source tools the agent can reach for to fetch fresh
+    # numbers before writing the new spec.
+    assert "WebSearch" in HOME_POCKET_PROMPT
+    assert "WebFetch" in HOME_POCKET_PROMPT
+    # The path-count change — the opening lists three response paths now.
+    assert "Three response paths" in HOME_POCKET_PROMPT
+
+
+def test_home_prompt_warns_against_duplicate_add() -> None:
+    """The refresh path explicitly tells the agent NOT to call
+    ``add_widget`` a second time — that would create a duplicate tile.
+    Without this guard the LLM tends to fall back to the only widget
+    mutation it has seen in earlier turns."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    assert "do NOT call `add_widget`" in HOME_POCKET_PROMPT
+
+
 def test_pocket_id_token_substitution() -> None:
     """The interaction prompt has a literal ``__POCKET_ID__`` token the
     caller substitutes via ``str.replace``. A naive ``str.format`` would
