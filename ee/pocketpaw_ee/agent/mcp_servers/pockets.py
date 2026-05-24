@@ -20,15 +20,15 @@ Moved here from ``src/pocketpaw/agents/sdk_mcp_pocket.py`` in the OSS-EE split
 (Phase 3b). That file also carried the ripple widget-spec tools, which have no
 cloud dependency and stayed in core as ``pocketpaw.agents.sdk_mcp_widgets``.
 
+Changes: 2026-05-24 (#1205) — added ``update_widget`` MCP tool for in-place
+widget refresh. Same shape as ``add_widget`` — agent passes the widget id
+from ``get_pocket`` and the fields to overwrite (usually ``spec`` with a
+fresh data series). Validates the new spec through the same manifest path
+``add_widget`` uses; the server version bumped to ``1.2.0``.
 Changes: 2026-05-22 (#1174) — added the writable ``add_widget`` tool, its
 ``ADD_WIDGET_TOOL_ID`` allowlist id, manifest validation of the widget's
 rippleSpec ``spec`` subtree (skipped for ``type="native"`` widgets), and the
 ``_get_manifest_for_validation`` seam tests patch.
-Changes: 2026-05-24 — added ``update_widget`` MCP tool for in-place widget
-refresh. Same shape as ``add_widget`` — agent passes the widget id from
-``get_pocket`` and the fields to overwrite (usually ``spec`` with a fresh
-data series). Validates the new spec through the same manifest path
-``add_widget`` uses; the server version bumped to ``1.2.0``.
 """
 
 from __future__ import annotations

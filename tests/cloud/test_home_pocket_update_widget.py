@@ -248,6 +248,18 @@ def _patch_store(doc: _FakeHomePocketDoc):
             new=MagicMock(side_effect=_capture),
         ),
     )
+    # Patch ``_resolved_view_for_frontend`` explicitly — otherwise the test
+    # silently relies on ``_FakeHomePocketDoc.rippleSpec`` being None (which
+    # short-circuits the helper before its ``ripple_resolver`` import). A
+    # future test variant carrying a real rippleSpec would pull in the
+    # resolver and either import-error or make a live call. See PR #1205
+    # review N1.
+    stack.enter_context(
+        patch(
+            "pocketpaw_ee.cloud.pockets.agent_context._resolved_view_for_frontend",
+            new=AsyncMock(side_effect=lambda v: v),
+        ),
+    )
     stack.enter_context(
         patch(
             "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
