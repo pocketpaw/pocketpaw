@@ -373,14 +373,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
     # We must run the token-verification cascade so dashboard session cookies
     # populate state, but skip the final 401 — ee routes authenticate at the
     # route level via fastapi-users (#888 follow-up).
-    auth_optional_prefixes = (
-        "/api/v1/chat",
-        "/api/v1/workspaces",
-        "/api/v1/pockets",
-        "/api/v1/sessions",
-        "/api/v1/agents",
-        "/api/v1/users",
-    )
+    auth_optional_prefixes = ("/api/v1/",)
 
     for exempt in exempt_paths:
         if path.startswith(exempt):
