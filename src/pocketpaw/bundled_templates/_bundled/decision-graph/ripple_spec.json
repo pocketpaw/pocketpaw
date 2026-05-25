@@ -1,5 +1,5 @@
 {
-  "_placeholder_note": "Built-in pocket template (decision-graph) for RFC 07. Renders the org's decision graph with three default views (one-decision, time-series, policy) and a narrator chat panel that calls POST /api/v1/decisions/explain. The specialist may swap the [bracketed] copy for the org's domain (e.g. 'Renewals' instead of 'Decisions') but should keep the explain action bound to state.explain_question and the response bound to state.explain_response. The `decision-graph` widget itself is a Layer-2 SvelteFlow render that paw-enterprise registers in Slice 3b; until that manifest entry lands, the widget passes through ingest validation as an unknown type (its props are not enforced).",
+  "_placeholder_note": "Built-in pocket template (decision-graph) for RFC 07. Renders the org's decision graph with three default views (one-decision, time-series, policy) and a narrator chat panel that calls POST /api/v1/decisions/explain via the canonical `api` action verb (the renderer's `EventDispatcher` has no `invoke_endpoint` case — `api` is the right verb per `_KNOWN_ACTION_VERBS` in pocketpaw/ripple/manifest.py and the zod schema in ripple/src/lib/schema/event-handler.ts). The specialist may swap the [bracketed] copy for the org's domain (e.g. 'Renewals' instead of 'Decisions') but should keep the explain action bound to state.explain_question and the response bound to state.explain_response via the `response_key` field. The `decision-graph` widget itself is a Layer-2 SvelteFlow render that paw-enterprise registers in Slice 3b; until that manifest entry lands, the widget passes through ingest validation as an unknown type (its props are not enforced).",
   "state": {
     "selected_decision_id": "",
     "view_mode": "one-decision",
@@ -119,20 +119,34 @@
                     "value": true
                   },
                   {
-                    "action": "invoke_endpoint",
-                    "endpoint": "POST /api/v1/decisions/explain",
+                    "action": "api",
+                    "method": "POST",
+                    "url": "/api/v1/decisions/explain",
                     "body": {
                       "question": "{state.explain_question}",
                       "scope": { "pocket_id": "{pocket.id}" },
                       "max_decisions": 5,
                       "depth": "{state.depth}"
                     },
-                    "bind": "explain_response"
-                  },
-                  {
-                    "action": "set",
-                    "target": "explain_loading",
-                    "value": false
+                    "response_key": "explain_response",
+                    "on_success": [
+                      {
+                        "action": "set",
+                        "target": "explain_loading",
+                        "value": false
+                      }
+                    ],
+                    "on_error": [
+                      {
+                        "action": "set",
+                        "target": "explain_loading",
+                        "value": false
+                      },
+                      {
+                        "action": "toast",
+                        "message": "Couldn't load explanation — try again"
+                      }
+                    ]
                   }
                 ]
               },

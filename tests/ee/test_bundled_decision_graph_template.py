@@ -13,6 +13,17 @@
 #       chat agent's STEP 0 keyword match looks for.
 #     - the loader returns the template by slug from a tmp install
 #       (no traversal into the user's real ~/.pocketpaw/templates/).
+#
+# Changes:
+#   - 2026-05-25 (RFC 07 follow-up): the explain-wiring assertion now
+#     looks for the canonical `api` action verb instead of the
+#     pre-merge `invoke_endpoint` shape. `invoke_endpoint` is not in
+#     the Ripple event dispatcher's switch (see `_KNOWN_ACTION_VERBS`
+#     in `src/pocketpaw/ripple/manifest.py` for the 18-verb truth);
+#     the renderer would silently no-op on the old spec. Fields
+#     mirrored from the dispatcher's `handleApi` (event-dispatcher.ts):
+#     `url` (required), `method`, `body`, `response_key` (where the
+#     response gets written into state).
 """Tests for the bundled decision-graph pocket template (RFC 07 Slice 3a)."""
 
 from __future__ import annotations
@@ -107,7 +118,10 @@ def test_template_yaml_matches_rfc03_field_set() -> None:
 def test_template_ripple_spec_is_valid_json_with_explain_wiring() -> None:
     """The ripple_spec parses, carries ui + state, includes the
     `_placeholder_note`, and binds an Explain button to the
-    POST /api/v1/decisions/explain endpoint."""
+    POST /api/v1/decisions/explain endpoint via the canonical `api`
+    action verb (the renderer's event dispatcher has no
+    `invoke_endpoint` case — `api` is one of the 18 verbs in
+    `_KNOWN_ACTION_VERBS`)."""
     spec_path = _BUNDLED_DIR / _SLUG / "ripple_spec.json"
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
 
@@ -123,36 +137,39 @@ def test_template_ripple_spec_is_valid_json_with_explain_wiring() -> None:
     assert "explain_response" in state
     assert state["explain_response"]["decisions_walked"] == []
 
-    # Walk the ui tree looking for the invoke_endpoint action pointed
-    # at /api/v1/decisions/explain. The Slice 3b frontend agent reads
+    # Walk the ui tree looking for the `api` action pointed at
+    # /api/v1/decisions/explain. The Slice 3b frontend agent reads
     # this binding to wire the chat panel.
-    explain_actions = _find_invoke_endpoints(spec["ui"], "POST /api/v1/decisions/explain")
+    explain_actions = _find_api_calls(spec["ui"], "/api/v1/decisions/explain")
     assert explain_actions, (
         "decision-graph template must bind an Explain action to "
         "POST /api/v1/decisions/explain so the narrator panel works"
     )
-    # The first invocation must pass a `question` from state and write
-    # the response into `explain_response`.
+    # The first invocation must POST, pass a `question` from state, and
+    # write the response into `state.explain_response` via the
+    # canonical `response_key` field that the dispatcher's `handleApi`
+    # reads.
     first = explain_actions[0]
+    assert first.get("method") == "POST"
     assert first["body"]["question"] == "{state.explain_question}"
-    assert first["bind"] == "explain_response"
+    assert first["response_key"] == "explain_response"
 
 
-def _find_invoke_endpoints(ui: dict, endpoint: str) -> list[dict]:
-    """Walk the ui tree and collect every invoke_endpoint action that
-    targets `endpoint`. Recursive over `children` and `on_click` lists."""
+def _find_api_calls(ui: dict, url: str) -> list[dict]:
+    """Walk the ui tree and collect every `api` action whose `url`
+    matches `url`. Recursive over `children` and `on_click` lists."""
     out: list[dict] = []
     if not isinstance(ui, dict):
         return out
     for click_action in ui.get("on_click", []) or []:
         if (
             isinstance(click_action, dict)
-            and click_action.get("action") == "invoke_endpoint"
-            and click_action.get("endpoint") == endpoint
+            and click_action.get("action") == "api"
+            and click_action.get("url") == url
         ):
             out.append(click_action)
     for child in ui.get("children", []) or []:
-        out.extend(_find_invoke_endpoints(child, endpoint))
+        out.extend(_find_api_calls(child, url))
     return out
 
 
