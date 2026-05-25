@@ -347,3 +347,64 @@ async def test_backtest_does_not_fan_to_instinct(isolated_instinct_store) -> Non
         r for r in rows if str(getattr(r, "pocket_id", "")).startswith("foresight:run:")
     ]
     assert foresight_rows == []
+
+
+# ---------------------------------------------------------------------------
+# §14.4 — forward_precedent_decision_id threads through emit_projected_decision
+# onto the persisted Beanie doc. PR #1235 introduced the engine-side
+# DecisionGraphRef; PR 8 wires the cloud closure so the persisted doc
+# carries the same id the runner writes to RunResult.projected_decisions.
+# ---------------------------------------------------------------------------
+
+
+async def test_emit_projected_decision_persists_forward_precedent_id() -> None:
+    """When the cloud-side caller passes a non-None precedent id, the
+    persisted ``ForesightProjectedDecision`` doc and the wire response
+    both surface it instead of the hardcoded ``None``.
+
+    Uses a custom anchor id that the run loop never emits so the
+    direct ``emit_projected_decision`` call lands the only record
+    under that anchor (the run itself fans ``decision:<name>``).
+    """
+    ctx = _ctx()
+    run = await foresight_service.create_scenario_run(ctx, _body(name="precedent-wire"))
+
+    response = await foresight_service.emit_projected_decision(
+        workspace_id="w1",
+        run_id=run.id,
+        anchor_id="custom:precedent-test",
+        persona_id="p1",
+        tick_id=42,
+        decision_text="accept",
+        confidence=0.8,
+        sub_type="decision_forecast",
+        forward_precedent_decision_id="synthetic-precedent-abc123def456",
+    )
+    assert response.forward_precedent_decision_id == "synthetic-precedent-abc123def456"
+
+    # ...and the persisted doc round-trips through the list endpoint
+    # filtered to the custom anchor so only the direct-emit row matches.
+    listing = await foresight_service.list_projected_decisions(
+        ctx, run.id, anchor_id="custom:precedent-test"
+    )
+    assert listing.total == 1
+    assert listing.items[0].forward_precedent_decision_id == "synthetic-precedent-abc123def456"
+
+
+async def test_emit_projected_decision_defaults_precedent_to_none() -> None:
+    """Backwards-compat: callers that omit the kwarg still get the
+    v0.1 wire shape (``forward_precedent_decision_id=None``)."""
+    ctx = _ctx()
+    run = await foresight_service.create_scenario_run(ctx, _body(name="precedent-default"))
+
+    response = await foresight_service.emit_projected_decision(
+        workspace_id="w1",
+        run_id=run.id,
+        anchor_id="decision:precedent-default",
+        persona_id="p1",
+        tick_id=0,
+        decision_text="accept",
+        confidence=0.5,
+        sub_type="decision_forecast",
+    )
+    assert response.forward_precedent_decision_id is None

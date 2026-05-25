@@ -1,4 +1,16 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 §14.4 wire:
+#   - ``emit_projected_decision`` now accepts an optional
+#     ``forward_precedent_decision_id`` kwarg and persists it on the
+#     ``ForesightProjectedDecision`` doc instead of hardcoding ``None``.
+#     The cloud-side closure in ``_run_engine_inline`` resolves the id
+#     via ``ee.foresight.decision_graph_ref.NoOpDecisionGraphRef`` (PR
+#     #1235 §14.4) so the persisted doc matches the engine's
+#     ``RunResult.projected_decisions`` shape one-to-one. The cloud
+#     body does not yet expose ``precedent_seed`` so the ref is seeded
+#     empty by default — every lookup returns ``None`` and behaviour
+#     is unchanged until either a body extension lands or RFC 07's
+#     real Decision Graph implementation replaces the NoOp ref.
 # Updated: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 / RFC 08 §8:
 #   - ``CreateScenarioRequest.route_to_instinct`` threads through
 #     ``_run_engine_inline`` into the per-tick callback. When the flag
@@ -251,6 +263,7 @@ async def _run_engine_inline(
     persist the run as a JSON-shaped blob without leaking dataclass
     types into the persistence layer.
     """
+    from pocketpaw_ee.foresight.decision_graph_ref import NoOpDecisionGraphRef
     from pocketpaw_ee.foresight.persona import OceanDrift
     from pocketpaw_ee.foresight.scenarios.runner import (
         PersonaSpec,
@@ -273,6 +286,19 @@ async def _run_engine_inline(
         personas=personas,
     )
 
+    # v14 (§14.4) — build a DecisionGraphRef mirroring the engine's
+    # default so the cloud closure can stamp the same
+    # ``forward_precedent_decision_id`` value the runner computes for
+    # ``RunResult.projected_decisions``. The cloud's
+    # ``CreateScenarioRequest`` body does not yet expose
+    # ``precedent_seed`` / ``precedent_seeds`` (engine YAML can carry
+    # them; cloud body extension lands later), so this ref is seeded
+    # empty by default — :class:`NoOpDecisionGraphRef` returns ``None``
+    # for every lookup in that case, preserving the v0.1 behaviour the
+    # callers expect. Real RFC 07 wiring drops in by swapping the
+    # implementation here once the Decision Graph lands in pocketpaw.
+    decision_graph_ref = NoOpDecisionGraphRef(seed="")
+
     # Per-tick emission closure — only wired when the cloud caller
     # supplies the run id. CLI smoke runs pass no run_id and the
     # callback stays None; the engine still surfaces the records on
@@ -284,6 +310,13 @@ async def _run_engine_inline(
     # projection when the scenario opted in. The engine layer itself
     # stays unaware of Instinct — it only sees the projection callback
     # signature it already supports.
+    #
+    # v14 (§14.4): the closure also resolves the forward-precedent id
+    # via the cloud-side DecisionGraphRef so the persisted
+    # ``ForesightProjectedDecision`` doc carries the same value the
+    # engine writes into ``RunResult.projected_decisions``. The lookup
+    # is pure / deterministic — same inputs always produce the same id
+    # — so the engine + cloud paths stay in sync without coordination.
     callback = None
     if workspace_id and run_id:
         scenario_name = body.name
@@ -296,6 +329,11 @@ async def _run_engine_inline(
             confidence: float,
             sub_type: str,
         ) -> None:
+            precedent_id = decision_graph_ref.lookup_precedent(
+                anchor_id=anchor_id,
+                persona_id=persona_id,
+                scenario_id=scenario_name,
+            )
             await emit_projected_decision(
                 workspace_id=workspace_id,
                 run_id=run_id,
@@ -305,6 +343,7 @@ async def _run_engine_inline(
                 decision_text=decision_text,
                 confidence=confidence,
                 sub_type=sub_type,
+                forward_precedent_decision_id=precedent_id,
                 route_to_instinct=route_to_instinct,
                 scenario_name=scenario_name,
             )
@@ -964,6 +1003,7 @@ async def emit_projected_decision(
     decision_text: str,
     confidence: float,
     sub_type: str,
+    forward_precedent_decision_id: str | None = None,
     route_to_instinct: bool = False,
     scenario_name: str = "",
 ) -> ProjectedDecisionResponse:
@@ -1016,7 +1056,11 @@ async def emit_projected_decision(
         decision_text=decision_text,
         confidence=confidence,
         sub_type=sub_type,
-        forward_precedent_decision_id=None,
+        # v14 (§14.4) — caller threads the forward-precedent id resolved
+        # by its DecisionGraphRef. ``None`` is still the default for
+        # un-seeded scenarios; PR #1235 introduces synthetic ids only
+        # when the scenario opts in via ``precedent_seed``.
+        forward_precedent_decision_id=forward_precedent_decision_id,
     )
     await doc.insert()
 
