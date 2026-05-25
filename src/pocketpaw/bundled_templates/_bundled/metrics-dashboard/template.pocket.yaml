@@ -3,9 +3,15 @@
 # Pocket Template Schema metadata for the built-in metrics dashboard.
 # ``shape`` is ``data-grid`` because RFC 03's shape enum does not carry a
 # ``dashboard`` value; the dashboard *pattern* is recorded in index.json.
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): migrated v1 ->
+# v2. Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. ``pattern: dashboard`` per the sibling index.json row.
+schema_version: "2"
 name: metrics-dashboard
 version: 1.0.0
 vertical: analytics
+pattern: dashboard
+display_name: Metrics Dashboard
 shape: data-grid
 description: |
   An at-a-glance metrics dashboard. A strip of headline KPI tiles over a
@@ -21,4 +27,4 @@ state:
     - { field: change_pct, widget: number }
 actions: []
 connectors: []
-skills: []
+skill_refs: []

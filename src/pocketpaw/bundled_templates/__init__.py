@@ -2,13 +2,17 @@
 # Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — package
 # for the curated set of built-in pocket templates the create
 # specialist instantiates instead of generating a pocket from scratch.
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): re-exports
+# ``PocketTemplate``, ``TemplateValidationError``, and the sub-models
+# so callers (CLI, tests, future runtime) can import them at the
+# package root without reaching into ``schema`` / ``errors`` submodules.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
 Where ``bundled_skills`` ships on-demand workflow markdown and ``bundled_kb``
 ships pre-compiled kb-go retrieval scopes, ``bundled_templates`` ships
 **ready-to-instantiate pocket templates** — hand-authored, production-quality
-rippleSpec skeletons paired with RFC 03 schema metadata.
+rippleSpec skeletons paired with RFC 03 v2 schema metadata.
 
 Why this exists
 ---------------
@@ -20,10 +24,12 @@ customizes* a matching built-in template instead of generating one cold.
 
 Each template is a directory under ``_bundled/<slug>/`` carrying two files:
 
-- ``template.pocket.yaml`` — RFC 03 Pocket Template Schema metadata
-  (``name, version, vertical, shape, state, actions, connectors, skills,
-  description``). Seed templates ship ``actions: []`` — Instinct / Outcomes
-  are not wired yet and dead action declarations are worse than none.
+- ``template.pocket.yaml`` — RFC 03 v2 Pocket Template Schema metadata
+  (``schema_version, name, version, vertical, pattern, display_name,
+  shape, state, ...``). Seed templates ship ``actions: []`` — Instinct /
+  Outcomes are not wired yet and dead action declarations are worse than
+  none. The seed bundled templates were migrated v1 -> v2 in the same PR
+  that introduced the Pydantic chokepoint.
 - ``ripple_spec.json`` — a full, hand-authored rippleSpec skeleton: the
   quality lever. The specialist starts from a correct skeleton, not a
   pressured cold generation.
@@ -31,21 +37,54 @@ Each template is a directory under ``_bundled/<slug>/`` carrying two files:
 On dashboard boot the installer mirrors ``_bundled/`` into
 ``~/.pocketpaw/templates/`` (SHA-256 idempotent, same pattern as the two
 sibling installers). The loader reads a single template back at
-pocket-creation time.
+pocket-creation time, validating it against the ``PocketTemplate``
+Pydantic v2 model. Validation failure returns ``None`` in the default
+loader path (back-compat) or raises ``TemplateValidationError`` under
+``strict=True`` (CLI ``template lint``, tests).
 
 Adding a template: drop a new ``_bundled/<slug>/`` directory with the two
 files and register it in ``_bundled/index.json``. The installer discovers
 directories via iteration — no installer code changes needed.
 """
 
+from pocketpaw.bundled_templates.errors import TemplateValidationError
 from pocketpaw.bundled_templates.installer import (
     TemplateInstallResult,
     install_bundled_templates,
 )
 from pocketpaw.bundled_templates.loader import load_template
+from pocketpaw.bundled_templates.schema import (
+    ActionDef,
+    AgentDef,
+    ColumnDef,
+    ConfirmDef,
+    DataSourceDef,
+    InstinctRule,
+    InstinctRulesDef,
+    JoinedEntity,
+    PermissionsDef,
+    PocketTemplate,
+    SavedView,
+    StateBinding,
+    TriggerDef,
+)
 
 __all__ = [
+    "ActionDef",
+    "AgentDef",
+    "ColumnDef",
+    "ConfirmDef",
+    "DataSourceDef",
+    "InstinctRule",
+    "InstinctRulesDef",
+    "JoinedEntity",
+    "PermissionsDef",
+    "PocketTemplate",
+    "SavedView",
+    "StateBinding",
     "TemplateInstallResult",
+    "TemplateValidationError",
+    "TriggerDef",
     "install_bundled_templates",
     "load_template",
 ]
