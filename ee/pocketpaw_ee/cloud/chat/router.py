@@ -499,14 +499,28 @@ router.include_router(agent_router)
 
 
 @router.websocket("/ws/cloud")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    """Cloud WebSocket -- authenticate via JWT token, then handle typed JSON messages."""
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
+    """Cloud WebSocket — authenticate via JWT (query param or HttpOnly cookie).
+
+    Priority:
+      1. ``?token=<JWT>`` query parameter (used by Tauri/bearer clients)
+      2. ``paw_auth`` HttpOnly cookie (used by browser clients after cookie login)
+    """
     import jwt as pyjwt
 
     # Gate realtime behind the enterprise license (parity with REST /chat routes).
     lic = get_license()
     if lic is None or lic.expired:
         await websocket.close(code=4003, reason="Enterprise license required")
+        return
+
+    # Resolve JWT from query param or cookie (browser sends paw_auth cookie
+    # automatically on same-origin WebSocket upgrade).
+    if not token:
+        token = websocket.cookies.get("paw_auth")
+
+    if not token:
+        await websocket.close(code=4001, reason="No token provided")
         return
 
     secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
