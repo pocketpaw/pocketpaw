@@ -1,4 +1,18 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
+# RFC 08 §11.2 / §11.5 / §11.6 backing endpoints:
+#     GET /api/v1/foresight/scenarios   → ScenarioCatalogResponse
+#         (bundled YAML template enumeration; workspace-agnostic).
+#     GET /api/v1/foresight/aggregate   → AggregateRollupResponse
+#         (rolling accuracy + drift + modal-outcome distribution over
+#         a trailing window; default 30 days, max 90, 422 above).
+#     GET /api/v1/foresight/insights    → InsightsResponse
+#         (pattern-based synthesizer over the same aggregate inputs;
+#         five v0.1 rules — accuracy_drop / persona_outlier /
+#         tier_imbalance / trend_break / threshold_unmet; cap 20).
+#   All three are read-only and delegate to ``ee.cloud.foresight.service``
+#   per the cloud rule #2 (service-IS-the-repository). The §11 UI lead
+#   builds its TypeScript surface against the exact shapes above.
 # Modified: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 / RFC 08 §8
 #   adds the Foresight → Instinct approval-loop surface:
 #     GET /api/v1/foresight/runs/{id}/instinct-proposals
@@ -55,13 +69,16 @@ from fastapi import APIRouter, Depends, Query
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.foresight import service as foresight_service
 from pocketpaw_ee.cloud.foresight.dto import (
+    AggregateRollupResponse,
     BacktestRunListItemResponse,
     BacktestRunResponse,
     CreateBacktestRequest,
     CreateScenarioRequest,
     ForesightInstinctProposalListResponse,
+    InsightsResponse,
     OnboardingGateResponse,
     ProjectedDecisionListResponse,
+    ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
 )
@@ -298,6 +315,82 @@ async def get_onboarding_gate(
     in a paw-enterprise PR (out of scope for the PocketPaw lane).
     """
     return await foresight_service.get_onboarding_gate(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Scenarios catalog + Aggregate rollup + Insights (RFC §11.2 / §11.5 / §11.6)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/scenarios", response_model=ScenarioCatalogResponse)
+async def list_scenarios(
+    ctx: RequestContext = Depends(request_context),
+) -> ScenarioCatalogResponse:
+    """Enumerate the bundled scenario templates (RFC 08 §11.2).
+
+    Static catalog of the YAML files under
+    ``ee/pocketpaw_ee/foresight/scenarios/``. The response is small —
+    one row per template — and changes only on code releases, so the
+    service caches the catalog and invalidates on directory mtime
+    change. Workspace-agnostic (the catalog is global), but the
+    request_context dep stays so the route surfaces a clean 401 when
+    auth fails upstream.
+
+    v1.0 will surface workspace-owned scenarios (RFC §18 grammar)
+    alongside the bundled ones — the response envelope is forward-
+    compatible (additive ``items`` rows only).
+    """
+    return await foresight_service.list_scenarios(ctx)
+
+
+@router.get("/aggregate", response_model=AggregateRollupResponse)
+async def get_aggregate_rollup(
+    window_days: int = Query(default=30, ge=1, le=90),
+    ctx: RequestContext = Depends(request_context),
+) -> AggregateRollupResponse:
+    """Rolling rollup over the workspace's recent backtests + projections
+    (RFC 08 §11.5).
+
+    ``window_days`` default is 30; values above 90 surface as 422
+    ``foresight.invalid_window``. Empty workspaces collapse to zeros +
+    empty arrays so the UI's Aggregate panel can render the empty
+    state without a separate code path.
+
+    v0.1 derives the rolling series from completed backtests'
+    ``gate_decision.observed`` (PR 4's calibration buffer didn't ship
+    Mongo persistence for the raw PredictionRecord shape); v1.0 will
+    swap to the real per-pair series once the buffer migrates.
+
+    The frontend Aggregate panel (RFC §11.5) reads
+    ``rolling_accuracy.points`` for the trendline, ``confidence_drift``
+    for the trend pill, and ``modal_outcome_distribution.entries`` for
+    the per-outcome share chart.
+    """
+    return await foresight_service.get_aggregate_rollup(
+        ctx,
+        window_days=window_days,
+    )
+
+
+@router.get("/insights", response_model=InsightsResponse)
+async def get_insights(
+    ctx: RequestContext = Depends(request_context),
+) -> InsightsResponse:
+    """Pattern-based insight synthesizer output (RFC 08 §11.6).
+
+    v0.1 ships five rules driven by the same aggregate inputs the
+    rollup endpoint reads — accuracy_drop / persona_outlier /
+    tier_imbalance / trend_break / threshold_unmet. Items are sorted
+    by severity descending (critical > warning > info) then
+    generated_at descending; capped at 20 per response (pagination
+    lands in v1.0 once the LLM synthesizer fans finer-grained rules).
+
+    Empty workspaces return ``items=[]`` — the synthesizer yields no
+    rows when none of the rules can fire. The frontend Insights panel
+    (RFC §11.6) consumes the items directly and renders one card per
+    row keyed on the stable ``id``.
+    """
+    return await foresight_service.get_insights(ctx)
 
 
 __all__ = ["router"]

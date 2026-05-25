@@ -1,4 +1,27 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
+# RFC 08 §11.2 / §11.5 / §11.6 backing service functions:
+#   - ``list_scenarios(ctx)`` — enumerates the bundled YAML templates
+#     at ``ee/pocketpaw_ee/foresight/scenarios/*.yaml``. Loader is
+#     cached at module import (a touch on disk reloads via the
+#     ``_SCENARIOS_CATALOG`` sentinel) and never touches the engine
+#     persona / LLM / substrate dependencies — only ``yaml.safe_load``.
+#   - ``get_aggregate_rollup(ctx, window_days)`` — derives the rolling
+#     accuracy series + confidence drift + modal-outcome distribution
+#     from the workspace's persisted ``ForesightBacktest`` +
+#     ``ForesightProjectedDecision`` docs. Empty workspaces collapse
+#     to zeros + empty arrays (never 404). Window capped at 90;
+#     above 90 → 422 ``foresight.invalid_window``.
+#   - ``get_insights(ctx)`` — composes the SynthesizerInput from the
+#     same aggregate inputs (rolling series, drift, modal dist, latest
+#     backtest gate, per-persona calibration proxy, tier-distribution
+#     deltas) and calls ``ee.foresight.insights.synthesize_insights``
+#     for the five v0.1 pattern rules. Cap 20.
+#   v0.1 NOTE: PR 4's CalibrationPair persistence didn't land — the
+#   aggregate + insights paths read backtest summaries + projected
+#   decisions as proxies. Documented in the PR body; v1.0 swaps to a
+#   real PredictionRecord collection once the calibration buffer
+#   migrates to Mongo.
 # Updated: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 §14.4 wire:
 #   - ``emit_projected_decision`` now accepts an optional
 #     ``forward_precedent_decision_id`` kwarg and persists it on the
@@ -97,7 +120,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from datetime import UTC as UTC_TZ
+from datetime import datetime, timedelta
+from typing import Any, Literal
 
 from beanie import PydanticObjectId
 
@@ -117,21 +142,37 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.foresight.domain import (
+    AggregateRollup,
     BacktestRun,
+    ConfidenceDrift,
+    InsightView,
+    ModalOutcomeEntry,
     OnboardingGateState,
     ProjectedDecision,
+    RollingAccuracyPoint,
+    ScenarioCatalogEntry,
     ScenarioRun,
 )
 from pocketpaw_ee.cloud.foresight.dto import (
+    AggregateRollupResponse,
     BacktestRunListItemResponse,
     BacktestRunResponse,
+    ConfidenceDriftDto,
     CreateBacktestRequest,
     CreateScenarioRequest,
     ForesightInstinctProposalListResponse,
     ForesightInstinctProposalResponse,
+    InsightResponse,
+    InsightsResponse,
+    ModalOutcomeDistributionDto,
+    ModalOutcomeEntryDto,
     OnboardingGateResponse,
     ProjectedDecisionListResponse,
     ProjectedDecisionResponse,
+    RollingAccuracyPointDto,
+    RollingAccuracySeriesDto,
+    ScenarioCatalogItem,
+    ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
 )
@@ -1402,16 +1443,720 @@ async def list_instinct_proposals_for_run(
     )
 
 
+# ---------------------------------------------------------------------------
+# Scenario catalog (RFC §11.2) — bundled YAML template enumeration.
+#
+# Read-only, workspace-agnostic — the catalog enumerates the engine's
+# bundled scenarios. The license dep stays on the route so OSS-only
+# consumers don't pull the catalog through the cloud surface.
+# ---------------------------------------------------------------------------
+
+
+_SCENARIOS_CATALOG: list[ScenarioCatalogEntry] | None = None
+_SCENARIOS_CATALOG_MTIME: float | None = None
+_SCENARIO_DESCRIPTIONS: dict[str, str] = {
+    "decision_forecast": (
+        "Rehearse a single approval-style decision across a small "
+        "persona panel — the fastest end-to-end loop. One tick, modal "
+        "outcome aggregated across the cohort."
+    ),
+    "market_sim": (
+        "Project market-segment behaviour over a short horizon — "
+        "enterprise / SMB / channel segments react to a pricing or "
+        "competitor shift declared on the scenario YAML."
+    ),
+    "org_change_rehearsal": (
+        "Walk a multi-step rollout (announce → training → deadline → "
+        "escalation) through a mixed manager / IC / ops cohort and "
+        "score per-event adoption + resistance."
+    ),
+}
+
+
+def _scenarios_dir():
+    """Resolve the bundled scenarios directory on disk.
+
+    Returns a :class:`pathlib.Path`. Type annotation is intentionally
+    omitted so the cloud module doesn't pick up a static
+    ``pocketpaw_ee.foresight.scenarios`` import — the package's
+    ``__file__`` is read lazily here only when the catalog rebuilds.
+    """
+    from pathlib import Path
+
+    # Module path resolution stays lazy so the import-linter's
+    # "engine import only inside functions" contract holds — the
+    # scenarios package is OSS-light (just YAML files + a small loader),
+    # but the principle is uniform across this module.
+    import pocketpaw_ee.foresight.scenarios as _scenarios_pkg
+
+    pkg_path = Path(_scenarios_pkg.__file__).parent
+    return pkg_path
+
+
+def _build_catalog_entries() -> list[ScenarioCatalogEntry]:
+    """Walk the scenarios directory and produce one catalog entry per
+    YAML file. Pure / read-only.
+
+    Each YAML is parsed with ``yaml.safe_load`` — no engine module
+    imports happen (persona, LLM, substrate stay untouched). The
+    ``id`` is the YAML stem; for the three v0.5-shipped templates
+    that's also the ``sub_type`` field.
+    """
+    import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
+
+    pkg_dir = _scenarios_dir()
+    entries: list[ScenarioCatalogEntry] = []
+    # Sort by stem so the response order is deterministic across
+    # filesystems (the YAML on-disk sort drives the picker order).
+    for path in sorted(pkg_dir.glob("*.yaml")):
+        try:
+            with open(path) as fh:
+                data = yaml.safe_load(fh) or {}
+        except Exception:  # noqa: BLE001 — skip malformed YAML; never break the listing
+            logger.exception("foresight.list_scenarios: failed to parse %s", path)
+            continue
+        if not isinstance(data, dict):
+            continue
+        stem = path.stem
+        sub_type = str(data.get("sub_type") or stem)
+        name = str(data.get("name") or stem)
+        personas = data.get("personas") or []
+        n_ticks = int(data.get("n_ticks") or 0)
+        tier_mix_block = data.get("tier_mix") or {}
+        tier_mix: dict[str, float] = {}
+        if isinstance(tier_mix_block, dict):
+            for tier_name in ("premium", "mid", "tail"):
+                if tier_name in tier_mix_block:
+                    try:
+                        tier_mix[tier_name] = float(tier_mix_block[tier_name])
+                    except (TypeError, ValueError):
+                        continue
+        # If the YAML omitted tier_mix, echo the captain-locked default.
+        if not tier_mix:
+            tier_mix = {"premium": 0.05, "mid": 0.15, "tail": 0.80}
+        description = _SCENARIO_DESCRIPTIONS.get(
+            sub_type,
+            "Foresight scenario template (RFC 08 §4).",
+        )
+        entries.append(
+            ScenarioCatalogEntry(
+                id=stem,
+                name=name,
+                sub_type=sub_type,
+                description=description,
+                num_personas=len(personas) if isinstance(personas, list) else 0,
+                num_ticks=n_ticks,
+                tier_mix=tier_mix,
+            )
+        )
+    return entries
+
+
+def _get_catalog(force_reload: bool = False) -> list[ScenarioCatalogEntry]:
+    """Return the cached catalog, rebuilding if the directory mtime
+    changed (touch-to-reload). Tests can force a reload via the kwarg.
+    """
+    global _SCENARIOS_CATALOG, _SCENARIOS_CATALOG_MTIME
+
+    try:
+        current_mtime = _scenarios_dir().stat().st_mtime
+    except Exception:  # noqa: BLE001 — fall through to the empty catalog
+        current_mtime = None
+
+    if force_reload or _SCENARIOS_CATALOG is None or _SCENARIOS_CATALOG_MTIME != current_mtime:
+        _SCENARIOS_CATALOG = _build_catalog_entries()
+        _SCENARIOS_CATALOG_MTIME = current_mtime
+    return _SCENARIOS_CATALOG
+
+
+async def list_scenarios(_ctx: RequestContext) -> ScenarioCatalogResponse:
+    """Return the bundled scenario template catalog.
+
+    Workspace-agnostic — the catalog is a global static enumeration of
+    the engine's bundled YAML files; v1.0 may add workspace-owned
+    scenarios (RFC §18 grammar). The context arg is accepted for
+    consistency with the other service functions and to keep the
+    route signature uniform.
+    """
+    entries = _get_catalog()
+    items = [
+        ScenarioCatalogItem(
+            id=e.id,
+            name=e.name,
+            sub_type=e.sub_type,
+            description=e.description,
+            num_personas=e.num_personas,
+            num_ticks=e.num_ticks,
+            tier_mix=dict(e.tier_mix),
+        )
+        for e in entries
+    ]
+    return ScenarioCatalogResponse(items=items)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate rollup (RFC §11.5) — rolling accuracy + drift + modal dist.
+#
+# Reads the workspace's persisted backtest summaries + projected
+# decisions over the window. PR 4's calibration buffer didn't land a
+# Mongo collection for ``PredictionRecord``; the rollup proxies the
+# missing data via the backtest summaries (rolling accuracy +
+# confidence drift) and the projection collection (modal outcome
+# distribution). Documented limitation; v1.0 wires the real buffer.
+# ---------------------------------------------------------------------------
+
+
+AGGREGATE_DEFAULT_WINDOW_DAYS: int = 30
+AGGREGATE_MAX_WINDOW_DAYS: int = 90
+
+
+def _resolve_window_days(window_days: int | None) -> int:
+    """Resolve the request's window_days against the v0.1 limits.
+
+    Returns the canonical window in days (default 30). Above 90 raises
+    a ValidationError (422) — the UI lead's TypeScript shape locks
+    the cap at 90 so a 91 from a misconfigured client must surface as
+    a structured error, not a silent clamp.
+    """
+    if window_days is None:
+        return AGGREGATE_DEFAULT_WINDOW_DAYS
+    if window_days < 1:
+        raise ValidationError(
+            "foresight.invalid_window",
+            f"window_days must be >= 1, got {window_days}",
+        )
+    if window_days > AGGREGATE_MAX_WINDOW_DAYS:
+        raise ValidationError(
+            "foresight.invalid_window",
+            f"window_days must be <= {AGGREGATE_MAX_WINDOW_DAYS}, got {window_days}",
+        )
+    return window_days
+
+
+def _compose_rolling_accuracy(
+    backtest_docs: list[Any],
+    *,
+    window_days: int,
+    now: datetime,
+) -> tuple[RollingAccuracyPoint, ...]:
+    """Bucket completed backtests by day and emit one point per bucket.
+
+    ``accuracy`` is the per-bucket mean of ``gate_decision.observed``
+    across the backtests that completed in the bucket; ``sample_count``
+    is the per-bucket backtest count (i.e. the proxy for prediction
+    pairs since PR 4's buffer is in-memory only). Empty buckets are
+    omitted from the points array — the UI's chart fills gaps from
+    the bucket end-timestamp grid.
+    """
+    buckets: dict[datetime, list[tuple[float, int]]] = {}
+    for doc in backtest_docs:
+        gate = doc.gate_decision or {}
+        observed = gate.get("observed")
+        if not isinstance(observed, (int, float)):
+            continue
+        ts = getattr(doc, "createdAt", None) or now
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC_TZ)
+        # Bucket at day boundary (UTC) so the wire ts is stable.
+        bucket_ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        n_pairs = int(gate.get("n_pairs") or 0)
+        buckets.setdefault(bucket_ts, []).append((float(observed), max(n_pairs, 1)))
+
+    points: list[RollingAccuracyPoint] = []
+    for ts, entries in sorted(buckets.items()):
+        if not entries:
+            continue
+        total_samples = sum(sc for _, sc in entries)
+        # Weighted average across the bucket so a backtest with 100
+        # anchors counts proportionally more than one with 5.
+        weighted = sum(acc * sc for acc, sc in entries)
+        avg_accuracy = weighted / total_samples if total_samples else 0.0
+        points.append(
+            RollingAccuracyPoint(
+                ts=ts,
+                accuracy=round(max(0.0, min(1.0, avg_accuracy)), 4),
+                sample_count=total_samples,
+            )
+        )
+    return tuple(points)
+
+
+def _compose_confidence_drift(
+    backtest_docs: list[Any],
+    *,
+    flat_threshold: float = 0.05,
+) -> ConfidenceDrift:
+    """Compute the §11.5 confidence-drift summary.
+
+    Compares the earliest vs latest completed backtest's
+    ``result.calibration_summary.confidence_calibration``. Empty input
+    returns a flat zero-magnitude record so the UI can render "no
+    data" without a separate path.
+
+    Vocabulary:
+      - ``rising``   — calibration improved (delta > flat_threshold)
+      - ``falling``  — calibration degraded (delta < -flat_threshold)
+      - ``flat``     — within the flat band (or no data)
+    """
+    if not backtest_docs:
+        return ConfidenceDrift(trend="flat", magnitude=0.0)
+    confidences: list[tuple[datetime, float]] = []
+    for doc in backtest_docs:
+        result = doc.result or {}
+        summary = result.get("calibration_summary") if isinstance(result, dict) else None
+        if not isinstance(summary, dict):
+            continue
+        conf = summary.get("confidence_calibration")
+        if not isinstance(conf, (int, float)):
+            continue
+        ts = getattr(doc, "createdAt", None)
+        if isinstance(ts, datetime) and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC_TZ)
+        if ts is None:
+            continue
+        confidences.append((ts, float(conf)))
+    if len(confidences) < 2:
+        # Single point — can't compute drift. Flat zero so consumers
+        # can render the empty state.
+        return ConfidenceDrift(trend="flat", magnitude=0.0)
+    confidences.sort(key=lambda item: item[0])
+    earliest = confidences[0][1]
+    latest = confidences[-1][1]
+    delta = latest - earliest
+    magnitude = abs(delta)
+    trend: Literal["rising", "falling", "flat"]
+    if magnitude < flat_threshold:
+        trend = "flat"
+    elif delta > 0:
+        trend = "rising"
+    else:
+        trend = "falling"
+    return ConfidenceDrift(trend=trend, magnitude=round(magnitude, 4))
+
+
+def _compose_modal_outcome_distribution(
+    projection_docs: list[Any],
+) -> tuple[ModalOutcomeEntry, ...]:
+    """Tally projected-decision modal verbs into a normalised share map.
+
+    Each :class:`ForesightProjectedDecision` carries the modal verb
+    (``decision_text``); the distribution counts each unique verb and
+    normalises by the total record count. Empty input yields an empty
+    tuple.
+    """
+    counts: dict[str, int] = {}
+    for doc in projection_docs:
+        verb = (getattr(doc, "decision_text", "") or "").strip().lower()
+        if not verb:
+            continue
+        counts[verb] = counts.get(verb, 0) + 1
+    total = sum(counts.values())
+    if total == 0:
+        return ()
+    entries = [
+        ModalOutcomeEntry(
+            outcome=outcome,
+            share=round(count / total, 4),
+        )
+        for outcome, count in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+    return tuple(entries)
+
+
+async def _fetch_aggregate_inputs(
+    workspace_id: str,
+    *,
+    window_days: int,
+    now: datetime,
+) -> tuple[list[Any], list[Any]]:
+    """Read the workspace's persisted backtests + projection records
+    over the window. Returns ``(backtest_docs, projection_docs)``.
+
+    Tenant filter on every read per cloud rule #7. ``createdAt``
+    comparison uses a UTC-anchored lower bound so the window is
+    deterministic across deployments with different default tzs.
+    """
+    window_start = now - timedelta(days=window_days)
+    backtest_docs = await (
+        _ForesightBacktestDoc.find(
+            {
+                "workspace": workspace_id,
+                "status": "complete",
+                "createdAt": {"$gte": window_start},
+            }
+        )
+        .sort([("createdAt", 1), ("_id", 1)])  # type: ignore[list-item]
+        .to_list()
+    )
+    projection_docs = await _ForesightProjectedDecisionDoc.find(
+        {
+            "workspace": workspace_id,
+            "createdAt": {"$gte": window_start},
+        }
+    ).to_list()
+    return backtest_docs, projection_docs
+
+
+def _aggregate_to_response(rollup: AggregateRollup) -> AggregateRollupResponse:
+    """Map the frozen-dataclass rollup into the wire shape.
+
+    Done by hand rather than ``model_validate(from_attributes=True)``
+    because the tuple-of-domain → list-of-pydantic projection is more
+    explicit than relying on Pydantic's nested coercion + every nested
+    DTO uses ``extra='forbid'``.
+    """
+    return AggregateRollupResponse(
+        window_days=rollup.window_days,
+        generated_at=_iso_required(rollup.generated_at),
+        rolling_accuracy=RollingAccuracySeriesDto(
+            points=[
+                RollingAccuracyPointDto(
+                    ts=_iso_required(p.ts),
+                    accuracy=p.accuracy,
+                    sample_count=p.sample_count,
+                )
+                for p in rollup.rolling_accuracy
+            ]
+        ),
+        confidence_drift=ConfidenceDriftDto(
+            trend=rollup.confidence_drift.trend,
+            magnitude=rollup.confidence_drift.magnitude,
+        ),
+        modal_outcome_distribution=ModalOutcomeDistributionDto(
+            entries=[
+                ModalOutcomeEntryDto(
+                    outcome=e.outcome,
+                    share=e.share,
+                )
+                for e in rollup.modal_outcome_distribution
+            ]
+        ),
+    )
+
+
+def _iso_required(dt: datetime) -> str:
+    """Like :func:`iso_utc` but never returns ``None`` — used when the
+    wire field is non-optional. Naïve datetimes are re-anchored to UTC
+    so the response always ends in ``Z``.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC_TZ)
+    return dt.astimezone(UTC_TZ).isoformat().replace("+00:00", "Z")
+
+
+async def get_aggregate_rollup(
+    ctx: RequestContext,
+    *,
+    window_days: int | None = None,
+) -> AggregateRollupResponse:
+    """Compose the workspace's aggregate rollup over the trailing window.
+
+    Read-only — no event emit, no Beanie writes. Empty workspaces
+    collapse to zeros + empty arrays so the UI never sees a 404 on
+    new-tenant boot. Above the 90-day cap → 422
+    ``foresight.invalid_window`` (validated in :func:`_resolve_window_days`).
+    """
+    workspace_id = _require_workspace(ctx)
+    effective_window = _resolve_window_days(window_days)
+    now = datetime.now(UTC_TZ)
+
+    backtest_docs, projection_docs = await _fetch_aggregate_inputs(
+        workspace_id,
+        window_days=effective_window,
+        now=now,
+    )
+
+    rolling = _compose_rolling_accuracy(
+        backtest_docs,
+        window_days=effective_window,
+        now=now,
+    )
+    drift = _compose_confidence_drift(backtest_docs)
+    distribution = _compose_modal_outcome_distribution(projection_docs)
+
+    rollup = AggregateRollup(
+        workspace_id=workspace_id,
+        window_days=effective_window,
+        generated_at=now,
+        rolling_accuracy=rolling,
+        confidence_drift=drift,
+        modal_outcome_distribution=distribution,
+    )
+    return _aggregate_to_response(rollup)
+
+
+# ---------------------------------------------------------------------------
+# Insights (RFC §11.6) — five-rule pattern synthesizer over the aggregate.
+#
+# The synthesizer module (``ee.foresight.insights``) lives in the engine
+# namespace so the rule logic stays pure / no I/O / no Beanie. The
+# cloud service composes the input bundle from the same persistence
+# the aggregate endpoint reads, then delegates the rule evaluation.
+# Engine import is lazy per the import-linter contract.
+# ---------------------------------------------------------------------------
+
+
+INSIGHTS_DEFAULT_CAP: int = 20
+
+
+def _compose_per_persona_calibration(
+    projection_docs: list[Any],
+    *,
+    floor_threshold: float,
+) -> list[Any]:
+    """Build the per-persona calibration proxy the synthesizer reads.
+
+    PR 4's CalibrationPair persistence didn't ship — the rule fires
+    on per-persona confidence levels read off the projection
+    collection as a proxy until the real buffer migrates to Mongo.
+
+    The synthesizer's ``PerPersonaCalibration`` dataclass lives in
+    the engine namespace; we import it lazily inside the function so
+    the cloud module stays clean of the engine layer at module top.
+    """
+    from pocketpaw_ee.foresight.insights import PerPersonaCalibration
+
+    per_persona: dict[str, list[float]] = {}
+    for doc in projection_docs:
+        persona_id = getattr(doc, "persona_id", "") or ""
+        if not persona_id:
+            continue
+        confidence = getattr(doc, "confidence", None)
+        if not isinstance(confidence, (int, float)):
+            continue
+        per_persona.setdefault(persona_id, []).append(float(confidence))
+
+    out: list[Any] = []
+    for persona_id, confidences in per_persona.items():
+        if not confidences:
+            continue
+        mean_conf = sum(confidences) / len(confidences)
+        # Synthesizer threshold gating happens in the rule itself;
+        # we surface every persona we have data for so a follow-up
+        # rule (or v1.0 LLM synthesizer) can re-evaluate without a
+        # second fetch.
+        # Drop personas with samples below 2 to avoid noise from a
+        # single low projection.
+        if len(confidences) < 2:
+            continue
+        out.append(
+            PerPersonaCalibration(
+                persona_id=persona_id,
+                calibration=round(mean_conf, 4),
+                sample_count=len(confidences),
+            )
+        )
+    # Keep deterministic ordering so the synthesizer's output is
+    # stable across re-fetches.
+    out.sort(key=lambda entry: entry.persona_id)
+    return out
+
+
+def _compose_tier_distribution_deltas(
+    backtest_docs: list[Any],
+    *,
+    configured_default: dict[str, float],
+) -> list[Any]:
+    """Compute the configured-vs-actual tier mix delta per tier.
+
+    The actual mix is averaged across the workspace's recent
+    completed backtests (the engine reports ``tier_distribution``
+    per run on ``result.tier_distribution``). Configured comes from
+    the locked default — v1.0 will read a per-scenario override from
+    the request when the operator opted in.
+
+    Returns a list of :class:`TierDistributionDelta` instances
+    suitable for the synthesizer's ``tier_distribution_deltas``
+    bundle field. Empty input yields an empty list (no tier-imbalance
+    insights fire).
+    """
+    from pocketpaw_ee.foresight.insights import TierDistributionDelta
+
+    actual_counts: dict[str, int] = {}
+    total = 0
+    for doc in backtest_docs:
+        result = doc.result or {}
+        if not isinstance(result, dict):
+            continue
+        tier_dist = result.get("tier_distribution")
+        if not isinstance(tier_dist, dict):
+            continue
+        for tier, count in tier_dist.items():
+            if not isinstance(count, int):
+                continue
+            actual_counts[str(tier)] = actual_counts.get(str(tier), 0) + count
+            total += count
+    if total == 0:
+        return []
+    deltas: list[Any] = []
+    for tier, configured in configured_default.items():
+        actual = actual_counts.get(tier, 0) / total if total else 0.0
+        deltas.append(
+            TierDistributionDelta(
+                tier=tier,
+                configured=round(float(configured), 4),
+                actual=round(actual, 4),
+            )
+        )
+    return deltas
+
+
+def _compose_latest_backtest_gate(
+    backtest_docs: list[Any],
+) -> Any | None:
+    """Build the synthesizer's ``LatestBacktestGate`` from the freshest
+    completed backtest. Returns ``None`` when no backtests exist —
+    the threshold_unmet rule then silently skips.
+    """
+    from pocketpaw_ee.foresight.insights import LatestBacktestGate
+
+    if not backtest_docs:
+        return None
+    # Backtest docs already arrive sorted ascending by createdAt from
+    # ``_fetch_aggregate_inputs``; the freshest is the last entry.
+    doc = backtest_docs[-1]
+    gate = doc.gate_decision or {}
+    observed = gate.get("observed")
+    threshold = gate.get("threshold")
+    passed = bool(gate.get("passed", False))
+    if not isinstance(observed, (int, float)) or not isinstance(threshold, (int, float)):
+        # Malformed gate payload — skip rather than fire a bogus insight.
+        return None
+    completed_at = getattr(doc, "createdAt", None)
+    if isinstance(completed_at, datetime) and completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=UTC_TZ)
+    return LatestBacktestGate(
+        backtest_id=str(doc.id),
+        passed=passed,
+        observed=float(observed),
+        threshold=float(threshold),
+        completed_at=completed_at,
+    )
+
+
+def _insight_to_response(view: InsightView) -> InsightResponse:
+    """Map the domain :class:`InsightView` into the wire shape.
+
+    Tuple → list conversion happens here so the DTO carries a plain
+    list. ``generated_at`` is converted to ISO-8601 UTC with a Z
+    suffix for parity with the rest of the foresight wire surface.
+    """
+    return InsightResponse(
+        id=view.id,
+        kind=view.kind,
+        title=view.title,
+        body=view.body,
+        severity=view.severity,
+        anchor_refs=list(view.anchor_refs),
+        generated_at=_iso_required(view.generated_at),
+    )
+
+
+async def get_insights(ctx: RequestContext) -> InsightsResponse:
+    """Compose the workspace's Insights panel response.
+
+    Composes the synthesizer input bundle from the same aggregate
+    inputs the rollup endpoint reads, then delegates rule evaluation
+    to :func:`ee.foresight.insights.synthesize_insights`. Engine
+    import is lazy so the cloud module stays clean of the engine
+    layer per the import-linter contract.
+
+    Empty workspaces return ``items=[]`` — the synthesizer yields no
+    rows when none of the five rules can fire.
+    """
+    workspace_id = _require_workspace(ctx)
+    now = datetime.now(UTC_TZ)
+
+    # Reuse the aggregate window so the insights view is consistent
+    # with the rollup view the UI renders side-by-side.
+    backtest_docs, projection_docs = await _fetch_aggregate_inputs(
+        workspace_id,
+        window_days=AGGREGATE_DEFAULT_WINDOW_DAYS,
+        now=now,
+    )
+
+    rolling = _compose_rolling_accuracy(
+        backtest_docs,
+        window_days=AGGREGATE_DEFAULT_WINDOW_DAYS,
+        now=now,
+    )
+    drift = _compose_confidence_drift(backtest_docs)
+    per_persona = _compose_per_persona_calibration(
+        projection_docs,
+        floor_threshold=0.50,
+    )
+    tier_deltas = _compose_tier_distribution_deltas(
+        backtest_docs,
+        configured_default={"premium": 0.05, "mid": 0.15, "tail": 0.80},
+    )
+    latest_gate = _compose_latest_backtest_gate(backtest_docs)
+
+    # Lazy import — the synthesizer module is pure but lives in the
+    # engine namespace, so the import-linter forbids static imports
+    # from the cloud surface. Imported inside the function call
+    # path keeps the contract clean.
+    from pocketpaw_ee.foresight.insights import (  # noqa: PLC0415
+        ConfidenceDriftInput,
+        SynthesizerInput,
+        synthesize_insights,
+    )
+    from pocketpaw_ee.foresight.insights import (
+        RollingAccuracyPoint as _RollingPoint,
+    )
+
+    bundle = SynthesizerInput(
+        now=now,
+        rolling_accuracy=tuple(
+            _RollingPoint(
+                ts=p.ts,
+                accuracy=p.accuracy,
+                sample_count=p.sample_count,
+            )
+            for p in rolling
+        ),
+        confidence_drift=ConfidenceDriftInput(
+            trend=drift.trend,
+            magnitude=drift.magnitude,
+        ),
+        per_persona_calibration=tuple(per_persona),
+        tier_distribution_deltas=tuple(tier_deltas),
+        latest_backtest=latest_gate,
+    )
+
+    raw_insights = synthesize_insights(bundle, cap=INSIGHTS_DEFAULT_CAP)
+    items = [
+        _insight_to_response(
+            InsightView(
+                id=insight.id,
+                kind=insight.kind,
+                title=insight.title,
+                body=insight.body,
+                severity=insight.severity,
+                anchor_refs=insight.anchor_refs,
+                generated_at=insight.generated_at,
+            )
+        )
+        for insight in raw_insights
+    ]
+    return InsightsResponse(items=items)
+
+
 __all__ = [
+    "AGGREGATE_DEFAULT_WINDOW_DAYS",
+    "AGGREGATE_MAX_WINDOW_DAYS",
     "GATE_DEFAULT_THRESHOLD",
+    "INSIGHTS_DEFAULT_CAP",
     "create_backtest",
     "create_scenario_run",
     "emit_projected_decision",
+    "get_aggregate_rollup",
     "get_backtest",
+    "get_insights",
     "get_onboarding_gate",
     "get_scenario_run",
     "list_backtests",
     "list_instinct_proposals_for_run",
     "list_projected_decisions",
     "list_scenario_runs",
+    "list_scenarios",
 ]
