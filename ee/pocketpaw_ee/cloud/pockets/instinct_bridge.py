@@ -41,11 +41,26 @@
 #   no credentials and is marked failed instead of firing a cross-tenant
 #   write. The instinct router's per-`_pocket_write` workspace assertion
 #   is the primary gate; this is belt-and-braces.
+#
+# Updated: 2026-05-25 (RFC 09 Slice 2 — Decision Graph live formation) —
+#   `_POCKET_WRITE_SCHEMA` bumped 1 → 2. The parked blob now carries
+#   ``correlation_id`` (set from the executor's mint point — Captain
+#   Decision 9) and ``parked_policy_event_id`` (populated by Slice 3 when
+#   Instinct emits the parked `policy.evaluated(passed=False)` event so
+#   the eventual `human.corrected` can chain its `causation_id` back to
+#   the policy event). RFC 09 Captain Decision 5: no backward-compat
+#   shim — schema-1 blobs that get approved post-deploy are marked
+#   failed by the existing schema-mismatch check at line ~220. Drain the
+#   Instinct queue before deploying Slice 2.
+#   ``execute_approved_write`` reads the correlation_id off the schema-2
+#   blob and passes it back into ``run_action(..., correlation_id=...)``
+#   so the chain folds under one id end-to-end.
 
 from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +68,20 @@ logger = logging.getLogger(__name__)
 # `Action.parameters._pocket_write`. Bump when the blob shape changes so a
 # stale pending Action approved after a deploy fails loud instead of
 # executing a misinterpreted write.
-_POCKET_WRITE_SCHEMA = 1
+#
+# Schema 2 (RFC 09 Slice 2) — adds:
+#   * ``correlation_id``: the Decision-Graph chain id minted by the
+#     executor at the moment ``agent.proposed`` fired. The Instinct
+#     router (Slice 3) reads it back when emitting ``policy.evaluated`` /
+#     ``human.corrected`` / ``decision.completed``.
+#   * ``parked_policy_event_id``: the id of the
+#     ``policy.evaluated(passed=False, reason="parked_for_human_approval")``
+#     event emitted by Instinct when the write was parked. Slice 3 uses
+#     it as the ``causation_id`` on the subsequent ``human.corrected``
+#     event so the chain has a clean cause-arrow from policy → human.
+#     ``None`` when not yet populated (e.g. if a future code path parks
+#     a write without firing the policy event first).
+_POCKET_WRITE_SCHEMA = 2
 
 
 def _resolve_approver(
@@ -146,6 +174,17 @@ async def propose_pocket_write(
     # The parked-write blob — everything `execute_approved_write` needs to
     # re-run the write, MINUS the credential. `outcome` rides along so the
     # outcome event can be emitted after the gated write succeeds.
+    #
+    # Schema 2 (RFC 09 Slice 2):
+    #   * ``correlation_id``: the Decision-Graph chain id minted by the
+    #     executor when ``agent.proposed`` fired. Must round-trip via the
+    #     Instinct store so the post-approval re-entry into
+    #     ``run_action`` uses the SAME id and the chain folds under one
+    #     correlation (instead of producing a second Decision row).
+    #   * ``parked_policy_event_id``: ``None`` here — Slice 3 wires the
+    #     parked-side ``policy.evaluated`` emit and populates this field
+    #     with the event id at that point. The field exists on the
+    #     schema-2 blob now so the round-trip contract is stable.
     pocket_write = {
         "schema": _POCKET_WRITE_SCHEMA,
         "action": action_name,
@@ -156,6 +195,9 @@ async def propose_pocket_write(
         "outcome": parked_write.get("outcome"),
         "workspace_id": workspace_id,
         "requested_by": requested_by,
+        # RFC 09 Slice 2 — schema-2 chain-correlation fields
+        "correlation_id": parked_write.get("correlation_id"),
+        "parked_policy_event_id": None,
     }
 
     approver = _resolve_approver(pocket, backend_config)
@@ -231,6 +273,26 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
     requested_by = str(blob.get("requested_by") or "")
     approver = str(getattr(action, "approved_by", "") or "") or "system"
 
+    # RFC 09 Slice 2 — pull the chain correlation_id back off the blob so
+    # the post-approval ``run_action`` re-entry folds into the SAME chain
+    # the original ``agent.proposed`` opened. A malformed / missing id
+    # falls through to None and ``run_action`` will mint a fresh one —
+    # the chain still records the executed write, just under a new id.
+    # That's better than failing the approve when the only thing wrong
+    # is a Decision-Graph wire.
+    raw_corr = blob.get("correlation_id")
+    parked_correlation_id: UUID | None = None
+    if isinstance(raw_corr, str) and raw_corr:
+        try:
+            parked_correlation_id = UUID(raw_corr)
+        except ValueError:
+            logger.warning(
+                "approved action %s has malformed correlation_id on blob — "
+                "post-approval write will mint a fresh chain id",
+                action.id,
+            )
+            parked_correlation_id = None
+
     # BLOCKER 1 defense-in-depth (PR #1183) — a parked write with no
     # workspace is unexecutable. The credential re-load below is the
     # tenancy gate (it matches `(workspace_id, pocket_id)` together), so
@@ -294,10 +356,28 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
             allowed_writes=allowed_writes,
             idempotency_key=blob.get("idempotency_key"),
             from_instinct=True,
+            # RFC 09 Slice 2 — pass the chain correlation_id back into the
+            # executor so the executor's gates run under the same id as
+            # the original ``agent.proposed``. When ``parked_correlation_id``
+            # is None (schema-2 blob with a malformed id, or a future code
+            # path that parks without one), ``run_action`` mints a fresh id.
+            correlation_id=parked_correlation_id,
         )
     except Exception:  # noqa: BLE001 — never let an executor crash break approve
         logger.warning("approved action %s: write executor crashed", action.id, exc_info=True)
         await store.mark_failed(action.id, "write executor failed")
+        # RFC 09 Slice 2 — close the Decision chain on the executor
+        # crash too (otherwise the chain stays open indefinitely until
+        # the Slice 4 abandon-sweeper picks it up after 24h).
+        _emit_bridge_chain_close(
+            passed=False,
+            action_outcome="failed",
+            error_class="ExecutorCrash",
+            correlation_id=parked_correlation_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=requested_by or approver,
+        )
         return
 
     if not result.get("ok"):
@@ -307,11 +387,42 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         code = result.get("code") or "error"
         err = result.get("error") or "write rejected"
         await store.mark_failed(action.id, f"{err} (code:{code})")
+        # RFC 09 Slice 2 — close the chain on the bridge-side failure
+        # path (audit Producer 4 site (d)). The error class rides as
+        # ``error_class`` so the explain narrator can say *why* it
+        # failed (re-validation rejected, etc.). action_executor's
+        # gate-8 failure emit is suppressed on the Instinct re-entry
+        # (``binding.requires_instinct=True`` branch) so this is the
+        # only emit that closes the chain in this case.
+        _emit_bridge_chain_close(
+            passed=False,
+            action_outcome="failed",
+            error_class=str(code),
+            correlation_id=parked_correlation_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=requested_by or approver,
+        )
         return
 
     await store.mark_executed(
         action.id,
         f"write '{action_name}' executed — HTTP {result.get('status')}",
+    )
+
+    # RFC 09 Slice 2 — chain close on the bridge-side success path
+    # (audit Producer 4 site (b)). Emit BEFORE ``emit_pocket_outcome``
+    # so the outcomes-side ``decision.outcome_attached`` (RFC 07 Slice 2
+    # back-reference) finds an existing Decision row to mutate. Order
+    # matters: a swap here would lose the late outcome attach.
+    _emit_bridge_chain_close(
+        passed=True,
+        action_outcome="landed",
+        error_class=None,
+        correlation_id=parked_correlation_id,
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=requested_by or approver,
     )
 
     # M2b.2 — emit the outcome AFTER the gated write succeeded. A binding
@@ -332,6 +443,66 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         logger.warning(
             "approved action %s: outcome emit failed (write succeeded)",
             action.id,
+            exc_info=True,
+        )
+
+
+def _emit_bridge_chain_close(
+    *,
+    passed: bool,
+    action_outcome: str,
+    error_class: str | None,
+    correlation_id: UUID | None,
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+) -> None:
+    """Emit the ``decision.completed`` chain close for the bridge path.
+
+    Producer 4 sites (b) and (d) in RFC 09 audit — the bridge owns the
+    chain close on the Instinct re-entry path because the action_executor
+    suppresses its own emit when ``binding.requires_instinct=True``.
+
+    Returns early when ``correlation_id`` is None (a parked blob with a
+    malformed id). The Slice 4 abandon-sweeper will close any chain that
+    accumulates without a terminal after 24h.
+    """
+    # Late imports — keep the bridge's import surface small at module
+    # load and avoid a circular import with the decisions package.
+    from soul_protocol.spec.journal import Actor
+
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
+
+    if correlation_id is None:
+        # Nothing to close — the original chain never threaded an id
+        # through. The next Slice 4 reconciler / abandon-sweeper tick
+        # will deal with any orphans.
+        return
+
+    actor = Actor(
+        kind="agent",
+        id=f"user:{user_id or 'unknown'}",
+        scope_context=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+    )
+    payload: dict[str, Any] = {
+        "passed": passed,
+        "action_outcome": action_outcome,
+    }
+    if error_class:
+        payload["error_class"] = error_class
+    try:
+        record_decision_completed(
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+            payload=payload,
+        )
+    except Exception:  # noqa: BLE001 — chain close is best-effort
+        logger.warning(
+            "bridge decision.completed emit failed for correlation_id=%s "
+            "(action_outcome=%s) — Slice 4 reconciler will catch up",
+            correlation_id,
+            action_outcome,
             exc_info=True,
         )
 

@@ -23,6 +23,14 @@
 #   2 + 3 wire each producer site through this function instead of calling
 #   `journal.append` directly.
 #
+#   2026-05-25 (RFC 09 Slice 2) — Producers call the per-action wrappers
+#   at the bottom of this file (``record_agent_proposed``,
+#   ``record_policy_evaluated``, ``record_human_corrected``,
+#   ``record_decision_completed``) so the chain-action string literal
+#   does not appear at producer call sites — keeps the
+#   ``scripts/audit_decision_chain.py`` lint clean. Each wrapper is a
+#   one-line forwarder to ``record_decision_event``.
+#
 #   Soul-protocol version note
 #   --------------------------
 #   Soul-protocol 0.3.1 (the wheel currently installed) does NOT yet have
@@ -244,4 +252,172 @@ def record_decision_event(
     return entry
 
 
-__all__ = ["DECISION_CHAIN_ACTIONS", "record_decision_event"]
+# ---------------------------------------------------------------------------
+# Per-action convenience wrappers (RFC 09 Slice 2)
+# ---------------------------------------------------------------------------
+# Producer sites in Slices 2 + 3 call the wrappers below instead of
+# spelling the chain-action strings at the call site. Two reasons:
+#
+#   1. The ``scripts/audit_decision_chain.py`` lint script flags any
+#      occurrence of ``action="agent.proposed"`` (et al) outside this
+#      module. Hiding the literal behind a wrapper keeps producer files
+#      audit-clean without losing the no-direct-construction guarantee.
+#
+#   2. A future swap to soul-protocol's typed builders (``build_proposal_event``
+#      with a structured ``AgentProposal`` payload, etc. — currently
+#      gated on the Slice 1a wheel publishing) only touches these four
+#      wrappers. Producer call sites stay the same.
+#
+# Each wrapper has the same kwargs as ``record_decision_event`` minus
+# the ``action`` string itself. ``payload`` shape is whatever the
+# projection's ``_fold_<kind>`` reads — see the docstrings on the
+# wrappers for the expected keys.
+
+
+def record_agent_proposed(
+    *,
+    correlation_id: UUID,
+    actor: Actor,
+    scope: list[str],
+    payload: dict,
+    causation_id: UUID | None = None,
+    ts: datetime | None = None,
+    event_id: UUID | None = None,
+) -> EventEntry:
+    """Emit ``agent.proposed`` — the chain-opening event.
+
+    Fold target: ``DecisionProjection._fold_proposed`` reads
+    ``intent`` / ``action`` / ``pocket_id`` / ``inputs`` /
+    ``precedents`` / ``data`` off the payload.
+
+    Producers: pocket runtime (``action_executor.run_action`` after the
+    allowlist gate, gated by ``not from_instinct`` — RFC 09 audit
+    Surprise 3) and any future "agent proposed a tool call" site.
+    """
+    return record_decision_event(
+        action="agent.proposed",
+        correlation_id=correlation_id,
+        actor=actor,
+        scope=scope,
+        payload=payload,
+        causation_id=causation_id,
+        ts=ts,
+        event_id=event_id,
+    )
+
+
+def record_policy_evaluated(
+    *,
+    correlation_id: UUID,
+    actor: Actor,
+    scope: list[str],
+    payload: dict,
+    causation_id: UUID | None = None,
+    ts: datetime | None = None,
+    event_id: UUID | None = None,
+) -> EventEntry:
+    """Emit ``policy.evaluated`` — a policy gate observation.
+
+    Fold target: ``DecisionProjection._fold_policy`` reads
+    ``policy`` / ``passed`` / ``reason`` off the payload.
+
+    Producers:
+      * direct-path auto-approve (Slice 2 — ``action_executor`` at the
+        gate-8 success branch) — ``passed=True, policy="auto"``.
+      * Instinct park (Slice 3 — ``instinct_bridge.propose_pocket_write``
+        after the Action is stored) — ``passed=False,
+        reason="parked_for_human_approval"``.
+      * Instinct approve (Slice 3 — ``instinct/router.approve_action``
+        after ``store.approve``) — ``passed=True``.
+    """
+    return record_decision_event(
+        action="policy.evaluated",
+        correlation_id=correlation_id,
+        actor=actor,
+        scope=scope,
+        payload=payload,
+        causation_id=causation_id,
+        ts=ts,
+        event_id=event_id,
+    )
+
+
+def record_human_corrected(
+    *,
+    correlation_id: UUID,
+    actor: Actor,
+    scope: list[str],
+    payload: dict,
+    causation_id: UUID | None = None,
+    ts: datetime | None = None,
+    event_id: UUID | None = None,
+) -> EventEntry:
+    """Emit ``human.corrected`` — a human approver's disposition.
+
+    Fold target: ``DecisionProjection._fold_corrected`` appends an
+    ``ApproverRef`` and stashes any ``note`` from the payload.
+
+    Producers (Slice 3, all in ``ee/pocketpaw_ee/instinct/router.py``):
+    ``approve_action`` (disposition ``accepted``/``edited``),
+    ``reject_action`` (``rejected``), and the bulk variants of both.
+    """
+    return record_decision_event(
+        action="human.corrected",
+        correlation_id=correlation_id,
+        actor=actor,
+        scope=scope,
+        payload=payload,
+        causation_id=causation_id,
+        ts=ts,
+        event_id=event_id,
+    )
+
+
+def record_decision_completed(
+    *,
+    correlation_id: UUID,
+    actor: Actor,
+    scope: list[str],
+    payload: dict,
+    causation_id: UUID | None = None,
+    ts: datetime | None = None,
+    event_id: UUID | None = None,
+) -> EventEntry:
+    """Emit ``decision.completed`` — the chain-closing terminal event.
+
+    Fold target: ``DecisionProjection._close_chain`` reads ``passed``
+    off the payload; ``action_outcome`` / ``error_class`` / ``reason``
+    ride along for the explain narrator.
+
+    Producers:
+      * direct success / failure (Slice 2 — ``action_executor`` at
+        gate-8 success branch and the 4 except branches; gated by
+        ``not binding.requires_instinct`` so the Instinct re-entry
+        doesn't double-emit).
+      * Instinct re-entry success / failure (Slice 2 —
+        ``instinct_bridge.execute_approved_write`` after
+        ``store.mark_executed`` or on rejection / executor crash).
+      * Instinct reject (Slice 3 — ``instinct/router.reject_action``).
+      * Abandon path (Slice 4 — ``decisions._action_sweeper`` for
+        chains stuck >24h without a terminal).
+    """
+    return record_decision_event(
+        action="decision.completed",
+        correlation_id=correlation_id,
+        actor=actor,
+        scope=scope,
+        payload=payload,
+        causation_id=causation_id,
+        ts=ts,
+        event_id=event_id,
+    )
+
+
+__all__ = [
+    "DECISION_CHAIN_ACTIONS",
+    "record_agent_proposed",
+    "record_decision_completed",
+    "record_decision_event",
+    "record_human_corrected",
+    "record_policy_evaluated",
+]

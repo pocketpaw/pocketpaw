@@ -60,6 +60,29 @@
 #   Emitter failures must never break the executor's return — the call
 #   is wrapped so a bus or audit hiccup logs a warning but the
 #   action's success result still propagates to the caller.
+# Updated: 2026-05-25 (RFC 09 Slice 2 — Decision Graph live formation) —
+#   `run_action` now MINTS a `correlation_id` at entry (Captain Decision 9
+#   — every entry path through the chokepoint gets one for free; callers
+#   can override via kwarg) and emits the chain-forming events through the
+#   ``record_decision_event`` helper in ``decisions.journal_writer``:
+#     * ``agent.proposed`` after gate-5 (allowlist) passes and before gate-7
+#       (instinct park). GATED by ``not from_instinct`` so the Instinct
+#       call-back path does NOT re-emit (audit Surprise 3 — would otherwise
+#       reset chain ``proposed_at`` / ``intent`` / ``action`` via
+#       ``_fold_proposed``).
+#     * ``policy.evaluated(passed=True, policy="auto")`` + ``decision.completed
+#       (landed)`` on the direct-path success branch (gated by
+#       ``not binding.requires_instinct`` so the Instinct re-entry doesn't
+#       double-emit with the bridge's site (b) at ``instinct_bridge.py``).
+#       The policy emit makes the chain shape symmetric with the parked-then-
+#       approved path — every chain carries a policy step.
+#     * ``decision.completed(passed=False, action_outcome="failed",
+#       error_class=...)`` on each of the 4 gate-8 failure branches (timeout,
+#       backend HTTP error, guard error, unexpected exception). Same
+#       ``not binding.requires_instinct`` guard — the Instinct re-entry
+#       failure is closed by the bridge at ``instinct_bridge.py`` site (d).
+#   correlation_id is THREADED through to ``_park`` so the bridge can stash
+#   it on the parked Instinct Action (schema-2 bump in ``instinct_bridge``).
 #
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
@@ -100,11 +123,18 @@ import time
 import urllib.parse
 import uuid
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import UUID, uuid4
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError, model_validator
+from soul_protocol.spec.journal import Actor
 
 from pocketpaw.security.url_validators import validate_external_url_strict
+from pocketpaw_ee.cloud.decisions.journal_writer import (
+    record_agent_proposed,
+    record_decision_completed,
+    record_policy_evaluated,
+)
 from pocketpaw_ee.cloud.pockets._http_guard import (
     _HTTP_TIMEOUT,
     _MAX_RESPONSE_BYTES,
@@ -344,6 +374,81 @@ def _error(action: str, message: str, code: str, on_error: list[dict]) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# RFC 09 Slice 2 — Decision-Graph chain emitters
+# ---------------------------------------------------------------------------
+# Each helper is a thin wrapper over `record_decision_event` so the call
+# sites read as one logical line and a future agent looking at gate 8
+# does not have to reconstruct the Actor / scope shape from scratch.
+#
+# Failure isolation: each helper swallows any exception raised by the
+# emit path. A Decision-Graph wiring bug or a downstream projection crash
+# must NEVER fail the producer's request — the journal-side row is the
+# source of truth, the Slice 4 reconciler is the safety net (RFC 09 §
+# Architecture). The helper in `journal_writer.py` already swallows
+# `projection.apply` failures; this outer layer guards against the journal
+# itself raising (e.g. a transient SQLite lock).
+#
+# Actor shape: the producer is the pocket runtime (a system actor on
+# behalf of the user who initiated the write). `id` is the user_id with a
+# `user:` prefix so a future reader of the chain can attribute the
+# proposal to the human who triggered it; `scope_context` carries the
+# workspace + pocket so visibility filters narrow correctly.
+
+
+def _chain_actor(*, user_id: str, workspace_id: str, pocket_id: str) -> Actor:
+    """Build the Actor recorded on each chain-forming event.
+
+    `kind="agent"` because the pocket runtime is the actor that
+    PROPOSED the write (the chat agent / Tier-0 deterministic router /
+    REST endpoint all flow through this same chokepoint — see RFC 09
+    Captain Decision 9). The user_id rides along on the Actor's `id`
+    so the projection can attribute the chain to the human who started
+    it; the workspace + pocket scopes ride on `scope_context` so the
+    `_visible()` filter on `DecisionStore.find` narrows correctly.
+    """
+    safe_user = user_id or "unknown"
+    return Actor(
+        kind="agent",
+        id=f"user:{safe_user}",
+        scope_context=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+    )
+
+
+def _chain_scope(*, workspace_id: str, pocket_id: str) -> list[str]:
+    """Scope tag set stamped onto every chain event for this pocket write.
+
+    Matches the producer-1 / producer-4 scope shape in RFC 09 § Privacy
+    / scope. The projection's `_visible()` check intersects these tags
+    with the requester's scopes.
+    """
+    return [f"workspace:{workspace_id}", f"pocket:{pocket_id}"]
+
+
+def _safe_record(record_fn, *, correlation_id: UUID, **kwargs):
+    """Best-effort chain emit; swallow + log failures.
+
+    Wraps any of the per-action wrappers from
+    ``pocketpaw_ee.cloud.decisions.journal_writer`` so a Decision-Graph
+    wiring bug or transient SQLite-locked exception cannot fail the
+    producer's request. Returns the event id on success so the parked
+    path can stash it as ``causation_id`` for the next event in the
+    chain. Returns ``None`` when the emit raised — the Slice 4 reconciler
+    will reconcile from the journal cursor on the next tick.
+    """
+    try:
+        entry = record_fn(correlation_id=correlation_id, **kwargs)
+        return entry.id
+    except Exception:  # noqa: BLE001 — see "Failure isolation" above
+        logger.warning(
+            "decision-chain emit failed for %s correlation_id=%s",
+            getattr(record_fn, "__name__", "record_*"),
+            correlation_id,
+            exc_info=True,
+        )
+        return None
+
+
 async def run_action(
     *,
     workspace_id: str,
@@ -364,6 +469,7 @@ async def run_action(
     row_context: dict[str, Any] | None = None,
     workspace_context: dict[str, Any] | None = None,
     row_id: str = "",
+    correlation_id: UUID | None = None,
 ) -> dict:
     """Run ONE pocket write action against its configured backend.
 
@@ -380,6 +486,16 @@ async def run_action(
     ``requires_instinct`` and ``from_instinct`` is ``False`` the executor
     runs every cheap validation gate then PARKS the write — it returns the
     ``instinct_pending`` sentinel and makes NO HTTP call.
+
+    ``correlation_id`` (RFC 09 Slice 2 — Captain Decision 9) is the
+    Decision-Graph chain id. When ``None`` (the default) the executor
+    mints a fresh UUID at entry — every chat-agent / Tier-0 router /
+    REST entry path through this chokepoint gets one for free. The
+    Instinct re-entry path passes the original id back in so the chain
+    folds correctly (``execute_approved_write`` reads it off the parked
+    Action's schema-2 ``_pocket_write`` blob). On the parked path the
+    minted / supplied id rides on the ``_park`` dict so the bridge can
+    stash it on the Instinct Action.
 
     The result shape on a fired success::
 
@@ -410,14 +526,34 @@ async def run_action(
       5. ALLOWLIST — ``(method, query-stripped, percent-decoded path)``
          must match an ``allowed_writes`` entry; a miss is audited WARNING
          ``rejected``.
+      5b. RFC 09 Slice 2 — emit ``agent.proposed`` (chain-forming).
+         Suppressed when ``from_instinct`` is True (re-entry guard —
+         audit Surprise 3). A write rejected at gate 5 never reaches the
+         proposal point in the agent's mental model and so produces no
+         chain (Captain Decision 10).
       6. DNS pre-resolve — reject a host that resolves internal.
       7. INSTINCT PARK — when the binding requires instinct and this is
          not a post-approval call, return the ``instinct_pending``
          sentinel after gates 2-6 have validated the write. A write the
-         allowlist would reject is rejected here, NOT parked.
+         allowlist would reject is rejected here, NOT parked. The
+         ``correlation_id`` rides on ``_park`` so the bridge can stash
+         it on the parked Action's ``_pocket_write`` blob.
       8. The HTTP call: redirects disabled, 3xx is an error, tight
-         timeouts, 512 KB response cap, sanitized errors.
+         timeouts, 512 KB response cap, sanitized errors. On the direct
+         (non-Instinct) path: emit ``policy.evaluated(passed=True,
+         policy="auto")`` + ``decision.completed(landed)`` on success,
+         or ``decision.completed(failed)`` on each of the 4 except
+         branches. The Instinct re-entry path (``from_instinct=True``)
+         skips both emits — the bridge owns the chain close.
     """
+    # ── 0. RFC 09 Slice 2 — mint the correlation_id (Captain Decision 9) ──
+    # Every entry path (chat agent, Tier-0 deterministic pocket-router,
+    # direct REST endpoint) flows through here, so minting at this
+    # chokepoint covers every code path uniformly. Caller may override
+    # (e.g. the Instinct re-entry from `execute_approved_write` passes the
+    # original id back in so the chain folds correctly).
+    correlation_id = correlation_id or uuid4()
+
     # ── 1. parse the binding ────────────────────────────────────────────
     try:
         binding = ActionBinding.model_validate(raw_action)
@@ -585,6 +721,52 @@ async def run_action(
             on_error,
         )
 
+    # ── 5b. RFC 09 Slice 2 — emit agent.proposed ────────────────────────
+    # The allowlist passed (gate 5), so this write is something the agent
+    # is actually going to *propose* — either fire it directly (gate 8)
+    # or park it for human approval (gate 7). Emit BEFORE the park so the
+    # chain starts at the proposal moment; the same chain will close at
+    # gate 8 (direct) or via the Instinct bridge (parked → approved).
+    #
+    # Re-entry guard (audit Surprise 3): when `from_instinct=True` we are
+    # inside the post-approval execution of an already-proposed write —
+    # the proposal was emitted on the FIRST entry. Re-emitting here would
+    # overwrite the chain's `proposed_at` / `intent` / `action` via
+    # `_fold_proposed` (projection.py:300+) on every Instinct-approved
+    # write — a subtle bug that turns a single Decision into a "double
+    # proposed" mess. Suppress the emit on re-entry.
+    if not from_instinct:
+        _safe_record(
+            record_agent_proposed,
+            correlation_id=correlation_id,
+            actor=_chain_actor(user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id),
+            scope=_chain_scope(workspace_id=workspace_id, pocket_id=pocket_id),
+            payload={
+                # Fields the projection's `_fold_proposed` consumes
+                # (`projection.py:_fold_proposed`): intent / action /
+                # pocket_id / inputs. Extra fields ride along for the
+                # explain narrator and a future swap to soul-protocol's
+                # `build_proposal_event(AgentProposal(...))` once the
+                # Slice 1a wheel publishes (TODO(rfc09-slice-1a-wheel)).
+                "intent": f"{method} {path_decoded} via pocket {pocket_id}",
+                "action": action,
+                "pocket_id": pocket_id,
+                "inputs": [],
+                # AgentProposal-shaped fields for future-builder compat.
+                "proposal_kind": "pocket_write",
+                "summary": f"{method} {path_decoded} via pocket {pocket_id}",
+                "proposal": {
+                    "method": method,
+                    "path": path_decoded,
+                    "binding": {
+                        "requires_instinct": binding.requires_instinct,
+                        "instinct_policy": binding.instinct_policy,
+                        "outcome": binding.outcome,
+                    },
+                },
+            },
+        )
+
     # ── 6. DNS pre-resolve ──────────────────────────────────────────────
     try:
         await _assert_host_external(urllib.parse.urlsplit(url).hostname or "")
@@ -628,6 +810,13 @@ async def run_action(
                 "params": params,
                 "idempotency_key": idempotency_key,
                 "outcome": binding.outcome,
+                # RFC 09 Slice 2 — correlation_id rides on _park so the
+                # bridge can stash it on the parked Action's schema-2
+                # _pocket_write blob. The Instinct router reads it back
+                # at approve/reject time to chain policy.evaluated +
+                # human.corrected + decision.completed under the same
+                # correlation as the agent.proposed we already emitted.
+                "correlation_id": str(correlation_id),
             },
             "on_success": [],
             "on_error": [],
@@ -659,6 +848,16 @@ async def run_action(
             status="error",
             base_url=base_url,
         )
+        _emit_direct_path_failure(
+            binding=binding,
+            from_instinct=from_instinct,
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+            error_class="TimeoutError",
+            reason="timeout",
+        )
         return _error(action, "action timed out", "timeout", on_error)
     except _BackendHTTPError as exc:
         # S2 — the exact backend HTTP status goes ONLY to the audit log,
@@ -674,6 +873,16 @@ async def run_action(
             base_url=base_url,
             backend_status=exc.status_code,
         )
+        _emit_direct_path_failure(
+            binding=binding,
+            from_instinct=from_instinct,
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+            error_class="BackendHTTPError",
+            reason="http_error",
+        )
         return _error(action, "the backend rejected the request", "http_error", on_error)
     except _GuardError as exc:
         _audit_action_run(
@@ -684,8 +893,18 @@ async def run_action(
             status="error",
             base_url=base_url,
         )
+        _emit_direct_path_failure(
+            binding=binding,
+            from_instinct=from_instinct,
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+            error_class="GuardError",
+            reason=exc.code,
+        )
         return _error(action, exc.message, exc.code, on_error)
-    except Exception:  # noqa: BLE001 — never let a raw exception escape
+    except Exception as exc:  # noqa: BLE001 — never let a raw exception escape
         logger.warning("pocket %s action %s: unexpected failure", pocket_id, action, exc_info=True)
         _audit_action_run(
             actor=user_id,
@@ -694,6 +913,16 @@ async def run_action(
             action=action,
             status="error",
             base_url=base_url,
+        )
+        _emit_direct_path_failure(
+            binding=binding,
+            from_instinct=from_instinct,
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+            error_class=type(exc).__name__,
+            reason="unexpected_error",
         )
         return _error(action, "action failed", "error", on_error)
 
@@ -734,6 +963,42 @@ async def run_action(
                 exc_info=True,
             )
 
+    # RFC 09 Slice 2 — direct-path (non-Instinct) close: emit the
+    # auto-approve `policy.evaluated(passed=True)` for chain symmetry
+    # with the parked-then-approved path, then the `decision.completed`
+    # terminal. Guarded by `not binding.requires_instinct` so the
+    # Instinct re-entry path (where `from_instinct=True` AND
+    # `binding.requires_instinct=True`) does NOT double-emit with the
+    # bridge at `instinct_bridge.execute_approved_write` site (b). The
+    # captain's brief: "if there's a path that doesn't go through
+    # Instinct's human approval flow, emit policy.evaluated(passed=True)
+    # AND decision.completed(landed) in sequence."
+    if not binding.requires_instinct:
+        actor = _chain_actor(user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id)
+        scope = _chain_scope(workspace_id=workspace_id, pocket_id=pocket_id)
+        policy_event_id = _safe_record(
+            record_policy_evaluated,
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=scope,
+            payload={
+                "policy": "auto",
+                "passed": True,
+                "evaluator": "auto",
+            },
+        )
+        _safe_record(
+            record_decision_completed,
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=scope,
+            payload={
+                "passed": True,
+                "action_outcome": "landed",
+            },
+            causation_id=policy_event_id,
+        )
+
     return {
         "ok": True,
         "action": action,
@@ -746,6 +1011,42 @@ async def run_action(
         "on_success": binding.on_success,
         "on_error": on_error,
     }
+
+
+def _emit_direct_path_failure(
+    *,
+    binding: ActionBinding,
+    from_instinct: bool,
+    correlation_id: UUID,
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    error_class: str,
+    reason: str,
+) -> None:
+    """Emit ``decision.completed(failed)`` for the direct (non-Instinct) path.
+
+    Same guard as the success emit: only fires when the binding is NOT
+    Instinct-gated. The Instinct re-entry failure path closes the chain
+    from ``instinct_bridge.execute_approved_write`` site (d) instead, so
+    we'd double-emit if we fired here too. ``error_class`` is the Python
+    exception type name (TimeoutError / BackendHTTPError / GuardError /
+    type(exc).__name__) for the narrator's "why did this fail" story.
+    """
+    if binding.requires_instinct:
+        return
+    _safe_record(
+        record_decision_completed,
+        correlation_id=correlation_id,
+        actor=_chain_actor(user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id),
+        scope=_chain_scope(workspace_id=workspace_id, pocket_id=pocket_id),
+        payload={
+            "passed": False,
+            "action_outcome": "failed",
+            "error_class": error_class,
+            "reason": reason,
+        },
+    )
 
 
 async def _do_request(

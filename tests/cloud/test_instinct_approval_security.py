@@ -64,10 +64,22 @@ class _FakeUser:
 
 def _pocket_write_params(workspace_id: str, outcome: str | None = "renewal_completed") -> dict:
     """An Action ``parameters`` payload carrying a parked pocket write — the
-    shape ``instinct_bridge.propose_pocket_write`` stores."""
+    shape ``instinct_bridge.propose_pocket_write`` stores.
+
+    Schema 2 (RFC 09 Slice 2) added the chain-correlation fields
+    ``correlation_id`` (the Decision-Graph chain id minted by the
+    action_executor at the moment ``agent.proposed`` fired) and
+    ``parked_policy_event_id`` (populated by Slice 3 when Instinct emits
+    the parked ``policy.evaluated(passed=False)``). These tests don't
+    exercise the chain semantics — they pin the security / re-entry
+    guarantees of the bridge — but the schema check in
+    ``execute_approved_write`` rejects any blob whose schema doesn't
+    match the current ``_POCKET_WRITE_SCHEMA``, so the round-trip needs
+    matching shape.
+    """
     return {
         "_pocket_write": {
-            "schema": 1,
+            "schema": 2,
             "action": "mark_renewed",
             "method": "POST",
             "path": "/leases/42/renew",
@@ -76,6 +88,12 @@ def _pocket_write_params(workspace_id: str, outcome: str | None = "renewal_compl
             "outcome": outcome,
             "workspace_id": workspace_id,
             "requested_by": "requester-9",
+            # RFC 09 Slice 2 — schema-2 chain-correlation fields. The
+            # bridge accepts None for both: a malformed correlation_id
+            # falls through to ``run_action``'s own mint, and
+            # ``parked_policy_event_id`` is populated by Slice 3.
+            "correlation_id": None,
+            "parked_policy_event_id": None,
         }
     }
 
