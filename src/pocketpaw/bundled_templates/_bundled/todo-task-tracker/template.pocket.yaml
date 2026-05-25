@@ -3,13 +3,15 @@
 # Pocket Template Schema metadata for the built-in todo / task tracker.
 # Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): migrated v1 ->
 # v2. Added schema_version, display_name, pattern. Renamed skills ->
-# skill_refs. No behavioural change.
+# skill_refs. ``display_name`` matches the gallery title in index.json
+# (avoids the redundant "Todo Task" that the slug's title-case fallback
+# would produce — index.json has shipped "Task Tracker" since launch).
 schema_version: "2"
 name: todo-task-tracker
 version: 1.0.0
 vertical: productivity
 pattern: app
-display_name: Todo Task Tracker
+display_name: Task Tracker
 shape: data-grid
 description: |
   A personal task tracker. A sortable, filterable list of tasks with a
