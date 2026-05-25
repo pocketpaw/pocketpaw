@@ -107,12 +107,6 @@ def build_editor_prompt_context(
     if not resolved:
         return None
 
-    default_tools = (
-        "paragraph, header, list, code, quote, image, checklist, table, "
-        "delimiter, warning, embed, linkTool, raw"
-    )
-    tool_list = ", ".join(available_tools) if available_tools else default_tools
-
     block_lines = [_format_block_for_prompt(b, i) for i, b in enumerate(resolved)]
     block_summary = "\n".join(block_lines) if block_lines else "(empty document)"
 
@@ -123,13 +117,44 @@ def build_editor_prompt_context(
             f"Focus your edit there unless the prompt says otherwise.\n"
         )
 
+    block_type_ref = (
+        "## Block type reference\n\n"
+        "You MUST use these EXACT type names. Any other name will cause a rendering error.\n\n"
+        "| Type       | Data shape |\n"
+        "|------------|------------|\n"
+        "| `paragraph` | `{\"text\": \"...\"}` |\n"
+        "| `header`    | `{\"text\": \"...\", \"level\": 1\\|2\\|3}` |\n"
+        '| `list`      | `{"style": "unordered"\\|"ordered", "meta": {}, "items": [{"content": "item1", "meta": {}, "items": []}]}` |\n'
+        "| `code`      | `{\"code\": \"...\"}` |\n"
+        '| `quote`     | `{"text": "...", "caption": "..."}` |\n'
+        '| `image`     | `{"file": {"url": "..."}, "caption": "..."}` |\n'
+        '| `checklist` | `{"items": [{"text": "...", "checked": true\\|false}]}` |\n'
+        '| `table`     | `{"content": [["cell", "cell"], ["cell", "cell"]]}` |\n'
+        "| `delimiter` | `{}` (no data needed) |\n"
+        '| `warning`   | `{"title": "...", "message": "..."}` |\n'
+        '| `embed`     | `{"embed": "url", ...}` |\n'
+        '| `linkTool`  | `{"link": "url", ...}` |\n'
+        '| `raw`       | `{"html": "..."}` |\n'
+        "\n"
+        "Common mistakes — these are NOT valid types and WILL break rendering:\n"
+        "  heading       → use `header` instead\n"
+        "  bullet_list_item → use `list` with style=unordered and items array\n"
+        "  numbered_list_item → use `list` with style=ordered and items array\n"
+        "  divider       → use `delimiter` instead\n"
+        "  blockquote     → use `quote` instead\n"
+        "  callout        → use `warning` instead\n"
+        "  check_list_item → use `checklist` with items array\n"
+        "  toggle         → not supported, use `paragraph` instead\n"
+        "\n"
+        "Lists are a SINGLE block with an `items` array — NOT one block per item.\n"
+        "Checklists are a SINGLE block with an `items` array of {text, checked} objects.\n"
+        "\n"
+    )
+
     return (
         "You are editing a document in PocketPaw's file editor.\n"
         "The document uses Editor.js block format. Each block has an id, type, and data.\n\n"
-        f"Available block types: {tool_list}\n\n"
-        "Look at the existing blocks below to understand the data shape for each type. "
-        "For example, a 'header' block has data={text, level}, a 'list' block has "
-        "data={style: 'ordered'|'unordered', items: [...]}, etc.\n\n"
+        f"{block_type_ref}\n"
         "## Current document\n\n"
         f"{block_summary}\n"
         f"{selection_hint}\n"
@@ -144,6 +169,130 @@ def build_editor_prompt_context(
         '- replaceAll: {"op":"replaceAll", "blocks":[...]}\n\n'
         "After making your edits, briefly tell the user what you changed."
     )
+
+
+def _normalize_block(block_type: str, data: dict) -> tuple[str, dict]:
+    """Normalize block type names and data shapes for Editor.js compatibility.
+
+    Fixes common LLM mistakes: Notion-style type names, wrong data shapes,
+    and list/checklist items sent as individual blocks instead of arrays.
+    """
+    bt = block_type.strip().lower()
+
+    # ── Type name normalization (only the cases that actually break) ──
+    if bt in ("heading", "headline", "h1", "h2", "h3"):
+        bt = "header"
+    elif bt in ("bullet_list_item", "bulleted_list", "unordered_list"):
+        bt = "list"
+        data = _coerce_list_data(data, style="unordered")
+    elif bt in ("numbered_list_item", "numbered_list", "ordered_list"):
+        bt = "list"
+        data = _coerce_list_data(data, style="ordered")
+    elif bt in ("divider", "horizontal_rule", "hr", "separator"):
+        bt = "delimiter"
+        data = {}
+    elif bt in ("blockquote", "block_quote"):
+        bt = "quote"
+    elif bt in ("callout", "note", "info", "alert"):
+        bt = "warning"
+        data = _coerce_warning_data(data)
+    elif bt in ("check_list_item", "check_list", "todo", "todo_list", "task_list"):
+        bt = "checklist"
+        data = _coerce_checklist_data(data)
+    elif bt in ("toggle", "collapsible", "accordion"):
+        bt = "paragraph"
+
+    # ── Data shape fixes for native names that still have wrong shapes ──
+    if bt == "list":
+        data = _coerce_list_data(data, style=None)
+    elif bt == "checklist":
+        data = _coerce_checklist_data(data)
+    elif bt == "delimiter":
+        data = {}
+    elif bt == "header" and "level" in data:
+        lvl = data["level"]
+        if not isinstance(lvl, int) or lvl < 1 or lvl > 3:
+            data = {**data, "level": 2}
+
+    return bt, data
+
+
+def _coerce_list_data(data: dict, *, style: str | None = None) -> dict:
+    """Normalize data for a ``list`` block into Editor.js list v2 format.
+
+    v2 format: {style, meta: {}, items: [{content, meta: {}, items: []}, ...]}
+    Also accepts v1 flat strings and Notion-style {text} items.
+    """
+    items = data.get("items", [])
+    # AI sent {text: "..."} instead of {items: [...]}
+    if not items and data.get("text"):
+        items = [str(data["text"])]
+    if isinstance(items, str):
+        items = [items]
+    if not isinstance(items, list):
+        items = []
+
+    normalized_items = []
+    for item in items:
+        if isinstance(item, str):
+            # v1 flat string → v2
+            normalized_items.append({"content": item, "meta": {}, "items": []})
+        elif isinstance(item, dict):
+            # Already v2 format (has "content") or Notion format (has "text")
+            content = str(item.get("content") or item.get("text") or "")
+            # Preserve nested items if present, otherwise empty list
+            nested = item.get("items", [])
+            if isinstance(nested, list):
+                nested = [
+                    {"content": str(s) if isinstance(s, str) else s.get("content", s.get("text", "")), "meta": s.get("meta", {}) if isinstance(s, dict) else {}, "items": s.get("items", []) if isinstance(s, dict) else []}
+                    if isinstance(s, (str, dict)) else {"content": str(s), "meta": {}, "items": []}
+                    for s in nested
+                ]
+            else:
+                nested = []
+            normalized_items.append({
+                "content": content,
+                "meta": item.get("meta", {}),
+                "items": nested,
+            })
+
+    resolved_style = style or data.get("style", "unordered")
+    if resolved_style not in ("unordered", "ordered"):
+        resolved_style = "unordered"
+
+    return {"style": resolved_style, "meta": {}, "items": normalized_items}
+
+
+def _coerce_checklist_data(data: dict) -> dict:
+    """Normalize data for a ``checklist`` block into {items: [{text, checked}, ...]}."""
+    items = data.get("items", [])
+    # AI sent {text: "...", checked: true} as a single item
+    if not items and data.get("text"):
+        items = [{"text": str(data["text"]), "checked": bool(data.get("checked", False))}]
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list):
+        items = []
+    normalized = []
+    for item in items:
+        if isinstance(item, str):
+            normalized.append({"text": item, "checked": False})
+        elif isinstance(item, dict):
+            normalized.append({
+                "text": str(item.get("text", "")),
+                "checked": bool(item.get("checked", False)),
+            })
+    return {"items": normalized}
+
+
+def _coerce_warning_data(data: dict) -> dict:
+    """Normalize data for a ``warning`` block into {title, message}."""
+    result: dict[str, str] = {}
+    result["title"] = str(data.get("title") or data.get("text") or "")
+    result["message"] = str(data.get("message") or data.get("text") or "")
+    if not result["title"] and not result["message"]:
+        result["title"] = "Note"
+    return result
 
 
 def apply_operations(
@@ -171,15 +320,19 @@ def apply_operations(
                 summaries.append(f"Block {block_id} not found — skipped update")
 
         elif op_type == "insert":
+            raw_type = op.get("type", "paragraph")
+            raw_data = op.get("data", {})
+            norm_type, norm_data = _normalize_block(raw_type, raw_data)
             new_block: dict[str, Any] = {
                 "id": uuid.uuid4().hex[:6],
-                "type": op["type"],
-                "data": op.get("data", {}),
+                "type": norm_type,
+                "data": norm_data,
             }
             idx = op.get("index", len(blocks))
             idx = max(0, min(idx, len(blocks)))
             blocks.insert(idx, new_block)
-            summaries.append(f"Inserted {op['type']} at index {idx}")
+            normalized = " (normalized)" if raw_type != norm_type else ""
+            summaries.append(f"Inserted {norm_type} at index {idx}{normalized}")
 
         elif op_type == "delete":
             block_id = op["id"]
@@ -216,6 +369,11 @@ def apply_operations(
             for b in new_blocks:
                 if "id" not in b:
                     b["id"] = uuid.uuid4().hex[:6]
+                raw_type = b.get("type", "paragraph")
+                raw_data = b.get("data", {})
+                norm_type, norm_data = _normalize_block(raw_type, raw_data)
+                b["type"] = norm_type
+                b["data"] = norm_data
             blocks.extend(new_blocks)
             summaries.append(f"Replaced all {old_count} blocks with {len(new_blocks)} blocks")
 
@@ -405,6 +563,26 @@ def build_edit_document_mcp_server() -> tuple[str, Any] | None:
             '  {"op": "move", "id": "<block_id>", "toIndex": 0},\n'
             '  {"op": "replaceAll", "blocks": [{"type":"paragraph","data":{"text":"..."}}]}\n'
             "]}\n\n"
+            "VALID BLOCK TYPES — use these exact names, anything else will break:\n"
+            "paragraph, header, list, code, quote, image, checklist, table,\n"
+            "delimiter, warning, embed, linkTool, raw\n\n"
+            "Data shape for each type:\n"
+            '- paragraph: {"text": "..."}\n'
+            '- header: {"text": "...", "level": 1|2|3}\n'
+            '- list: {"style": "unordered"|"ordered", "meta": {}, "items": [{"content": "item1", "meta": {}, "items": []}]}\n'
+            '- code: {"code": "..."}\n'
+            '- quote: {"text": "...", "caption": "..."}\n'
+            '- checklist: {"items": [{"text": "...", "checked": true|false}]}\n'
+            '- table: {"content": [["cell", "cell"], ["cell", "cell"]]}\n'
+            '- delimiter: {} (empty object)\n'
+            '- warning: {"title": "...", "message": "..."}\n'
+            '- embed: {"embed": "url", ...}\n'
+            '- linkTool: {"link": "url", ...}\n'
+            '- raw: {"html": "..."}\n\n'
+            "NEVER use these (they are NOT valid): heading, bullet_list_item,\n"
+            "numbered_list_item, divider, blockquote, callout, check_list_item, toggle.\n\n"
+            "Lists are ONE block with an items array — NOT one block per item.\n"
+            "Checklists are ONE block with an items array — NOT one block per item.\n\n"
             "IMPORTANT: The field is `op` (not operation or action). "
             "Everything goes inside the `operations` array — not at top level."
         ),
