@@ -1,6 +1,9 @@
 # tests/unit/test_cli_template.py
 # Created: 2026-05-25 (feat/rfc-03-v2-cli) — RED-first tests for the
 # new ``pocketpaw template`` CLI subcommand (lint / migrate / diff).
+# Modified 2026-05-25 (feat/rfc-03-v2-compile): added tests for the
+# new ``compile`` subaction — JSON (default) + YAML (--yaml) output,
+# end-to-end through the dispatch path, plus argparse wiring sanity.
 # These cover the six contract pillars from RFC 03 v2 "Style and tooling
 # notes":
 #   1. lint on a clean v2 fixture exits 0 and reports schema_version.
@@ -13,6 +16,8 @@
 #      .v1.bak unless --no-backup, and preserves YAML vs JSON format.
 #   6. diff returns a semantic dict-walked diff (+ / - / ~) grouped
 #      under top-level fields, empty for identical inputs.
+#   7. compile emits a runtime-shaped rippleSpec dict to stdout — JSON
+#      by default, YAML under --yaml; round-trips through argparse.
 # All commands also support --json for scripting.
 """Tests for the ``pocketpaw template`` CLI subcommand.
 
@@ -531,3 +536,117 @@ def test_argparse_template_diff_two_files(monkeypatch: pytest.MonkeyPatch) -> No
     assert args.subaction == "diff"
     assert args.file1 == str(_TODO_V2)
     assert args.file2 == str(_KANBAN_V2)
+
+
+# ===========================================================================
+# pocketpaw template compile <file>
+# ===========================================================================
+
+_LEASE_V2_FIXTURE = _FIXTURES_DIR / "lease-renewal-v2.yaml"
+
+
+def test_compile_emits_json_by_default() -> None:
+    """``compile <file>`` prints the runtime-shaped rippleSpec as JSON
+    on stdout. Exit 0 on a clean v2 fixture."""
+    rc, out = _capture(run_template_cmd, subaction="compile", file1=str(_LEASE_V2_FIXTURE))
+    assert rc == 0
+    data = json.loads(out)
+    assert isinstance(data, dict)
+    # data_sources -> sources translation must have happened
+    assert "sources" in data
+    assert set(data["sources"].keys()) == {"expiring_leases", "tenant_responses"}
+    # name passthrough at the top level
+    assert data["name"] == "lease-renewal-v1"
+
+
+def test_compile_yaml_flag_emits_yaml() -> None:
+    """``compile --yaml`` emits YAML instead of JSON. Round-trip via
+    ``yaml.safe_load`` must produce the same dict shape as the JSON
+    output."""
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="compile",
+        file1=str(_LEASE_V2_FIXTURE),
+        as_yaml=True,
+    )
+    assert rc == 0
+    # YAML output should parse cleanly
+    data = yaml.safe_load(out)
+    assert isinstance(data, dict)
+    assert "sources" in data
+    assert set(data["sources"].keys()) == {"expiring_leases", "tenant_responses"}
+
+
+def test_compile_bundled_template_produces_empty_sources() -> None:
+    """The bundled todo template carries no ``data_sources`` — compile
+    must produce ``{"sources": {}}`` and still exit 0."""
+    rc, out = _capture(run_template_cmd, subaction="compile", file1=str(_TODO_V2))
+    assert rc == 0
+    data = json.loads(out)
+    assert data["sources"] == {}
+
+
+def test_compile_invalid_template_exits_one(tmp_path: Path) -> None:
+    """A template with a missing required field cannot be compiled —
+    must fail validation and exit non-zero."""
+    bad = _minimal_v2_dict()
+    del bad["version"]
+    f = _write_yaml(tmp_path / "bad.yaml", bad)
+    rc, out = _capture(run_template_cmd, subaction="compile", file1=str(f))
+    assert rc == 1
+    assert "version" in out.lower() or "error" in out.lower()
+
+
+def test_compile_v1_input_auto_promotes(tmp_path: Path) -> None:
+    """A v1 template on disk is auto-promoted through the loader's
+    ``_promote_v1_to_v2`` translation before compile runs."""
+    v1 = _minimal_v1_dict()
+    f = _write_yaml(tmp_path / "old.yaml", v1)
+    rc, out = _capture(run_template_cmd, subaction="compile", file1=str(f))
+    assert rc == 0, f"v1 compile after promote should pass; got: {out}"
+    data = json.loads(out)
+    # promoted_from_v1 schema_version visible
+    assert data.get("schema_version") == "2"
+
+
+def test_compile_missing_file_exits_one(tmp_path: Path) -> None:
+    missing = tmp_path / "nope.yaml"
+    rc, _out = _capture(run_template_cmd, subaction="compile", file1=str(missing))
+    assert rc != 0
+
+
+def test_compile_requires_file_arg() -> None:
+    rc, _out = _capture(run_template_cmd, subaction="compile", file1=None)
+    assert rc != 0
+
+
+def test_argparse_template_compile_subcommand() -> None:
+    """``pocketpaw template compile <file>`` resolves to the right
+    dispatch."""
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    args = parser.parse_args(["template", "compile", str(_TODO_V2)])
+    _resolve_subargs(args)
+    assert args.command == "template"
+    assert args.subaction == "compile"
+    assert getattr(args, "file1", None) == str(_TODO_V2)
+
+
+def test_argparse_template_compile_yaml_flag() -> None:
+    """The ``--yaml`` top-level flag parses and surfaces via
+    ``args.yaml``. Uses ``parse_known_args`` to mirror what the real
+    ``main()`` does — this is what allows
+    ``pocketpaw template compile --yaml <file>`` to work despite ``--yaml``
+    appearing between two positionals."""
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    args, unknown = parser.parse_known_args(["template", "compile", "--yaml", str(_TODO_V2)])
+    # Mirror the main()'s unknown-positional folding behaviour
+    if unknown:
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
+    _resolve_subargs(args)
+    assert args.subaction == "compile"
+    assert args.file1 == str(_TODO_V2)
+    assert getattr(args, "yaml", False) is True

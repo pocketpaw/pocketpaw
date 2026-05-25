@@ -7,14 +7,20 @@
 #                   y/N confirmation prompt (idempotent on v2 input).
 #   * ``diff``    — semantic dict-walked diff between two templates,
 #                   internally promoted to v2 so v1 / v2 compare cleanly.
+# Modified 2026-05-25 (feat/rfc-03-v2-compile): added ``compile <file>``
+# subaction. Prints the runtime-shaped rippleSpec dict that
+# ``compile_template`` produces (JSON by default, YAML under --yaml).
+# Author-facing inspection only — installation is NOT part of this
+# path (that's Bucket C / Registry).
 # Publish / install / upgrade are intentionally NOT here — they belong
 # to the registry PR (Bucket C). Fabric tier:registered + via_link
 # enforcement in lint is deferred to the Fabric integration PR (PR 2g).
 """``pocketpaw template`` — author-side template tooling.
 
-Three sub-subcommands: ``lint``, ``migrate``, ``diff``. Dispatched from
-the top-level argparse parser via ``__main__._handle_early_command`` so
-the template subcommand never pays the agent / settings boot cost.
+Four sub-subcommands: ``lint``, ``migrate``, ``diff``, ``compile``.
+Dispatched from the top-level argparse parser via
+``__main__._handle_early_command`` so the template subcommand never
+pays the agent / settings boot cost.
 
 Imports of ``pocketpaw.bundled_templates`` are lazy — invoking ``--help``
 or any of the unrelated CLI commands must not pull Pydantic, YAML, or
@@ -120,14 +126,15 @@ def run_template_cmd(
     as_json: bool = False,
     yes: bool = False,
     no_backup: bool = False,
+    as_yaml: bool = False,
 ) -> int:
     """Dispatch ``pocketpaw template <subaction>`` to the right handler.
 
     Returns an exit code: 0 on success, 1 on validation / I/O failure,
     2 on usage error (unknown subaction, missing required positional).
     """
-    if subaction not in {"lint", "migrate", "diff"}:
-        msg = f"unknown subcommand {subaction!r}. Expected one of: lint, migrate, diff."
+    if subaction not in {"lint", "migrate", "diff", "compile"}:
+        msg = f"unknown subcommand {subaction!r}. Expected one of: lint, migrate, diff, compile."
         if as_json:
             output_json({"error": msg})
         else:
@@ -150,6 +157,12 @@ def run_template_cmd(
             yes=yes,
             no_backup=no_backup,
         )
+
+    if subaction == "compile":
+        if not file1:
+            _usage_error("pocketpaw template compile <file> [--yaml]", as_json)
+            return 2
+        return _run_compile(Path(file1), as_yaml=as_yaml)
 
     # subaction == "diff"
     if not file1 or not file2:
@@ -524,6 +537,75 @@ def _short(value: Any, limit: int = 60) -> str:
     if len(s) > limit:
         return s[: limit - 3] + "..."
     return s
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: compile
+# ---------------------------------------------------------------------------
+
+
+def _run_compile(path: Path, *, as_yaml: bool) -> int:
+    """Print the runtime-shaped rippleSpec dict the compile pass produces.
+
+    Author-facing inspection only — this command does NOT install or
+    persist anything. The output is what the runtime executors would
+    consume if this template were instantiated (RFC 04 sources block,
+    plus the passthrough fields PRs 2c-2g will translate).
+
+    Steps:
+      1. Read + parse the input (YAML or JSON, by extension).
+      2. Auto-promote v1 input via the loader's ``_promote_v1_to_v2``.
+      3. Validate through the Pydantic chokepoint.
+      4. Compile via ``compile_template``.
+      5. Emit the result as JSON (default) or YAML (--yaml).
+    """
+
+    # Phase 1 — read + parse
+    try:
+        meta = _parse_file(path)
+    except ValueError as exc:
+        print_fail(str(exc))
+        return 1
+
+    # Phase 2 — v1 -> v2 promotion (idempotent on v2 input)
+    from pocketpaw.bundled_templates.loader import _promote_v1_to_v2  # noqa: PLC0415
+
+    merged = _promote_v1_to_v2(meta) if _is_v1(meta) else meta
+
+    # Phase 3 — Pydantic validation
+    try:
+        from pydantic import ValidationError  # noqa: PLC0415
+
+        from pocketpaw.bundled_templates.schema import PocketTemplate  # noqa: PLC0415
+
+        template = PocketTemplate.model_validate(merged)
+    except ValidationError as exc:
+        errors = _format_pydantic_errors(exc)
+        print_fail(f"{path} failed validation:")
+        for e in errors:
+            print(f"    - {e}")
+        return 1
+    except Exception as exc:  # noqa: BLE001 — defensive
+        print_fail(f"unexpected error validating {path}: {exc}")
+        return 1
+
+    # Phase 4 — compile
+    from pocketpaw.bundled_templates.compile import compile_template  # noqa: PLC0415
+
+    try:
+        spec = compile_template(template)
+    except Exception as exc:  # noqa: BLE001 — surface compile failures cleanly
+        print_fail(f"failed to compile {path}: {exc}")
+        return 1
+
+    # Phase 5 — emit
+    if as_yaml:
+        import yaml  # noqa: PLC0415
+
+        sys.stdout.write(yaml.safe_dump(spec, sort_keys=False, default_flow_style=False))
+    else:
+        sys.stdout.write(json.dumps(spec, indent=2, default=str) + "\n")
+    return 0
 
 
 __all__ = ["run_template_cmd"]

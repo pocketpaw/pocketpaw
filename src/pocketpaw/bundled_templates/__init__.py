@@ -6,6 +6,10 @@
 # ``PocketTemplate``, ``TemplateValidationError``, and the sub-models
 # so callers (CLI, tests, future runtime) can import them at the
 # package root without reaching into ``schema`` / ``errors`` submodules.
+# Modified 2026-05-25 (feat/rfc-03-v2-compile): re-exports
+# ``compile_template`` — the OSS-side template-to-runtime translation
+# seam. PR 2b implements ``data_sources[]`` only; other top-level
+# fields passthrough until PRs 2c-2g land their runtime executors.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -47,6 +51,7 @@ files and register it in ``_bundled/index.json``. The installer discovers
 directories via iteration — no installer code changes needed.
 """
 
+from pocketpaw.bundled_templates.compile import compile_template
 from pocketpaw.bundled_templates.errors import TemplateValidationError
 from pocketpaw.bundled_templates.installer import (
     TemplateInstallResult,
@@ -85,6 +90,7 @@ __all__ = [
     "TemplateInstallResult",
     "TemplateValidationError",
     "TriggerDef",
+    "compile_template",
     "install_bundled_templates",
     "load_template",
 ]
