@@ -1,6 +1,11 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-05-25: Added `template` subcommand (lint / migrate / diff) for
+                RFC 03 v2 templates. Wired into _EARLY_COMMANDS so the
+                lint / migrate / diff path never pays the agent or
+                settings boot cost. Adds --yes and --no-backup flags for
+                template migrate.
   - 2026-04-07: Auto-detect free port in range 8000-9000 if requested port is busy.
   - 2026-03-18: Added CLI subcommands: doctor, health, channels, skills,
                 sessions, memory, config, errors, logs.
@@ -96,6 +101,7 @@ _EARLY_COMMANDS = {
     "config",
     "errors",
     "logs",
+    "template",
 }
 
 
@@ -175,6 +181,18 @@ def _handle_early_command(args) -> int | None:
             limit=getattr(args, "limit", 50),
             follow=getattr(args, "follow", False),
             as_json=getattr(args, "json", False),
+        )
+
+    if cmd == "template":
+        from pocketpaw.cli.template import run_template_cmd
+
+        return run_template_cmd(
+            subaction=getattr(args, "subaction", None),
+            file1=getattr(args, "file1", None),
+            file2=getattr(args, "file2", None),
+            as_json=getattr(args, "json", False),
+            yes=getattr(args, "yes", False),
+            no_backup=getattr(args, "no_backup", False),
         )
 
     return None
@@ -311,6 +329,7 @@ Examples:
             "config",
             "errors",
             "logs",
+            "template",
         ],
         help="Subcommand to run",
     )
@@ -323,6 +342,16 @@ Examples:
         help="Limit number of results (for errors, logs, sessions, memory)",
     )
     parser.add_argument("--follow", action="store_true", help="Tail mode (for logs)")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts (for template migrate)",
+    )
+    parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip backup creation (for template migrate)",
+    )
 
     return parser
 
@@ -338,6 +367,8 @@ def _resolve_subargs(args) -> None:
     args.query = None
     args.key = None
     args.value = None
+    args.file1 = None
+    args.file2 = None
 
     cmd = args.command
 
@@ -359,6 +390,13 @@ def _resolve_subargs(args) -> None:
             args.key = subargs[1]
         if len(subargs) > 2:
             args.value = subargs[2]
+    elif cmd == "template" and subargs:
+        # pocketpaw template <lint|migrate|diff> <file1> [<file2>]
+        args.subaction = subargs[0]
+        if len(subargs) > 1:
+            args.file1 = subargs[1]
+        if len(subargs) > 2:
+            args.file2 = subargs[2]
 
     if args.limit is None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
@@ -425,7 +463,22 @@ def main() -> None:
     """Main entry point."""
     _check_python_version()
     parser = _build_parser()
-    args = parser.parse_args()
+    # parse_known_args lets the template subcommand accept flags
+    # interspersed with positional file paths (e.g.
+    # ``pocketpaw template migrate --yes /path/to/file``). argparse's
+    # default `parse_args` aborts on the trailing positional because
+    # the nargs="*" subargs collector stops at the first optional. The
+    # unknown leftovers are folded into ``args.subargs`` below so the
+    # existing dispatch logic keeps working.
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        # Reject truly unknown flags (anything starting with `-`) so we
+        # don't silently swallow typos like `--frobnicate`. Bare
+        # positionals are appended to subargs for the active command.
+        bad_flags = [a for a in unknown if a.startswith("-")]
+        if bad_flags:
+            parser.error(f"unrecognized arguments: {' '.join(bad_flags)}")
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
     _resolve_subargs(args)
 
     # Reject combining --telegram with other channel flags. Telegram is the
