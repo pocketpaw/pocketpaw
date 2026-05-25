@@ -24,10 +24,18 @@
 #   projection consumes it as a STRING LITERAL here — when Slice 0
 #   merges, no code change is needed; the namespace registration is
 #   advisory, not enforced.
+#
+#   2026-05-25 (RFC 07 Slice 3a) — added a tiny post-apply hook registry
+#   so the explain cache layer (`decisions.explain.cache`) can invalidate
+#   cached entries when a new Decision lands. The registry is additive:
+#   hooks default to empty, every existing apply() path now funnels its
+#   return through `_emit(decision)` which fires hooks before returning.
+#   This keeps layering one-way (explain → decisions) — the projection
+#   never imports the cache.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -135,6 +143,11 @@ class DecisionProjection:
         self._pending: dict[UUID, _PendingChain] = {}
         self._last_hash_per_correlation: dict[UUID, str] = {}
         self._cursor: int = self._store.get_cursor()
+        # Slice 3a — post-apply hook registry. The explain cache
+        # registers an invalidator here; future consumers (search index,
+        # notification fan-out, etc.) can pile on without touching the
+        # projection's hot path.
+        self._post_apply_hooks: list[Callable[[Decision], None]] = []
 
     @property
     def store(self) -> DecisionStore:
@@ -143,6 +156,38 @@ class DecisionProjection:
     @property
     def cursor(self) -> int:
         return self._cursor
+
+    def register_post_apply_hook(self, hook: Callable[[Decision], None]) -> None:
+        """Register a callback fired after every successful Decision emit.
+
+        Hooks are best-effort — exceptions raised by a hook are caught
+        and logged so one bad subscriber can't block the projection's
+        write path. Hooks see the freshly-emitted Decision (the same
+        object the apply() return value would carry); they MUST NOT
+        mutate it.
+
+        Idempotence — the same callable can be registered more than once;
+        each registration adds another invocation. Callers that need
+        once-only semantics should track their own registration state.
+        """
+        self._post_apply_hooks.append(hook)
+
+    def _emit(self, decision: Decision | None) -> Decision | None:
+        """Fire post-apply hooks for a freshly-emitted Decision, then
+        return it. The single chokepoint for apply()'s return values so
+        every emit path triggers the hooks symmetrically."""
+        if decision is None:
+            return None
+        for hook in self._post_apply_hooks:
+            try:
+                hook(decision)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "post-apply hook %s raised — continuing",
+                    getattr(hook, "__qualname__", repr(hook)),
+                    exc_info=True,
+                )
+        return decision
 
     # --- rebuild / apply ----------------------------------------------------
 
@@ -215,7 +260,7 @@ class DecisionProjection:
         # Special-case the late outcome attach — doesn't accumulate into a
         # pending chain; mutates an already-emitted Decision in place.
         if entry.action == "decision.outcome_attached":
-            return self._apply_outcome_attached(entry)
+            return self._emit(self._apply_outcome_attached(entry))
 
         correlation_id = entry.correlation_id
         if correlation_id is None:
@@ -223,7 +268,7 @@ class DecisionProjection:
             # with no correlation. The graph still represents it, the
             # explain narrator still has something to say.
             if entry.action in _FABRIC_WRITE_ACTIONS:
-                return self._emit_degenerate(entry)
+                return self._emit(self._emit_degenerate(entry))
             # Other actions without a correlation aren't actionable.
             logger.debug(
                 "decision projection: %s without correlation_id — dropped",
@@ -247,7 +292,7 @@ class DecisionProjection:
             # A2: contribute, do not close.
             self._fold_fabric_write(chain, entry)
         elif entry.action in _TERMINAL_ACTIONS:
-            return self._close_chain(chain, entry)
+            return self._emit(self._close_chain(chain, entry))
         return None
 
     # --- fold helpers -------------------------------------------------------

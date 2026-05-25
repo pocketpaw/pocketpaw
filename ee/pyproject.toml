@@ -385,6 +385,10 @@ source_modules = [
     "pocketpaw_ee.cloud.decisions.domain",
     "pocketpaw_ee.cloud.decisions.projection",
     "pocketpaw_ee.cloud.decisions.store",
+    "pocketpaw_ee.cloud.decisions.explain.extractor",
+    "pocketpaw_ee.cloud.decisions.explain.narrator",
+    "pocketpaw_ee.cloud.decisions.explain.cache",
+    "pocketpaw_ee.cloud.decisions.explain.service",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.notification",

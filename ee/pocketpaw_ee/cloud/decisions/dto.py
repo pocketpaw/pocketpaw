@@ -10,6 +10,11 @@
 #   `(ts DESC, id DESC)` — the cursor is encoded as opaque
 #   `before_ts` / `before_id` query params; the response echoes them
 #   back as `next_before_ts` / `next_before_id` for the next page.
+# Updated: 2026-05-25 (RFC 07 Slice 3a) — added the explain DTOs
+#   (`ExplainRequest`, `ExplanationResponse`) for the
+#   `POST /api/v1/decisions/explain` route. Wire ≠ domain (Rule 4): the
+#   domain `Explanation` lives in `decisions.explain.narrator`; the wire
+#   response trims the field list to what the UI consumes.
 from __future__ import annotations
 
 from datetime import datetime
@@ -311,6 +316,68 @@ class TimelineResponse(BaseModel):
     events: list[JournalEventDTO] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# POST /api/v1/decisions/explain  (Slice 3a)
+# ---------------------------------------------------------------------------
+
+
+class ExplainRequest(BaseModel):
+    """Validated body for `POST /api/v1/decisions/explain`.
+
+    The natural-language question is required; everything else is
+    optional. `backend` lets a per-pocket overlay opt out of the LLM
+    narrator (per RFC 07 line 621 — `narrator.backend_pref`); the
+    default `None` keeps the orchestrator's "llm with templated
+    fallback" behavior.
+
+    `max_decisions` caps how many candidates the extractor's find()
+    step pulls. The narrator only walks the top candidate; the cap
+    bounds the find() cost not the narration cost.
+    """
+
+    model_config = ConfigDict(frozen=False)
+
+    question: str = Field(min_length=1, max_length=2000)
+    scope: dict[str, Any] | None = None
+    max_decisions: int = Field(default=5, ge=1, le=20)
+    depth: int = Field(default=3, ge=1, le=10)
+    backend: Literal["llm", "templated"] | None = None
+
+
+class ExplanationResponse(BaseModel):
+    """Wire mirror of `decisions.explain.narrator.Explanation`.
+
+    `ungrounded_sentences` is included so the UI can surface them
+    when the verifier strips a hallucinated citation — telemetry
+    point for the operator to see how often the narrator
+    over-reaches. Empty by default.
+    """
+
+    model_config = ConfigDict(frozen=False)
+
+    narrative: str
+    decisions_walked: list[UUID] = Field(default_factory=list)
+    depth_reached: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    ungrounded_sentences: list[str] = Field(default_factory=list)
+    backend_used: Literal["llm", "templated"] = "templated"
+
+    @classmethod
+    def from_domain(cls, explanation: Any) -> ExplanationResponse:
+        """Build the wire response from a domain Explanation. Single
+        mapping path so the REST + MCP surfaces never drift."""
+        return cls(
+            narrative=explanation.narrative,
+            decisions_walked=list(explanation.decisions_walked),
+            depth_reached=explanation.depth_reached,
+            tokens_in=explanation.tokens_in,
+            tokens_out=explanation.tokens_out,
+            ungrounded_sentences=list(explanation.ungrounded_sentences),
+            backend_used=explanation.backend_used,
+        )
+
+
 __all__ = [
     "ApproverWire",
     "DecisionResponse",
@@ -319,6 +386,8 @@ __all__ = [
     "DecisionsListRequest",
     "DecisionsListResponse",
     "EdgeDTO",
+    "ExplainRequest",
+    "ExplanationResponse",
     "InputWire",
     "JournalEventDTO",
     "OutcomeWire",
