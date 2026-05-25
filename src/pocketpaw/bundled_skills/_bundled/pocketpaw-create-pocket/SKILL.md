@@ -291,7 +291,7 @@ call's response depends on what the brief contains:
   is set on the server, the response is a **plan-pointer kit** pointing
   at the ``pocketpaw-pocket-planner`` skill. Invoke that skill — it
   drives a research → draft → iterate → build flow via the
-  ``mcp__pocketpaw_planner__plan_pocket`` MCP tool and the
+  ``mcp__pocketpaw_pocket_planner__plan_pocket`` MCP tool and the
   ``POST /api/v1/pockets/<id>/spec/merge`` endpoint. Do NOT draft the
   spec inline in this case; the planner skill handles the build.
 

@@ -95,7 +95,7 @@ class TestPlanKitGate:
         kit = result.draft_kit
         assert kit is not None
         assert kit["skill_name"] == "pocketpaw-pocket-planner"
-        assert kit["mcp_tool"] == "mcp__pocketpaw_planner__plan_pocket"
+        assert kit["mcp_tool"] == "mcp__pocketpaw_pocket_planner__plan_pocket"
         # Auth headers carry the tenant identity for loopback /spec/merge.
         assert kit["auth_headers"]["X-PocketPaw-Workspace-Id"] == "ws_1"
         assert kit["auth_headers"]["X-PocketPaw-User-Id"] == "user_1"

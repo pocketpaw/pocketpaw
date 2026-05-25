@@ -93,13 +93,22 @@ TOOL_PROFILES: dict[str, dict] = {
 # turn a cloud agent's ``tools`` entries into ``mcp_servers_allow``, and
 # ``ClaudeSDKBackend`` reads it to gate both server registration and the tool
 # allowlist. A new opt-in server is added here once.
-# 2026-05-25: ``pocketpaw_planner`` was previously opt-in (Mission Control
-# only). It now also hosts ``plan_pocket`` which the pocket-specialist
-# plan-pointer kit directs the chat agent to invoke for complex pocket
-# creation. Making the server ambient is the simpler shape for the MVP
-# (the MCP tools are inert until called). Re-gate per-tool later if
-# selective exposure becomes important.
-OPT_IN_MCP_SERVERS: frozenset[str] = frozenset()
+#
+# ``pocketpaw_planner`` hosts Mission Control's ``plan_project`` and stays
+# opt-in — most cloud agents never plan a project and the schema is dead
+# weight in their context. Cloud agents opt in by listing the bare token
+# ``pocketpaw_planner`` in their ``config.tools`` field; ``AgentPool._build``
+# turns that into a ``ToolPolicy.mcp_servers_allow`` entry.
+#
+# The sibling ``pocketpaw_pocket_planner`` server (hosting ``plan_pocket``,
+# the pocket-create planning tool) is intentionally NOT in this set — it
+# must be ambient so the bundled ``pocketpaw-pocket-planner`` skill can
+# call it on a cloud agent that has never explicitly opted into anything.
+# The two were briefly hosted on a single server during the
+# feat/pocket-planner-skill MVP; PR #1223 R2 split them back apart so each
+# tool gets the policy regime it actually needs. See
+# ``ee/pocketpaw_ee/agent/mcp_servers/planner.py`` for the split.
+OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
 
 
 class ToolPolicy:

@@ -125,6 +125,44 @@ This should not land in STATE.
         sections = _parse_pocket_prd_sections("")
         assert all(v == "" for v in sections.values())
 
+    def test_prd_parser_tolerates_heading_drift(self) -> None:
+        """Heading-level / case / trailing-punctuation / bold-wrapper
+        drift must not silently drop a section.
+
+        The PRD prompt asks for ``## NARRATIVE``, ``## WIDGETS`` etc.
+        but LLMs produce variants the brain accepts:
+          * ``### Widgets`` — one extra hash level
+          * ``**Narrative**`` — bold wrapper, no hash heading at all
+          * ``## Sources:`` — trailing colon
+          * ``## actions`` — lowercase
+        Each variant has been observed in real model output. The
+        parser tolerates all four; otherwise the brief silently loses
+        the section and the chat agent renders an empty list.
+        """
+        prd = """\
+## Narrative
+Drift case: lowercase + h2.
+
+### Widgets
+- stat: a metric
+
+**State**
+- count: int — the tally
+
+## Sources:
+- crm: feeds count via GET /total
+
+## actions
+- click: set on count
+"""
+        sections = _parse_pocket_prd_sections(prd)
+        # All five sections must surface non-empty content.
+        assert "Drift case" in sections["NARRATIVE"]
+        assert "stat: a metric" in sections["WIDGETS"], "h3 heading must be accepted"
+        assert "count: int" in sections["STATE"], "bold-wrapper heading must be accepted"
+        assert "crm: feeds count" in sections["SOURCES"], "trailing colon must be stripped"
+        assert "click: set on count" in sections["ACTIONS"], "lowercase heading must match"
+
 
 class TestParseBulletPairs:
     """The ``- left: right`` bullet primitive used by every section parser."""
@@ -447,26 +485,150 @@ class TestPlanPocketHandlerArgs:
 
 class TestPlanPocketToolSurface:
     """Pin the public surface of the planner MCP module — the IDs and
-    the tuple that drives the allowlist."""
+    the per-server tuples that drive the allowlist.
+
+    PR #1223 R2 split the original single-server hosting both tools
+    into two servers. ``PLANNER_TOOL_IDS`` now belongs to the
+    opt-in ``pocketpaw_planner`` server and carries ``plan_project``
+    only; ``POCKET_PLANNER_TOOL_IDS`` belongs to the ambient
+    ``pocketpaw_pocket_planner`` server and carries ``plan_pocket``.
+    """
 
     def test_plan_pocket_tool_id_constant(self) -> None:
         from pocketpaw_ee.agent.mcp_servers.planner import (
             PLAN_POCKET_TOOL_ID,
+            POCKET_PLANNER_SERVER_NAME,
+            POCKET_PLANNER_TOOL_IDS,
+        )
+
+        assert PLAN_POCKET_TOOL_ID == f"mcp__{POCKET_PLANNER_SERVER_NAME}__plan_pocket"
+        assert PLAN_POCKET_TOOL_ID in POCKET_PLANNER_TOOL_IDS
+        assert len(POCKET_PLANNER_TOOL_IDS) == 1
+
+    def test_plan_project_tool_id_constant(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers.planner import (
+            PLAN_PROJECT_TOOL_ID,
             PLANNER_TOOL_IDS,
             SERVER_NAME,
         )
 
-        assert PLAN_POCKET_TOOL_ID == f"mcp__{SERVER_NAME}__plan_pocket"
-        assert PLAN_POCKET_TOOL_ID in PLANNER_TOOL_IDS
+        assert PLAN_PROJECT_TOOL_ID == f"mcp__{SERVER_NAME}__plan_project"
+        assert PLAN_PROJECT_TOOL_ID in PLANNER_TOOL_IDS
+        assert len(PLANNER_TOOL_IDS) == 1
 
-    def test_plan_project_still_in_tool_ids(self) -> None:
-        """Adding plan_pocket must not drop plan_project."""
+    def test_tool_ids_live_on_separate_servers(self) -> None:
+        """The split is what restores the per-server OPT_IN gate. The
+        two tool IDs must NOT be hosted on the same server name."""
         from pocketpaw_ee.agent.mcp_servers.planner import (
             PLAN_POCKET_TOOL_ID,
             PLAN_PROJECT_TOOL_ID,
-            PLANNER_TOOL_IDS,
+            POCKET_PLANNER_SERVER_NAME,
+            SERVER_NAME,
         )
 
-        assert PLAN_PROJECT_TOOL_ID in PLANNER_TOOL_IDS
-        assert PLAN_POCKET_TOOL_ID in PLANNER_TOOL_IDS
-        assert len(PLANNER_TOOL_IDS) == 2
+        assert SERVER_NAME != POCKET_PLANNER_SERVER_NAME
+        # Tool IDs follow ``mcp__<server>__<tool>``.
+        assert f"__{SERVER_NAME}__" in PLAN_PROJECT_TOOL_ID
+        assert f"__{POCKET_PLANNER_SERVER_NAME}__" in PLAN_POCKET_TOOL_ID
+
+
+class TestTaskBreakdownParserDrift:
+    """The task-breakdown step is JSON output. LLM drift produces
+    patterns the original strict regex parser silently dropped — see
+    PR #1223 R2 high-priority #2. The lenient parser must extract a
+    balanced array from those shapes; ``_lenient_parse_taskspecs``
+    wraps it for the pipeline.
+    """
+
+    def test_task_breakdown_parser_handles_drift(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers.planner import _parse_lenient_json_list
+
+        # Case 1: trailing prose after the array.
+        case_trailing_prose = (
+            '[{"key": "t1", "title": "Seed state.cards"}]\n\n'
+            "-- and here's why I chose those tasks..."
+        )
+        data, err = _parse_lenient_json_list(case_trailing_prose)
+        assert err is None, f"trailing-prose case errored: {err}"
+        assert data == [{"key": "t1", "title": "Seed state.cards"}]
+
+        # Case 2: ``#`` comments inside the JSON.
+        case_comments = """\
+[
+  # the seed task — runs first
+  {"key": "t1", "title": "Seed state.cards"},
+  # the widget task
+  {"key": "t2", "title": "Add kanban"}
+]
+"""
+        data, err = _parse_lenient_json_list(case_comments)
+        assert err is None, f"comments case errored: {err}"
+        assert data == [
+            {"key": "t1", "title": "Seed state.cards"},
+            {"key": "t2", "title": "Add kanban"},
+        ]
+
+        # Case 3: trailing commas (JSON5-style).
+        case_trailing_commas = """\
+[
+  {"key": "t1", "title": "Seed state.cards",},
+  {"key": "t2", "title": "Add kanban",},
+]
+"""
+        data, err = _parse_lenient_json_list(case_trailing_commas)
+        assert err is None, f"trailing-comma case errored: {err}"
+        assert data == [
+            {"key": "t1", "title": "Seed state.cards"},
+            {"key": "t2", "title": "Add kanban"},
+        ]
+
+    def test_multiple_fenced_blocks_picks_first_array(self) -> None:
+        """Some models emit a fenced 'thinking' block, then the JSON in
+        a separate fence. The lenient parser walks the text and grabs
+        the first balanced ``[...]`` — which is the JSON, not the prose.
+        """
+        from pocketpaw_ee.agent.mcp_servers.planner import _parse_lenient_json_list
+
+        raw = """\
+Here is my thinking:
+
+```
+This pocket needs three tasks. The first seeds state...
+```
+
+And here is the JSON:
+
+```json
+[
+  {"key": "t1", "title": "Seed state.cards"}
+]
+```
+"""
+        data, err = _parse_lenient_json_list(raw)
+        assert err is None, f"multi-fence case errored: {err}"
+        assert data == [{"key": "t1", "title": "Seed state.cards"}]
+
+    def test_unparseable_output_surfaces_diagnostic(self) -> None:
+        """When the model emits nothing parseable, the parser returns
+        ``(None, err)`` with a short snippet so the captain can see
+        what was attempted. The handler propagates this into
+        ``warnings`` on the MCP response.
+        """
+        from pocketpaw_ee.agent.mcp_servers.planner import _parse_lenient_json_list
+
+        raw = "Sorry, I cannot help with that today."
+        data, err = _parse_lenient_json_list(raw)
+        assert data is None
+        assert err is not None
+        assert "no balanced JSON array" in err
+
+    def test_strings_with_brackets_do_not_break_extractor(self) -> None:
+        """A ``[`` inside a string literal must not be counted as a
+        bracket — the balanced-bracket walker respects double-quoted
+        strings."""
+        from pocketpaw_ee.agent.mcp_servers.planner import _parse_lenient_json_list
+
+        raw = '[{"key": "t1", "title": "Render [Project] dashboard"}]'
+        data, err = _parse_lenient_json_list(raw)
+        assert err is None
+        assert data == [{"key": "t1", "title": "Render [Project] dashboard"}]

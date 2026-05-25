@@ -5,7 +5,7 @@ description: |
   pocket_specialist create path returns a ``plan_kit`` (template-match
   failed and the request looks like a custom multi-widget app).
   The skill teaches the agent to call
-  ``mcp__pocketpaw_planner__plan_pocket``, render the brief in chat
+  ``mcp__pocketpaw_pocket_planner__plan_pocket``, render the brief in chat
   as markdown, iterate with the user, then walk the todos to build via
   ``POST /api/v1/pockets/<id>/spec/merge``. Sibling to
   ``pocketpaw-pocket-specialist`` — that skill applies edits; this one
@@ -48,7 +48,7 @@ DO NOT use this skill when:
 Call the planner tool with the user's verbatim brief:
 
 ```
-mcp__pocketpaw_planner__plan_pocket({
+mcp__pocketpaw_pocket_planner__plan_pocket({
   intent: "<the user's original ask>",
   deep_research: false
 })
@@ -134,7 +134,7 @@ The user replies in one of three shapes:
   delta:
 
   ```
-  mcp__pocketpaw_planner__plan_pocket({
+  mcp__pocketpaw_pocket_planner__plan_pocket({
     intent: "<the original brief>",
     prior_plan: <the brief object from the previous call>,
     iteration_delta: "<the user's verbatim revision request>"
@@ -219,6 +219,24 @@ hardened. Load that skill if you need to refresh on the shape.
 - **NEVER post to /spec/merge without the auth headers** from
   ``plan_kit.auth_headers``. They are how the loopback-internal
   endpoint trusts the workspace and user.
+
+## Known MVP limitations
+
+These are real friction points that the MVP cuts; if you bump into
+them often in real use, surface that to the captain so we know to
+prioritise the follow-up.
+
+- **Widget / state / source / action IDs are NOT stable across
+  iteration calls.** Each ``plan_pocket`` call re-derives the brief
+  from scratch, so a revision that adds one widget can renumber every
+  existing widget (``w_3`` → ``w_4``, etc.). When you walk the todos
+  in Phase 4 you key off ``brief.todos[i].id`` for tracking, but the
+  underlying widget refs inside the merge bodies may not line up with
+  what the user thinks they approved on a prior round. Surface
+  changed IDs in the rendered diff so the user is not surprised.
+- **No end-to-end test of the handler with a mocked LLM yet.** The
+  parser layer is unit-tested but the full ``_plan_pocket_handler``
+  → pipeline → brief path is exercised only against a live model.
 
 ## When done
 

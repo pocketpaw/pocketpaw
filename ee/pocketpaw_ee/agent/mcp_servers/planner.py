@@ -14,41 +14,69 @@
 #   markdown — no project_id, no DB persistence, no DeepWorkSession
 #   state machine. Iteration is stateless: the chat agent passes
 #   ``prior_plan`` + ``iteration_delta`` back in on the next call.
-"""Agent-side MCP surface for the cloud Planner entity.
+# Updated: 2026-05-25 (R2 fix for PR #1223) — split the planner module
+#   into TWO in-process MCP servers so the OPT_IN gate stays accurate:
+#     * ``pocketpaw_planner``         hosts ``plan_project`` only (opt-in)
+#     * ``pocketpaw_pocket_planner``  hosts ``plan_pocket`` only (ambient)
+#   The original single-server design conflated two policy regimes —
+#   the per-server OPT_IN_MCP_SERVERS frozenset could not gate one
+#   tool ambient + one opt-in on a single server. Splitting keeps
+#   plan_project under the existing opt-in regime (Mission Control
+#   only) while letting plan_pocket reach the pocket-create flow with
+#   no extra opt-in plumbing. Also hardened the PRD parser
+#   (heading-level / case / trailing-punctuation tolerance) and added
+#   a balanced-bracket JSON extractor for the task-breakdown step so
+#   LLM drift (trailing prose, ``#`` comments, trailing commas) no
+#   longer silently produces an empty todo list.
+"""Agent-side MCP surface for the cloud Planner entities.
 
-Tools registered:
+Two in-process MCP servers live in this module:
 
-  - ``plan_project(project_id, goal, deep_research=False)`` — invokes
-    ``ee.cloud.planner.service.agent_plan_project`` so the agent can
-    drive the full deep_work planner against a workspace Project and
-    receive the materialized cloud primitives back as JSON.
-  - ``plan_pocket(intent, prior_plan=None, iteration_delta=None,
-    deep_research=False)`` — runs the deep_work planner pipeline (sans
-    team assembly) against pocket-flavored prompts and returns a
-    structured brief (narrative + widgets + state + sources + actions
-    + ordered todos). The chat agent renders it as markdown, iterates
-    with the user, then walks the todos calling /spec/merge per todo.
-    Ephemeral: no Project, no PlanSession, no DB row.
+  - ``pocketpaw_planner`` — hosts ``plan_project(project_id, goal,
+    deep_research=False)``. Invokes
+    ``ee.cloud.planner.service.agent_plan_project`` to drive the full
+    deep_work planner against a workspace Project. **Opt-in** via the
+    per-agent ``mcp_servers_allow`` policy (Mission Control only).
+  - ``pocketpaw_pocket_planner`` — hosts ``plan_pocket(intent,
+    prior_plan=None, iteration_delta=None, deep_research=False)``.
+    Runs the deep_work planner pipeline (sans team assembly) against
+    pocket-flavored prompts and returns a structured brief
+    (narrative + widgets + state + sources + actions + ordered
+    todos). The chat agent renders it as markdown, iterates with the
+    user, then walks the todos calling /spec/merge per todo.
+    Ephemeral: no Project, no PlanSession, no DB row. **Ambient** —
+    the pocket-create skill needs to call it without explicit opt-in.
 
 The agent identity is resolved through the same chokepoint the pocket
 and tasks MCP servers use — see ``sdk_mcp_tasks._identity`` for the
-contract. ``mcp__pocketpaw_planner__plan_project`` is the canonical
-allowlist id; ``mcp__pocketpaw_planner__plan_pocket`` is the sibling.
+contract. ``mcp__pocketpaw_planner__plan_project`` and
+``mcp__pocketpaw_pocket_planner__plan_pocket`` are the canonical
+allowlist ids.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_planner"
-PLAN_PROJECT_TOOL_ID = f"mcp__{SERVER_NAME}__plan_project"
-PLAN_POCKET_TOOL_ID = f"mcp__{SERVER_NAME}__plan_pocket"
+POCKET_PLANNER_SERVER_NAME = "pocketpaw_pocket_planner"
 
-PLANNER_TOOL_IDS = (PLAN_PROJECT_TOOL_ID, PLAN_POCKET_TOOL_ID)
+PLAN_PROJECT_TOOL_ID = f"mcp__{SERVER_NAME}__plan_project"
+PLAN_POCKET_TOOL_ID = f"mcp__{POCKET_PLANNER_SERVER_NAME}__plan_pocket"
+
+# ``PLANNER_TOOL_IDS`` is the allowlist tuple for the opt-in
+# ``pocketpaw_planner`` server. It used to carry both tool ids; the
+# split moved ``plan_pocket`` onto ``POCKET_PLANNER_TOOL_IDS`` (its own
+# always-on server). Callers iterating tool ids for the allowlist must
+# concatenate both tuples — done in ``extensions.py`` via two
+# providers, one per server.
+PLANNER_TOOL_IDS = (PLAN_PROJECT_TOOL_ID,)
+POCKET_PLANNER_TOOL_IDS = (PLAN_POCKET_TOOL_ID,)
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -161,15 +189,43 @@ async def _plan_project_handler(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
+_HEADING_RE = re.compile(r"^(#{2,3})\s+(.+?)\s*$")
+
+
+def _normalize_heading_token(text: str) -> str:
+    """Strip Markdown/punctuation noise an LLM may add around a heading
+    name and upper-case the result. Tolerates ``**bold**`` wrappers,
+    trailing colons, lowercase, leading/trailing whitespace. Returns
+    the cleaned token (still upper-cased) so the caller can match it
+    against the canonical section names.
+    """
+
+    cleaned = text.strip()
+    # Repeatedly peel ``**...**`` / ``*...*`` wrappers so ``**Narrative**``
+    # and ``*Narrative*`` both reduce to ``Narrative``.
+    while len(cleaned) >= 4 and cleaned.startswith("**") and cleaned.endswith("**"):
+        cleaned = cleaned[2:-2].strip()
+    while len(cleaned) >= 2 and cleaned.startswith("*") and cleaned.endswith("*"):
+        cleaned = cleaned[1:-1].strip()
+    cleaned = cleaned.rstrip(":").rstrip("-").strip()
+    return cleaned.upper()
+
+
 def _parse_pocket_prd_sections(prd_text: str) -> dict[str, str]:
     """Split the PRD into its five labelled sections.
 
     The PRD prompt instructs the LLM to use exactly these headings:
     ``## NARRATIVE``, ``## WIDGETS``, ``## STATE``, ``## SOURCES``,
-    ``## ACTIONS``. We split on those tokens and return a dict mapping
-    each section name to its raw text (without the heading). Missing
-    sections come back as empty strings so the caller can branch on
-    that rather than KeyError-handling.
+    ``## ACTIONS``. In practice LLM drift produces variants the brain
+    accepts but the parser would silently drop: lowercased
+    (``## narrative``), trailing colons (``## NARRATIVE:``), one extra
+    hash level (``### NARRATIVE``), bold wrappers (``**Narrative**``).
+    We accept all of those — the contract is "the heading text equals
+    one of the canonical names, case-insensitively, after stripping
+    noise punctuation and Markdown emphasis markers".
+
+    Missing sections come back as empty strings so the caller can
+    branch on that rather than KeyError-handling.
     """
 
     sections: dict[str, str] = {
@@ -183,19 +239,32 @@ def _parse_pocket_prd_sections(prd_text: str) -> dict[str, str]:
         return sections
 
     # Walk the text line by line, capture lines under the most recent
-    # ``## <NAME>`` heading we recognise. Headings we don't recognise
-    # close the current section (so stray content does not leak).
+    # heading we recognise. Headings we don't recognise close the
+    # current section (so stray content does not leak).
     current: str | None = None
     buffers: dict[str, list[str]] = {k: [] for k in sections}
     for line in prd_text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("## "):
-            name = stripped[3:].strip().upper()
+        heading_match = _HEADING_RE.match(stripped)
+        if heading_match:
+            name = _normalize_heading_token(heading_match.group(2))
             if name in sections:
                 current = name
             else:
                 current = None
             continue
+
+        # Tolerate the LLM emitting ``**Narrative**`` as its own line
+        # (no leading ``##``) — treat it as a heading too.
+        if (stripped.startswith("**") and stripped.endswith("**")) or (
+            stripped.startswith("*") and stripped.endswith("*")
+        ):
+            candidate = _normalize_heading_token(stripped)
+            if candidate in sections:
+                current = candidate
+                continue
+            # Fall through — it might be normal emphasis inside prose.
+
         if current is None:
             continue
         buffers[current].append(line)
@@ -203,6 +272,149 @@ def _parse_pocket_prd_sections(prd_text: str) -> dict[str, str]:
     for name, lines in buffers.items():
         sections[name] = "\n".join(lines).strip()
     return sections
+
+
+def _extract_first_json_array(text: str) -> str | None:
+    """Pull the first ``[...]`` block out of ``text`` via balanced-bracket
+    counting, tolerating prose / comments / multiple fenced blocks
+    around it.
+
+    The original task-breakdown parser ran ``re.search`` over a single
+    ``` ```json ... ``` `` fence and called ``json.loads`` on the result.
+    LLM drift broke that:
+      * Trailing prose after the array (``[...] -- and here's why``)
+      * Multiple separate code fences (the model emits a fenced thought
+        block, THEN the JSON in a second fence)
+      * Python-style ``#`` comments inside the array
+      * Trailing commas (JSON5-style)
+
+    This walks the text scanning for the first ``[``, then counts
+    brackets — respecting double-quoted strings (with backslash
+    escapes) — until the matching outer ``]``. Returns the inclusive
+    substring or ``None`` if no balanced array exists. Strings inside
+    the array are scanned but their content is untouched; this is just
+    extraction, not validation.
+    """
+
+    start = text.find("[")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+_HASH_COMMENT_RE = re.compile(r"(?<!\\)#.*?$", re.MULTILINE)
+_TRAILING_COMMA_RE = re.compile(r",(\s*[\]\}])")
+
+
+def _strip_json_noise(text: str) -> str:
+    """Remove Python-style ``# comments`` and JSON5 trailing commas.
+
+    Run this AFTER ``_extract_first_json_array`` peeled the right
+    substring; the inputs here are the bracketed array body. We do not
+    try to be exhaustive — JSON5 supports several relaxations but the
+    two that bite us in practice are ``#`` comments (the model leaves
+    inline annotations) and trailing commas after the last item.
+    Removing both is safe because real JSON disallows them; if a
+    string literal happens to contain ``#`` we leave it alone (we only
+    strip when not inside a string — same string-scanning logic as the
+    bracket extractor).
+    """
+
+    # Strip ``#`` comments only when not inside a string literal. We
+    # walk the text once, copying chars into a buffer and skipping
+    # comment runs. The regex form would also clip ``#`` inside a JSON
+    # string ("foo#bar"), which is a no-go.
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "#":
+            # Skip to end of line (do not consume the newline so block
+            # structure is preserved).
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    stripped = "".join(out)
+    # Trailing commas: ``,]`` → ``]`` and ``,}`` → ``}``. Safe outside
+    # strings because we've already stripped comments; remaining
+    # commas in strings are preserved by the regex (it requires the
+    # following character to be a closing bracket).
+    return _TRAILING_COMMA_RE.sub(r"\1", stripped)
+
+
+def _parse_lenient_json_list(raw: str) -> tuple[list[dict] | None, str | None]:
+    """Lenient JSON-list parser used by the pocket task-breakdown step.
+
+    Returns ``(parsed_list, error_message)`` where ``parsed_list`` is
+    None on failure and ``error_message`` carries a short diagnostic
+    (suitable for surfacing in MCP warnings so the captain can see
+    what was attempted). On success ``error_message`` is None.
+
+    Strategy:
+      1. Pull the first balanced ``[...]`` block out of the raw text.
+      2. Strip ``#`` comments and trailing commas inside it.
+      3. ``json.loads`` the result.
+
+    Any of those steps can fail — we keep the original raw text in
+    the diagnostic so a follow-up retry can include the surface error.
+    """
+
+    if not raw:
+        return None, "empty model output"
+    extracted = _extract_first_json_array(raw)
+    if extracted is None:
+        return None, f"no balanced JSON array in model output: {raw[:200]!r}"
+    cleaned = _strip_json_noise(extracted)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        return None, f"JSON parse failed ({exc}); attempted: {cleaned[:300]!r}"
+    if not isinstance(data, list):
+        return None, f"expected a JSON array, got {type(data).__name__}: {cleaned[:200]!r}"
+    return [item for item in data if isinstance(item, dict)], None
 
 
 def _parse_bullet_pairs(section_text: str) -> list[tuple[str, str]]:
@@ -338,17 +550,52 @@ def _compose_intent_with_iteration(
     return "\n".join(parts)
 
 
+def _lenient_parse_taskspecs(raw: str) -> tuple[list[Any], list[str]]:
+    """Parse the task-breakdown LLM output into TaskSpec instances.
+
+    Tries the lenient extractor first (balanced-bracket + comment /
+    trailing-comma scrub); on failure falls back to PlannerAgent's
+    ``_parse_tasks`` so the original behaviour is preserved.
+
+    Returns ``(tasks, warnings)``. ``warnings`` carries any diagnostic
+    messages from the parse attempts — empty on a clean pass. The
+    handler surfaces these so the captain can see what was attempted
+    when the LLM drifts.
+    """
+
+    from pocketpaw.deep_work.models import TaskSpec
+    from pocketpaw.deep_work.planner import PlannerAgent
+
+    warnings: list[str] = []
+    data, err = _parse_lenient_json_list(raw)
+    if data is None:
+        if err:
+            warnings.append(f"lenient parse: {err}")
+        # Fall back to the strict regex parser — if the model emitted a
+        # clean ``` ```json``` ``` fence this still works.
+        legacy = PlannerAgent(manager=None)  # type: ignore[arg-type]
+        fallback = legacy._parse_tasks(raw)
+        if fallback:
+            return fallback, warnings
+        return [], warnings
+    return [TaskSpec.from_dict(item) for item in data], warnings
+
+
 async def _run_pocket_planner_pipeline(
     intent: str,
     *,
     deep_research: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[str]]:
     """Run the pocket-flavored 3-phase planner (research → PRD → todos).
 
-    Returns the brief dict directly. Mirrors PlannerAgent.plan() but
-    with the POCKET_* prompt family and no team-assembly phase. We do
-    NOT broadcast SystemEvents here — the MCP tool boundary is the
-    progress surface, not the deep_work bus.
+    Returns ``(brief, warnings)``. The brief is the dict the MCP tool
+    body wraps; warnings are diagnostic strings the handler surfaces
+    so the captain can see what the LLM emitted when a parse failed.
+
+    Mirrors PlannerAgent.plan() but with the POCKET_* prompt family
+    and no team-assembly phase. We do NOT broadcast SystemEvents here —
+    the MCP tool boundary is the progress surface, not the deep_work
+    bus.
     """
 
     from pocketpaw.deep_work.planner import PlannerAgent
@@ -358,16 +605,22 @@ async def _run_pocket_planner_pipeline(
         POCKET_TASK_BREAKDOWN_PROMPT,
     )
 
-    # Use PlannerAgent's _run_prompt / _parse_tasks plumbing — it
-    # already handles the markdown-code-fence stripping and the
-    # one-retry JSON-coercion semantics. We pass ``manager=None``
-    # because the pipeline below never touches Mission Control.
+    # ``manager=None`` is safe here even though PlannerAgent's __init__
+    # types it as required: the only PlannerAgent methods we touch
+    # (``_run_prompt`` and ``_parse_tasks``) never reach into
+    # ``self.manager`` — ``ensure_profile`` and ``_broadcast_phase``
+    # are the two that do, and we don't call them. TODO(PR #1223
+    # follow-up): refactor PlannerAgent so the prompt-runner + task
+    # parser are static helpers on a separate class and the optional-
+    # manager landmine goes away.
     planner = PlannerAgent(manager=None)  # type: ignore[arg-type]
 
     from pocketpaw.agents.router import AgentRouter
     from pocketpaw.config import get_settings
 
     router = AgentRouter(get_settings())
+
+    warnings: list[str] = []
 
     # Phase 1 — research. ``deep_research`` only toggles a couple of
     # paragraph-count knobs; pocket research is always opinionated.
@@ -389,8 +642,11 @@ async def _run_pocket_planner_pipeline(
         router=router,
     )
 
-    # Phase 3 — todos. JSON output, reuse PlannerAgent's retry-on-
-    # malformed-JSON behaviour.
+    # Phase 3 — todos. JSON output. Use the lenient parser so common
+    # LLM drift (trailing prose, ``#`` comments, trailing commas,
+    # multiple code fences) does not silently produce an empty todo
+    # list. On failure we retry with the explicit-JSON hint — same
+    # one-retry budget the upstream planner uses.
     tasks_raw = await planner._run_prompt(
         POCKET_TASK_BREAKDOWN_PROMPT.format(
             project_description=intent,
@@ -399,10 +655,16 @@ async def _run_pocket_planner_pipeline(
         ),
         router=router,
     )
-    tasks = planner._parse_tasks(tasks_raw)
+    tasks, parse_warnings = _lenient_parse_taskspecs(tasks_raw)
+    warnings.extend(parse_warnings)
     if not tasks:
         # One retry with the explicit-JSON hint, same logic plan() uses.
+        # Include the original output snippet in the warning so a
+        # debugging captain can see exactly what the model emitted.
         logger.info("plan_pocket: retrying task breakdown with explicit JSON hint")
+        warnings.append(
+            f"task-breakdown first attempt produced no todos; raw output (first 300 chars): {tasks_raw[:300]!r}"
+        )
         tasks_raw = await planner._run_prompt(
             "Your previous response was not valid JSON. Return ONLY a "
             "JSON array of todo objects, no markdown, no explanation — "
@@ -414,13 +676,19 @@ async def _run_pocket_planner_pipeline(
             ),
             router=router,
         )
-        tasks = planner._parse_tasks(tasks_raw)
+        tasks, retry_warnings = _lenient_parse_taskspecs(tasks_raw)
+        warnings.extend(retry_warnings)
+        if not tasks:
+            warnings.append(
+                f"task-breakdown retry also failed; raw output (first 300 chars): {tasks_raw[:300]!r}"
+            )
 
-    return _build_pocket_brief(
+    brief = _build_pocket_brief(
         prd=prd,
         tasks=tasks,
         research_notes=research_notes,
     )
+    return brief, warnings
 
 
 async def _plan_pocket_handler(args: dict) -> dict:
@@ -463,7 +731,7 @@ async def _plan_pocket_handler(args: dict) -> dict:
     )
 
     try:
-        brief = await _run_pocket_planner_pipeline(
+        brief, warnings = await _run_pocket_planner_pipeline(
             composed_intent,
             deep_research=deep_research,
         )
@@ -476,16 +744,30 @@ async def _plan_pocket_handler(args: dict) -> dict:
         logger.warning("plan_pocket failed", exc_info=True)
         return _error_response(f"plan_pocket failed: {exc}")
 
-    return _success_response({"ok": True, "brief": brief})
+    body: dict[str, Any] = {"ok": True, "brief": brief}
+    if warnings:
+        # Surface parser drift so the captain can see what the model
+        # emitted. The chat agent treats this as informational —
+        # ``ok: True`` still means the brief is renderable.
+        body["warnings"] = warnings
+    return _success_response(body)
 
 
 def build_planner_context_server() -> tuple[str, Any] | None:
-    """Build the in-process SDK MCP server for the planner, or ``None``
-    when the Claude Agent SDK isn't installed.
+    """Build the in-process SDK MCP server for the **opt-in** project
+    planner (Mission Control). Returns ``None`` when the Claude Agent
+    SDK isn't installed.
+
+    This server hosts ``plan_project`` only. The sibling
+    ``pocketpaw_pocket_planner`` server (built by
+    :func:`build_pocket_planner_context_server`) hosts the ambient
+    ``plan_pocket`` tool. The split is what restores the per-server
+    OPT_IN_MCP_SERVERS gate to working order — see the module
+    docstring and PR #1223 R2 review for the why.
 
     Matches the shape returned by ``build_tasks_context_server`` so the
-    backend's MCP registration loop in ``claude_sdk.py`` treats both
-    identically.
+    backend's MCP registration loop in ``claude_sdk.py`` treats this
+    identically to the other in-process servers.
     """
 
     try:
@@ -513,6 +795,34 @@ def build_planner_context_server() -> tuple[str, Any] | None:
     async def plan_project(args):  # type: ignore[no-untyped-def]
         return await _plan_project_handler(args)
 
+    server = create_sdk_mcp_server(
+        name=SERVER_NAME,
+        version="1.1.0",
+        tools=[plan_project],
+    )
+    return SERVER_NAME, server
+
+
+def build_pocket_planner_context_server() -> tuple[str, Any] | None:
+    """Build the in-process SDK MCP server for the **ambient** pocket
+    planner. Returns ``None`` when the Claude Agent SDK isn't
+    installed.
+
+    This server hosts ``plan_pocket`` only. It is registered under a
+    DIFFERENT name (``pocketpaw_pocket_planner``) from the project
+    planner so the per-server OPT_IN_MCP_SERVERS gate can keep
+    ``plan_project`` opt-in while leaving ``plan_pocket`` reachable
+    for the pocket-create flow without explicit opt-in plumbing.
+    """
+
+    try:
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+    except ImportError:
+        logger.debug(
+            "claude_agent_sdk not installed; pocketpaw_pocket_planner MCP disabled"
+        )
+        return None
+
     @tool(
         "plan_pocket",
         (
@@ -539,17 +849,20 @@ def build_planner_context_server() -> tuple[str, Any] | None:
         return await _plan_pocket_handler(args)
 
     server = create_sdk_mcp_server(
-        name=SERVER_NAME,
-        version="1.1.0",
-        tools=[plan_project, plan_pocket],
+        name=POCKET_PLANNER_SERVER_NAME,
+        version="1.0.0",
+        tools=[plan_pocket],
     )
-    return SERVER_NAME, server
+    return POCKET_PLANNER_SERVER_NAME, server
 
 
 __all__ = [
-    "PLANNER_TOOL_IDS",
     "PLAN_POCKET_TOOL_ID",
     "PLAN_PROJECT_TOOL_ID",
+    "PLANNER_TOOL_IDS",
+    "POCKET_PLANNER_SERVER_NAME",
+    "POCKET_PLANNER_TOOL_IDS",
     "SERVER_NAME",
     "build_planner_context_server",
+    "build_pocket_planner_context_server",
 ]

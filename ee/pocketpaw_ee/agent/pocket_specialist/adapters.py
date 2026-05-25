@@ -502,7 +502,7 @@ def _plan_kit_response(
     agent:
 
       1. Loads the ``pocketpaw-pocket-planner`` skill body.
-      2. Calls ``mcp__pocketpaw_planner__plan_pocket(intent=...)`` and
+      2. Calls ``mcp__pocketpaw_pocket_planner__plan_pocket(intent=...)`` and
          renders the returned brief as markdown in the chat panel.
       3. Iterates with the user (``plan_pocket`` again with
          ``prior_plan`` + ``iteration_delta``).
@@ -525,7 +525,7 @@ def _plan_kit_response(
         "brief": input.brief,
         "structural_plan": hints_dict,
         "skill_name": "pocketpaw-pocket-planner",
-        "mcp_tool": "mcp__pocketpaw_planner__plan_pocket",
+        "mcp_tool": "mcp__pocketpaw_pocket_planner__plan_pocket",
         "auth_headers": {
             "X-PocketPaw-Internal": "true",
             "X-PocketPaw-Workspace-Id": workspace_id,
@@ -533,7 +533,7 @@ def _plan_kit_response(
         },
         "next_step": (
             "Invoke the ``pocketpaw-pocket-planner`` skill and the "
-            "``mcp__pocketpaw_planner__plan_pocket`` tool to draft a "
+            "``mcp__pocketpaw_pocket_planner__plan_pocket`` tool to draft a "
             "plan. Render the returned brief in chat as markdown "
             "(narrative + widgets + state + sources + actions + todos "
             "as a checkbox list). Iterate with the user — when they say "
