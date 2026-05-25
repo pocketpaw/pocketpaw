@@ -208,7 +208,7 @@ def _seed_chain(
         _event(
             ts=base_ts + timedelta(seconds=1),
             actor=actor,
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
             scope=scope,
@@ -602,7 +602,7 @@ def test_timeline_returns_journal_events(client, projection, base_ts, journal_pa
             id=uuid4(),
             ts=base_ts + timedelta(seconds=1),
             actor=actor,
-            action="decision.graduated",
+            action="decision.completed",
             scope=["org:nerve", "workspace:ws_a_test", "pocket:p_main"],
             correlation_id=corr,
             payload={"passed": True},
@@ -618,7 +618,7 @@ def test_timeline_returns_journal_events(client, projection, base_ts, journal_pa
     # Events are seq-ordered.
     assert body["events"][0]["seq"] < body["events"][1]["seq"]
     assert body["events"][0]["action"] == "agent.proposed"
-    assert body["events"][1]["action"] == "decision.graduated"
+    assert body["events"][1]["action"] == "decision.completed"
 
 
 def test_timeline_returns_404_when_decision_missing(client) -> None:

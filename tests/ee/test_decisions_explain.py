@@ -211,7 +211,7 @@ def _seed_chain(
         _event(
             ts=base_ts + timedelta(seconds=2),
             actor=actor,
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
             scope=scope,

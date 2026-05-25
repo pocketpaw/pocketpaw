@@ -446,27 +446,65 @@ def _visible(decision: Decision, requester_scopes: list[str] | None) -> bool:
 _GRAPH: DecisionGraph | None = None
 
 
-def init_decisions_projection() -> DecisionGraph:
+def init_decisions_projection(*, rebuild_from_journal: bool = False) -> DecisionGraph:
     """Wire the singleton DecisionGraph + projection. Idempotent.
 
     Called from `mount_cloud()` after `init_realtime()`. Subsequent
     calls return the existing singleton — re-mounting (tests) does not
     rebuild the store.
 
-    The projection's `rebuild()` is NOT invoked here. Slice 1 ships the
-    substrate; the rebuild + journal subscription that keeps the
-    projection live land in Slice 2 when the journal-to-projection
-    bus subscriber wires in. For now the store stays empty until a
-    caller (test or future Slice 2 wiring) feeds events via
-    `graph.projection.apply()`.
+    Cold-start replay (RFC 09 Slice 1b)
+    ----------------------------------
+    When `rebuild_from_journal=True` the projection is replayed from the
+    org journal starting at its persisted cursor. This folds any
+    chain-forming events the journal already holds (e.g. events written
+    by a producer in a prior process lifetime before the projection had
+    a chance to apply them). The cursor is persisted by the store, so a
+    warm restart skips the replay — only genuinely-cold starts pay the
+    rebuild cost.
+
+    `mount_cloud()` is the only caller that passes `rebuild_from_journal=
+    True` today. Tests + smoke contexts get the no-replay default so a
+    per-test `tmp_path` decisions.db cannot accidentally absorb events
+    from a developer's real `~/.soul/journal.db`. Tests that want to
+    exercise the rebuild path call `projection.rebuild(...)` directly
+    against a journal fixture (see `tests/ee/test_record_decision_event
+    .py::test_cold_start_rebuild_folds_pre_existing_events`).
+
+    Replay failures are logged but do NOT block boot. The Slice 4
+    reconciler (RFC 09) will catch any rows the cold start missed; the
+    journal remains the source of truth.
     """
     global _GRAPH
     if _GRAPH is None:
         _GRAPH = DecisionGraph()
+        applied = 0
+        if rebuild_from_journal:
+            try:
+                # Local import keeps the journal_dep dependency lazy —
+                # tests + smoke contexts that don't mount cloud skip the
+                # journal lookup entirely.
+                from pocketpaw.journal_dep import get_journal
+
+                journal = get_journal()
+                cursor = _GRAPH.projection.cursor
+                applied = _GRAPH.projection.rebuild(
+                    journal.replay_from(cursor), since_seq=cursor
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "decisions projection cold-start rebuild skipped — "
+                    "journal unavailable or replay failed; projection "
+                    "will start empty and the Slice 4 reconciler will "
+                    "catch up",
+                    exc_info=True,
+                )
         logger.info(
-            "decisions projection initialized — cursor=%d count=%d",
+            "decisions projection initialized — cursor=%d count=%d "
+            "events_replayed=%d",
             _GRAPH.projection.cursor,
             _GRAPH.store.count(),
+            applied,
         )
     return _GRAPH
 

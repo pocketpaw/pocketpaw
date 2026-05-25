@@ -98,7 +98,7 @@ def _approval_chain(
     scope: list[str] | None = None,
     pocket_id: str = "p_lease_renewals",
 ) -> tuple[UUID, list[EventEntry]]:
-    """Build a 5-event approval chain ending in `decision.graduated`."""
+    """Build a 5-event approval chain ending in `decision.completed`."""
     corr = correlation_id or uuid4()
     scope = scope or ["org:nerve", f"pocket:{pocket_id}"]
     events = [
@@ -172,7 +172,7 @@ def _approval_chain(
             seq=105,
             ts=base_ts + timedelta(seconds=15),
             actor=_agent_actor(),
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
             scope=scope,
@@ -182,16 +182,16 @@ def _approval_chain(
 
 
 # ---------------------------------------------------------------------------
-# 1. Happy-path: 5-event chain emits one Decision on `decision.graduated`
+# 1. Happy-path: 5-event chain emits one Decision on `decision.completed`
 # ---------------------------------------------------------------------------
 
 
-def test_chain_emits_decision_on_graduated(
+def test_chain_emits_decision_on_completed(
     projection: DecisionProjection, base_ts: datetime
 ) -> None:
     """A canonical chain (proposed → policy → human → policy → fabric →
-    graduated) emits exactly one Decision, and the terminal event is the
-    graduated event."""
+    completed) emits exactly one Decision, and the terminal event is the
+    completed event."""
     _, events = _approval_chain(base_ts)
 
     emitted = [d for d in (projection.apply(e) for e in events) if d is not None]
@@ -227,9 +227,9 @@ def test_fabric_writes_do_not_close_chain(
 ) -> None:
     """A2 enforcement: a fabric.object.updated event mid-flow records the
     target object as an input but the chain stays OPEN until
-    decision.graduated lands. The store stays empty until then."""
+    decision.completed lands. The store stays empty until then."""
     corr = uuid4()
-    events_before_graduated = [
+    events_before_completed = [
         _event(
             seq=200,
             ts=base_ts,
@@ -251,22 +251,22 @@ def test_fabric_writes_do_not_close_chain(
             payload={"object_id": "lease:LR-2026-117"},
         ),
     ]
-    for e in events_before_graduated:
+    for e in events_before_completed:
         result = projection.apply(e)
         assert result is None, f"chain emitted prematurely on {e.action}"
     # Still empty.
     assert projection.store.count() == 0
 
-    # Now graduate.
-    graduated = _event(
+    # Now complete.
+    completed = _event(
         seq=202,
         ts=base_ts + timedelta(seconds=2),
         actor=_agent_actor(),
-        action="decision.graduated",
+        action="decision.completed",
         correlation_id=corr,
         payload={"passed": True},
     )
-    decision = projection.apply(graduated)
+    decision = projection.apply(completed)
     assert decision is not None
     assert decision.action == "patch"
     # The fabric write's target object is present as an input.
@@ -275,14 +275,14 @@ def test_fabric_writes_do_not_close_chain(
 
 
 # ---------------------------------------------------------------------------
-# 3. Rejection chain — `policy.evaluated(passed=false)` → graduated
+# 3. Rejection chain — `policy.evaluated(passed=false)` → completed
 # ---------------------------------------------------------------------------
 
 
 def test_rejection_chain_emits_rejected_outcome(
     projection: DecisionProjection, base_ts: datetime
 ) -> None:
-    """A rejected policy followed by decision.graduated emits a Decision
+    """A rejected policy followed by decision.completed emits a Decision
     with outcome.status == 'rejected'."""
     corr = uuid4()
     events = [
@@ -314,7 +314,7 @@ def test_rejection_chain_emits_rejected_outcome(
             seq=302,
             ts=base_ts + timedelta(seconds=2),
             actor=_agent_actor(),
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": False},
         ),
@@ -371,7 +371,7 @@ def test_approver_ref_carries_timestamp_and_position(
             seq=403,
             ts=base_ts + timedelta(seconds=12),
             actor=_agent_actor(),
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
         ),
@@ -498,7 +498,7 @@ def test_precedent_payload_supplied(projection: DecisionProjection, base_ts: dat
             seq=501,
             ts=base_ts + timedelta(seconds=1),
             actor=_agent_actor(),
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
         ),
@@ -545,7 +545,7 @@ def test_precedent_fallback_same_pocket_action(
                 seq=601 + i * 10,
                 ts=ts_seed + timedelta(seconds=1),
                 actor=_agent_actor(),
-                action="decision.graduated",
+                action="decision.completed",
                 correlation_id=corr_seed,
                 payload={"passed": True},
             ),
@@ -573,7 +573,7 @@ def test_precedent_fallback_same_pocket_action(
             seq=701,
             ts=base_ts + timedelta(seconds=1),
             actor=_agent_actor(),
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
         ),

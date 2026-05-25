@@ -532,14 +532,18 @@ def mount_cloud(app: FastAPI) -> None:
 
     _get_bus().subscribe("pocket.outcome", _outcomes_service.record_outcome)
 
-    # Decision graph projection (RFC 07 Slice 1). Lazy-init the
-    # singleton DecisionGraph + projection so `GET /api/v1/decisions/_ping`
-    # and the in-process Python API (`get_decision_graph()`) work from
-    # process start. Slice 1 ships the substrate only — Slice 2 wires
-    # the journal-to-projection subscription that keeps the store live.
+    # Decision graph projection (RFC 07 Slice 1 + RFC 09 Slice 1b).
+    # Lazy-init the singleton DecisionGraph + projection so
+    # `GET /api/v1/decisions/_ping` and the in-process Python API
+    # (`get_decision_graph()`) work from process start. Pass
+    # `rebuild_from_journal=True` so a cold process boot folds any
+    # pre-existing chain events the journal already holds (RFC 09
+    # Slice 1b § "Bootstrap replay verification"). Warm restarts skip
+    # the replay because the projection's cursor is persisted in
+    # decisions.db.
     from pocketpaw_ee.cloud.decisions.service import init_decisions_projection
 
-    init_decisions_projection()
+    init_decisions_projection(rebuild_from_journal=True)
 
     # Tasks → notifications fan-out. When a Task is proposed to a human
     # assignee, drop an in-app notification so they see it even without

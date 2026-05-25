@@ -121,7 +121,7 @@ def _seed_decision(
             id=uuid4(),
             ts=base_ts + timedelta(seconds=1),
             actor=actor,
-            action="decision.graduated",
+            action="decision.completed",
             scope=scope,
             correlation_id=corr,
             payload={"passed": True},

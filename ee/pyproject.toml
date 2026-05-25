@@ -577,3 +577,12 @@ forbidden_modules = [
     "pocketpaw_ee.agent.pocket_specialist.runtime",
     "pocketpaw_ee.agent.pocket_specialist.adapters",
 ]
+
+# RFC 09 Slice 1b — see `scripts/audit_decision_chain.py` for the
+# enforcement of "Decision-Graph chain producers must route through
+# `pocketpaw_ee.cloud.decisions.journal_writer.record_decision_event`."
+# That rule isn't expressible as an import-linter contract because the
+# forbidden surface (`soul_protocol.spec.decisions`) is a sub-package of
+# an external package and import-linter forbidden contracts only accept
+# top-level external packages. The script is wired into the same CI
+# step as `lint-imports` — see `Makefile` / `.github/workflows/ci.yml`.

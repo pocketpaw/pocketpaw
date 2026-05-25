@@ -80,7 +80,7 @@ def _seed_chain(
     seq_base: int = 1000,
 ) -> UUID:
     """Seed one approval chain in the store; return the chain's
-    correlation_id. Returns the FIRST `decision.graduated` Decision's
+    correlation_id. Returns the FIRST `decision.completed` Decision's
     id via a helper lookup post-emit."""
     corr = uuid4()
     scope = scope or ["org:nerve", f"pocket:{pocket_id}"]
@@ -106,7 +106,7 @@ def _seed_chain(
             seq=seq_base + 1,
             ts=base_ts + timedelta(seconds=1),
             actor=actor,
-            action="decision.graduated",
+            action="decision.completed",
             correlation_id=corr,
             payload={"passed": True},
             scope=scope,
