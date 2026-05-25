@@ -285,6 +285,26 @@
             "icon": "lucide:layout-dashboard"
           },
           {
+            "label": "Foresight",
+            "href": "/concepts/foresight",
+            "icon": "lucide:eye"
+          },
+          {
+            "label": "Pocket Sources",
+            "href": "/concepts/pocket-sources",
+            "icon": "lucide:database"
+          },
+          {
+            "label": "Pocket Write Actions",
+            "href": "/concepts/pocket-write-actions",
+            "icon": "lucide:zap"
+          },
+          {
+            "label": "LiveKit (Calls)",
+            "href": "/concepts/livekit",
+            "icon": "lucide:video"
+          },
+          {
             "label": "PocketPaw vs OpenClaw",
             "href": "/concepts/vs-openclaw",
             "icon": "lucide:scale"
@@ -766,6 +786,12 @@
               { "label": "Cancel Project", "href": "/api/post-deep-work-cancel", "method": "POST" },
               { "label": "Skip Task", "href": "/api/post-deep-work-skip-task", "method": "POST" },
               { "label": "Retry Task", "href": "/api/post-deep-work-retry-task", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Pockets",
+            "items": [
+              { "label": "Merge Pocket Spec", "href": "/api/post-pocket-spec-merge", "method": "POST" }
             ]
           },
           {
