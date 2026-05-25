@@ -211,7 +211,7 @@ class PocketSpecialistCreateInput(BaseModel):
 
 class PocketSpecialistCreateOutput(BaseModel):
     ok: bool
-    action: Literal["created", "extended", "failed", "draft_kit", "redraft"]
+    action: Literal["created", "extended", "failed", "draft_kit", "redraft", "plan_kit"]
     pocket: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
@@ -223,7 +223,11 @@ class PocketSpecialistCreateOutput(BaseModel):
             "Agent-mode first-call payload: design rules digest, structural "
             "plan echo, available widget list, and instructions for the "
             "calling chat agent to draft a rippleSpec and call back with "
-            "``spec=<draft>``. None in subagent mode."
+            "``spec=<draft>``. None in subagent mode. When ``action="
+            "'plan_kit'`` this carries the plan-pointer kit instead of the "
+            "draft kit: the chat agent should invoke the "
+            "``pocketpaw-pocket-planner`` skill and the ``plan_pocket`` MCP "
+            "tool to draft a multi-widget brief before any spec is built."
         ),
     )
 
