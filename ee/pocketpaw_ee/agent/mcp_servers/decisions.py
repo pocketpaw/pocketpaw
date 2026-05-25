@@ -6,16 +6,20 @@
 #   `tasks.py` and `planner.py`: agent identity comes from the per-stream
 #   ContextVars in `ee.cloud.chat.agent_service`; outside an SSE stream
 #   the tools return a clear MCP error rather than silently mis-tenanting.
+# Updated: 2026-05-25 (RFC 07 Slice 3a) — added `decisions_explain`,
+#   the natural-language Q&A wrapper. Same identity + scope contract
+#   as the read tools; delegates to the cloud-side orchestrator at
+#   `pocketpaw_ee.cloud.decisions.explain.explain`.
 #
 # Tools registered:
 #   - decisions_get(decision_id)
 #   - decisions_find(actor=, since=, until=, scope_kind=, pocket_id=,
 #                    policy=, outcome_status=, limit=)
 #   - decisions_trace(decision_id, depth=3)
+#   - decisions_explain(question, scope=, max_decisions=, depth=,
+#                       backend=)
 #
-# `explain` (NL Q&A with narrator) is intentionally Slice 3 — not on this
-# surface yet. Same shape as the REST router's read endpoints; the wire
-# response shape is `DecisionResponse` from `decisions.dto`.
+# The wire shape mirrors the REST router so REST + MCP never drift.
 """Agent-side MCP surface for the decision-graph entity.
 
 These tools let an agent ask "what did we decide, why, and what came
@@ -47,11 +51,13 @@ SERVER_NAME = "pocketpaw_decisions"
 DECISIONS_GET_TOOL_ID = f"mcp__{SERVER_NAME}__decisions_get"
 DECISIONS_FIND_TOOL_ID = f"mcp__{SERVER_NAME}__decisions_find"
 DECISIONS_TRACE_TOOL_ID = f"mcp__{SERVER_NAME}__decisions_trace"
+DECISIONS_EXPLAIN_TOOL_ID = f"mcp__{SERVER_NAME}__decisions_explain"
 
 DECISIONS_TOOL_IDS = (
     DECISIONS_GET_TOOL_ID,
     DECISIONS_FIND_TOOL_ID,
     DECISIONS_TRACE_TOOL_ID,
+    DECISIONS_EXPLAIN_TOOL_ID,
 )
 
 
@@ -300,6 +306,65 @@ async def _decisions_trace_handler(args: dict) -> dict:
     return _success_response(_trace_wire(result))
 
 
+async def _decisions_explain_handler(args: dict) -> dict:
+    """Wrap the cloud-side explain orchestrator for MCP callers.
+
+    Same identity / scope contract as the read tools — the per-stream
+    workspace + agent id are pulled from ContextVars; outside an SSE
+    stream the handler returns an MCP error.
+    """
+    workspace_id, agent_id = _identity()
+    if not workspace_id or not agent_id:
+        return _error_response(
+            "no active workspace/agent — decisions_explain can only be called "
+            "from inside a cloud SSE chat stream"
+        )
+
+    question = args.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return _error_response("question is required (non-empty string)")
+
+    scope = args.get("scope") if isinstance(args.get("scope"), dict) else None
+    max_decisions_raw = args.get("max_decisions") or 5
+    try:
+        max_decisions = max(1, min(int(max_decisions_raw), 20))
+    except (TypeError, ValueError):
+        max_decisions = 5
+
+    depth_raw = args.get("depth") or 3
+    try:
+        depth = max(1, min(int(depth_raw), 10))
+    except (TypeError, ValueError):
+        depth = 3
+
+    backend = args.get("backend")
+    if backend not in {"llm", "templated", None}:
+        backend = None
+
+    from pocketpaw_ee.cloud.decisions.dto import ExplanationResponse
+    from pocketpaw_ee.cloud.decisions.explain import ExplainRequestInput, explain
+
+    body = ExplainRequestInput(
+        question=question.strip(),
+        scope=scope,
+        max_decisions=max_decisions,
+        depth=depth,
+        backend=backend,
+    )
+
+    try:
+        explanation = await explain(
+            body,
+            requester_scopes=_requester_scopes(workspace_id),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("decisions_explain failed", exc_info=True)
+        return _error_response(f"decisions_explain failed: {exc}")
+
+    wire = ExplanationResponse.from_domain(explanation)
+    return _success_response(wire.model_dump(mode="json"))
+
+
 # ---------------------------------------------------------------------------
 # Server factory — matches the shape of `build_tasks_context_server`
 # ---------------------------------------------------------------------------
@@ -386,15 +451,45 @@ def build_decisions_context_server() -> tuple[str, Any] | None:
     async def decisions_trace(args):  # type: ignore[no-untyped-def]
         return await _decisions_trace_handler(args)
 
+    @tool(
+        "decisions_explain",
+        (
+            "Ask a natural-language question of the decision graph and get "
+            "a grounded narrative answer with citations. The pipeline "
+            "extracts entities from the question (Haiku call, cached), "
+            "finds candidate decisions in the caller's scope, walks a "
+            "depth-bounded trace upstream from the top candidate, and "
+            "narrates the result with Sonnet (or a deterministic "
+            "templated narrator when `backend=\"templated\"` is set or "
+            "the LLM call fails). Every sentence in the narrative cites "
+            "a decision id; the response also surfaces "
+            "`decisions_walked` (every node in the trace) and "
+            "`ungrounded_sentences` (anything the verifier stripped). "
+            "Use this to answer free-form 'why did we...' questions when "
+            "you don't already have a decision id — for known ids, "
+            "prefer `decisions_get` + `decisions_trace`."
+        ),
+        {
+            "question": str,
+            "scope": dict,
+            "max_decisions": int,
+            "depth": int,
+            "backend": str,
+        },
+    )
+    async def decisions_explain(args):  # type: ignore[no-untyped-def]
+        return await _decisions_explain_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[decisions_get, decisions_find, decisions_trace],
+        tools=[decisions_get, decisions_find, decisions_trace, decisions_explain],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "DECISIONS_EXPLAIN_TOOL_ID",
     "DECISIONS_FIND_TOOL_ID",
     "DECISIONS_GET_TOOL_ID",
     "DECISIONS_TOOL_IDS",

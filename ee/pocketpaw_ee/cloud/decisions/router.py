@@ -18,6 +18,15 @@
 #
 #   The `_ping` smoke route stays — operators rely on it as a cheap
 #   liveness check on the projection cursor + row count.
+# Updated: 2026-05-25 (RFC 07 Slice 3a) — added the natural-language
+#   explain route:
+#
+#     POST /api/v1/decisions/explain        → ExplanationResponse
+#
+#   Pipeline: extractor → find → trace → narrator → cache. Scope filter
+#   is the same load-bearing invariant the read routes enforce; a
+#   workspace caller cannot probe another workspace's decisions through
+#   the question.
 #
 # Router contract (mirrors `outcomes/router.py` and `pockets/router.py`):
 #   - Thin one-line bodies that delegate to `DecisionGraph` or read the
@@ -47,10 +56,13 @@ from pocketpaw_ee.cloud.decisions.dto import (
     DecisionsListResponse,
     DecisionTraceResponse,
     EdgeDTO,
+    ExplainRequest,
+    ExplanationResponse,
     JournalEventDTO,
     TimelineResponse,
     TraceNodeResponse,
 )
+from pocketpaw_ee.cloud.decisions.explain import ExplainRequestInput, explain
 from pocketpaw_ee.cloud.decisions.service import (
     DecisionGraph,
     TraceResult,
@@ -400,6 +412,52 @@ async def decision_timeline(
         correlation_id=decision.correlation_id,
         events=events,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/decisions/explain — natural-language Q&A (Slice 3a)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/explain", response_model=ExplanationResponse)
+async def explain_decision(
+    body: ExplainRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ExplanationResponse:
+    """Answer a natural-language question about the decision graph.
+
+    The pipeline (per RFC 07 § "LLM-grounded query"):
+
+      1. extractor: small LLM call (Haiku) distills the question to
+         structured filters. Falls back to a deterministic regex
+         extractor when the SDK / key are missing.
+      2. find: index-driven multi-axis filter over Decisions.
+      3. trace: depth-bounded BFS upstream from the top candidate.
+      4. narrator: Sonnet call (or templated fallback) produces a
+         grounded paragraph. Every claim must cite a decision id.
+      5. verifier: re-scans the narrative for ungrounded sentences.
+      6. cache: 24h TTL keyed on (question_norm, root_id, depth,
+         scope_hash). The projection's post-apply hook invalidates
+         entries whose `decisions_walked` set contains a newly-emitted
+         decision.
+
+    Scope filter: identical to the read routes — the request's scope
+    tag list is derived from auth, never from the body. A question
+    that resolves to a decision outside scope produces the empty
+    "no matching decision" response (the privacy invariant).
+    """
+    input_body = ExplainRequestInput(
+        question=body.question,
+        scope=body.scope,
+        max_decisions=body.max_decisions,
+        depth=body.depth,
+        backend=body.backend,
+    )
+    explanation = await explain(
+        input_body,
+        requester_scopes=_requester_scopes(ctx),
+    )
+    return ExplanationResponse.from_domain(explanation)
 
 
 # Export the cursor encoder for the test suite's keyset assertions.

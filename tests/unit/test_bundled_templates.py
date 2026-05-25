@@ -27,7 +27,10 @@ from pocketpaw.bundled_templates.installer import (
 )
 from pocketpaw.bundled_templates.loader import load_template
 
-# The six built-in templates Increment 2a ships.
+# The built-in templates the bundled installer ships. Increment 2a
+# shipped six; RFC 07 Slice 3a added `decision-graph`. Update when a
+# new bundled template lands so the parametrized RFC03-shape tests
+# cover it automatically.
 _EXPECTED_SLUGS = {
     "todo-task-tracker",
     "kanban-board",
@@ -35,6 +38,7 @@ _EXPECTED_SLUGS = {
     "crm-record-list",
     "calendar-planner",
     "activity-feed",
+    "decision-graph",
 }
 
 # RFC 03 Pocket Template Schema — the field set a seed template may
@@ -227,7 +231,7 @@ def test_crm_template_ships_sources_placeholder() -> None:
     assert "pocket_open" in records["refresh"]
 
 
-def test_index_json_lists_all_six_templates() -> None:
+def test_index_json_lists_all_bundled_templates() -> None:
     """index.json registers every bundled template with the registry
     row shape the chat agent's STEP 0 keyword match consumes."""
     index = json.loads((_BUNDLED_DIR / "index.json").read_text())
