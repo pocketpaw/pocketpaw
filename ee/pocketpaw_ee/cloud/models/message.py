@@ -58,6 +58,7 @@ class Message(TimestampedDocument):
     group: str | None = None
     sender: str | None = None  # User ID; None when system or agent
     sender_type: str = "user"  # user | agent
+    sender_name: str | None = None  # Friendly display name (e.g. "Meeting Notes")
     agent: str | None = None  # Agent ID when sender_type == "agent"
     content: str = ""
     mentions: list[Mention] = Field(default_factory=list)

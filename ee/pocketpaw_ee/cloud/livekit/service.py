@@ -32,6 +32,12 @@ from pocketpaw_ee.cloud.livekit.types import MeetingAgentProtocol  # noqa: E402
 
 _active_agents: dict[str, MeetingAgentProtocol] = {}
 
+# Collected meeting-notes payloads from agent subprocesses.
+# Populated by _collect_agent_notes (background reader on stdout pipe)
+# and consumed by _reap_agent_process (which posts them to the group
+# chat using the parent process's Beanie connection).
+_agent_notes_payloads: dict[str, dict[str, Any]] = {}
+
 # ---------------------------------------------------------------------------
 # Active recordings registry  (group_id → egress_id)
 # ---------------------------------------------------------------------------
@@ -147,12 +153,79 @@ async def _spawn_agent_process(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+
+    # Forward stderr to the parent logger so agent logs are visible in
+    # the server output.  The background task reads the pipe so the
+    # subprocess never blocks on a full buffer.
+    asyncio.create_task(_forward_agent_stderr(proc, room_name))
+
+    # Collect meeting notes from stdout.
+    # The agent writes a JSON payload to stdout when the call ends.
+    # We read it here in the parent process so we can post it to the
+    # group chat using the parent's Beanie connection (the subprocess
+    # is isolated and doesn't have MongoDB initialized).
+    asyncio.create_task(_collect_agent_notes(proc, group_id, room_name))
+
     logger.info(
         "Spawned agent subprocess (PID %d) for room %s",
         proc.pid,
         room_name,
     )
     return proc
+
+
+async def _forward_agent_stderr(
+    proc: asyncio.subprocess.Process,
+    room_name: str,
+) -> None:
+    """Forward an agent subprocess's stderr to the parent logger."""
+    label = f"agent[{room_name}]"
+    while True:
+        line = await proc.stderr.readline()
+        if not line:
+            break
+        text = line.decode("utf-8", errors="replace").rstrip("\n")
+        if text:
+            logger.log(logging.WARNING, "[%s] %s", label, text)
+
+
+async def _collect_agent_notes(
+    proc: asyncio.subprocess.Process,
+    group_id: str,
+    room_name: str,
+) -> None:
+    """Read the agent's stdout and capture the meeting notes JSON payload.
+
+    The agent writes a single JSON line to stdout in ``_finalize_notes()``
+    with ``type: "meeting_notes"``.  We read it here and store it in
+    ``_agent_notes_payloads`` so that ``_reap_agent_process`` can post it
+    to the group chat using the parent process's Beanie connection.
+
+    Runs as a background ``asyncio.Task``.  The pipe is unbuffered enough
+    that the agent's ``print(..., flush=True)`` won't block.
+    """
+    import json
+
+    try:
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+                if isinstance(payload, dict) and payload.get("type") == "meeting_notes":
+                    _agent_notes_payloads[group_id] = payload
+                    logger.info(
+                        "Collected meeting notes payload from agent for room %s",
+                        room_name,
+                    )
+            except json.JSONDecodeError:
+                pass  # ignore non-JSON output (shouldn't happen)
+    except Exception as exc:
+        logger.warning("Error reading agent stdout for %s: %s", room_name, exc)
 
 
 async def _reap_agent_process(
@@ -164,7 +237,14 @@ async def _reap_agent_process(
     Runs in a background ``asyncio.Task``.  When the agent detects the
     room is empty and exits on its own, this removes it from
     ``_active_agents`` so the registry doesn't leak.
+
+    If the agent exited on its own (natural end — room empty), emit
+    ``CallEnded`` so all connected clients refresh their message list
+    and see the meeting notes.  When ``end_room()`` kills the agent
+    manually it already pops the agent from ``_active_agents``, so
+    ``pop`` returns ``None`` and we skip the duplicate emit.
     """
+    was_registered = False
     try:
         await proc.wait()
     except asyncio.CancelledError:
@@ -173,12 +253,55 @@ async def _reap_agent_process(
             proc.kill()
         raise
     finally:
-        _active_agents.pop(group_id, None)
+        was_registered = _active_agents.pop(group_id, None) is not None
         logger.info(
             "Reaped agent subprocess for group %s (exit code %s)",
             group_id,
             proc.returncode,
         )
+
+    # ── Post meeting notes (parent process handles the DB write) ──
+    # The agent subprocess outputs a JSON payload to stdout with the
+    # meeting notes data.  We read it via _collect_agent_notes and
+    # post it here where Beanie/MongoDB is already initialized.
+    # Yield control first so _collect_agent_notes can drain the pipe.
+    await asyncio.sleep(0)
+    payload = _agent_notes_payloads.pop(group_id, None)
+    if payload is not None:
+        try:
+            await post_meeting_notes_to_group(
+                group_id=group_id,
+                transcript=payload.get("transcript", ""),
+                summary=payload.get("summary", "Call ended."),
+                action_items=payload.get("action_items", []),
+                participants=payload.get("participants", []),
+                duration_seconds=payload.get("duration_seconds", 0),
+            )
+            logger.info("Posted meeting notes for group %s from agent payload", group_id)
+        except Exception:
+            logger.exception(
+                "Failed to post meeting notes for group %s from agent payload",
+                group_id,
+            )
+
+    # Emit CallEnded for natural end — notes are now in the DB,
+    # so tell all connected clients to refresh and display them.
+    if was_registered:
+        try:
+            from pocketpaw_ee.cloud._core.realtime.emit import emit as realtime_emit
+            from pocketpaw_ee.cloud._core.realtime.events import CallEnded as _CallEnded
+
+            await realtime_emit(
+                _CallEnded(
+                    data={
+                        "group_id": group_id,
+                        "room_name": room_name_for_group(group_id),
+                    }
+                )
+            )
+            logger.info("Emitted CallEnded for natural room end (group %s)", group_id)
+        except Exception:
+            logger.debug("Could not emit CallEnded for natural room end (shutdown?)")
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +652,29 @@ async def end_room(group_id: str) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("Error stopping meeting agent for group %s: %s", group_id, exc)
 
+    # ── Post meeting notes synchronously ──
+    # The agent wrote a JSON payload to stdout before exiting.
+    # _collect_agent_notes stored it in _agent_notes_payloads.
+    # We post it here (in the parent's Beanie context) so that notes
+    # are in the DB BEFORE the room is deleted and CallEnded is
+    # emitted by the router layer.
+    # Yield control first so _collect_agent_notes can drain the pipe.
+    await asyncio.sleep(0)
+    payload = _agent_notes_payloads.pop(group_id, None)
+    if payload is not None:
+        try:
+            await post_meeting_notes_to_group(
+                group_id=group_id,
+                transcript=payload.get("transcript", ""),
+                summary=payload.get("summary", "Call ended."),
+                action_items=payload.get("action_items", []),
+                participants=payload.get("participants", []),
+                duration_seconds=payload.get("duration_seconds", 0),
+            )
+            logger.info("Posted meeting notes for group %s (end_room)", group_id)
+        except Exception as exc:
+            logger.warning("Failed to post meeting notes for group %s: %s", group_id, exc)
+
     async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
         try:
             req = DeleteRoomRequest(room=room_name)
@@ -652,8 +798,10 @@ async def post_meeting_notes_to_group(
             group_id=group_id,
             sender=CALL_BOT_USER_ID,
             sender_type="user",
+            sender_name="Meeting Notes",
             content=content,
         )
+        # Emit on internal event bus (group stats, mention notifications)
         await event_bus.emit(
             "message.sent",
             {
