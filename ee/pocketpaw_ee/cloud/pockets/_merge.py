@@ -5,6 +5,11 @@
 # ``POST /api/v1/pockets/{id}/spec/merge`` endpoint — one server-side
 # merge entry point that replaces the 17-tool LangChain edit surface for
 # the ``pocket_specialist`` agent.
+# Updated: 2026-05-25 (PR #1222 R1 high-priority 1) — added a visited-set
+# cycle guard to ``_collect_patch_nodes`` and ``_collect_all_ids`` so an
+# adversarial or buggy patch with a self-referential ``children`` graph
+# cannot hang the merge walk. The patch comes from untrusted agent
+# output, so the guard is required, not optional.
 #
 # Merge rules — see ``merge_ripple_spec`` docstring for the canonical
 # spec. Short version: top-level keys in ``patch`` overwrite the base;
@@ -35,10 +40,19 @@ def _collect_patch_nodes(patch_ui: Any) -> dict[str, dict[str, Any]]:
     rule below stops descending once a parent is matched, so nesting is
     preserved naturally. Nodes without an ``id`` field are skipped (only
     id-bearing nodes can act as merge points).
+
+    Cycle guard (PR #1222 R1 high-priority 1): the patch comes from
+    untrusted agent output. A buggy or adversarial patch with a
+    self-referential ``children`` list (``a.children = [b]``,
+    ``b.children = [a]``) would loop forever without a visited-set
+    guard. ``visited_ids`` skips id-bearing nodes we've already walked
+    — that is sufficient because cycles can only form through the
+    id-keyed graph the merge rule cares about.
     """
     out: dict[str, dict[str, Any]] = {}
     if not isinstance(patch_ui, dict):
         return out
+    visited_ids: set[str] = set()
     stack: list[Any] = [patch_ui]
     while stack:
         node = stack.pop()
@@ -46,6 +60,12 @@ def _collect_patch_nodes(patch_ui: Any) -> dict[str, dict[str, Any]]:
             continue
         nid = node.get("id")
         if isinstance(nid, str) and nid:
+            if nid in visited_ids:
+                # Cycle (or duplicate id-bearing subtree): stop
+                # descending. The first occurrence of this id is
+                # already in ``out`` — first-write-wins, so we keep it.
+                continue
+            visited_ids.add(nid)
             # First-write wins — defensive against a patch that
             # accidentally re-states the same id twice. Either is
             # technically a bug in the caller; pinning to the first
@@ -62,10 +82,18 @@ def _collect_all_ids(node: Any) -> list[str]:
     """Walk a node and return every ``id`` reachable from it (including
     its own). Helper for marking patch descendants as ``matched`` when
     their parent is the merge point — they ride along inside the
-    wholesale replacement and should NOT be reported as orphans."""
+    wholesale replacement and should NOT be reported as orphans.
+
+    Cycle guard (PR #1222 R1 high-priority 1): mirrors
+    ``_collect_patch_nodes`` — an adversarial patch with a
+    self-referential children graph would loop forever otherwise. The
+    visited-set is keyed on node id, the only invariant we can rely on
+    in untrusted agent output.
+    """
     out: list[str] = []
     if not isinstance(node, dict):
         return out
+    visited_ids: set[str] = set()
     stack: list[Any] = [node]
     while stack:
         cur = stack.pop()
@@ -73,6 +101,9 @@ def _collect_all_ids(node: Any) -> list[str]:
             continue
         nid = cur.get("id")
         if isinstance(nid, str) and nid:
+            if nid in visited_ids:
+                continue
+            visited_ids.add(nid)
             out.append(nid)
         for kid_key in ("children", "else_children"):
             kids = cur.get(kid_key)
@@ -119,7 +150,9 @@ def _replace_in_tree(
     return out
 
 
-def merge_ripple_spec(base: dict[str, Any], patch: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def merge_ripple_spec(
+    base: dict[str, Any], patch: dict[str, Any]
+) -> tuple[dict[str, Any], list[str]]:
     """Merge a partial ``rippleSpec`` onto a base ``rippleSpec``.
 
     Returns ``(new_spec, orphan_ids)``. ``orphan_ids`` is the list of

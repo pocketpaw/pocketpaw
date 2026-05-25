@@ -70,7 +70,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CreatePocketRequest(BaseModel):
@@ -162,6 +162,38 @@ class ShareLinkRequest(BaseModel):
 class AddCollaboratorRequest(BaseModel):
     user_id: str
     access: str = Field(default="edit", pattern="^(view|comment|edit)$")
+
+
+class MergeSpecRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/spec/merge``.
+
+    Carries EXACTLY ONE of:
+
+    * ``replace`` — a full rippleSpec dict that wholesale-replaces the
+      pocket's current spec.
+    * ``merge`` — a partial rippleSpec dict that is applied via
+      ``_merge.merge_ripple_spec`` against the current spec.
+
+    The ``model_validator`` below enforces the exactly-one rule at
+    parse time so the router never has to hand-roll an ``isinstance``
+    check on a free-form ``dict`` body (the original MVP shape that
+    PR #1222 R1 flagged). A body with both keys or neither raises a
+    422 before the request reaches the service layer.
+
+    PR #1222 R1 follow-up: introduced to replace the prior
+    ``body: dict`` route signature.
+    """
+
+    replace: dict | None = None
+    merge: dict | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> MergeSpecRequest:
+        if (self.replace is None) == (self.merge is None):
+            raise ValueError(
+                "Body must carry exactly one of 'replace' or 'merge' (got both or neither).",
+            )
+        return self
 
 
 class PocketResponse(BaseModel):

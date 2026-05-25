@@ -49,6 +49,15 @@ against real relative paths instead of hallucinating endpoints. Wired into
 ``_build_system_prompt`` for the create path and into
 ``_run_edit_subagent_pipeline`` for the edit path (the edit path already
 fetches ``backend_summary`` from ``get_pocket_backend``).
+Changes: 2026-05-25 (PR #1222 R1 Blocker 1) — the SKILL branch no
+longer writes per-request tenancy to ``os.environ``. The runtime now
+calls ``backend.attach_subprocess_env({...})`` with workspace_id,
+user_id, and the process-local internal token; the backend merges
+that dict into the subprocess env at spawn time. The prior code
+mutated the parent process's env on every request, racing across
+concurrent edits (one request's tenancy could leak into another's
+subprocess if their spawns interleaved). The new path is per-request
+isolated by the isolated-backend instance the runtime already created.
 Changes: 2026-05-24 (MVP skill+merge endpoint) — the edit subagent
 pipeline now branches on ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL``. When
 truthy, the pipeline:
@@ -58,10 +67,12 @@ truthy, the pipeline:
      specialist`` skill plus the ``POST /spec/merge`` endpoint), and
   2. SKIPS ``backend.attach_specialist_tools(make_edit_pocket_tools)``
      so the 17-tool granular-op surface is NOT attached, and
-  3. Sets ``POCKETPAW_WORKSPACE_ID`` + ``POCKETPAW_USER_ID`` env vars
-     on the parent process so the Claude Code subprocess inherits them
-     for ``curl`` against the local API (with the loopback internal
-     bypass headers documented in the merge endpoint).
+  3. Calls ``backend.attach_subprocess_env`` with
+     ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+     ``POCKETPAW_INTERNAL_TOKEN`` so the Claude Code subprocess
+     inherits them for ``curl`` against the local API (with the
+     loopback internal bypass headers documented in the merge
+     endpoint).
 
 The flag defaults False so existing behavior is unchanged — both paths
 coexist until the captain greenlights deletion of the granular surface
@@ -957,15 +968,44 @@ async def _run_edit_subagent_pipeline(
     if use_skill:
         # Don't attach the granular ops — the agent applies edits via
         # curl to ``POST /spec/merge`` using Claude Code's native Bash.
-        # Set the tenancy env vars so the loopback internal-bypass
-        # auth on the endpoint accepts the agent's calls.
-        os.environ["POCKETPAW_WORKSPACE_ID"] = workspace_id
-        os.environ["POCKETPAW_USER_ID"] = user_id
+        # Ship the tenancy + bypass-token env values into the subprocess
+        # via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1) so the
+        # loopback internal-bypass auth on the endpoint accepts the
+        # agent's calls — WITHOUT mutating the parent process's
+        # ``os.environ``, which would race across concurrent requests.
+        # The backend merges this dict into the subprocess env at spawn
+        # time; backends that don't spawn a subprocess (deep_agents)
+        # silently no-op, which is correct because they don't run the
+        # SKILL path either.
+        from pocketpaw_ee.cloud._core.internal_token import get_internal_token
+
+        subprocess_env: dict[str, str] = {
+            "POCKETPAW_WORKSPACE_ID": workspace_id,
+            "POCKETPAW_USER_ID": user_id,
+        }
+        internal_token = get_internal_token()
+        if internal_token:
+            subprocess_env["POCKETPAW_INTERNAL_TOKEN"] = internal_token
+        try:
+            backend.attach_subprocess_env(subprocess_env)
+        except (AttributeError, NotImplementedError):
+            # Backend predates the protocol addition or opted out of
+            # subprocess env injection. The SKILL path then has no
+            # path to the API — log loudly so the operator sees the
+            # config drift; don't crash the request.
+            log.warning(
+                "[pocket-specialist:edit] backend %s does not support "
+                "attach_subprocess_env — the SKILL path's curl auth will "
+                "fail. Switch to claude_agent_sdk or revert the "
+                "POCKETPAW_POCKET_SPECIALIST_USE_SKILL flag.",
+                backend_name,
+            )
         log.info(
             "[pocket-specialist:edit] skill+merge path engaged "
-            "(workspace=%s user=%s)",
+            "(workspace=%s user=%s token_present=%s)",
             workspace_id,
             user_id,
+            bool(internal_token),
         )
     else:
         backend.attach_specialist_tools(

@@ -89,6 +89,22 @@ class AgentBackend(Protocol):
         """
         ...
 
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:
+        """Inject extra env vars into any subprocess this backend spawns.
+
+        Used by the pocket-specialist runtime to thread per-request
+        tenancy (``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        ``POCKETPAW_INTERNAL_TOKEN``) into the Claude Code subprocess
+        WITHOUT mutating the parent process's ``os.environ`` (which
+        would race across concurrent requests — see PR #1222 R1
+        Blocker 1).
+
+        Backends that don't spawn subprocesses can no-op safely.
+        Backends that DO spawn one (claude_sdk, codex_cli) merge the
+        dict into the env passed to that subprocess at spawn time.
+        """
+        ...
+
 
 class BaseAgentBackend:
     """Default no-op implementations of optional ``AgentBackend`` methods.
@@ -105,3 +121,14 @@ class BaseAgentBackend:
             "Set POCKETPAW_POCKET_SPECIALIST_BACKEND=deep_agents (the default) "
             "to use a backend that supports specialist tool injection."
         )
+
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:  # noqa: ARG002
+        """No-op default — backends that don't spawn subprocesses ignore.
+
+        ``ClaudeSDKBackend`` overrides this to merge ``env`` into the
+        Claude Code subprocess's ``options_kwargs["env"]``. The runtime
+        calls this once per isolated specialist run to ship per-request
+        tenancy values that the subprocess needs in its environment
+        without polluting the parent's ``os.environ``.
+        """
+        return None

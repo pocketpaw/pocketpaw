@@ -120,7 +120,17 @@ def mount_cloud(app: FastAPI) -> None:
     request-timing middleware."""
     from pocketpaw_ee.cloud._core.csrf import CSRFMiddleware, csrf_router
     from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
     from pocketpaw_ee.cloud._core.timing import TimingMiddleware
+
+    # Boot-time secret for the loopback internal bypass on the
+    # pocket-specialist spec-merge endpoint (PR #1222 R1 fix). Generated
+    # or loaded from ``~/.pocketpaw/internal-token`` (0600). Exported as
+    # ``POCKETPAW_INTERNAL_TOKEN`` so the pocket-specialist subprocess
+    # inherits it. Idempotent on restart; safe to call before any
+    # routers register because the merge endpoint reads the token
+    # lazily on each request.
+    ensure_internal_token()
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here: CSRF → Timing → route handler.

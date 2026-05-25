@@ -54,11 +54,17 @@ pocket id is in the task you were given (look for a
 ``<current-pocket>`` block in the system prompt or a ``pocket_id``
 field in the parent's handoff).
 
-The two endpoints you need:
+The two endpoints you need. The loopback bypass requires four
+headers together: the magic ``X-PocketPaw-Internal: true``, the
+process-local ``X-PocketPaw-Internal-Token`` (the dashboard set
+``$POCKETPAW_INTERNAL_TOKEN`` in your environment on boot), and the
+workspace + user ids. All four are required — drop any one and you
+get a clean 401.
 
 ```bash
 # READ the existing pocket
 curl -s -H "X-PocketPaw-Internal: true" \
+     -H "X-PocketPaw-Internal-Token: $POCKETPAW_INTERNAL_TOKEN" \
      -H "X-PocketPaw-Workspace-Id: $POCKETPAW_WORKSPACE_ID" \
      -H "X-PocketPaw-User-Id: $POCKETPAW_USER_ID" \
      http://localhost:8888/api/v1/pockets/<pocket_id>
@@ -67,6 +73,7 @@ curl -s -H "X-PocketPaw-Internal: true" \
 curl -s -X POST \
      -H "Content-Type: application/json" \
      -H "X-PocketPaw-Internal: true" \
+     -H "X-PocketPaw-Internal-Token: $POCKETPAW_INTERNAL_TOKEN" \
      -H "X-PocketPaw-Workspace-Id: $POCKETPAW_WORKSPACE_ID" \
      -H "X-PocketPaw-User-Id: $POCKETPAW_USER_ID" \
      -d '{"merge": { <partial spec> }}' \
