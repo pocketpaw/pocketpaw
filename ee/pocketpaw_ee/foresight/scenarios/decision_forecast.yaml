@@ -1,0 +1,43 @@
+# ee/pocketpaw_ee/foresight/scenarios/decision_forecast.yaml
+# Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
+#
+# v0.1 Decision Forecast scenario — the simplest end-to-end loop the
+# captain asked for. Five personas, one tick, decisions logged.
+#
+# This is intentionally a *fragment* of the full RFC §18 example YAML.
+# Fields like ``world.source``, ``tier_mix``, ``activation``,
+# ``action_space``, ``instinct_policy_overlay``, ``aggregator``,
+# ``projection``, ``calibration``, ``cost_estimate``, ``ui_rail``,
+# ``triggers``, and ``permissions`` are all valid for v1.0 but ignored
+# by the v0.1 loader (``ScenarioConfig.from_yaml``). Adding them now
+# would be dead schema — v0.1 ships only what the runner reads.
+
+name: smoke-decision-forecast
+sub_type: decision_forecast
+n_ticks: 1
+
+personas:
+  - name: tenant-maria
+    role: tenant
+    ocean:
+      conscientiousness: 0.4
+      agreeableness: 0.5
+  - name: tenant-alex
+    role: tenant
+    ocean:
+      openness: 0.6
+      neuroticism: -0.2
+  - name: approver-prakash
+    role: approver
+    ocean:
+      conscientiousness: 1.2
+  - name: property-manager-anne
+    role: property_manager
+    ocean:
+      extraversion: 0.3
+      agreeableness: 0.4
+  - name: renewal-specialist
+    role: agent
+    ocean:
+      conscientiousness: 0.8
+      openness: 0.3
