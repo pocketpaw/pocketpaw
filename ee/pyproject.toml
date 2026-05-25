@@ -366,6 +366,34 @@ source_modules = [
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.audit"]
 
+# Decisions — Beanie writes only from service.py (RFC 07 Slice 1).
+# The decision-graph entity has no Beanie document of its own — it
+# materializes into SQLite (`~/.soul/decisions.db`) via DecisionStore,
+# not MongoDB. The contract is included for consistency with the other
+# entities and to forbid any future Beanie creep. `domain.py`, `dto.py`,
+# `router.py`, `projection.py`, and `store.py` must never import the
+# cloud models.* tree — only `service.py` may (it doesn't yet, but the
+# contract pins the rule for future maintenance).
+[[tool.importlinter.contracts]]
+name = "Decisions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.decisions.router",
+    "pocketpaw_ee.cloud.decisions.dto",
+    "pocketpaw_ee.cloud.decisions.domain",
+    "pocketpaw_ee.cloud.decisions.projection",
+    "pocketpaw_ee.cloud.decisions.store",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.session",
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.agent",
+    "pocketpaw_ee.cloud.models.workspace",
+]
+
 # Increment 3 — the pocket execution router. The classifier is PURE: a
 # rule-based ``classify(intent, ripple_spec)`` with no I/O. It must never
 # import Beanie documents, the cloud-side executors / services, or the LLM
