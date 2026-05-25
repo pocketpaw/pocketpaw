@@ -93,7 +93,13 @@ TOOL_PROFILES: dict[str, dict] = {
 # turn a cloud agent's ``tools`` entries into ``mcp_servers_allow``, and
 # ``ClaudeSDKBackend`` reads it to gate both server registration and the tool
 # allowlist. A new opt-in server is added here once.
-OPT_IN_MCP_SERVERS: frozenset[str] = frozenset({"pocketpaw_planner"})
+# 2026-05-25: ``pocketpaw_planner`` was previously opt-in (Mission Control
+# only). It now also hosts ``plan_pocket`` which the pocket-specialist
+# plan-pointer kit directs the chat agent to invoke for complex pocket
+# creation. Making the server ambient is the simpler shape for the MVP
+# (the MCP tools are inert until called). Re-gate per-tool later if
+# selective exposure becomes important.
+OPT_IN_MCP_SERVERS: frozenset[str] = frozenset()
 
 
 class ToolPolicy:
