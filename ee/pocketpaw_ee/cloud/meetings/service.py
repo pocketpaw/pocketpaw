@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) -> MeetingResponse:
+    payload = doc.raw_provider_payload or {}
     return MeetingResponse(
         id=str(doc.id),
         source=getattr(doc, "source", "recall"),
@@ -60,6 +61,7 @@ def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) ->
         bot_status=doc.bot_status,
         bot_status_detail=doc.bot_status_detail,
         bot_status_at=doc.bot_status_at,
+        auto_created_from_calendar=payload.get("auto_created_by") == "calendar_bridge",
     )
 
 
