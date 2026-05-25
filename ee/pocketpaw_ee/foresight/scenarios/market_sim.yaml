@@ -1,4 +1,12 @@
 # ee/pocketpaw_ee/foresight/scenarios/market_sim.yaml
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring. Optional scenario-root fields:
+#   - ``precedent_seed`` (string | null): scenario-wide seed the engine's
+#     DecisionGraphRef hashes into synthetic forward-precedent ids for
+#     every emitted ProjectedDecision.
+#   - ``precedent_seeds`` (map | null): per-anchor overrides keyed by
+#     anchor_id (``segment:<role>``). Anchor-level wins.
+# Absent by default — synthetic ids only surface when a scenario opts in.
 # Created: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) —
 # RFC 08 PR 5. Market Sim sub-type smoke scenario — RFC §4.2.
 #
