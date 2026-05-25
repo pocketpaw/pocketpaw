@@ -192,11 +192,130 @@ class OnboardingGateState:
     last_backtest_at: datetime | None = None
 
 
+# ---------------------------------------------------------------------------
+# Scenario catalog (RFC §11.2) — bundled YAML template descriptors.
+#
+# Catalog entries are global, not workspace-scoped — they describe the
+# static set of templates shipped with the engine. The cloud rule #3
+# tenancy invariant doesn't apply here (no Mongo doc, no tenant key);
+# the descriptor mirrors the YAML on disk.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ScenarioCatalogEntry:
+    """One scenario template descriptor surfaced by ``GET /scenarios``.
+
+    Field-for-field mirror of :class:`ScenarioCatalogItem` so the
+    service layer can map domain → DTO via Pydantic's
+    ``model_validate(..., from_attributes=True)`` per cloud rule #8.
+
+    ``tier_mix`` carries the explicit 5/15/80 default (or whatever
+    override the YAML declares) as a plain dict — easier for the
+    frontend to consume than a triple of floats.
+    """
+
+    id: str
+    name: str
+    sub_type: str
+    description: str
+    num_personas: int
+    num_ticks: int
+    tier_mix: dict[str, float]
+
+
+# ---------------------------------------------------------------------------
+# Aggregate rollup (RFC §11.5) — derived view over recent backtests +
+# projection records. Workspace-scoped at construction per cloud rule #3.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RollingAccuracyPoint:
+    """One time-bucketed accuracy reading on the rolling series."""
+
+    ts: datetime
+    accuracy: float
+    sample_count: int
+
+
+@dataclass(frozen=True)
+class ConfidenceDrift:
+    """Confidence-drift summary across the rollup window.
+
+    ``trend`` uses the §11.5 vocabulary (``"rising"`` / ``"falling"``
+    / ``"flat"``); ``magnitude`` is the absolute drift size.
+    """
+
+    trend: Literal["rising", "falling", "flat"]
+    magnitude: float
+
+
+@dataclass(frozen=True)
+class ModalOutcomeEntry:
+    """One row in the modal-outcome distribution."""
+
+    outcome: str
+    share: float
+
+
+@dataclass(frozen=True)
+class AggregateRollup:
+    """Workspace-scoped aggregate rollup over a trailing window.
+
+    Reads come from the persisted backtest + projection collections; no
+    new collection is introduced for the rollup itself in v0.1
+    (computed on demand). The cloud rule #3 invariant holds:
+    ``workspace_id`` is positionally required.
+    """
+
+    workspace_id: str
+    window_days: int
+    generated_at: datetime
+    rolling_accuracy: tuple[RollingAccuracyPoint, ...]
+    confidence_drift: ConfidenceDrift
+    modal_outcome_distribution: tuple[ModalOutcomeEntry, ...]
+
+
+# ---------------------------------------------------------------------------
+# Insights (RFC §11.6) — synthesizer output container. Domain mirror of
+# the wire shape so the service can compose ``InsightView`` -> DTO via
+# Pydantic mapping per cloud rule #8.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InsightView:
+    """One insight row in the workspace's Insights panel.
+
+    Tenancy: each view is implicitly workspace-scoped via the service
+    call that produced it — the row itself is not persisted in v0.1
+    (the synthesizer re-runs on every poll), so it doesn't carry the
+    ``workspace_id`` field that a persisted entity would. The cloud
+    rule #3 invariant still holds: the entity that constructs this
+    view (``get_insights``) always passes through the tenant filter.
+    """
+
+    id: str
+    kind: str
+    title: str
+    body: str
+    severity: Literal["info", "warning", "critical"]
+    anchor_refs: tuple[str, ...]
+    generated_at: datetime
+
+
 __all__ = [
+    "AggregateRollup",
     "BacktestRun",
     "BacktestRunStatus",
+    "ConfidenceDrift",
+    "InsightView",
+    "ModalOutcomeEntry",
     "OnboardingGateState",
     "ProjectedDecision",
+    "RollingAccuracyPoint",
+    "ScenarioCatalogEntry",
     "ScenarioRun",
     "ScenarioRunStatus",
 ]

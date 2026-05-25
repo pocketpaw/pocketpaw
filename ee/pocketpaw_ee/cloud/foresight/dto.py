@@ -1,4 +1,16 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
+# RFC 08 §11.2 / §11.5 / §11.6 backing shapes:
+#   - ``ScenarioCatalogItem`` + ``ScenarioCatalogResponse`` —
+#     ``GET /api/v1/foresight/scenarios`` template enumeration.
+#   - ``RollingAccuracyPointDto`` + ``RollingAccuracySeriesDto`` +
+#     ``ConfidenceDriftDto`` + ``ModalOutcomeEntryDto`` +
+#     ``ModalOutcomeDistributionDto`` + ``AggregateRollupResponse`` —
+#     ``GET /api/v1/foresight/aggregate?window_days=N`` rollup output.
+#   - ``InsightResponse`` + ``InsightsResponse`` —
+#     ``GET /api/v1/foresight/insights`` synthesizer output.
+#   The UI lead's TypeScript shapes mirror these field-for-field;
+#   property names are locked to the contract in the §11 brief.
 # Modified: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5
 #   adds the per-anchor projection fanout surface:
 #     - ``ProjectedDecisionResponse`` — one record on the wire.
@@ -394,18 +406,214 @@ class ForesightInstinctProposalListResponse(BaseModel):
     has_more: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Scenario catalog (RFC §11.2) — ``GET /api/v1/foresight/scenarios``.
+#
+# Static enumeration of the bundled YAML scenario templates. The UI's
+# Scenarios panel reads this to populate the "Run a scenario" picker;
+# the response is small (one row per template) and changes only on
+# code releases, so the loader caches it at module import.
+# ---------------------------------------------------------------------------
+
+
+class ScenarioCatalogItem(BaseModel):
+    """One scenario template entry surfaced in the catalog.
+
+    Fields mirror the §11.2 contract: ``id`` is the YAML stem (also
+    the sub_type for the three v0.5-shipped templates); ``name`` is
+    the human label; ``description`` is a short blurb the UI renders
+    next to the card; ``num_personas`` and ``num_ticks`` give the
+    operator a feel for the scenario shape before they run it;
+    ``tier_mix`` echoes the locked default so the cost-aware operator
+    can see the L2 backend split without expanding the row.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    sub_type: str
+    description: str
+    num_personas: int = Field(ge=0)
+    num_ticks: int = Field(ge=0)
+    tier_mix: dict[str, float]
+
+
+class ScenarioCatalogResponse(BaseModel):
+    """``GET /api/v1/foresight/scenarios`` response.
+
+    Flat envelope — no pagination because the catalog ships exactly
+    three templates in v0.5; v1.0 may grow this once the remaining
+    four RFC §4 sub-types land. The order matches the YAML on-disk
+    sort so the picker renders deterministically across deploys.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ScenarioCatalogItem]
+
+
+# ---------------------------------------------------------------------------
+# Aggregate rollup (RFC §11.5) — ``GET /api/v1/foresight/aggregate``.
+#
+# Rolling time-windowed view of accuracy, confidence drift, and modal
+# outcome distribution across the workspace's recent backtests +
+# scenario runs. ``window_days`` query parameter controls the look-back
+# window; defaults to 30, capped at 90 (422 above) per the §11.5
+# contract.
+# ---------------------------------------------------------------------------
+
+
+class RollingAccuracyPointDto(BaseModel):
+    """One time-bucketed accuracy reading.
+
+    ``ts`` is the bucket-end timestamp (ISO-8601 UTC); ``accuracy`` is
+    the modal accuracy across the bucket; ``sample_count`` is the
+    number of pairs (or proxy records) that fed the bucket so the UI
+    can show "thin sample" warnings without a second round trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ts: str
+    accuracy: float = Field(ge=0.0, le=1.0)
+    sample_count: int = Field(ge=0)
+
+
+class RollingAccuracySeriesDto(BaseModel):
+    """Series wrapper for ``rolling_accuracy.points``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    points: list[RollingAccuracyPointDto] = Field(default_factory=list)
+
+
+class ConfidenceDriftDto(BaseModel):
+    """Confidence-drift summary across the window.
+
+    ``trend`` is the bucket label the synthesizer reads; ``magnitude``
+    is the absolute drift size. The aggregator emits ``rising``,
+    ``falling``, or ``flat`` based on a configurable flat-threshold.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    trend: str  # "rising" | "falling" | "flat"
+    magnitude: float = Field(ge=0.0)
+
+
+class ModalOutcomeEntryDto(BaseModel):
+    """One row in the modal-outcome distribution.
+
+    ``outcome`` is the string value (e.g. ``"approved"``,
+    ``"rejected"``); ``share`` is the fraction of pairs that landed
+    that value across the window. Shares across the entries are
+    normalized to sum to 1.0 (within floating-point rounding).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: str
+    share: float = Field(ge=0.0, le=1.0)
+
+
+class ModalOutcomeDistributionDto(BaseModel):
+    """Distribution wrapper for the modal-outcome rollup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entries: list[ModalOutcomeEntryDto] = Field(default_factory=list)
+
+
+class AggregateRollupResponse(BaseModel):
+    """``GET /api/v1/foresight/aggregate?window_days=N`` response.
+
+    Read-only — derived from the workspace's persisted backtests +
+    projected-decision records over the window. Empty workspaces
+    return zeros + empty arrays (never 404) so the UI's Aggregate
+    panel can render the empty state without a separate code path.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    window_days: int = Field(ge=1, le=90)
+    generated_at: str
+    rolling_accuracy: RollingAccuracySeriesDto
+    confidence_drift: ConfidenceDriftDto
+    modal_outcome_distribution: ModalOutcomeDistributionDto
+
+
+# ---------------------------------------------------------------------------
+# Insights (RFC §11.6) — ``GET /api/v1/foresight/insights``.
+#
+# Pattern-based synthesizer output — the v0.1 rules live in
+# ``ee.foresight.insights`` (pure module, no I/O). v1.0 will swap the
+# rule engine for an LLM synthesizer; the wire shape stays.
+# ---------------------------------------------------------------------------
+
+
+class InsightResponse(BaseModel):
+    """One synthesized insight row.
+
+    Mirrors :class:`pocketpaw_ee.foresight.insights.Insight` plus the
+    ISO-8601 ``generated_at`` string. ``anchor_refs`` is a list of
+    optional link targets the UI renders as inline pills (e.g.
+    ``anchor:rollout:training``, ``persona:enterprise-acme``,
+    ``backtest:5f5...``).
+
+    ``severity`` vocabulary is locked to ``info | warning | critical``
+    so the frontend can map each level to a stable colour without
+    consulting a dictionary.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    kind: str  # "accuracy_drop" | "persona_outlier" | "tier_imbalance"
+    # | "trend_break" | "threshold_unmet"
+    title: str
+    body: str
+    severity: str  # "info" | "warning" | "critical"
+    anchor_refs: list[str] = Field(default_factory=list)
+    generated_at: str
+
+
+class InsightsResponse(BaseModel):
+    """``GET /api/v1/foresight/insights`` response.
+
+    Flat envelope; the synthesizer caps at 20 items by default
+    (pagination lands in v1.0 once the LLM synthesizer can fan
+    finer-grained rules). Items are sorted by severity descending
+    (critical > warning > info) then ``generated_at`` descending.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[InsightResponse]
+
+
 __all__ = [
+    "AggregateRollupResponse",
     "BacktestRunListItemResponse",
     "BacktestRunResponse",
+    "ConfidenceDriftDto",
     "CreateBacktestRequest",
     "CreateScenarioRequest",
     "ForesightInstinctProposalListResponse",
     "ForesightInstinctProposalResponse",
     "HistoricalAnchorRequest",
+    "InsightResponse",
+    "InsightsResponse",
+    "ModalOutcomeDistributionDto",
+    "ModalOutcomeEntryDto",
     "OnboardingGateResponse",
     "PersonaSpecRequest",
     "ProjectedDecisionListResponse",
     "ProjectedDecisionResponse",
+    "RollingAccuracyPointDto",
+    "RollingAccuracySeriesDto",
+    "ScenarioCatalogItem",
+    "ScenarioCatalogResponse",
     "ScenarioRunListItemResponse",
     "ScenarioRunResponse",
 ]
