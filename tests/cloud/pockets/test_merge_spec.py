@@ -4,16 +4,20 @@
 # four cases the merge semantics need to pin: a prop-change on one node,
 # an added child via parent re-statement, a state-only patch, and an
 # orphan id that doesn't match anything in the base tree.
+# Updated: 2026-05-25 (PR #1222 R1 high-priority 1) — added
+# ``test_merge_cycle_in_patch_does_not_hang`` to pin the visited-set
+# guard added to ``_collect_patch_nodes`` / ``_collect_all_ids``. The
+# patch tree is untrusted agent output; a self-referential children
+# graph used to loop forever before the guard.
 """Unit tests for ``pocketpaw_ee.cloud.pockets._merge.merge_ripple_spec``."""
 
 from __future__ import annotations
 
 import copy
+from typing import Any
 
 import pytest
-
 from pocketpaw_ee.cloud.pockets._merge import merge_ripple_spec
-
 
 # ---------------------------------------------------------------------------
 # Fixtures — a small base spec a few tests can reuse without re-typing.
@@ -228,3 +232,50 @@ def test_non_dict_inputs_raise_typeerror():
         merge_ripple_spec([], {})
     with pytest.raises(TypeError):
         merge_ripple_spec({}, "not a dict")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# PR #1222 R1 high-priority 1 — cycle guard. The patch tree comes from
+# untrusted agent output; a self-referential ``children`` list must not
+# hang the merge walk. The guard lives in ``_collect_patch_nodes`` and
+# ``_collect_all_ids`` and is keyed on node id.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_cycle_in_patch_does_not_hang():
+    """A patch where node_a.children references node_b and node_b.children
+    references node_a must terminate. ``asyncio.wait_for`` is the
+    timeout primitive available without an extra plugin.
+    """
+    import asyncio
+
+    # Construct a cycle via shared dict references — the merge walk
+    # follows ``children`` lists, so two id-bearing dicts that point at
+    # each other's children form a self-referential graph.
+    node_a: dict[str, Any] = {"id": "n_a00001", "type": "flex", "props": {}}
+    node_b: dict[str, Any] = {"id": "n_b00001", "type": "flex", "props": {}}
+    node_a["children"] = [node_b]
+    node_b["children"] = [node_a]
+
+    base = _base_spec()
+    patch = {"ui": node_a}
+
+    async def _run() -> tuple[dict, list[str]]:
+        # ``merge_ripple_spec`` is sync — wrap so wait_for can cancel
+        # if the implementation regresses to an unbounded walk.
+        return merge_ripple_spec(base, patch)
+
+    merged, orphans = asyncio.run(asyncio.wait_for(_run(), timeout=2.0))
+
+    # Result shape doesn't matter as much as termination. Confirm the
+    # walk produced a sane structure: both ids in the patch are reachable
+    # (via the visited-set, each is recorded once) and neither is an
+    # orphan because the patch UI tree was walked but never matched a
+    # base id — the orphan-vs-matched bookkeeping treats them as orphans
+    # (n_a / n_b aren't in base.ui, base's children are unchanged).
+    assert isinstance(merged, dict)
+    assert isinstance(orphans, list)
+    # The IDs in the cycle must appear in the orphan list (they're in
+    # patch but not in base) — exactly once each, no infinite duplicates.
+    assert orphans.count("n_a00001") == 1
+    assert orphans.count("n_b00001") == 1

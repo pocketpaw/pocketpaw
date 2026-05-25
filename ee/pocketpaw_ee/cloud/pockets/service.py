@@ -82,6 +82,14 @@ generation path, persists on success, returns a wire dict + warnings
 list. Lives alongside (not replacing) the 17-tool granular-op surface
 — the captain greenlights deletion in a follow-up PR after the new
 path is proven on real chat traffic.
+Changes: 2026-05-25 (PR #1222 R1) — ``merge_spec`` now accepts either
+the typed ``MergeSpecRequest`` Pydantic model or a legacy dict and
+``model_validate``s at entry. The exactly-one rule (``replace`` xor
+``merge``) is enforced by the model's ``model_validator``; the
+hand-rolled ``isinstance`` + presence checks the original MVP carried
+are gone. Behaviour is unchanged for the happy path; bad bodies now
+raise the same ``spec_merge.invalid_body`` ValidationError but via
+Pydantic instead of an ad-hoc branch.
 """
 
 from __future__ import annotations
@@ -123,6 +131,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
+    MergeSpecRequest,
     UpdatePocketRequest,
     UpdateWidgetRequest,
     pocket_to_wire_dict,
@@ -739,7 +748,7 @@ async def merge_spec(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
-    body: dict[str, Any],
+    body: MergeSpecRequest | dict[str, Any],
 ) -> dict:
     """One-shot rippleSpec write — full replace OR partial merge.
 
@@ -753,6 +762,13 @@ async def merge_spec(
     keys overwrite, ``state`` is shallow-merged, ``ui`` nodes are
     replaced by id via ``merge_ripple_spec``).
 
+    Accepts either the typed ``MergeSpecRequest`` model the router
+    constructs from the HTTP body OR a plain dict (for internal
+    callers — CLI / bus handlers / tests). The first line below
+    re-validates via ``model_validate`` so the exactly-one rule is
+    enforced regardless of which path the caller came in through —
+    per cloud convention #6 (validate at entry).
+
     Validation runs the STRICT catalog + action-wiring gates (mirrors
     the agent-generation path in ``create_from_ripple_spec``). A
     catalog or action-wiring violation BLOCKS the persist and returns
@@ -765,38 +781,33 @@ async def merge_spec(
     response mirrors the existing wire shape so the desktop client can
     re-render directly from the result.
     """
+    # Validate at entry (cloud rule #6) — accept either the typed
+    # model or a raw dict and normalize to the model. ``model_validate``
+    # re-runs the exactly-one ``model_validator``, so a dict caller
+    # carrying both / neither raises here instead of later.
+    if isinstance(body, MergeSpecRequest):
+        parsed = body
+    else:
+        try:
+            parsed = MergeSpecRequest.model_validate(body)
+        except Exception as exc:  # noqa: BLE001 — pydantic validation
+            raise ValidationError(
+                "spec_merge.invalid_body",
+                str(exc),
+            ) from exc
+
     doc = await _fetch_pocket(pocket_id)
     pocket = _pocket_to_domain(doc)
     _check_domain_edit_access(pocket, user_id)
 
-    # Body shape — exactly one of ``replace`` or ``merge``.
-    has_replace = "replace" in body and body.get("replace") is not None
-    has_merge = "merge" in body and body.get("merge") is not None
-    if has_replace == has_merge:  # both or neither
-        raise ValidationError(
-            "spec_merge.invalid_body",
-            "Body must carry exactly one of 'replace' or 'merge' (got both or neither).",
-        )
-
     # Compute the new spec.
     orphans: list[str] = []
-    if has_replace:
-        candidate = body["replace"]
-        if not isinstance(candidate, dict):
-            raise ValidationError(
-                "spec_merge.invalid_replace",
-                "'replace' must be a full rippleSpec dict.",
-            )
-        new_spec_raw = candidate
+    if parsed.replace is not None:
+        new_spec_raw = parsed.replace
     else:
-        patch = body["merge"]
-        if not isinstance(patch, dict):
-            raise ValidationError(
-                "spec_merge.invalid_merge",
-                "'merge' must be a partial rippleSpec dict.",
-            )
+        assert parsed.merge is not None  # narrowing for type checkers
         base_spec = doc.rippleSpec or {}
-        new_spec_raw, orphans = merge_ripple_spec(base_spec, patch)
+        new_spec_raw, orphans = merge_ripple_spec(base_spec, parsed.merge)
 
     # Normalize + validate (mirror the create_from_ripple_spec gate
     # sequence at line 794+ — strict on catalog + action-wiring, logged
