@@ -1,25 +1,165 @@
 # dto.py — Request / response DTOs for the decision-graph REST surface.
-# Created: 2026-05-25 (RFC 07 Slice 1) — skeletons only. Slice 1 ships the
-#   in-process Python API (`DecisionGraph` in service.py) which returns
-#   `Decision` domain objects directly. The REST router fills in shape
-#   in Slice 2 — these DTOs are the wire contract it will use.
-#
-# Why ship the DTOs now: Slice 2 work can start without re-deriving the
-# wire shape, and the import-linter contract (decisions/dto.py forbidden
-# from importing models.*) needs a real file to lint. Distinct
-# Request/Response per ee/cloud Rule 4.
+# Created: 2026-05-25 (RFC 07 Slice 1) — skeletons only.
+# Updated: 2026-05-25 (RFC 07 Slice 2) — wired the real wire shapes the
+#   five REST routes return (get / list / trace / downstream / timeline).
+#   Adds `DecisionResponse` (the wire mirror of the domain Decision so
+#   wire ≠ domain per ee/cloud Rule 4), `EdgeDTO` (relation-tagged trace
+#   edge), `JournalEventDTO` + `TimelineResponse` (the flattened journal
+#   chain for one correlation_id), and keeps the original request DTOs
+#   the router parses query strings into. Pagination is keyset on
+#   `(ts DESC, id DESC)` — the cursor is encoded as opaque
+#   `before_ts` / `before_id` query params; the response echoes them
+#   back as `next_before_ts` / `next_before_id` for the next page.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from pocketpaw_ee.cloud.decisions.domain import (
     Decision,
-    DecisionEdgeRecord,
+    EdgeRelation,
     OutcomeStatus,
     ScopeKind,
 )
+
+
+# ---------------------------------------------------------------------------
+# Approver / input / outcome wire shapes — minor flattenings of the domain
+# value objects so the wire schema doesn't leak Pydantic internals.
+# ---------------------------------------------------------------------------
+
+
+class ApproverWire(BaseModel):
+    """Wire shape for one approver — flattens the embedded Actor so the
+    JSON consumer can read `actor_id` / `actor_kind` without unpacking.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    actor_kind: str
+    actor_id: str
+    approved_at: datetime
+    position: int = 0
+
+
+class InputWire(BaseModel):
+    """Wire shape for one input — same fields as `InputRef`, no nesting."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str
+    id: str
+    label: str = ""
+    point_in_time: datetime | None = None
+
+
+class OutcomeWire(BaseModel):
+    """Wire shape for the outcome attached to a Decision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    outcome_id: UUID
+    status: OutcomeStatus
+    landed_at: datetime | None = None
+    metered: bool = False
+
+
+class PrecedentWire(BaseModel):
+    """Wire shape for a precedent reference — just the target id + weight."""
+
+    model_config = ConfigDict(frozen=True)
+
+    decision_id: UUID
+    weight: float = 1.0
+
+
+class DecisionResponse(BaseModel):
+    """Wire mirror of `decisions.domain.Decision` (ee/cloud Rule 4).
+
+    Renames `decided_by` to `actor_kind` / `actor_id` for symmetry with
+    `ApproverWire`. `correlation_id` and `hash_link` are surfaced as
+    strings so the client never has to know the SQLite or hash encoding.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    ts: datetime
+    actor_kind: str
+    actor_id: str
+    scope: list[str]
+    scope_kind: ScopeKind
+    intent: str
+    action: str
+    inputs: list[InputWire] = Field(default_factory=list)
+    approvers: list[ApproverWire] = Field(default_factory=list)
+    instinct_policy: str | None = None
+    instinct_policy_passed: bool | None = None
+    precedents: list[PrecedentWire] = Field(default_factory=list)
+    outcome: OutcomeWire | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    pocket_id: str | None = None
+    correlation_id: UUID | None = None
+    hash_link: str = ""
+    last_seq: int = 0
+
+    @classmethod
+    def from_domain(cls, decision: Decision) -> DecisionResponse:
+        """Build the wire response from a domain Decision. Centralised so
+        the five routes share one mapping path (no drift)."""
+        return cls(
+            id=decision.id,
+            ts=decision.ts,
+            actor_kind=decision.decided_by.kind,
+            actor_id=decision.decided_by.id,
+            scope=list(decision.scope),
+            scope_kind=decision.scope_kind,
+            intent=decision.intent,
+            action=decision.action,
+            inputs=[
+                InputWire(
+                    kind=i.kind,
+                    id=i.id,
+                    label=i.label,
+                    point_in_time=i.point_in_time,
+                )
+                for i in decision.inputs
+            ],
+            approvers=[
+                ApproverWire(
+                    actor_kind=a.actor.kind,
+                    actor_id=a.actor.id,
+                    approved_at=a.approved_at,
+                    position=a.position,
+                )
+                for a in decision.approvers
+            ],
+            instinct_policy=decision.instinct_policy,
+            instinct_policy_passed=decision.instinct_policy_passed,
+            precedents=[
+                PrecedentWire(decision_id=p.decision_id, weight=p.weight)
+                for p in decision.precedents
+            ],
+            outcome=(
+                OutcomeWire(
+                    outcome_id=decision.outcome.outcome_id,
+                    status=decision.outcome.status,
+                    landed_at=decision.outcome.landed_at,
+                    metered=decision.outcome.metered,
+                )
+                if decision.outcome
+                else None
+            ),
+            payload=dict(decision.payload),
+            pocket_id=decision.pocket_id,
+            correlation_id=decision.correlation_id,
+            hash_link=decision.hash_link,
+            last_seq=decision.last_seq,
+        )
+
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/decisions  (Slice 2)
@@ -27,11 +167,11 @@ from pocketpaw_ee.cloud.decisions.domain import (
 
 
 class DecisionsListRequest(BaseModel):
-    """Validated query for `GET /api/v1/decisions` (Slice 2).
+    """Validated query for `GET /api/v1/decisions`.
 
-    ``workspace_id`` is taken from auth context, never the query.
+    `workspace_id` is taken from auth context, never the query.
     Pagination is keyset-style (RFC perf budget — never OFFSET at scale):
-    ``before_ts`` + ``before_id`` carry the cursor from the previous page.
+    `before_ts` + `before_id` carry the cursor from the previous page.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -45,7 +185,7 @@ class DecisionsListRequest(BaseModel):
     outcome_status: OutcomeStatus | None = None
     input_id: str | None = None
     limit: int = Field(default=50, ge=1, le=200)
-    # keyset pagination cursor (sort key: ts DESC, id DESC). Slice 2 wires.
+    # keyset pagination cursor (sort key: ts DESC, id DESC).
     before_ts: datetime | None = None
     before_id: str | None = None
 
@@ -53,12 +193,13 @@ class DecisionsListRequest(BaseModel):
 class DecisionsListResponse(BaseModel):
     """List response. ``total`` is post-scope-filter — never the
     pre-filter count (RFC 07 § Privacy + audit; matches FabricProjection
-    invariant).
+    invariant). Pagination cursor echoes the last (ts, id) so the
+    client can request the next page without recomputing position.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    decisions: list[Decision] = Field(default_factory=list)
+    decisions: list[DecisionResponse] = Field(default_factory=list)
     total: int = 0
     next_before_ts: datetime | None = None
     next_before_id: str | None = None
@@ -78,37 +219,110 @@ class DecisionTraceRequest(BaseModel):
     max_fanout: int = Field(default=20, ge=1, le=100)
 
 
-class TraceNodeWire(BaseModel):
-    """One node in the trace response wire shape (Slice 2)."""
+class EdgeDTO(BaseModel):
+    """One edge in the trace / downstream response. Mirrors
+    `DecisionEdgeRecord` but renames `src_id` → `src` / `target_id` →
+    `target` for wire brevity. The five edge relations cover everything
+    the narrator + UI need to render (RFC 07 § Edge kinds).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    src: str
+    target: str
+    relation: EdgeRelation
+    weight: float = 1.0
+
+
+class TraceNodeResponse(BaseModel):
+    """One node in the trace response.
+
+    ``decision`` is populated when the node IS a Decision (the upstream /
+    downstream walk hydrated it from the store). For external inputs and
+    actor terminals, ``decision`` is None and ``label`` is the only
+    identifier the renderer has.
+    """
 
     model_config = ConfigDict(frozen=True)
 
     id: str
-    kind: str  # decision | fabric_object | dataref
-    decision: Decision | None = None
+    kind: Literal["decision", "fabric_object", "dataref", "actor"]
+    decision: DecisionResponse | None = None
     label: str = ""
 
 
 class DecisionTraceResponse(BaseModel):
     """BFS trace response (Slice 2). ``truncated`` is set when any node
     exceeded the fanout cap; ``truncated_count`` reports how many edges
-    were dropped (RFC 07 amendment for gap G7).
+    were dropped (RFC 07 amendment for gap G7). Shape is `{root, nodes,
+    edges, truncated, truncated_count}` per the RFC spec.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    root: str
-    nodes: dict[str, TraceNodeWire] = Field(default_factory=dict)
-    edges: list[DecisionEdgeRecord] = Field(default_factory=list)
+    root: UUID
+    nodes: dict[str, TraceNodeResponse] = Field(default_factory=dict)
+    edges: list[EdgeDTO] = Field(default_factory=list)
     truncated: bool = False
     truncated_count: int = 0
     depth_reached: int = 0
 
 
+# ---------------------------------------------------------------------------
+# GET /api/v1/decisions/:id/timeline  (Slice 2)
+# ---------------------------------------------------------------------------
+
+
+class JournalEventDTO(BaseModel):
+    """One event from the journal in the timeline wire shape.
+
+    Slim mirror of `EventEntry` — only the fields the narrator + UI
+    timeline view need. `seq` is the journal's monotonic per-org sequence,
+    surfaced so the client can sort even when timestamps tie.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    seq: int
+    id: UUID
+    ts: datetime
+    actor_kind: str
+    actor_id: str
+    action: str
+    scope: list[str] = Field(default_factory=list)
+    correlation_id: UUID | None = None
+    causation_id: UUID | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class TimelineResponse(BaseModel):
+    """Wire shape for `GET /api/v1/decisions/:id/timeline`.
+
+    Bypasses the projection — reads the journal directly for events
+    sharing the Decision's `correlation_id`, returning them in seq
+    order. A Decision with no correlation_id (degenerate write) gets
+    an empty events list and the response's `correlation_id` is None.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    decision_id: UUID
+    correlation_id: UUID | None = None
+    events: list[JournalEventDTO] = Field(default_factory=list)
+
+
 __all__ = [
+    "ApproverWire",
+    "DecisionResponse",
     "DecisionTraceRequest",
     "DecisionTraceResponse",
     "DecisionsListRequest",
     "DecisionsListResponse",
-    "TraceNodeWire",
+    "EdgeDTO",
+    "InputWire",
+    "JournalEventDTO",
+    "OutcomeWire",
+    "PrecedentWire",
+    "TimelineResponse",
+    "TraceNodeResponse",
 ]

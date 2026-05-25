@@ -132,6 +132,7 @@ cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
 tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
 planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
+decisions = "pocketpaw_ee.extensions:CloudDecisionsMcpProvider"
 pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
 composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 
