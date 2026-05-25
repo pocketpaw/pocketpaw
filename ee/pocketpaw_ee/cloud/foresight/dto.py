@@ -62,6 +62,17 @@ class CreateScenarioRequest(BaseModel):
       - ``scenario_id``: reference a stored scenario by id
       - ``tier_mix_override``, ``budget_cap_usd``, ``activation_overlay``
         and the rest of RFC §18's grammar.
+
+    PR 8 (RFC 08 §8) adds ``route_to_instinct``: when true, every
+    ``ProjectedDecision`` the run emits also lands one row in the
+    Instinct approval queue so the operator's Tray surfaces the
+    forecast as evidence next to the matching real-world decision.
+    Defaults to ``False`` so backwards-compatible callers (smoke
+    runs, backtests, the chat-driven CLI) don't accidentally fan
+    proposals into the Tray. The flag is documented on the scenario
+    YAML files (``decision_forecast.yaml`` / ``market_sim.yaml`` /
+    ``org_change.yaml``) as a v1.0 loader hook — v0.5 reads it only
+    from the request body.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -70,6 +81,17 @@ class CreateScenarioRequest(BaseModel):
     sub_type: str = Field(default="decision_forecast", max_length=64)
     n_ticks: int = Field(default=1, ge=1, le=1000)
     personas: list[PersonaSpecRequest] = Field(..., min_length=1, max_length=1000)
+    route_to_instinct: bool = Field(
+        default=False,
+        description=(
+            "When true, every ProjectedDecision the run emits is also "
+            "fanned into the Instinct approval queue (RFC 08 §8). The "
+            "proposal is EVIDENCE-only — approving it acknowledges the "
+            "forecast but does NOT trigger an executing side-effect. "
+            "Backtests cannot opt in (the backtest endpoint reuses the "
+            "scenario runner but disables this fan-out)."
+        ),
+    )
 
 
 class ScenarioRunResponse(BaseModel):
@@ -305,11 +327,80 @@ class ProjectedDecisionListResponse(BaseModel):
     has_more: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Foresight → Instinct approval-loop fan-out (RFC 08 §8 + PR 8).
+#
+# When a scenario opts in via ``route_to_instinct=True``, each
+# ProjectedDecision becomes one row in the Instinct approval queue.
+# These response shapes wrap the persisted Instinct Action rows back
+# into a Foresight-flavoured view so the Tray UI can render
+# "the proposals spawned by THIS run" without poking the generic
+# ``/instinct/actions/pending`` endpoint with a client-side filter.
+# ---------------------------------------------------------------------------
+
+
+class ForesightInstinctProposalResponse(BaseModel):
+    """One Instinct proposal spawned by a Foresight ProjectedDecision.
+
+    A subset of the full ``Action`` shape — enough for the Tray rail's
+    Foresight column to render the row without requesting the
+    Instinct detail endpoint. Operators who need the full Action
+    payload (corrections, audit) fetch it via
+    ``GET /api/v1/instinct/actions/{id}`` keyed by ``action_id``.
+
+    Fields mirror the Instinct ``Action`` model where they apply,
+    plus the ``foresight`` provenance block the bridge stamped onto
+    ``parameters._foresight`` at propose time so the consumer can
+    rehydrate the originating (run × tick × anchor) without a second
+    round trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action_id: str
+    pocket_id: str
+    title: str
+    description: str
+    recommendation: str
+    status: str  # "pending" | "approved" | "rejected" | "executed" | "failed"
+    priority: str  # "low" | "medium" | "high" | "critical"
+    category: str  # "data" for foresight evidence proposals
+    assignee: str | None = None
+    created_at: str | None = None
+    # Provenance — the ``_foresight`` block the bridge stamped on
+    # ``parameters`` at propose time. Carrying it on the response lets
+    # the Tray UI render the "Why?" drawer (originating run / tick /
+    # anchor / confidence) without a second API call.
+    foresight: dict[str, Any]
+
+
+class ForesightInstinctProposalListResponse(BaseModel):
+    """Paginated wrapper for
+    ``GET /runs/{id}/instinct-proposals``.
+
+    Mirrors :class:`ProjectedDecisionListResponse`: the items array
+    plus the cursor metadata a paginating client needs. v0.8 keeps
+    the cursor offset-based for parity with the projection-list
+    endpoint; v1.0 may swap to opaque cursors once dataset sizes
+    make a count_documents call expensive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ForesightInstinctProposalResponse]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+    has_more: bool = False
+
+
 __all__ = [
     "BacktestRunListItemResponse",
     "BacktestRunResponse",
     "CreateBacktestRequest",
     "CreateScenarioRequest",
+    "ForesightInstinctProposalListResponse",
+    "ForesightInstinctProposalResponse",
     "HistoricalAnchorRequest",
     "OnboardingGateResponse",
     "PersonaSpecRequest",

@@ -507,6 +507,19 @@ class ForesightProjectedDecisionEmitted(Event):
     EVENT_TYPE: ClassVar[str] = "foresight.projected_decision.emitted"
 
 
+# Foresight → Instinct approval loop — RFC 08 §8. Fires when a
+# ProjectedDecision opts into the Instinct queue (via the scenario's
+# ``route_to_instinct=true`` flag) and the cloud-side fan-out creates
+# one Instinct ``Action`` row. The proposal is EVIDENCE — the Instinct
+# policy that already gates the underlying real decision still owns
+# the predicate; approving the proposal acknowledges the forecast but
+# does NOT trigger any executing side-effect. Listeners use this event
+# to refresh the Tray feed without polling.
+@dataclass
+class ForesightInstinctProposalCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.instinct_proposal.created"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first

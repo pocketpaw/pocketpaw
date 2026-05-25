@@ -28,6 +28,16 @@ name: smoke-market-sim
 sub_type: market_sim
 n_ticks: 2
 
+# PR 8 (RFC 08 §8) — when true, every ProjectedDecision this scenario
+# emits is also fanned into the Instinct approval queue so The Tray
+# surfaces the forecast as evidence next to the matching real-world
+# decision. Defaults to false here (and in the request DTO) so smoke
+# runs don't pollute the Tray. The v0.8 cloud loader only reads this
+# flag from the POST body; the YAML carries it as documentation /
+# v1.0 loader hook.
+#
+# route_to_instinct: false
+
 # Captain-locked 5/15/80 default per RFC §10. Declared explicitly so
 # new readers see the tier mix without chasing the loader's default.
 tier_mix:

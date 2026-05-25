@@ -1,4 +1,12 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-25 (feat/foresight-v08-approval-loop) — PR 8 / RFC 08 §8
+#   adds the Foresight → Instinct approval-loop surface:
+#     GET /api/v1/foresight/runs/{id}/instinct-proposals
+#       → paginated list of Instinct rows spawned by this run. Tenancy:
+#         404 when the run is unknown / cross-tenant (same collapsing
+#         rule as the projection-list endpoint). Cursor: offset-based
+#         ``limit`` (default 50, capped at 500) + ``offset`` (default 0).
+#         Empty list when the run didn't opt into ``route_to_instinct``.
 # Modified: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5
 #   adds the per-anchor projection fanout surface:
 #     GET /api/v1/foresight/runs/{id}/projected-decisions
@@ -51,6 +59,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     BacktestRunResponse,
     CreateBacktestRequest,
     CreateScenarioRequest,
+    ForesightInstinctProposalListResponse,
     OnboardingGateResponse,
     ProjectedDecisionListResponse,
     ScenarioRunListItemResponse,
@@ -154,6 +163,52 @@ async def list_projected_decisions(
         ctx,
         run_id,
         anchor_id=anchor_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Foresight → Instinct approval loop (RFC 08 §8 + PR 8)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/runs/{run_id}/instinct-proposals",
+    response_model=ForesightInstinctProposalListResponse,
+)
+async def list_instinct_proposals(
+    run_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    ctx: RequestContext = Depends(request_context),
+) -> ForesightInstinctProposalListResponse:
+    """List the Instinct proposals spawned by one Foresight run.
+
+    PR 8 contract (RFC 08 §8):
+      - Returns the Instinct rows whose ``parameters._foresight.run_id``
+        matches the run. Empty list when the run didn't opt into
+        ``route_to_instinct`` or when the run hasn't ticked yet.
+      - Each row is the EVIDENCE-only proposal the bridge spawned: the
+        Instinct policy that already gates the underlying real decision
+        still owns the predicate; approving a row acknowledges the
+        forecast but does NOT trigger any executing side-effect.
+      - Tenancy: an unknown / cross-tenant run id returns 404
+        (``foresight_run.not_found``) — same collapsing rule the
+        projection-list endpoint uses so existence isn't cross-tenant
+        leakable. The Instinct store itself doesn't carry a
+        ``workspace_id`` column (it's OSS-runtime SQLite), so the
+        workspace check happens at the run level here.
+      - Pagination is offset-based for parity with the projection-list
+        endpoint; ``limit`` is hard-capped at 500.
+
+    Operators who need the full Action payload (corrections, audit)
+    fetch it via ``GET /api/v1/instinct/actions/{id}`` keyed by
+    ``action_id``.
+    """
+    return await foresight_service.list_instinct_proposals_for_run(
+        ctx,
+        run_id,
         limit=limit,
         offset=offset,
     )
