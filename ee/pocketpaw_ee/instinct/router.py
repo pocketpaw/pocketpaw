@@ -52,6 +52,41 @@
 #     actor are now the AUTHENTICATED user id, not the free-text
 #     ``approver`` request field — a caller can no longer forge the
 #     audit actor. The request field stays for display only.
+#
+# Updated: 2026-05-26 (RFC 09 Slice 3 — Instinct emits + reject security fix) —
+#   * Decision-Graph chain emits — ``approve_action`` /
+#     ``bulk_approve_actions`` now emit ``human.corrected(disposition=
+#     accepted|edited)`` per item, chained off the parked
+#     ``policy.evaluated`` (the bridge populated the parked blob's
+#     ``parked_policy_event_id`` in Slice 3). ``reject_action`` /
+#     ``bulk_reject_actions`` emit ``human.corrected(disposition=
+#     rejected)`` followed by ``decision.completed(passed=False,
+#     action_outcome="rejected")`` to close the chain — the bridge is
+#     never invoked on the reject paths, so the router owns the close.
+#     The approve paths DO NOT emit ``decision.completed`` — the
+#     bridge's ``execute_approved_write`` owns the chain close after
+#     the post-approval HTTP call lands (success / re-validation
+#     rejection / executor crash all close via
+#     ``instinct_bridge._emit_bridge_chain_close``). All emits are
+#     best-effort (``record_*`` helpers swallow projection failures
+#     internally + the local try/except guards the journal-side
+#     failure path so a Decision-Graph wire never breaks an approval /
+#     rejection).
+#   * Touch-time security fix on reject endpoints —
+#     ``reject_action`` and ``bulk_reject_actions`` previously lacked
+#     ``current_user`` / ``current_workspace_id`` deps, which meant
+#     ``_assert_pocket_write_workspace`` could not run on reject paths.
+#     A workspace-A approver could therefore reject a workspace-B
+#     ``_pocket_write`` Action — a cross-tenant rejection escalation
+#     mirror of the BLOCKER 1 gap closed for approvals in PR #1183. The
+#     two deps are added and the assertion runs before any state
+#     mutation. Same partial-failure-fails-whole-batch semantics as
+#     ``bulk_approve_actions``.
+#   * ``bulk_reject_actions`` per-item emit loop — the underlying
+#     ``store.bulk_reject`` already iterates per item internally; the
+#     router now also loops over the returned ``rejected`` list to fire
+#     the per-item chain emits. No semantic change to the bulk-reject
+#     response shape (``BulkActionResponse`` with shared ``bulk_id``).
 
 from __future__ import annotations
 
@@ -117,6 +152,10 @@ def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
     differs from the caller's active workspace, raise ``Forbidden`` (403).
     A non-pocket-write Action (no blob) is unaffected — instinct's other
     Action kinds are not tenant-bound by this column.
+
+    Slice 3 (RFC 09) — the reject paths now invoke this check too
+    (previously only approve paths did). Same error code so the
+    frontend's existing 403 handler covers both.
     """
     blob = _pocket_write_blob(action)
     if blob is None:
@@ -126,6 +165,175 @@ def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This action's pocket write belongs to a different workspace",
+        )
+
+
+# ---------------------------------------------------------------------------
+# RFC 09 Slice 3 — Decision-Graph chain emit helpers
+# ---------------------------------------------------------------------------
+# The approve / reject endpoints emit ``human.corrected`` per item; the
+# reject endpoints additionally emit ``decision.completed(rejected)`` to
+# close the chain. The bridge owns the chain close on the approve path
+# (``instinct_bridge._emit_bridge_chain_close`` fires from
+# ``execute_approved_write`` after the post-approval HTTP call). Both
+# helpers below are best-effort — a Decision-Graph wiring failure must
+# never break an approval or rejection (the journal write is the source
+# of truth; the Slice 4 reconciler is the safety net).
+#
+# ``_chain_actor_human`` shape: ``kind="user"`` (this is the human
+# approver acting, not the agent that proposed). ``id`` is the
+# authenticated user id with a ``user:`` prefix so the projection's
+# ``_fold_corrected`` can attribute the ApproverRef to the human.
+# ``scope_context`` carries the approver's active workspace + the
+# action's pocket so visibility filters narrow correctly.
+
+
+def _chain_actor_human(*, user_id: str, workspace_id: str, pocket_id: str) -> Any:
+    """Build the Actor recorded on a ``human.corrected`` / reject-path
+    ``decision.completed`` chain event."""
+    from soul_protocol.spec.journal import Actor
+
+    return Actor(
+        kind="user",
+        id=f"user:{user_id or 'unknown'}",
+        scope_context=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+    )
+
+
+def _parked_policy_event_id(blob: dict[str, Any]) -> Any:
+    """Pull the ``parked_policy_event_id`` UUID off a schema-2 blob, or
+    ``None`` if missing / malformed. The Slice 3 bridge writes this back
+    onto the Action after ``store.propose`` succeeds; using it as the
+    ``causation_id`` on the next ``human.corrected`` event gives the
+    chain a clean policy → human cause-arrow."""
+    from uuid import UUID
+
+    raw = blob.get("parked_policy_event_id")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
+def _parked_correlation_id(blob: dict[str, Any]) -> Any:
+    """Pull the chain ``correlation_id`` off a schema-2 blob, or
+    ``None`` if missing / malformed. Without a correlation_id the emit
+    is skipped — there's no chain to fold into."""
+    from uuid import UUID
+
+    raw = blob.get("correlation_id")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
+def _emit_human_corrected(
+    *,
+    blob: dict[str, Any],
+    action: Any,
+    user_id: str,
+    workspace_id: str,
+    disposition: str,
+    note: str | None,
+) -> None:
+    """Best-effort ``human.corrected`` emit for an approve / reject /
+    bulk-approve / bulk-reject item.
+
+    ``disposition`` is one of ``accepted`` / ``edited`` / ``rejected``.
+    ``note`` is the operator-supplied reason text (reject path) or
+    correction note (edit path); ``None`` for a plain approve.
+
+    Skipped silently when the blob carries no ``correlation_id`` — a
+    blob-without-chain-id is a defensive guard (Slice 2 always populates
+    it from the executor's mint; a None means a future code path parked
+    a write without minting one). The Slice 4 reconciler / abandon
+    sweeper will deal with the orphan.
+    """
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_human_corrected
+
+    correlation_id = _parked_correlation_id(blob)
+    if correlation_id is None:
+        return
+
+    pocket_id = str(getattr(action, "pocket_id", "") or "")
+    causation = _parked_policy_event_id(blob)
+    payload: dict[str, Any] = {
+        "disposition": disposition,
+        "action_id": str(getattr(action, "id", "") or ""),
+    }
+    if note:
+        payload["note"] = note
+
+    try:
+        record_human_corrected(
+            correlation_id=correlation_id,
+            actor=_chain_actor_human(
+                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
+            ),
+            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+            payload=payload,
+            causation_id=causation,
+        )
+    except Exception:  # noqa: BLE001 — chain emit is best-effort
+        logger.warning(
+            "instinct human.corrected emit failed for correlation_id=%s "
+            "(disposition=%s) — Slice 4 reconciler will catch up",
+            correlation_id,
+            disposition,
+            exc_info=True,
+        )
+
+
+def _emit_decision_completed_rejected(
+    *,
+    blob: dict[str, Any],
+    action: Any,
+    user_id: str,
+    workspace_id: str,
+    reason: str,
+) -> None:
+    """Best-effort ``decision.completed(passed=False, action_outcome=
+    "rejected")`` chain-close for a reject / bulk-reject item.
+
+    Same skip-on-missing-correlation-id semantics as
+    ``_emit_human_corrected``. The reject path owns the close because
+    the bridge is never invoked on rejection — for the approve path the
+    bridge's ``_emit_bridge_chain_close`` owns the close instead.
+    """
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
+
+    correlation_id = _parked_correlation_id(blob)
+    if correlation_id is None:
+        return
+
+    pocket_id = str(getattr(action, "pocket_id", "") or "")
+    payload: dict[str, Any] = {
+        "passed": False,
+        "action_outcome": "rejected",
+    }
+    if reason:
+        payload["reason"] = reason
+
+    try:
+        record_decision_completed(
+            correlation_id=correlation_id,
+            actor=_chain_actor_human(
+                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
+            ),
+            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+            payload=payload,
+        )
+    except Exception:  # noqa: BLE001 — chain close is best-effort
+        logger.warning(
+            "instinct decision.completed(rejected) emit failed for "
+            "correlation_id=%s — Slice 4 reconciler will catch up",
+            correlation_id,
+            exc_info=True,
         )
 
 
@@ -402,17 +610,33 @@ async def bulk_approve_actions(
     # instinct package free of a module-top dependency on ee.cloud.pockets,
     # and any failure is recorded on the Action by the bridge — it must
     # never break the bulk response.
+    #
+    # RFC 09 Slice 3 — per-item ``human.corrected`` emit slots into the
+    # same loop. Disposition is always ``accepted`` for bulk-approve —
+    # the endpoint doesn't support edits (the UI doesn't expose them on
+    # the bulk bar). The bridge owns the chain close on the approve
+    # path so we do NOT emit ``decision.completed`` here.
     for action in approved:
-        if _pocket_write_blob(action) is not None:
-            try:
-                from pocketpaw_ee.cloud.pockets import instinct_bridge
+        action_blob = _pocket_write_blob(action)
+        if action_blob is None:
+            continue
+        _emit_human_corrected(
+            blob=action_blob,
+            action=action,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition="accepted",
+            note=req.note,
+        )
+        try:
+            from pocketpaw_ee.cloud.pockets import instinct_bridge
 
-                await instinct_bridge.execute_approved_write(action)
-            except Exception:
-                logger.exception(
-                    "bulk-approve pocket-write execution failed for %s (non-fatal)",
-                    action.id,
-                )
+            await instinct_bridge.execute_approved_write(action)
+        except Exception:
+            logger.exception(
+                "bulk-approve pocket-write execution failed for %s (non-fatal)",
+                action.id,
+            )
 
     return BulkActionResponse(bulk_id=bulk_id, affected=approved, missing=missing)
 
@@ -422,7 +646,11 @@ async def bulk_approve_actions(
     response_model=BulkActionResponse,
     dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
 )
-async def bulk_reject_actions(req: BulkRejectRequest) -> BulkActionResponse:
+async def bulk_reject_actions(
+    req: BulkRejectRequest,
+    user: Any = Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> BulkActionResponse:
     """Reject N pending actions in one call. ``reason`` is required.
 
     Mirrors ``bulk_approve_actions``: shared ``bulk_id``, per-item audit
@@ -430,10 +658,57 @@ async def bulk_reject_actions(req: BulkRejectRequest) -> BulkActionResponse:
     on every audit row's ``context.reason`` and on each Action's
     ``rejected_reason`` so the soul-bridge correction pipeline still
     sees the same shape it sees on single-item rejects.
+
+    Slice 3 (RFC 09) — endpoint signature grew ``current_user`` and
+    ``current_workspace_id`` deps for the same two reasons as
+    ``reject_action``: (a) the touch-time cross-workspace security fix,
+    and (b) per-item ``human.corrected`` + ``decision.completed
+    (rejected)`` chain emits. Cross-workspace check fails the whole
+    batch with 403 — a partial bulk that silently dropped a foreign
+    item would hide a cross-tenant rejection-escalation attempt
+    (mirror of bulk-approve's BLOCKER 1 behaviour).
     """
-    rejected, missing, bulk_id = await _store().bulk_reject(
-        list(req.ids), reason=req.reason, rejector=req.rejector
+    store = _store()
+    rejector_id = str(user.id)
+
+    # Touch-time security fix — verify tenancy on every requested
+    # action up front, same shape as ``bulk_approve_actions``. A
+    # missing id has no blob to check; it falls through to
+    # ``bulk_reject`` and lands in ``missing``.
+    for action_id in req.ids:
+        action = await store.get_action(action_id)
+        if action is not None:
+            _assert_pocket_write_workspace(action, workspace_id)
+
+    rejected, missing, bulk_id = await store.bulk_reject(
+        list(req.ids), reason=req.reason, rejector=rejector_id
     )
+
+    # RFC 09 Slice 3 — per-item ``human.corrected`` + ``decision.
+    # completed(rejected)`` emit loop. The store's bulk_reject already
+    # iterates per item internally for the audit log; this loop adds
+    # the chain emits. Non-pocket-write Actions (no blob) skip both
+    # emits — there's no chain to close.
+    for action in rejected:
+        action_blob = _pocket_write_blob(action)
+        if action_blob is None:
+            continue
+        _emit_human_corrected(
+            blob=action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=req.reason or None,
+        )
+        _emit_decision_completed_rejected(
+            blob=action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=req.reason,
+        )
+
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
 
@@ -498,13 +773,35 @@ async def approve_action(
     if not approved:
         raise HTTPException(404, "Action not found")
 
+    # RFC 09 Slice 3 — emit the ``human.corrected`` chain event BEFORE
+    # the bridge fires. Disposition is ``edited`` when the approver
+    # adjusted fields (``edited_fields`` is non-empty), ``accepted``
+    # otherwise. The bridge owns the chain close on the approve path
+    # (``_emit_bridge_chain_close`` from ``execute_approved_write``),
+    # so we do NOT emit ``decision.completed`` here — emitting it would
+    # double-fire the chain terminal.
+    approved_blob = _pocket_write_blob(approved)
+    if approved_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        # ``note`` is the correction's free-text summary when the
+        # approver edited; None on a plain approve.
+        note = correction.context_summary if correction is not None else None
+        _emit_human_corrected(
+            blob=approved_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+        )
+
     # RFC 05 M2b.1 — when the approved Action carries a parked pocket
     # write (``parameters._pocket_write``), fire it. Best-effort: a
     # lazy import keeps the instinct package free of a module-top
     # dependency on ee.cloud.pockets, and any failure is recorded on the
     # Action by the bridge itself — it must NEVER break this approve
     # response. A non-pocket-write Action (the common case) skips this.
-    if _pocket_write_blob(approved) is not None:
+    if approved_blob is not None:
         try:
             from pocketpaw_ee.cloud.pockets import instinct_bridge
 
@@ -535,12 +832,71 @@ async def _forward_to_soul(correction: Correction, action: Action) -> None:
     response_model=Action,
     dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
 )
-async def reject_action(action_id: str, req: RejectRequest | None = None):
-    """Reject a pending action with an optional reason."""
+async def reject_action(
+    action_id: str,
+    req: RejectRequest | None = None,
+    user: Any = Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Reject a pending action with an optional reason.
+
+    Slice 3 (RFC 09) — endpoint signature grew ``current_user`` and
+    ``current_workspace_id`` deps for two reasons:
+
+      1. **Touch-time security fix** — ``require_action_any_workspace``
+         only proves the caller holds ``instinct.approve`` SOMEWHERE; it
+         does not bind the rejected Action to the caller's workspace.
+         Without the workspace dep, ``_assert_pocket_write_workspace``
+         could not run on the reject path — a workspace-A approver
+         could reject a workspace-B parked write, the mirror of the
+         BLOCKER 1 approval-escalation gap closed for approvals in PR
+         #1183. Now the same 403 + ``instinct.cross_workspace_approval``
+         error code fires on cross-tenant rejections.
+      2. **Decision-Graph chain emits** — the rejection emits
+         ``human.corrected(disposition=rejected)`` then closes the
+         chain with ``decision.completed(passed=False, action_outcome=
+         "rejected")``. The actor on both events is the authenticated
+         user id (same forge-resistance as ``approve_action``'s
+         SHOULD-FIX 1); the workspace + action's pocket form the
+         scope. The bridge is NOT invoked on reject so the router owns
+         the chain close.
+    """
+    store = _store()
+    before = await store.get_action(action_id)
+    if not before:
+        raise HTTPException(404, "Action not found")
+
+    # Touch-time security fix — same gate the approve path runs.
+    _assert_pocket_write_workspace(before, workspace_id)
+
     reason = req.reason if req else ""
-    action = await _store().reject(action_id, reason=reason)
+    rejector_id = str(user.id)
+    action = await store.reject(action_id, reason=reason, rejector=rejector_id)
     if not action:
         raise HTTPException(404, "Action not found")
+
+    # RFC 09 Slice 3 — emit ``human.corrected`` then ``decision.completed``
+    # to close the chain. Order matters for the narrator: the human
+    # action lands before the chain terminal, mirroring the approve
+    # path's "human.corrected → execute → decision.completed" ordering.
+    rejected_blob = _pocket_write_blob(action)
+    if rejected_blob is not None:
+        _emit_human_corrected(
+            blob=rejected_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+        )
+        _emit_decision_completed_rejected(
+            blob=rejected_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+        )
+
     return action
 
 

@@ -16,6 +16,18 @@
 # POST /instinct/actions, read back via GET /instinct/actions) so the
 # TestClient owns the only event loop. SHOULD-FIX 3 is a plain async
 # service test. `pocketpaw_ee` is import-skipped on an OSS-only install.
+#
+# Updated: 2026-05-26 (RFC 09 Slice 3 — Instinct emits + reject security fix) —
+#   Added ``TestRejectCrossWorkspaceSecurity`` covering the
+#   touch-time fix that closed the BLOCKER-1-mirror gap on
+#   ``reject_action`` / ``bulk_reject_actions``. Until Slice 3 the
+#   reject endpoints lacked ``current_user`` / ``current_workspace_id``
+#   deps, which meant ``_assert_pocket_write_workspace`` could not run
+#   on rejection — a workspace-A approver could reject a workspace-B
+#   parked write. The new tests pin: (a) single + bulk reject return
+#   403 with the same ``instinct.cross_workspace_approval`` code, and
+#   (b) same-workspace reject still succeeds + the rejected Action
+#   transitions to ``rejected``.
 
 from __future__ import annotations
 
@@ -216,6 +228,121 @@ class TestBlocker1CrossTenantApproval:
             # The whole batch is rejected — nothing flipped.
             assert _status_of(client, own) == "pending"
             assert _status_of(client, foreign) == "pending"
+
+
+# ---------------------------------------------------------------------------
+# RFC 09 Slice 3 — cross-workspace REJECT escalation (BLOCKER 1 mirror)
+# ---------------------------------------------------------------------------
+
+
+class TestRejectCrossWorkspaceSecurity:
+    """Slice 3 closes the cross-workspace rejection-escalation gap that
+    mirrored BLOCKER 1 on the approve side. Until this slice, the
+    reject endpoints lacked ``current_user`` / ``current_workspace_id``
+    deps so ``_assert_pocket_write_workspace`` could not run on
+    rejection paths — a workspace-A approver could reject a
+    workspace-B parked write. Adding the deps + the assertion closes
+    the gap with the same 403 + ``instinct.cross_workspace_approval``
+    error code the approve path uses."""
+
+    def test_single_reject_of_foreign_workspace_pocket_write_is_403(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """A ws-A approver POSTing /reject on an action whose parked
+        write belongs to ws-B is forbidden — the action stays pending."""
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="pocket-B",
+                title="ws-B write",
+                parameters=_pocket_write_params(workspace_id="ws-B"),
+            )
+            resp = client.post(
+                f"/instinct/actions/{action_id}/reject",
+                json={"reason": "nope"},
+            )
+            assert resp.status_code == 403
+            assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
+            assert _status_of(client, action_id) == "pending"
+
+    def test_single_reject_of_own_workspace_pocket_write_succeeds(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """A ws-A approver may reject a ws-A parked write — the
+        workspace check does not block a same-tenant rejection."""
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="pocket-A",
+                title="ws-A write",
+                parameters=_pocket_write_params(workspace_id="ws-A"),
+            )
+            resp = client.post(
+                f"/instinct/actions/{action_id}/reject",
+                json={"reason": "ok"},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["status"] == "rejected"
+
+    def test_bulk_reject_of_foreign_workspace_pocket_write_is_403(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """Bulk-reject mirrors bulk-approve's BLOCKER 1: a list with
+        even one foreign-workspace item fails the whole batch with
+        403 and nothing flips. A partial bulk that silently dropped
+        the foreign item would hide the escalation attempt."""
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            own = _propose(
+                client,
+                pocket_id="pocket-A",
+                title="ws-A write",
+                parameters=_pocket_write_params(workspace_id="ws-A"),
+            )
+            foreign = _propose(
+                client,
+                pocket_id="pocket-B",
+                title="ws-B write",
+                parameters=_pocket_write_params(workspace_id="ws-B"),
+            )
+            resp = client.post(
+                "/instinct/actions/bulk-reject",
+                json={"ids": [own, foreign], "reason": "batch nope"},
+            )
+            assert resp.status_code == 403
+            assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
+            assert _status_of(client, own) == "pending"
+            assert _status_of(client, foreign) == "pending"
+
+    def test_bulk_reject_of_own_workspace_pocket_writes_succeeds(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """Bulk-reject of N same-tenant items flips all of them and
+        returns the bulk_id + affected list."""
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            a = _propose(
+                client,
+                pocket_id="pocket-A",
+                title="ws-A first",
+                parameters=_pocket_write_params(workspace_id="ws-A"),
+            )
+            b = _propose(
+                client,
+                pocket_id="pocket-A",
+                title="ws-A second",
+                parameters=_pocket_write_params(workspace_id="ws-A"),
+            )
+            resp = client.post(
+                "/instinct/actions/bulk-reject",
+                json={"ids": [a, b], "reason": "ship it"},
+            )
+            assert resp.status_code == 200, resp.text
+            assert len(resp.json()["affected"]) == 2
+            assert _status_of(client, a) == "rejected"
+            assert _status_of(client, b) == "rejected"
 
 
 # ---------------------------------------------------------------------------

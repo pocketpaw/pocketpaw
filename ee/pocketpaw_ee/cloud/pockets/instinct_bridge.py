@@ -55,6 +55,21 @@
 #   ``execute_approved_write`` reads the correlation_id off the schema-2
 #   blob and passes it back into ``run_action(..., correlation_id=...)``
 #   so the chain folds under one id end-to-end.
+#
+# Updated: 2026-05-26 (RFC 09 Slice 3 — Instinct emits) —
+#   ``propose_pocket_write`` now emits the parked-side
+#   ``policy.evaluated(passed=False, reason="parked_for_human_approval")``
+#   chain event after ``store.propose`` succeeds, and persists the
+#   emitted event's id back onto the parked blob's
+#   ``parked_policy_event_id`` field. The instinct router's approve /
+#   reject paths read that id off the blob and use it as the
+#   ``causation_id`` on the subsequent ``human.corrected`` event so the
+#   chain has a clean cause-arrow from policy → human → close. The
+#   emit + the SQL write-back run best-effort: a Decision-Graph wiring
+#   failure must NEVER fail the propose response (the parked Action is
+#   already persisted; the worst case is a chain without a policy →
+#   human causation, which the Slice 4 reconciler / abandon-sweeper
+#   will eventually surface).
 
 from __future__ import annotations
 
@@ -220,7 +235,162 @@ async def propose_pocket_write(
         action.id,
         approver or "<owner-unset>",
     )
+
+    # RFC 09 Slice 3 — emit the parked-side ``policy.evaluated`` chain
+    # event AFTER the Action is durably stored. The semantic: parking
+    # ALWAYS means "this kind of write needs a human"; the implicit
+    # policy gate evaluated as ``passed=False`` and the chain stays open
+    # waiting for ``human.corrected``. The auto-approve ``passed=True``
+    # case lives in the action_executor's direct-path success branch
+    # (Slice 2) — Instinct never auto-approves today, so we don't emit
+    # ``passed=True`` from the router on approve (Slice 3 brief
+    # explicitly scopes that out).
+    #
+    # Best-effort: failure here must not break the propose response —
+    # the parked Action exists, the worst case is a chain without a
+    # policy→human causation_id which the Slice 4 abandon-sweeper /
+    # reconciler will eventually close.
+    raw_corr = pocket_write.get("correlation_id")
+    if isinstance(raw_corr, str) and raw_corr:
+        try:
+            correlation_id = UUID(raw_corr)
+        except ValueError:
+            logger.warning(
+                "parked pocket write %s carries malformed correlation_id %r — "
+                "policy.evaluated emit skipped; the bridge already swallows "
+                "a missing chain id",
+                action.id,
+                raw_corr,
+            )
+            correlation_id = None
+    else:
+        correlation_id = None
+
+    if correlation_id is not None:
+        event_id = _emit_parked_policy_evaluated(
+            correlation_id=correlation_id,
+            action_id=str(action.id),
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            instinct_policy=str(parked_write.get("instinct_policy") or "human_approval"),
+        )
+        if event_id is not None:
+            # Persist the emitted event's id back onto the parked blob so
+            # the eventual ``human.corrected`` event (Slice 3 — instinct
+            # router approve / reject) can chain its ``causation_id``
+            # back to this policy event. The write is best-effort: a
+            # transient SQLite lock would leave the field None and the
+            # human.corrected would emit without causation_id (the chain
+            # still folds — causation_id is optional).
+            await _persist_parked_policy_event_id(
+                store=store,
+                action_id=str(action.id),
+                event_id=str(event_id),
+            )
+
     return action.id
+
+
+def _emit_parked_policy_evaluated(
+    *,
+    correlation_id: UUID,
+    action_id: str,
+    workspace_id: str,
+    pocket_id: str,
+    instinct_policy: str,
+) -> UUID | None:
+    """Emit ``policy.evaluated(passed=False)`` for the parked write.
+
+    Returns the emitted event's id so the caller can persist it onto
+    the parked blob's ``parked_policy_event_id`` field for the
+    eventual ``human.corrected`` causation chain. Returns ``None`` if
+    the emit raised — best-effort per RFC 09 § Architecture; the Slice
+    4 reconciler picks up any orphans.
+    """
+    # Late imports — same pattern as ``_emit_bridge_chain_close``.
+    from soul_protocol.spec.journal import Actor
+
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_policy_evaluated
+
+    actor = Actor(
+        kind="system",
+        id="system:instinct",
+        scope_context=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+    )
+    payload: dict[str, Any] = {
+        "policy": instinct_policy,
+        "passed": False,
+        "reason": "parked_for_human_approval",
+        "action_id": action_id,
+        "evaluator": "instinct",
+    }
+    try:
+        entry = record_policy_evaluated(
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+            payload=payload,
+        )
+        return entry.id
+    except Exception:  # noqa: BLE001 — chain emit is best-effort
+        logger.warning(
+            "bridge policy.evaluated emit failed for correlation_id=%s "
+            "(action_id=%s) — Slice 4 reconciler will catch up",
+            correlation_id,
+            action_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _persist_parked_policy_event_id(
+    *,
+    store: Any,
+    action_id: str,
+    event_id: str,
+) -> None:
+    """Write ``parked_policy_event_id`` onto the persisted Action's
+    ``parameters._pocket_write`` blob.
+
+    The Instinct store has no field-level mutator for ``parameters``
+    (it's a JSON TEXT column); ``_update_status`` flips status too, which
+    we don't want here (the action must stay ``pending``). Direct SQL
+    update — same pattern as ``router._persist_edits``. Best-effort:
+    failure leaves the field None and the eventual ``human.corrected``
+    emits without a causation_id (the chain still folds; causation_id
+    is optional on EventEntry).
+    """
+    import json as _json
+
+    import aiosqlite
+
+    try:
+        action = await store.get_action(action_id)
+        if action is None:
+            return
+        params = dict(getattr(action, "parameters", None) or {})
+        blob = params.get("_pocket_write")
+        if not isinstance(blob, dict):
+            return
+        blob = dict(blob)
+        blob["parked_policy_event_id"] = event_id
+        params["_pocket_write"] = blob
+
+        async with aiosqlite.connect(store._db_path) as db:
+            await db.execute(
+                "UPDATE instinct_actions SET parameters = ?,"
+                " updated_at = datetime('now') WHERE id = ?",
+                (_json.dumps(params), action_id),
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001 — write-back is best-effort
+        logger.warning(
+            "failed to persist parked_policy_event_id=%s onto action %s — "
+            "the chain's human.corrected will emit without causation_id",
+            event_id,
+            action_id,
+            exc_info=True,
+        )
 
 
 async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def]
@@ -307,11 +477,25 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
 
     # The action's raw binding shape, rebuilt from the parked blob. The
     # executor reads `method` off this dict and re-validates everything.
+    #
+    # RFC 09 Slice 3 — ``requires_instinct=True`` is now stamped onto
+    # the reconstructed binding. Without it, ``action_executor.
+    # run_action``'s gate-8 success branch sees ``binding.requires_
+    # instinct=False`` and fires its auto-approve ``policy.evaluated +
+    # decision.completed`` emits — but THIS path is the Instinct
+    # re-entry, where the bridge below (``_emit_bridge_chain_close``)
+    # owns the chain close. Without the flag, every Instinct-approved
+    # write produces a doubled chain close (one from action_executor
+    # gate-8, one from the bridge). The Slice 2 tests missed this
+    # because they passed ``requires_instinct=True`` directly into
+    # ``raw_action`` rather than driving through the bridge's
+    # reconstruct step.
     raw_action = {
         "kind": "write_binding",
         "method": blob.get("method"),
         "path": blob.get("path"),
         "params": blob.get("params") or {},
+        "requires_instinct": True,
     }
 
     try:
