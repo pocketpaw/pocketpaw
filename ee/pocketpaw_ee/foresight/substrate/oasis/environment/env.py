@@ -26,23 +26,35 @@ from pocketpaw_ee.foresight.substrate.oasis.social_platform.platform import Plat
 from pocketpaw_ee.foresight.substrate.oasis.social_platform.typing import (ActionType, DefaultPlatformType,
                                           RecsysType)
 
-# Create log directory if it doesn't exist
+# Modified by PocketPaw, 2026-05-25 — RFC 08 PR 3: same eager-log-dir
+# guard as social_agent/agent.py — see that file for rationale. Logs
+# fall back to stream-only when ``./log/`` is not writable.
 log_dir = "./log"
-if not os.path.exists(log_dir):
-    os.makedirs(log_dir)
+_pp_file_logging_enabled = True
+try:
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+except OSError:
+    _pp_file_logging_enabled = False
 
 # Configure logger
 env_log = logging.getLogger("oasis.env")
 env_log.setLevel("INFO")
 
-# Add file handler to save logs to file
-current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-file_handler = logging.FileHandler(f"{log_dir}/oasis-{current_time}.log",
-                                   encoding="utf-8")
-file_handler.setLevel("INFO")
-file_handler.setFormatter(
-    logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-env_log.addHandler(file_handler)
+# Add file handler to save logs to file (only if log dir is writable).
+if _pp_file_logging_enabled:
+    try:
+        current_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        file_handler = logging.FileHandler(
+            f"{log_dir}/oasis-{current_time}.log", encoding="utf-8")
+        file_handler.setLevel("INFO")
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        env_log.addHandler(file_handler)
+    except OSError:
+        # File logging not possible; stream handler still receives logs.
+        pass
 
 
 class OasisEnv:

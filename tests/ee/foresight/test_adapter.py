@@ -350,28 +350,37 @@ async def test_fake_backend_run_advances_call_count_like_complete():
     assert backend.call_count == 2
 
 
-# --- PR 2: LiteLLMFallbackBackend stub -------------------------------
+# --- PR 3: LiteLLMFallbackBackend is no longer a stub ----------------
+#
+# The deep contract — complete() / run() actually talk to LiteLLM —
+# lives in tests/ee/foresight/test_litellm_fallback.py (which uses
+# monkeypatch on ``litellm.acompletion`` so no network is needed).
+# Here we only assert the constructor still works and the availability
+# flag has flipped.
 
 
-def test_litellm_backend_marked_unavailable_at_v02():
-    """The fallback ships as a stub at PR 2; PR 3 wires the real proxy."""
-    assert LiteLLMFallbackBackend.BACKEND_AVAILABLE is False
-
-
-async def test_litellm_backend_complete_raises_with_pr3_pointer():
-    backend = LiteLLMFallbackBackend()
-    with pytest.raises(NotImplementedError, match="PR 3"):
-        await backend.complete("anything")
-
-
-async def test_litellm_backend_run_raises_with_pr3_pointer():
-    backend = LiteLLMFallbackBackend()
-    with pytest.raises(NotImplementedError, match="PR 3"):
-        await backend.run([])
+def test_litellm_backend_marked_available_at_v03():
+    """PR 2 shipped False (stub); PR 3 flips the flag to True since the
+    real ``litellm.acompletion`` proxy is now wired up.
+    """
+    assert LiteLLMFallbackBackend.BACKEND_AVAILABLE is True
 
 
 def test_litellm_backend_constructor_accepts_kwargs_without_crashing():
-    """PR 3 will accept model, base_url, api_key — for now we just ensure
-    construction doesn't blow up so the tier-pool builder can iterate."""
-    backend = LiteLLMFallbackBackend(model="anthropic/claude-sonnet-4-7")
+    """The tier-pool builder iterates over fallback slots; the
+    constructor must accept the full PR 3 kwarg surface.
+    """
+    backend = LiteLLMFallbackBackend(
+        model="anthropic/claude-sonnet-4-7",
+        base_url="https://api.example.com",
+        api_key="sk-test",
+        max_concurrent=64,
+        extra_kwargs={"temperature": 0.7},
+    )
     assert backend is not None
+    assert backend._model == "anthropic/claude-sonnet-4-7"
+
+
+def test_litellm_backend_rejects_zero_concurrency():
+    with pytest.raises(ValueError, match="max_concurrent"):
+        LiteLLMFallbackBackend(max_concurrent=0)

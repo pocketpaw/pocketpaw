@@ -76,6 +76,33 @@ dependencies = [
     "composio_openai_agents>=0.7.0",
     "composio_google_adk>=0.7.0",
     "composio_langgraph>=0.7.0",
+    # Foresight module (RFC 08) — promoted to hard dep in PR 3 (was the
+    # pocketpaw-ee[foresight] optional extra in PR 2). CAMEL provides the
+    # LLM-backend abstraction (ChatAgent, BaseModelBackend, MemoryRecord,
+    # ModelFactory, FunctionTool, TextPrompt, OpenAIEmbedding) consumed
+    # by the vendored OASIS fork at
+    # ee/pocketpaw_ee/foresight/substrate/oasis/.
+    #
+    # We pin a QBTRIX fork (relax-caps branch) because CAMEL 0.2.90 caps
+    # ``psutil<6`` which collides with livekit-agents (already an ee/ dep
+    # at psutil>=5.9.0 with no upper bound) and the root pocketpaw
+    # dependency group. The fork removes ONLY the psutil cap — the
+    # openai cap was already lifted upstream so no extra patches needed.
+    # See ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for
+    # vendoring rationale; the fork-pin is verified by ``uv lock``
+    # alongside langchain-openai + livekit-agents (the colliding deps).
+    "camel-ai",
+    # igraph is the default backend for ``oasis.AgentGraph`` (Foresight
+    # uses it for the in-memory follower / approver / reports-to
+    # relationship graph). The neo4j backend stays optional — we made
+    # it lazy-imported in
+    # ``substrate/oasis/social_agent/agent_graph.py`` so the neo4j
+    # driver doesn't have to be installed. ``torch`` (needed by the
+    # recsys tier we don't use) and ``sentence-transformers`` /
+    # ``cairocffi`` (also recsys-only) remain unlisted; see
+    # ``OASIS_RECSYS_AVAILABLE`` in
+    # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
+    "igraph>=0.11",
 ]
 
 [project.optional-dependencies]
@@ -86,19 +113,6 @@ extraction = [
     "trafilatura",
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
-]
-# Foresight module (RFC 08). CAMEL provides the LLM-backend abstraction
-# (ChatAgent, BaseModelBackend, MemoryRecord, ModelFactory, FunctionTool,
-# TextPrompt, OpenAIEmbedding) consumed by the vendored OASIS fork at
-# ee/pocketpaw_ee/foresight/substrate/oasis/. Kept optional at v0.2
-# because CAMEL 0.2.78-0.2.90 cap openai<2 and psutil<6, which collide
-# with langchain-openai (in the OSS dev group) and livekit-agents
-# (already an ee/ dep). Install with `pocketpaw-ee[foresight]` once the
-# v0.2 PR lands; PR 3 wires the substrate into the engine and revisits
-# the pin (likely needs a CAMEL fork or a constrained alt-pip resolve).
-# Released 2026-03-22, well past the 7-day supply-chain min-age gate.
-foresight = [
-    "camel-ai==0.2.90",
 ]
 
 [project.urls]
@@ -154,8 +168,24 @@ cloud = "pocketpaw_ee.extensions:CloudAgentExtension"
 [project.entry-points."pocketpaw.composio_tools"]
 cloud = "pocketpaw_ee.extensions:CloudComposioToolProvider"
 
+[tool.hatch.metadata]
+# Allow git+ direct references in dependencies (PEP 440 disallows them
+# in published metadata by default; hatchling honors this flag locally).
+# Needed for the qbtrix CAMEL fork pinned via [tool.uv.sources] below.
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["pocketpaw_ee"]
+
+# RFC 08 PR 3 — Foresight CAMEL hard-dep promotion. The QBTRIX fork's
+# only change vs upstream camel-ai==0.2.90 is removing the psutil<6 cap
+# (which collides with livekit-agents at psutil>=7). uv resolves the
+# CAMEL dep via this source override when `uv lock` runs against
+# ee/pyproject.toml (workspace-local source). See
+# ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for the
+# vendoring rationale and the openai/psutil cap audit.
+[tool.uv.sources]
+camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
 
 # ---------------------------------------------------------------------------
 # import-linter: chokepoint contracts for ee/pocketpaw_ee/cloud/

@@ -1,7 +1,15 @@
 # tests/ee/foresight/test_substrate.py
+# Updated: 2026-05-25 (feat/foresight-v03-calibration) — PR 3:
+#   - Added OASIS_RECSYS_AVAILABLE assertions to mirror the tiered
+#     import model introduced in this PR. The CORE tier
+#     (SocialAgent / AgentGraph / Channel / UserInfo / ActionType)
+#     loads with just camel-ai + igraph; the RECSYS tier (Platform /
+#     make / generate_*_agent_graph / LLMAction / ManualAction)
+#     needs torch + sentence-transformers and is deferred to v2.0
+#     Market Sim work.
 # Created: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — PR 2.
 #
-# Pin the v0.2 OASIS substrate vendoring contract:
+# Pin the v0.2/v0.3 OASIS substrate vendoring contract:
 #   - The vendored package at ee/pocketpaw_ee/foresight/substrate/oasis/
 #     is importable as a namespace package (no camel-ai dep needed).
 #   - When camel-ai is missing, OASIS_AVAILABLE=False and the package
@@ -10,11 +18,6 @@
 #   - The LICENSE / NOTICE / README-FORK.md files survive vendoring.
 #   - The upstream init lives at _upstream_init.py with rewritten
 #     absolute imports (oasis.X -> pocketpaw_ee.foresight.substrate.oasis.X).
-#
-# This file does NOT try to instantiate any OASIS class — PR 3 wires
-# the substrate into the engine and adds the integration tests that
-# exercise OasisEnv.step / SocialAgent / AgentGraph. PR 2's smoke
-# contract is just "the package is importable and well-formed."
 
 from __future__ import annotations
 
@@ -47,6 +50,32 @@ def test_substrate_records_load_error_when_unavailable():
     if not oasis.OASIS_AVAILABLE:
         assert oasis.OASIS_LOAD_ERROR is not None
         assert isinstance(oasis.OASIS_LOAD_ERROR, Exception)
+
+
+def test_substrate_exposes_recsys_tier_availability_flag():
+    """PR 3 — tiered import model. ``OASIS_RECSYS_AVAILABLE`` is True
+    only when torch + sentence-transformers + cairocffi are around;
+    PR 3's smoke install does NOT include them, so the flag is False
+    by default. The CORE tier loads regardless.
+    """
+    assert hasattr(oasis, "OASIS_RECSYS_AVAILABLE")
+    assert isinstance(oasis.OASIS_RECSYS_AVAILABLE, bool)
+    if not oasis.OASIS_RECSYS_AVAILABLE:
+        assert oasis.OASIS_RECSYS_LOAD_ERROR is not None
+        assert isinstance(oasis.OASIS_RECSYS_LOAD_ERROR, Exception)
+
+
+def test_substrate_core_tier_loads_when_camel_installed():
+    """When OASIS_AVAILABLE is True (PR 3 — camel-ai is a hard dep),
+    the core symbols must all be bound. This is the contract
+    PR 3 wiring relies on for ``make_paw_social_agent``.
+    """
+    if oasis.OASIS_AVAILABLE:
+        assert oasis.SocialAgent is not None
+        assert oasis.AgentGraph is not None
+        assert oasis.Channel is not None
+        assert oasis.UserInfo is not None
+        assert oasis.ActionType is not None
 
 
 def test_substrate_directory_contains_license_and_notice():

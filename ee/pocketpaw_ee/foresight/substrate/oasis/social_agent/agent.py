@@ -35,19 +35,40 @@ from pocketpaw_ee.foresight.substrate.oasis.social_platform.typing import Action
 if TYPE_CHECKING:
     from pocketpaw_ee.foresight.substrate.oasis.social_agent import AgentGraph
 
+# Modified by PocketPaw, 2026-05-25 — RFC 08 PR 3:
+#   - Made the eager FileHandler attachment GUARDED. Upstream
+#     unconditionally writes to ``./log/social.agent-<timestamp>.log``
+#     at module import, which fails on read-only sandboxes (CI, tests
+#     run from /tmp, packaged wheels) and on any cwd where ``./log/``
+#     hasn't been pre-created. The guard skips the file handler when
+#     the directory isn't writable; the StreamHandler (default Python
+#     logger) still receives every log line, so observability is
+#     preserved without crashing imports.
+#   - The change is documented in
+#     ``ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md``
+#     under "What we modified".
 if "sphinx" not in sys.modules:
     agent_log = logging.getLogger(name="social.agent")
     agent_log.setLevel("DEBUG")
 
     if not agent_log.handlers:
-        now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        file_handler = logging.FileHandler(
-            f"./log/social.agent-{str(now)}.log")
-        file_handler.setLevel("DEBUG")
-        file_handler.setFormatter(
-            logging.Formatter(
-                "%(levelname)s - %(asctime)s - %(name)s - %(message)s"))
-        agent_log.addHandler(file_handler)
+        import os as _pp_os  # noqa: PLC0415
+
+        _pp_log_dir = "./log"
+        try:
+            _pp_os.makedirs(_pp_log_dir, exist_ok=True)
+            now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            file_handler = logging.FileHandler(
+                f"{_pp_log_dir}/social.agent-{str(now)}.log")
+            file_handler.setLevel("DEBUG")
+            file_handler.setFormatter(
+                logging.Formatter(
+                    "%(levelname)s - %(asctime)s - %(name)s - %(message)s"))
+            agent_log.addHandler(file_handler)
+        except OSError:
+            # ./log/ not writable (sandbox, packaged wheel, read-only fs).
+            # Skip the file handler; stream handler still receives logs.
+            pass
 
 ALL_SOCIAL_ACTIONS = [action.value for action in ActionType]
 

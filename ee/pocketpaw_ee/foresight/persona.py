@@ -1,4 +1,25 @@
 # ee/pocketpaw_ee/foresight/persona.py
+# Updated: 2026-05-25 (feat/foresight-v03-calibration) — PR 3 adds the
+# OASIS substrate-level integration RFC §7.2 specifies:
+#   - ``PawSocialAgent`` class that subclasses
+#     ``oasis.social_agent.SocialAgent`` when OASIS_AVAILABLE. The
+#     subclass overrides ``perform_action_by_llm`` to delegate to a
+#     wrapped ``SoulSeededPersona.decide`` so the runtime cognition
+#     path (PawAgent + Soul bootstrap + memory tiers) is preserved
+#     inside the OASIS-side agent shell. The "fidelity floor" RFC
+#     §7.2 calls for is met: what Foresight rehearses is what the
+#     live system would do.
+#   - ``make_paw_social_agent(...)`` factory — convenience builder
+#     that constructs the OASIS ``UserInfo`` + auto-assigns a unique
+#     integer ``social_agent_id`` so callers don't have to thread
+#     them through.
+#   - Graceful fallback — when OASIS is not loaded (e.g. missing
+#     torch / pandas / igraph despite the PR 3 lazy-import work), the
+#     factory raises ``RuntimeError`` with a clear pointer to the
+#     ``OASIS_AVAILABLE`` flag and the recovery path.
+#   - ``SoulSeededPersona`` remains the lightweight fallback path
+#     (no OASIS dependency) for the smoke loop, tests, and dev
+#     environments without the full substrate.
 # Updated: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — PR 2 lifts
 # the persona toward RFC §7.2 fidelity:
 #   - Optional ``paw_agent: PawAgent`` parameter — when provided, the
@@ -365,3 +386,255 @@ class SoulSeededPersona:
         else:
             put = {put_raw: True}
         return {"action": action, "rationale": rationale, "put": put}
+
+
+# --- PR 3 — PawSocialAgent (RFC §7.2 substrate-level integration) -----
+#
+# This is the load-bearing primitive RFC 08 §7.2 calls for: a persona
+# that IS a real Paw agent wrapped in OASIS's SocialAgent shell. The
+# class subclasses ``oasis.social_agent.SocialAgent`` so OASIS-side
+# machinery (AgentGraph membership, action-space restriction, the
+# Channel-based message bus) treats it like any other SocialAgent —
+# while the cognition path delegates to a wrapped
+# ``SoulSeededPersona`` so the live runtime's bootstrap / memory /
+# tool routing is preserved.
+#
+# Construction is via the ``make_paw_social_agent`` factory because
+# OASIS's ``SocialAgent.__init__`` needs a ``user_info`` and an
+# integer ``agent_id`` — the factory hands callers a friendlier shape
+# and handles the OASIS-import gating.
+
+
+_PAW_SOCIAL_AGENT_COUNTER = 0
+"""Monotonic counter for ``social_agent_id``. OASIS keys its
+AgentGraph on this int; we need uniqueness within a run. Reset by
+``reset_paw_social_agent_counter()`` for tests.
+"""
+
+
+def reset_paw_social_agent_counter() -> None:
+    """Reset the module-level counter — test-only convenience."""
+    global _PAW_SOCIAL_AGENT_COUNTER
+    _PAW_SOCIAL_AGENT_COUNTER = 0
+
+
+def _wrap_as_camel_backend(backend: Any) -> Any:
+    """Wrap a Foresight backend in a CAMEL ``BaseModelBackend`` shim
+    so OASIS's ``SocialAgent.__init__`` accepts it.
+
+    Foresight's adapters (ClaudeCodeBackend etc.) are intentionally
+    protocol-shaped (``async def run(messages, ...) -> dict``) and
+    don't subclass CAMEL's ``BaseModelBackend``. CAMEL's ChatAgent
+    constructor strictly type-checks ``model``, so we wrap.
+
+    The shim:
+      - subclasses ``BaseModelBackend`` (so CAMEL's check passes)
+      - delegates ``_arun`` (the async path) to ``backend.run(...)``
+      - synthesizes ``_run`` (sync) by calling ``asyncio.run`` on the
+        async path — sufficient for the simulation tick context where
+        only the async path is exercised.
+      - exposes a ``token_counter`` that always returns 0 (Foresight's
+        cost meter is fed from outside; CAMEL just needs the property
+        to exist).
+
+    If ``backend`` is already a ``BaseModelBackend`` instance, it's
+    returned unchanged.
+    """
+    from camel.models import BaseModelBackend  # noqa: PLC0415
+    from camel.types import ModelType  # noqa: PLC0415
+
+    if isinstance(backend, BaseModelBackend):
+        return backend
+
+    class _ForesightBackendShim(BaseModelBackend):
+        """Minimal BaseModelBackend wrapper. Constructed on-demand
+        so each ``make_paw_social_agent`` call gets a fresh instance
+        — avoids state collisions when one PawAgent is reused across
+        multiple PawSocialAgents.
+        """
+
+        def __init__(self) -> None:
+            # CAMEL's __init__ wants a ModelType + model_config; the
+            # config is consulted by CAMEL's default token counter,
+            # which we override to a noop below. Picking
+            # ``ModelType.STUB`` (if it exists) or ``ModelType.DEFAULT``
+            # avoids accidentally engaging CAMEL's pricing tables.
+            chosen_type = getattr(ModelType, "STUB", None) or ModelType.DEFAULT
+            super().__init__(model_type=chosen_type, model_config_dict={})
+            self._wrapped = backend
+
+        async def _arun(self, messages, response_format=None, tools=None):  # noqa: ARG002, ANN001
+            """Delegate to the wrapped backend's run(). Returns a CAMEL
+            chat-completion-shaped dict; CAMEL will parse it.
+            """
+            return await self._wrapped.run(messages, response_format=response_format, tools=tools)
+
+        def _run(self, messages, response_format=None, tools=None):  # noqa: ARG002, ANN001
+            """Sync fallback — CAMEL rarely exercises this in async
+            sim runs but the abstract method must be implemented.
+            """
+            import asyncio  # noqa: PLC0415
+
+            return asyncio.run(
+                self._wrapped.run(messages, response_format=response_format, tools=tools)
+            )
+
+        @property
+        def token_counter(self):  # type: ignore[override]
+            """Foresight's cost meter is fed externally (RFC §10);
+            CAMEL's per-call counter is bypassed.
+            """
+            return _NoopTokenCounter()
+
+    return _ForesightBackendShim()
+
+
+class _NoopTokenCounter:
+    """Always returns 0. Used by ``_ForesightBackendShim``."""
+
+    def count_tokens_from_messages(self, messages: Any) -> int:  # noqa: ARG002
+        return 0
+
+    def count_tokens_from_text(self, text: Any) -> int:  # noqa: ARG002
+        return 0
+
+
+def make_paw_social_agent(
+    *,
+    persona: SoulSeededPersona,
+    user_info_template: str | None = None,
+    available_actions: list[Any] | None = None,
+    backend: Any | None = None,
+) -> Any:
+    """Construct a ``PawSocialAgent`` (subclass of
+    ``oasis.social_agent.SocialAgent``) wrapping the given
+    ``SoulSeededPersona``.
+
+    The wrapped persona owns the cognition path: when OASIS's
+    ``perform_action_by_llm`` fires, the override delegates to
+    ``persona.decide(observation)`` — same code path the
+    ``ForesightWorld.tick()`` smoke loop uses. The OASIS shell layers
+    on the AgentGraph membership + Channel-based message bus that
+    Market Sim and Org Change Rehearsal sub-types will need (RFC §4.2,
+    §4.3).
+
+    Args:
+        persona: a ``SoulSeededPersona`` (ideally with
+            ``paw_agent=`` attached for RFC §7.2 fidelity).
+        user_info_template: optional ``camel.prompts.TextPrompt`` for
+            ``SocialAgent.user_info.to_custom_system_message``.
+            Defaults to ``None`` so OASIS uses
+            ``user_info.to_system_message()``.
+        available_actions: optional ``list[oasis.ActionType]`` — gates
+            which OASIS action vocab the agent is allowed to emit.
+            Defaults to "all" (matches OASIS's default).
+        backend: optional CAMEL ``BaseModelBackend`` to pass to
+            OASIS's ``SocialAgent(model=...)``. Defaults to the
+            persona's own backend.
+
+    Raises:
+        RuntimeError: when OASIS is not loaded (missing igraph /
+            pandas / torch / camel — see
+            ``pocketpaw_ee.foresight.substrate.oasis.OASIS_LOAD_ERROR``
+            for the underlying cause).
+
+    Returns:
+        An instance of the dynamically-created ``PawSocialAgent``
+        subclass (subclass of ``oasis.social_agent.SocialAgent``).
+        Its ``perform_action_by_llm`` delegates to ``persona.decide``;
+        its ``decide`` (added for parity with ``SoulSeededPersona``)
+        also delegates to ``persona.decide`` so ``ForesightWorld.tick``
+        can treat it as a regular persona.
+    """
+    from pocketpaw_ee.foresight.substrate import oasis  # noqa: PLC0415 — lazy
+
+    if not oasis.OASIS_AVAILABLE or oasis.SocialAgent is None or oasis.UserInfo is None:
+        raise RuntimeError(
+            "make_paw_social_agent requires the OASIS substrate to be "
+            "loaded. OASIS_AVAILABLE=False; underlying error: "
+            f"{oasis.OASIS_LOAD_ERROR!r}. Use SoulSeededPersona directly "
+            "for the non-OASIS path."
+        )
+
+    global _PAW_SOCIAL_AGENT_COUNTER
+    agent_id_int = _PAW_SOCIAL_AGENT_COUNTER
+    _PAW_SOCIAL_AGENT_COUNTER += 1
+
+    raw_backend = backend or persona._backend  # noqa: SLF001 — internal contract
+    # OASIS's ``SocialAgent.__init__`` (inherited from CAMEL's
+    # ``ChatAgent``) strictly type-checks the ``model`` parameter and
+    # rejects anything that isn't a ``BaseModelBackend``. Our adapter
+    # classes (ClaudeCodeBackend, DeterministicFakeBackend,
+    # LiteLLMFallbackBackend) intentionally don't subclass it — they
+    # are protocol-shaped. Wrap them in a thin CAMEL BaseModelBackend
+    # shim so CAMEL's type check passes; the shim's ``_arun`` delegates
+    # straight to the wrapped backend's ``run``.
+    backend_to_use = _wrap_as_camel_backend(raw_backend)
+
+    # Build a UserInfo from the persona. OASIS UserInfo carries a
+    # ``user_id`` and a ``description`` (used by
+    # ``to_system_message()``); we render the persona's identity
+    # block as the description so the OASIS-side system prompt
+    # carries the soul context.
+    user_info = oasis.UserInfo(
+        name=persona.name,
+        description=persona._identity_block(),  # noqa: SLF001
+        profile={
+            "role": persona.role,
+            "ocean_drift": {
+                "openness": persona.ocean_drift.openness,
+                "conscientiousness": persona.ocean_drift.conscientiousness,
+                "extraversion": persona.ocean_drift.extraversion,
+                "agreeableness": persona.ocean_drift.agreeableness,
+                "neuroticism": persona.ocean_drift.neuroticism,
+            },
+            "has_fidelity": persona.has_fidelity,
+        },
+    )
+
+    class PawSocialAgent(oasis.SocialAgent):  # type: ignore[misc, valid-type]
+        """RFC §7.2 — Paw persona wrapped in OASIS's SocialAgent shell.
+
+        Defined inline so the OASIS class lookup happens lazily at
+        ``make_paw_social_agent`` call time, not at module import.
+        This keeps ``persona.py`` importable without OASIS.
+        """
+
+        def __init__(self, _agent_id: int, _user_info: Any, _persona: SoulSeededPersona) -> None:
+            super().__init__(
+                agent_id=_agent_id,
+                user_info=_user_info,
+                user_info_template=user_info_template,
+                model=backend_to_use,
+                available_actions=available_actions,
+            )
+            self._persona = _persona
+
+        async def perform_action_by_llm(self) -> Any:
+            """Override OASIS's per-tick action emitter. The persona's
+            ``decide`` runs the live Paw runtime path (bootstrap,
+            memory, Soul recall, the SDK's loop); we wrap its return
+            in a CAMEL response shape so OASIS's downstream parsers
+            don't break if a future PR wires the ``perform_action_by_data``
+            path back in.
+            """
+            # The observation OASIS would normally read off
+            # ``self.env`` is not available here (we don't have a
+            # Platform). Pass a minimal observation so the persona's
+            # prompt composer can render its tick context.
+            observation = {
+                "tick": getattr(self, "_pp_tick", 0),
+                "state": getattr(self, "_pp_state", {}),
+                "active_count": 1,
+            }
+            return await self._persona.decide(observation)
+
+        async def decide(self, observation: dict[str, Any]) -> dict[str, Any]:
+            """Parity surface for ``ForesightWorld.tick()`` — delegates
+            straight through to the wrapped persona's decide(). Lets
+            the world's registry treat a ``PawSocialAgent`` and a
+            plain ``SoulSeededPersona`` identically.
+            """
+            return await self._persona.decide(observation)
+
+    return PawSocialAgent(agent_id_int, user_info, persona)
