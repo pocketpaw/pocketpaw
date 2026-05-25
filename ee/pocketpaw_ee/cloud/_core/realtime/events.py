@@ -463,6 +463,38 @@ class ForesightRunFailed(Event):
     EVENT_TYPE: ClassVar[str] = "foresight.run.failed"
 
 
+# Foresight backtests — RFC 08 §10 + §13.1 gate 7. A backtest is the
+# retroactive variant of a scenario run: it scores projected outcomes
+# against known actual outcomes pulled from the customer's historical
+# data and produces an accuracy summary that gates forward sims.
+# ``ForesightBacktestCreated`` fires when the backtest doc is inserted
+# (status="queued"); ``ForesightBacktestCompleted`` fires once the
+# aggregator's gate decision lands; ``ForesightBacktestFailed`` fires
+# when the engine raises. Listeners use these to refresh the UI's
+# Onboarding + Aggregate panels (RFC §10 + §11.4) and, when the
+# gate flips from closed to open, fire the
+# ``ForesightOnboardingUnlocked`` companion event so the chat agent's
+# onboarding skill can move the customer to the Scenarios panel.
+@dataclass
+class ForesightBacktestCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.created"
+
+
+@dataclass
+class ForesightBacktestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.completed"
+
+
+@dataclass
+class ForesightBacktestFailed(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.failed"
+
+
+@dataclass
+class ForesightOnboardingUnlocked(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.onboarding.unlocked"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first

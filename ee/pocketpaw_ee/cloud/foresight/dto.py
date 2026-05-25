@@ -1,4 +1,13 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4
+#   adds the retroactive backtest gate surface:
+#     - ``CreateBacktestRequest`` — POST /foresight/backtests body.
+#     - ``BacktestRunResponse`` — POST + GET response.
+#     - ``BacktestRunListItemResponse`` — lighter list shape.
+#     - ``OnboardingGateResponse`` — GET /foresight/onboarding/gate.
+#   Each is a distinct shape per the cloud rule #4 separation; the
+#   request body is forbidding-extra so a typo at the operator side
+#   surfaces as a 422 instead of a silent default.
 # Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — PR 7 adds
 #   ScenarioRunListItemResponse (lighter shape for GET /runs without
 #   the inline ``result`` blob) and re-exports the existing v0.1 shapes
@@ -107,8 +116,136 @@ class ScenarioRunListItemResponse(BaseModel):
     error: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Backtest gate (RFC §10 + §13.1 gate 7) — retroactive runs scored against
+# ground truth; the unlock criterion for forward sims.
+# ---------------------------------------------------------------------------
+
+
+class HistoricalAnchorRequest(BaseModel):
+    """One historical-decision anchor for a backtest run.
+
+    v0.1 keeps this minimal: the anchor object id (Fabric ``kind:id``),
+    the known actual outcome dict (so the aggregator can pair against
+    it without an out-of-band lookup), and an optional ``observed_at``
+    so listeners can compute time-bucketed accuracy. v1.0 will pull
+    anchors from the Fabric/journal connector directly and the request
+    shape will collapse to a query window.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchor_object_id: str = Field(..., min_length=1, max_length=256)
+    actual_outcome: dict[str, Any] = Field(default_factory=dict)
+    scenario_template: str = Field(default="decision_forecast.yaml", max_length=128)
+    projection_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class CreateBacktestRequest(BaseModel):
+    """POST /api/v1/foresight/backtests body.
+
+    Reuses the forward-run grammar for personas + sub_type + n_ticks so
+    operators don't learn a second vocabulary; adds:
+
+    - ``anchors``: the historical decisions the backtest scores against.
+      One pair per anchor. v0.1 takes the actual_outcome inline; v1.0
+      will accept a Fabric query window instead.
+    - ``threshold``: optional per-run threshold override (defaults to the
+      workspace's effective threshold). Capped at [0.0, 1.0]; the gate
+      can only be tightened, not relaxed below the default — that's
+      enforced in the service layer so the DTO stays a plain shape.
+
+    The response shape (:class:`BacktestRunResponse`) carries both the
+    raw run result and the gate decision so the UI can render the
+    unlock label without a second round trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=128)
+    sub_type: str = Field(default="decision_forecast", max_length=64)
+    n_ticks: int = Field(default=1, ge=1, le=1000)
+    personas: list[PersonaSpecRequest] = Field(..., min_length=1, max_length=1000)
+    anchors: list[HistoricalAnchorRequest] = Field(..., min_length=1, max_length=500)
+    threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class BacktestRunResponse(BaseModel):
+    """POST /backtests response + GET /backtests/:id response.
+
+    Mirrors :class:`ScenarioRunResponse` plus two backtest-specific
+    fields:
+
+    - ``gate_decision``: ``ThresholdDecision.as_wire_dict()`` once the
+      backtest completes (``None`` while queued / running / failed).
+      The UI's Aggregate panel reads this directly to render the unlock
+      label without re-computing.
+    - ``threshold``: the gate threshold this backtest was scored against
+      (echoed back so the operator can reconcile the verdict with the
+      bar it was measured against, even if the workspace default has
+      since been tuned).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    workspace_id: str | None = None
+    scenario_name: str
+    status: str  # "queued" | "running" | "complete" | "failed"
+    created_at: str  # ISO-8601
+    updated_at: str | None = None
+    request: dict[str, Any]
+    threshold: float
+    result: dict[str, Any] | None = None
+    gate_decision: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class BacktestRunListItemResponse(BaseModel):
+    """Lighter shape for ``GET /backtests`` — drops the inline
+    ``result`` / ``request`` blobs but keeps ``gate_decision`` so the
+    list can render the unlock label per row without a click-through."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    workspace_id: str | None = None
+    scenario_name: str
+    status: str
+    created_at: str
+    updated_at: str | None = None
+    threshold: float
+    gate_decision: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class OnboardingGateResponse(BaseModel):
+    """GET /api/v1/foresight/onboarding/gate response.
+
+    Derived from the latest completed backtest in the workspace. The
+    UI's onboarding flow polls this on the new-workspace path; the
+    Scenarios panel checks ``unlocked`` before letting the operator
+    start a forward sim.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    unlocked: bool
+    threshold: float
+    reason: str  # "no_backtest" | "below_threshold" | "in_flight" | "unlocked"
+    last_backtest_id: str | None = None
+    last_backtest_accuracy: float | None = None
+    last_backtest_at: str | None = None
+
+
 __all__ = [
+    "BacktestRunListItemResponse",
+    "BacktestRunResponse",
+    "CreateBacktestRequest",
     "CreateScenarioRequest",
+    "HistoricalAnchorRequest",
+    "OnboardingGateResponse",
     "PersonaSpecRequest",
     "ScenarioRunListItemResponse",
     "ScenarioRunResponse",
