@@ -1,30 +1,42 @@
 # ee/pocketpaw_ee/foresight/__init__.py
+# Updated: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — PR 2:
+#   - Bumped __version__ to 0.2.0 to reflect the OASIS substrate
+#     vendoring + adapter expansion + PawAgent wrapping.
+#   - Added LiteLLMFallbackBackend to the lazy-export surface (stub at
+#     v0.2; PR 3 wires the real proxy).
 # Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
 # Foresight module — the "rehearse the future" engine for the Paw IS.
 #
-# This v0.1 PR establishes the module skeleton + a minimal end-to-end
-# loop (Decision Forecast sub-type, 5 personas, 1 tick). It is the
-# first of several PRs that will land the full engine described in
-# RFC 08; see docs/internal/2026-05-foresight.md for the cut.
+# PR 1 (v0.1) shipped the module skeleton + minimal end-to-end loop
+# (Decision Forecast sub-type, 5 personas, 1 tick).
+# PR 2 (v0.2 — this commit) lands:
+#   - The vendored OASIS fork at substrate/oasis/ (upstream SHA 46cdc8d).
+#   - ClaudeCodeBackend.run(messages, ...) — CAMEL BaseModelBackend surface.
+#   - SoulSeededPersona(paw_agent=...) — RFC §7.2 fidelity floor.
+#   - LiteLLMFallbackBackend stub.
+# See docs/internal/2026-05-foresight.md for the full cut.
 #
-# Public surface (v0.1):
+# Public surface (v0.2):
 #   - ForesightWorld   — Fabric-backed world stub (world.py)
-#   - SoulSeededPersona — soul-seeded persona stub (persona.py)
+#   - SoulSeededPersona — soul-seeded persona (now PawAgent-aware) (persona.py)
 #   - ClaudeCodeBackend — CC SDK ↔ CAMEL BaseModelBackend adapter (llm/adapter.py)
+#   - LiteLLMFallbackBackend — fallback proxy stub (llm/adapter.py)
 #   - run_scenario     — single-scenario smoke entrypoint (scenarios/runner.py)
 #
-# All four are intentionally minimal at v0.1 — protocol-shaped, not
-# subclass-shaped, so they run without the OASIS src-copy on disk.
-# v1.0 wires the vendored substrate; v2.0 scales to 100K personas.
+# The engine surfaces remain protocol-shaped at v0.2 — the OASIS
+# substrate is vendored but PR 3 is the one that wires it into the
+# tick loop. v1.0 fully wires the vendored substrate; v2.0 scales to
+# 100K personas.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "ForesightWorld",
     "SoulSeededPersona",
     "ClaudeCodeBackend",
+    "LiteLLMFallbackBackend",
     "run_scenario",
     "ScenarioConfig",
     "RunResult",
@@ -46,10 +58,16 @@ def __getattr__(name: str):  # pragma: no cover — lazy import shim
         from pocketpaw_ee.foresight.persona import SoulSeededPersona
 
         return SoulSeededPersona
-    if name == "ClaudeCodeBackend":
-        from pocketpaw_ee.foresight.llm.adapter import ClaudeCodeBackend
+    if name in {"ClaudeCodeBackend", "LiteLLMFallbackBackend"}:
+        from pocketpaw_ee.foresight.llm.adapter import (
+            ClaudeCodeBackend,
+            LiteLLMFallbackBackend,
+        )
 
-        return ClaudeCodeBackend
+        return {
+            "ClaudeCodeBackend": ClaudeCodeBackend,
+            "LiteLLMFallbackBackend": LiteLLMFallbackBackend,
+        }[name]
     if name in {"run_scenario", "ScenarioConfig", "RunResult"}:
         from pocketpaw_ee.foresight.scenarios.runner import (
             RunResult,
