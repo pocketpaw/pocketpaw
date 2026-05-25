@@ -1,4 +1,10 @@
 # ee/pocketpaw_ee/foresight/__init__.py
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring:
+#   - Lazy-export surface grew: DecisionGraphRef (protocol),
+#     NoOpDecisionGraphRef (v0.5 default implementation),
+#     SYNTHETIC_PRECEDENT_PREFIX (id-format constant for downstream
+#     code that distinguishes synthetic from real precedent ids).
 # Updated: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4:
 #   - Bumped __version__ to 0.4.0 — aggregator primitives shipped at
 #     ``foresight/aggregator.py`` and the cloud-side backtest gate
@@ -63,14 +69,17 @@ __all__ = [
     "ClaudeCodeBackend",
     "ConfidenceDrift",
     "Correction",
+    "DecisionGraphRef",
     "DeterministicFakeBackend",
     "ForesightWorld",
     "LiteLLMFallbackBackend",
     "ModalOutcomeDistribution",
+    "NoOpDecisionGraphRef",
     "OceanDrift",
     "PredictionBuffer",
     "PredictionRecord",
     "RunResult",
+    "SYNTHETIC_PRECEDENT_PREFIX",
     "ScenarioConfig",
     "SoulSeededPersona",
     "ThresholdDecision",
@@ -108,6 +117,18 @@ def __getattr__(name: str):  # pragma: no cover — lazy import shim
         from pocketpaw_ee.foresight.world import ForesightWorld
 
         return ForesightWorld
+    if name in {"DecisionGraphRef", "NoOpDecisionGraphRef", "SYNTHETIC_PRECEDENT_PREFIX"}:
+        from pocketpaw_ee.foresight.decision_graph_ref import (
+            SYNTHETIC_PRECEDENT_PREFIX,
+            DecisionGraphRef,
+            NoOpDecisionGraphRef,
+        )
+
+        return {
+            "DecisionGraphRef": DecisionGraphRef,
+            "NoOpDecisionGraphRef": NoOpDecisionGraphRef,
+            "SYNTHETIC_PRECEDENT_PREFIX": SYNTHETIC_PRECEDENT_PREFIX,
+        }[name]
     if name in {"SoulSeededPersona", "OceanDrift", "make_paw_social_agent"}:
         from pocketpaw_ee.foresight.persona import (
             OceanDrift,
