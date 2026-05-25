@@ -1,4 +1,5 @@
-# CI — runs tests and lint on every PR targeting dev/main.
+# CI — runs tests and lint on every PR targeting dev/main or an
+# RFC integration branch (pattern: feat/*-integration).
 # Created: 2026-02-26
 # Updated: 2026-03-11 — Added Python version matrix (3.11, 3.12, 3.13) for
 # the test job. Lint job pinned to 3.12 only.
@@ -6,13 +7,16 @@
 # `pocketpaw-ee` (enterprise) are now two packages. CI verifies both the
 # OSS-only install and the full (core + EE) install, builds both wheels,
 # and runs the import-linter contracts for each package.
+# Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
+# sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
+# Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
 name: CI
 
 on:
   pull_request:
-    branches: [dev, main, ee]
+    branches: [dev, main, 'feat/*-integration']
   push:
-    branches: [dev]
+    branches: [dev, 'feat/*-integration']
 
 concurrency:
   group: ci-${{ github.ref }}
