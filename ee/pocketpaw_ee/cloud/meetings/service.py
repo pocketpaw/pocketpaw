@@ -62,6 +62,7 @@ def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) ->
         bot_status_detail=doc.bot_status_detail,
         bot_status_at=doc.bot_status_at,
         auto_created_from_calendar=payload.get("auto_created_by") == "calendar_bridge",
+        calendar_event_id=payload.get("calendar_event_id"),
     )
 
 

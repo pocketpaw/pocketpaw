@@ -76,6 +76,11 @@ class MeetingResponse(BaseModel):
     # a "From calendar" badge so users understand why a meeting they
     # didn't manually schedule appeared in their list.
     auto_created_from_calendar: bool = False
+    # When the meeting is linked to a calendar event (via the auto-create
+    # path), expose the calendar event id so /calendar can render a small
+    # "has recording" indicator next to the event. None for meetings that
+    # don't originate from a calendar event.
+    calendar_event_id: str | None = None
 
 
 class MeetingDetailResponse(MeetingResponse):
