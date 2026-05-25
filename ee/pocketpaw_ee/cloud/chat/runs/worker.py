@@ -7,19 +7,11 @@ Deploy as a separate process alongside the web service::
 The worker owns the agent run; the web process just enqueues
 ``execute_run_job`` via ``ArqExecutor`` and streams events back through Redis.
 
-On boot, if ``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true``, the worker sweeps any
-run left in ``queued``/``running`` by the previous worker (it crashed,
-otherwise we wouldn't be starting) and marks them ``interrupted``. LLM token
-streams cannot resume mid-generation, so the sweep does not re-enqueue — the
-partial already streamed remains visible and the user retries manually.
-
-The boot sweep is off by default because a fresh worker booting alongside a
-healthy sibling in a multi-replica deployment would otherwise mark the
-sibling's in-flight runs as interrupted (there is no per-run owner tag that
-distinguishes "my previous instance" from "another live worker"). Operators
-running a single worker replica should set the env var to true for fast
-post-crash recovery; everyone else relies on the heartbeat sweeper's
-10-minute cutoff.
+On boot, if ``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true`` (single-replica only —
+multi-replica would interrupt sibling workers' in-flight runs), sweep any
+``queued``/``running`` leftovers as ``interrupted``. LLM streams can't resume
+mid-generation; the partial already streamed remains visible, the user
+retries manually. HA deploys rely on the 10-minute heartbeat sweeper instead.
 """
 
 from __future__ import annotations
@@ -45,12 +37,7 @@ logger = logging.getLogger(__name__)
 # runs created seconds ago by the web process should not be swept.
 _BOOT_SWEEP_OLDER_THAN_SECONDS = 5
 
-# Gate the boot sweep. Safe default for multi-replica deployments: a fresh
-# worker booting alongside a healthy sibling must NOT sweep runs the sibling
-# is actively processing (no per-run owner tag distinguishes them today).
-# Single-replica deployments opt in with ``POCKETPAW_CLOUD_WORKER_BOOT_SWEEP=true``
-# to get fast post-crash recovery; the 10-minute heartbeat sweeper is the
-# fallback when it stays off.
+# Default off — multi-replica safety. See module docstring.
 _BOOT_SWEEP_ENV = "POCKETPAW_CLOUD_WORKER_BOOT_SWEEP"
 
 
@@ -77,12 +64,7 @@ async def _startup(ctx: dict[str, Any]) -> None:
     await init_cloud_db(mongo_uri)
     init_realtime()
     if not _boot_sweep_enabled():
-        logger.info(
-            "worker boot: stale-run sweep disabled (set %s=true on single-replica "
-            "deployments for fast recovery; multi-replica deploys rely on the "
-            "10-minute heartbeat sweeper instead)",
-            _BOOT_SWEEP_ENV,
-        )
+        logger.info("worker boot: stale-run sweep disabled (%s)", _BOOT_SWEEP_ENV)
         return
     try:
         swept = await sweep_stale_runs(older_than_seconds=_BOOT_SWEEP_OLDER_THAN_SECONDS)

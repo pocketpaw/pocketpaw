@@ -20,19 +20,16 @@ from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
 
 logger = logging.getLogger(__name__)
 
-# Types we know how to coerce losslessly via str() — datetimes round-trip to
-# ISO, paths to their string form, bytes via decode-or-repr. Anything outside
-# this set still coerces (better than crashing the whole turn) but logs a WARN
-# so we notice degraded payloads instead of shipping ``<MyObj object at 0x…>``
-# strings to clients silently.
+# Types str() round-trips cleanly. Others coerce too (better than crashing the
+# turn) but log so we notice junk like ``<MyObj at 0x…>`` reaching clients.
 _KNOWN_STR_COERCIBLE = (datetime, date, PurePath, bytes)
 
 
 def _encode_unknown(value: Any) -> str:
     if not isinstance(value, _KNOWN_STR_COERCIBLE):
         logger.warning(
-            "redis_stream: coercing non-primitive %s via str() — payload is "
-            "lossy, fix the producer or extend _KNOWN_STR_COERCIBLE",
+            "redis_stream: lossy str() coercion of %s — fix producer or extend "
+            "_KNOWN_STR_COERCIBLE",
             type(value).__name__,
         )
     return str(value)
@@ -51,10 +48,6 @@ class RedisStreamTransport:
         self._redis = redis
 
     async def append_event(self, run_id: str, event: str, data: dict[str, Any]) -> str:
-        # _encode_unknown coerces stragglers (bytes, datetime, Path, …) tool
-        # results may carry. Without it, one un-serializable value would crash
-        # ``execute_run`` and fail the whole turn. Unknown types still coerce
-        # but emit a WARN — see ``_encode_unknown``.
         return await self._redis.xadd(
             _events_key(run_id),
             {"event": event, "data": json.dumps(data, default=_encode_unknown)},
@@ -63,14 +56,8 @@ class RedisStreamTransport:
     async def read_events(
         self, run_id: str, *, after: str = "0", block_ms: int = 15000
     ) -> AsyncIterator[StreamEvent]:
-        """Yield events from the run's stream, then return.
-
-        Not an infinite tail: this iterator ends in three cases — terminal
-        event yielded, ``xread`` returns empty after ``block_ms`` (no new
-        events arrived), or the inner ``xread`` loop exhausts itself.
-        Callers (the router's SSE loop) re-call this between iterations and
-        emit heartbeats during the gaps.
-        """
+        """Yield events then return on terminal event or ``block_ms`` timeout.
+        Not infinite — callers re-invoke and emit heartbeats between calls."""
         cursor = after
         while True:
             resp = await self._redis.xread({_events_key(run_id): cursor}, block=block_ms, count=64)

@@ -24,8 +24,7 @@ _pool_lock = asyncio.Lock()
 
 async def _get_pool() -> ArqRedis:
     global _pool
-    # Lock so two concurrent first-submits don't both build a pool — the loser
-    # would leak its open Redis connection.
+    # Double-checked lock so concurrent first-submits don't leak pools.
     if _pool is None:
         async with _pool_lock:
             if _pool is None:

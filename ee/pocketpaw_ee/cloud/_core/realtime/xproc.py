@@ -132,8 +132,7 @@ async def run_consumer(
     name = consumer_name or f"web-{uuid.uuid4().hex[:8]}"
     logger.info("xproc consumer %s starting on %s", name, XPROC_STREAM)
 
-    # Exponential backoff on xreadgroup failures so a Redis outage doesn't
-    # produce 60 traceback lines/minute. Resets on first successful read.
+    # Exponential backoff so a Redis outage doesn't spam tracebacks.
     backoff_seconds = 1.0
     while True:
         try:

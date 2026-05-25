@@ -62,25 +62,18 @@ async def test_create_run_is_idempotent_on_client_message_id(mongo_db):
 
 
 async def test_create_run_concurrent_same_client_message_id_returns_one(mongo_db):
-    """Two concurrent inserts with the same client_message_id must both
-    return the same winning row — the unique index + DuplicateKeyError
-    fallback close the find-then-insert race that orphans queued runs."""
     import asyncio
 
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
     spec_a = _spec(run_id="ra")
-    # Different run_id, SAME client_message_id — simulates a retry that the
-    # client thinks is a fresh request.
-    spec_b = _spec(run_id="rb")
-    spec_b = spec_b.model_copy(update={"client_message_id": spec_a.client_message_id})
+    spec_b = _spec(run_id="rb").model_copy(update={"client_message_id": spec_a.client_message_id})
 
     a, b = await asyncio.gather(
         run_service.create_run(spec_a),
         run_service.create_run(spec_b),
     )
     assert a.run_id == b.run_id
-    # Only one doc landed.
-    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
-
     rows = await ChatRunDoc.find(
         ChatRunDoc.workspace == spec_a.workspace_id,
         ChatRunDoc.client_message_id == spec_a.client_message_id,

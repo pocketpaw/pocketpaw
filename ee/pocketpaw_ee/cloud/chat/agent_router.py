@@ -43,10 +43,7 @@ Scope = Literal["dm", "group", "pocket", "session"]
 
 
 def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> bytes:
-    # Emit ``id:`` when we have a stream cursor so EventSource clients pick up
-    # ``Last-Event-Id`` on reconnect — symmetric with the GET stream endpoint.
-    # Synthetic frames (``message.persisted``) don't have a Redis entry id and
-    # ship without one.
+    # ``id:`` powers EventSource Last-Event-Id resume; synthetic frames omit it.
     head = f"id: {entry_id}\n" if entry_id else ""
     return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 

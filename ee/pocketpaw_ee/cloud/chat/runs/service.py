@@ -21,13 +21,8 @@ def _utcnow() -> datetime:
 
 
 async def create_run(spec: RunSpec) -> ChatRunDoc:
-    """Idempotent on ``(workspace, client_message_id)``.
-
-    The find-then-insert path covers the common case; the
-    ``DuplicateKeyError`` fallback wins the race when two concurrent retries
-    of the same ``client_message_id`` both pass the find. The unique index
-    on ``(workspace, client_message_id)`` is the actual source of truth.
-    """
+    """Idempotent on ``(workspace, client_message_id)`` — unique index is the
+    source of truth; find-then-insert is the fast path."""
     existing = await ChatRunDoc.find_one(
         ChatRunDoc.workspace == spec.workspace_id,
         ChatRunDoc.client_message_id == spec.client_message_id,
@@ -49,9 +44,6 @@ async def create_run(spec: RunSpec) -> ChatRunDoc:
     try:
         await doc.insert()
     except DuplicateKeyError:
-        # Concurrent insert won the race. Refetch the winning row so the
-        # caller's RunSpec.run_id is overwritten with the live run's id
-        # (agent_router checks for this and reuses it).
         winner = await ChatRunDoc.find_one(
             ChatRunDoc.workspace == spec.workspace_id,
             ChatRunDoc.client_message_id == spec.client_message_id,

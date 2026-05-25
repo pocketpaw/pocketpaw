@@ -37,20 +37,9 @@ class ChatRunDoc(Document):
 
     class Settings:
         name = "chat_runs"
+        # Uniques close the create_run find-then-insert race.
         indexes = [
-            # Unique on run_id: a duplicate id would let two streams disagree on
-            # the run's final state. Unique on (workspace, client_message_id):
-            # the create_run idempotency guard is otherwise a find-then-insert
-            # race that orphans a queued run on concurrent retries.
             IndexModel([("run_id", 1)], unique=True),
-            IndexModel(
-                [("workspace", 1), ("client_message_id", 1)],
-                unique=True,
-            ),
-            [
-                ("workspace", 1),
-                ("context_type", 1),
-                ("scope_id", 1),
-                ("createdAt", -1),
-            ],
+            IndexModel([("workspace", 1), ("client_message_id", 1)], unique=True),
+            [("workspace", 1), ("context_type", 1), ("scope_id", 1), ("createdAt", -1)],
         ]
