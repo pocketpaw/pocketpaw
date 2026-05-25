@@ -237,6 +237,27 @@ class CloudPocketMcpProvider:
         return list(POCKET_TOOL_IDS)
 
 
+class CloudDecisionsMcpProvider:
+    """`pocketpaw.mcp_servers` — the decision-graph in-process server.
+
+    Wires the three read tools (decisions_get / decisions_find /
+    decisions_trace) shipped in RFC 07 Slice 2. The narrator
+    `decisions_explain` tool is intentionally Slice 3 — not registered
+    here yet so the SDK surface tracks what the substrate actually
+    supports.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.decisions import build_decisions_context_server
+
+        return build_decisions_context_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.decisions import DECISIONS_TOOL_IDS
+
+        return list(DECISIONS_TOOL_IDS)
+
+
 class CloudPocketSpecialistMcpProvider:
     """`pocketpaw.mcp_servers` — the pocket specialist (create/edit) server."""
 
