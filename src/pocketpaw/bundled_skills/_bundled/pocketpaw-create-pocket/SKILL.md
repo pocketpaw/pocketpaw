@@ -278,9 +278,45 @@ caller-supplied hints, and (in agent mode) the drafted ``spec``:
 ```
 
 In **agent mode** (``POCKETPAW_POCKET_SPECIALIST_MODE=agent``), the first
-call returns a draft kit with the structural plan echoed, widget hints,
-and instructions. Draft the spec inline, then call the tool AGAIN with
-``spec=<your draft>`` for validate-and-persist.
+call's response depends on what the brief contains:
+
+- **Template or recipe matched** → response is a regular draft kit with
+  the structural plan echoed, widget hints, and instructions. Draft the
+  spec inline, then call the tool AGAIN with ``spec=<your draft>`` for
+  validate-and-persist.
+
+- **No template, no recipe, custom multi-widget brief** (e.g. brewing
+  log, school-bus router, podcast publisher — domains the bundled
+  recipes don't cover) → if ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL``
+  is set on the server, the response is a **plan-pointer kit** pointing
+  at the ``pocketpaw-pocket-planner`` skill. Invoke that skill — it
+  drives a research → draft → iterate → build flow via the
+  ``mcp__pocketpaw_pocket_planner__plan_pocket`` MCP tool and the
+  ``POST /api/v1/pockets/<id>/spec/merge`` endpoint. Do NOT draft the
+  spec inline in this case; the planner skill handles the build.
+
+To request the plan-pointer kit shape, call the tool WITHOUT a
+``spec`` field on the first invocation:
+
+```json
+{
+  "brief": "<the user's original brief>",
+  "hints": {
+    "name": "Brewer's Log",
+    "description": "Home-brewing fermentation tracker",
+    "color": "#92400e",
+    "icon": "beaker",
+    "purpose": "...",
+    "key_interactions": ["log gravity reading", "compute hop bill"]
+  }
+}
+```
+
+The adapter returns either a draft kit (template/recipe match) or a
+plan kit (no match + USE_SKILL on). Branch based on the ``action``
+field in the response: ``draft_kit`` → draft inline → call again with
+``spec``; ``plan_kit`` → invoke ``Skill('pocketpaw-pocket-planner')``
+and follow its instructions.
 
 In **subagent mode** (default), the tool spawns its own specialist
 backend and returns the created pocket — you only call once with the

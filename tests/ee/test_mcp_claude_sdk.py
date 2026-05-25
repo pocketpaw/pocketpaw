@@ -25,6 +25,9 @@ from unittest.mock import patch
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.planner import (
+    POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
@@ -45,7 +48,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     Note: ``pocketpaw_planner`` is a built-in but is *not* always-on — it is
     gated behind an explicit policy opt-in. It is stripped here so the
     external-config assertions remain correct regardless of whether a given
-    test happens to opt the planner in.
+    test happens to opt the planner in. ``pocketpaw_pocket_planner`` IS
+    always-on (the bundled pocket-create skill calls it without opt-in)
+    so it is stripped unconditionally.
     """
     out = dict(result)
     out.pop(_WIDGETS_MCP_SERVER_NAME, None)
@@ -56,6 +61,7 @@ def _strip_builtin_servers(result: dict) -> dict:
     out.pop(_DECISIONS_MCP_SERVER_NAME, None)
     out.pop(_MEETINGS_MCP_SERVER_NAME, None)
     out.pop(_FORESIGHT_MCP_SERVER_NAME, None)
+    out.pop(_POCKET_PLANNER_MCP_SERVER_NAME, None)
     return out
 
 
@@ -480,3 +486,71 @@ class TestMcpProviderLoadFailures:
 
         assert "pocketpaw_foresight" in result
         assert "bad" not in _strip_builtin_servers(result) or True  # bad is skipped
+
+
+class TestPocketPlannerMcpAmbient:
+    """The sibling ``pocketpaw_pocket_planner`` server (hosting
+    ``plan_pocket``) must be **ambient** — reachable to any agent
+    without explicit opt-in.
+
+    The pocket-create flow's plan-pointer kit directs the chat agent
+    to call ``plan_pocket`` straight away; if that server were opt-in
+    the kit's first call would 404 and the pocket-create UX would
+    break. The split from ``pocketpaw_planner`` (which IS opt-in) is
+    what restores both policy regimes — see PR #1223 R2.
+    """
+
+    def _make_sdk(self, policy: ToolPolicy | None = None, **overrides) -> ClaudeAgentSDK:
+        settings = Settings(
+            anthropic_api_key="test-key",
+            tool_profile="full",
+            **overrides,
+        )
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings, policy=policy)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_pocket_planner_ambient(self):
+        """No injected policy → the pocket planner still loads.
+
+        This is the mirror image of ``test_planner_absent_by_default``
+        — that one pins the opt-in gate on ``pocketpaw_planner``;
+        this one pins the ambient default on
+        ``pocketpaw_pocket_planner``.
+        """
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _POCKET_PLANNER_MCP_SERVER_NAME in result
+        assert result[_POCKET_PLANNER_MCP_SERVER_NAME]["type"] == "sdk"
+
+    def test_pocket_planner_still_loads_when_planner_not_opted_in(self):
+        """The ambient pocket planner does not depend on the opt-in
+        project planner being on. Opting one out must not leak into
+        the other."""
+        sdk = self._make_sdk(policy=ToolPolicy())  # explicit, no opt-ins
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _POCKET_PLANNER_MCP_SERVER_NAME in result
+        assert _PLANNER_MCP_SERVER_NAME not in result
+
+    def test_pocket_planner_absent_when_denied(self):
+        """Even an ambient server must respect a deny entry — defense
+        in depth for the rare deployment that wants to block the
+        planner entirely."""
+        sdk = self._make_sdk(policy=ToolPolicy(deny=[f"mcp:{_POCKET_PLANNER_MCP_SERVER_NAME}:*"]))
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            result = sdk._get_mcp_servers()
+        assert _POCKET_PLANNER_MCP_SERVER_NAME not in result
+
+    def test_pocket_planner_tool_on_allowlist_by_default(self):
+        """The ambient pocket-planner tool id must appear on the
+        in-process allowlist with no policy opt-in — the chat agent
+        calls it via ``mcp__pocketpaw_pocket_planner__plan_pocket``
+        and that id has to be reachable."""
+        from pocketpaw_ee.agent.mcp_servers.planner import PLAN_POCKET_TOOL_ID
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert PLAN_POCKET_TOOL_ID in ids

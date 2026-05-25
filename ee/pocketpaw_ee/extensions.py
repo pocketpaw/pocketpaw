@@ -409,7 +409,14 @@ class CloudMeetingsMcpProvider:
 
 
 class CloudPlannerMcpProvider:
-    """`pocketpaw.mcp_servers` — the cloud Planner in-process server."""
+    """`pocketpaw.mcp_servers` — the cloud Project Planner in-process
+    server (``pocketpaw_planner``). Hosts ``plan_project`` only.
+
+    Stays **opt-in** via ``OPT_IN_MCP_SERVERS`` — Mission Control's
+    project-level planner is dead weight in the context of agents that
+    never plan a project. The sibling ``CloudPocketPlannerMcpProvider``
+    handles the ambient pocket planner.
+    """
 
     def build_server(self) -> tuple[str, Any] | None:
         from pocketpaw_ee.agent.mcp_servers.planner import build_planner_context_server
@@ -420,6 +427,30 @@ class CloudPlannerMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.planner import PLANNER_TOOL_IDS
 
         return list(PLANNER_TOOL_IDS)
+
+
+class CloudPocketPlannerMcpProvider:
+    """`pocketpaw.mcp_servers` — the pocket-create planner in-process
+    server (``pocketpaw_pocket_planner``). Hosts ``plan_pocket`` only.
+
+    Intentionally ambient — the bundled ``pocketpaw-pocket-planner``
+    skill must be reachable from any cloud agent that hits the
+    plan-pointer kit branch on pocket_specialist create. Splitting
+    this off from the project planner is what restores the per-server
+    OPT_IN gate for ``plan_project`` (see PR #1223 R2).
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.planner import (
+            build_pocket_planner_context_server,
+        )
+
+        return build_pocket_planner_context_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.planner import POCKET_PLANNER_TOOL_IDS
+
+        return list(POCKET_PLANNER_TOOL_IDS)
 
 
 class CloudPocketMcpProvider:

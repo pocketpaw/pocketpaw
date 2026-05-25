@@ -11,6 +11,14 @@
 # spec-merge endpoint requires the token in addition to the prior
 # magic header + tenancy headers; without it the agent would hit a
 # clean 401 instead of the previous (forgeable) bypass.
+# Modified: 2026-05-25 (feat/pocket-planner-skill) — ``AgentModeAdapter
+# .create`` now branches to ``_plan_kit_response`` (a plan-pointer kit
+# pointing at the ``pocketpaw-pocket-planner`` skill + ``plan_pocket``
+# MCP tool) when ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` is truthy,
+# template-match failed, and ``input.spec is None``. Custom multi-
+# widget briefs go through plan-then-build instead of the one-shot
+# draft kit. Widens ``PocketSpecialistCreateOutput.action`` to include
+# ``"plan_kit"``.
 # Modified: 2026-05-23 (#1197) — ``_apply_ops`` now re-fetches the live
 # spec after a successful op batch and runs the strict action-wiring
 # gate against it. Without this, an end-of-batch spec with a hallucinated
@@ -269,6 +277,26 @@ class AgentModeAdapter:
                 template_id,
             )
 
+        # Plan-pointer kit (feat/pocket-planner-skill, 2026-05-25). When
+        # USE_SKILL is on and template-match found nothing, custom multi-
+        # widget briefs go through plan-then-build instead of the one-
+        # shot draft kit. The chat agent invokes the
+        # ``pocketpaw-pocket-planner`` skill which calls the
+        # ``plan_pocket`` MCP tool, renders the brief in markdown, lets
+        # the user iterate, then walks the todos calling /spec/merge per
+        # todo. Falls back to ``_draft_kit_response`` when USE_SKILL is
+        # off so the existing one-shot path remains the default.
+        use_skill = os.environ.get(
+            "POCKETPAW_POCKET_SPECIALIST_USE_SKILL", ""
+        ).lower() in ("1", "true", "yes")
+        if use_skill:
+            return _plan_kit_response(
+                input,
+                started=started,
+                workspace_id=workspace_id,
+                user_id=user_id,
+            )
+
         return _draft_kit_response(input, started=started)
 
 
@@ -456,6 +484,98 @@ def _draft_kit_response(input: Any, *, started: float) -> Any:
         duration_ms=duration_ms,
         backend_used="agent_mode",
         draft_kit=kit,
+    )
+
+
+def _plan_kit_response(
+    input: Any,
+    *,
+    started: float,
+    workspace_id: str = "",
+    user_id: str = "",
+) -> Any:
+    """Build the plan-pointer kit (feat/pocket-planner-skill).
+
+    Mirrors the structure of the edit-side ``skill_kit`` branch in
+    ``_edit_kit_response`` but points at the planner skill + the
+    ``plan_pocket`` MCP tool instead of the merge endpoint. The chat
+    agent:
+
+      1. Loads the ``pocketpaw-pocket-planner`` skill body.
+      2. Calls ``mcp__pocketpaw_pocket_planner__plan_pocket(intent=...)`` and
+         renders the returned brief as markdown in the chat panel.
+      3. Iterates with the user (``plan_pocket`` again with
+         ``prior_plan`` + ``iteration_delta``).
+      4. On "build it" — walks the brief's ``todos`` in order, posting
+         each one's partial rippleSpec to
+         ``POST /api/v1/pockets/<id>/spec/merge`` with the auth headers
+         below. (The pocket itself is created on the first /spec/merge
+         call — there is no separate create step.)
+
+    No backend is spawned. Returns the same
+    ``PocketSpecialistCreateOutput`` shape as the draft kit so the MCP
+    tool handler treats both paths uniformly — just with
+    ``action="plan_kit"`` so the chat agent can switch on it.
+    """
+    from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistCreateOutput
+
+    hints_dict: dict[str, Any] = input.hints.model_dump(exclude_none=True) if input.hints else {}
+
+    plan_kit: dict[str, Any] = {
+        "brief": input.brief,
+        "structural_plan": hints_dict,
+        "skill_name": "pocketpaw-pocket-planner",
+        "mcp_tool": "mcp__pocketpaw_pocket_planner__plan_pocket",
+        "auth_headers": {
+            "X-PocketPaw-Internal": "true",
+            "X-PocketPaw-Workspace-Id": workspace_id,
+            "X-PocketPaw-User-Id": user_id,
+        },
+        "next_step": (
+            "Invoke the ``pocketpaw-pocket-planner`` skill and the "
+            "``mcp__pocketpaw_pocket_planner__plan_pocket`` tool to draft a "
+            "plan. Render the returned brief in chat as markdown "
+            "(narrative + widgets + state + sources + actions + todos "
+            "as a checkbox list). Iterate with the user — when they say "
+            "'drop X' / 'add Y' / 'rebuild', call plan_pocket again "
+            "with prior_plan + iteration_delta. When the user says "
+            "'build it' (or 'go' / 'ship it'), walk the todos in order: "
+            "for each todo compute the smallest partial rippleSpec that "
+            "satisfies its success_criteria, then POST to "
+            "``http://localhost:8888/api/v1/pockets/<id>/spec/merge`` "
+            "with the auth_headers above and body "
+            "``{\"merge\": <partial>}``. The first /spec/merge against "
+            "a fresh pocket id creates the pocket; subsequent calls "
+            "merge into it. Tick each todo as you go. Halt on the "
+            "first failure unless the user says retry."
+        ),
+        "lookup_tool": (
+            "Use ``mcp__pocketpaw_pocket__get_widget_spec`` to look up "
+            "allowed props for any widget kind referenced in the brief "
+            "before assembling the partial rippleSpec. Use "
+            "``mcp__pocketpaw_pocket__list_pockets`` to see existing "
+            "pockets in the workspace."
+        ),
+    }
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "[pocket-specialist] agent-mode plan-pointer kit returned "
+        "(USE_SKILL=true) (hints_keys=%s brief_len=%d duration=%dms)",
+        sorted(hints_dict.keys()),
+        len(input.brief or ""),
+        duration_ms,
+    )
+
+    return PocketSpecialistCreateOutput(
+        ok=False,
+        action="plan_kit",
+        pocket=None,
+        warnings=[],
+        error=None,
+        duration_ms=duration_ms,
+        backend_used="agent_mode_skill",
+        draft_kit=plan_kit,
     )
 
 
