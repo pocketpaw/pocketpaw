@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
+    Mounts the Foresight router at ``/api/v1/foresight/*`` alongside the
+    other domain routers. Routes delegate to ``ee.cloud.foresight.service``
+    which owns Beanie writes against the ``foresight_runs`` collection.
+    The engine itself (vendored OASIS substrate + CAMEL adapter) lives at
+    ``ee/pocketpaw_ee/foresight/``; the cloud surface is a thin shell over
+    persistence + event emission.
 Modified: 2026-05-24 (#1202) — Registers ``register_audit_bridge`` during
     ``mount_cloud`` so every ``security.audit.AuditLogger.log()`` call from
     EE cloud writers (pocket actions, source runs, skills config, …) is
@@ -144,6 +151,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.license import get_license_info
     from pocketpaw_ee.cloud.planner.router import router as planner_router
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
@@ -168,6 +176,12 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
+    # Foresight — RFC 08 scenario-run surface (POST /foresight/scenarios,
+    # GET /foresight/runs[/{id}]). Mounted alongside cycles so the
+    # Mission Control rail can launch / inspect simulation runs from the
+    # same surface as live cycles. Persistence lands in the
+    # ``foresight_runs`` Mongo collection via ``ee.cloud.foresight.service``.
+    app.include_router(foresight_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
 

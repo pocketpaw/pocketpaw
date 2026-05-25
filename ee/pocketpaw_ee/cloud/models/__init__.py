@@ -13,6 +13,7 @@ from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
+from pocketpaw_ee.cloud.models.foresight_run import ForesightRun
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
@@ -56,6 +57,7 @@ __all__ = [
     "FileFolder",
     "FileObj",
     "FileUpload",
+    "ForesightRun",
     "Group",
     "GroupAgent",
     "Invite",
@@ -109,6 +111,7 @@ def get_all_documents():
         Cycle,
         Project,
         PlanSession,
+        ForesightRun,
     ]
 
 
