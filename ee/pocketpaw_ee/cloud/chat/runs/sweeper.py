@@ -12,17 +12,14 @@ Two cadences share this:
 - The Tier 2 worker's boot sweep (5-second cutoff) catches runs orphaned by
   the previous worker that just crashed.
 
-When the run's Redis stream is still alive, the sweeper appends an
+If the run's stream buffer is still live, the sweeper appends an
 ``interrupted`` terminal event so any live SSE subscriber finalises
-immediately instead of waiting for the heartbeat timeout. The append step
-is silently skipped when ``POCKETPAW_REDIS_URL`` is unset (Tier 0
-deployments) so no warning spam appears on every tick.
+immediately instead of waiting for the heartbeat timeout.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
@@ -98,22 +95,9 @@ async def sweep_stale_runs(
 
 
 def _resolve_transport():
-    """Return the stream transport when Redis is configured, else ``None``.
-
-    A Tier 0 deployment (EE installed but ``POCKETPAW_REDIS_URL`` unset) used
-    to log a WARNING + traceback every 5 minutes from the heartbeat sweeper.
-    Short-circuiting on the env var keeps those deployments quiet — the
-    Mongo-only sweep still works.
-    """
-    if not os.environ.get("POCKETPAW_REDIS_URL", "").strip():
-        return None
+    """Return the stream transport, or ``None`` if construction fails."""
     try:
         return get_stream_transport()
     except Exception:
-        # Env is set but the transport refused to construct (e.g. malformed
-        # URL). One-off WARNING without traceback — operators get told once
-        # per process start, not on every tick.
-        logger.warning(
-            "sweep_stale_runs: stream transport unavailable; interrupt events will not be appended"
-        )
+        logger.warning("sweep_stale_runs: stream transport unavailable")
         return None

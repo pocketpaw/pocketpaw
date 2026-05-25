@@ -186,25 +186,21 @@ async def test_sweep_rejects_both_cutoff_kwargs(mongo_db):  # noqa: ARG001
         await sweeper.sweep_stale_runs(older_than_minutes=10, older_than_seconds=5)
 
 
-async def test_sweep_no_redis_env_does_not_call_transport(
+async def test_sweep_no_redis_env_uses_memory_transport(
     mongo_db,  # noqa: ARG001
     monkeypatch,
     caplog,
 ):
-    """Review finding #5 — Tier 0 deployments (EE installed, but Redis not
-    configured yet) used to get a WARNING+traceback every sweep tick. The
-    sweep must short-circuit cleanly when there's no Redis env: no transport
-    call, no warning, no traceback."""
+    """When POCKETPAW_REDIS_URL is unset the sweeper still works — the
+    transport selector falls back to the in-memory impl. The sweep must
+    not raise or log a warning on the tick."""
     import logging
 
+    from pocketpaw_ee.cloud.chat.runs import transport as transport_mod
+
     monkeypatch.delenv("POCKETPAW_REDIS_URL", raising=False)
-    called: list[str] = []
-
-    def _spy_transport():
-        called.append("get_stream_transport")
-        raise RuntimeError("POCKETPAW_REDIS_URL is not set")
-
-    monkeypatch.setattr(sweeper, "get_stream_transport", _spy_transport)
+    monkeypatch.delenv("POCKETPAW_CLOUD_STREAM_TRANSPORT", raising=False)
+    transport_mod._reset_for_tests()
 
     stale = _make_run(status="running", created_minutes_ago=30)
     await stale.insert()
@@ -212,17 +208,14 @@ async def test_sweep_no_redis_env_does_not_call_transport(
     with caplog.at_level(logging.WARNING, logger="pocketpaw_ee.cloud.chat.runs.sweeper"):
         n = await sweeper.sweep_stale_runs(older_than_minutes=10)
 
-    # Mongo update still happens — the sweep core works without Redis.
     assert n == 1
-    # Sweeper short-circuited before calling the transport.
-    assert called == []
-    # And no WARNING from the sweeper.
     sweeper_warnings = [
         r
         for r in caplog.records
         if r.name == "pocketpaw_ee.cloud.chat.runs.sweeper" and r.levelno >= logging.WARNING
     ]
     assert sweeper_warnings == []
+    transport_mod._reset_for_tests()
 
 
 async def test_sweep_sets_ttl_on_resurrected_stream(mongo_db, fake_transport, monkeypatch):  # noqa: ARG001

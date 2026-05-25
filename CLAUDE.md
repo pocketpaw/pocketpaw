@@ -201,9 +201,12 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
 - **Env vars**: All settings use `POCKETPAW_` prefix (e.g., `POCKETPAW_ANTHROPIC_API_KEY`)
 - **Soul config**: `POCKETPAW_SOUL_ENABLED=true`, `POCKETPAW_SOUL_NAME`, `POCKETPAW_SOUL_ARCHETYPE`, `POCKETPAW_SOUL_PATH`, `POCKETPAW_SOUL_AUTO_SAVE_INTERVAL`
 - **Files-as-Knowledge config** (Phase 1): `POCKETPAW_EXTRACTION_CHAIN` (JSON list of adapter names, e.g. `'["gemini-flash","local"]'`), `POCKETPAW_EXTRACTION_PER_MIME` (JSON map of mime→adapter), `POCKETPAW_GEMINI_API_KEY` for the cloud captioning adapter; `POCKETPAW_KB_SCOPES` (JSON list, e.g. `'["workspace:w1","agent:a1"]'`) drives multi-scope KB injection in the agent system prompt. The legacy `POCKETPAW_KB_SCOPE` (single string) still works via a deprecation shim that copies it into `kb_scopes` on startup. Phase 3 (Stage 3.E): uploads can carry `pocket_id` (form field on `POST /api/v1/uploads`, query on `GET /api/v1/files`); the FileReady listener routes pocket uploads into `pocket:{id}` KB and the agent's `_get_kb_context` resolves scope priority `pocket > agent > workspace` via the per-request `KbContext` threaded from the cloud chat path.
-- **Resumable chat runs config**: `POCKETPAW_REDIS_URL` (required for resumable
-  cloud chat — e.g. `redis://redis:6379/0`; Dragonfly / Valkey work as drop-in
-  since they speak the Redis wire protocol);
+- **Resumable chat runs config**: `POCKETPAW_REDIS_URL` (e.g.
+  `redis://redis:6379/0`; Dragonfly / Valkey work as drop-in since they
+  speak the Redis wire protocol). When unset, the transport falls back to
+  an in-process buffer (Tier 0, dev-only — runs do not survive restart and
+  the Tier 2 arq worker is unavailable). Production deploys must set it;
+  startup logs a WARN if missing;
   `POCKETPAW_CLOUD_RUN_EXECUTOR` (`inprocess` default, `arq` for the Tier 2
   worker — added in the follow-up PR);
   `POCKETPAW_CLOUD_STREAM_TRANSPORT` (`redis` default — adapter selector for
