@@ -40,11 +40,7 @@ from pocketpaw.bundled_templates.schema import PocketTemplate
 
 _FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "templates"
 _BUNDLED_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "pocketpaw"
-    / "bundled_templates"
-    / "_bundled"
+    Path(__file__).resolve().parents[2] / "src" / "pocketpaw" / "bundled_templates" / "_bundled"
 )
 
 
@@ -182,9 +178,7 @@ def test_lease_renewal_v2_fixture_validates() -> None:
     assert len(template.state.joined_entities) == 2
     assert {je.name for je in template.state.joined_entities} == {"tenant", "property"}
     # CEL saved-view filter parsed
-    expiring = next(
-        sv for sv in template.state.saved_views if sv.name == "Expiring 30 days"
-    )
+    expiring = next(sv for sv in template.state.saved_views if sv.name == "Expiring 30 days")
     assert "days_remaining" in expiring.filter
     # Temporal trigger present
     temporal = next(t for t in template.triggers if t.type == "temporal")
@@ -389,9 +383,7 @@ def _write_template(tmp_path: Path, slug: str, meta: dict, spec: dict) -> Path:
 
     slug_dir = tmp_path / slug
     slug_dir.mkdir(parents=True, exist_ok=True)
-    (slug_dir / "template.pocket.yaml").write_text(
-        yaml.safe_dump(meta), encoding="utf-8"
-    )
+    (slug_dir / "template.pocket.yaml").write_text(yaml.safe_dump(meta), encoding="utf-8")
     (slug_dir / "ripple_spec.json").write_text(json.dumps(spec), encoding="utf-8")
     return slug_dir
 
@@ -446,9 +438,7 @@ def test_loader_strict_true_translates_v1_then_validates(tmp_path: Path) -> None
     v1_meta = _minimal_v1_dict()
     _write_template(tmp_path, "todo-task-tracker", v1_meta, {"ui": {}, "state": {}})
 
-    result = load_template(
-        "todo-task-tracker", templates_dir=tmp_path, strict=True
-    )
+    result = load_template("todo-task-tracker", templates_dir=tmp_path, strict=True)
     assert result is not None
     meta = result["meta"]
     assert meta["schema_version"] == "2"

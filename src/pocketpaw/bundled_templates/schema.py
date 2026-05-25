@@ -283,9 +283,7 @@ class TriggerDef(BaseModel):
             raise ValueError("triggers[].schedule is required when type=cron")
         if self.type in ("webhook", "signal", "calendar", "source_change"):
             if not self.source:
-                raise ValueError(
-                    f"triggers[].source is required when type={self.type!r}"
-                )
+                raise ValueError(f"triggers[].source is required when type={self.type!r}")
         if self.type == "temporal" and not self.when:
             raise ValueError("triggers[].when is required when type=temporal")
         return self
