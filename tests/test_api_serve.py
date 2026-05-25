@@ -102,10 +102,23 @@ class TestNoDashboardUI:
 
 
 class TestAuthMiddleware:
-    def test_unauthenticated_request_blocked(self, client):
-        """Non-localhost requests without a token should be rejected."""
+    def test_unauthenticated_v1_request_passes_through(self, client):
+        """``/api/v1/*`` is intentionally auth-optional at the middleware
+        level (PR #888 follow-up): cloud routes authenticate at the route
+        level via fastapi-users JWT. In an OSS-only install with no JWT
+        dependency on the route, the request reaches the handler and gets
+        a 2xx. The legacy 401 is asserted in
+        ``test_unauthenticated_legacy_request_blocked`` below."""
         with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False):
             resp = client.get("/api/v1/health")
+            assert resp.status_code == 200
+
+    def test_unauthenticated_legacy_request_blocked(self, client):
+        """Non-``/api/v1/*`` API paths are still gated by the auth
+        middleware — a request without a token gets 401 before the route
+        handler runs (the 401 wins over a route-not-found 404)."""
+        with patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False):
+            resp = client.get("/api/mission-control/anything")
             assert resp.status_code == 401
 
     def test_options_preflight_passes_without_auth(self, client):
