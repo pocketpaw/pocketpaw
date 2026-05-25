@@ -384,6 +384,25 @@ only-include = ["src/pocketpaw"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Skip vendored third-party code. The OASIS fork at
+# ee/pocketpaw_ee/foresight/substrate/oasis/ is upstream code under
+# Apache-2.0; we treat it as a frozen snapshot and don't reformat it
+# (see substrate/oasis/README-FORK.md for the drift policy). Any
+# behavioural edits we make in future PRs carry a per-file
+# "Modified by PocketPaw" notice and can be linted then.
+extend-exclude = [
+    "ee/pocketpaw_ee/foresight/substrate/oasis",
+]
+
+[tool.mypy]
+# Same rationale as the ruff extend-exclude above. The vendored OASIS
+# fork at substrate/oasis/ carries upstream type-checking debt we
+# inherited (implicit Optionals, unannotated variables, narrow
+# subclass-vs-base mismatches). We don't fix upstream — see the drift
+# policy in substrate/oasis/README-FORK.md.
+exclude = [
+    "ee/pocketpaw_ee/foresight/substrate/oasis/.*",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
