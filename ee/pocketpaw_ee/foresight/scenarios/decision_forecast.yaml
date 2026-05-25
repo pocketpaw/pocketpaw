@@ -1,4 +1,17 @@
 # ee/pocketpaw_ee/foresight/scenarios/decision_forecast.yaml
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring. Two new optional scenario-root fields:
+#   - ``precedent_seed`` (string | null): scenario-wide seed the engine's
+#     DecisionGraphRef hashes into deterministic synthetic precedent
+#     ids on every emitted ProjectedDecision. Omit (or null) to keep
+#     ``forward_precedent_decision_id`` ``None`` (v0.1 behavior).
+#   - ``precedent_seeds`` (map | null): per-anchor overrides keyed by
+#     anchor_id (``decision:<name>`` / ``segment:<role>`` /
+#     ``rollout:<event>``). Anchor-level wins when both blocks are set.
+# Both fields stay absent in this smoke scenario by default — the
+# default loop is precedent-free until RFC 07 lands real Decision-Graph
+# lookup. Operators wanting synthetic ids for UI/dev work can add
+# ``precedent_seed: "abc"`` here.
 # Updated: 2026-05-25 (feat/foresight-v03-calibration) — PR 3:
 #   - Added the optional ``tier_mix:`` block. The 5/15/80 captain-
 #     locked default is implicit when the block is omitted; declaring

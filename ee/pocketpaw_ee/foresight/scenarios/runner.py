@@ -1,4 +1,33 @@
 # ee/pocketpaw_ee/foresight/scenarios/runner.py
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring:
+#   - ``ScenarioConfig`` grows two optional fields: ``precedent_seed``
+#     (scenario-level seed for synthetic precedent ids) and
+#     ``precedent_seeds`` (anchor-level override map; anchor-level wins
+#     when set). Both default to ``None`` / empty so existing scenarios
+#     are unaffected.
+#   - ``ScenarioConfig.from_yaml`` parses both blocks — scenario-root
+#     ``precedent_seed:`` and the optional ``precedent_seeds:`` map of
+#     ``{anchor_id: seed}``. Documented in market_sim.yaml /
+#     org_change.yaml / decision_forecast.yaml.
+#   - ``run_scenario`` accepts ``decision_graph_ref: DecisionGraphRef``;
+#     defaults to ``NoOpDecisionGraphRef`` seeded from the config. Each
+#     per-anchor projected record now carries a
+#     ``forward_precedent_decision_id`` field — ``None`` when no seed
+#     is configured (preserves the v0.1 behavior), a deterministic
+#     synthetic id when a seed is configured.
+#   - The ``on_projected_decision`` callback signature is **unchanged**
+#     at 6 args (anchor, persona, tick, decision, confidence, sub_type)
+#     to preserve compatibility with the cloud's existing closure in
+#     ``cloud/foresight/service.py`` and the §8 approval-bridge lane.
+#     The precedent id surfaces on ``RunResult.projected_decisions``
+#     (engine wire shape) so callers consuming the result dataclass
+#     directly get the new field immediately; the cloud-side
+#     persistence backfill is a follow-up stream that will populate
+#     the same field on the Mongo doc.
+#   - When RFC 07 actually lands in pocketpaw, the cloud injects a
+#     real DecisionGraphRef into ``run_scenario`` (the
+#     NoOpDecisionGraphRef is replaced; no wire-shape change).
 # Updated: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5:
 #   - ``SUPPORTED_SUB_TYPES`` lifted to include ``market_sim`` and
 #     ``org_change_rehearsal`` alongside ``decision_forecast``. The
@@ -55,6 +84,10 @@ from uuid import uuid4
 
 import yaml  # type: ignore[import-untyped]
 
+from pocketpaw_ee.foresight.decision_graph_ref import (
+    DecisionGraphRef,
+    NoOpDecisionGraphRef,
+)
 from pocketpaw_ee.foresight.llm.adapter import DeterministicFakeBackend
 from pocketpaw_ee.foresight.llm.tier_pool import TierMix, tier_distribution
 from pocketpaw_ee.foresight.persona import OceanDrift, SoulSeededPersona
@@ -103,6 +136,15 @@ class ScenarioConfig:
     n_ticks: int = 1
     personas: list[PersonaSpec] = field(default_factory=list)
     tier_mix: TierMix | None = None
+    # v14 — RFC 08 §14.4 forward-precedent seed plumbing. The scenario
+    # carries an optional global seed plus an optional per-anchor
+    # override map; the runner constructs a NoOpDecisionGraphRef from
+    # both when the caller doesn't supply a real DecisionGraphRef. When
+    # both are absent the runner still attaches a NoOp, and the lookup
+    # returns ``None`` so ``forward_precedent_decision_id`` keeps its
+    # v0.1 "always None" wire-shape behavior for un-seeded scenarios.
+    precedent_seed: str | None = None
+    precedent_seeds: dict[str, str] = field(default_factory=dict)
 
     # PR 5 lifts the supported set to the three sub-types v0.5 ships
     # (decision_forecast + market_sim + org_change_rehearsal). The
@@ -155,12 +197,28 @@ class ScenarioConfig:
                 mid=float(tier_mix_block.get("mid", 0.15)),
                 tail=float(tier_mix_block.get("tail", 0.80)),
             )
+        # v14 — optional forward-precedent seeds. The scenario-root
+        # ``precedent_seed:`` is the global default; the optional
+        # ``precedent_seeds:`` map carries anchor-level overrides. Both
+        # are normalized to strings here so the NoOp lookup contract
+        # (which treats the empty string as "no seed configured")
+        # stays uniform.
+        raw_seed = data.get("precedent_seed")
+        precedent_seed: str | None = str(raw_seed) if raw_seed not in (None, "") else None
+        precedent_seeds_block = data.get("precedent_seeds") or {}
+        precedent_seeds: dict[str, str] = {
+            str(anchor_id): str(seed)
+            for anchor_id, seed in precedent_seeds_block.items()
+            if seed not in (None, "")
+        }
         return cls(
             name=data["name"],
             sub_type=data.get("sub_type", "decision_forecast"),
             n_ticks=int(data.get("n_ticks", 1)),
             personas=personas,
             tier_mix=tier_mix,
+            precedent_seed=precedent_seed,
+            precedent_seeds=precedent_seeds,
         )
 
 
@@ -276,6 +334,7 @@ async def run_scenario(
     backend_pool: list[Any] | None = None,
     on_projected_decision: ProjectedDecisionCallback | None = None,
     run_id: str | None = None,
+    decision_graph_ref: DecisionGraphRef | None = None,
 ) -> RunResult:
     """Run one scenario end-to-end.
 
@@ -303,6 +362,17 @@ async def run_scenario(
             so the per-tick records cross-reference the same id the
             ForesightRun document carries. The callback receives the
             run id implicitly via the closure the caller supplies.
+        decision_graph_ref: v14 — RFC 08 §14.4 forward-precedent lookup
+            contract. When the caller doesn't supply one (CLI smoke,
+            v0.5 cloud), the runner constructs a default
+            :class:`NoOpDecisionGraphRef` seeded from
+            ``config.precedent_seed`` + ``config.precedent_seeds``. The
+            ref is consulted once per projected-decision record; the
+            return value populates the record's
+            ``forward_precedent_decision_id`` field. When RFC 07 lands
+            in pocketpaw the cloud will inject a real ``DecisionGraphRef``
+            that returns Decision-Graph short-ids instead of synthetic
+            ones — no wire-shape change.
 
     Production callers hand in a ``backend_pool`` built from
     ``TierMix.locked_default()`` (or the scenario's
@@ -314,6 +384,16 @@ async def run_scenario(
 
     if backend_pool is None and backend is None:
         backend = DeterministicFakeBackend()
+
+    # v14 — default to the NoOp ref seeded from the scenario config. The
+    # ref is consulted once per projected-decision record below; when no
+    # seed is configured the NoOp returns ``None`` and the wire shape
+    # carries ``forward_precedent_decision_id=None`` (the v0.1 behavior).
+    if decision_graph_ref is None:
+        decision_graph_ref = NoOpDecisionGraphRef(
+            seed=config.precedent_seed or "",
+            per_anchor_seeds=dict(config.precedent_seeds),
+        )
 
     world = ForesightWorld()
     tier_dist: dict[str, int] = {}
@@ -352,6 +432,8 @@ async def run_scenario(
             snapshot=snapshot,
             tick_index=tick_index,
             sub_type=config.sub_type,
+            scenario_id=config.name,
+            decision_graph_ref=decision_graph_ref,
         )
         for record in tick_records:
             projected_records.append(record)
@@ -388,6 +470,8 @@ def _project_tick(
     snapshot: WorldSnapshot,
     tick_index: int,
     sub_type: str,
+    scenario_id: str,
+    decision_graph_ref: DecisionGraphRef,
 ) -> list[dict[str, Any]]:
     """Build one projected-decision record per anchor for this tick.
 
@@ -404,6 +488,14 @@ def _project_tick(
         else an empty string. v1.0 will fan one record per (anchor ×
         persona) pair; v0.5 stays one-per-anchor so the cloud's storage
         footprint is linear in anchor count, not anchor × persona.
+
+    v14 additions (RFC 08 §14.4):
+      - ``forward_precedent_decision_id`` is resolved per record by
+        delegating to the supplied ``DecisionGraphRef``. The NoOp
+        default returns ``None`` when no scenario seed is configured
+        (preserving v0.1 wire shape) and a stable synthetic id when a
+        seed is configured. A real Decision-Graph implementation (RFC
+        07) will return live short-ids; the field shape is unchanged.
     """
     # Count verbs across successful actions; the persona id of the
     # last-seen action for each verb so we can attribute the modal
@@ -438,6 +530,11 @@ def _project_tick(
             "decision_text": modal_verb,
             "confidence": confidence,
             "sub_type": sub_type,
+            "forward_precedent_decision_id": decision_graph_ref.lookup_precedent(
+                anchor_id=anchor_id,
+                persona_id=persona_id,
+                scenario_id=scenario_id,
+            ),
         }
         for anchor_id in anchors
     ]
