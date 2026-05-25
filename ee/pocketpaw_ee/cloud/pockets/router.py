@@ -11,6 +11,13 @@ The YAML + in-process store live in ee.cloud.pockets.layouts. Export is
 pure. Template storage is workspace-scoped and in-process for now; the
 REST contract matches the MongoDB-backed version that Wave 4 will ship.
 
+Updated: 2026-05-21 — added ``GET /pockets/home``, the home-as-pocket
+foundation. It resolves-or-provisions the caller's home pocket via
+``pockets_service.ensure_home_pocket`` and returns a typed
+``HomePocketResponse`` (``{pocket_id, pocket, created}``) — ``created`` is
+True only when the call just provisioned a brand-new home pocket, so the
+client can gate one-time seeding/migration on it. Declared ahead of
+``GET /{pocket_id}`` so the static ``/home`` segment wins the route match.
 Updated: 2026-05-21 (RFC 04 alpha) — Added three routes for the per-pocket
 backend binding + read-only source-run feature:
 
@@ -77,6 +84,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
+    HomePocketResponse,
     PocketBackendConfigRequest,
     PocketBackendConfigResponse,
     ReorderWidgetsRequest,
@@ -251,6 +259,25 @@ async def list_pockets(
     project_id: str | None = Query(default=None, alias="project_id"),
 ) -> list[dict]:
     return await pockets_service.list_pockets(workspace_id, user_id, project_id=project_id)
+
+
+@router.get("/home", response_model=HomePocketResponse)
+async def get_home_pocket(
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> HomePocketResponse:
+    """Resolve-or-provision the caller's home pocket.
+
+    Declared ahead of ``GET /{pocket_id}`` so the static ``/home`` segment
+    is matched before the pocket-id wildcard. Returns
+    ``{pocket_id, pocket, created}`` where ``pocket`` is the full wire dict
+    (rippleSpec + widgets) and ``created`` is ``True`` only when this call
+    just provisioned a brand-new home pocket. The client gates one-time
+    work — seeding default widgets, migrating legacy localStorage widgets —
+    on ``created``.
+    """
+    pocket, created = await pockets_service.ensure_home_pocket(workspace_id, user_id)
+    return HomePocketResponse(pocket_id=pocket["_id"], pocket=pocket, created=created)
 
 
 @router.get("/{pocket_id}")

@@ -1,4 +1,16 @@
-"""Pocket and Widget documents."""
+"""Pocket and Widget documents.
+
+Updated: 2026-05-21 — documented the ``type="home"`` pocket type (the
+per-user pocket that backs the home page) and the ``type="native"``
+widget type (rendered by the frontend as a built-in Svelte component
+keyed on ``name``). Both reuse the free-form ``type`` field — no schema
+change, just recognized values.
+Updated: 2026-05-22 — added the optional ``Widget.spec`` field: a Ripple
+rippleSpec subtree for a single tile (e.g. a ``chart`` node with a real
+``data`` series). The home grid renders a ``widgets[]`` entry from its
+``spec``; the home agent's ``add_widget`` MCP tool populates it. Native
+widgets leave it ``None``.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +37,8 @@ class Widget(BaseModel):
 
     id: str = Field(default_factory=lambda: str(ObjectId()), alias="_id")
     name: str
+    # Free-form. ``type="native"`` marks a widget the frontend renders as a
+    # built-in Svelte component keyed on ``name`` (no rippleSpec).
     type: str = "custom"
     icon: str = ""
     color: str = ""
@@ -33,6 +47,11 @@ class Widget(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     props: dict[str, Any] = Field(default_factory=dict)
     data: Any = None
+    # Optional Ripple rippleSpec subtree for this single tile (e.g. a
+    # ``chart`` node carrying a real ``data`` series). The home grid
+    # renders the tile from ``spec`` when present. ``None`` for native
+    # widgets, which have no rippleSpec.
+    spec: dict[str, Any] | None = None
     assignedAgent: str | None = Field(default=None, alias="assignedAgent")
     position: WidgetPosition = Field(default_factory=WidgetPosition)
 
@@ -52,7 +71,9 @@ class Pocket(TimestampedDocument):
     project_id: str | None = None
     name: str
     description: str = ""
-    type: str = "custom"  # no pattern restriction — frontend sends data, deep-work, etc.
+    # No pattern restriction — frontend sends data, deep-work, etc.
+    # ``type="home"`` marks the per-user pocket that backs the home page.
+    type: str = "custom"
     icon: str = ""
     color: str = ""
     owner: str

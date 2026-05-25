@@ -437,6 +437,7 @@ dev = [
     "moto[s3]>=5.0.0",
     "types-aiofiles>=25.1.0.20260409",
     "import-linter>=2.11",
+    "fakeredis>=2.21.0",
 ]
 
 # Enterprise layer — opt-in. `uv sync --dev --group ee` installs the
@@ -486,4 +487,7 @@ ignore_imports = [
     "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.service",
     "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.agent_context",
     "pocketpaw.tools.cli -> pocketpaw_ee.agent.pocket_specialist.cli_tool",
+    # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
+    # try/except runtime import; the OSS core never imports EE statically.
+    "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
 ]

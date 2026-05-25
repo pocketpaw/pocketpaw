@@ -131,6 +131,85 @@ def test_get_pocket_prompts_selects_by_backend() -> None:
         assert cli_interact is POCKET_INTERACTION_PROMPT_CLI
 
 
+def test_home_pocket_prompt_is_exported_and_focused() -> None:
+    """``HOME_POCKET_PROMPT`` is the home-surface analogue of the slim
+    interaction prompt. It must be re-exported from ``pocketpaw.ripple``,
+    name the home tools it actually uses (``add_widget``, ``get_pocket``),
+    and stay slim — no heavier "inside a dashboard" framing."""
+    from pocketpaw.ripple import (
+        HOME_POCKET_PROMPT,
+        POCKET_INTERACTION_PROMPT_MCP,
+    )
+
+    # Tagged block, same shape as the other pocket-mode prompts.
+    assert "<home-pocket>" in HOME_POCKET_PROMPT
+
+    # Teaches the agent the two tools the home surface actually uses.
+    assert "add_widget" in HOME_POCKET_PROMPT
+    assert "get_pocket" in HOME_POCKET_PROMPT
+
+    # Slim — the home-surface analogue of POCKET_INTERACTION_PROMPT, not a
+    # heavier framing. It must not be longer than the slim interaction
+    # prompt it mirrors.
+    assert len(HOME_POCKET_PROMPT) < len(POCKET_INTERACTION_PROMPT_MCP), (
+        "HOME_POCKET_PROMPT should stay slimmer than the interaction prompt"
+    )
+
+    # It must NOT carry the heavy specialist-delegation machinery — the
+    # home surface mutates widgets directly via add_widget.
+    assert "pocket_specialist__create" not in HOME_POCKET_PROMPT
+    assert "pocket_specialist__edit" not in HOME_POCKET_PROMPT
+
+
+def test_home_pocket_prompt_teaches_the_spec_first_workflow() -> None:
+    """For a non-trivial widget the home agent must first look up the
+    catalog shape (``get_widget_spec``) and then call ``add_widget`` with a
+    populated rippleSpec ``spec``. A chart needs a real ``data`` series — the
+    prompt must say so and carry one worked example so the agent does not
+    ship a bare stat tile when asked for a chart."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    # The catalog-lookup step is named — the agent must not guess prop shapes.
+    assert "get_widget_spec" in HOME_POCKET_PROMPT
+    # The prompt teaches the chart-data contract explicitly.
+    assert "data" in HOME_POCKET_PROMPT
+    # A worked example of a populated chart widget is embedded.
+    assert "label" in HOME_POCKET_PROMPT and "value" in HOME_POCKET_PROMPT
+    # The example shows the spec is stored under the widget's ``spec`` key.
+    assert "spec" in HOME_POCKET_PROMPT
+
+
+def test_home_prompt_teaches_refresh_workflow() -> None:
+    """The home agent has a third response path: REFRESH. It must call
+    ``update_widget`` (with the id from ``get_pocket``) instead of
+    ``add_widget`` again. The prompt also names ``WebSearch`` and
+    ``WebFetch`` as data sources so the agent knows where to pull fresh
+    numbers from before writing the new spec."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    body = HOME_POCKET_PROMPT.lower()
+    assert "refresh" in body
+    # The two tools the refresh workflow uses end-to-end.
+    assert "update_widget" in HOME_POCKET_PROMPT
+    assert "get_pocket" in HOME_POCKET_PROMPT
+    # The named data-source tools the agent can reach for to fetch fresh
+    # numbers before writing the new spec.
+    assert "WebSearch" in HOME_POCKET_PROMPT
+    assert "WebFetch" in HOME_POCKET_PROMPT
+    # The path-count change — the opening lists three response paths now.
+    assert "Three response paths" in HOME_POCKET_PROMPT
+
+
+def test_home_prompt_warns_against_duplicate_add() -> None:
+    """The refresh path explicitly tells the agent NOT to call
+    ``add_widget`` a second time — that would create a duplicate tile.
+    Without this guard the LLM tends to fall back to the only widget
+    mutation it has seen in earlier turns."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    assert "do NOT call `add_widget`" in HOME_POCKET_PROMPT
+
+
 def test_pocket_id_token_substitution() -> None:
     """The interaction prompt has a literal ``__POCKET_ID__`` token the
     caller substitutes via ``str.replace``. A naive ``str.format`` would
