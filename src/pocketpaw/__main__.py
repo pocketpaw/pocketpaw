@@ -1,6 +1,11 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-05-25: Added `template compile <file>` subaction next to lint /
+                migrate / diff (RFC 03 v2 PR 2b). Compile prints the
+                runtime-shaped rippleSpec dict the template produces —
+                JSON by default, YAML under the new top-level `--yaml`
+                flag. Author-facing inspection only; never persists.
   - 2026-05-25: Added `template` subcommand (lint / migrate / diff) for
                 RFC 03 v2 templates. Wired into _EARLY_COMMANDS so the
                 lint / migrate / diff path never pays the agent or
@@ -193,6 +198,7 @@ def _handle_early_command(args) -> int | None:
             as_json=getattr(args, "json", False),
             yes=getattr(args, "yes", False),
             no_backup=getattr(args, "no_backup", False),
+            as_yaml=getattr(args, "yaml", False),
         )
 
     return None
@@ -351,6 +357,11 @@ Examples:
         "--no-backup",
         action="store_true",
         help="Skip backup creation (for template migrate)",
+    )
+    parser.add_argument(
+        "--yaml",
+        action="store_true",
+        help="Emit YAML instead of JSON (for template compile)",
     )
 
     return parser
