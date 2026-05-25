@@ -7,6 +7,7 @@ from typing import Literal
 
 from beanie import Document
 from pydantic import Field
+from pymongo import IndexModel
 
 RunStatus = Literal["queued", "running", "completed", "interrupted", "failed", "cancelled"]
 
@@ -37,7 +38,15 @@ class ChatRunDoc(Document):
     class Settings:
         name = "chat_runs"
         indexes = [
-            [("run_id", 1)],
+            # Unique on run_id: a duplicate id would let two streams disagree on
+            # the run's final state. Unique on (workspace, client_message_id):
+            # the create_run idempotency guard is otherwise a find-then-insert
+            # race that orphans a queued run on concurrent retries.
+            IndexModel([("run_id", 1)], unique=True),
+            IndexModel(
+                [("workspace", 1), ("client_message_id", 1)],
+                unique=True,
+            ),
             [
                 ("workspace", 1),
                 ("context_type", 1),

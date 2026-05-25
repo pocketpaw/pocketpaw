@@ -7,6 +7,7 @@ lifetime of the process.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -18,15 +19,22 @@ from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 logger = logging.getLogger(__name__)
 
 _pool: ArqRedis | None = None
+_pool_lock = asyncio.Lock()
 
 
 async def _get_pool() -> ArqRedis:
     global _pool
+    # Lock so two concurrent first-submits don't both build a pool — the loser
+    # would leak its open Redis connection.
     if _pool is None:
-        url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
-        if not url:
-            raise RuntimeError("POCKETPAW_REDIS_URL is not set — the arq executor needs Redis.")
-        _pool = await create_pool(RedisSettings.from_dsn(url))
+        async with _pool_lock:
+            if _pool is None:
+                url = os.environ.get("POCKETPAW_REDIS_URL", "").strip()
+                if not url:
+                    raise RuntimeError(
+                        "POCKETPAW_REDIS_URL is not set — the arq executor needs Redis."
+                    )
+                _pool = await create_pool(RedisSettings.from_dsn(url))
     return _pool
 
 

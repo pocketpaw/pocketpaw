@@ -75,6 +75,7 @@ async def test_startup_runs_short_cutoff_sweep(mongo_db, monkeypatch):  # noqa: 
 
     monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
     monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    monkeypatch.setenv(worker._BOOT_SWEEP_ENV, "true")
 
     orphan = ChatRunDoc(
         run_id="r-orphan",
@@ -95,6 +96,41 @@ async def test_startup_runs_short_cutoff_sweep(mongo_db, monkeypatch):  # noqa: 
 
     refreshed = await ChatRunDoc.find_one(ChatRunDoc.run_id == orphan.run_id)
     assert refreshed is not None and refreshed.status == "interrupted"
+
+
+async def test_startup_skips_sweep_when_gate_off(mongo_db, monkeypatch):  # noqa: ARG001
+    """Default off: a fresh worker booting alongside a healthy sibling must
+    NOT mark the sibling's in-flight runs as interrupted."""
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    inflight = ChatRunDoc(
+        run_id="r-sibling",
+        workspace="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="k1",
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c-sibling",
+        user_message_id="um1",
+        status="running",  # type: ignore[arg-type]
+        createdAt=datetime.now(UTC) - timedelta(seconds=30),
+    )
+    await inflight.insert()
+
+    await worker._startup({})
+
+    refreshed = await ChatRunDoc.find_one(ChatRunDoc.run_id == inflight.run_id)
+    assert refreshed is not None and refreshed.status == "running"
 
 
 async def test_worker_settings_exposes_execute_run_job():

@@ -17,6 +17,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import (
     InvalidScope,
@@ -31,7 +32,6 @@ from pocketpaw_ee.cloud.chat.runs.executor import get_executor
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
-from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.surface import resolve_surface_context
 
 logger = logging.getLogger(__name__)
@@ -42,8 +42,13 @@ router = APIRouter(tags=["Cloud Agent Chat"], dependencies=[Depends(require_lice
 Scope = Literal["dm", "group", "pocket", "session"]
 
 
-def _sse(event: str, data: dict[str, Any]) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
+def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> bytes:
+    # Emit ``id:`` when we have a stream cursor so EventSource clients pick up
+    # ``Last-Event-Id`` on reconnect — symmetric with the GET stream endpoint.
+    # Synthetic frames (``message.persisted``) don't have a Redis entry id and
+    # ship without one.
+    head = f"id: {entry_id}\n" if entry_id else ""
+    return f"{head}event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 @router.post("/cloud/chat/{scope}/{scope_id}/agent")
@@ -141,7 +146,7 @@ async def post_agent_chat(
             saw_terminal = False
             async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
                 cursor = ev.entry_id
-                yield _sse(ev.event, ev.data)
+                yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
                 if ev.is_terminal:
                     saw_terminal = True
             if saw_terminal:

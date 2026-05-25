@@ -35,6 +35,10 @@ _DEFAULT_OLDER_THAN_MINUTES = 10
 # append step (stream_exists/append_event race window) so a TTL-evicted key
 # can't be brought back from the dead to live forever.
 _STREAM_TTL_AFTER_INTERRUPT = 3600
+# Cap the per-tick batch. After a long outage the backlog could be thousands
+# of stale runs; materialising the whole list + serially saving each one would
+# wedge the heartbeat for minutes. The next tick (5 min) picks up the rest.
+_SWEEP_BATCH_LIMIT = 200
 
 
 async def sweep_stale_runs(
@@ -60,10 +64,14 @@ async def sweep_stale_runs(
     else:
         cutoff = datetime.now(UTC) - timedelta(minutes=_DEFAULT_OLDER_THAN_MINUTES)
 
-    stale = await ChatRunDoc.find(
-        {"status": {"$in": ["queued", "running"]}},
-        ChatRunDoc.createdAt < cutoff,
-    ).to_list()
+    stale = (
+        await ChatRunDoc.find(
+            {"status": {"$in": ["queued", "running"]}},
+            ChatRunDoc.createdAt < cutoff,
+        )
+        .limit(_SWEEP_BATCH_LIMIT)
+        .to_list()
+    )
     if not stale:
         return 0
 
