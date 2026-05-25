@@ -14,6 +14,15 @@
 #
 #   `explain` (NL Q&A with narrator) lives in Slice 3 and is intentionally
 #   NOT on this surface yet.
+# Updated: 2026-05-25 (RFC 07 Slice 2 — post-filter total) — added
+#   `count(filters, requester_scopes=...) → int` so the list router can
+#   return the true post-scope-filter total instead of the page size.
+#   This protects the anti-probe property from RFC 07 § Privacy + audit:
+#   a caller varying `limit` cannot observe a changing `total`, so
+#   pre- vs post-filter counts can never be compared to infer hidden
+#   rows. The new method shares the iteration path with `find()`; the
+#   only divergence is that `count()` does not slice by `limit` or
+#   `before_*` cursors (those reshape the page, not the filter set).
 #
 # Scope-filter-post-count invariant
 # ---------------------------------
@@ -202,6 +211,43 @@ class DecisionGraph:
             if len(results) >= limit:
                 break
         return results
+
+    # --- post-scope-filter total ------------------------------------------
+
+    async def count(
+        self,
+        *,
+        actor: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        scope_kind: ScopeKind | None = None,
+        pocket_id: str | None = None,
+        policy: str | None = None,
+        outcome_status: OutcomeStatus | None = None,
+        input_id: str | None = None,
+        requester_scopes: list[str] | None = None,
+    ) -> int:
+        """Count decisions matching the same filter set as ``find()``,
+        post-scope-filter. ``limit`` / ``before_ts`` / ``before_id`` are
+        NOT accepted — those reshape a page, not the filter set, and
+        including them would make the total drift across pages and let
+        a caller probe for hidden rows by comparing counts.
+        """
+        n = 0
+        for d in self._store.iter_decisions(
+            actor=actor,
+            pocket_id=pocket_id,
+            policy=policy,
+            outcome_status=outcome_status,
+            scope_kind=scope_kind,
+            since=since,
+            until=until,
+            input_id=input_id,
+        ):
+            if not _visible(d, requester_scopes):
+                continue
+            n += 1
+        return n
 
     # --- trace upstream ----------------------------------------------------
 

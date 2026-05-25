@@ -2,6 +2,11 @@
 # Created: 2026-05-25 — pins the five real REST routes shipped in
 #   `pocketpaw_ee.cloud.decisions.router` (the Slice 1 ping route stays;
 #   the rest replaces the stub):
+# Updated: 2026-05-25 (RFC 07 Slice 2 — post-filter total) — added two
+#   regression tests for the list endpoint: `test_total_is_post_scope_
+#   filter_not_page_size` (the load-bearing anti-probe assertion) and
+#   `test_partial_page_returns_null_cursor` (a short page must NOT echo
+#   a phantom `next_before_*` cursor).
 #
 #     GET  /api/v1/decisions/_ping       — Slice 1 liveness; smoke test
 #     GET  /api/v1/decisions/:id          — single lookup, 404 + scope hide
@@ -388,6 +393,73 @@ def test_list_scope_filter_per_call(
     b_body = client.get("/api/v1/decisions").json()
     assert b_body["total"] == 1
     assert "workspace:ws_b_test" in b_body["decisions"][0]["scope"]
+
+
+def test_total_is_post_scope_filter_not_page_size(
+    client, app, projection, base_ts, workspace_b_id
+) -> None:
+    """``total`` reports the post-scope-filter count, not the page size.
+
+    Load-bearing test for the RFC 07 § Privacy anti-probe property: a
+    caller varying ``limit`` MUST NOT observe a changing ``total``. If
+    ``total`` echoed the page size, a caller could compare
+    ``total(limit=N)`` to a workspace-wide count to infer hidden rows
+    in their own scope; if ``total`` echoed the pre-scope-filter count,
+    the leak would be even worse — a caller would see how many rows
+    sit in OTHER workspaces.
+    """
+    # 5 in workspace A, 3 in workspace B. The route's caller (this
+    # client) is workspace A by default.
+    for i in range(5):
+        _seed_chain(
+            projection,
+            base_ts=base_ts + timedelta(seconds=i),
+            workspace="ws_a_test",
+        )
+    for i in range(3):
+        _seed_chain(
+            projection,
+            base_ts=base_ts + timedelta(seconds=100 + i),
+            workspace="ws_b_test",
+        )
+
+    # Page-sized request: limit=2 (well under the 5 we seeded for A).
+    body = client.get("/api/v1/decisions", params={"limit": 2}).json()
+
+    # The page is the requested 2 rows.
+    assert len(body["decisions"]) == 2
+    # `total` is workspace A's full scoped count, NOT the page size...
+    assert body["total"] == 5
+    # ...and NOT the unscoped total (which would leak workspace B).
+    assert body["total"] != 8
+    # ...and NOT the requested page size.
+    assert body["total"] != 2
+
+    # Sanity: varying `limit` does not move `total`. This is the
+    # invariant a probe would try to violate.
+    body_full = client.get("/api/v1/decisions", params={"limit": 50}).json()
+    assert body_full["total"] == 5
+
+    # Workspace B sees its own 3 — same scope-aware shape.
+    app.dependency_overrides[request_context] = lambda: _make_request_context(workspace_b_id)
+    body_b = client.get("/api/v1/decisions", params={"limit": 1}).json()
+    assert len(body_b["decisions"]) == 1
+    assert body_b["total"] == 3
+
+
+def test_partial_page_returns_null_cursor(client, projection, base_ts) -> None:
+    """A partial page (fewer rows returned than the limit) MUST NOT echo
+    a ``next_before_*`` cursor — the client would otherwise follow a
+    phantom next page that always returns empty.
+    """
+    # Seed 3 decisions; request limit=10 so the response is partial.
+    for i in range(3):
+        _seed_chain(projection, base_ts=base_ts + timedelta(seconds=i))
+
+    body = client.get("/api/v1/decisions", params={"limit": 10}).json()
+    assert len(body["decisions"]) == 3
+    assert body["next_before_ts"] is None
+    assert body["next_before_id"] is None
 
 
 # ---------------------------------------------------------------------------
