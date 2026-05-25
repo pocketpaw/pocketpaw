@@ -1,4 +1,11 @@
 # tests/ee/foresight/test_adapter.py
+# Updated: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — PR 2 adds:
+#   - ClaudeCodeBackend.run(messages, ...) — CAMEL BaseModelBackend-shaped
+#     surface returns OpenAI chat-completion dict.
+#   - DeterministicFakeBackend.run(...) — same shape, deterministic.
+#   - LiteLLMFallbackBackend stub — complete() + run() both raise
+#     NotImplementedError with a PR 3 pointer.
+#   - _compose_prompt + _role_tag flattening logic.
 # Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
 #
 # Pin the v0.1 backend adapter contract:
@@ -13,12 +20,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 from pocketpaw_ee.foresight.llm.adapter import (
     ClaudeCodeBackend,
     DeterministicFakeBackend,
+    LiteLLMFallbackBackend,
 )
 
 # --- DeterministicFakeBackend ---------------------------------------
@@ -203,3 +212,166 @@ async def test_claude_backend_factory_can_be_async():
     backend = ClaudeCodeBackend(client_factory=_async_factory)
     result = await backend.complete("p")
     assert result == "async-built"
+
+
+# --- PR 2: CAMEL BaseModelBackend-shaped surface --------------------
+#
+# These tests exercise the ``run(messages, response_format, tools)``
+# surface PR 3 will pass to ``oasis.SocialAgent(model=...)``. The
+# message objects are stub BaseMessage-shapes (we don't import
+# camel.messages.BaseMessage here so tests stay runnable without
+# pocketpaw-ee[foresight]).
+
+
+@dataclass
+class _FakeCAMELMessage:
+    """Quacks like ``camel.messages.BaseMessage`` — has ``content`` and
+    optionally ``role_name`` / ``role_type``. Used to test the adapter's
+    prompt flattening without depending on CAMEL at test time.
+    """
+
+    content: str
+    role_name: str = "User"
+    role_type: str | None = None
+
+
+async def test_claude_backend_run_returns_camel_chat_completion_shape():
+    fake = _FakeSDKClient(response="here is my reply")
+    backend = ClaudeCodeBackend(client_factory=lambda: fake)
+    msgs = [_FakeCAMELMessage(content="hello world", role_name="User")]
+
+    result = await backend.run(msgs)
+
+    # OpenAI ChatCompletion-shaped dict so CAMEL's downstream parsers
+    # (SocialAgent.perform_action_by_llm) consume it unchanged.
+    assert isinstance(result, dict)
+    assert result["object"] == "chat.completion"
+    assert len(result["choices"]) == 1
+    assert result["choices"][0]["message"]["role"] == "assistant"
+    assert result["choices"][0]["message"]["content"] == "here is my reply"
+    assert result["choices"][0]["message"]["tool_calls"] == []  # v0.2 stub
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert "usage" in result
+
+
+async def test_claude_backend_run_flattens_message_list_into_prompt():
+    """Multiple messages should flatten to a single newline-joined
+    prompt the SDK sees (the SDK doesn't carry conversation history)."""
+    fake = _FakeSDKClient(response="ok")
+    backend = ClaudeCodeBackend(client_factory=lambda: fake)
+    msgs = [
+        _FakeCAMELMessage(content="be helpful", role_name="System"),
+        _FakeCAMELMessage(content="hi", role_name="User"),
+        _FakeCAMELMessage(content="hello there", role_name="Assistant"),
+        _FakeCAMELMessage(content="what is 2+2?", role_name="User"),
+    ]
+
+    await backend.run(msgs)
+
+    sent = fake.queried_with or ""
+    # Each message body should appear in order
+    assert "be helpful" in sent
+    assert "hi" in sent
+    assert "hello there" in sent
+    assert "what is 2+2?" in sent
+    assert sent.index("be helpful") < sent.index("hi") < sent.index("hello there")
+
+
+async def test_claude_backend_run_accepts_empty_message_list():
+    """An empty list should produce an empty prompt — not crash."""
+    fake = _FakeSDKClient(response="empty-prompt-handled")
+    backend = ClaudeCodeBackend(client_factory=lambda: fake)
+    result = await backend.run([])
+    assert result["choices"][0]["message"]["content"] == "empty-prompt-handled"
+
+
+async def test_claude_backend_run_ignores_response_format_and_tools_at_v02():
+    """v0.2 passes response_format / tools but doesn't act on them.
+    PR 3 closes this gap; v0.2 just ensures the signature accepts them."""
+    fake = _FakeSDKClient(response="ack")
+    backend = ClaudeCodeBackend(client_factory=lambda: fake)
+    msgs = [_FakeCAMELMessage(content="hi")]
+
+    result = await backend.run(
+        msgs,
+        response_format={"type": "json_object"},
+        tools=[{"type": "function", "function": {"name": "noop"}}],
+    )
+
+    assert result["choices"][0]["message"]["content"] == "ack"
+
+
+def test_claude_backend_role_tag_extracts_system_messages():
+    msg = _FakeCAMELMessage(content="be careful", role_name="System")
+    assert ClaudeCodeBackend._role_tag(msg) == "SYSTEM"
+
+    msg2 = _FakeCAMELMessage(content="hi", role_name="User")
+    assert ClaudeCodeBackend._role_tag(msg2) == "USER"
+
+    msg3 = _FakeCAMELMessage(content="answer", role_name="Assistant")
+    assert ClaudeCodeBackend._role_tag(msg3) == "ASSISTANT"
+
+
+def test_claude_backend_role_tag_handles_unknown_role_as_user():
+    """Unrecognized roles default to USER — safe fallback."""
+    msg = _FakeCAMELMessage(content="?", role_name="Bystander")
+    assert ClaudeCodeBackend._role_tag(msg) == "USER"
+
+
+def test_claude_backend_compose_prompt_handles_messages_without_content():
+    """Messages with no ``content`` attr should fall through to ``str(msg)``
+    without crashing."""
+    backend = ClaudeCodeBackend()
+    prompt = backend._compose_prompt(["just a string", "another"])
+    assert "just a string" in prompt
+    assert "another" in prompt
+
+
+# --- PR 2: DeterministicFakeBackend.run ------------------------------
+
+
+async def test_fake_backend_run_returns_camel_chat_completion_shape():
+    backend = DeterministicFakeBackend()
+    result = await backend.run([])
+
+    assert isinstance(result, dict)
+    assert result["object"] == "chat.completion"
+    content = result["choices"][0]["message"]["content"]
+    assert "action=" in content  # carries the deterministic action line
+
+
+async def test_fake_backend_run_advances_call_count_like_complete():
+    """Calling ``run`` should increment the same counter ``complete`` does,
+    so a mixed-mode test still sees deterministic verb rotation.
+    """
+    backend = DeterministicFakeBackend()
+    await backend.run([])  # advances counter via internal complete()
+    await backend.complete("p")
+    assert backend.call_count == 2
+
+
+# --- PR 2: LiteLLMFallbackBackend stub -------------------------------
+
+
+def test_litellm_backend_marked_unavailable_at_v02():
+    """The fallback ships as a stub at PR 2; PR 3 wires the real proxy."""
+    assert LiteLLMFallbackBackend.BACKEND_AVAILABLE is False
+
+
+async def test_litellm_backend_complete_raises_with_pr3_pointer():
+    backend = LiteLLMFallbackBackend()
+    with pytest.raises(NotImplementedError, match="PR 3"):
+        await backend.complete("anything")
+
+
+async def test_litellm_backend_run_raises_with_pr3_pointer():
+    backend = LiteLLMFallbackBackend()
+    with pytest.raises(NotImplementedError, match="PR 3"):
+        await backend.run([])
+
+
+def test_litellm_backend_constructor_accepts_kwargs_without_crashing():
+    """PR 3 will accept model, base_url, api_key — for now we just ensure
+    construction doesn't blow up so the tier-pool builder can iterate."""
+    backend = LiteLLMFallbackBackend(model="anthropic/claude-sonnet-4-7")
+    assert backend is not None

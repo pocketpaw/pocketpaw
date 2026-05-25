@@ -87,6 +87,19 @@ extraction = [
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
 ]
+# Foresight module (RFC 08). CAMEL provides the LLM-backend abstraction
+# (ChatAgent, BaseModelBackend, MemoryRecord, ModelFactory, FunctionTool,
+# TextPrompt, OpenAIEmbedding) consumed by the vendored OASIS fork at
+# ee/pocketpaw_ee/foresight/substrate/oasis/. Kept optional at v0.2
+# because CAMEL 0.2.78-0.2.90 cap openai<2 and psutil<6, which collide
+# with langchain-openai (in the OSS dev group) and livekit-agents
+# (already an ee/ dep). Install with `pocketpaw-ee[foresight]` once the
+# v0.2 PR lands; PR 3 wires the substrate into the engine and revisits
+# the pin (likely needs a CAMEL fork or a constrained alt-pip resolve).
+# Released 2026-03-22, well past the 7-day supply-chain min-age gate.
+foresight = [
+    "camel-ai==0.2.90",
+]
 
 [project.urls]
 Homepage = "https://pocketpaw.xyz"
