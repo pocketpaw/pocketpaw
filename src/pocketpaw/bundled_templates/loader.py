@@ -71,9 +71,7 @@ def _lookup_pattern_in_index(name: str, templates_dir: Path | None) -> str | Non
     try:
         index = json.loads(index_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 — best-effort lookup
-        logger.debug(
-            "bundled_templates.loader: could not read sibling index.json: %s", exc
-        )
+        logger.debug("bundled_templates.loader: could not read sibling index.json: %s", exc)
         return None
     rows = index.get("templates", []) if isinstance(index, dict) else []
     for row in rows:
@@ -84,9 +82,7 @@ def _lookup_pattern_in_index(name: str, templates_dir: Path | None) -> str | Non
     return None
 
 
-def _promote_v1_to_v2(
-    meta: dict[str, Any], *, templates_dir: Path | None = None
-) -> dict[str, Any]:
+def _promote_v1_to_v2(meta: dict[str, Any], *, templates_dir: Path | None = None) -> dict[str, Any]:
     """Apply the four RFC 03 v1 -> v2 translation rules in-place on a
     COPY of the input dict, returning the promoted dict.
 
@@ -138,11 +134,7 @@ def _promote_v1_to_v2(
     # Rule 4: pattern
     if "pattern" not in out:
         name = out.get("name")
-        looked_up = (
-            _lookup_pattern_in_index(name, templates_dir)
-            if isinstance(name, str)
-            else None
-        )
+        looked_up = _lookup_pattern_in_index(name, templates_dir) if isinstance(name, str) else None
         out["pattern"] = looked_up if looked_up is not None else "app"
 
     return out
