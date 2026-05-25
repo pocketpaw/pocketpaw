@@ -1,4 +1,18 @@
 # ee/pocketpaw_ee/cloud/foresight/domain.py
+# Updated: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) —
+# PR 5:
+#   - Rebuilt ``ProjectedDecision`` to match the persisted shape of
+#     the new ``foresight_projected_decisions`` collection. Fields
+#     follow RFC §7.7 (anchor_id, persona_id, tick_id, decision_text,
+#     confidence, sub_type, run_id) plus the workspace tenancy key.
+#   - Added ``forward_precedent_decision_id`` field stubbed to None —
+#     RFC 07 Decision Graph wiring (forward-precedent edge) is out of
+#     scope per the PR brief; the field is reserved so the future
+#     backfill pass doesn't have to reshape the wire contract.
+#   - The PR 7 embedded-decision shape didn't survive any consumers
+#     beyond the docstring, so the rewrite is non-breaking. The
+#     dataclass is still frozen and workspace_id is still required
+#     positionally per cloud rule #3.
 # Updated: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4:
 #   - Added ``BacktestRun`` (parallel to ``ScenarioRun`` but for
 #     retroactive runs scored against ground truth) and
@@ -9,18 +23,20 @@
 #
 # Foresight cloud domain — frozen value objects, no Beanie / Pydantic /
 # FastAPI imports. The service (``ee.cloud.foresight.service``) maps
-# between these and the ``ForesightRun`` Beanie document; the DTO layer
+# between these and the ``ForesightRun`` / ``ForesightBacktest`` /
+# ``ForesightProjectedDecision`` Beanie documents; the DTO layer
 # (``ee.cloud.foresight.dto``) maps these to Pydantic responses.
 #
 # Multi-tenancy is enforced at construction per the cloud rule #3:
 # ``workspace_id`` is required positionally with no default — building a
-# ``ScenarioRun`` (or ``BacktestRun``, or ``OnboardingGateState``)
-# without one is a type error.
+# ``ScenarioRun`` (or ``BacktestRun``, ``OnboardingGateState``,
+# ``ProjectedDecision``) without one is a type error.
 #
-# Four value objects ship as of PR 4:
+# Five value objects ship as of PR 5:
 #
 #   - ``ScenarioRun`` (PR 7) — the persisted forward-run record.
-#   - ``ProjectedDecision`` (PR 7) — RFC §7.7 projected-decision shape.
+#   - ``ProjectedDecision`` (PR 5) — per-anchor projection record
+#     persisted into ``foresight_projected_decisions``.
 #   - ``BacktestRun`` (PR 4) — persisted retroactive-run record with
 #     the aggregator's accuracy summary + threshold decision pinned
 #     to the doc so historical pass/fail labels survive default tuning.
@@ -30,7 +46,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
@@ -67,31 +83,43 @@ class ScenarioRun:
 
 @dataclass(frozen=True)
 class ProjectedDecision:
-    """A Decision (RFC 07 shape) emitted inside a Foresight run.
+    """One projected decision emitted during a Foresight run.
 
-    Same field set as the real Decision (anchor object, payload, actors)
-    plus three Foresight-specific extras per RFC §7.7:
+    Field shape mirrors the persisted
+    :class:`pocketpaw_ee.cloud.models.foresight_projected_decision.ForesightProjectedDecision`
+    document 1-to-1 plus the cloud rule #3 tenancy invariant:
 
-    - ``run_id``: the Foresight run that produced this projection.
-    - ``sim_tick``: the simulation tick at which the chain closed.
-    - ``projection_confidence``: aggregate confidence in (0.0, 1.0).
-
-    Not persisted as its own Mongo collection in PR 7 — projected
-    decisions live inside the run's ``result`` dict for now. PR 8 fans
-    them out into a sibling ``projected_decisions`` collection so the
-    Decision-Graph join (RFC §7.7 ``forward-precedent`` edge) can be
-    indexed cheaply. Freezing the dataclass now so PR 8's persistence
-    layer doesn't have to reshape the wire contract.
+    - ``id`` — Mongo ObjectId rendered as hex string.
+    - ``workspace_id`` — tenancy key (required positionally).
+    - ``run_id`` — the ForesightRun document id this projection
+      belongs to.
+    - ``anchor_id`` — sub-type-specific anchor identifier
+      (``decision:<name>`` / ``segment:<role>`` / ``rollout:<event>``).
+    - ``persona_id`` — the persona whose modal action drove the
+      projection (empty string when no persona acted).
+    - ``tick_id`` — zero-based tick index inside the run.
+    - ``decision_text`` — short string capturing the modal action
+      verb (e.g. ``"accept"``, ``"churn"``, ``"escalate"``).
+    - ``confidence`` — aggregate confidence in (0.0, 1.0).
+    - ``sub_type`` — the scenario's sub_type.
+    - ``forward_precedent_decision_id`` — RFC §7.7 forward-precedent
+      hook. ``None`` in PR 5 because RFC 07's Decision Graph wiring
+      isn't yet in pocketpaw; the field is reserved so the future
+      backfill pass (Decision Graph → projection cross-link) doesn't
+      have to reshape the wire contract.
+    - ``created_at`` — server-side timestamp from the Mongo doc.
     """
 
     id: str
     workspace_id: str
     run_id: str
-    sim_tick: int
-    anchor_object_id: str
-    payload: dict[str, Any]
-    projection_confidence: float = 0.5
-    actors: tuple[str, ...] = field(default_factory=tuple)
+    anchor_id: str
+    tick_id: int
+    decision_text: str
+    confidence: float
+    sub_type: str
+    persona_id: str = ""
+    forward_precedent_decision_id: str | None = None
     created_at: datetime | None = None
 
 

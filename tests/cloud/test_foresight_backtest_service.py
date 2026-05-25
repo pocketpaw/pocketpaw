@@ -243,8 +243,8 @@ async def test_create_captures_engine_failure_as_failed_status(monkeypatch, reco
 async def test_create_rejects_unsupported_sub_type() -> None:
     ctx = _ctx()
     body = CreateBacktestRequest(
-        name="market-backtest",
-        sub_type="market_sim",
+        name="ops-stress-backtest",
+        sub_type="ops_stress_test",
         n_ticks=1,
         personas=[PersonaSpecRequest(name="A", role="participant", ocean={})],
         anchors=[

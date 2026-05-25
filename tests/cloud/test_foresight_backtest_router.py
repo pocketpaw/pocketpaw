@@ -134,7 +134,7 @@ async def test_post_accepts_threshold_tightening(w1_client: AsyncClient) -> None
 async def test_post_422_unsupported_sub_type(w1_client: AsyncClient) -> None:
     r = await w1_client.post(
         "/foresight/backtests",
-        json=_payload(sub_type="market_sim"),
+        json=_payload(sub_type="ops_stress_test"),
     )
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "foresight.invalid_scenario"

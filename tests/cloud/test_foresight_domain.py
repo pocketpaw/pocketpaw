@@ -71,23 +71,28 @@ def test_scenario_run_carries_optional_result_and_error() -> None:
 
 
 def test_projected_decision_carries_rfc_extras() -> None:
-    """RFC §7.7: a ProjectedDecision is a Decision plus three extras —
-    ``run_id``, ``sim_tick``, ``projection_confidence``. Freeze the
-    contract now so PR 8's persistence layer doesn't have to reshape."""
+    """RFC §7.7: a ProjectedDecision carries the per-anchor projection
+    fields PR 5 added — anchor_id, persona_id, tick_id, decision_text,
+    confidence, sub_type, run_id. Tenancy (``workspace_id``) is the
+    cloud rule #3 invariant. ``forward_precedent_decision_id`` is
+    reserved for the RFC 07 Decision Graph backfill — None in v0.5."""
     pd = ProjectedDecision(
         id="proj-1",
         workspace_id="w1",
         run_id="run-1",
-        sim_tick=10,
-        anchor_object_id="lease:LR-2026-117",
-        payload={"outcome": "accept", "price": 2850},
-        projection_confidence=0.78,
-        actors=("renewal_specialist", "approver_prakash"),
+        anchor_id="decision:LR-2026-117",
+        persona_id="persona-anne",
+        tick_id=10,
+        decision_text="accept",
+        confidence=0.78,
+        sub_type="decision_forecast",
     )
     assert pd.run_id == "run-1"
-    assert pd.sim_tick == 10
-    assert 0.0 < pd.projection_confidence < 1.0
-    assert pd.anchor_object_id == "lease:LR-2026-117"
+    assert pd.anchor_id == "decision:LR-2026-117"
+    assert pd.tick_id == 10
+    assert 0.0 < pd.confidence < 1.0
+    assert pd.decision_text == "accept"
+    assert pd.forward_precedent_decision_id is None
 
 
 def test_projected_decision_is_frozen() -> None:
@@ -95,12 +100,14 @@ def test_projected_decision_is_frozen() -> None:
         id="p",
         workspace_id="w1",
         run_id="r",
-        sim_tick=0,
-        anchor_object_id="x",
-        payload={},
+        anchor_id="a",
+        tick_id=0,
+        decision_text="noop",
+        confidence=0.0,
+        sub_type="decision_forecast",
     )
     with pytest.raises(FrozenInstanceError):
-        pd.projection_confidence = 0.9  # type: ignore[misc]
+        pd.confidence = 0.9  # type: ignore[misc]
 
 
 def test_projected_decision_requires_workspace_id() -> None:
@@ -108,9 +115,11 @@ def test_projected_decision_requires_workspace_id() -> None:
         ProjectedDecision(  # type: ignore[call-arg]
             id="p",
             run_id="r",
-            sim_tick=0,
-            anchor_object_id="x",
-            payload={},
+            anchor_id="a",
+            tick_id=0,
+            decision_text="noop",
+            confidence=0.0,
+            sub_type="decision_forecast",
         )
 
 

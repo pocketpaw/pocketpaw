@@ -1,4 +1,12 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5
+#   adds the per-anchor projection fanout surface:
+#     GET /api/v1/foresight/runs/{id}/projected-decisions
+#       → paginated list of projected decisions for one run, optional
+#         ``anchor_id`` query filter. Tenancy: returns 404 when the run
+#         is unknown / cross-tenant (same collapsing rule as
+#         ``GET /runs/{id}``). Cursor: offset-based ``limit`` (default
+#         50, capped at 500) + ``offset`` (default 0).
 # Modified: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4
 #   adds the retroactive backtest gate surface:
 #     POST /api/v1/foresight/backtests       → run a backtest + score it
@@ -44,6 +52,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateBacktestRequest,
     CreateScenarioRequest,
     OnboardingGateResponse,
+    ProjectedDecisionListResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
 )
@@ -111,6 +120,43 @@ async def list_runs(
     detail endpoint.
     """
     return await foresight_service.list_scenario_runs(ctx, limit=limit)
+
+
+@router.get(
+    "/runs/{run_id}/projected-decisions",
+    response_model=ProjectedDecisionListResponse,
+)
+async def list_projected_decisions(
+    run_id: str,
+    anchor_id: str | None = Query(default=None, max_length=256),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    ctx: RequestContext = Depends(request_context),
+) -> ProjectedDecisionListResponse:
+    """List projected decisions for one run.
+
+    PR 5 contract:
+      - Items are returned in ``(tick_id ASC, anchor_id ASC)`` order
+        — the index on the persistence layer makes this a single
+        bounded scan even across hundreds of records.
+      - ``anchor_id`` query filter narrows to one anchor across all
+        ticks (e.g. ``?anchor_id=segment:enterprise`` on a Market Sim
+        run, ``?anchor_id=rollout:training`` on an Org Change run).
+      - Tenancy: an unknown / cross-tenant run id returns 404
+        (``foresight_run.not_found``) — same collapsing rule the
+        scenario-run endpoints use so existence isn't cross-tenant
+        leakable.
+      - Pagination is offset-based; ``limit`` is hard-capped at 500.
+        Cursor-based pagination lands in v1.0 once the dataset grows
+        past the point where ``count_documents`` is cheap.
+    """
+    return await foresight_service.list_projected_decisions(
+        ctx,
+        run_id,
+        anchor_id=anchor_id,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,20 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5:
+#   - Added the RFC §7.7 per-anchor projection fanout. The engine call
+#     (``_run_engine_inline``) now accepts a ``run_id`` + an injected
+#     per-tick callback. The callback (``emit_projected_decision``) is
+#     the engine → cloud direction: defined here in cloud, passed by
+#     closure into the engine's ``run_scenario`` so the import-linter's
+#     "engine never imports cloud" contract holds. Every (anchor × tick)
+#     bucket gets one ForesightProjectedDecision document plus a
+#     ``ForesightProjectedDecisionEmitted`` event so the Live panel can
+#     render the timeline without polling.
+#   - Added ``list_projected_decisions(ctx, run_id, anchor_id=None,
+#     limit=50, offset=0)`` — the GET endpoint reader. Tenancy + run
+#     scoping enforced via the ``_fetch_in_workspace`` helper that
+#     already collapses unknown runs / cross-tenant ids into 404; the
+#     ``anchor_id`` filter is the additional optional clause. v0.5
+#     keeps the cursor offset-based.
 # Updated: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4:
 #   - Added retroactive backtest API (``create_backtest`` /
 #     ``get_backtest`` / ``list_backtests``) and the onboarding gate
@@ -62,6 +78,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     ForesightBacktestCreated,
     ForesightBacktestFailed,
     ForesightOnboardingUnlocked,
+    ForesightProjectedDecisionEmitted,
     ForesightRunCompleted,
     ForesightRunCreated,
     ForesightRunFailed,
@@ -70,6 +87,7 @@ from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.foresight.domain import (
     BacktestRun,
     OnboardingGateState,
+    ProjectedDecision,
     ScenarioRun,
 )
 from pocketpaw_ee.cloud.foresight.dto import (
@@ -78,11 +96,16 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateBacktestRequest,
     CreateScenarioRequest,
     OnboardingGateResponse,
+    ProjectedDecisionListResponse,
+    ProjectedDecisionResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
 )
 from pocketpaw_ee.cloud.models.foresight_backtest import (
     ForesightBacktest as _ForesightBacktestDoc,
+)
+from pocketpaw_ee.cloud.models.foresight_projected_decision import (
+    ForesightProjectedDecision as _ForesightProjectedDecisionDoc,
 )
 from pocketpaw_ee.cloud.models.foresight_run import ForesightRun as _ForesightRunDoc
 
@@ -178,7 +201,12 @@ async def _fetch_in_workspace(workspace_id: str, run_id: str) -> _ForesightRunDo
 # ---------------------------------------------------------------------------
 
 
-async def _run_engine_inline(body: CreateScenarioRequest) -> dict[str, Any]:
+async def _run_engine_inline(
+    body: CreateScenarioRequest,
+    *,
+    workspace_id: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """Drive the foresight engine for one scenario run.
 
     Imports are lazy: the engine modules (persona, llm, scenarios) live
@@ -187,6 +215,14 @@ async def _run_engine_inline(body: CreateScenarioRequest) -> dict[str, Any]:
     cloud rule #2 forbids touching the Beanie doc outside this service;
     the analogous principle on the engine side is that the cloud
     surface must remain importable without the engine's optional deps.
+
+    PR 5 wires the per-tick ProjectedDecision callback. When the caller
+    supplies a ``workspace_id`` + ``run_id``, the runner emits one
+    ForesightProjectedDecision document per (anchor × tick) bucket via
+    the ``emit_projected_decision`` closure below. The closure stays
+    here (rather than in the runner) so the engine never statically
+    imports the cloud — the import-linter contract holds and the
+    engine's optional-extra story is preserved.
 
     Returns the engine's ``RunResult.as_wire_dict()`` so the caller can
     persist the run as a JSON-shaped blob without leaking dataclass
@@ -213,7 +249,40 @@ async def _run_engine_inline(body: CreateScenarioRequest) -> dict[str, Any]:
         n_ticks=body.n_ticks,
         personas=personas,
     )
-    result = await run_scenario(config)
+
+    # Per-tick emission closure — only wired when the cloud caller
+    # supplies the run id. CLI smoke runs pass no run_id and the
+    # callback stays None; the engine still surfaces the records on
+    # ``RunResult.projected_decisions`` either way.
+    callback = None
+    if workspace_id and run_id:
+
+        async def _on_projected_decision(
+            anchor_id: str,
+            persona_id: str,
+            tick_id: int,
+            decision_text: str,
+            confidence: float,
+            sub_type: str,
+        ) -> None:
+            await emit_projected_decision(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                anchor_id=anchor_id,
+                persona_id=persona_id,
+                tick_id=tick_id,
+                decision_text=decision_text,
+                confidence=confidence,
+                sub_type=sub_type,
+            )
+
+        callback = _on_projected_decision
+
+    result = await run_scenario(
+        config,
+        on_projected_decision=callback,
+        run_id=run_id,
+    )
     return result.as_wire_dict()
 
 
@@ -297,7 +366,11 @@ async def create_scenario_run(
     # PR 7 keeps the v0.1 event vocabulary (created → completed/failed).
 
     try:
-        result_dict = await _run_engine_inline(body)
+        result_dict = await _run_engine_inline(
+            body,
+            workspace_id=workspace_id,
+            run_id=str(doc.id),
+        )
     except Exception as exc:  # noqa: BLE001 — capture into the doc, never bubble
         error_message = f"{type(exc).__name__}: {exc}"
         doc.status = "failed"
@@ -797,13 +870,178 @@ async def get_onboarding_gate(ctx: RequestContext) -> OnboardingGateResponse:
     return _to_gate_response(state)
 
 
+# ---------------------------------------------------------------------------
+# Projected decisions (RFC §7.7 + PR 5 per-anchor projection fanout)
+# ---------------------------------------------------------------------------
+
+
+def _to_projected_decision_domain(doc: _ForesightProjectedDecisionDoc) -> ProjectedDecision:
+    return ProjectedDecision(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        run_id=doc.run_id,
+        anchor_id=doc.anchor_id,
+        persona_id=doc.persona_id,
+        tick_id=doc.tick_id,
+        decision_text=doc.decision_text,
+        confidence=doc.confidence,
+        sub_type=doc.sub_type,
+        forward_precedent_decision_id=doc.forward_precedent_decision_id,
+        created_at=getattr(doc, "createdAt", None),
+    )
+
+
+def _to_projected_decision_response(pd: ProjectedDecision) -> ProjectedDecisionResponse:
+    return ProjectedDecisionResponse(
+        id=pd.id,
+        workspace_id=pd.workspace_id,
+        run_id=pd.run_id,
+        anchor_id=pd.anchor_id,
+        persona_id=pd.persona_id,
+        tick_id=pd.tick_id,
+        decision_text=pd.decision_text,
+        confidence=pd.confidence,
+        sub_type=pd.sub_type,
+        forward_precedent_decision_id=pd.forward_precedent_decision_id,
+        created_at=iso_utc(pd.created_at),
+    )
+
+
+async def emit_projected_decision(
+    *,
+    workspace_id: str,
+    run_id: str,
+    anchor_id: str,
+    persona_id: str,
+    tick_id: int,
+    decision_text: str,
+    confidence: float,
+    sub_type: str,
+) -> ProjectedDecisionResponse:
+    """Persist one projected-decision record and emit the event.
+
+    Called by the engine's per-tick callback (wired in
+    ``_run_engine_inline``). The callback is injected into the runner
+    via closure so the engine module stays clean of the cloud import
+    surface — the import-linter contract pins this direction.
+
+    Tenancy:
+      - ``workspace_id`` is required (the closure inside
+        ``_run_engine_inline`` will only be wired when the cloud call
+        has already resolved a workspace), so this function asserts
+        rather than validating.
+      - The run_id is the ForesightRun document id; cross-tenant
+        protection is enforced by the run's own ``_fetch_in_workspace``
+        check on the read side (a misrouted write here is impossible
+        because the closure binds the workspace from the same
+        RequestContext that constructed the run).
+
+    Returns the persisted record as a response shape so callers can
+    surface it on the live ws fan-out without a second round trip.
+
+    Per RFC §7.7: ``forward_precedent_decision_id`` is stubbed ``None``
+    until RFC 07 lands in pocketpaw; the field is part of the persisted
+    shape so the backfill pass can populate it without a wire-shape
+    bump.
+    """
+    if not workspace_id:
+        raise Forbidden(
+            "foresight.no_workspace",
+            "workspace required to emit a projected decision",
+        )
+
+    doc = _ForesightProjectedDecisionDoc(
+        workspace=workspace_id,
+        run_id=run_id,
+        anchor_id=anchor_id,
+        persona_id=persona_id,
+        tick_id=tick_id,
+        decision_text=decision_text,
+        confidence=confidence,
+        sub_type=sub_type,
+        forward_precedent_decision_id=None,
+    )
+    await doc.insert()
+
+    response = _to_projected_decision_response(_to_projected_decision_domain(doc))
+    await emit(ForesightProjectedDecisionEmitted(data=response.model_dump()))
+    return response
+
+
+async def list_projected_decisions(
+    ctx: RequestContext,
+    run_id: str,
+    *,
+    anchor_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> ProjectedDecisionListResponse:
+    """List projected decisions for a run, optionally filtered by anchor.
+
+    Cross-tenant safety: this function calls ``_fetch_in_workspace``
+    first so an unknown / cross-tenant run id surfaces as ``NotFound``
+    *before* the projection query runs. That keeps the 404 collapsing
+    rule consistent with ``get_scenario_run`` — existence is never
+    leakable across tenants.
+
+    Pagination:
+      - ``limit`` defaults to 50; hard-capped at 500 so a misconfigured
+        caller can't drag the entire collection into memory.
+      - ``offset`` is the cursor; v0.5 keeps the cursor offset-based
+        and computes ``total`` via ``count_documents`` under the same
+        filter. v1.0 may swap to an opaque cursor once dataset sizes
+        make ``count_documents`` expensive.
+      - ``has_more`` is derived from ``offset + len(items) < total`` so
+        callers can detect EOF without a second round trip.
+
+    Order: ``(tick_id ASC, anchor_id ASC)`` matches the
+    ``(workspace, run_id, tick_id, anchor_id)`` index so the query is a
+    single bounded scan.
+    """
+    workspace_id = _require_workspace(ctx)
+    # 404-collapse rule — run must exist in this workspace before the
+    # projection query runs (otherwise an attacker could probe run-id
+    # existence by listing projections that always return ``items=[]``).
+    await _fetch_in_workspace(workspace_id, run_id)
+
+    if limit < 1:
+        raise ValidationError("foresight.invalid_limit", "limit must be >= 1")
+    if limit > 500:
+        limit = 500
+    if offset < 0:
+        raise ValidationError("foresight.invalid_offset", "offset must be >= 0")
+
+    query: dict[str, Any] = {"workspace": workspace_id, "run_id": run_id}
+    if anchor_id:
+        query["anchor_id"] = anchor_id
+
+    total = await _ForesightProjectedDecisionDoc.find(query).count()
+    docs = (
+        await _ForesightProjectedDecisionDoc.find(query)
+        .sort([("tick_id", 1), ("anchor_id", 1)])  # type: ignore[list-item]
+        .skip(offset)
+        .limit(limit)
+        .to_list()
+    )
+    items = [_to_projected_decision_response(_to_projected_decision_domain(d)) for d in docs]
+    return ProjectedDecisionListResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=(offset + len(items)) < total,
+    )
+
+
 __all__ = [
     "GATE_DEFAULT_THRESHOLD",
     "create_backtest",
     "create_scenario_run",
+    "emit_projected_decision",
     "get_backtest",
     "get_onboarding_gate",
     "get_scenario_run",
     "list_backtests",
+    "list_projected_decisions",
     "list_scenario_runs",
 ]

@@ -14,6 +14,9 @@ from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
+from pocketpaw_ee.cloud.models.foresight_projected_decision import (
+    ForesightProjectedDecision,
+)
 from pocketpaw_ee.cloud.models.foresight_run import ForesightRun
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.invite import Invite
@@ -59,6 +62,7 @@ __all__ = [
     "FileObj",
     "FileUpload",
     "ForesightBacktest",
+    "ForesightProjectedDecision",
     "ForesightRun",
     "Group",
     "GroupAgent",
@@ -115,6 +119,7 @@ def get_all_documents():
         PlanSession,
         ForesightRun,
         ForesightBacktest,
+        ForesightProjectedDecision,
     ]
 
 
