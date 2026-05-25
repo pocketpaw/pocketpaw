@@ -1,4 +1,7 @@
-# tests/cloud/test_foresight_domain.py — RFC 08 PR 7.
+# tests/cloud/test_foresight_domain.py
+# Modified: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4
+#   adds frozen-domain coverage for BacktestRun + OnboardingGateState:
+#   tenancy invariant, immutability, optional vs required fields.
 # Created: 2026-05-25 (feat/foresight-v07-cloud-mount) — domain-layer
 #   tests for the frozen value objects. No Mongo / Beanie / FastAPI;
 #   asserts the cloud-rule #3 tenancy invariant (workspace_id required
@@ -11,7 +14,12 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
-from pocketpaw_ee.cloud.foresight.domain import ProjectedDecision, ScenarioRun
+from pocketpaw_ee.cloud.foresight.domain import (
+    BacktestRun,
+    OnboardingGateState,
+    ProjectedDecision,
+    ScenarioRun,
+)
 
 
 def _scenario_run(**overrides) -> ScenarioRun:
@@ -103,4 +111,106 @@ def test_projected_decision_requires_workspace_id() -> None:
             sim_tick=0,
             anchor_object_id="x",
             payload={},
+        )
+
+
+# --- BacktestRun ----------------------------------------------------
+
+
+def _backtest_run(**overrides) -> BacktestRun:
+    defaults = {
+        "id": "abc",
+        "workspace_id": "w1",
+        "scenario_name": "onboarding-backtest",
+        "status": "complete",
+        "created_at": datetime.now(UTC),
+        "request": {},
+        "threshold": 0.65,
+    }
+    defaults.update(overrides)
+    return BacktestRun(**defaults)
+
+
+def test_backtest_run_is_frozen() -> None:
+    run = _backtest_run()
+    with pytest.raises(FrozenInstanceError):
+        run.status = "failed"  # type: ignore[misc]
+
+
+def test_backtest_run_requires_workspace_id() -> None:
+    """Cloud rule #3: tenancy enforced at construction."""
+    with pytest.raises(TypeError):
+        BacktestRun(  # type: ignore[call-arg]
+            id="abc",
+            scenario_name="x",
+            status="complete",
+            created_at=datetime.now(UTC),
+            request={},
+            threshold=0.65,
+        )
+
+
+def test_backtest_run_carries_gate_decision_and_threshold() -> None:
+    run = _backtest_run(
+        gate_decision={"passed": True, "observed": 0.72, "threshold": 0.65, "margin": 0.07},
+        threshold=0.65,
+    )
+    assert run.gate_decision is not None
+    assert run.gate_decision["passed"] is True
+    assert run.threshold == 0.65
+
+
+def test_backtest_run_supports_failed_state() -> None:
+    failed = _backtest_run(status="failed", error="engine outage", result=None, gate_decision=None)
+    assert failed.status == "failed"
+    assert failed.error == "engine outage"
+
+
+# --- OnboardingGateState --------------------------------------------
+
+
+def test_onboarding_gate_state_unlocked_carries_backtest_ref() -> None:
+    state = OnboardingGateState(
+        workspace_id="w1",
+        unlocked=True,
+        threshold=0.65,
+        reason="unlocked",
+        last_backtest_id="bt-1",
+        last_backtest_accuracy=0.72,
+        last_backtest_at=datetime.now(UTC),
+    )
+    assert state.unlocked is True
+    assert state.reason == "unlocked"
+    assert state.last_backtest_id == "bt-1"
+
+
+def test_onboarding_gate_state_closed_no_backtest_has_no_ref() -> None:
+    state = OnboardingGateState(
+        workspace_id="w1",
+        unlocked=False,
+        threshold=0.65,
+        reason="no_backtest",
+    )
+    assert state.unlocked is False
+    assert state.last_backtest_id is None
+    assert state.last_backtest_accuracy is None
+
+
+def test_onboarding_gate_state_is_frozen() -> None:
+    state = OnboardingGateState(
+        workspace_id="w1",
+        unlocked=False,
+        threshold=0.65,
+        reason="no_backtest",
+    )
+    with pytest.raises(FrozenInstanceError):
+        state.unlocked = True  # type: ignore[misc]
+
+
+def test_onboarding_gate_state_requires_workspace_id() -> None:
+    with pytest.raises(TypeError):
+        OnboardingGateState(  # type: ignore[call-arg]
+            unlocked=False,
+            threshold=0.65,
+            reason="no_backtest",
         )

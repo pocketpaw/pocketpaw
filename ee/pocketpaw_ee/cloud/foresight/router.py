@@ -1,4 +1,13 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4
+#   adds the retroactive backtest gate surface:
+#     POST /api/v1/foresight/backtests       → run a backtest + score it
+#     GET  /api/v1/foresight/backtests/{id}  → fetch a stored backtest
+#     GET  /api/v1/foresight/backtests       → list backtests in the workspace
+#     GET  /api/v1/foresight/onboarding/gate → onboarding unlock state
+#   All endpoints delegate to ``ee.cloud.foresight.service``; persistence
+#   lives in the new ``foresight_backtests`` collection. The onboarding
+#   UI flow that consumes the gate state belongs to a paw-enterprise PR.
 # Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — PR 7. Routes now
 #   delegate to ``ee.cloud.foresight.service`` instead of writing through
 #   the in-memory ``RunStore``; ``GET /runs`` (list endpoint) added; the
@@ -8,16 +17,20 @@
 #   returns the same field set.
 # Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
 #
-# Foresight REST surface — PR 7 contract:
+# Foresight REST surface — PR 4 contract:
 #
-#   POST /api/v1/foresight/scenarios     → run a scenario inline, return result
-#   GET  /api/v1/foresight/runs/{id}     → fetch a stored run
-#   GET  /api/v1/foresight/runs          → list runs in the caller's workspace
+#   POST /api/v1/foresight/scenarios       → run a scenario inline
+#   GET  /api/v1/foresight/runs/{id}       → fetch a stored run
+#   GET  /api/v1/foresight/runs            → list runs in the caller's workspace
+#   POST /api/v1/foresight/backtests       → run a retroactive backtest + score
+#   GET  /api/v1/foresight/backtests/{id}  → fetch a stored backtest
+#   GET  /api/v1/foresight/backtests       → list backtests in the workspace
+#   GET  /api/v1/foresight/onboarding/gate → onboarding unlock posture
 #
 # Mounted by ``ee.cloud.__init__:mount_cloud`` alongside the other cloud
-# routers. Service-owned writes go to the ``ForesightRun`` Beanie
-# collection (see ``ee.cloud.models.foresight_run``); persistence
-# survives restarts and is workspace-scoped.
+# routers. Service-owned writes go to the ``ForesightRun`` +
+# ``ForesightBacktest`` Beanie collections; persistence survives restarts
+# and is workspace-scoped.
 
 from __future__ import annotations
 
@@ -26,7 +39,11 @@ from fastapi import APIRouter, Depends, Query
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.foresight import service as foresight_service
 from pocketpaw_ee.cloud.foresight.dto import (
+    BacktestRunListItemResponse,
+    BacktestRunResponse,
+    CreateBacktestRequest,
     CreateScenarioRequest,
+    OnboardingGateResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
 )
@@ -94,6 +111,92 @@ async def list_runs(
     detail endpoint.
     """
     return await foresight_service.list_scenario_runs(ctx, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Backtest gate (RFC §10 + §13.1 gate 7)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/backtests", response_model=BacktestRunResponse)
+async def create_backtest(
+    body: CreateBacktestRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> BacktestRunResponse:
+    """Run a retroactive backtest inline, score it against the unlock
+    threshold, and return the result + gate decision.
+
+    Body shape matches the forward-sim grammar (personas + sub_type +
+    n_ticks) plus the ``anchors`` list — one historical decision per
+    anchor with its known actual outcome inline. v0.1 takes the actuals
+    inline; v1.0 will pull them from the Fabric/journal connector.
+
+    Contract:
+      - The backtest completes synchronously before this returns (same
+        as v0.1's scenarios endpoint).
+      - The response carries both ``result`` (engine wire dict +
+        ``calibration_summary``) and ``gate_decision`` (the
+        ThresholdDecision wire dict).
+      - A passing backtest fires both ``foresight.backtest.completed``
+        and ``foresight.onboarding.unlocked`` — the latter is the
+        signal the chat agent's onboarding skill watches for.
+      - Per-run thresholds may tighten above the workspace default
+        (``GATE_DEFAULT_THRESHOLD = 0.65``) but cannot relax below it.
+        A relaxation request returns 422 ``foresight.threshold_below_default``.
+    """
+    return await foresight_service.create_backtest(ctx, body)
+
+
+@router.get("/backtests/{backtest_id}", response_model=BacktestRunResponse)
+async def get_backtest(
+    backtest_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> BacktestRunResponse:
+    """Fetch a stored backtest by id.
+
+    Returns 404 (``foresight_backtest.not_found``) for unknown,
+    malformed, or cross-tenant ids — same collapsing rule the
+    scenarios endpoint uses so existence isn't cross-tenant leakable.
+    """
+    return await foresight_service.get_backtest(ctx, backtest_id)
+
+
+@router.get("/backtests", response_model=list[BacktestRunListItemResponse])
+async def list_backtests(
+    limit: int = Query(default=50, ge=1, le=200),
+    ctx: RequestContext = Depends(request_context),
+) -> list[BacktestRunListItemResponse]:
+    """List backtests in the caller's workspace, most recent first.
+
+    Lighter list-item shape keeps the per-row payload cheap; the
+    detail endpoint serves the full result blob. ``gate_decision`` is
+    preserved in the list shape so the Aggregate panel can render the
+    pass / fail label per row without click-through.
+    """
+    return await foresight_service.list_backtests(ctx, limit=limit)
+
+
+@router.get("/onboarding/gate", response_model=OnboardingGateResponse)
+async def get_onboarding_gate(
+    ctx: RequestContext = Depends(request_context),
+) -> OnboardingGateResponse:
+    """Return the workspace's onboarding unlock posture.
+
+    Derived from the latest completed backtest in the workspace; the
+    UI's onboarding flow polls this on the new-workspace path and the
+    Scenarios panel checks ``unlocked`` before letting the operator
+    start a forward sim.
+
+    Reason vocabulary:
+      - ``no_backtest`` — no backtest has run yet
+      - ``in_flight`` — a backtest is queued / running, no prior pass
+      - ``below_threshold`` — latest backtest failed the gate
+      - ``unlocked`` — latest backtest passed; forward sims are open
+
+    Note: the actual onboarding UI flow that consumes this state ships
+    in a paw-enterprise PR (out of scope for the PocketPaw lane).
+    """
+    return await foresight_service.get_onboarding_gate(ctx)
 
 
 __all__ = ["router"]

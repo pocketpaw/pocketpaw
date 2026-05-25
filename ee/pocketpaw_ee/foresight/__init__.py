@@ -1,4 +1,15 @@
 # ee/pocketpaw_ee/foresight/__init__.py
+# Updated: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4:
+#   - Bumped __version__ to 0.4.0 — aggregator primitives shipped at
+#     ``foresight/aggregator.py`` and the cloud-side backtest gate
+#     (``ee/cloud/foresight/{service,router,dto,domain}.py``) consumes
+#     them as the unlock criterion for forward sims (RFC §13.1 gate 7).
+#   - Lazy-export surface grew: accuracy_meets_threshold,
+#     ThresholdDecision, summarize_by, group_pairs_by,
+#     per_scenario_template_summary, per_anchor_namespace_summary,
+#     rolling_accuracy, rolling_accuracy_series, confidence_drift,
+#     ConfidenceDrift, modal_outcome_distribution,
+#     ModalOutcomeDistribution, index_predictions.
 # Updated: 2026-05-25 (feat/foresight-v03-calibration) — PR 3:
 #   - Bumped __version__ to 0.3.0 — CAMEL hard-dep promotion, OASIS
 #     substrate wiring (AgentGraph + PawSocialAgent), real LiteLLM
@@ -43,32 +54,45 @@
 
 from __future__ import annotations
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "CORRECTION_CAP",
     "CalibrationPair",
     "CalibrationSummary",
     "ClaudeCodeBackend",
+    "ConfidenceDrift",
     "Correction",
     "DeterministicFakeBackend",
     "ForesightWorld",
     "LiteLLMFallbackBackend",
+    "ModalOutcomeDistribution",
     "OceanDrift",
     "PredictionBuffer",
     "PredictionRecord",
     "RunResult",
     "ScenarioConfig",
     "SoulSeededPersona",
+    "ThresholdDecision",
     "TierMix",
     "__version__",
+    "accuracy_meets_threshold",
     "aggregate_pairs",
     "apply_correction",
     "build_prediction_record",
     "build_tier_pool",
+    "confidence_drift",
+    "group_pairs_by",
+    "index_predictions",
     "make_paw_social_agent",
+    "modal_outcome_distribution",
     "pair_against_reality",
+    "per_anchor_namespace_summary",
+    "per_scenario_template_summary",
+    "rolling_accuracy",
+    "rolling_accuracy_series",
     "run_scenario",
+    "summarize_by",
     "tier_distribution",
     "translate_camel_tools_to_sdk_overrides",
 ]
@@ -175,5 +199,51 @@ def __getattr__(name: str):  # pragma: no cover — lazy import shim
             "run_scenario": run_scenario,
             "ScenarioConfig": ScenarioConfig,
             "RunResult": RunResult,
+        }[name]
+    if name in {
+        "ThresholdDecision",
+        "ConfidenceDrift",
+        "ModalOutcomeDistribution",
+        "accuracy_meets_threshold",
+        "confidence_drift",
+        "group_pairs_by",
+        "index_predictions",
+        "modal_outcome_distribution",
+        "per_anchor_namespace_summary",
+        "per_scenario_template_summary",
+        "rolling_accuracy",
+        "rolling_accuracy_series",
+        "summarize_by",
+    }:
+        from pocketpaw_ee.foresight.aggregator import (
+            ConfidenceDrift,
+            ModalOutcomeDistribution,
+            ThresholdDecision,
+            accuracy_meets_threshold,
+            confidence_drift,
+            group_pairs_by,
+            index_predictions,
+            modal_outcome_distribution,
+            per_anchor_namespace_summary,
+            per_scenario_template_summary,
+            rolling_accuracy,
+            rolling_accuracy_series,
+            summarize_by,
+        )
+
+        return {
+            "ConfidenceDrift": ConfidenceDrift,
+            "ModalOutcomeDistribution": ModalOutcomeDistribution,
+            "ThresholdDecision": ThresholdDecision,
+            "accuracy_meets_threshold": accuracy_meets_threshold,
+            "confidence_drift": confidence_drift,
+            "group_pairs_by": group_pairs_by,
+            "index_predictions": index_predictions,
+            "modal_outcome_distribution": modal_outcome_distribution,
+            "per_anchor_namespace_summary": per_anchor_namespace_summary,
+            "per_scenario_template_summary": per_scenario_template_summary,
+            "rolling_accuracy": rolling_accuracy,
+            "rolling_accuracy_series": rolling_accuracy_series,
+            "summarize_by": summarize_by,
         }[name]
     raise AttributeError(f"module 'pocketpaw_ee.foresight' has no attribute {name!r}")
