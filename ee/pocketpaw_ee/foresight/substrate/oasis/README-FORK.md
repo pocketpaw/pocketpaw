@@ -1,5 +1,6 @@
 # OASIS vendored fork
 
+Updated: 2026-05-25 (feat/foresight-v03-calibration) — RFC 08 PR 3.
 Updated: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — RFC 08 v0.2 PR.
 Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 first PR.
 
@@ -28,14 +29,18 @@ automatically — see "Drift policy" below.
 | File / region | Change | Why |
 |---|---|---|
 | All `*.py` files | `from oasis.X` → `from pocketpaw_ee.foresight.substrate.oasis.X` (mechanical rewrite) | Upstream uses absolute imports rooted at top-level `oasis`. Vendoring inside our namespace package requires the rewrite. No semantic change. |
-| `__init__.py` | Replaced with a safe wrapper that lazy-imports upstream re-exports | Lets the package be importable on machines without `camel-ai` installed (OSS-only install path). Upstream's verbatim re-exports moved to `_upstream_init.py`. |
-| `_upstream_init.py` | New file — verbatim copy of upstream's `__init__.py` with the import-path rewrite above | Preserves provenance; PR 3 wires the re-exports into the engine via the `OASIS_AVAILABLE` flag the new `__init__.py` exposes. |
+| `__init__.py` | Replaced with a tiered import wrapper (`OASIS_AVAILABLE` for the core / `OASIS_RECSYS_AVAILABLE` for the recsys+torch tier) | Lets the package be importable without torch / pandas / neo4j. Upstream's verbatim re-exports moved to `_upstream_init.py`. |
+| `_upstream_init.py` | New file — verbatim copy of upstream's `__init__.py` with the import-path rewrite above | Preserves provenance; the recsys tier loads from here via `oasis.__init__.py`'s second try block. |
+| `social_platform/__init__.py` | **(PR 3)** Made `Platform` re-export lazy via module-level `__getattr__` | Upstream eagerly imports `.platform` → `.recsys` → `torch`. Foresight per RFC 08 §6.2 drops Platform entirely (replaced with `ForesightWorld`). Lazy import keeps `Channel` cheap. |
+| `social_agent/__init__.py` | **(PR 3)** Made `generate_*_agent_graph` / `generate_agents_100w` re-exports lazy via module-level `__getattr__` | Upstream eagerly imports `agents_generator` → `pandas`. Foresight v0.1 uses `.soul`-file persona pools, not CSV imports. |
+| `social_agent/agent.py` | **(PR 3)** Guarded the eager `FileHandler` setup with try/except + `makedirs(exist_ok=True)` | Upstream unconditionally writes to `./log/social.agent-<ts>.log` at import; fails in read-only sandboxes (CI, /tmp). Guard preserves stream-handler logging when file logging fails. |
+| `social_agent/agent_graph.py` | **(PR 3)** Lazy-imported `neo4j.GraphDatabase` inside `Neo4jHandler.__init__` | Upstream eagerly imports it; AgentGraph defaults to `igraph` (the v0.1 backend), so the neo4j driver stays optional. |
+| `environment/env.py` | **(PR 3)** Same log-dir guard as `social_agent/agent.py` | Same rationale. |
 
-No upstream functional code was modified. Every algorithm, schema, and
-control-flow path comes from upstream as-is. The Apache-2.0 §4(b)
-modified-file marker is reserved for *future* per-file behavioural
-edits; the import-path rewrite is a packaging-only adaptation and is
-documented here at the module level rather than per-file.
+The Apache-2.0 §4(b) modified-file markers are at the top of each PR-3
+file listed above, with a "Modified by PocketPaw, 2026-05-25" notice
+plus the per-change justification. PR 2's mechanical import-path
+rewrite is documented at the module level (no behavioural change).
 
 ### What was NOT copied (intentional)
 

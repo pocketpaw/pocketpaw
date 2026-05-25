@@ -1,4 +1,16 @@
 # ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py
+# Updated: 2026-05-25 (feat/foresight-v03-calibration) — PR 3:
+#   - Switched to a tiered import strategy so OASIS's torch-dependent
+#     recsys (Twitter Platform / TWHIN-BERT / process_recsys_posts)
+#     stays lazy. The bits PR 3+ actually uses — SocialAgent, AgentGraph,
+#     UserInfo, ActionType, Channel — DO NOT need torch and load
+#     cleanly. RFC 08 §6.2 explicitly drops the SQLite/recsys-backed
+#     Platform; setting up the OASIS_AVAILABLE branch on the lightweight
+#     core lets ForesightWorld wire through SocialAgent without
+#     dragging torch into every dev shell. The heavy upstream surface
+#     (Platform, make, print_db_contents, generate_*_agent_graph,
+#     LLMAction, ManualAction) is still importable on machines that
+#     happen to have torch — guarded by OASIS_RECSYS_AVAILABLE.
 # Updated: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — vendored fork
 # of camel-ai/oasis at upstream SHA 46cdc8d.
 #
@@ -6,13 +18,14 @@
 # init so ``import pocketpaw_ee.foresight.substrate.oasis`` always
 # succeeds — even on machines without camel-ai installed. The upstream
 # top-level re-exports live in ``_upstream_init.py`` (preserved verbatim
-# except for absolute-import path rewrites from ``oasis.*`` to
-# ``pocketpaw_ee.foresight.substrate.oasis.*``); we attempt them on
-# import and fall through to a namespace-only package when CAMEL is
-# missing. PR 3 wires the substrate into ForesightWorld; until then,
-# v0.1's engine surfaces (World, Persona, Backend) are protocol-shaped
-# and do NOT import from this package, so missing-CAMEL machines remain
-# fully operational.
+# except for absolute-import path rewrites). PR 3 splits the surface
+# in two:
+#   - the *core* (SocialAgent / AgentGraph / UserInfo / ActionType /
+#     Channel) — needs CAMEL but NOT torch; this is what the Foresight
+#     engine actually wires through.
+#   - the *recsys* tier (Platform / make / generate_*_agent_graph /
+#     LLMAction / ManualAction / print_db_contents) — needs torch
+#     because oasis.social_platform.platform pulls recsys.py.
 
 from __future__ import annotations
 
@@ -30,53 +43,101 @@ __version__ = "0.2.5"
 # at every call site.
 OASIS_AVAILABLE: bool = False
 OASIS_LOAD_ERROR: Exception | None = None
+OASIS_RECSYS_AVAILABLE: bool = False
+OASIS_RECSYS_LOAD_ERROR: Exception | None = None
+
+# Names that get bound at module level when their tier loads cleanly.
+# Declared up-front for type checkers; reassigned in the try blocks.
+ActionType = None  # type: ignore[assignment]
+AgentGraph = None  # type: ignore[assignment]
+Channel = None  # type: ignore[assignment]
+SocialAgent = None  # type: ignore[assignment]
+UserInfo = None  # type: ignore[assignment]
+
+# Recsys-tier symbols (only bound when torch is installed).
+DefaultPlatformType = None  # type: ignore[assignment]
+LLMAction = None  # type: ignore[assignment]
+ManualAction = None  # type: ignore[assignment]
+Platform = None  # type: ignore[assignment]
+generate_reddit_agent_graph = None  # type: ignore[assignment]
+generate_twitter_agent_graph = None  # type: ignore[assignment]
+make = None  # type: ignore[assignment]
+print_db_contents = None  # type: ignore[assignment]
 
 try:
-    # The upstream init pulls in oasis.environment, oasis.social_agent,
-    # oasis.social_platform — each of which transitively imports CAMEL.
-    # On an OSS-only install (``uv sync --dev`` without ``--group ee``),
-    # camel-ai is not installed and this import will fail. That is OK —
-    # the foresight engine's v0.1 protocol surfaces don't depend on
-    # this package being loaded.
-    from pocketpaw_ee.foresight.substrate.oasis._upstream_init import (  # noqa: F401
-        ActionType,
+    # The CORE OASIS surface — SocialAgent / AgentGraph / Channel /
+    # UserInfo / ActionType. These do NOT touch torch; they only
+    # require camel-ai (the BaseModelBackend protocol + Channel
+    # primitives). This is the surface RFC 08 §6.2 says we KEEP.
+    from pocketpaw_ee.foresight.substrate.oasis.social_agent.agent import SocialAgent  # noqa: F811
+    from pocketpaw_ee.foresight.substrate.oasis.social_agent.agent_graph import (  # noqa: F811
         AgentGraph,
+    )
+    from pocketpaw_ee.foresight.substrate.oasis.social_platform.channel import Channel  # noqa: F811
+    from pocketpaw_ee.foresight.substrate.oasis.social_platform.config import UserInfo  # noqa: F811
+    from pocketpaw_ee.foresight.substrate.oasis.social_platform.typing import (  # noqa: F811
+        ActionType,
+    )
+
+    OASIS_AVAILABLE = True
+except Exception as exc:  # noqa: BLE001 — broad on purpose
+    OASIS_LOAD_ERROR = exc
+    logger.debug(
+        "OASIS core substrate not loaded (likely missing camel-ai dep). "
+        "Module is importable as a namespace package; symbols unavailable. "
+        "Underlying error: %s: %s",
+        type(exc).__name__,
+        exc,
+    )
+
+# The RECSYS-tier OASIS surface — Platform / make / generate_*_agent_graph
+# / LLMAction / ManualAction / print_db_contents. These all transitively
+# import ``oasis.social_platform.recsys`` which depends on torch. Per
+# RFC 08 §6.2 we explicitly DROP Platform (replace with Fabric-backed
+# ForesightWorld), so the recsys tier is only useful for upstream-
+# compat smoke tests and the v2.0 Market Sim sub-type (which may
+# revisit recsys). On machines without torch this branch is skipped.
+try:
+    from pocketpaw_ee.foresight.substrate.oasis._upstream_init import (  # noqa: F401, F811
         DefaultPlatformType,
         LLMAction,
         ManualAction,
         Platform,
-        SocialAgent,
-        UserInfo,
         generate_reddit_agent_graph,
         generate_twitter_agent_graph,
         make,
         print_db_contents,
     )
 
-    OASIS_AVAILABLE = True
-    __all__ = [
-        "ActionType",
-        "AgentGraph",
-        "DefaultPlatformType",
-        "LLMAction",
-        "ManualAction",
-        "OASIS_AVAILABLE",
-        "Platform",
-        "SocialAgent",
-        "UserInfo",
-        "__version__",
-        "generate_reddit_agent_graph",
-        "generate_twitter_agent_graph",
-        "make",
-        "print_db_contents",
-    ]
-except Exception as exc:  # noqa: BLE001 — broad on purpose; any import failure means no symbols
-    OASIS_LOAD_ERROR = exc
+    OASIS_RECSYS_AVAILABLE = True
+except Exception as exc:  # noqa: BLE001 — broad on purpose
+    OASIS_RECSYS_LOAD_ERROR = exc
     logger.debug(
-        "OASIS substrate is vendored but not loaded (likely missing camel-ai dep). "
-        "Module is importable as a namespace package; symbols unavailable. "
-        "Underlying error: %s: %s",
+        "OASIS recsys tier not loaded (likely missing torch). "
+        "Foresight only needs the recsys tier for Market Sim sub-type "
+        "(v2.0). Core OASIS symbols (SocialAgent, AgentGraph, Channel) "
+        "remain available. Underlying error: %s: %s",
         type(exc).__name__,
         exc,
     )
-    __all__ = ["OASIS_AVAILABLE", "OASIS_LOAD_ERROR", "__version__"]
+
+__all__ = [
+    "ActionType",
+    "AgentGraph",
+    "Channel",
+    "DefaultPlatformType",
+    "LLMAction",
+    "ManualAction",
+    "OASIS_AVAILABLE",
+    "OASIS_LOAD_ERROR",
+    "OASIS_RECSYS_AVAILABLE",
+    "OASIS_RECSYS_LOAD_ERROR",
+    "Platform",
+    "SocialAgent",
+    "UserInfo",
+    "__version__",
+    "generate_reddit_agent_graph",
+    "generate_twitter_agent_graph",
+    "make",
+    "print_db_contents",
+]

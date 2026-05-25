@@ -11,12 +11,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # =========== Copyright 2023 @ CAMEL-AI.org. All Rights Reserved. ===========
+# Modified by PocketPaw, 2026-05-25 — RFC 08 PR 3:
+#   - Lazy-imported ``neo4j.GraphDatabase``. Upstream eagerly imports
+#     it at module level, which is unhelpful: AgentGraph defaults to
+#     the ``igraph`` backend, and the neo4j backend is only used when
+#     a caller explicitly passes ``backend="neo4j"``. Foresight v0.1
+#     uses igraph exclusively (RFC 08 §6.3). Gating the import behind
+#     ``Neo4jHandler.__init__`` lets neo4j stay an optional dep.
+#   - Documented in ``substrate/oasis/README-FORK.md``.
 from __future__ import annotations
 
 from typing import Any, Literal
 
 import igraph as ig
-from neo4j import GraphDatabase
 
 from pocketpaw_ee.foresight.substrate.oasis.social_agent.agent import SocialAgent
 from pocketpaw_ee.foresight.substrate.oasis.social_platform.config import Neo4jConfig
@@ -25,6 +32,9 @@ from pocketpaw_ee.foresight.substrate.oasis.social_platform.config import Neo4jC
 class Neo4jHandler:
 
     def __init__(self, nei4j_config: Neo4jConfig):
+        # Lazy import — see modification note at the top of this file.
+        from neo4j import GraphDatabase  # noqa: PLC0415
+
         self.driver = GraphDatabase.driver(
             nei4j_config.uri,
             auth=(nei4j_config.username, nei4j_config.password),
