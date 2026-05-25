@@ -92,12 +92,12 @@ async def test_create_emits_created_then_completed(recording_bus) -> None:
 
 async def test_create_rejects_unsupported_sub_type() -> None:
     ctx = _ctx()
-    # ``market_sim`` lands in a later PR; PR 7's engine only supports
-    # ``decision_forecast`` and the service surfaces engine validation
-    # as a 422 before opening a doc row.
+    # PR 5 lifted market_sim + org_change_rehearsal into the supported
+    # set; the next-up sub-type is ops_stress_test (PR 6+). The service
+    # still surfaces engine validation as a 422 before opening a doc row.
     body = CreateScenarioRequest(
-        name="early-market-sim",
-        sub_type="market_sim",
+        name="early-ops-stress",
+        sub_type="ops_stress_test",
         n_ticks=1,
         personas=[PersonaSpecRequest(name="A", role="participant", ocean={})],
     )
@@ -119,7 +119,7 @@ async def test_create_captures_engine_failure_as_failed_status(monkeypatch, reco
     not bubble out as a 500."""
     ctx = _ctx()
 
-    async def _boom(_body):
+    async def _boom(_body, **_kwargs):  # PR 5 added workspace_id + run_id kwargs
         raise RuntimeError("simulated engine outage")
 
     # Patch the lazy engine call (the service's only side door into the

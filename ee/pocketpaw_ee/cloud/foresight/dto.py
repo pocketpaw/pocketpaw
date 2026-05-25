@@ -1,4 +1,13 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) — PR 5
+#   adds the per-anchor projection fanout surface:
+#     - ``ProjectedDecisionResponse`` — one record on the wire.
+#     - ``ProjectedDecisionListResponse`` — paginated envelope for
+#       ``GET /api/v1/foresight/runs/{id}/projected-decisions`` with the
+#       ``total / limit / offset / has_more`` fields a paginating
+#       client needs. v0.5 keeps the cursor offset-based; v1.0 may
+#       swap to opaque cursors once the dataset grows past the point
+#       where ``count_documents`` is cheap.
 # Modified: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — PR 4
 #   adds the retroactive backtest gate surface:
 #     - ``CreateBacktestRequest`` — POST /foresight/backtests body.
@@ -239,6 +248,63 @@ class OnboardingGateResponse(BaseModel):
     last_backtest_at: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# ProjectedDecision (RFC §7.7) — PR 5 per-anchor projection fanout.
+# ---------------------------------------------------------------------------
+
+
+class ProjectedDecisionResponse(BaseModel):
+    """One projected-decision record on the wire.
+
+    Mirrors :class:`pocketpaw_ee.cloud.foresight.domain.ProjectedDecision`
+    plus the ISO-8601 ``created_at`` string. The list endpoint
+    (``GET /runs/{id}/projected-decisions``) returns these in
+    ``(tick_id, anchor_id)`` order — bounded by the index on the
+    persistence layer.
+
+    ``forward_precedent_decision_id`` is reserved for the RFC 07
+    Decision Graph backfill path; v0.5 always reports ``None`` because
+    RFC 07 isn't yet integrated into pocketpaw. The field is on the
+    response so frontend consumers can render the link as soon as the
+    backfill pass starts populating it without a wire-shape bump.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    workspace_id: str
+    run_id: str
+    anchor_id: str
+    persona_id: str
+    tick_id: int
+    decision_text: str
+    confidence: float
+    sub_type: str
+    forward_precedent_decision_id: str | None = None
+    created_at: str | None = None
+
+
+class ProjectedDecisionListResponse(BaseModel):
+    """Paginated wrapper for ``GET /runs/{id}/projected-decisions``.
+
+    PR 5 returns a flat envelope with the items and the cursor metadata
+    a paginating client needs: ``total`` (when cheap to compute under
+    the workspace + run filter), ``limit``, ``offset``, and a
+    ``has_more`` boolean derived from
+    ``offset + len(items) < total``. The frontend Live panel uses the
+    items array; cost-aware consumers (the v1.0 export endpoint) read
+    the totals to size their fetch.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ProjectedDecisionResponse]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+    has_more: bool = False
+
+
 __all__ = [
     "BacktestRunListItemResponse",
     "BacktestRunResponse",
@@ -247,6 +313,8 @@ __all__ = [
     "HistoricalAnchorRequest",
     "OnboardingGateResponse",
     "PersonaSpecRequest",
+    "ProjectedDecisionListResponse",
+    "ProjectedDecisionResponse",
     "ScenarioRunListItemResponse",
     "ScenarioRunResponse",
 ]

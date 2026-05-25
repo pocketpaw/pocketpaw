@@ -143,7 +143,7 @@ async def test_get_404_on_malformed_id(w1_client: AsyncClient) -> None:
 async def test_post_422_on_unsupported_sub_type(w1_client: AsyncClient) -> None:
     r = await w1_client.post(
         "/foresight/scenarios",
-        json=_payload(sub_type="market_sim"),
+        json=_payload(sub_type="ops_stress_test"),
     )
     # The engine-side validation surfaces as a 422 with the
     # foresight-namespaced error code.

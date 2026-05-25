@@ -39,10 +39,12 @@ SCENARIO_YAML = (
 
 
 def test_scenario_config_rejects_unsupported_sub_type():
-    with pytest.raises(NotImplementedError, match="market_sim"):
+    # PR 5 lifted market_sim + org_change_rehearsal into the supported
+    # set; the next-up sub-type is ops_stress_test (PR 6+).
+    with pytest.raises(NotImplementedError, match="ops_stress_test"):
         ScenarioConfig(
             name="x",
-            sub_type="market_sim",  # not in v0.1 SUPPORTED_SUB_TYPES
+            sub_type="ops_stress_test",  # not yet in SUPPORTED_SUB_TYPES
             n_ticks=1,
             personas=[PersonaSpec(name="p")],
         )

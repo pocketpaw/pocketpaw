@@ -495,6 +495,18 @@ class ForesightOnboardingUnlocked(Event):
     EVENT_TYPE: ClassVar[str] = "foresight.onboarding.unlocked"
 
 
+# Foresight per-anchor projection fanout — RFC 08 §7.7 + PR 5. Fires
+# once per (anchor × tick) bucket as the engine ticks the run forward;
+# the UI's Live panel consumes these to render the projection timeline
+# without polling the GET /runs/{id}/projected-decisions endpoint.
+# v1.0's calibration loop will subscribe so each projection lands in
+# the prediction buffer (RFC §9.1) as it is minted, not at the end of
+# the run.
+@dataclass
+class ForesightProjectedDecisionEmitted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.projected_decision.emitted"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first
