@@ -1,9 +1,15 @@
 # src/pocketpaw/bundled_templates/_bundled/todo-task-tracker/template.pocket.yaml
 # Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
 # Pocket Template Schema metadata for the built-in todo / task tracker.
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): migrated v1 ->
+# v2. Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. No behavioural change.
+schema_version: "2"
 name: todo-task-tracker
 version: 1.0.0
 vertical: productivity
+pattern: app
+display_name: Todo Task Tracker
 shape: data-grid
 description: |
   A personal task tracker. A sortable, filterable list of tasks with a
@@ -19,4 +25,4 @@ state:
     - { field: due_date, widget: date }
 actions: []
 connectors: []
-skills: []
+skill_refs: []
