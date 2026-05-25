@@ -1,0 +1,158 @@
+---
+title: "Pocket Planner: Plan-Before-Create for Complex Pockets"
+description: "A plan-pointer gate in front of the pocket specialist. Custom multi-widget briefs get planned via the deep_work pipeline first; the chat agent renders the brief, iterates with the user, then walks the todos through the merge endpoint."
+section: Core Concepts
+ogType: article
+keywords: ["pocket planner", "plan-before-create", "pocket specialist", "plan kit", "deep work", "rfc 03"]
+tags: ["pockets", "planner", "ee"]
+---
+
+# Pocket Planner: Plan-Before-Create for Complex Pockets
+
+The pocket planner sits in front of `pocket_specialist__create`. When a brief doesn't match a built-in template and looks like a custom multi-widget app, the specialist returns a **plan-pointer kit** instead of a one-shot draft. The chat agent then walks a four-phase loop — research, render, iterate, build — driven by a bundled skill and an in-process MCP tool, reusing the existing `deep_work` planner pipeline. The build phase calls the [merge endpoint](/api/post-pocket-spec-merge) once per cohesive todo.
+
+<Callout type="info">
+**Status (2026-05-25):** IN FLIGHT — merged on `feat/pocket-planner-skill`, not yet folded into `dev`.
+
+**Implementation PRs:** #1223 (pocket-planner — plan-before-create gate reusing `deep_work` for complex pockets, merged into `feat/pocket-edit-skill-merge`).
+
+**Workspace RFC:** ties indirectly to [RFC 03 — Pocket Template Schema](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/03-pocket-template-schema.md) v2 template work.
+
+**What's live (on the planner branch):** plan-before-create gate; reuse of `pocketpaw.deep_work.planner.PlannerAgent` (4-phase pipeline, skip team assembly); `POCKET_*` prompts in `src/pocketpaw/deep_work/prompts.py`; `mcp__pocketpaw_pocket_planner__plan_pocket` MCP tool; bundled `pocketpaw-pocket-planner` skill; flag-gated coexistence with the legacy one-shot draft via `POCKETPAW_POCKET_SPECIALIST_USE_SKILL`.
+
+**What's planned:** rebase onto `dev` after PR #1240 (RFC 07 Decision Graph umbrella) and #1240's stack settle; iterate the gate triggers (when does the planner fire vs the draft path); expand the plan-kit catalog; tighten the loopback bypass to a short-lived JWT; click-on-todo-to-edit UI in the chat panel (paw-enterprise follow-up).
+</Callout>
+
+## Why a Gate, Not a Smarter Specialist
+
+The pocket-create path historically had two shapes:
+
+1. **Template match** (fast) — the chat agent's STEP 0 keyword-matches the brief against `src/pocketpaw/bundled_templates/_bundled/index.json`. On a hit, the specialist instantiates the template and skips drafting entirely.
+2. **One-shot draft** (slow, error-prone) — on a template miss, the specialist asks the LLM to generate a full rippleSpec in one turn. Custom multi-widget briefs (a home brewing log, a podcast publisher, a school-bus router) routinely came back half-baked: missing state bindings, fabricated widget types, unwired actions. 2-3 rebuild iterations was typical.
+
+The planner gate adds a third path between them: **plan-then-build**. The specialist returns a `plan_kit` payload instead of drafting. The chat agent then runs the planner explicitly, renders the brief, iterates with the user, and walks the todos one merge endpoint call at a time.
+
+## When the Gate Fires
+
+`AgentModeAdapter.create` in `ee/pocketpaw_ee/agent/pocket_specialist/adapters.py` branches to `_plan_kit_response` when ALL of:
+
+- The `POCKETPAW_POCKET_SPECIALIST_USE_SKILL` env var is truthy.
+- Template-match returned no hit (no `hints.template_id` in the input).
+- `input.spec is None` (the caller didn't pass a pre-baked spec).
+
+Otherwise it returns the legacy `_draft_kit_response`. The template-match short-circuit still runs first; templates and recipes keep their fast path. The planner only fires on custom multi-widget briefs.
+
+## The Plan-Pointer Kit
+
+The kit is a small JSON payload pointing at the skill and tool the chat agent should drive:
+
+```json
+{
+  "ok": true,
+  "action": "plan_kit",
+  "draft_kit": {
+    "skill_name": "pocketpaw-pocket-planner",
+    "mcp_tool": "mcp__pocketpaw_pocket_planner__plan_pocket",
+    "workspace_id": "<from request>",
+    "user_id":      "<from request>",
+    "loopback_headers": {
+      "X-PocketPaw-Internal":     "true",
+      "X-PocketPaw-Workspace-Id": "<workspace_id>",
+      "X-PocketPaw-User-Id":      "<user_id>"
+    }
+  }
+}
+```
+
+The loopback headers are inherited from the [merge endpoint](/api/post-pocket-spec-merge) MVP bypass — the chat agent's Claude Code subprocess uses them when it `curl`s `POST /api/v1/pockets/<id>/spec/merge` per todo.
+
+## Deep_work Reuse — the Architectural Call
+
+The planner gate **does not build a parallel planner**. It reuses the existing `pocketpaw.deep_work.planner.PlannerAgent` and threads it through a pocket-flavoured prompt set. Concrete reuse:
+
+| Module | What's reused |
+|---|---|
+| `pocketpaw.deep_work.planner.PlannerAgent` | The 4-phase pipeline engine (research → PRD → task breakdown → team assembly), with team assembly skipped |
+| `pocketpaw.deep_work.prompts.POCKET_*` | Three new prompt strings — `POCKET_RESEARCH_PROMPT`, `POCKET_PRD_PROMPT`, `POCKET_TASK_BREAKDOWN_PROMPT` — siblings of the existing project prompts in the same file |
+| `PlannerAgent._run_prompt` / `_parse_tasks` | Reused for the LLM phases |
+| `TaskSpec` with `success_criteria` / `depends_on` | Each TaskSpec becomes one ordered todo in the brief |
+
+Skipped deliberately:
+
+- `DeepWorkSession` state machine — the chat session owns the iteration state, not a Mission Control Project lifecycle.
+- `PlanSession` Beanie doc — plan iteration is ephemeral; chat history is enough.
+- Team assembly — pockets don't need a multi-agent team.
+
+The architectural call: pockets and projects are different objects with different lifecycles, but the underlying "research → PRD → tasks" pipeline is the same. Sharing the pipeline (and the prompt file) keeps the two surfaces close and means improvements to one carry to the other for free. See [Deep Work](/advanced/deep-work) for the project-side surface.
+
+## The Plan_Pocket MCP Tool
+
+`mcp__pocketpaw_pocket_planner__plan_pocket` lives in `ee/pocketpaw_ee/agent/mcp_servers/planner.py`. Two MCP servers ship from this module:
+
+- `pocketpaw_planner` — hosts `plan_project(...)` for Mission Control projects. **Opt-in** via the per-agent `mcp_servers_allow` policy.
+- `pocketpaw_pocket_planner` — hosts `plan_pocket(intent, prior_plan=None, iteration_delta=None, deep_research=False)`. **Ambient** — the pocket-create skill needs to call it without explicit opt-in.
+
+The split is per a follow-up fix on the same branch (`e17ed3f1 fix(pocket-planner): split planner MCP server to restore opt-in gating`). Operators can keep the project planner opt-in while letting `plan_pocket` flow freely.
+
+## The Bundled Skill
+
+`pocketpaw-pocket-planner` is auto-installed to `~/.claude/skills/` by the bundled-skills installer (see [Bundled Skills](/advanced/skills)). The skill teaches the chat agent the four-phase flow:
+
+1. **Research and draft the plan** — call `plan_pocket(intent=<user's verbatim brief>)`. The tool returns `{ok: true, brief}` with `narrative`, `widgets`, `state`, `sources`, `actions`, `todos[]`, and `research_notes`.
+2. **Render the brief in chat as markdown** — narrative + bulleted widget list + state shape + source/action wiring + numbered todos with done-when criteria.
+3. **Iterate with the user** — re-invoke `plan_pocket` with `prior_plan` + `iteration_delta` text until the user says "build it."
+4. **Walk the todos** — one `POST /api/v1/pockets/<id>/spec/merge` per todo, in dependency order. The merge endpoint's strict catalog + action-wiring gate catches anything the planner missed; on a blocked merge the agent fixes the spec and retries.
+
+## How It Composes
+
+```
+  user brief
+       │
+       ▼
+  pocket_specialist__create
+       │
+       ├── template match?  ──── YES ──▶ instantiate + customize (skip planner)
+       │
+       └── NO + USE_SKILL=true + spec is None
+                │
+                ▼
+        return plan_kit
+                │
+                ▼
+        chat agent invokes pocketpaw-pocket-planner skill
+                │
+                ▼
+        mcp__pocketpaw_pocket_planner__plan_pocket(intent)
+                │
+                ▼
+        PlannerAgent.plan(POCKET_* prompts, no team assembly)
+                │
+                ▼
+        brief { narrative, widgets, state, sources, actions, todos[] }
+                │
+                ├── render as markdown in chat
+                ├── iterate with user
+                │
+                ▼
+        walk todos → POST /spec/merge per todo
+                │
+                ▼
+        finished pocket
+```
+
+## Flag and Coexistence
+
+The whole gate is behind `POCKETPAW_POCKET_SPECIALIST_USE_SKILL`. With the flag off, the specialist takes the legacy one-shot draft path and the planner branch is dead code. With the flag on:
+
+- Template matches still short-circuit FIRST (templates + recipes keep their fast path).
+- Custom multi-widget briefs land on the plan-pointer kit.
+- The legacy 17-tool LangChain edit path still ships alongside the merge endpoint (gated by the same flag).
+
+Default is `false` until the captain greenlights deletion of the legacy paths.
+
+## Related
+
+- [Merge Pocket Spec](/api/post-pocket-spec-merge) — the endpoint the build phase walks, one call per todo.
+- [Deep Work](/advanced/deep-work) — the project-side use of the same `PlannerAgent` pipeline.
+- [Pocket Templates](/concepts/pocket-templates) — STEP 0 keyword match runs before the planner even gets a chance to fire.
+- [Pocket Execution Router](/concepts/pocket-execution-router) — the router classifier sits in front of `pocket_specialist__edit` (the edit-side sibling).

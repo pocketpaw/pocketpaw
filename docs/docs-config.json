@@ -305,6 +305,36 @@
             "icon": "lucide:video"
           },
           {
+            "label": "Decision Graph",
+            "href": "/concepts/decision-graph",
+            "icon": "lucide:git-branch"
+          },
+          {
+            "label": "Pocket Planner",
+            "href": "/concepts/pocket-planner",
+            "icon": "lucide:clipboard-list"
+          },
+          {
+            "label": "Pocket Execution Router",
+            "href": "/concepts/pocket-execution-router",
+            "icon": "lucide:route"
+          },
+          {
+            "label": "Pocket Templates",
+            "href": "/concepts/pocket-templates",
+            "icon": "lucide:layout-template"
+          },
+          {
+            "label": "Calendar",
+            "href": "/concepts/calendar",
+            "icon": "lucide:calendar"
+          },
+          {
+            "label": "OSS-EE Split",
+            "href": "/concepts/oss-ee-split",
+            "icon": "lucide:split"
+          },
+          {
             "label": "PocketPaw vs OpenClaw",
             "href": "/concepts/vs-openclaw",
             "icon": "lucide:scale"
@@ -543,6 +573,11 @@
             "label": "MCP Servers",
             "href": "/integrations/mcp-servers",
             "icon": "lucide:server"
+          },
+          {
+            "label": "Composio",
+            "href": "/integrations/composio",
+            "icon": "lucide:puzzle"
           },
           {
             "label": "A2A Protocol",
