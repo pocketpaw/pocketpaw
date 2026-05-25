@@ -1,4 +1,8 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — PR 7 adds
+#   ScenarioRunListItemResponse (lighter shape for GET /runs without
+#   the inline ``result`` blob) and re-exports the existing v0.1 shapes
+#   unchanged so any v0.1 caller keeps working.
 # Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
 #
 # Request / response models for the Foresight REST surface. Per the
@@ -58,14 +62,54 @@ class ScenarioRunResponse(BaseModel):
     returns a "queued" envelope with the run id and a websocket subscription
     URL, GET returns the full result with the per-tick aggregates and
     projected decisions stream.
+
+    PR 7 keeps the v0.1 wire field set (id, scenario_name, status,
+    created_at, request, result, error) and adds an optional
+    ``workspace_id`` so the cloud surface can echo the tenancy key the
+    persistence layer enforces. Older callers that only consumed the
+    v0.1 fields keep working — Pydantic's default ``extra="forbid"``
+    constraint is unchanged at the request side; responses tolerate
+    additional fields client-side.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    workspace_id: str | None = None
     scenario_name: str
     status: str  # "queued" | "running" | "complete" | "failed"
     created_at: str  # ISO-8601
+    updated_at: str | None = None
     request: dict[str, Any]
     result: dict[str, Any] | None = None
     error: str | None = None
+
+
+class ScenarioRunListItemResponse(BaseModel):
+    """Lighter shape for ``GET /runs`` — drops the inline ``result`` and
+    ``request`` blobs so the list endpoint stays cheap on workspaces
+    that have accumulated dozens of runs.
+
+    The detail endpoint (``GET /runs/{id}``) returns the full
+    :class:`ScenarioRunResponse` shape; the frontend Scenarios + Live
+    panels (RFC §11.2 / §11.3) use the list shape for cards and call
+    the detail endpoint when the operator clicks through.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    workspace_id: str | None = None
+    scenario_name: str
+    status: str
+    created_at: str
+    updated_at: str | None = None
+    error: str | None = None
+
+
+__all__ = [
+    "CreateScenarioRequest",
+    "PersonaSpecRequest",
+    "ScenarioRunListItemResponse",
+    "ScenarioRunResponse",
+]

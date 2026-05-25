@@ -440,6 +440,29 @@ class PlanGapResolved(Event):
     EVENT_TYPE: ClassVar[str] = "plan.gap_resolved"
 
 
+# Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a
+# scenario run document is first inserted (status="queued"); the engine
+# then ticks the run (in PR 7 it stays synchronous, in v1.0 it fans to a
+# background task) and fires either ``ForesightRunCompleted`` once the
+# run lands a wire-dict ``result`` or ``ForesightRunFailed`` if the
+# engine raises. Listeners use these to refresh the UI rail's Live +
+# Results panels (RFC §11.3 / §11.4) and, in v1.0, to seed the
+# calibration loop's prediction buffer (RFC §9.1).
+@dataclass
+class ForesightRunCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.created"
+
+
+@dataclass
+class ForesightRunCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.completed"
+
+
+@dataclass
+class ForesightRunFailed(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.failed"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first

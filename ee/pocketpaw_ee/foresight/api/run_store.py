@@ -1,15 +1,25 @@
 # ee/pocketpaw_ee/foresight/api/run_store.py
+# Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — PR 7. SUPERSEDED.
+#   The cloud router no longer uses this store; ``ee.cloud.foresight.service``
+#   persists runs to the ``foresight_runs`` Mongo collection via Beanie
+#   instead. Kept in-tree as a documented deprecation breadcrumb so any
+#   v0.1 caller pinning the old import path fails loudly rather than
+#   silently regressing to ephemeral storage. Remove after one release
+#   cycle once no external callers reference it.
 # Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
 #
 # In-memory run store — the v0.1 stand-in for the projected_decisions
 # + foresight_runs Mongo collections RFC §7.7 + §13.1 specify. The
-# router writes a RunRecord on POST /scenarios and reads it on
-# GET /runs/{id}; tests inject a fresh store via the singleton resolver.
+# v0.1 router wrote a RunRecord on POST /scenarios and read it on
+# GET /runs/{id}; tests injected a fresh store via the singleton
+# resolver.
 #
-# v1.0 swaps this for Beanie documents under ee/pocketpaw_ee/cloud/foresight/
-# following the cloud rules (4-file shape, service-owned writes, events
-# on every mutation). The router will then talk to a service module
-# instead of this store directly.
+# PR 7 SUPERSEDED this with Beanie-backed persistence at
+# ``ee.cloud.foresight.service``. The 4-file cloud shape ships in the
+# same PR: domain.py (value objects), dto.py (request/response),
+# service.py (Beanie writes + event emission), router.py (thin endpoints).
+# The router is mounted from ``mount_cloud``; this in-memory store is
+# no longer wired into the request path.
 
 from __future__ import annotations
 

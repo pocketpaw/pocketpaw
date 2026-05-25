@@ -347,6 +347,41 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
 
 [[tool.importlinter.contracts]]
+name = "Foresight — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.foresight.router",
+    "pocketpaw_ee.cloud.foresight.dto",
+    "pocketpaw_ee.cloud.foresight.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.foresight_run"]
+
+[[tool.importlinter.contracts]]
+name = "Foresight cloud — must not import the engine layer"
+# Cloud is API + persistence + service; the engine (persona, llm,
+# scenarios, substrate) carries the OASIS + CAMEL deps and is the
+# optional ``pocketpaw-ee[foresight]`` extra. Static imports from the
+# cloud entity into the engine would couple the cloud surface to the
+# optional extra; the service uses lazy imports inside the engine call
+# path instead. router / dto / domain / models stay clean.
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.foresight.router",
+    "pocketpaw_ee.cloud.foresight.dto",
+    "pocketpaw_ee.cloud.foresight.domain",
+    "pocketpaw_ee.cloud.models.foresight_run",
+]
+forbidden_modules = [
+    "pocketpaw_ee.foresight.persona",
+    "pocketpaw_ee.foresight.llm",
+    "pocketpaw_ee.foresight.scenarios",
+    "pocketpaw_ee.foresight.substrate",
+    "pocketpaw_ee.foresight.world",
+]
+
+[[tool.importlinter.contracts]]
 name = "Projects — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
