@@ -5,6 +5,12 @@
 # new two-call protocol where the calling chat agent drafts the
 # rippleSpec inline using its own LLM and the specialist only runs
 # validate-and-persist on the returned draft.
+# Modified: 2026-05-25 (PR #1222 R1 Blocker 2) — the SKILL kit's
+# ``auth_headers`` now carries ``X-PocketPaw-Internal-Token`` when the
+# process-local internal token is loaded. The loopback bypass on the
+# spec-merge endpoint requires the token in addition to the prior
+# magic header + tenancy headers; without it the agent would hit a
+# clean 401 instead of the previous (forgeable) bypass.
 # Modified: 2026-05-23 (#1197) — ``_apply_ops`` now re-fetches the live
 # spec after a successful op batch and runs the strict action-wiring
 # gate against it. Without this, an end-of-batch spec with a hallucinated
@@ -738,17 +744,33 @@ def _edit_kit_response(
     duration_ms_func = lambda: int((time.monotonic() - started) * 1000)  # noqa: E731
 
     if use_skill:
+        # PR #1222 R1 Blocker 2 — the loopback bypass now requires a
+        # process-local token in addition to the magic header +
+        # tenancy headers. Pull it from the env (the dashboard's
+        # boot-time ``ensure_internal_token`` exports it); skip the
+        # header when absent so a misconfigured dev environment surfaces
+        # a clean 401 instead of a confusing JSON-shape error.
+        from pocketpaw_ee.cloud._core.internal_token import (
+            INTERNAL_TOKEN_HEADER,
+            get_internal_token,
+        )
+
+        auth_headers: dict[str, str] = {
+            "X-PocketPaw-Internal": "true",
+            "X-PocketPaw-Workspace-Id": workspace_id,
+            "X-PocketPaw-User-Id": user_id,
+        }
+        internal_token = get_internal_token()
+        if internal_token:
+            auth_headers[INTERNAL_TOKEN_HEADER] = internal_token
+
         skill_kit: dict[str, Any] = {
             "intent": input.intent,
             "pocket": input.pocket,
             "target_node_ids": input.target_node_ids,
             "skill_name": "pocketpaw-pocket-specialist",
             "endpoint": f"http://localhost:8888/api/v1/pockets/{input.pocket_id}/spec/merge",
-            "auth_headers": {
-                "X-PocketPaw-Internal": "true",
-                "X-PocketPaw-Workspace-Id": workspace_id,
-                "X-PocketPaw-User-Id": user_id,
-            },
+            "auth_headers": auth_headers,
             "next_step": (
                 "Apply this edit yourself via the ``pocketpaw-pocket-specialist`` "
                 "skill — DO NOT call ``pocket_specialist__edit`` again. "
@@ -758,7 +780,7 @@ def _edit_kit_response(
                 "nodes you're changing, by their stable ids; new nodes get a "
                 "fresh ``n_xxxxxxxx`` id); (3) ``curl -X POST`` the partial "
                 "to the ``endpoint`` above with the ``auth_headers`` and a "
-                "JSON body of ``{\"merge\": <partial>}``; (4) report the "
+                'JSON body of ``{"merge": <partial>}``; (4) report the '
                 "outcome (and any ``warnings`` from the response) back to the "
                 "user. The skill spells out the four interactivity conventions "
                 "(client-side push, value/label split, lowercase column ids, "
