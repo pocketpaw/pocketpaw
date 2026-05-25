@@ -1,5 +1,12 @@
 # router.py — FastAPI router for the decision-graph entity (RFC 07).
 # Created: 2026-05-25 (RFC 07 Slice 1) — skeleton ping route only.
+# Updated: 2026-05-25 (RFC 07 Slice 2 — post-filter total) — list endpoint
+#   now sources ``total`` from ``DecisionGraph.count`` (post-scope-filter)
+#   instead of ``len(decisions)`` (page size), and only echoes the
+#   keyset cursor when the returned page is full. Page-size totals
+#   defeat the anti-probe property RFC 07 § Privacy requires; partial-
+#   page cursor echoes give clients a phantom "next page" that always
+#   returns empty.
 # Updated: 2026-05-25 (RFC 07 Slice 2) — wires the five real read routes
 #   that the RFC pins:
 #
@@ -195,6 +202,7 @@ async def list_decisions(
         )
 
     graph: DecisionGraph = get_decision_graph()
+    scopes = _requester_scopes(ctx)
     decisions = await graph.find(
         actor=actor,
         since=since,
@@ -207,19 +215,33 @@ async def list_decisions(
         limit=limit,
         before_ts=before_ts,
         before_id=before_id,
-        requester_scopes=_requester_scopes(ctx),
+        requester_scopes=scopes,
+    )
+    total = await graph.count(
+        actor=actor,
+        since=since,
+        until=until,
+        scope_kind=scope_kind,  # type: ignore[arg-type]
+        pocket_id=pocket_id,
+        policy=policy,
+        outcome_status=outcome_status,  # type: ignore[arg-type]
+        input_id=input_id,
+        requester_scopes=scopes,
     )
 
+    # Only echo the cursor when the page was full. A short page is the
+    # last page — echoing a cursor here would give the client a phantom
+    # next page that always returns empty.
     next_ts: datetime | None = None
     next_id: str | None = None
-    if decisions:
+    if decisions and len(decisions) == limit:
         last = decisions[-1]
         next_ts = last.ts
         next_id = str(last.id)
 
     return DecisionsListResponse(
         decisions=[DecisionResponse.from_domain(d) for d in decisions],
-        total=len(decisions),
+        total=total,
         next_before_ts=next_ts,
         next_before_id=next_id,
     )
