@@ -1,24 +1,46 @@
 # ee/pocketpaw_ee/foresight/persona.py
+# Updated: 2026-05-25 (feat/foresight-v02-oasis-camel-paw) — PR 2 lifts
+# the persona toward RFC §7.2 fidelity:
+#   - Optional ``paw_agent: PawAgent`` parameter — when provided, the
+#     persona uses the live PawAgent's bootstrap provider + soul bridge
+#     to seed the prompt with the soul's context (identity block, recent
+#     memories, OCEAN baseline). The captain-locked "fidelity floor" is
+#     met once a real PawAgent is attached.
+#   - ``SoulSeededPersona.from_paw_agent`` factory — convenience builder
+#     that constructs a persona by wrapping an existing PawAgent. PR 3
+#     will swap this for the OASIS ``PawSocialAgent(SocialAgent)`` shell
+#     when the substrate is wired in.
+#   - Backward-compat preserved — when ``paw_agent`` is ``None`` the
+#     persona falls back to the v0.1 backend-only path so the smoke
+#     test (DeterministicFakeBackend, no soul) keeps passing.
 # Created: 2026-05-25 (feat/foresight-v01-scaffold) — RFC 08 v0.1 scaffold.
 #
-# SoulSeededPersona — the v0.1 persona shape. RFC 08 §7.2 calls for
+# SoulSeededPersona — the v0.2 persona shape. RFC 08 §7.2 calls for
 # wrapping a real PawAgent inside OASIS's SocialAgent and routing
-# memory through the Soul engine. v0.1 ships a *minimal* persona that
-# carries OCEAN traits + a memory-tier-stub config + a backend handle,
-# and delegates the actual "think" step to a pluggable backend.
+# memory through the Soul engine. PR 1 shipped a backend-only stub;
+# PR 2 lands the PawAgent wrapper while leaving the OASIS subclass
+# swap for PR 3 (the substrate is now vendored but not yet wired into
+# the engine's tick loop).
 #
 # The persona deliberately does NOT subclass ``oasis.social_agent.SocialAgent``
-# in v0.1 — the OASIS src-copy isn't vendored yet (see
-# substrate/oasis/README-FORK.md). The shape here matches the public
-# surface RFC 08 §7.2 specifies (OceanDrift + memory tier stub +
-# delegate-to-backend), so the v1.0 wiring becomes "swap parent class"
+# in v0.2 — the OASIS substrate is vendored but the cross-class wiring
+# (action vocabulary translation, AgentGraph membership, message channel)
+# is a PR 3 deliverable. The shape here matches the public surface RFC
+# 08 §7.2 specifies (OceanDrift + memory tier stub + PawAgent reference
+# + delegate-to-backend), so the PR 3 wiring becomes "swap parent class"
 # rather than "rewrite cognition path".
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+if TYPE_CHECKING:
+    from pocketpaw.paw.agent import PawAgent  # type: ignore[import-untyped]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,6 +97,11 @@ class MemoryTierStub:
     but the actual memory routing to Soul Protocol is deferred. The
     persona reads from ``self.scratchpad`` for now — a single-list
     in-memory store equivalent to OASIS's tick-scoped scratchpad.
+
+    PR 2 update: when a Persona is bound to a real PawAgent, the
+    ``soul_bridge`` slot holds the PawAgent's ``SoulBridge`` so the
+    overlay can be promoted to a real soul memory in PR 3. v0.2 still
+    writes to the scratchpad regardless — soul writes stay deferred.
     """
 
     tiers: dict[str, int] = field(
@@ -87,6 +114,7 @@ class MemoryTierStub:
         }
     )
     scratchpad: list[dict[str, Any]] = field(default_factory=list)
+    soul_bridge: Any | None = None  # PR 3 routes writes through this
 
     def remember(self, entry: dict[str, Any]) -> None:
         """v0.1: append to the scratchpad. v1.0 will route the write
@@ -104,16 +132,31 @@ class MemoryTierStub:
 
 
 class SoulSeededPersona:
-    """v0.1 soul-seeded persona.
+    """v0.2 soul-seeded persona.
 
-    Construction: ``SoulSeededPersona(name, ocean_drift, backend, ...)``.
+    Construction has two shapes:
+
+      - ``SoulSeededPersona(name, backend=..., ...)`` — the v0.1
+        backend-only path. The persona has no live PawAgent attached;
+        prompts are composed locally from identity + drift + scratchpad.
+        Backwards-compat path retained for tests and the smoke runner.
+
+      - ``SoulSeededPersona(name, backend=..., paw_agent=..., ...)`` or
+        the convenience factory ``SoulSeededPersona.from_paw_agent(...)``
+        — the v0.2 fidelity path. The persona's prompt composer pulls
+        the soul's identity context via ``paw_agent.bootstrap_provider.
+        get_context()`` and routes recall through
+        ``paw_agent.bridge.recall``. The captain-locked "fidelity
+        floor" (RFC §7.2) is met here: the persona's system context is
+        what the live runtime would assemble.
 
     The persona's ``decide`` entrypoint is what ``ForesightWorld.tick()``
     invokes per tick. ``decide`` composes a prompt from the persona's
     identity block + the world observation + the recent scratchpad,
     asks the backend to produce an action, parses the backend's
     response into an action dict, and remembers the cycle in the
-    scratchpad.
+    scratchpad. When a PawAgent is attached, the identity block is
+    enriched with the soul's bootstrap context.
 
     The backend interface is intentionally minimal:
       ``await backend.complete(prompt: str) -> str``
@@ -131,6 +174,7 @@ class SoulSeededPersona:
         memory: MemoryTierStub | None = None,
         agent_id: UUID | None = None,
         role: str | None = None,
+        paw_agent: PawAgent | None = None,
     ) -> None:
         if not hasattr(backend, "complete"):
             raise TypeError(
@@ -143,6 +187,64 @@ class SoulSeededPersona:
         self.ocean_drift = ocean_drift or OceanDrift()
         self.memory = memory or MemoryTierStub()
         self._backend = backend
+        self._paw_agent = paw_agent
+        if paw_agent is not None:
+            # Bind the soul bridge for PR 3's overlay-write path. v0.2
+            # only reads through the bridge; writes still hit scratchpad.
+            self.memory.soul_bridge = getattr(paw_agent, "bridge", None)
+
+    @property
+    def paw_agent(self) -> PawAgent | None:
+        """The live PawAgent backing this persona, or ``None`` for
+        the v0.1 backend-only path. Read-only at v0.2; PR 3 may add
+        rebind-at-tick support for scenario-mid swaps.
+        """
+        return self._paw_agent
+
+    @property
+    def has_fidelity(self) -> bool:
+        """``True`` when the persona is backed by a real PawAgent and
+        thus meets RFC §7.2's "fidelity floor" requirement. Useful for
+        the run report to surface how much of a scenario hit the
+        floor vs ran on stub personas.
+        """
+        return self._paw_agent is not None
+
+    # --- convenience factory --------------------------------------------
+
+    @classmethod
+    def from_paw_agent(
+        cls,
+        paw_agent: PawAgent,
+        *,
+        backend: Any,
+        name: str | None = None,
+        role: str | None = None,
+        ocean_drift: OceanDrift | None = None,
+        agent_id: UUID | None = None,
+    ) -> SoulSeededPersona:
+        """Build a persona that wraps an already-constructed PawAgent.
+
+        v0.2 keeps the PawAgent factory call (``get_paw_agent``) out
+        of band — callers are expected to instantiate the agent
+        themselves and hand it in. This keeps the persona pure and
+        side-effect-free; PR 3 will offer a higher-level
+        ``run_scenario(paw_agent_factory=...)`` entrypoint that lazily
+        builds per-persona agents.
+
+        The persona's display name defaults to the soul's ``name``
+        attribute when no explicit ``name`` is supplied.
+        """
+        soul = getattr(paw_agent, "soul", None)
+        derived_name = name or getattr(soul, "name", None) or "unnamed-persona"
+        return cls(
+            name=derived_name,
+            backend=backend,
+            ocean_drift=ocean_drift,
+            agent_id=agent_id,
+            role=role,
+            paw_agent=paw_agent,
+        )
 
     # --- the entrypoint ForesightWorld.tick() calls -------------------
 
@@ -170,14 +272,24 @@ class SoulSeededPersona:
         return action
 
     def _compose_prompt(self, observation: dict[str, Any]) -> str:
-        """v0.1 prompt: identity + drift + recent scratchpad + observation.
+        """Compose a prompt for one think-act cycle.
 
-        v1.0 will hand control of prompt assembly back to the
+        Two branches:
+
+          - With a live PawAgent attached: identity block comes from the
+            soul's bootstrap provider (so the persona's prompt matches
+            what the live runtime would assemble). OCEAN drift is added
+            as a persona-shaping suffix. Recent scratchpad + observation
+            stay v0.1-shaped so the parser contract holds.
+          - Without PawAgent (v0.1 backend-only path): identity block
+            is composed locally from name + role + drift, matching the
+            v0.1 contract the smoke test pins.
+
+        v1.0 will hand control of prompt assembly fully back to the
         live PawAgent so the persona produces what the real runtime
         would produce (RFC §7.2 "fidelity floor" — the captain-locked
-        requirement).
+        requirement). v0.2 takes the first half of that step.
         """
-        drift = self.ocean_drift.as_prompt_block()
         recent = self.memory.recall(limit=3)
         recent_lines = (
             "\n".join(f"  - t{e.get('tick')}: {e.get('action', {})}" for e in recent) or "  (none)"
@@ -186,8 +298,9 @@ class SoulSeededPersona:
             "Respond with one short line of the form: "
             "action=<verb>; rationale=<one phrase>; put=<key>:<value>"
         )
+        identity_block = self._identity_block()
         return (
-            f"You are {self.name}, role={self.role}. Personality: {drift}.\n"
+            f"{identity_block}\n"
             f"Recent activity:\n{recent_lines}\n"
             f"Current observation: tick={observation.get('tick')}, "
             f"active_count={observation.get('active_count')}, "
@@ -195,6 +308,35 @@ class SoulSeededPersona:
             f"{format_hint}\n"
             "If no state change is appropriate, set put=none.\n"
         )
+
+    def _identity_block(self) -> str:
+        """Render the persona's identity block for the prompt header.
+
+        When the persona is bound to a PawAgent, defer to the soul's
+        bootstrap provider for the bulk of the identity; layer the
+        scenario role + OCEAN drift on top. When no agent is bound,
+        compose a local identity block (the v0.1 shape).
+        """
+        drift = self.ocean_drift.as_prompt_block()
+        if self._paw_agent is None:
+            return f"You are {self.name}, role={self.role}. Personality: {drift}."
+        bootstrap = getattr(self._paw_agent, "bootstrap_provider", None)
+        soul_context = ""
+        if bootstrap is not None and hasattr(bootstrap, "get_context"):
+            try:
+                soul_context = str(bootstrap.get_context() or "")
+            except Exception as exc:  # noqa: BLE001 — never let bootstrap break decide
+                logger.debug(
+                    "Soul bootstrap failed for persona %s: %s: %s",
+                    self.name,
+                    type(exc).__name__,
+                    exc,
+                )
+                soul_context = ""
+        scenario_overlay = (
+            f"\nScenario role: {self.role}. Personality overlay for this simulation: {drift}."
+        )
+        return (soul_context.rstrip() + scenario_overlay).strip()
 
     @staticmethod
     def _parse_response(raw: str) -> dict[str, Any]:

@@ -12,7 +12,21 @@ The full design lives in RFC 08
 The v0.1 cut and internal handover live at
 `pocketPaw/docs/internal/2026-05-foresight.md`.
 
-## v0.1 scope (this PR)
+## v0.2 scope (this PR)
+
+PR 2 lands the three items PR 1 deferred:
+
+| In (PR 2) | Out (later PRs) |
+|----|-----|
+| Vendored OASIS fork at `substrate/oasis/` (~6000 LOC, upstream SHA `46cdc8d`) | Calibration loop (PR 3) |
+| `camel-ai==0.2.90` optional dep (`pocketpaw-ee[foresight]`) | Retroactive backtest gate |
+| `ClaudeCodeBackend.run(messages, response_format, tools)` — CAMEL surface | UI rail (5 panels) |
+| `LiteLLMFallbackBackend` stub (PR 3 wires the proxy) | Tier mix beyond stub config |
+| `SoulSeededPersona(paw_agent=...)` — wraps a real `PawAgent` | Sub-types beyond Decision Forecast |
+| `SoulSeededPersona.from_paw_agent(...)` convenience factory | vLLM hosting |
+| `OASIS_AVAILABLE` flag on the substrate package | Go port (long-horizon) |
+
+## v0.1 scope (PR 1, merged)
 
 | In | Out |
 |----|-----|
@@ -109,8 +123,8 @@ ee/pocketpaw_ee/cloud/foresight/
 
 | PR | Cut |
 |----|-----|
-| 2 | OASIS src-copy at `substrate/oasis/` (~2,000 LOC, captain reviews vendoring) |
-| 3 | Calibration loop scaffold (prediction buffer + pair-against-reality + score) |
+| ~~2~~ | ~~OASIS src-copy at `substrate/oasis/`~~ — shipped (this PR) |
+| 3 | OASIS wired into `ForesightWorld.tick()` + `PawSocialAgent(SocialAgent)` subclass + calibration loop scaffold (prediction buffer + pair-against-reality + score) |
 | 4 | Backtest gate at onboarding (retroactive run, accuracy report) |
 | 5 | Three sub-types complete (Market Sim, Org Change Rehearsal) |
 | 6 | UI rail (Scenarios / Live / Results / Aggregate / Insights) |
