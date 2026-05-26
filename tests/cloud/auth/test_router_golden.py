@@ -89,13 +89,15 @@ async def test_patch_me_updates_full_name(app_client) -> None:
 
 async def test_set_active_workspace(app_client) -> None:
     client, user_doc = app_client
-    resp = await client.post("/api/v1/auth/set-active-workspace", json={"workspace_id": "w42"})
+    # The seeded user is a member of "w1" — pinning to a workspace the user
+    # isn't a member of is rejected by the service (cross-tenant guard).
+    resp = await client.post("/api/v1/auth/set-active-workspace", json={"workspace_id": "w1"})
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "activeWorkspace": "w42"}
+    assert resp.json() == {"ok": True, "activeWorkspace": "w1"}
 
     refreshed = await _UserDoc.get(user_doc.id)
     assert refreshed is not None
-    assert refreshed.active_workspace == "w42"
+    assert refreshed.active_workspace == "w1"
 
 
 async def test_set_active_workspace_empty_returns_422(app_client) -> None:
