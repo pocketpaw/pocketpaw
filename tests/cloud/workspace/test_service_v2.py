@@ -1009,3 +1009,139 @@ async def test_get_workspace_plan_reraises_on_db_error(
     monkeypatch.setattr(workspace_service._WorkspaceDoc, "get", _raise)
     with pytest.raises(_Boom):
         await workspace_service.get_workspace_plan(ws.id)
+
+
+# ---------------------------------------------------------------------------
+# resend_invite (Wave 2 Task 16)
+# ---------------------------------------------------------------------------
+
+
+async def test_resend_invite_returns_new_plaintext(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    original = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+
+    result = await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+
+    assert result["invite_id"] == original.id
+    new_plaintext = result["token"]
+    assert isinstance(new_plaintext, str) and len(new_plaintext) >= 32
+    assert new_plaintext != original.token
+
+    from pocketpaw_ee.cloud.models.invite import hash_token
+
+    row = await _InviteDoc.get(PydanticObjectId(original.id))
+    assert row is not None
+    assert row.token_hash == hash_token(new_plaintext)
+    assert row.token in (None, "")
+
+
+async def test_resend_invite_resets_expires_at(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    original = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+    row = await _InviteDoc.get(PydanticObjectId(original.id))
+    assert row is not None
+    row.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await row.save()
+
+    await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+
+    refreshed = await _InviteDoc.get(PydanticObjectId(original.id))
+    assert refreshed is not None
+    exp = refreshed.expires_at
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=UTC)
+    delta = exp - datetime.now(UTC)
+    # Should be very close to 7 days; allow a wide window for slow CI.
+    assert timedelta(days=6, hours=23) <= delta <= timedelta(days=7, minutes=1)
+
+
+async def test_resend_invite_increments_count(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    original = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+
+    await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+    await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+
+    refreshed = await _InviteDoc.get(PydanticObjectId(original.id))
+    assert refreshed is not None
+    assert refreshed.resend_count == 2
+
+
+async def test_resend_invite_emits_audit_row(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    original = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+
+    await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+
+    from pocketpaw_ee.cloud.models.audit_event import AuditEvent as _AuditEventDoc
+
+    rows = await _AuditEventDoc.find(
+        {"workspace": ws.id, "action": "workspace.invite_resent"}
+    ).to_list()
+    assert len(rows) == 1
+    assert rows[0].metadata["invite_id"] == original.id
+    assert rows[0].metadata["email"] == "x@y.z"
+    assert rows[0].metadata["resend_count"] == 1
+
+
+async def test_resend_invite_rejects_accepted_invite(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    original = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+    invitee = await _seed_user(email="x@y.z")
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), original.token)
+
+    with pytest.raises(ConflictError) as exc:
+        await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+    assert exc.value.code == "invite.already_accepted"
+
+
+async def test_resend_invite_rejects_revoked_invite(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    original = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="x@y.z")
+    )
+    await workspace_service.revoke_invite(ws.id, original.id, str(owner.id))
+
+    with pytest.raises(ConflictError) as exc:
+        await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
+    assert exc.value.code == "invite.revoked"

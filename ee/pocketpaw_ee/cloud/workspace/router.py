@@ -19,6 +19,7 @@ from pocketpaw_ee.cloud._core.deps import (
 from pocketpaw_ee.cloud._core.rate_limit import (
     consume_invite_create_tokens,
     rate_limit_invite_create,
+    rate_limit_invite_resend,
 )
 from pocketpaw_ee.cloud.auth.core import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
@@ -224,3 +225,20 @@ async def revoke_invite(
 ) -> Response:
     await workspace_service.revoke_invite(workspace_id, invite_id, str(user.id))
     return Response(status_code=204)
+
+
+@router.post("/{workspace_id}/invites/{invite_id}/resend")
+async def resend_invite_route(
+    workspace_id: str,
+    invite_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("invite.resend")),
+    _rl: None = Depends(rate_limit_invite_resend),
+) -> dict:
+    """Rotate the invite's token and return the fresh plaintext.
+
+    The plaintext is the value the UI needs to put on the clipboard for
+    the inviter — the server only stores the hash, so this is the only
+    moment the plaintext exists outside the original email link.
+    """
+    return await workspace_service.resend_invite(ctx, workspace_id, invite_id)

@@ -26,7 +26,7 @@ Changes: added get_workspace_plan helper for plan-feature gate dep.
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from beanie import PydanticObjectId
@@ -898,6 +898,68 @@ async def revoke_invite(
         )
 
 
+async def resend_invite(
+    ctx: RequestContext,
+    workspace_id: str,
+    invite_id: str,
+) -> dict:
+    """Rotate the invite's token and reset the 7-day expiry.
+
+    Mints a fresh plaintext, persists only the new hash, and returns the
+    plaintext so the route can ship it to the inviter's clipboard — the
+    original plaintext is gone (server only ever stored the hash). The
+    invite_id, workspace_id, email, and group are unchanged.
+    """
+    try:
+        invite_doc = await _InviteDoc.get(PydanticObjectId(invite_id))
+    except Exception:
+        invite_doc = None
+    if invite_doc is None or invite_doc.workspace != workspace_id:
+        raise NotFound("invite", invite_id)
+    if invite_doc.accepted:
+        raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+    if invite_doc.revoked:
+        raise ConflictError("invite.revoked", "This invite has been revoked")
+
+    plaintext = secrets.token_urlsafe(32)
+    new_expiry = datetime.now(UTC) + timedelta(days=7)
+    invite_doc.token = None
+    invite_doc.token_hash = hash_token(plaintext)
+    invite_doc.expires_at = new_expiry
+    invite_doc.resend_count = (invite_doc.resend_count or 0) + 1
+    await invite_doc.save()
+
+    await emit(
+        WorkspaceInviteCreated(
+            data={
+                "workspace_id": workspace_id,
+                "invite_id": invite_id,
+                "email": invite_doc.email,
+                "resend": True,
+            }
+        )
+    )
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.invite_resent",
+        target_type="invite",
+        target_id=invite_id,
+        metadata={
+            "invite_id": invite_id,
+            "email": invite_doc.email,
+            "resend_count": invite_doc.resend_count,
+        },
+    )
+
+    return {
+        "invite_id": invite_id,
+        "token": plaintext,
+        "expires_at": new_expiry.isoformat(),
+    }
+
+
 async def decline_invite(token: str) -> None:
     """Invitee-side decline. No auth — the invitee may not have an account.
 
@@ -1096,6 +1158,7 @@ __all__ = [
     "list_peer_ids",
     "preview_invite",
     "remove_member",
+    "resend_invite",
     "revoke_invite",
     "seed_default_workspace",
     "update",

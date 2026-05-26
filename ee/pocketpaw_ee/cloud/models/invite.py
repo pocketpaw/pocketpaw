@@ -47,6 +47,7 @@ class Invite(Document):
     revoked_reason: str | None = None  # e.g. "declined" when invitee declines vs inviter-revoke
     accepted_at: datetime | None = None  # single-use stamp (Task 4)
     expires_at: datetime = Field(default_factory=_default_expiry)
+    resend_count: int = 0  # increments on each POST /invites/{id}/resend
 
     @property
     def expired(self) -> bool:

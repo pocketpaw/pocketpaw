@@ -23,6 +23,10 @@ from pocketpaw_ee.cloud._core.errors import RateLimited
 # 50/day so a single bad admin can't email-bomb a workspace's domain.
 _invite_create_limiter = RateLimiter(rate=50.0 / 86400.0, capacity=50)
 
+# 5 resends per 30 minutes per invite. Keyed on invite_id rather than actor
+# so an admin can't sidestep by rotating between teammates.
+_invite_resend_limiter = RateLimiter(rate=5.0 / 1800.0, capacity=5)
+
 
 async def rate_limit_invite_create(
     workspace_id: str,
@@ -60,4 +64,27 @@ def consume_invite_create_tokens(user_id: str, workspace_id: str, count: int) ->
             )
 
 
-__all__ = ["consume_invite_create_tokens", "rate_limit_invite_create"]
+async def rate_limit_invite_resend(
+    workspace_id: str,
+    invite_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> None:
+    """Per-invite bucket guarding POST /workspaces/{id}/invites/{invite_id}/resend.
+
+    Keyed on invite_id rather than actor: the resend is meant to refresh a
+    plaintext for the inviter's clipboard, not a re-mail blast surface.
+    """
+    key = f"invite-resend:{invite_id}"
+    info = _invite_resend_limiter.check(key)
+    if not info.allowed:
+        raise RateLimited(
+            "workspace.invite_resend_rate_limited",
+            "Too many resends — wait before retrying.",
+        )
+
+
+__all__ = [
+    "consume_invite_create_tokens",
+    "rate_limit_invite_create",
+    "rate_limit_invite_resend",
+]

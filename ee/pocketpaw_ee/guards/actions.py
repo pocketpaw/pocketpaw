@@ -146,6 +146,7 @@ ACTIONS: dict[str, ActionRule] = {
     # Invite
     "invite.create": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "invite.revoke": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    "invite.resend": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     # Billing
     "billing.view": ActionRule(WorkspaceRole.ADMIN, "billing.admin_only"),
     "billing.manage": ActionRule(WorkspaceRole.OWNER, "billing.owner_only"),
