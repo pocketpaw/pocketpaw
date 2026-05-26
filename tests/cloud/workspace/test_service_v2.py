@@ -431,3 +431,52 @@ async def test_validate_invite_accepts_plaintext_by_hash(
 async def test_validate_invite_unknown_hash_404(mongo_db: Any) -> None:
     with pytest.raises(NotFound):
         await workspace_service.validate_invite("definitely-not-a-real-token")
+
+
+async def test_accept_invite_is_single_use(mongo_db: Any, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    owner = await _seed_user(email="own@x.c")
+    invitee = await _seed_user(email="inv@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="SU", slug="su"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="inv@x.c", role="member"),
+    )
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+    with pytest.raises(ConflictError):
+        await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+
+async def test_accept_invite_concurrent_only_one_wins(mongo_db: Any, monkeypatch) -> None:
+    """Two concurrent accepts on the same token: exactly one succeeds."""
+    import asyncio
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    owner = await _seed_user(email="own2@x.c")
+    inv = await _seed_user(email="i@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="CC", slug="cc"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="i@x.c", role="member"),
+    )
+    results = await asyncio.gather(
+        workspace_service.accept_invite(_ctx(str(inv.id)), invite.token),
+        workspace_service.accept_invite(_ctx(str(inv.id)), invite.token),
+        return_exceptions=True,
+    )
+    successes = [r for r in results if not isinstance(r, Exception)]
+    failures = [r for r in results if isinstance(r, ConflictError)]
+    assert len(successes) == 1
+    assert len(failures) == 1

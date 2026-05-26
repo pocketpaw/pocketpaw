@@ -503,30 +503,62 @@ async def validate_invite(token: str) -> tuple[Invite, str]:
 
 async def accept_invite(ctx: RequestContext, token: str) -> None:
     th = hash_token(token)
-    invite_doc = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
-    if invite_doc is None:
-        invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
-        if invite_doc is None:
+
+    # Atomic claim: set accepted=True only if it's currently False.
+    # Returns the original (BEFORE) doc on success, None on lose.
+    collection = _InviteDoc.get_pymongo_collection()
+    claimed = await collection.find_one_and_update(
+        {"token_hash": th, "accepted": False, "revoked": False},
+        {"$set": {"accepted": True, "accepted_at": datetime.now(UTC)}},
+        return_document=False,
+    )
+
+    if claimed is None:
+        # Disambiguate: missing, revoked, expired, or already accepted?
+        existing = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
+        if existing is None:
+            existing = await _InviteDoc.find_one(_InviteDoc.token == token)
+        if existing is None:
             raise NotFound("invite")
-        invite_doc.token_hash = th
-        invite_doc.token = None
-        await invite_doc.save()
-    invite = _invite_to_domain(invite_doc)
-    if invite.accepted:
-        raise ConflictError("invite.already_accepted", "This invite has already been accepted")
-    if invite.revoked:
-        raise Forbidden("invite.revoked", "This invite has been revoked")
-    if invite.expired:
-        raise Forbidden("invite.expired", "This invite has expired")
+        if existing.accepted:
+            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+        if existing.revoked:
+            raise Forbidden("invite.revoked", "This invite has been revoked")
+        if existing.expired:
+            raise Forbidden("invite.expired", "This invite has expired")
+        # Legacy plaintext row — backfill the hash field and retry the claim.
+        existing.token_hash = th
+        existing.token = None
+        await existing.save()
+        claimed = await collection.find_one_and_update(
+            {"_id": existing.id, "accepted": False, "revoked": False},
+            {"$set": {"accepted": True, "accepted_at": datetime.now(UTC)}},
+            return_document=False,
+        )
+        if claimed is None:
+            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+
+    # Rebuild the domain object from the BEFORE doc so downstream emit/
+    # membership logic has the data it needs.
+    invite = _invite_to_domain(_InviteDoc.model_validate(claimed))
 
     ws_doc = await _fetch_workspace(invite.workspace_id)
     if ws_doc is None:
+        # Roll back the claim — the invite must stay usable.
+        await collection.update_one(
+            {"_id": claimed["_id"]},
+            {"$set": {"accepted": False, "accepted_at": None}},
+        )
         raise NotFound("workspace", invite.workspace_id)
 
     already_member = await _get_member_role(invite.workspace_id, ctx.user_id) is not None
     if not already_member:
         member_count = await _count_members(invite.workspace_id)
         if member_count >= ws_doc.seats:
+            await collection.update_one(
+                {"_id": claimed["_id"]},
+                {"$set": {"accepted": False, "accepted_at": None}},
+            )
             raise SeatLimitError(ws_doc.seats)
         await _add_member(
             invite.workspace_id,
@@ -534,9 +566,6 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             role=invite.role,
             set_active=True,
         )
-
-    invite_doc.accepted = True
-    await invite_doc.save()
 
     await event_bus.emit(
         "invite.accepted",
