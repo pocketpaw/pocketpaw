@@ -1,5 +1,10 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — added
+``ForesightWorkspaceConfig`` to the registered docs + ``__all__`` so RFC 08
+v1.0's per-workspace onboarding threshold override is wired into
+``init_beanie``. Only ``ee.cloud.foresight.service`` imports the doc class
+directly (import-linter contract).
 Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) — added
 ``ForesightPredictionRecord`` to the registered docs + ``__all__`` so the
 RFC 08 §9 calibration buffer's Mongo persistence is wired into ``init_beanie``.
@@ -24,6 +29,9 @@ from pocketpaw_ee.cloud.models.foresight_projected_decision import (
     ForesightProjectedDecision,
 )
 from pocketpaw_ee.cloud.models.foresight_run import ForesightRun
+from pocketpaw_ee.cloud.models.foresight_workspace_config import (
+    ForesightWorkspaceConfig,
+)
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
@@ -71,6 +79,7 @@ __all__ = [
     "ForesightPredictionRecord",
     "ForesightProjectedDecision",
     "ForesightRun",
+    "ForesightWorkspaceConfig",
     "Group",
     "GroupAgent",
     "Invite",
@@ -128,6 +137,7 @@ def get_all_documents():
         ForesightBacktest,
         ForesightProjectedDecision,
         ForesightPredictionRecord,
+        ForesightWorkspaceConfig,
     ]
 
 

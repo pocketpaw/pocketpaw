@@ -1,4 +1,22 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) —
+# RFC 08 v1.0 PR 10 adds the per-workspace onboarding-gate threshold
+# override surface:
+#     GET /api/v1/foresight/workspace/threshold
+#       → ForesightThresholdResponse (current / default / is_overridden /
+#         updated_at). Workspace-scoped; no cross-tenant read possible
+#         (the view is intrinsically per-workspace, and an absent
+#         override collapses to the default).
+#     PUT /api/v1/foresight/workspace/threshold
+#       Body: { threshold: float | None } — float ∈ [0.5, 0.95] sets the
+#         workspace override; null resets to the default.
+#       → ForesightThresholdResponse (same shape, reflecting the new
+#         state). 422 on out-of-bounds (DTO-level enforcement); 400 on
+#         malformed body; emits ``foresight.threshold.updated`` on
+#         effective-value changes.
+#   Both routes delegate to ``ee.cloud.foresight.service`` per cloud
+#   rule #2. paw-enterprise Team A2 builds the settings panel against
+#   the locked field set above.
 # Modified: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
 # RFC 08 v1.0 PR adds the LivePanel backing endpoint:
 #     GET /api/v1/foresight/runs/{id}/live-snapshot
@@ -83,6 +101,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateBacktestRequest,
     CreateScenarioRequest,
     ForesightInstinctProposalListResponse,
+    ForesightThresholdResponse,
     InsightsResponse,
     LiveSnapshotResponse,
     OnboardingGateResponse,
@@ -90,6 +109,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
+    SetForesightThresholdRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
 
@@ -446,6 +466,67 @@ async def get_insights(
     row keyed on the stable ``id``.
     """
     return await foresight_service.get_insights(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Per-workspace onboarding-gate threshold override (RFC 08 v1.0 PR 10)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/workspace/threshold",
+    response_model=ForesightThresholdResponse,
+)
+async def get_workspace_threshold(
+    ctx: RequestContext = Depends(request_context),
+) -> ForesightThresholdResponse:
+    """Return the workspace's resolved onboarding-gate threshold view.
+
+    Workspace-scoped — the view is intrinsically per-workspace and an
+    absent override collapses to the default (``current_threshold ==
+    default_threshold == 0.65``, ``is_overridden=False``,
+    ``updated_at=null``). No cross-tenant read possible.
+
+    Tenancy: 403 when the caller has no active workspace. Never 404.
+
+    paw-enterprise Team A2's settings panel reads this on mount to
+    render the override input pre-populated with the current value plus
+    a "default 0.65" hint next to it.
+    """
+    return await foresight_service.get_threshold(ctx)
+
+
+@router.put(
+    "/workspace/threshold",
+    response_model=ForesightThresholdResponse,
+)
+async def set_workspace_threshold(
+    body: SetForesightThresholdRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ForesightThresholdResponse:
+    """Upsert the workspace's onboarding-gate threshold override.
+
+    ``body.threshold = float`` in ``[0.5, 0.95]`` sets the workspace
+    override (validated at the DTO layer — 422 fires before the service
+    runs); ``body.threshold = null`` resets the workspace to the global
+    default.
+
+    Returns the same response shape as the GET so the UI can keep its
+    local store in sync with one round trip.
+
+    Side effects:
+      - Upserts the
+        :class:`pocketpaw_ee.cloud.models.foresight_workspace_config.ForesightWorkspaceConfig`
+        doc keyed by ``workspace_id``.
+      - Emits ``foresight.threshold.updated`` when the effective value
+        changes; a no-op write (same value) stays quiet.
+
+    Tenancy: 403 when no active workspace. The override applies to ALL
+    future ``get_onboarding_gate`` reads and ALL future ``create_backtest``
+    calls — a workspace that tightens its floor to 0.80 will reject
+    per-run threshold requests below 0.80 starting on the next call.
+    """
+    return await foresight_service.set_threshold(ctx, body)
 
 
 __all__ = ["router"]

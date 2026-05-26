@@ -1,4 +1,35 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — RFC
+# 08 v1.0 PR 10. Per-workspace onboarding-gate threshold override:
+#   - New ``get_threshold(ctx)`` — returns the resolved
+#     :class:`ForesightThresholdResponse` (current / default /
+#     is_overridden / updated_at) for the caller's workspace. Reads the
+#     ``ForesightWorkspaceConfig`` doc (creates none); collapses absent
+#     overrides to the default. Tenancy: 403 when no workspace; 404
+#     never (the doc is per-workspace and read is intrinsically scoped).
+#   - New ``set_threshold(ctx, body)`` — upserts the workspace's
+#     override. ``body.threshold=None`` clears the override (sets the
+#     doc field to ``None``); a float ∈ [0.5, 0.95] sets it. Emits
+#     ``foresight.threshold.updated`` whenever the effective value
+#     changes; a no-op write (same value) does NOT emit.
+#   - ``get_onboarding_gate(ctx)`` now reads the workspace's effective
+#     threshold via the new ``_resolve_workspace_threshold`` helper
+#     instead of the hardcoded ``GATE_DEFAULT_THRESHOLD``. Backward
+#     compat: a workspace with no override still sees 0.65 echoed back.
+#   - ``create_backtest(ctx, body)`` now resolves the workspace floor
+#     before validating the per-run threshold — a workspace that has
+#     tightened to 0.80 cannot accept a per-run threshold of 0.70 even
+#     though the global default is 0.65. The 422 message reports the
+#     effective floor so the operator sees the right number.
+#   - The ``_score_backtest`` -> ``ThresholdDecision`` path is
+#     unchanged: the caller (``create_backtest``) already passes the
+#     resolved threshold through, so the backtest scores against the
+#     workspace-effective value automatically. Verified by the new
+#     ``test_create_backtest_uses_workspace_override`` test.
+#   - The aggregator (``ee.foresight.aggregator``) layer never sees the
+#     workspace doc; the cloud service reads + resolves the override at
+#     the entry point and threads the resulting float through. The
+#     import-linter contract (cloud → engine forbidden) is preserved.
 # Updated: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
 # RFC 08 v1.0 — three changes:
 #   1. New ``get_live_snapshot(ctx, run_id)`` — backs
@@ -202,6 +233,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     ForesightRunCompleted,
     ForesightRunCreated,
     ForesightRunFailed,
+    ForesightThresholdUpdated,
 )
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.foresight.domain import (
@@ -218,6 +250,7 @@ from pocketpaw_ee.cloud.foresight.domain import (
     RollingAccuracyPoint,
     ScenarioCatalogEntry,
     ScenarioRun,
+    ThresholdOverrideView,
 )
 from pocketpaw_ee.cloud.foresight.dto import (
     AggregateRollupResponse,
@@ -229,6 +262,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateScenarioRequest,
     ForesightInstinctProposalListResponse,
     ForesightInstinctProposalResponse,
+    ForesightThresholdResponse,
     GateDecision,
     InsightResponse,
     InsightsResponse,
@@ -245,6 +279,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
+    SetForesightThresholdRequest,
     TierMixActual,
 )
 from pocketpaw_ee.cloud.foresight.live_snapshot import (
@@ -265,6 +300,9 @@ from pocketpaw_ee.cloud.models.foresight_projected_decision import (
     ForesightProjectedDecision as _ForesightProjectedDecisionDoc,
 )
 from pocketpaw_ee.cloud.models.foresight_run import ForesightRun as _ForesightRunDoc
+from pocketpaw_ee.cloud.models.foresight_workspace_config import (
+    ForesightWorkspaceConfig as _ForesightWorkspaceConfigDoc,
+)
 
 # Default onboarding gate threshold (RFC §13.1 gate 7 — captain locked for
 # v0.1 per PR 4 brief; v1.0 ops UI will let workspace admins tune).
@@ -865,23 +903,196 @@ async def _fetch_backtest_in_workspace(
     return doc
 
 
-def _resolve_threshold(requested: float | None) -> float:
+def _resolve_threshold(requested: float | None, *, floor: float = GATE_DEFAULT_THRESHOLD) -> float:
     """Pick the effective threshold for one backtest run.
 
-    v0.1: caller may tighten above ``GATE_DEFAULT_THRESHOLD`` but not
-    relax below it — an operator who could relax the bar could trivially
-    open the gate. v1.0's workspace-config override will let admins
-    set the floor; the per-run tightening path stays.
+    v1.0 (this PR): the floor is now the workspace's effective threshold
+    (the workspace admin's override when set, otherwise the global
+    :data:`GATE_DEFAULT_THRESHOLD`). A workspace that has tightened to
+    0.80 cannot accept a per-run threshold of 0.70 even though the
+    global default is 0.65 — the operator must tighten above the
+    workspace floor, never relax below it. The 422 message reports the
+    floor so the operator sees the right number.
+
+    v0.1 took a single argument and always compared against
+    ``GATE_DEFAULT_THRESHOLD``. The new ``floor`` kwarg defaults to that
+    constant so any unmigrated caller (none in tree) behaves identically.
     """
     if requested is None:
-        return GATE_DEFAULT_THRESHOLD
-    if requested < GATE_DEFAULT_THRESHOLD:
+        return floor
+    if requested < floor:
         raise ValidationError(
             "foresight.threshold_below_default",
-            f"per-run threshold {requested} cannot relax below the default "
-            f"{GATE_DEFAULT_THRESHOLD}; tighten above the floor only",
+            f"per-run threshold {requested} cannot relax below the workspace "
+            f"floor {floor}; tighten above the floor only",
         )
     return requested
+
+
+# ---------------------------------------------------------------------------
+# Per-workspace threshold override (RFC 08 v1.0 PR 10).
+#
+# Workspaces can persist a per-workspace override above the global
+# default (0.5–0.95 inclusive, enforced at the DTO layer). The override
+# is read by ``get_onboarding_gate`` and by ``create_backtest`` so all
+# gate-scoping reads see the same effective value.
+#
+# Two reads:
+#   - ``_resolve_workspace_threshold`` returns just the float (used in
+#     hot paths that don't need the full view, e.g. the gate read).
+#   - ``_load_threshold_view`` returns the full
+#     :class:`ThresholdOverrideView` (used by the GET / PUT response
+#     mappers).
+# ---------------------------------------------------------------------------
+
+
+async def _load_threshold_view(workspace_id: str) -> ThresholdOverrideView:
+    """Compose the workspace's threshold-override view.
+
+    A workspace with no config doc, or with a doc whose
+    ``threshold_override`` is ``None``, collapses to a "no override"
+    view — ``current_threshold`` equals the default, ``is_overridden``
+    is ``False``, ``updated_at`` is ``None``. The read never raises (an
+    absent doc is the normal case for a fresh workspace).
+    """
+    doc = await _ForesightWorkspaceConfigDoc.find_one(
+        {"workspace": workspace_id},
+    )
+    if doc is None or doc.threshold_override is None:
+        return ThresholdOverrideView(
+            workspace_id=workspace_id,
+            current_threshold=GATE_DEFAULT_THRESHOLD,
+            default_threshold=GATE_DEFAULT_THRESHOLD,
+            is_overridden=False,
+            updated_at=None,
+        )
+    return ThresholdOverrideView(
+        workspace_id=workspace_id,
+        current_threshold=float(doc.threshold_override),
+        default_threshold=GATE_DEFAULT_THRESHOLD,
+        is_overridden=True,
+        updated_at=doc.updatedAt,
+    )
+
+
+async def _resolve_workspace_threshold(workspace_id: str) -> float:
+    """Return the workspace's effective onboarding-gate threshold.
+
+    Light wrapper around :func:`_load_threshold_view` that pulls just the
+    float — used by hot paths (``get_onboarding_gate``, ``create_backtest``)
+    that don't need the full view shape.
+    """
+    view = await _load_threshold_view(workspace_id)
+    return view.current_threshold
+
+
+def _to_threshold_response(view: ThresholdOverrideView) -> ForesightThresholdResponse:
+    """Map the domain view to the wire DTO."""
+    return ForesightThresholdResponse(
+        workspace_id=view.workspace_id,
+        current_threshold=view.current_threshold,
+        default_threshold=view.default_threshold,
+        is_overridden=view.is_overridden,
+        updated_at=iso_utc(view.updated_at),
+    )
+
+
+async def get_threshold(ctx: RequestContext) -> ForesightThresholdResponse:
+    """Return the workspace's resolved onboarding-gate threshold view.
+
+    GET /api/v1/foresight/workspace/threshold backing.
+
+    Tenancy:
+      - 403 ``foresight.no_workspace`` when the caller has no active
+        workspace.
+      - No cross-tenant reads possible — the view is intrinsically
+        per-workspace; an absent override collapses to the default view
+        (never 404).
+    """
+    workspace_id = _require_workspace(ctx)
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    view = await _load_threshold_view(workspace_id)
+    return _to_threshold_response(view)
+
+
+async def set_threshold(
+    ctx: RequestContext,
+    body: SetForesightThresholdRequest,
+) -> ForesightThresholdResponse:
+    """Upsert the workspace's onboarding-gate threshold override.
+
+    PUT /api/v1/foresight/workspace/threshold backing.
+
+    ``body.threshold=None`` resets the workspace to the global default
+    (writes ``threshold_override=None`` on the doc — the doc itself
+    survives, since a "previously overridden, now reset" workspace has
+    an audit-relevant updatedAt). A float ∈ [0.5, 0.95] sets the
+    override; DTO-level bounds enforce the range so a 422 fires before
+    this function runs.
+
+    Emit semantics:
+      - When the effective value changes (override → different override,
+        override → reset, no-override → set), fire
+        ``foresight.threshold.updated`` with ``data={
+            workspace_id, threshold (new effective), is_overridden,
+            previous_threshold, previous_is_overridden,
+        }`` so listeners (UI panels, audit log) can react without a
+        round trip.
+      - A no-op write (same value as the current effective threshold)
+        does NOT emit — keeps the UI's optimistic-local-state path from
+        rebroadcasting redundant updates.
+    """
+    body = SetForesightThresholdRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    previous_view = await _load_threshold_view(workspace_id)
+    new_override = body.threshold  # already validated to None or ∈ [0.5, 0.95]
+
+    # Upsert pattern — Beanie has no native upsert helper that returns
+    # the resulting doc, so split into find_one + insert / update. The
+    # workspace field is unique-indexed so a concurrent insert race
+    # would surface as a DuplicateKeyError; for v1.0's admin-only write
+    # path that race is unlikely enough to treat as a 500 (no retry
+    # loop). v1.1 can swap to Mongo's $setOnInsert if the race shows up.
+    doc = await _ForesightWorkspaceConfigDoc.find_one(
+        {"workspace": workspace_id},
+    )
+    if doc is None:
+        doc = _ForesightWorkspaceConfigDoc(
+            workspace=workspace_id,
+            threshold_override=new_override,
+        )
+        await doc.insert()
+    else:
+        doc.threshold_override = new_override
+        await doc.save()
+
+    new_view = await _load_threshold_view(workspace_id)
+    response = _to_threshold_response(new_view)
+
+    # Emit only when the effective value changed. A no-op write
+    # (e.g. PUT {"threshold": 0.7} when the override is already 0.7)
+    # stays quiet so the UI's optimistic state doesn't get echoed.
+    changed = (
+        previous_view.current_threshold != new_view.current_threshold
+        or previous_view.is_overridden != new_view.is_overridden
+    )
+    if changed:
+        await emit(
+            ForesightThresholdUpdated(
+                data={
+                    "workspace_id": workspace_id,
+                    "threshold": new_view.current_threshold,
+                    "is_overridden": new_view.is_overridden,
+                    "previous_threshold": previous_view.current_threshold,
+                    "previous_is_overridden": previous_view.is_overridden,
+                }
+            )
+        )
+    # else: no-event: idempotent write (cloud rule #9 allows this with
+    # the inline comment); the GET still returns the resolved view so
+    # the client's PUT round-trip stays useful.
+    return response
 
 
 async def _score_backtest(
@@ -1033,7 +1244,8 @@ async def create_backtest(ctx: RequestContext, body: CreateBacktestRequest) -> B
     """
     body = CreateBacktestRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
-    threshold = _resolve_threshold(body.threshold)
+    workspace_floor = await _resolve_workspace_threshold(workspace_id)
+    threshold = _resolve_threshold(body.threshold, floor=workspace_floor)
 
     # Surface engine-side scenario validation as 422 before opening a
     # doc row — the engine config carries the supported-sub-type list.
@@ -1212,12 +1424,15 @@ async def get_onboarding_gate(ctx: RequestContext) -> OnboardingGateResponse:
         quarterly recalibration shouldn't briefly close the gate
         mid-run).
 
-    The threshold echoed back is the workspace's effective floor
-    (``GATE_DEFAULT_THRESHOLD`` in v0.1; v1.0 reads a workspace-config
-    override here).
+    The threshold echoed back is the workspace's effective floor —
+    the per-workspace override when set, else the global
+    :data:`GATE_DEFAULT_THRESHOLD`. v1.0 reads the
+    :class:`pocketpaw_ee.cloud.models.foresight_workspace_config.ForesightWorkspaceConfig`
+    doc via :func:`_resolve_workspace_threshold` (which handles the
+    absent-doc and null-override cases).
     """
     workspace_id = _require_workspace(ctx)
-    threshold = GATE_DEFAULT_THRESHOLD
+    threshold = await _resolve_workspace_threshold(workspace_id)
 
     latest_complete = await (
         _ForesightBacktestDoc.find({"workspace": workspace_id, "status": "complete"})
@@ -2862,10 +3077,12 @@ __all__ = [
     "get_live_snapshot",
     "get_onboarding_gate",
     "get_scenario_run",
+    "get_threshold",
     "list_backtests",
     "list_instinct_proposals_for_run",
     "list_projected_decisions",
     "list_scenario_runs",
     "list_scenarios",
     "pair_prediction",
+    "set_threshold",
 ]

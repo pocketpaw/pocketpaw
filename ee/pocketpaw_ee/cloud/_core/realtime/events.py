@@ -495,6 +495,16 @@ class ForesightOnboardingUnlocked(Event):
     EVENT_TYPE: ClassVar[str] = "foresight.onboarding.unlocked"
 
 
+# Foresight per-workspace configuration — RFC 08 v1.0 PR 10. Fires when
+# an admin tightens the workspace's onboarding gate threshold via the
+# PUT /foresight/workspace/threshold endpoint, or resets it back to the
+# global default. Listeners can refresh the Aggregate / Onboarding panels
+# in the UI without polling the GET endpoint.
+@dataclass
+class ForesightThresholdUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.threshold.updated"
+
+
 # Foresight per-anchor projection fanout — RFC 08 §7.7 + PR 5. Fires
 # once per (anchor × tick) bucket as the engine ticks the run forward;
 # the UI's Live panel consumes these to render the projection timeline
