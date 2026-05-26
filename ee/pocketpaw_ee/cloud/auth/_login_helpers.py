@@ -35,4 +35,13 @@ async def mint_and_record(backend, user: User, request: Request) -> Response:
     jti = jti_from_token(token)
     if jti:
         await sessions_service.record_session(str(user.id), jti, request)
-    return await backend.transport.get_login_response(token)
+    response = await backend.transport.get_login_response(token)
+
+    # Why: pair paw_csrf with paw_auth so the double-submit pair exists
+    # the moment the browser is authenticated. Bearer transport never
+    # sets paw_auth, so its response carries no paw_csrf either.
+    if backend.name == "cookie":
+        from pocketpaw_ee.cloud._core.csrf import mint_csrf_token, set_csrf_cookie
+
+        set_csrf_cookie(response, mint_csrf_token())
+    return response

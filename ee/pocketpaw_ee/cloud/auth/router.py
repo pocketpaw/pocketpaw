@@ -210,8 +210,12 @@ async def logout_cookie(
     request: Request,
     user: Any = Depends(current_active_user),
 ):
+    from pocketpaw_ee.cloud._core.csrf import clear_csrf_cookie
+
     await _revoke_current(request, user)
-    return await cookie_backend.transport.get_logout_response()
+    response = await cookie_backend.transport.get_logout_response()
+    clear_csrf_cookie(response)
+    return response
 
 
 @router.post("/auth/bearer/logout", name="auth:bearer.logout.revoke")
@@ -219,8 +223,12 @@ async def logout_bearer(
     request: Request,
     user: Any = Depends(current_active_user),
 ):
+    from pocketpaw_ee.cloud._core.csrf import clear_csrf_cookie
+
     await _revoke_current(request, user)
-    return Response(status_code=204)
+    response = Response(status_code=204)
+    clear_csrf_cookie(response)
+    return response
 
 
 # ---------------------------------------------------------------------------
