@@ -530,6 +530,26 @@ class ForesightInstinctProposalCreated(Event):
     EVENT_TYPE: ClassVar[str] = "foresight.instinct_proposal.created"
 
 
+# Foresight workspace-scoped custom scenarios — RFC 08 v1.0 wave 3.
+# Fires when an operator saves, edits, or deletes a custom scenario
+# YAML via the ``/api/v1/foresight/scenarios/custom`` surface. The
+# Scenarios panel uses these to refresh its list without polling; the
+# audit log subscribes for create/update/delete records.
+@dataclass
+class ForesightCustomScenarioCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.created"
+
+
+@dataclass
+class ForesightCustomScenarioUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.updated"
+
+
+@dataclass
+class ForesightCustomScenarioDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.deleted"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first

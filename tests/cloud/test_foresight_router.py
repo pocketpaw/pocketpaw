@@ -184,3 +184,147 @@ async def test_list_isolates_across_workspaces(
     items_w2 = (await w2_client.get("/foresight/runs")).json()
     assert {i["scenario_name"] for i in items_w1} == {"w1-only"}
     assert {i["scenario_name"] for i in items_w2} == {"w2-only"}
+
+
+# ---------------------------------------------------------------------------
+# Custom scenarios (RFC 08 v1.0 wave 3) — router-level smoke + tenancy.
+# Service-level coverage lives in ``test_foresight_custom_scenarios.py``;
+# the router tests here only check the wiring (status codes, location).
+# ---------------------------------------------------------------------------
+
+
+def _custom_yaml(name: str = "saved", n_ticks: int = 1) -> str:
+    return f"""name: {name}
+sub_type: decision_forecast
+n_ticks: {n_ticks}
+personas:
+  - name: a
+    role: tenant
+    ocean: {{}}
+  - name: b
+    role: approver
+    ocean: {{}}
+"""
+
+
+def _custom_payload(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "name": "saved-scenario",
+        "sub_type": "decision_forecast",
+        "description": "desc",
+        "yaml_body": _custom_yaml(name=overrides.get("name", "saved-scenario")),
+    }
+    base.update(overrides)
+    return base
+
+
+async def test_custom_scenario_post_then_get(w1_client: AsyncClient) -> None:
+    r = await w1_client.post(
+        "/foresight/scenarios/custom",
+        json=_custom_payload(name="renewal"),
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["name"] == "renewal"
+    assert body["sub_type"] == "decision_forecast"
+    assert body["parsed_meta"]["num_personas"] == 2
+    sid = body["id"]
+
+    r2 = await w1_client.get(f"/foresight/scenarios/custom/{sid}")
+    assert r2.status_code == 200
+    assert r2.json()["yaml_body"].startswith("name: renewal")
+
+
+async def test_custom_scenario_list_envelope(w1_client: AsyncClient) -> None:
+    await w1_client.post("/foresight/scenarios/custom", json=_custom_payload(name="s1"))
+    await w1_client.post("/foresight/scenarios/custom", json=_custom_payload(name="s2"))
+    r = await w1_client.get("/foresight/scenarios/custom")
+    assert r.status_code == 200
+    env = r.json()
+    assert env["total"] == 2
+    assert len(env["items"]) == 2
+    # List shape drops yaml_body.
+    assert "yaml_body" not in env["items"][0]
+
+
+async def test_custom_scenario_put_replaces(w1_client: AsyncClient) -> None:
+    r = await w1_client.post("/foresight/scenarios/custom", json=_custom_payload(name="orig"))
+    sid = r.json()["id"]
+    new_body = _custom_payload(name="renamed")
+    new_body["yaml_body"] = _custom_yaml(name="renamed", n_ticks=3)
+    r2 = await w1_client.put(f"/foresight/scenarios/custom/{sid}", json=new_body)
+    assert r2.status_code == 200
+    assert r2.json()["name"] == "renamed"
+    assert r2.json()["parsed_meta"]["num_ticks"] == 3
+
+
+async def test_custom_scenario_delete_204(w1_client: AsyncClient) -> None:
+    r = await w1_client.post("/foresight/scenarios/custom", json=_custom_payload(name="to-delete"))
+    sid = r.json()["id"]
+    r2 = await w1_client.delete(f"/foresight/scenarios/custom/{sid}")
+    assert r2.status_code == 204
+    # Subsequent GET is a 404.
+    r3 = await w1_client.get(f"/foresight/scenarios/custom/{sid}")
+    assert r3.status_code == 404
+
+
+async def test_custom_scenario_isolates_across_workspaces(
+    w1_client: AsyncClient, w2_client: AsyncClient
+) -> None:
+    r = await w1_client.post("/foresight/scenarios/custom", json=_custom_payload(name="w1-only"))
+    sid = r.json()["id"]
+    # w2 sees a 404 — same collapsing rule the run endpoint uses.
+    r2 = await w2_client.get(f"/foresight/scenarios/custom/{sid}")
+    assert r2.status_code == 404
+    # w2's list is empty.
+    r3 = await w2_client.get("/foresight/scenarios/custom")
+    assert r3.json()["total"] == 0
+
+
+async def test_custom_scenario_post_422_on_invalid_yaml(w1_client: AsyncClient) -> None:
+    payload = _custom_payload()
+    payload["yaml_body"] = "not: valid: yaml: : :: :"
+    r = await w1_client.post("/foresight/scenarios/custom", json=payload)
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "foresight.invalid_yaml"
+
+
+async def test_run_with_custom_scenario_id_via_router(w1_client: AsyncClient) -> None:
+    """End-to-end wiring: save a custom scenario, then POST a run that
+    references it via ``custom_scenario_id``. Router-level proof that
+    the DTO change + service integration produces a complete run."""
+    r = await w1_client.post(
+        "/foresight/scenarios/custom",
+        json=_custom_payload(name="run-target"),
+    )
+    sid = r.json()["id"]
+
+    run_payload = {
+        "name": "run-from-saved",
+        "sub_type": "decision_forecast",
+        "n_ticks": 1,
+        "personas": [],
+        "custom_scenario_id": sid,
+    }
+    r2 = await w1_client.post("/foresight/scenarios", json=run_payload)
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["status"] == "complete"
+    assert body["result"]["scenario_name"] == "run-target"
+
+
+async def test_run_422_on_unknown_custom_scenario_id_via_router(
+    w1_client: AsyncClient,
+) -> None:
+    r = await w1_client.post(
+        "/foresight/scenarios",
+        json={
+            "name": "unknown",
+            "sub_type": "decision_forecast",
+            "n_ticks": 1,
+            "personas": [],
+            "custom_scenario_id": "5f50c31b1c9d440000000000",
+        },
+    )
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "foresight.custom_scenario_not_found"

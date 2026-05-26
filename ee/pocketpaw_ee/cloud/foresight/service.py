@@ -1,4 +1,19 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC
+# 08 v1.0 wave 3. ``create_scenario_run`` now honors the optional
+# ``custom_scenario_id`` field on the POST body:
+#   - When set, the service loads the workspace's saved YAML scenario
+#     via :func:`ee.cloud.foresight.scenarios.load_workspace_scenario`,
+#     parses it into a :class:`ScenarioConfig` via
+#     ``ScenarioConfig.from_yaml``, and uses THAT config for the run
+#     instead of the inline ``personas`` + ``sub_type`` + ``n_ticks``
+#     fields on the body. Body fields stay on the persisted
+#     ``request`` blob for audit but the engine reads the saved YAML.
+#   - When both ``custom_scenario_id`` and ``sub_type`` are present,
+#     ``custom_scenario_id`` wins (the saved YAML's sub_type drives
+#     the engine).
+#   - Unknown / cross-tenant ids surface as 422
+#     ``foresight.custom_scenario_not_found``.
 # Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — RFC
 # 08 v1.0 PR 10. Per-workspace onboarding-gate threshold override:
 #   - New ``get_threshold(ctx)`` — returns the resolved
@@ -396,6 +411,106 @@ async def _fetch_in_workspace(workspace_id: str, run_id: str) -> _ForesightRunDo
 # ---------------------------------------------------------------------------
 
 
+async def _build_engine_config_from_body(
+    body: CreateScenarioRequest,
+    *,
+    workspace_id: str | None = None,
+) -> Any:
+    """Resolve the engine :class:`ScenarioConfig` for one POST body.
+
+    Two paths (wave 3):
+
+      - **inline-personas** (the v0.5 default): the body's ``personas``
+        / ``sub_type`` / ``n_ticks`` drive the engine config directly.
+        Behaviour identical to PR 7 — added here so both validation
+        and run dispatch use one resolver.
+      - **custom_scenario_id**: load the workspace's saved YAML scenario
+        via :func:`ee.cloud.foresight.scenarios.load_workspace_scenario`,
+        write it to a tmp path, and let the engine's
+        ``ScenarioConfig.from_yaml`` parse it. The saved YAML wins
+        over the request's ``sub_type`` / ``personas`` / ``n_ticks``;
+        the body fields are still echoed onto the audit ``request``
+        blob but the engine reads the YAML's values.
+
+    Both paths surface engine-side validation errors (unsupported
+    sub_type, persona-empty, n_ticks bound) as plain Python exceptions
+    the caller catches into 422 ``foresight.invalid_scenario``. The
+    workspace-scenario lookup raises ``ValidationError`` directly so a
+    missing / cross-tenant id surfaces as
+    ``foresight.custom_scenario_not_found``.
+    """
+    from pocketpaw_ee.foresight.persona import OceanDrift  # noqa: PLC0415
+    from pocketpaw_ee.foresight.scenarios.runner import (  # noqa: PLC0415
+        PersonaSpec,
+        ScenarioConfig,
+    )
+
+    if body.custom_scenario_id and workspace_id:
+        # Lazy import to keep ``service.py`` from carrying a top-level
+        # dependency on the wave-3 scenarios module. The function is
+        # async; we await it and let it raise on missing / cross-tenant.
+        from pocketpaw_ee.cloud.foresight.scenarios import (  # noqa: PLC0415
+            load_workspace_scenario,
+        )
+
+        scenario = await load_workspace_scenario(workspace_id, body.custom_scenario_id)
+
+        # Engine ``from_yaml`` expects a path; we round-trip the saved
+        # body through a tmp file so the engine's existing parser owns
+        # the grammar contract. Keeps the cloud entity free of a
+        # parallel parser that could drift from the engine's.
+        import tempfile  # noqa: PLC0415
+        from pathlib import Path  # noqa: PLC0415
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".yaml",
+            delete=False,
+            encoding="utf-8",
+        ) as fh:
+            fh.write(scenario.yaml_body)
+            tmp_path = Path(fh.name)
+        try:
+            config = ScenarioConfig.from_yaml(tmp_path)
+        finally:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+        # Body's optional ``precedent_seed`` overrides the YAML's when
+        # supplied; consistent with the inline-personas path where the
+        # body's seed wins. ``precedent_seeds`` (per-anchor map) is
+        # additive — the YAML's map is the baseline; the body's map
+        # layers on top so an operator can override one anchor without
+        # rewriting the YAML.
+        if body.precedent_seed is not None:
+            config.precedent_seed = body.precedent_seed
+        if body.precedent_seeds:
+            merged = dict(config.precedent_seeds or {})
+            merged.update(body.precedent_seeds)
+            config.precedent_seeds = merged
+        return config
+
+    # Inline-personas path (the v0.5 default).
+    personas = [
+        PersonaSpec(
+            name=p.name,
+            role=p.role,
+            ocean=OceanDrift(**p.ocean),
+        )
+        for p in body.personas
+    ]
+    return ScenarioConfig(
+        name=body.name,
+        sub_type=body.sub_type,
+        n_ticks=body.n_ticks,
+        personas=personas,
+        precedent_seed=body.precedent_seed,
+        precedent_seeds=dict(body.precedent_seeds or {}),
+    )
+
+
 async def _run_engine_inline(
     body: CreateScenarioRequest,
     *,
@@ -420,26 +535,20 @@ async def _run_engine_inline(
     imports the cloud — the import-linter contract holds and the
     engine's optional-extra story is preserved.
 
+    v1.0 wave 3 — when the request carries ``custom_scenario_id``, the
+    engine config comes from the saved workspace YAML instead of the
+    inline body fields. See :func:`_build_engine_config_from_body`
+    for the resolution logic.
+
     Returns the engine's ``RunResult.as_wire_dict()`` so the caller can
     persist the run as a JSON-shaped blob without leaking dataclass
     types into the persistence layer.
     """
-    from pocketpaw_ee.foresight.decision_graph_ref import NoOpDecisionGraphRef
-    from pocketpaw_ee.foresight.persona import OceanDrift
-    from pocketpaw_ee.foresight.scenarios.runner import (
-        PersonaSpec,
-        ScenarioConfig,
-        run_scenario,
-    )
+    from pocketpaw_ee.foresight.decision_graph_ref import NoOpDecisionGraphRef  # noqa: PLC0415
+    from pocketpaw_ee.foresight.scenarios.runner import run_scenario  # noqa: PLC0415
 
-    personas = [
-        PersonaSpec(
-            name=p.name,
-            role=p.role,
-            ocean=OceanDrift(**p.ocean),
-        )
-        for p in body.personas
-    ]
+    config = await _build_engine_config_from_body(body, workspace_id=workspace_id)
+
     # v1.0 PR (§14.4 body plumbing) — pass the request's optional
     # ``precedent_seed`` / ``precedent_seeds`` into the engine config so
     # the runner's own NoOp ref construction matches what the cloud
@@ -447,16 +556,12 @@ async def _run_engine_inline(
     # agree on seeds so the per-record id the runner stamps on
     # ``RunResult.projected_decisions`` matches the per-record id the
     # cloud closure persists on ``ForesightProjectedDecision.forward_precedent_decision_id``.
-    seed_value = body.precedent_seed or ""
-    per_anchor_seeds = dict(body.precedent_seeds or {})
-    config = ScenarioConfig(
-        name=body.name,
-        sub_type=body.sub_type,
-        n_ticks=body.n_ticks,
-        personas=personas,
-        precedent_seed=body.precedent_seed,
-        precedent_seeds=per_anchor_seeds,
-    )
+    #
+    # The config's own seeds are already the merged result (custom
+    # scenarios start from the YAML + layer the body on top); we mirror
+    # them on the cloud-side ref below so the lookups stay deterministic.
+    seed_value = config.precedent_seed or ""
+    per_anchor_seeds = dict(config.precedent_seeds or {})
 
     # v14 (§14.4) — build a DecisionGraphRef mirroring the engine's
     # default so the cloud closure can stamp the same
@@ -493,7 +598,13 @@ async def _run_engine_inline(
     # — so the engine + cloud paths stay in sync without coordination.
     callback = None
     if workspace_id and run_id:
-        scenario_name = body.name
+        # ``scenario_name`` is the precedent-lookup key; the engine
+        # writes its ``RunResult.projected_decisions`` records using the
+        # ScenarioConfig's name, so we mirror that here. For inline
+        # bodies the two match (``config.name == body.name``); for
+        # custom_scenario_id runs the saved YAML's name wins so the
+        # cloud-side ref agrees with the engine on the per-record id.
+        scenario_name = config.name
 
         async def _on_projected_decision(
             anchor_id: str,
@@ -588,30 +699,18 @@ async def create_scenario_run(
     # Lazy import inside the engine helper; constructing the config also
     # validates engine-side rules (sub_type, n_ticks, personas) so we
     # surface those as 422 before opening a doc row.
+    #
+    # v1.0 wave 3: ``_build_engine_config_from_body`` honors
+    # ``custom_scenario_id`` when set — the saved YAML's grammar is the
+    # validation source of truth in that case; otherwise the inline
+    # personas / sub_type / n_ticks fields validate as before.
     try:
-        # Build the config once to surface engine-side validation errors
-        # before persisting; the actual run is driven from
-        # ``_run_engine_inline`` below to keep the import lazy.
-        from pocketpaw_ee.foresight.persona import OceanDrift
-        from pocketpaw_ee.foresight.scenarios.runner import PersonaSpec, ScenarioConfig
-
-        _ = ScenarioConfig(
-            name=body.name,
-            sub_type=body.sub_type,
-            n_ticks=body.n_ticks,
-            personas=[
-                PersonaSpec(
-                    name=p.name,
-                    role=p.role,
-                    ocean=OceanDrift(**p.ocean),
-                )
-                for p in body.personas
-            ],
-            # v1.0 PR (§14.4 body plumbing) — surface precedent-seed
-            # validation errors as 422 before opening a doc row.
-            precedent_seed=body.precedent_seed,
-            precedent_seeds=dict(body.precedent_seeds or {}),
-        )
+        _ = await _build_engine_config_from_body(body, workspace_id=workspace_id)
+    except ValidationError:
+        # ``load_workspace_scenario`` raises this with the
+        # ``foresight.custom_scenario_not_found`` code — re-raise
+        # untouched so the caller's 422 carries the right code.
+        raise
     except (TypeError, ValueError, NotImplementedError) as exc:
         raise ValidationError("foresight.invalid_scenario", str(exc)) from exc
 

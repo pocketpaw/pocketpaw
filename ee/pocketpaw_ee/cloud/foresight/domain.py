@@ -1,4 +1,17 @@
 # ee/pocketpaw_ee/cloud/foresight/domain.py
+# Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC 08
+# v1.0 wave 3 — adds workspace-scoped custom-scenario domain shapes:
+#   - ``CustomScenario`` — frozen value object mirroring the persisted
+#     :class:`pocketpaw_ee.cloud.models.foresight_workspace_scenario.ForesightWorkspaceScenario`
+#     document 1-to-1 plus the cloud rule #3 tenancy invariant.
+#   - ``CustomScenarioParsedMeta`` — frozen value object capturing the
+#     denormalized parse result (num_personas, num_ticks, tier_mix,
+#     precedent_seed) the service stamps onto each doc at write time so
+#     the list endpoint can render per-row counts without re-parsing the
+#     YAML body on every request.
+#   The shapes are frozen so the service can hand them to mapping
+#   helpers without import-direction violations — both sides see plain
+#   dataclasses with no Beanie / FastAPI surface.
 # Updated: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) — RFC
 # 08 v1.0 — adds live-snapshot domain shapes:
 #   - ``LiveSnapshotView`` — workspace-scoped frozen view backing the
@@ -490,11 +503,70 @@ class ThresholdOverrideView:
     updated_at: datetime | None = None
 
 
+# ---------------------------------------------------------------------------
+# Custom scenarios (RFC 08 v1.0 wave 3) — workspace-owned scenario YAML
+# storage. Sibling shape to ``ScenarioCatalogEntry`` (which enumerates
+# the bundled engine templates); ``CustomScenario`` is the persisted
+# operator-authored record.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CustomScenarioParsedMeta:
+    """Denormalized parse result for a workspace's custom scenario.
+
+    Service stamps this onto the doc at write time so the list endpoint
+    can render ``num_personas`` / ``num_ticks`` / ``tier_mix`` per row
+    without re-parsing the YAML body on every read. Mirrors the
+    ``parsed_meta`` field on
+    :class:`pocketpaw_ee.cloud.models.foresight_workspace_scenario.ForesightWorkspaceScenario`.
+
+    ``tier_mix`` carries the premium/mid/tail share triple parsed from
+    the YAML (or the captain-locked default {0.05, 0.15, 0.80} when the
+    YAML omits the block). ``precedent_seed`` is the scenario-root seed
+    if present, else ``None``.
+    """
+
+    num_personas: int
+    num_ticks: int
+    tier_mix: dict[str, float]
+    precedent_seed: str | None = None
+
+
+@dataclass(frozen=True)
+class CustomScenario:
+    """One workspace-scoped custom scenario, scoped to a workspace.
+
+    Fields mirror the
+    :class:`pocketpaw_ee.cloud.models.foresight_workspace_scenario.ForesightWorkspaceScenario`
+    document 1-to-1 plus the cloud rule #3 tenancy invariant —
+    ``workspace_id`` is required positionally with no default.
+
+    The wire response (``CustomScenarioResponse``) drops ``yaml_body``
+    from the list shape but keeps it on the detail shape; this domain
+    object carries the full body so the service has a single value
+    object spanning both read shapes.
+    """
+
+    id: str
+    workspace_id: str
+    name: str
+    sub_type: str
+    description: str
+    author: str
+    created_at: datetime
+    updated_at: datetime
+    yaml_body: str
+    parsed_meta: CustomScenarioParsedMeta
+
+
 __all__ = [
     "AggregateRollup",
     "BacktestRun",
     "BacktestRunStatus",
     "ConfidenceDrift",
+    "CustomScenario",
+    "CustomScenarioParsedMeta",
     "InsightView",
     "LiveAnomaly",
     "LiveSampledTrace",

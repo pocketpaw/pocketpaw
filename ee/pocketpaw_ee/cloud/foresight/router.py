@@ -1,4 +1,24 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) —
+# RFC 08 v1.0 wave 3 adds the workspace-scoped custom-scenario CRUD:
+#     GET    /api/v1/foresight/scenarios/custom
+#       → CustomScenarioListResponse (paginated, optional sub_type filter)
+#     GET    /api/v1/foresight/scenarios/custom/{id}
+#       → CustomScenarioResponse (full yaml_body + parsed_meta)
+#     POST   /api/v1/foresight/scenarios/custom
+#       → CustomScenarioResponse (201)
+#     PUT    /api/v1/foresight/scenarios/custom/{id}
+#       → CustomScenarioResponse (full replace)
+#     DELETE /api/v1/foresight/scenarios/custom/{id}
+#       → 204 No Content
+#   All five routes delegate to ``ee.cloud.foresight.scenarios`` (the
+#   sibling service module to ``service.py`` — keeps the workspace-
+#   scenario reads/writes scoped to a dedicated module so the
+#   import-linter contract stays narrow).
+#   Also: the existing POST /scenarios body now honors an optional
+#   ``custom_scenario_id`` field (DTO change); when present the
+#   server loads the workspace scenario's saved YAML and uses it for
+#   the run.
 # Modified: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) —
 # RFC 08 v1.0 PR 10 adds the per-workspace onboarding-gate threshold
 # override surface:
@@ -90,16 +110,20 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud.foresight import scenarios as foresight_scenarios
 from pocketpaw_ee.cloud.foresight import service as foresight_service
 from pocketpaw_ee.cloud.foresight.dto import (
     AggregateRollupResponse,
     BacktestRunListItemResponse,
     BacktestRunResponse,
     CreateBacktestRequest,
+    CreateCustomScenarioRequest,
     CreateScenarioRequest,
+    CustomScenarioListResponse,
+    CustomScenarioResponse,
     ForesightInstinctProposalListResponse,
     ForesightThresholdResponse,
     InsightsResponse,
@@ -527,6 +551,129 @@ async def set_workspace_threshold(
     per-run threshold requests below 0.80 starting on the next call.
     """
     return await foresight_service.set_threshold(ctx, body)
+
+
+# ---------------------------------------------------------------------------
+# Workspace-scoped custom scenarios (RFC 08 v1.0 wave 3)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/scenarios/custom",
+    response_model=CustomScenarioListResponse,
+)
+async def list_custom_scenarios(
+    sub_type: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    ctx: RequestContext = Depends(request_context),
+) -> CustomScenarioListResponse:
+    """List workspace-scoped custom scenarios, most-recently-edited first.
+
+    The picker UI (Team 2) consumes this on the new-scenario sheet to
+    let operators choose from saved YAMLs. Pagination is offset-based
+    for parity with the projection-list / instinct-proposal endpoints;
+    ``limit`` is hard-capped at 100.
+
+    Optional ``sub_type`` filter narrows to ``decision_forecast`` /
+    ``market_sim`` / ``org_change_rehearsal``. Tenancy: workspace-scoped
+    via the dependency-resolved context; 403 when no active workspace.
+    """
+    return await foresight_scenarios.list_custom_scenarios(
+        ctx,
+        sub_type=sub_type,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/scenarios/custom/{scenario_id}",
+    response_model=CustomScenarioResponse,
+)
+async def get_custom_scenario(
+    scenario_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> CustomScenarioResponse:
+    """Fetch one custom scenario by id.
+
+    Returns 404 (``foresight_custom_scenario.not_found``) for unknown,
+    malformed, or cross-tenant ids — same collapsing rule the other
+    foresight endpoints use so existence isn't leakable.
+    """
+    return await foresight_scenarios.get_custom_scenario(ctx, scenario_id)
+
+
+@router.post(
+    "/scenarios/custom",
+    response_model=CustomScenarioResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_custom_scenario(
+    body: CreateCustomScenarioRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CustomScenarioResponse:
+    """Save a new custom scenario YAML against the workspace.
+
+    Validation flow (DTO → service):
+
+      - DTO enforces field-shape bounds: ``name`` ≤120, ``description``
+        ≤500, ``yaml_body`` ≤64 KB, ``sub_type`` in the supported set.
+      - Service parses the YAML and validates engine grammar +
+        v1.0 caps (persona/tick counts ≤100, tier_mix sums to 1.0 ±0.001,
+        request ``sub_type`` matches YAML ``sub_type``).
+
+    422 vocabulary:
+      - ``foresight.invalid_yaml`` — YAML parse error.
+      - ``foresight.sub_type_mismatch`` — request vs. YAML sub_type differ.
+      - ``foresight.invalid_scenario`` — engine grammar / cap violation.
+
+    Emits ``foresight.custom_scenario.created``.
+    """
+    return await foresight_scenarios.create_custom_scenario(ctx, body)
+
+
+@router.put(
+    "/scenarios/custom/{scenario_id}",
+    response_model=CustomScenarioResponse,
+)
+async def update_custom_scenario(
+    scenario_id: str,
+    body: CreateCustomScenarioRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> CustomScenarioResponse:
+    """Full-replace the custom scenario fields.
+
+    Validation is identical to create. Author / workspace tenancy stay
+    pinned to the original doc — the edit doesn't reassign the author
+    column (the audit log is the source of truth for who edited).
+
+    Emits ``foresight.custom_scenario.updated``.
+
+    Returns 404 (``foresight_custom_scenario.not_found``) for unknown
+    or cross-tenant ids; 422 on the same validation rules as create.
+    """
+    return await foresight_scenarios.update_custom_scenario(ctx, scenario_id, body)
+
+
+@router.delete(
+    "/scenarios/custom/{scenario_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_custom_scenario(
+    scenario_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Remove the custom scenario row.
+
+    Idempotency note: a second call against the same id returns 404 —
+    we never silently no-op a delete against an unknown doc.
+
+    Emits ``foresight.custom_scenario.deleted``.
+    """
+    await foresight_scenarios.delete_custom_scenario(ctx, scenario_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 __all__ = ["router"]
