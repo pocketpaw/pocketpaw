@@ -499,8 +499,9 @@ router.include_router(agent_router)
 
 
 @router.websocket("/ws/cloud")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    """Cloud WebSocket -- authenticate via JWT token, then handle typed JSON messages."""
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)):
+    """Cloud WebSocket -- authenticate via paw_auth cookie (browser) or JWT
+    query param (Tauri / native clients). Then handle typed JSON messages."""
     import jwt as pyjwt
 
     # Gate realtime behind the enterprise license (parity with REST /chat routes).
@@ -509,9 +510,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4003, reason="Enterprise license required")
         return
 
+    # Why: HttpOnly paw_auth cookie is the browser auth; query token is fallback
+    # for Tauri / native clients that have no cookie store.
+    jwt_token = websocket.cookies.get("paw_auth") or token
+    if not jwt_token:
+        await websocket.close(code=4001, reason="Missing token")
+        return
+
     secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
     try:
-        payload = pyjwt.decode(token, secret, algorithms=["HS256"], audience=["fastapi-users:auth"])
+        payload = pyjwt.decode(
+            jwt_token, secret, algorithms=["HS256"], audience=["fastapi-users:auth"]
+        )
         user_id = payload.get("sub")
         if not user_id:
             await websocket.close(code=4001, reason="Invalid token")
