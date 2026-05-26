@@ -956,16 +956,25 @@ async def seed_default_workspace(admin_id: str, *, name: str, slug: str) -> _Wor
         return None
 
 
-async def get_workspace_plan(workspace_id: str) -> str:
-    """Return the plan tier string for a workspace.
+async def get_workspace_plan(workspace_id: str) -> str | None:
+    """Return the plan tier string for a workspace, or None if missing.
 
-    Used by the plan-feature gate dependency. Returns "team" (the most
-    restrictive plan) as a safe fallback when the workspace cannot be
-    loaded so the guard fails open on plan rather than raising a 500.
+    Used by the plan-feature gate dependency. Returns None when the
+    workspace genuinely doesn't exist (invalid id, never created, or
+    soft-deleted) so the caller can map that to a 404.
+
+    Re-raises any DB-level exception rather than swallowing it. The
+    previous implementation silently degraded to the most restrictive
+    plan on transient Mongo errors, which 403'd paying customers during
+    DB hiccups. Let the framework surface a 5xx instead.
     """
-    doc = await _fetch_workspace(workspace_id)
-    if doc is None:
-        return "team"
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return None
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return None
     return doc.plan
 
 

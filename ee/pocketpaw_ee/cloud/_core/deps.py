@@ -22,7 +22,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException
 
-from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.auth import current_active_user
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.guards.audit import log_denial
@@ -172,7 +172,12 @@ def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None
     async def _guard(workspace_id: str = Depends(current_workspace_id)) -> None:
         from pocketpaw_ee.cloud.workspace import service as workspace_service
 
+        # Re-raises on DB errors — better to surface 5xx than silently
+        # downgrade an enterprise customer to the most restrictive plan
+        # during a transient Mongo flap.
         plan = await workspace_service.get_workspace_plan(workspace_id)
+        if plan is None:
+            raise NotFound("workspace", workspace_id)
         allowed_features = PLAN_FEATURES.get(plan, set())
         if feature not in allowed_features:
             raise Forbidden(

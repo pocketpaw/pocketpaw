@@ -941,3 +941,71 @@ async def test_bulk_create_invites_max_100_emails() -> None:
     # Empty list also rejected (min_length=1).
     with pytest.raises(Exception):
         BulkInviteRequest(emails=[])
+
+
+# ---------------------------------------------------------------------------
+# get_workspace_plan — fail-closed semantics (Wave 2 Task 8)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_workspace_plan_returns_real_plan(owner) -> None:
+    """Happy path: an existing workspace returns its plan tier verbatim."""
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="W", slug="w-plan")
+    )
+    # Upgrade plan directly on the doc.
+    ws_doc = await workspace_service._WorkspaceDoc.get(PydanticObjectId(ws.id))
+    assert ws_doc is not None
+    ws_doc.plan = "enterprise"
+    await ws_doc.save()
+
+    plan = await workspace_service.get_workspace_plan(ws.id)
+    assert plan == "enterprise"
+
+
+async def test_get_workspace_plan_returns_none_for_missing_workspace() -> None:
+    """A genuinely missing workspace returns None — caller decides 404."""
+    # Valid ObjectId shape, but no doc with that id.
+    missing_id = str(PydanticObjectId())
+    plan = await workspace_service.get_workspace_plan(missing_id)
+    assert plan is None
+
+
+async def test_get_workspace_plan_returns_none_for_invalid_id() -> None:
+    """A malformed id is treated as 'doesn't exist', not propagated."""
+    plan = await workspace_service.get_workspace_plan("not-an-objectid")
+    assert plan is None
+
+
+async def test_get_workspace_plan_returns_none_for_soft_deleted(owner) -> None:
+    """Soft-deleted workspaces are indistinguishable from missing here."""
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="W", slug="w-del")
+    )
+    ws_doc = await workspace_service._WorkspaceDoc.get(PydanticObjectId(ws.id))
+    assert ws_doc is not None
+    ws_doc.deleted_at = datetime.now(UTC)
+    await ws_doc.save()
+
+    plan = await workspace_service.get_workspace_plan(ws.id)
+    assert plan is None
+
+
+async def test_get_workspace_plan_reraises_on_db_error(
+    owner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Transient DB failures must propagate, not silently downgrade
+    enterprise customers to the most restrictive plan."""
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="W", slug="w-flap")
+    )
+
+    class _Boom(Exception):
+        pass
+
+    async def _raise(*_a: Any, **_k: Any) -> None:
+        raise _Boom("simulated mongo outage")
+
+    monkeypatch.setattr(workspace_service._WorkspaceDoc, "get", _raise)
+    with pytest.raises(_Boom):
+        await workspace_service.get_workspace_plan(ws.id)
