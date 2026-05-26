@@ -41,4 +41,23 @@ async def rate_limit_invite_create(
         )
 
 
-__all__ = ["rate_limit_invite_create"]
+def consume_invite_create_tokens(user_id: str, workspace_id: str, count: int) -> None:
+    """Consume ``count`` tokens from the invite-create bucket for this
+    (actor, workspace). Used by the bulk-invite route, where the batch
+    size isn't known at Depends-resolution time so the limiter has to be
+    checked manually inside the handler. Each email in the batch consumes
+    one token, so the same 50/day cap covers batches too — a 100-email
+    paste effectively spends two days of budget. That's intentional: bulk
+    is for one-off onboarding, not steady-state invite traffic.
+    """
+    key = f"invite-create:{user_id}:{workspace_id}"
+    for _ in range(count):
+        info = _invite_create_limiter.check(key)
+        if not info.allowed:
+            raise RateLimited(
+                "workspace.invite_rate_limited",
+                "Too many invites created — try again later.",
+            )
+
+
+__all__ = ["consume_invite_create_tokens", "rate_limit_invite_create"]

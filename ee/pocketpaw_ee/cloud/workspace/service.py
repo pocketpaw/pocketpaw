@@ -61,6 +61,7 @@ from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
 from pocketpaw_ee.cloud.workspace.dto import (
+    BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
@@ -451,6 +452,62 @@ async def list_invites(workspace_id: str) -> list[Invite]:
     return [_invite_to_domain(d) for d in docs if not d.expired]
 
 
+async def _mint_invite_for_email(
+    ctx: RequestContext,
+    workspace_id: str,
+    email: str,
+    role: str,
+    group_id: str | None,
+) -> Invite:
+    """Pre-clean expired/stale rows, reject duplicate pending, insert the
+    hashed invite. Shared between ``create_invite`` (single) and
+    ``bulk_create_invites`` (batch) so token hashing + pre-cleanup stay
+    in lockstep. Does NOT emit or notify — the caller handles side-effects.
+    """
+    # Mongo TTL is the long-term GC; this pre-cleanup makes the
+    # collision check below honest about what's "still pending."
+    await _InviteDoc.find(
+        {
+            "workspace": workspace_id,
+            "email": email,
+            "group": group_id,
+            "$or": [
+                {"revoked": True},
+                {"accepted": True},
+                {"expires_at": {"$lt": datetime.now(UTC)}},
+            ],
+        }
+    ).delete()
+
+    existing = await _InviteDoc.find_one(
+        {
+            "workspace": workspace_id,
+            "email": email,
+            "accepted": False,
+            "revoked": False,
+            "group": group_id,
+        }
+    )
+    if existing is not None and not existing.expired:
+        msg = f"A pending invite already exists for {email}" + (
+            " in this group" if group_id else ""
+        )
+        raise ConflictError("invite.already_pending", msg)
+
+    plaintext = secrets.token_urlsafe(32)
+    invite_doc = _InviteDoc(
+        workspace=workspace_id,
+        email=email,
+        role=role,
+        invited_by=ctx.user_id,
+        token=None,  # plaintext never persisted for new invites
+        token_hash=hash_token(plaintext),
+        group=group_id,
+    )
+    await invite_doc.insert()
+    return _invite_to_domain(invite_doc, plaintext_token=plaintext)
+
+
 async def create_invite(
     ctx: RequestContext,
     workspace_id: str,
@@ -464,48 +521,7 @@ async def create_invite(
     if member_count >= doc.seats:
         raise SeatLimitError(doc.seats)
 
-    # Mongo TTL is the long-term GC; this pre-cleanup makes the
-    # collision check below honest about what's "still pending."
-    await _InviteDoc.find(
-        {
-            "workspace": workspace_id,
-            "email": body.email,
-            "group": body.group_id,
-            "$or": [
-                {"revoked": True},
-                {"accepted": True},
-                {"expires_at": {"$lt": datetime.now(UTC)}},
-            ],
-        }
-    ).delete()
-
-    existing = await _InviteDoc.find_one(
-        {
-            "workspace": workspace_id,
-            "email": body.email,
-            "accepted": False,
-            "revoked": False,
-            "group": body.group_id,
-        }
-    )
-    if existing is not None and not existing.expired:
-        msg = f"A pending invite already exists for {body.email}" + (
-            " in this group" if body.group_id else ""
-        )
-        raise ConflictError("invite.already_pending", msg)
-
-    plaintext = secrets.token_urlsafe(32)
-    invite_doc = _InviteDoc(
-        workspace=workspace_id,
-        email=body.email,
-        role=body.role,
-        invited_by=ctx.user_id,
-        token=None,  # plaintext never persisted for new invites
-        token_hash=hash_token(plaintext),
-        group=body.group_id,
-    )
-    await invite_doc.insert()
-    invite = _invite_to_domain(invite_doc, plaintext_token=plaintext)
+    invite = await _mint_invite_for_email(ctx, workspace_id, body.email, body.role, body.group_id)
 
     invited_user_id = await _find_user_id_by_email(body.email)
 
@@ -534,6 +550,78 @@ async def create_invite(
         )
 
     return invite
+
+
+async def bulk_create_invites(
+    ctx: RequestContext,
+    workspace_id: str,
+    body: BulkInviteRequest,
+) -> dict:
+    """Create many invites in one call.
+
+    Seat-limit is checked ONCE against the full batch size before any row
+    is inserted, so callers don't get partial writes when the batch can't
+    possibly fit. Per-email failures (already a member, already a pending
+    invite) are returned in the ``skipped`` list — they don't abort the
+    batch. Emits one WorkspaceInviteCreated event per created row, mirroring
+    the single-invite path so downstream subscribers (search index, audit
+    log, notifications) see no special bulk shape.
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    current_count = await _count_members(workspace_id)
+    if current_count + len(body.emails) > doc.seats:
+        raise SeatLimitError(doc.seats)
+
+    created: list[Invite] = []
+    skipped: list[dict] = []
+
+    for email in body.emails:
+        existing_user_id = await _find_user_id_by_email(email)
+        if existing_user_id is not None:
+            existing_role = await _get_member_role(workspace_id, existing_user_id)
+            if existing_role is not None:
+                skipped.append({"email": email, "reason": "already_member"})
+                continue
+
+        try:
+            invite = await _mint_invite_for_email(
+                ctx, workspace_id, email, body.role, body.group_id
+            )
+        except ConflictError as exc:
+            if exc.code == "invite.already_pending":
+                skipped.append({"email": email, "reason": "already_pending"})
+                continue
+            raise
+
+        event_data: dict = {
+            "workspace_id": workspace_id,
+            "invite_id": invite.id,
+            "email": email,
+        }
+        if existing_user_id:
+            event_data["user_id"] = existing_user_id
+        await emit(WorkspaceInviteCreated(data=event_data))
+
+        if existing_user_id:
+            await notifications_service.create(
+                workspace_id=workspace_id,
+                recipient=existing_user_id,
+                kind="invite",
+                title=f"You were invited to join {doc.name}",
+                body="",
+                source=NotificationSource(
+                    type="invite",
+                    id=invite.id,
+                    room_id=invite.group_id,
+                ),
+            )
+
+        created.append(invite)
+
+    return {"created": created, "skipped": skipped}
 
 
 async def validate_invite(token: str) -> tuple[Invite, str]:
@@ -883,6 +971,7 @@ async def get_workspace_plan(workspace_id: str) -> str:
 
 __all__ = [
     "accept_invite",
+    "bulk_create_invites",
     "create",
     "create_invite",
     "decline_invite",

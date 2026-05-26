@@ -16,12 +16,18 @@ from pocketpaw_ee.cloud._core.deps import (
     require_action,
     require_membership,
 )
-from pocketpaw_ee.cloud._core.rate_limit import rate_limit_invite_create
+from pocketpaw_ee.cloud._core.rate_limit import (
+    consume_invite_create_tokens,
+    rate_limit_invite_create,
+)
 from pocketpaw_ee.cloud.auth.core import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.cloud.workspace.dto import (
+    BulkInviteRequest,
+    BulkInviteResponse,
+    BulkInviteSkip,
     CreateInviteRequest,
     CreateWorkspaceRequest,
     InviteOut,
@@ -157,6 +163,25 @@ async def create_invite(
 ) -> InviteOut:
     invite = await workspace_service.create_invite(ctx, workspace_id, body)
     return invite_to_dto(invite)
+
+
+@router.post("/{workspace_id}/invites/bulk", response_model=BulkInviteResponse)
+async def bulk_create_invites(
+    workspace_id: str,
+    body: BulkInviteRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("invite.create")),
+) -> BulkInviteResponse:
+    # FastAPI's Depends can't see the request body, so the limiter has
+    # to be consumed inside the handler with the actual batch size.
+    # Counted BEFORE the service call so a rejected batch never touches
+    # the DB.
+    consume_invite_create_tokens(ctx.user_id, workspace_id, len(body.emails))
+    result = await workspace_service.bulk_create_invites(ctx, workspace_id, body)
+    return BulkInviteResponse(
+        created=[invite_to_dto(inv) for inv in result["created"]],
+        skipped=[BulkInviteSkip(**s) for s in result["skipped"]],
+    )
 
 
 @router.get("/invites/{token}/preview", response_model=InvitePreviewResponse)

@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
@@ -48,6 +48,25 @@ class CreateInviteRequest(BaseModel):
 
 class UpdateMemberRoleRequest(BaseModel):
     role: str = Field(pattern="^(owner|admin|member)$")
+
+
+class BulkInviteRequest(BaseModel):
+    """POST /workspaces/{id}/invites/bulk request.
+
+    ``emails`` is bounded at 100 so a single batch can't dwarf the daily
+    invite-rate budget. The frontend's paste-a-list UI clamps client-side.
+    """
+
+    emails: list[EmailStr] = Field(min_length=1, max_length=100)
+    role: str = Field(default="member", pattern="^(admin|member)$")
+    group_id: str | None = None
+
+
+class BulkInviteSkip(BaseModel):
+    """One per-email skip in the bulk response."""
+
+    email: str
+    reason: Literal["already_member", "already_pending", "invalid_email", "seat_limit"]
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +116,13 @@ class InviteOut(BaseModel):
     expiresAt: str | None  # noqa: N815 - camelCase wire key
 
     model_config = {"populate_by_name": True}
+
+
+class BulkInviteResponse(BaseModel):
+    """POST /workspaces/{id}/invites/bulk response."""
+
+    created: list[InviteOut]
+    skipped: list[BulkInviteSkip]
 
 
 class ValidateInviteOut(InviteOut):
@@ -192,6 +218,9 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
 
 
 __all__ = [
+    "BulkInviteRequest",
+    "BulkInviteResponse",
+    "BulkInviteSkip",
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
     "InviteOut",

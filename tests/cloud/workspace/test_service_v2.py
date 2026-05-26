@@ -38,6 +38,7 @@ from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.cloud.workspace.dto import (
+    BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
@@ -835,3 +836,108 @@ async def test_decline_invite_atomic_against_accept(owner, monkeypatch) -> None:
     with pytest.raises(Forbidden) as exc:
         await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
     assert exc.value.code == "invite.revoked"
+
+
+# ---------------------------------------------------------------------------
+# Bulk invites
+# ---------------------------------------------------------------------------
+
+
+async def test_bulk_create_invites_happy_path_3_emails(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    result = await workspace_service.bulk_create_invites(
+        _ctx(str(owner.id)),
+        ws.id,
+        BulkInviteRequest(emails=["a@x.c", "b@x.c", "c@x.c"]),
+    )
+    assert len(result["created"]) == 3
+    assert result["skipped"] == []
+    # Each minted invite carries a plaintext token.
+    assert all(inv.token and len(inv.token) >= 32 for inv in result["created"])
+
+
+async def test_bulk_create_invites_skips_existing_members(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Seed an existing member of the workspace.
+    member = await _seed_user(email="member@x.c")
+    await workspace_service._add_member(ws.id, str(member.id), role="member")
+
+    result = await workspace_service.bulk_create_invites(
+        _ctx(str(owner.id)),
+        ws.id,
+        BulkInviteRequest(emails=["new@x.c", "member@x.c"]),
+    )
+    assert len(result["created"]) == 1
+    assert result["created"][0].email == "new@x.c"
+    assert result["skipped"] == [{"email": "member@x.c", "reason": "already_member"}]
+
+
+async def test_bulk_create_invites_skips_pending_dupes(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="dup@x.c")
+    )
+
+    result = await workspace_service.bulk_create_invites(
+        _ctx(str(owner.id)),
+        ws.id,
+        BulkInviteRequest(emails=["dup@x.c", "fresh@x.c"]),
+    )
+    assert len(result["created"]) == 1
+    assert result["created"][0].email == "fresh@x.c"
+    assert result["skipped"] == [{"email": "dup@x.c", "reason": "already_pending"}]
+
+
+async def test_bulk_create_invites_rejects_over_seats(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Shrink seats to 5 and pre-fill 3 extra members → current_count=4.
+    ws_doc = await workspace_service._WorkspaceDoc.get(PydanticObjectId(ws.id))
+    assert ws_doc is not None
+    ws_doc.seats = 5
+    await ws_doc.save()
+    for i in range(3):
+        u = await _seed_user(email=f"seat{i}@x.c")
+        await workspace_service._add_member(ws.id, str(u.id), role="member")
+
+    invite_count_before = await _InviteDoc.find({"workspace": ws.id}).count()
+    with pytest.raises(SeatLimitError):
+        await workspace_service.bulk_create_invites(
+            _ctx(str(owner.id)),
+            ws.id,
+            BulkInviteRequest(emails=["a@x.c", "b@x.c", "c@x.c"]),
+        )
+    # No partial writes: the invite collection is untouched.
+    invite_count_after = await _InviteDoc.find({"workspace": ws.id}).count()
+    assert invite_count_after == invite_count_before
+
+
+async def test_bulk_create_invites_max_100_emails() -> None:
+    # 100 is the cap — exactly 100 validates.
+    ok = BulkInviteRequest(emails=[f"u{i}@x.c" for i in range(100)])
+    assert len(ok.emails) == 100
+    # 101 trips the pydantic max_length validator.
+    with pytest.raises(Exception):  # pydantic.ValidationError
+        BulkInviteRequest(emails=[f"u{i}@x.c" for i in range(101)])
+    # Empty list also rejected (min_length=1).
+    with pytest.raises(Exception):
+        BulkInviteRequest(emails=[])
