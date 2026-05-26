@@ -1,4 +1,23 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
+# RFC 08 v1.0 PR — three additions:
+#   1. ``LiveSnapshotResponse`` + nested ``TierMixActual`` / ``SampledTrace``
+#      / ``Anomaly`` DTOs — backing GET /runs/{id}/live-snapshot for the
+#      paw-enterprise LivePanel UI. Contract is locked against PR #267.
+#   2. ``GateDecision`` Pydantic sub-model — replaces the loose
+#      ``dict[str, Any] | None`` on ``BacktestRunResponse.gate_decision``
+#      and ``BacktestRunListItemResponse.gate_decision``. Mirrors the
+#      :class:`ee.foresight.aggregator.ThresholdDecision.as_wire_dict()`
+#      shape (passed / observed / threshold / margin / n_pairs) plus a
+#      derived ``reason`` and an ``evaluated_at`` ISO-8601 timestamp.
+#      Backward-compat — Pydantic's ``model_dump()`` produces the same
+#      dict callers already consume.
+#   3. ``CreateScenarioRequest`` gains optional ``precedent_seed`` and
+#      ``precedent_seeds`` fields — the cloud body now mirrors the
+#      engine YAML grammar (RFC §14.4). The engine's
+#      ``NoOpDecisionGraphRef`` is seeded from these on the cloud-side
+#      ``_run_engine_inline`` so ``ProjectedDecision.forward_precedent_decision_id``
+#      gets a synthetic, deterministic id whenever the operator opts in.
 # Modified: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
 # RFC 08 §11.2 / §11.5 / §11.6 backing shapes:
 #   - ``ScenarioCatalogItem`` + ``ScenarioCatalogResponse`` —
@@ -85,6 +104,18 @@ class CreateScenarioRequest(BaseModel):
     YAML files (``decision_forecast.yaml`` / ``market_sim.yaml`` /
     ``org_change.yaml``) as a v1.0 loader hook — v0.5 reads it only
     from the request body.
+
+    v1.0 PR (this file) adds ``precedent_seed`` + ``precedent_seeds``
+    — the cloud body now exposes the same forward-precedent grammar
+    the engine YAML carries (RFC §14.4). When a seed is supplied the
+    cloud's per-tick projection closure feeds it into the
+    :class:`pocketpaw_ee.foresight.decision_graph_ref.NoOpDecisionGraphRef`
+    so every persisted ``ForesightProjectedDecision`` doc gets a
+    synthetic, deterministic ``forward_precedent_decision_id`` of the
+    form ``synthetic-precedent-<sha1[:12]>``. ``None`` (the default)
+    preserves the v0.5 "always None" wire shape for un-seeded
+    scenarios. RFC §14.4 documents the synthetic-id semantics +
+    backfill path when the real Decision Graph (RFC 07) lands.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -102,6 +133,32 @@ class CreateScenarioRequest(BaseModel):
             "forecast but does NOT trigger an executing side-effect. "
             "Backtests cannot opt in (the backtest endpoint reuses the "
             "scenario runner but disables this fan-out)."
+        ),
+    )
+    precedent_seed: str | None = Field(
+        default=None,
+        max_length=128,
+        description=(
+            "Optional global forward-precedent seed (RFC 08 §14.4). When "
+            "set, every persisted ProjectedDecision for the run gets a "
+            "synthetic, deterministic ``forward_precedent_decision_id`` "
+            "derived from sha1(scenario_id|anchor_id|persona_id|seed). "
+            "Same inputs always produce the same id. ``None`` keeps the "
+            "v0.5 wire shape (every projection's precedent id is "
+            "``None``). The engine's YAML scenarios carry this field at "
+            "the scenario root; v1.0 lifts it onto the cloud body so "
+            "operators can drive synthetic-precedent runs from the API."
+        ),
+    )
+    precedent_seeds: dict[str, str] | None = Field(
+        default=None,
+        description=(
+            "Per-anchor precedent seed overrides (RFC 08 §14.4). Keys "
+            "are anchor ids (e.g. ``decision:renewal``, "
+            "``segment:enterprise``, ``rollout:training``); values are "
+            "the seeds to use for that anchor. An anchor-level override "
+            "wins over the scenario-wide ``precedent_seed``. Pass "
+            "``None`` (or omit) to apply the global seed uniformly."
         ),
     )
 
@@ -213,16 +270,93 @@ class CreateBacktestRequest(BaseModel):
     threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class GateDecision(BaseModel):
+    """The structured wire shape for a backtest's gate verdict.
+
+    v0.5 stored this as a free-form ``dict[str, Any] | None`` so a typo
+    on the write path could ship to the UI without anyone noticing.
+    v1.0 tightens the wire surface to this Pydantic model — mirrors the
+    :class:`ee.foresight.aggregator.ThresholdDecision.as_wire_dict()`
+    payload (``passed`` / ``observed`` / ``threshold`` / ``margin`` /
+    ``n_pairs``) plus two derived fields the UI lead requested:
+
+    - ``reason``: short label the Aggregate / Onboarding panels render
+      next to the pass/fail badge. Vocabulary:
+        * ``no_pairs`` — ``n_pairs == 0`` (gate never ran a comparison)
+        * ``threshold_met`` — ``passed=True``
+        * ``threshold_unmet`` — ``passed=False`` and ``n_pairs >= 1``
+        * fallback — free-form string for future error states
+    - ``evaluated_at``: ISO-8601 UTC timestamp the gate was scored.
+      Captured at backtest completion; surfaces on the wire so the UI
+      can render "scored 2 hours ago" without a second round trip.
+
+    Field-name fidelity: ``observed`` is the raw modal accuracy the
+    aggregator reports (kept on the wire so existing callers that key
+    on ``gate_decision["observed"]`` keep working). ``modal_accuracy``
+    is an alias-style mirror so the UI lead's TypeScript shape doesn't
+    have to learn the aggregator's internal vocabulary; the service
+    populates both with the same float so they never diverge.
+
+    Backward-compat: existing callers that read ``gate_decision`` as a
+    dict still work — Pydantic's :meth:`model_dump` produces a dict
+    with the legacy keys (``passed`` / ``observed`` / ``threshold`` /
+    ``margin`` / ``n_pairs``) plus the new ones, so a ``dict.get(key)``
+    against the dump returns the same value v0.5 did.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    passed: bool
+    threshold: float = Field(..., ge=0.0, le=1.0)
+    observed: float = Field(..., ge=0.0, le=1.0)
+    modal_accuracy: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "UI-friendly alias of ``observed``. The service populates "
+            "both with the same float so the two never diverge. "
+            "Optional on the wire so a future write path that omits the "
+            "alias still validates."
+        ),
+    )
+    margin: float = Field(
+        default=0.0,
+        description=(
+            "Signed accuracy margin (``observed - threshold``). Negative when the gate failed."
+        ),
+    )
+    n_pairs: int = Field(..., ge=0)
+    reason: str = Field(
+        default="threshold_unmet",
+        max_length=64,
+        description=(
+            "Short label the UI renders next to the pass/fail badge. "
+            "v1.0 vocabulary: ``no_pairs`` | ``threshold_met`` | "
+            "``threshold_unmet``. Free-form fallback allowed so a "
+            "future error path can surface a custom string without a "
+            "DTO migration."
+        ),
+    )
+    evaluated_at: str = Field(
+        ...,
+        description="ISO-8601 UTC timestamp the gate was scored.",
+    )
+
+
 class BacktestRunResponse(BaseModel):
     """POST /backtests response + GET /backtests/:id response.
 
     Mirrors :class:`ScenarioRunResponse` plus two backtest-specific
     fields:
 
-    - ``gate_decision``: ``ThresholdDecision.as_wire_dict()`` once the
+    - ``gate_decision``: a :class:`GateDecision` sub-model once the
       backtest completes (``None`` while queued / running / failed).
       The UI's Aggregate panel reads this directly to render the unlock
-      label without re-computing.
+      label without re-computing. v0.5 typed this as a free-form
+      ``dict[str, Any] | None`` — v1.0 tightens to the structured
+      sub-model. Pydantic's ``model_dump()`` produces the same dict
+      callers already consume, so the change is backward-compatible.
     - ``threshold``: the gate threshold this backtest was scored against
       (echoed back so the operator can reconcile the verdict with the
       bar it was measured against, even if the workspace default has
@@ -240,14 +374,19 @@ class BacktestRunResponse(BaseModel):
     request: dict[str, Any]
     threshold: float
     result: dict[str, Any] | None = None
-    gate_decision: dict[str, Any] | None = None
+    gate_decision: GateDecision | None = None
     error: str | None = None
 
 
 class BacktestRunListItemResponse(BaseModel):
     """Lighter shape for ``GET /backtests`` — drops the inline
     ``result`` / ``request`` blobs but keeps ``gate_decision`` so the
-    list can render the unlock label per row without a click-through."""
+    list can render the unlock label per row without a click-through.
+
+    ``gate_decision`` is the structured :class:`GateDecision` sub-model
+    so the list shape matches the detail shape. v0.5 typed this loosely
+    as ``dict[str, Any] | None``; v1.0 follows the detail endpoint's
+    tightening (same backward-compat reasoning)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -258,7 +397,7 @@ class BacktestRunListItemResponse(BaseModel):
     created_at: str
     updated_at: str | None = None
     threshold: float
-    gate_decision: dict[str, Any] | None = None
+    gate_decision: GateDecision | None = None
     error: str | None = None
 
 
@@ -592,8 +731,107 @@ class InsightsResponse(BaseModel):
     items: list[InsightResponse]
 
 
+# ---------------------------------------------------------------------------
+# Live snapshot (RFC 08 §11.3) — GET /api/v1/foresight/runs/{id}/live-snapshot.
+#
+# Compact "what's happening right now" view of a single Foresight run.
+# Backs the paw-enterprise LivePanel. Contract is locked against PR
+# #267 (paw-enterprise) — every field name + nesting shape below
+# mirrors the TypeScript shape the UI lead built against.
+# ---------------------------------------------------------------------------
+
+
+class TierMixActual(BaseModel):
+    """Actual tier mix observed across the run's personas.
+
+    Each field is the share of personas assigned to that tier; the
+    three values should sum to ~1.0 (rounding allowed). When the run
+    hasn't fanned any projections yet (or the engine pool is empty),
+    the service returns zeros across all three — callers should not
+    expect a strict sum-to-1 invariant on an empty run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    premium: float = Field(default=0.0, ge=0.0, le=1.0)
+    mid: float = Field(default=0.0, ge=0.0, le=1.0)
+    tail: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class SampledTrace(BaseModel):
+    """One sampled per-tick projection trace for the LivePanel timeline.
+
+    The service samples up to 10 :class:`ProjectedDecisionResponse`
+    rows per run (deterministically, by tick id ascending) so the
+    panel renders a stable slice across re-fetches without paginating.
+    ``action_summary`` is built by a sub-type-aware formatter (mirrors
+    the Instinct bridge labelling so the operator sees consistent
+    text across the Tray + LivePanel) and capped at 200 chars.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tick_id: int = Field(..., ge=0)
+    persona_id: str = Field(default="", max_length=128)
+    sub_type: str = Field(..., max_length=64)
+    action_summary: str = Field(..., max_length=200)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+class Anomaly(BaseModel):
+    """One anomaly flagged on the run snapshot.
+
+    Three rule kinds ship in v1.0 (see
+    :mod:`pocketpaw_ee.cloud.foresight.live_snapshot` for the
+    detector implementations):
+
+    - ``tier_drift`` — actual tier mix deviates from configured 5/15/80
+      by more than 0.15 (info) or 0.25 (warning).
+    - ``confidence_spike`` — confidence distribution skews extreme
+      (variance < 0.02 with mean > 0.8 OR mean < 0.2) → info; low-mean
+      with sample count ≥ 5 → warning.
+    - ``stalled_persona`` — any persona's last decision ts > 30s
+      behind the run's latest tick ts (warning); zero decisions while
+      the run reached >0 ticks (critical).
+
+    ``severity`` vocabulary mirrors the §11.6 insights surface so the
+    UI's severity → colour mapping is uniform across panels.
+    ``body`` is capped at 240 chars (the LivePanel renders these as
+    one-line pills).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(..., max_length=64)
+    severity: str = Field(..., max_length=16)
+    body: str = Field(..., max_length=240)
+
+
+class LiveSnapshotResponse(BaseModel):
+    """``GET /api/v1/foresight/runs/{id}/live-snapshot`` response.
+
+    Compact, read-only view of the run "as it stands right now".
+    Workspace-scoped — an unknown / cross-tenant run id collapses to a
+    404 (existence not leakable). Empty runs return zeros + empty
+    arrays — the UI never sees a 404 on a fresh run.
+
+    Contract is locked to paw-enterprise PR #267; any breaking change
+    requires the UI repo's contract test to flip first.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    generated_at: str
+    status: str  # "created" | "running" | "complete" | "failed"
+    tier_mix_actual: TierMixActual
+    sampled_traces: list[SampledTrace] = Field(default_factory=list, max_length=10)
+    anomalies: list[Anomaly] = Field(default_factory=list)
+
+
 __all__ = [
     "AggregateRollupResponse",
+    "Anomaly",
     "BacktestRunListItemResponse",
     "BacktestRunResponse",
     "ConfidenceDriftDto",
@@ -601,9 +839,11 @@ __all__ = [
     "CreateScenarioRequest",
     "ForesightInstinctProposalListResponse",
     "ForesightInstinctProposalResponse",
+    "GateDecision",
     "HistoricalAnchorRequest",
     "InsightResponse",
     "InsightsResponse",
+    "LiveSnapshotResponse",
     "ModalOutcomeDistributionDto",
     "ModalOutcomeEntryDto",
     "OnboardingGateResponse",
@@ -612,8 +852,10 @@ __all__ = [
     "ProjectedDecisionResponse",
     "RollingAccuracyPointDto",
     "RollingAccuracySeriesDto",
+    "SampledTrace",
     "ScenarioCatalogItem",
     "ScenarioCatalogResponse",
     "ScenarioRunListItemResponse",
     "ScenarioRunResponse",
+    "TierMixActual",
 ]

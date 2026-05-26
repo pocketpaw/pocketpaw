@@ -1,4 +1,14 @@
 # ee/pocketpaw_ee/cloud/foresight/domain.py
+# Updated: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) — RFC
+# 08 v1.0 — adds live-snapshot domain shapes:
+#   - ``LiveSnapshotView`` — workspace-scoped frozen view backing the
+#     ``GET /runs/{id}/live-snapshot`` endpoint.
+#   - ``LiveTierMixActual`` — premium/mid/tail share triple.
+#   - ``LiveSampledTrace`` — one sampled per-tick projection row.
+#   - ``LiveAnomaly`` — one anomaly flagged by the detector rules.
+#   The view is implicitly workspace-scoped via the service call that
+#   produced it; the service always passes through the tenant filter
+#   before composing the view (cloud rule #3 invariant held there).
 # Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) — RFC
 # 08 v1.0 PR 10:
 #   - Added ``PredictionRecord`` frozen dataclass mirroring the persisted
@@ -367,12 +377,89 @@ class InsightView:
     generated_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Live snapshot (RFC 08 §11.3) — workspace-scoped view backing
+# ``GET /api/v1/foresight/runs/{id}/live-snapshot``. Cloud rule #3 is
+# enforced at the service-call site rather than on the dataclass (the
+# view is read-only and ephemeral — it's recomputed on every request,
+# so there's no persisted row that could leak across tenants by
+# storage path).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LiveTierMixActual:
+    """The premium/mid/tail share triple observed across the run.
+
+    Empty runs collapse to zeros; the service never raises when no
+    projections have landed yet (the UI's LivePanel renders the empty
+    state from the zeros).
+    """
+
+    premium: float
+    mid: float
+    tail: float
+
+
+@dataclass(frozen=True)
+class LiveSampledTrace:
+    """One sampled per-tick projection trace, deterministic at fetch time."""
+
+    tick_id: int
+    persona_id: str
+    sub_type: str
+    action_summary: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class LiveAnomaly:
+    """One anomaly flagged on the run snapshot.
+
+    Severity vocabulary mirrors the §11.6 insights surface so the UI's
+    severity → colour mapping is uniform across panels.
+    """
+
+    kind: Literal["tier_drift", "confidence_spike", "stalled_persona"]
+    severity: Literal["info", "warning", "critical"]
+    body: str
+
+
+@dataclass(frozen=True)
+class LiveSnapshotView:
+    """Compact view of one Foresight run's live state.
+
+    Tenancy: implicitly workspace-scoped via the service call that
+    produced this view — the service always passes through the tenant
+    filter before composing the snapshot. The view itself is not
+    persisted (recomputed on every request) so it carries no
+    ``workspace_id`` field of its own.
+
+    ``status`` mirrors :class:`ScenarioRunStatus` but renames
+    ``queued`` to ``created`` to match the paw-enterprise PR #267
+    contract — the v0.5 wire vocabulary uses ``queued``; the LivePanel
+    spec calls the same state ``created``. The service maps between
+    them so the wire surface and the persisted shape stay decoupled.
+    """
+
+    run_id: str
+    generated_at: datetime
+    status: Literal["created", "running", "complete", "failed"]
+    tier_mix_actual: LiveTierMixActual
+    sampled_traces: tuple[LiveSampledTrace, ...]
+    anomalies: tuple[LiveAnomaly, ...]
+
+
 __all__ = [
     "AggregateRollup",
     "BacktestRun",
     "BacktestRunStatus",
     "ConfidenceDrift",
     "InsightView",
+    "LiveAnomaly",
+    "LiveSampledTrace",
+    "LiveSnapshotView",
+    "LiveTierMixActual",
     "ModalOutcomeEntry",
     "OnboardingGateState",
     "PredictionRecord",

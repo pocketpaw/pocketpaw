@@ -1,4 +1,12 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
+# RFC 08 v1.0 PR adds the LivePanel backing endpoint:
+#     GET /api/v1/foresight/runs/{id}/live-snapshot
+#       → ``LiveSnapshotResponse`` (status + tier_mix_actual +
+#         up-to-10 sampled traces + anomaly readouts). Cross-tenant
+#         404 via the same ``_fetch_in_workspace`` rule the other
+#         run-scoped reads use. Contract is locked to paw-enterprise
+#         PR #267.
 # Modified: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
 # RFC 08 §11.2 / §11.5 / §11.6 backing endpoints:
 #     GET /api/v1/foresight/scenarios   → ScenarioCatalogResponse
@@ -76,6 +84,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateScenarioRequest,
     ForesightInstinctProposalListResponse,
     InsightsResponse,
+    LiveSnapshotResponse,
     OnboardingGateResponse,
     ProjectedDecisionListResponse,
     ScenarioCatalogResponse,
@@ -183,6 +192,52 @@ async def list_projected_decisions(
         limit=limit,
         offset=offset,
     )
+
+
+# ---------------------------------------------------------------------------
+# Live snapshot (RFC 08 §11.3 + paw-enterprise PR #267)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/runs/{run_id}/live-snapshot",
+    response_model=LiveSnapshotResponse,
+)
+async def get_live_snapshot(
+    run_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> LiveSnapshotResponse:
+    """Compact "right now" view of one Foresight run.
+
+    Backs the paw-enterprise LivePanel. Contract is locked to
+    paw-enterprise PR #267 — every field name and nesting shape on
+    :class:`LiveSnapshotResponse` mirrors the TypeScript surface the
+    UI was built against; this endpoint activates the LivePanel from
+    its mock-fallthrough state.
+
+    Tenancy: an unknown / cross-tenant run id returns 404
+    (``foresight_run.not_found``) — same collapsing rule the other
+    run-scoped endpoints use so existence isn't cross-tenant
+    leakable.
+
+    Status vocabulary on the wire is ``created | running | complete |
+    failed``; the persisted ``queued`` state surfaces as ``created``.
+
+    Empty / in-flight runs collapse to a zero ``tier_mix_actual``
+    triple, empty ``sampled_traces``, and (usually) empty
+    ``anomalies``. The UI's empty state renders directly off those
+    defaults without a separate code path.
+
+    Three v1.0 anomaly rules fire automatically:
+
+      - ``tier_drift`` — actual tier mix off configured 5/15/80 by
+        more than 0.15 (info) or 0.25 (warning).
+      - ``confidence_spike`` — variance / mean extremes on the
+        projection confidence distribution.
+      - ``stalled_persona`` — persona behind the run's tick clock
+        (warning) or silent while the run reached tick > 0 (critical).
+    """
+    return await foresight_service.get_live_snapshot(ctx, run_id)
 
 
 # ---------------------------------------------------------------------------
