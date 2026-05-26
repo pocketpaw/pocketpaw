@@ -604,8 +604,11 @@ async def test_bulk_reject_emits_human_corrected_and_completed_per_item(
 async def test_full_chain_causation_wires_policy_to_human(
     monkeypatch, journal, graph: DecisionGraph, router_store: InstinctStore
 ):
-    """Exercise propose → approve and assert: the
-    ``policy.evaluated`` event id is the ``human.corrected.causation_id``.
+    """Exercise propose → approve and assert the full causation walk:
+    ``policy.evaluated(parked, passed=False) → human.corrected →
+    policy.evaluated(approve_per_row, passed=True)`` — Slice 4 (c)
+    follow-up adds the third event so ``Decision.instinct_policy_passed``
+    flips True on approved chains (chain symmetry, Captain Decision 12).
     The bridge is stubbed so the chain only contains the router-side +
     propose-side emits this test cares about."""
     user = _FakeUser("user-A", "ws-A")
@@ -647,11 +650,30 @@ async def test_full_chain_causation_wires_policy_to_human(
 
     chain = _events_by_correlation(journal, corr)
     actions = [e.action for e in chain]
-    assert actions == ["policy.evaluated", "human.corrected"], actions
+    # Slice 4 adds the approve-side policy.evaluated emit; the chain
+    # now reads policy(parked, fail) → human → policy(approve_per_row,
+    # pass).
+    assert actions == [
+        "policy.evaluated",
+        "human.corrected",
+        "policy.evaluated",
+    ], actions
 
-    policy_event = chain[0]
+    parked_policy_event = chain[0]
     human_event = chain[1]
-    assert human_event.causation_id == policy_event.id
+    approve_policy_event = chain[2]
+    # human.corrected chains back to the parked policy.evaluated
+    # (causation_id from the schema-2 _pocket_write blob).
+    assert human_event.causation_id == parked_policy_event.id
+    # The approve-side policy.evaluated chains back to the human event
+    # — the human action causes the new policy evaluation.
+    assert approve_policy_event.causation_id == human_event.id
+    # Payload sanity — Slice 4 fills policy="approve_per_row",
+    # passed=True so the projection's last-seen fold flips
+    # instinct_policy_passed True.
+    assert approve_policy_event.payload["policy"] == "approve_per_row"
+    assert approve_policy_event.payload["passed"] is True
+    assert "approved by user:" in approve_policy_event.payload["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -871,23 +893,29 @@ async def test_full_chain_via_graph_with_real_proposed_event(
 
     chain = _events_by_correlation(journal, corr)
     actions = [e.action for e in chain]
-    # Expected order: agent.proposed (executor) → policy.evaluated
-    # (bridge propose) → human.corrected (router approve) →
-    # decision.completed (bridge close on re-entry success).
+    # Expected order (Slice 4): agent.proposed (executor) →
+    # policy.evaluated (bridge propose, parked) → human.corrected
+    # (router approve) → policy.evaluated (router approve, Slice 4
+    # chain-symmetry emit, passed=True) → decision.completed (bridge
+    # close on re-entry success).
     assert actions == [
         "agent.proposed",
         "policy.evaluated",
         "human.corrected",
+        "policy.evaluated",
         "decision.completed",
     ], actions
 
-    proposed, policy, human, completed = chain
+    proposed, parked_policy, human, approve_policy, completed = chain
     # The full cause-arrow chain — each event's causation_id (when
     # present) points back at the previous emit's id.
     assert proposed.causation_id is None  # the chain origin
-    # policy.evaluated doesn't currently chain a causation_id (Slice 2
-    # bridge doesn't pass one), so we just verify the chain folds.
-    assert human.causation_id == policy.id
+    # bridge's parked policy.evaluated doesn't currently chain a
+    # causation_id (Slice 2 bridge doesn't pass one).
+    assert human.causation_id == parked_policy.id
+    # Slice 4 — the approve-side policy.evaluated chains back to the
+    # human.corrected event.
+    assert approve_policy.causation_id == human.id
     # decision.completed from the bridge does not set causation_id —
     # the chain still folds correctly via correlation_id.
 
@@ -903,12 +931,16 @@ async def test_full_chain_via_graph_with_real_proposed_event(
     assert len(decision.approvers) == 1
     assert decision.approvers[0].actor.kind == "user"
     assert decision.approvers[0].actor.id == "user:user-A"
-    # The Slice 3 brief explicitly does NOT emit a follow-up
-    # ``policy.evaluated(passed=True)`` on approve — the last-seen
-    # policy state is the parked-side passed=False. The chain is NOT
-    # marked rejected because the terminal ``decision.completed`` payload's
+    # Slice 4 (c) — the approve-side ``policy.evaluated(passed=True)``
+    # is now emitted by the router; the projection's ``_fold_policy``
+    # keeps the LAST policy event, so the approved chain reads
+    # ``instinct_policy="approve_per_row"`` + ``instinct_policy_passed=
+    # True``. Pre-Slice-4 this read False because only the parked
+    # passed=False event was visible. The chain is NOT marked rejected
+    # because the terminal ``decision.completed`` payload's
     # ``passed=True`` overrides the policy state (projection.py:
     # ``_close_chain``). The outcome stays None — no rejection, no
     # late attach happened in this test.
-    assert decision.instinct_policy_passed is False
+    assert decision.instinct_policy == "approve_per_row"
+    assert decision.instinct_policy_passed is True
     assert decision.outcome is None or decision.outcome.status != "rejected"

@@ -87,6 +87,28 @@
 #     router now also loops over the returned ``rejected`` list to fire
 #     the per-item chain emits. No semantic change to the bulk-reject
 #     response shape (``BulkActionResponse`` with shared ``bulk_id``).
+#
+# Updated: 2026-05-26 (RFC 09 Slice 4 — approve-side policy.evaluated emit) —
+#   * Captain Decision 12 (chain symmetry) follow-up — ``approve_action``
+#     and ``bulk_approve_actions`` now emit a second
+#     ``policy.evaluated(passed=True, policy_name="approve_per_row")``
+#     AFTER ``human.corrected`` and BEFORE the bridge call. Today's
+#     chain on an approved write reads ``instinct_policy_passed=False``
+#     because the only ``policy.evaluated`` event seen by the projection
+#     is the parked ``passed=False`` emit from
+#     ``instinct_bridge.propose_pocket_write``. The projection's
+#     ``_fold_policy`` uses the LAST policy.evaluated seen before the
+#     terminal — adding the ``passed=True`` emit on the approve path
+#     flips ``Decision.instinct_policy_passed`` to True and replaces the
+#     placeholder policy name with the real approval-gate label
+#     ("approve_per_row"). The synthetic policy name keeps approved
+#     chains queryable as policy gates rather than confusing them with
+#     auto-approve chains (the ``"auto"`` synthetic name from the
+#     direct-success path). Reject chains keep the last-seen ``False``
+#     emit so ``instinct_policy_passed`` stays False on rejection. Best-
+#     effort with the same log-and-continue pattern as the other Slice 3
+#     helpers — a Decision-Graph wiring failure must never break an
+#     approval.
 
 from __future__ import annotations
 
@@ -240,7 +262,7 @@ def _emit_human_corrected(
     workspace_id: str,
     disposition: str,
     note: str | None,
-) -> None:
+) -> Any | None:
     """Best-effort ``human.corrected`` emit for an approve / reject /
     bulk-approve / bulk-reject item.
 
@@ -253,12 +275,18 @@ def _emit_human_corrected(
     it from the executor's mint; a None means a future code path parked
     a write without minting one). The Slice 4 reconciler / abandon
     sweeper will deal with the orphan.
+
+    Returns the emitted event id (``UUID``) on success, or ``None`` when
+    the emit was skipped (missing correlation_id) or raised. Slice 4's
+    approve-side ``policy.evaluated`` emit uses this as its
+    ``causation_id`` so the chain ``policy(fail) → human → policy(pass)
+    → completed`` walks a clean causal arrow.
     """
     from pocketpaw_ee.cloud.decisions.journal_writer import record_human_corrected
 
     correlation_id = _parked_correlation_id(blob)
     if correlation_id is None:
-        return
+        return None
 
     pocket_id = str(getattr(action, "pocket_id", "") or "")
     causation = _parked_policy_event_id(blob)
@@ -270,7 +298,7 @@ def _emit_human_corrected(
         payload["note"] = note
 
     try:
-        record_human_corrected(
+        entry = record_human_corrected(
             correlation_id=correlation_id,
             actor=_chain_actor_human(
                 user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
@@ -287,6 +315,8 @@ def _emit_human_corrected(
             disposition,
             exc_info=True,
         )
+        return None
+    return entry.id
 
 
 def _emit_decision_completed_rejected(
@@ -331,6 +361,68 @@ def _emit_decision_completed_rejected(
     except Exception:  # noqa: BLE001 — chain close is best-effort
         logger.warning(
             "instinct decision.completed(rejected) emit failed for "
+            "correlation_id=%s — Slice 4 reconciler will catch up",
+            correlation_id,
+            exc_info=True,
+        )
+
+
+def _emit_policy_evaluated_approved(
+    *,
+    blob: dict[str, Any],
+    action: Any,
+    user_id: str,
+    workspace_id: str,
+    causation_event_id: Any | None,
+) -> None:
+    """Best-effort ``policy.evaluated(passed=True, policy="approve_per_row")``
+    emit after a human approval lands (Slice 4 — Captain Decision 12 follow-up).
+
+    The projection's ``_fold_policy`` keeps the LAST observed
+    ``policy.evaluated`` event for the chain. Without this emit, an
+    approved chain still reads ``Decision.instinct_policy_passed=False``
+    because the only policy event seen is the parked ``passed=False``
+    from ``instinct_bridge.propose_pocket_write``. Firing this AFTER the
+    ``human.corrected`` event and BEFORE the bridge's chain close gives
+    the projection a fresh policy-evaluated to fold into the closed
+    Decision row — chain symmetry with auto-approve chains, which carry
+    ``policy="auto", passed=True`` from the direct-success path in
+    ``action_executor``.
+
+    Causation: the natural cause is the ``human.corrected`` event that
+    just landed. The caller threads its emitted event id through
+    ``causation_event_id`` so the projection's edge graph can chain
+    policy → human → policy as a single causal sequence.
+
+    Same skip-on-missing-correlation-id semantics as the sibling helpers.
+    """
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_policy_evaluated
+
+    correlation_id = _parked_correlation_id(blob)
+    if correlation_id is None:
+        return
+
+    pocket_id = str(getattr(action, "pocket_id", "") or "")
+    payload: dict[str, Any] = {
+        "policy": "approve_per_row",
+        "passed": True,
+        "reason": f"approved by user:{user_id or 'unknown'}",
+        "action_id": str(getattr(action, "id", "") or ""),
+        "evaluator": "instinct",
+    }
+    try:
+        record_policy_evaluated(
+            correlation_id=correlation_id,
+            actor=_chain_actor_human(
+                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
+            ),
+            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
+            payload=payload,
+            causation_id=causation_event_id,
+        )
+    except Exception:  # noqa: BLE001 — chain emit is best-effort
+        logger.warning(
+            "instinct policy.evaluated(passed=True) emit failed for "
             "correlation_id=%s — Slice 4 reconciler will catch up",
             correlation_id,
             exc_info=True,
@@ -620,13 +712,25 @@ async def bulk_approve_actions(
         action_blob = _pocket_write_blob(action)
         if action_blob is None:
             continue
-        _emit_human_corrected(
+        human_event_id = _emit_human_corrected(
             blob=action_blob,
             action=action,
             user_id=approver_id,
             workspace_id=workspace_id,
             disposition="accepted",
             note=req.note,
+        )
+        # Slice 4 — chain symmetry: a second ``policy.evaluated`` event
+        # with ``passed=True`` flips ``Decision.instinct_policy_passed``
+        # from the parked ``False`` to ``True``. ``causation_id`` points
+        # at the just-emitted ``human.corrected`` so the projection's
+        # edge graph carries the human → policy causal arrow.
+        _emit_policy_evaluated_approved(
+            blob=action_blob,
+            action=action,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            causation_event_id=human_event_id,
         )
         try:
             from pocketpaw_ee.cloud.pockets import instinct_bridge
@@ -786,13 +890,25 @@ async def approve_action(
         # ``note`` is the correction's free-text summary when the
         # approver edited; None on a plain approve.
         note = correction.context_summary if correction is not None else None
-        _emit_human_corrected(
+        human_event_id = _emit_human_corrected(
             blob=approved_blob,
             action=approved,
             user_id=approver_id,
             workspace_id=workspace_id,
             disposition=disposition,
             note=note,
+        )
+        # Slice 4 — chain symmetry: a second ``policy.evaluated`` event
+        # with ``passed=True`` flips ``Decision.instinct_policy_passed``
+        # to True on the approved chain. ``causation_id`` points at the
+        # just-emitted ``human.corrected`` so the chain reads policy
+        # (fail) → human → policy(pass) → completed as one causal walk.
+        _emit_policy_evaluated_approved(
+            blob=approved_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            causation_event_id=human_event_id,
         )
 
     # RFC 05 M2b.1 — when the approved Action carries a parked pocket

@@ -545,6 +545,45 @@ def mount_cloud(app: FastAPI) -> None:
 
     init_decisions_projection(rebuild_from_journal=True)
 
+    # Decision-graph reconciler + abandon-path sweeper (RFC 09 Slice 4).
+    #
+    # The reconciler is a 60s background loop that drains the journal
+    # from the projection's cursor and replays any chain events the
+    # hot-path co-location missed. The sweeper is an hourly background
+    # loop that closes Decision chains for parked Instinct Actions older
+    # than the configurable TTL (default 30 days). Both are gated on
+    # the same scheduler env flag the daily-snapshot scheduler uses so
+    # test runs do not spawn background loops that outlive the test.
+    # Production deployments set ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=
+    # true`` to flip them on.
+    import os as _os_slice4_decisions
+
+    if _os_slice4_decisions.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.decisions._action_sweeper import (
+            start_action_sweeper,
+            stop_action_sweeper,
+        )
+        from pocketpaw_ee.cloud.decisions.reconciler import (
+            start_reconciler,
+            stop_reconciler,
+        )
+
+        @app.on_event("startup")
+        async def _start_decisions_reconciler() -> None:
+            await start_reconciler(app)
+
+        @app.on_event("shutdown")
+        async def _stop_decisions_reconciler() -> None:
+            await stop_reconciler(app)
+
+        @app.on_event("startup")
+        async def _start_decisions_sweeper() -> None:
+            await start_action_sweeper(app)
+
+        @app.on_event("shutdown")
+        async def _stop_decisions_sweeper() -> None:
+            await stop_action_sweeper(app)
+
     # Tasks → notifications fan-out. When a Task is proposed to a human
     # assignee, drop an in-app notification so they see it even without
     # Mission Control open. Agent assignees skip this path — they pick

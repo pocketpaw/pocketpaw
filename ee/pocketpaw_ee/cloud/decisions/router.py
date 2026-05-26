@@ -125,6 +125,23 @@ def _maybe_uuid(value: str) -> UUID:
         raise CloudError(400, "decisions.invalid_id", f"'{value}' is not a valid UUID") from exc
 
 
+def _admin_dep():
+    """Lazy resolver for the admin-only FastAPI dep used by the
+    reconciler status endpoint (Slice 4 § Observability).
+
+    Mirrors the ``admin.perf`` gate the cloud bootstrap uses on the
+    top-level ``/api/v1/_admin/perf`` endpoint — owner-only, since the
+    per-projection cursor + lag numbers expose system-wide traffic
+    patterns that a workspace admin shouldn't necessarily see.
+
+    The import is wrapped in a function so this router still imports
+    cleanly in tests that don't pull the whole shared-deps surface.
+    """
+    from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
+
+    return require_action_any_workspace("admin.perf")
+
+
 def _trace_to_response(result: TraceResult) -> DecisionTraceResponse:
     """Map the service-layer TraceResult into the wire trace DTO."""
     return DecisionTraceResponse(
@@ -171,6 +188,39 @@ async def decisions_ping() -> dict[str, Any]:
         "cursor": graph.projection.cursor,
         "decisions": graph.store.count(),
     }
+
+
+# ---------------------------------------------------------------------------
+# Slice 4 — reconciler status (admin-only)
+# ---------------------------------------------------------------------------
+#
+# The reconciler is a 60s background loop that drains the journal from
+# the projection's cursor and replays any chain events the hot path
+# missed. The status endpoint surfaces its heartbeat so an operator can
+# tell at a glance whether the loop is alive and how far behind the
+# journal tail the projection is.
+#
+# Admin-gated via ``require_action_any_workspace("admin.perf")`` — same
+# convention the ``/api/v1/_admin/perf`` endpoint uses for the per-route
+# timing dump. The reconciler heartbeat is operational telemetry; an
+# average workspace member does not need to see it.
+
+
+@router.get("/_reconciler/status")
+async def decisions_reconciler_status(
+    _user: Any = Depends(_admin_dep()),
+) -> dict[str, Any]:
+    """Snapshot of the in-process reconciler's state.
+
+    Returns ``cursor`` (the projection's persisted seq), ``lag_seconds``
+    (wall-clock distance from the journal tail), ``last_tick_ts``,
+    ``last_tick_applied``, ``errors_last_hour``, and totals since the
+    process started. The numbers come straight from the singleton
+    ``DecisionReconciler.status`` — no DB query, sub-1ms cost.
+    """
+    from pocketpaw_ee.cloud.decisions.reconciler import get_reconciler
+
+    return get_reconciler().status.to_payload()
 
 
 # ---------------------------------------------------------------------------
