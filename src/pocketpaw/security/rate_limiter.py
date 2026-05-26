@@ -3,6 +3,7 @@
 Pre-configured tiers:
   - api:      10 req/s, burst 30  (general API endpoints)
   - auth:      1 req/s, burst  5  (token/QR endpoints)
+  - login:    5 per 15 min, burst 5  (login/register/bearer-login, keyed by (ip, email))
   - ws:        2 conn/s, burst  5  (WebSocket connections)
   - api_key:   configurable per-key limiter (default 60 req/min)
 
@@ -20,6 +21,7 @@ __all__ = [
     "RateLimitInfo",
     "api_limiter",
     "auth_limiter",
+    "login_limiter",
     "ws_limiter",
     "get_api_key_limiter",
     "cleanup_all",
@@ -120,6 +122,9 @@ class RateLimiter:
 # Pre-configured limiter instances
 api_limiter = RateLimiter(rate=10.0, capacity=30)
 auth_limiter = RateLimiter(rate=1.0, capacity=5)
+# Login / register / bearer-login: 5 attempts per 15 min, keyed by (ip, email)
+# so attackers can't bypass the bucket by rotating the email field behind one IP.
+login_limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
 ws_limiter = RateLimiter(rate=2.0, capacity=5)
 _api_key_limiter: RateLimiter | None = None
 
@@ -140,7 +145,12 @@ def get_api_key_limiter() -> RateLimiter:
 
 def cleanup_all() -> int:
     """Run cleanup on all global limiters. Returns total entries removed."""
-    total = api_limiter.cleanup() + auth_limiter.cleanup() + ws_limiter.cleanup()
+    total = (
+        api_limiter.cleanup()
+        + auth_limiter.cleanup()
+        + login_limiter.cleanup()
+        + ws_limiter.cleanup()
+    )
     if _api_key_limiter is not None:
         total += _api_key_limiter.cleanup()
     return total

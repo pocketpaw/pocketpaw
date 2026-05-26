@@ -16,6 +16,7 @@ from pocketpaw_ee.cloud._core.deps import (
     require_action,
     require_membership,
 )
+from pocketpaw_ee.cloud._core.rate_limit import rate_limit_invite_create
 from pocketpaw_ee.cloud.auth.core import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.user import User
@@ -152,6 +153,7 @@ async def create_invite(
     body: CreateInviteRequest,
     ctx: RequestContext = Depends(request_context),
     user: User = Depends(require_action("invite.create")),
+    _rl: None = Depends(rate_limit_invite_create),
 ) -> InviteOut:
     invite = await workspace_service.create_invite(ctx, workspace_id, body)
     return invite_to_dto(invite)
