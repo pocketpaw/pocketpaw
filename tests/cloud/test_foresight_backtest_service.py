@@ -1,4 +1,9 @@
 # tests/cloud/test_foresight_backtest_service.py — RFC 08 PR 4.
+# Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) —
+#   monkeypatched ``_score_backtest`` fakes accept ``**_kwargs`` to
+#   absorb the new ``workspace_id`` + ``backtest_run_id`` kwargs PR 10
+#   threads through for paired PredictionRecord persistence. Behaviour
+#   under test (gate state machine, unlock event) is unaffected.
 # Created: 2026-05-25 (feat/foresight-v04-backtest-aggregator) — service
 #   tests for the retroactive backtest gate. Exercises:
 #     - create → score → emit pipeline (queued / running / complete)
@@ -138,7 +143,7 @@ async def test_create_unlock_event_carries_workspace_and_accuracy(
     v0.1's placeholder pairing happens to score."""
     ctx = _ctx(workspace="ws-unlock-test")
 
-    async def _passing_scorer(_body, *, engine_result, threshold):
+    async def _passing_scorer(_body, *, engine_result, threshold, **_kwargs):
         return (
             {"modal_accuracy": 0.8, "confidence_calibration": 1.0, "n_pairs": 10},
             {
@@ -167,7 +172,7 @@ async def test_create_no_unlock_event_when_gate_fails(recording_bus, monkeypatch
     """Failing gate should NOT fire the unlock event."""
     ctx = _ctx()
 
-    async def _failing_scorer(_body, *, engine_result, threshold):
+    async def _failing_scorer(_body, *, engine_result, threshold, **_kwargs):
         return (
             {"modal_accuracy": 0.3, "confidence_calibration": 0.5, "n_pairs": 10},
             {
@@ -376,7 +381,7 @@ async def test_gate_reports_no_backtest_when_workspace_is_empty() -> None:
 async def test_gate_reports_unlocked_after_passing_backtest(monkeypatch) -> None:
     ctx = _ctx(workspace="pass-ws")
 
-    async def _passing_scorer(_body, *, engine_result, threshold):
+    async def _passing_scorer(_body, *, engine_result, threshold, **_kwargs):
         return (
             {"modal_accuracy": 0.8, "n_pairs": 10},
             {
@@ -401,7 +406,7 @@ async def test_gate_reports_unlocked_after_passing_backtest(monkeypatch) -> None
 async def test_gate_reports_below_threshold_after_failing_backtest(monkeypatch) -> None:
     ctx = _ctx(workspace="fail-ws")
 
-    async def _failing_scorer(_body, *, engine_result, threshold):
+    async def _failing_scorer(_body, *, engine_result, threshold, **_kwargs):
         return (
             {"modal_accuracy": 0.3, "n_pairs": 10},
             {
@@ -427,7 +432,7 @@ async def test_gate_isolates_across_workspaces(monkeypatch) -> None:
     ctx_w1 = _ctx(workspace="w1")
     ctx_w2 = _ctx(workspace="w2")
 
-    async def _passing_scorer(_body, *, engine_result, threshold):
+    async def _passing_scorer(_body, *, engine_result, threshold, **_kwargs):
         return (
             {"modal_accuracy": 0.9, "n_pairs": 10},
             {

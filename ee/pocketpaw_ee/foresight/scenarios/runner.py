@@ -1,4 +1,18 @@
 # ee/pocketpaw_ee/foresight/scenarios/runner.py
+# Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) —
+# RFC 08 v1.0 PR 10:
+#   - ``run_scenario`` accepts an optional ``on_prediction_record``
+#     callback alongside the existing ``on_projected_decision``. The
+#     prediction-record callback receives the per-(anchor × tick)
+#     projection as a CAPTURE-shaped dict so the cloud's
+#     ``foresight_prediction_records`` collection can mirror each
+#     emission. Legacy callers (CLI smoke, v0.5 tests) pass nothing
+#     and behaviour is unchanged — the in-engine
+#     ``RunResult.projected_decisions`` field still carries the same
+#     records for direct consumption.
+#   - The engine never imports cloud; the callback is injected by
+#     closure exactly like ``on_projected_decision`` so the
+#     import-linter's "engine → cloud forbidden" contract holds.
 # Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
 # §14.4 wiring:
 #   - ``ScenarioConfig`` grows two optional fields: ``precedent_seed``
@@ -326,6 +340,23 @@ class RunResult:
 #     that index per-anchor records across runs of different sub-types).
 ProjectedDecisionCallback = Callable[[str, str, int, str, float, str], Any]
 
+# PR 10 — per-tick PredictionRecord callback. The cloud side passes a
+# function that mirrors each (anchor × tick) projection into the
+# ``foresight_prediction_records`` Mongo collection so the v1.0
+# aggregate + insights endpoints can read paired records persistently
+# (replacing the v0.5 ForesightBacktest + ForesightProjectedDecision
+# proxies). The dict payload mirrors the engine's per-tick
+# projected-decision record so the cloud-side writer is a thin field
+# map; the engine never sees Mongo / Beanie / pydantic.
+#
+# Args:
+#   record: dict with keys ``{anchor_id, persona_id, tick_id,
+#     decision_text, confidence, sub_type,
+#     forward_precedent_decision_id, scenario_id, run_id, prediction}``.
+#     The ``prediction`` key carries the per-tick modal-outcome dict
+#     the cloud will store as the PredictionRecord's payload.
+PredictionRecordCallback = Callable[[dict[str, Any]], Any]
+
 
 async def run_scenario(
     config: ScenarioConfig,
@@ -333,6 +364,7 @@ async def run_scenario(
     backend: Any | None = None,
     backend_pool: list[Any] | None = None,
     on_projected_decision: ProjectedDecisionCallback | None = None,
+    on_prediction_record: PredictionRecordCallback | None = None,
     run_id: str | None = None,
     decision_graph_ref: DecisionGraphRef | None = None,
 ) -> RunResult:
@@ -437,18 +469,46 @@ async def run_scenario(
         )
         for record in tick_records:
             projected_records.append(record)
-            if on_projected_decision is None:
-                continue
-            maybe_coro = on_projected_decision(
-                record["anchor_id"],
-                record["persona_id"],
-                record["tick_id"],
-                record["decision_text"],
-                record["confidence"],
-                record["sub_type"],
-            )
-            if inspect.isawaitable(maybe_coro):
-                await maybe_coro
+            if on_projected_decision is not None:
+                maybe_coro = on_projected_decision(
+                    record["anchor_id"],
+                    record["persona_id"],
+                    record["tick_id"],
+                    record["decision_text"],
+                    record["confidence"],
+                    record["sub_type"],
+                )
+                if inspect.isawaitable(maybe_coro):
+                    await maybe_coro
+            # PR 10 — PredictionRecord mirror callback. The cloud side
+            # hands in a closure that persists each (anchor × tick)
+            # projection into the ``foresight_prediction_records``
+            # collection. The dict carries the same per-tick payload
+            # the projected-decision callback received plus the
+            # scenario / run identifiers so the writer can satisfy
+            # the cloud's cloud-rule-#3 tenancy invariant without a
+            # second engine round-trip. The ``prediction`` key is the
+            # per-tick modal-outcome dict (keyed by
+            # ``decision_text`` so the cloud-side modal-distribution
+            # rollup tallies on the same vocabulary it used in v0.5).
+            if on_prediction_record is not None:
+                prediction_payload: dict[str, Any] = {
+                    "anchor_id": record["anchor_id"],
+                    "persona_id": record["persona_id"],
+                    "tick_id": record["tick_id"],
+                    "decision_text": record["decision_text"],
+                    "confidence": record["confidence"],
+                    "sub_type": record["sub_type"],
+                    "forward_precedent_decision_id": record.get("forward_precedent_decision_id"),
+                    "scenario_id": config.name,
+                    "run_id": run_id or "",
+                    "prediction": {
+                        "modal_outcome": record["decision_text"],
+                    },
+                }
+                maybe_coro_pr = on_prediction_record(prediction_payload)
+                if inspect.isawaitable(maybe_coro_pr):
+                    await maybe_coro_pr
 
     aggregate = adapter.aggregate(snapshots, config)
 
