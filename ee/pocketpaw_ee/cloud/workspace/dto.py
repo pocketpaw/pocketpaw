@@ -151,6 +151,30 @@ class WorkspaceDeletePreviewResponse(BaseModel):
     total_bytes: int
 
 
+class AddDomainRequest(BaseModel):
+    """POST /workspaces/{id}/domains."""
+
+    domain: str = Field(min_length=3, max_length=253)
+
+
+class UpdateDomainRequest(BaseModel):
+    """PATCH /workspaces/{id}/domains/{domain}."""
+
+    auto_join: bool
+
+
+class VerifiedDomainOut(BaseModel):
+    """One verified-domain entry. ``verification_token`` is the value the
+    admin must place in the domain's DNS TXT record before calling verify."""
+
+    domain: str
+    verification_token: str
+    verified: bool
+    verified_at: str | None = None
+    auto_join: bool
+    created_at: str | None = None
+
+
 class InvitePreviewResponse(BaseModel):
     """Typed preview of an invite token for the accept UI.
 
@@ -236,6 +260,7 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
 
 
 __all__ = [
+    "AddDomainRequest",
     "BulkInviteRequest",
     "BulkInviteResponse",
     "BulkInviteSkip",
@@ -244,9 +269,11 @@ __all__ = [
     "InviteOut",
     "InvitePreviewResponse",
     "MemberOut",
+    "UpdateDomainRequest",
     "UpdateMemberRoleRequest",
     "UpdateWorkspaceRequest",
     "ValidateInviteOut",
+    "VerifiedDomainOut",
     "WorkspaceDeletePreviewResponse",
     "WorkspaceOut",
     "invite_to_dto",

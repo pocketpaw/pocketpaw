@@ -53,6 +53,8 @@ dependencies = [
     "python-socketio>=5.11.0",
     "slowapi>=0.1.9",
     "redis[hiredis]>=5.0.0",
+    # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
+    "dnspython>=2.6.0",
     # --- Background worker (Tier 2 resumable chat runs) ---
     # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
     # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.

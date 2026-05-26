@@ -46,7 +46,7 @@ from fastapi_users.jwt import generate_jwt
 from fastapi_users_db_beanie import BeanieUserDatabase, ObjectIDIDMixin
 
 from pocketpaw_ee.cloud.auth.password_policy import validate_password_async
-from pocketpaw_ee.cloud.models.user import OAuthAccount, User
+from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,44 @@ class UserManager(ObjectIDIDMixin, BaseUserManager[User, PydanticObjectId]):
 
     async def on_after_register(self, user: User, request: Request | None = None):
         logger.info("User registered: %s (%s)", user.email, user.id)
+        # Wave 3 Task 12: best-effort auto-join via verified-domain capture.
+        # Wrapped so any failure here (DNS, DB, audit) never blocks the
+        # newly-minted account from being usable.
+        try:
+            email = (user.email or "").lower()
+            if "@" not in email:
+                return
+            domain = email.split("@", 1)[1]
+
+            # Local import to avoid the workspace package on the OSS-only
+            # startup path (auth.core is imported broadly).
+            from pocketpaw_ee.cloud.audit import service as audit_service
+            from pocketpaw_ee.cloud.workspace import domains as domains_service
+
+            ws = await domains_service.find_workspace_by_verified_domain(domain)
+            if ws is None:
+                return
+            if any(m.workspace == str(ws.id) for m in user.workspaces):
+                return
+
+            user.workspaces.append(WorkspaceMembership(workspace=str(ws.id), role="member"))
+            if user.active_workspace is None:
+                user.active_workspace = str(ws.id)
+            await user.save()
+
+            try:
+                await audit_service.record(
+                    str(ws.id),
+                    str(user.id),
+                    "domain.auto_join",
+                    target_type="user",
+                    target_id=str(user.id),
+                    metadata={"email": email, "domain": domain},
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("auto-join audit record failed", exc_info=True)
+        except Exception:  # noqa: BLE001
+            logger.warning("verified-domain auto-join failed for %s", user.email, exc_info=True)
 
     async def on_after_login(self, user: User, request: Request | None = None, response=None):
         logger.debug("User logged in: %s", user.email)

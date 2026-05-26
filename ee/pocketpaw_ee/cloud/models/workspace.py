@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from beanie import Indexed
 from pydantic import BaseModel, Field
@@ -27,6 +27,23 @@ class SsoConfig(BaseModel):
     enforced: bool = False
 
 
+class VerifiedDomain(BaseModel):
+    """One claimed email domain on a workspace (Wave 3 Task 12).
+
+    DNS TXT-record proof: when a record matching ``verification_token``
+    is found on the domain, ``verified`` flips True. Once verified +
+    ``auto_join``, new registrants with that email domain are routed
+    into the workspace as ``member`` by ``UserManager.on_after_register``.
+    """
+
+    domain: str  # "acme.com" — lowercase, no @
+    verification_token: str  # "paw-verify=<32 hex>"
+    verified: bool = False
+    verified_at: datetime | None = None
+    auto_join: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class Workspace(TimestampedDocument):
     """Organization workspace — one per enterprise deployment."""
 
@@ -37,6 +54,7 @@ class Workspace(TimestampedDocument):
     seats: int = 5
     settings: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     sso_config: SsoConfig | None = None
+    verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None
 
     class Settings:
