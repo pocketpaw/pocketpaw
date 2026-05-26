@@ -1,4 +1,18 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-26 (feat/foresight-v10-insights-llm) — RFC 08 v1.0.
+# LLM-driven insights synthesizer toggle:
+#     GET /api/v1/foresight/workspace/insights-config
+#       → ForesightInsightsConfigResponse (synthesizer +
+#         llm_cache_ttl_seconds + updated_at). Workspace-scoped; an
+#         absent config collapses to the default (synthesizer="pattern").
+#     PUT /api/v1/foresight/workspace/insights-config
+#       Body: { synthesizer: "pattern" | "llm" } — opts the workspace
+#         into the LLM synthesizer (default stays "pattern"). 422 on
+#         unknown synthesizer value (DTO-level enforcement); emits
+#         ``foresight.insights_config.updated`` on effective change.
+#   Both routes delegate to ``ee.cloud.foresight.service`` per cloud
+#   rule #2. The /insights endpoint signature is UNCHANGED — only the
+#   synthesizer implementation behind it swaps.
 # Modified: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) —
 # RFC 08 v1.0 wave 3 adds the workspace-scoped custom-scenario CRUD:
 #     GET    /api/v1/foresight/scenarios/custom
@@ -124,6 +138,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateScenarioRequest,
     CustomScenarioListResponse,
     CustomScenarioResponse,
+    ForesightInsightsConfigResponse,
     ForesightInstinctProposalListResponse,
     ForesightThresholdResponse,
     InsightsResponse,
@@ -133,6 +148,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
+    SetForesightInsightsConfigRequest,
     SetForesightThresholdRequest,
 )
 from pocketpaw_ee.cloud.license import require_license
@@ -554,8 +570,76 @@ async def set_workspace_threshold(
 
 
 # ---------------------------------------------------------------------------
-# Workspace-scoped custom scenarios (RFC 08 v1.0 wave 3)
+# Per-workspace insights-synthesizer toggle (RFC 08 v1.0 — LLM insights PR)
+#
+# Sibling endpoint to the threshold pair above. Workspaces opt into the
+# LLM synthesizer here; the wire shape of /insights is unchanged either
+# way (the toggle only swaps the synthesizer implementation behind the
+# endpoint). Default stays ``"pattern"`` — cost discipline: the LLM
+# path is opt-in, deterministic pattern rules stay free.
+#
+# Workspace-scoped custom scenarios (RFC 08 v1.0 wave 3) follow below.
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/workspace/insights-config",
+    response_model=ForesightInsightsConfigResponse,
+)
+async def get_workspace_insights_config(
+    ctx: RequestContext = Depends(request_context),
+) -> ForesightInsightsConfigResponse:
+    """Return the workspace's resolved insights-synthesizer config.
+
+    Workspace-scoped — the view is intrinsically per-workspace and an
+    absent config collapses to the default (``synthesizer="pattern"``,
+    ``llm_cache_ttl_seconds=300``, ``updated_at=null``). No
+    cross-tenant read possible.
+
+    Tenancy: 403 when the caller has no active workspace. Never 404.
+
+    paw-enterprise builds the Foresight admin panel against this read
+    so the settings UI can show the current toggle plus the LLM cache
+    TTL note without a hard-coded constant.
+    """
+    return await foresight_service.get_insights_config(ctx)
+
+
+@router.put(
+    "/workspace/insights-config",
+    response_model=ForesightInsightsConfigResponse,
+)
+async def set_workspace_insights_config(
+    body: SetForesightInsightsConfigRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> ForesightInsightsConfigResponse:
+    """Upsert the workspace's insights-synthesizer choice.
+
+    ``body.synthesizer = "pattern"`` keeps the v0.5 deterministic
+    five-rule synthesizer (default). ``body.synthesizer = "llm"`` opts
+    into the v1.0 LLM-driven synthesizer; LLM failures fall back to
+    pattern at runtime so the wire response never 5xxs.
+
+    Returns the same response shape as the GET so the UI can keep its
+    local store in sync with one round trip.
+
+    Side effects:
+      - Upserts the
+        :class:`pocketpaw_ee.cloud.models.foresight_workspace_config.ForesightWorkspaceConfig`
+        doc keyed by ``workspace_id``.
+      - Emits ``foresight.insights_config.updated`` when the effective
+        synthesizer changes; a no-op write (same value) stays quiet.
+
+    Tenancy: 403 when no active workspace. The toggle applies to ALL
+    future ``GET /api/v1/foresight/insights`` reads.
+
+    Cost discipline: opting into the LLM synthesizer triggers per-poll
+    LLM round-trips (cached per workspace with a 5-minute TTL). The
+    pattern synthesizer is deterministic and free; workspaces should
+    only flip to "llm" when the operator wants richer pattern
+    discovery and accepts the LLM cost.
+    """
+    return await foresight_service.set_insights_config(ctx, body)
 
 
 @router.get(

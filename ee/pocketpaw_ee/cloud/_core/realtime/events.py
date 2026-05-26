@@ -505,6 +505,17 @@ class ForesightThresholdUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "foresight.threshold.updated"
 
 
+# Foresight insights-synthesizer config — RFC 08 v1.0 (LLM insights PR).
+# Fires when an admin flips the workspace's synthesizer choice between
+# "pattern" (the v0.5 deterministic synthesizer) and "llm" (the v1.0
+# LLM-driven synthesizer with a hard fallback). Listeners can clear
+# any per-workspace LLM insight cache and refresh the Insights panel
+# without polling.
+@dataclass
+class ForesightInsightsConfigUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.insights_config.updated"
+
+
 # Foresight per-anchor projection fanout — RFC 08 §7.7 + PR 5. Fires
 # once per (anchor × tick) bucket as the engine ticks the run forward;
 # the UI's Live panel consumes these to render the projection timeline

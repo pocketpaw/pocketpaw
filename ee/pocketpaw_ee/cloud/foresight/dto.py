@@ -946,6 +946,74 @@ class SetForesightThresholdRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Per-workspace insights-synthesizer config (RFC 08 v1.0 — LLM insights PR).
+#
+# Companion endpoint to the threshold override above. Same shape pattern
+# (separate request / response with explicit field bounds) so the
+# settings panel can read + write each knob independently. The synthesizer
+# choice defaults to "pattern" — the v0.5 deterministic synthesizer
+# stays as the default. Workspaces opt into "llm" explicitly via the
+# PUT body.
+# ---------------------------------------------------------------------------
+
+
+class ForesightInsightsConfigResponse(BaseModel):
+    """Response shape for both
+    ``GET /api/v1/foresight/workspace/insights-config`` and
+    ``PUT /api/v1/foresight/workspace/insights-config``.
+
+    Fields:
+      - ``workspace_id``: tenancy key (echoed for client-side
+        bookkeeping).
+      - ``synthesizer``: ``"pattern"`` (default — the v0.5 deterministic
+        five-rule synthesizer) or ``"llm"`` (the v1.0 LLM-driven
+        synthesizer; opt-in only). LLM failures fall back to the
+        pattern synthesizer so the wire response never 5xxs.
+      - ``llm_cache_ttl_seconds``: the in-memory LRU TTL the LLM
+        synthesizer applies to its per-workspace cache. v1.0 echoes the
+        module constant (300 seconds) so the UI can render the cost-
+        discipline note without round-tripping a separate read.
+      - ``updated_at``: ISO-8601 UTC timestamp of the last config write.
+        ``None`` when no config row exists for the workspace.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    synthesizer: Literal["pattern", "llm"]
+    llm_cache_ttl_seconds: int = Field(..., ge=1)
+    updated_at: str | None = None
+
+
+class SetForesightInsightsConfigRequest(BaseModel):
+    """``PUT /api/v1/foresight/workspace/insights-config`` body.
+
+    Single-field shape:
+
+    - ``synthesizer: Literal["pattern", "llm"]`` — the synthesizer the
+      workspace's ``/insights`` endpoint runs by default. ``"pattern"``
+      keeps the v0.5 deterministic five-rule synthesizer; ``"llm"`` opts
+      into the LLM-driven synthesizer.
+
+    Bounds rationale:
+      - The Literal forbids the third-state ``None`` / unknown values so
+        a typo (``"LLM"``, ``"ai"``) gets 422'd at the DTO layer rather
+        than silently coerced.
+      - The LLM path has a hard fallback to ``pattern`` on failure
+        (timeouts, malformed JSON, etc.) so a workspace stuck on "llm"
+        during an outage still gets pattern-rule insights.
+
+    The service emits ``foresight.insights_config.updated`` whenever
+    the effective synthesizer changes. A no-op write (same value)
+    stays quiet so the UI's optimistic local state doesn't echo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    synthesizer: Literal["pattern", "llm"]
+
+
+# ---------------------------------------------------------------------------
 # Custom scenarios (Team 1 wave 3) — workspace-scoped scenario YAML
 # storage + CRUD wire shapes (RFC 08 v1.0).
 #
@@ -1098,6 +1166,7 @@ __all__ = [
     "CustomScenarioParsedMetaDto",
     "CustomScenarioResponse",
     "CustomScenarioSubType",
+    "ForesightInsightsConfigResponse",
     "ForesightInstinctProposalListResponse",
     "ForesightInstinctProposalResponse",
     "ForesightThresholdResponse",
@@ -1119,6 +1188,7 @@ __all__ = [
     "ScenarioCatalogResponse",
     "ScenarioRunListItemResponse",
     "ScenarioRunResponse",
+    "SetForesightInsightsConfigRequest",
     "SetForesightThresholdRequest",
     "TierMixActual",
 ]
