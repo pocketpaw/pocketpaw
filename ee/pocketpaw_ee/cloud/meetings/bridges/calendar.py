@@ -1,27 +1,29 @@
-"""Calendar events → Meeting auto-creation.
+"""Calendar ↔ Meeting bidirectional bridge.
 
-When a calendar event lands with a Zoom / Google Meet / Teams URL in its
-description or location, automatically create a corresponding Meeting
-row with ``source="recall"`` and the detected provider. The Recall.ai
-bot then becomes one click away from any calendar invite — no manual
-copy-paste of a meeting URL needed.
+Forward (calendar → meeting): when a calendar event lands with a
+Zoom / Google Meet / Teams URL in its description or location,
+automatically create a corresponding Meeting row with ``source="recall"``
+and the detected provider. The Recall.ai bot then becomes one click
+away from any calendar invite — no manual copy-paste needed.
 
-Subscribes to ``calendar.event.created`` and ``calendar.event.deleted``
-on ``shared.events.event_bus``:
+Reverse (meeting → calendar): when a Meeting is scheduled via /meetings
+(or the chat agent, MCP tools, etc.), mint a matching CalendarEvent so
+the meeting shows up on /calendar. The calendar event is stamped with
+``fabric_object_id="meeting:{meeting_id}"`` so the forward handler can
+short-circuit and avoid re-creating a duplicate Meeting.
 
-* **created** → load the event doc, detect a meeting URL, mint a
-  ``MeetingDoc`` with the detected provider and the calendar event id
-  recorded under ``raw_provider_payload.calendar_event_id`` so we can
-  deduplicate on update + clean up on delete.
-* **deleted** → look up the linked meeting (by ``calendar_event_id``)
-  and mark it cancelled. The Recall bot, if dispatched, gets the leave
-  signal via the existing stop-bot path on cancellation.
+Subscribes on ``shared.events.event_bus``:
 
-Updates (``calendar.event.updated``) intentionally don't re-detect URLs
-— if someone adds a Zoom link to an existing event after the fact, they
-can dispatch a bot manually. Auto-recreating on update risks
+* ``calendar.event.created`` → forward: scan for URL, mint Meeting
+  (skipped if ``fabric_object_id`` already links to a meeting we made)
+* ``calendar.event.deleted`` → forward: cancel the linked Meeting
+* ``meeting.scheduled`` → reverse: mint a CalendarEvent, link both rows
+* ``meeting.cancelled`` → reverse: delete the linked CalendarEvent
+
+Updates (``calendar.event.updated`` / silent meeting updates)
+intentionally don't sync. Re-detecting URLs on calendar updates risks
 double-creating meetings when descriptions are edited for unrelated
-reasons.
+reasons; the same logic applies in reverse.
 """
 
 from __future__ import annotations
@@ -106,6 +108,14 @@ async def _on_calendar_event_created(data: dict[str, Any]) -> None:
 
     doc = await _EventDoc.find_one({"workspace": workspace_id, "_id": event_id})
     if doc is None:
+        return
+
+    # Reverse-bridge loop guard: this calendar event was minted by us from
+    # a Meeting that already exists. Re-detecting the URL would create a
+    # second Meeting row pointing at the same call. ``getattr`` keeps the
+    # check forward-compatible with test doubles that omit the attribute.
+    fabric_link = getattr(doc, "fabric_object_id", None)
+    if isinstance(fabric_link, str) and fabric_link.startswith("meeting:"):
         return
 
     haystack = " ".join(filter(None, [doc.description, doc.location, doc.title]))
@@ -247,15 +257,189 @@ def _default_end(start: datetime | None) -> datetime | None:
 
 
 # ---------------------------------------------------------------------------
+# Reverse bridge — Meeting → CalendarEvent
+# ---------------------------------------------------------------------------
+
+# All Meeting-derived calendar events land on a single synthetic calendar
+# so they group cleanly in /calendar UIs (next to the workspace's own
+# calendars). Per ``calendar.service._load_calendar``, no row needs to
+# exist — the service synthesizes a default Calendar with this name when
+# missing, owned by the request actor.
+_MEETING_CALENDAR_ID = "meetings"
+
+
+async def _on_meeting_scheduled(data: dict[str, Any]) -> None:
+    """Mint a CalendarEvent so a scheduled Meeting shows up on /calendar."""
+    workspace_id = data.get("workspace_id")
+    meeting_id = data.get("meeting_id")
+    if not (workspace_id and meeting_id):
+        return
+
+    # Forward-bridge loop guard: this Meeting was already minted from a
+    # calendar event by ``_on_calendar_event_created``; emitting our own
+    # reverse-bridge calendar event would create a second row.
+    if data.get("auto_created_from_calendar"):
+        return
+
+    try:
+        from pocketpaw_ee.calendar._context import RequestContext
+        from pocketpaw_ee.calendar.dto import CreateEventRequest
+        from pocketpaw_ee.calendar.service import create_event
+        from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
+    except ImportError:
+        logger.warning("calendar package unavailable — reverse bridge disabled")
+        return
+
+    doc = await _MeetingDoc.find_one(
+        {"workspace": workspace_id, "_id": _maybe_object_id(meeting_id)},
+    )
+    if doc is None:
+        return
+
+    # Idempotency: a second meeting.scheduled emit (retry, bus replay)
+    # must not create a second calendar row.
+    payload = dict(doc.raw_provider_payload or {})
+    if payload.get("calendar_event_id"):
+        return
+
+    starts_at = doc.scheduled_start
+    if starts_at is None:
+        # Meetings without a scheduled_start (e.g. instant calls) don't
+        # need a calendar entry; skip silently.
+        return
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=UTC)
+    ends_at = doc.scheduled_end
+    if ends_at is None:
+        ends_at = _default_end(starts_at)
+    elif ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=UTC)
+    # CreateEventRequest enforces ends > starts; nudge by 1 minute if
+    # the meeting somehow ended up zero-length.
+    if ends_at is None or ends_at <= starts_at:
+        ends_at = starts_at + timedelta(minutes=30)
+
+    actor = doc.created_by_user_id or data.get("created_by") or "system"
+    ctx = RequestContext(workspace_id=workspace_id, user_id=actor)
+
+    body = CreateEventRequest(
+        calendar_id=_MEETING_CALENDAR_ID,
+        title=doc.title or "Untitled meeting",
+        starts_at=starts_at,
+        ends_at=ends_at,
+        timezone="UTC",
+        description=_format_description(doc),
+        location=doc.join_url or None,
+        # Loop-prevention marker — _on_calendar_event_created checks this
+        # and short-circuits when present.
+        fabric_object_id=f"meeting:{meeting_id}",
+    )
+
+    try:
+        event_resp = await create_event(ctx, body)
+    except Exception:  # noqa: BLE001 — bridge must not break meeting create
+        logger.exception("reverse bridge: failed to mint CalendarEvent for meeting=%s", meeting_id)
+        return
+
+    # Link the meeting back to the new calendar event so the forward
+    # bridge sees the linkage and the cancellation handler can find it.
+    payload["calendar_event_id"] = event_resp.id
+    payload.setdefault("auto_linked_to_calendar", "meeting_bridge")
+    doc.raw_provider_payload = payload
+    await doc.save()
+
+    logger.info(
+        "Reverse bridge: minted CalendarEvent=%s for meeting=%s",
+        event_resp.id,
+        meeting_id,
+    )
+
+
+async def _on_meeting_cancelled(data: dict[str, Any]) -> None:
+    """Delete the CalendarEvent that mirrored a now-cancelled Meeting."""
+    workspace_id = data.get("workspace_id")
+    meeting_id = data.get("meeting_id")
+    if not (workspace_id and meeting_id):
+        return
+
+    try:
+        from pocketpaw_ee.calendar._context import RequestContext
+        from pocketpaw_ee.calendar.service import delete_event
+        from pocketpaw_ee.cloud.models.meeting import Meeting as _MeetingDoc
+    except ImportError:
+        return
+
+    doc = await _MeetingDoc.find_one(
+        {"workspace": workspace_id, "_id": _maybe_object_id(meeting_id)},
+    )
+    if doc is None:
+        return
+
+    payload = dict(doc.raw_provider_payload or {})
+    event_id = payload.get("calendar_event_id")
+    auto_linked = payload.get("auto_linked_to_calendar")
+    if not event_id or auto_linked != "meeting_bridge":
+        # Either we didn't mint this calendar event (forward-bridge case)
+        # or there's no link at all. Forward-bridge events are cleaned up
+        # via the user's own calendar cancellation, not from here.
+        return
+
+    actor = doc.created_by_user_id or "system"
+    ctx = RequestContext(workspace_id=workspace_id, user_id=actor)
+    try:
+        await delete_event(ctx, event_id)
+    except Exception:  # noqa: BLE001 — bridge must not break meeting cancel
+        logger.exception(
+            "reverse bridge: failed to delete CalendarEvent=%s for cancelled meeting=%s",
+            event_id,
+            meeting_id,
+        )
+
+
+def _format_description(doc: Any) -> str:
+    """Compose a calendar event description from meeting metadata.
+
+    Kept terse — the join URL goes in ``location`` so calendar clients
+    surface it as a clickable link. Description carries the human label
+    and a stable provenance marker.
+    """
+    lines: list[str] = []
+    if doc.provider == "zoom":
+        lines.append("Zoom meeting")
+    elif doc.provider == "google_meet":
+        lines.append("Google Meet")
+    elif doc.source == "livekit":
+        lines.append("Group call (in-app)")
+    else:
+        lines.append("Meeting")
+    if doc.join_url:
+        lines.append(f"Join: {doc.join_url}")
+    lines.append("— Synced from Meetings")
+    return "\n".join(lines)
+
+
+def _maybe_object_id(value: str) -> Any:
+    """Coerce ``value`` to ``PydanticObjectId`` when possible; else raw."""
+    try:
+        from beanie import PydanticObjectId
+
+        return PydanticObjectId(value)
+    except Exception:  # noqa: BLE001 — bson/beanie raise a variety
+        return value
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
 
 def register_meeting_calendar_listeners() -> None:
-    """Wire calendar.event.* → meeting auto-create. Idempotent."""
+    """Wire the bidirectional Calendar ↔ Meeting bridge. Idempotent."""
     event_bus.subscribe("calendar.event.created", _on_calendar_event_created)
     event_bus.subscribe("calendar.event.deleted", _on_calendar_event_deleted)
-    logger.info("registered calendar → meeting auto-create subscribers")
+    event_bus.subscribe("meeting.scheduled", _on_meeting_scheduled)
+    event_bus.subscribe("meeting.cancelled", _on_meeting_cancelled)
+    logger.info("registered calendar ↔ meeting bidirectional bridge")
 
 
 __all__ = [
