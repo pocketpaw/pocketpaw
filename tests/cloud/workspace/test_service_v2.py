@@ -209,6 +209,86 @@ async def test_remove_member_emits_both_paths(
     resolver_mock.invalidate_workspace.assert_called_with(ws.id)
 
 
+async def test_update_member_role_blocks_demoting_last_owner(owner) -> None:
+    """Role-based last-owner check fires even when target is not doc.owner.
+
+    Seeds a NON-doc-owner user, promotes them to owner-role, then strips the
+    original doc.owner's owner role so the new user is the SOLE owner. The
+    doc.owner-field check would not catch this; the new _count_owners guard
+    must.
+    """
+    sole_owner = await _seed_user(email="sole@x.c", full_name="Sole")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(sole_owner.id), role="owner")
+    # Demote the doc.owner directly via the User doc so we bypass the
+    # cannot_demote_owner guard; this leaves sole_owner as the only owner.
+    owner_doc = await _UserDoc.get(owner.id)
+    assert owner_doc is not None
+    for m in owner_doc.workspaces:
+        if m.workspace == ws.id:
+            m.role = "member"
+    await owner_doc.save()
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.update_member_role(
+            ws.id, str(sole_owner.id), "admin", str(sole_owner.id)
+        )
+    assert exc.value.code == "workspace.last_owner"
+
+
+async def test_update_member_role_allows_demoting_one_of_many_owners(
+    owner, recording_bus, resolver_mock
+) -> None:
+    co_owner = await _seed_user(email="co@x.c", full_name="Co")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(co_owner.id), role="owner")
+
+    # Demoting co_owner (not doc.owner) when there are two owners — allowed.
+    await workspace_service.update_member_role(ws.id, str(co_owner.id), "admin", str(owner.id))
+
+    role = await workspace_service._get_member_role(ws.id, str(co_owner.id))
+    assert role == "admin"
+
+
+async def test_remove_member_blocks_removing_last_owner(owner) -> None:
+    sole_owner = await _seed_user(email="sole@x.c", full_name="Sole")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(sole_owner.id), role="owner")
+    # Strip doc.owner's owner role so sole_owner is the only owner.
+    owner_doc = await _UserDoc.get(owner.id)
+    assert owner_doc is not None
+    for m in owner_doc.workspaces:
+        if m.workspace == ws.id:
+            m.role = "member"
+    await owner_doc.save()
+
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.remove_member(ws.id, str(sole_owner.id), str(sole_owner.id))
+    assert exc.value.code == "workspace.last_owner"
+
+
+async def test_remove_member_allows_removing_one_of_many_owners(
+    owner, recording_bus, captured_legacy_events, resolver_mock
+) -> None:
+    co_owner = await _seed_user(email="co@x.c", full_name="Co")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(co_owner.id), role="owner")
+
+    # Removing one owner when another remains — allowed.
+    await workspace_service.remove_member(ws.id, str(co_owner.id), str(owner.id))
+
+    role = await workspace_service._get_member_role(ws.id, str(co_owner.id))
+    assert role is None
+
+
 # ---------------------------------------------------------------------------
 # Invites
 # ---------------------------------------------------------------------------

@@ -121,6 +121,23 @@ async def _count_members(workspace_id: str) -> int:
     return await _UserDoc.find({"workspaces.workspace": workspace_id}).count()
 
 
+async def _count_owners(workspace_id: str) -> int:
+    """Count members whose role is ``owner`` in this workspace.
+
+    Independent of the ``Workspace.owner`` singular field — once ownership
+    transfers via update_member_role, that field can lag behind reality.
+    Uses ``$elemMatch`` so a single ``find().count()`` does the work
+    (aggregation cursors don't survive mongomock-motor in tests).
+    """
+    return await _UserDoc.find(
+        {
+            "workspaces": {
+                "$elemMatch": {"workspace": workspace_id, "role": "owner"},
+            }
+        }
+    ).count()
+
+
 async def _count_members_bulk(workspace_ids: list[str]) -> dict[str, int]:
     """Aggregation: ``{workspace_id: member_count}`` in one round-trip."""
     if not workspace_ids:
@@ -339,6 +356,18 @@ async def update_member_role(
             "workspace.cannot_demote_owner",
             "Cannot demote the workspace owner",
         )
+    # Independent last-owner guard: even if target is not doc.owner, if
+    # they hold an owner ROLE and they're the only owner, blocking the
+    # demotion keeps the workspace governable.
+    if role != "owner":
+        target_role = await _get_member_role(workspace_id, target_user_id)
+        if target_role == "owner":
+            owner_count = await _count_owners(workspace_id)
+            if owner_count <= 1:
+                raise Forbidden(
+                    "workspace.last_owner",
+                    "Cannot demote the last owner. Promote another member to owner first.",
+                )
     user = await _UserDoc.get(PydanticObjectId(target_user_id))
     if user is None:
         raise NotFound("member", target_user_id)
@@ -374,6 +403,16 @@ async def remove_member(
         raise NotFound("workspace", workspace_id)
     if doc.owner == target_user_id:
         raise Forbidden("workspace.cannot_remove_owner", "Cannot remove the workspace owner")
+
+    # Role-based last-owner guard (independent of doc.owner field).
+    target_role = await _get_member_role(workspace_id, target_user_id)
+    if target_role == "owner":
+        owner_count = await _count_owners(workspace_id)
+        if owner_count <= 1:
+            raise Forbidden(
+                "workspace.last_owner",
+                "Cannot remove the last owner. Promote another member to owner first.",
+            )
 
     user = await _UserDoc.get(PydanticObjectId(target_user_id))
     if user is None:
