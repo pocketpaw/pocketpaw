@@ -1,4 +1,24 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-26 (feat/foresight-v10-insights-llm) — RFC 08 v1.0.
+# LLM-driven insights synthesizer + per-workspace synthesizer toggle:
+#   - ``get_insights(ctx)`` extended — reads the workspace's
+#     ``insights_synthesizer`` config ("pattern" | "llm", default
+#     "pattern") and either delegates to the v0.5 pattern synthesizer
+#     (unchanged) OR to the new LLM synthesizer
+#     (``ee.foresight.insights_llm.synthesize_insights_llm``). LLM
+#     failures (timeout, malformed output, rate-limit) fall back to the
+#     pattern synthesizer + log a structured warning so the wire
+#     response never 5xxs. Wire shape (``InsightsResponse``) unchanged.
+#   - New ``get_insights_config(ctx)`` / ``set_insights_config(ctx,
+#     body)`` — sibling endpoint to the threshold pair. Reads / writes
+#     the per-workspace synthesizer choice. Emits
+#     ``foresight.insights_config.updated`` on effective change; no-op
+#     write stays quiet.
+#   - Lazy engine import for ``insights_llm`` (same pattern as the v0.5
+#     synthesizer) — preserves the cloud→engine import-linter contract.
+#   - Cost discipline: LLM mode is opt-in only. Default stays "pattern"
+#     (deterministic, free). Workspaces with no config doc see the
+#     pattern path; only an explicit PUT flips the toggle.
 # Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC
 # 08 v1.0 wave 3. ``create_scenario_run`` now honors the optional
 # ``custom_scenario_id`` field on the POST body:
@@ -229,6 +249,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC as UTC_TZ
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -242,6 +263,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     ForesightBacktestCompleted,
     ForesightBacktestCreated,
     ForesightBacktestFailed,
+    ForesightInsightsConfigUpdated,
     ForesightInstinctProposalCreated,
     ForesightOnboardingUnlocked,
     ForesightProjectedDecisionEmitted,
@@ -255,6 +277,7 @@ from pocketpaw_ee.cloud.foresight.domain import (
     AggregateRollup,
     BacktestRun,
     ConfidenceDrift,
+    InsightsConfigView,
     InsightView,
     LiveAnomaly,
     LiveSnapshotView,
@@ -275,6 +298,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     ConfidenceDriftDto,
     CreateBacktestRequest,
     CreateScenarioRequest,
+    ForesightInsightsConfigResponse,
     ForesightInstinctProposalListResponse,
     ForesightInstinctProposalResponse,
     ForesightThresholdResponse,
@@ -294,6 +318,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
+    SetForesightInsightsConfigRequest,
     SetForesightThresholdRequest,
     TierMixActual,
 )
@@ -2874,18 +2899,33 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
 
     Composes the synthesizer input bundle from PredictionRecord docs
     (the same source the aggregate endpoint reads), then delegates
-    rule evaluation to :func:`ee.foresight.insights.synthesize_insights`.
-    Engine import is lazy so the cloud module stays clean of the
+    rule evaluation to either:
+
+      - the v0.5 deterministic five-rule synthesizer
+        (:func:`ee.foresight.insights.synthesize_insights`), when the
+        workspace config's ``insights_synthesizer`` is ``"pattern"``
+        (default), OR
+      - the v1.0 LLM-driven synthesizer
+        (:func:`ee.foresight.insights_llm.synthesize_insights_llm`),
+        when the toggle is ``"llm"``. Failures collapse to the pattern
+        path so the wire response never 5xxs.
+
+    Engine imports are lazy so the cloud module stays clean of the
     engine layer per the import-linter contract.
 
     Empty workspaces return ``items=[]`` — the synthesizer yields no
-    rows when none of the five rules can fire.
+    rows when none of the rules / patterns can fire.
 
     PR 10 (v1.0): per-persona calibration + rolling accuracy + drift
     now read PredictionRecord docs instead of the v0.5 proxies. The
     ``tier_distribution_deltas`` + ``latest_backtest`` synthesizer
     fields still source from backtest docs (those carry the per-run
     tier mix + gate decision the prediction records don't echo).
+
+    LLM PR (v1.0): the workspace can opt into the LLM synthesizer via
+    the ``insights_synthesizer`` config; the wire shape stays the
+    same. Cost discipline: LLM mode is opt-in only — the default
+    pattern path stays free.
     """
     workspace_id = _require_workspace(ctx)
     now = datetime.now(UTC_TZ)
@@ -2925,16 +2965,121 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
     latest_backtest_doc = backtest_docs[-1] if backtest_docs else None
     latest_gate = _compose_latest_backtest_gate(latest_backtest_doc)
 
-    # Lazy import — the synthesizer module is pure but lives in the
-    # engine namespace, so the import-linter forbids static imports
-    # from the cloud surface. Imported inside the function call
-    # path keeps the contract clean.
+    # Read the per-workspace synthesizer choice. Absent doc → "pattern".
+    config_view = await _load_insights_config_view(workspace_id)
+
+    raw_insights: list[Any]
+    if config_view.synthesizer == "llm":
+        # Try LLM. On ANY failure (timeout, malformed output, rate
+        # limit, missing backend) fall back to the pattern synthesizer
+        # so the wire response stays valid. The LLM helper itself
+        # collapses internal exceptions to ``[]``; we treat that as
+        # "fallback to pattern" so the operator never sees an empty
+        # panel when the pattern rules would have fired.
+        llm_insights = await _synthesize_insights_llm(
+            workspace_id=workspace_id,
+            now=now,
+            rolling=rolling,
+            drift=drift,
+            per_persona=per_persona,
+            tier_deltas=tier_deltas,
+            latest_gate=latest_gate,
+            all_records=all_records,
+        )
+        if llm_insights:
+            raw_insights = list(llm_insights)
+        else:
+            # Empty LLM output — likely a failure or a quiet workspace.
+            # Either way the pattern rules are the safe default; if
+            # they also produce nothing the response is correctly empty.
+            logger.warning(
+                "foresight.insights.llm_empty_falling_back_to_pattern",
+                extra={"workspace_id": workspace_id},
+            )
+            raw_insights = list(
+                _synthesize_insights_pattern(
+                    now=now,
+                    rolling=rolling,
+                    drift=drift,
+                    per_persona=per_persona,
+                    tier_deltas=tier_deltas,
+                    latest_gate=latest_gate,
+                )
+            )
+    else:
+        raw_insights = list(
+            _synthesize_insights_pattern(
+                now=now,
+                rolling=rolling,
+                drift=drift,
+                per_persona=per_persona,
+                tier_deltas=tier_deltas,
+                latest_gate=latest_gate,
+            )
+        )
+
+    items = [
+        _insight_to_response(
+            InsightView(
+                id=insight.id,
+                kind=insight.kind,
+                title=insight.title,
+                body=insight.body,
+                severity=insight.severity,
+                anchor_refs=insight.anchor_refs,
+                generated_at=insight.generated_at,
+            )
+        )
+        for insight in raw_insights
+    ]
+    return InsightsResponse(items=items)
+
+
+# ── LLM insights (Team 3 wave 3) ──────────────────────────────────────────
+# Workspace-config toggle + LLM synthesizer integration. Team 1's
+# scenario CRUD lives elsewhere in this file — do not interleave. All
+# helpers below are scoped to the LLM insights surface.
+# --------------------------------------------------------------------------
+
+# Module-level handle used by tests to inject a stub LLM backend. None
+# means "construct the default :class:`ClaudeCodeBackend`"; tests
+# monkey-patch this to a stub backend that returns canned JSON.
+_LLM_BACKEND_OVERRIDE: Any | None = None
+
+
+def _set_llm_backend_for_testing(backend: Any | None) -> None:
+    """Test-only hook to inject a stub LLM backend.
+
+    Replaces the default :class:`ClaudeCodeBackend` constructed inside
+    :func:`_synthesize_insights_llm`. Tests use this rather than
+    monkey-patching ``claude_agent_sdk`` so the cloud module stays
+    decoupled from the SDK install.
+    """
+    global _LLM_BACKEND_OVERRIDE
+    _LLM_BACKEND_OVERRIDE = backend
+
+
+def _synthesize_insights_pattern(
+    *,
+    now: datetime,
+    rolling: Sequence[Any],
+    drift: ConfidenceDrift,
+    per_persona: Sequence[Any],
+    tier_deltas: Sequence[Any],
+    latest_gate: Any | None,
+) -> list[Any]:
+    """Run the v0.5 deterministic five-rule synthesizer over the bundle.
+
+    Lazy engine imports per the cloud → engine import-linter contract.
+    Returns the list directly (already sorted + capped by the engine
+    function).
+    """
     from pocketpaw_ee.foresight.insights import (  # noqa: PLC0415
         ConfidenceDriftInput,
         SynthesizerInput,
         synthesize_insights,
     )
-    from pocketpaw_ee.foresight.insights import (
+    from pocketpaw_ee.foresight.insights import (  # noqa: PLC0415
         RollingAccuracyPoint as _RollingPoint,
     )
 
@@ -2956,23 +3101,262 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
         tier_distribution_deltas=tuple(tier_deltas),
         latest_backtest=latest_gate,
     )
+    return list(synthesize_insights(bundle, cap=INSIGHTS_DEFAULT_CAP))
 
-    raw_insights = synthesize_insights(bundle, cap=INSIGHTS_DEFAULT_CAP)
-    items = [
-        _insight_to_response(
-            InsightView(
-                id=insight.id,
-                kind=insight.kind,
-                title=insight.title,
-                body=insight.body,
-                severity=insight.severity,
-                anchor_refs=insight.anchor_refs,
-                generated_at=insight.generated_at,
+
+async def _synthesize_insights_llm(
+    *,
+    workspace_id: str,
+    now: datetime,
+    rolling: Sequence[Any],
+    drift: ConfidenceDrift,
+    per_persona: Sequence[Any],
+    tier_deltas: Sequence[Any],
+    latest_gate: Any | None,
+    all_records: list[Any],
+) -> list[Any]:
+    """Run the v1.0 LLM-driven synthesizer over the bundle.
+
+    The helper is wrapped in a broad except so any unexpected error
+    (engine module import failure, prompt-construction edge case,
+    backend not wired) falls back to ``[]`` and the caller swaps to
+    the pattern synthesizer. The LLM module itself ALSO collapses
+    internal exceptions to ``[]``; this outer guard catches anything
+    the inner guard misses (e.g. import errors).
+    """
+    try:
+        # Lazy engine imports per the import-linter contract.
+        from pocketpaw_ee.foresight.insights import (  # noqa: PLC0415
+            ConfidenceDriftInput,
+        )
+        from pocketpaw_ee.foresight.insights import (  # noqa: PLC0415
+            RollingAccuracyPoint as _RollingPoint,
+        )
+        from pocketpaw_ee.foresight.insights_llm import (  # noqa: PLC0415
+            LLMInsightsInput,
+            RecentPredictionRecordSummary,
+            synthesize_insights_llm,
+        )
+
+        backend = _LLM_BACKEND_OVERRIDE
+        if backend is None:
+            from pocketpaw_ee.foresight.llm.adapter import (  # noqa: PLC0415
+                ClaudeCodeBackend,
+            )
+
+            backend = ClaudeCodeBackend()
+
+        period_key = _llm_period_key_for(now)
+        recent_records = [
+            RecentPredictionRecordSummary(
+                anchor_id=getattr(doc, "anchor_id", "") or "",
+                persona_id=getattr(doc, "persona_id", "") or "",
+                modal_outcome=_extract_modal_outcome(getattr(doc, "prediction", {})),
+                confidence=float(getattr(doc, "confidence", 0.0) or 0.0),
+                paired=bool(getattr(doc, "paired", False)),
+                observed_outcome=_extract_modal_outcome(
+                    getattr(doc, "observed_outcome", None) or {}
+                )
+                or None,
+                captured_at=getattr(doc, "captured_at", None),
+            )
+            for doc in all_records[-50:]
+        ]
+        bundle = LLMInsightsInput(
+            workspace_id=workspace_id,
+            period_key=period_key,
+            now=now,
+            rolling_accuracy=tuple(
+                _RollingPoint(
+                    ts=p.ts,
+                    accuracy=p.accuracy,
+                    sample_count=p.sample_count,
+                )
+                for p in rolling
+            ),
+            confidence_drift=ConfidenceDriftInput(
+                trend=drift.trend,
+                magnitude=drift.magnitude,
+            ),
+            per_persona_calibration=tuple(per_persona),
+            tier_distribution_deltas=tuple(tier_deltas),
+            latest_backtest=latest_gate,
+            recent_records=tuple(recent_records),
+        )
+        result = await synthesize_insights_llm(
+            bundle,
+            backend,
+            cap=INSIGHTS_DEFAULT_CAP,
+        )
+        return list(result)
+    except Exception as exc:  # noqa: BLE001 — defensive outer guard
+        logger.warning(
+            "foresight.insights.llm_outer_error",
+            extra={"workspace_id": workspace_id, "error": repr(exc)},
+        )
+        return []
+
+
+def _llm_period_key_for(now: datetime) -> str:
+    """Compute a stable ISO year-week key for ``now``.
+
+    Mirrors :func:`ee.foresight.insights._default_period_key`. Kept
+    local rather than imported so the cloud → engine call surface
+    stays restricted to the public synthesizer functions (the helper
+    is private to the engine module).
+    """
+    iso = now.isocalendar()
+    return f"{iso.year}_W{iso.week:02d}"
+
+
+def _extract_modal_outcome(payload: Any) -> str:
+    """Pull a short modal-outcome label out of a prediction or
+    observation payload dict. Returns ``""`` when nothing matches.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("modal_outcome", "outcome", "action", "decision"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:48]
+    return ""
+
+
+# --------------------------------------------------------------------------
+# Insights-synthesizer config — workspace-scoped GET / PUT.
+# --------------------------------------------------------------------------
+
+
+async def _load_insights_config_view(workspace_id: str) -> InsightsConfigView:
+    """Compose the workspace's insights-synthesizer config view.
+
+    Absent doc OR a doc missing the field (older records persisted
+    before this PR) collapses to the default ``"pattern"`` synthesizer
+    so the read path stays back-compat.
+    """
+    # Lazy import — keeps the LLM cache-TTL constant out of the cloud
+    # module's static deps. ``ee.foresight.insights_llm`` is in the
+    # engine namespace; lazy import preserves the import-linter
+    # contract.
+    from pocketpaw_ee.foresight.insights_llm import (  # noqa: PLC0415
+        DEFAULT_CACHE_TTL_SECONDS,
+    )
+
+    doc = await _ForesightWorkspaceConfigDoc.find_one(
+        {"workspace": workspace_id},
+    )
+    if doc is None:
+        return InsightsConfigView(
+            workspace_id=workspace_id,
+            synthesizer="pattern",
+            llm_cache_ttl_seconds=DEFAULT_CACHE_TTL_SECONDS,
+            updated_at=None,
+        )
+    # Older docs persisted before this PR don't carry the field; the
+    # Pydantic default makes ``doc.insights_synthesizer`` resolve to
+    # ``"pattern"``, but be defensive in case a malformed write
+    # landed.
+    synthesizer = getattr(doc, "insights_synthesizer", "pattern") or "pattern"
+    if synthesizer not in ("pattern", "llm"):
+        synthesizer = "pattern"
+    return InsightsConfigView(
+        workspace_id=workspace_id,
+        synthesizer=synthesizer,  # type: ignore[arg-type]
+        llm_cache_ttl_seconds=DEFAULT_CACHE_TTL_SECONDS,
+        updated_at=doc.updatedAt,
+    )
+
+
+def _to_insights_config_response(view: InsightsConfigView) -> ForesightInsightsConfigResponse:
+    """Map the domain view to the wire DTO."""
+    return ForesightInsightsConfigResponse(
+        workspace_id=view.workspace_id,
+        synthesizer=view.synthesizer,
+        llm_cache_ttl_seconds=view.llm_cache_ttl_seconds,
+        updated_at=iso_utc(view.updated_at),
+    )
+
+
+async def get_insights_config(ctx: RequestContext) -> ForesightInsightsConfigResponse:
+    """Return the workspace's resolved insights-synthesizer config view.
+
+    GET /api/v1/foresight/workspace/insights-config backing.
+
+    Tenancy:
+      - 403 ``foresight.no_workspace`` when the caller has no active
+        workspace.
+      - No cross-tenant reads possible — the view is intrinsically
+        per-workspace; an absent config collapses to the default view
+        (synthesizer="pattern"). Never 404.
+    """
+    workspace_id = _require_workspace(ctx)
+    # no-event: read-only path; emit only on writes (cloud rule #9).
+    view = await _load_insights_config_view(workspace_id)
+    return _to_insights_config_response(view)
+
+
+async def set_insights_config(
+    ctx: RequestContext,
+    body: SetForesightInsightsConfigRequest,
+) -> ForesightInsightsConfigResponse:
+    """Upsert the workspace's insights-synthesizer choice.
+
+    PUT /api/v1/foresight/workspace/insights-config backing.
+
+    Emit semantics:
+      - When the effective synthesizer changes (pattern → llm or
+        llm → pattern), fire ``foresight.insights_config.updated``
+        with ``data={workspace_id, synthesizer (new), previous_synthesizer}``
+        so listeners (LLM cache invalidator, UI panels) can react
+        without a round trip.
+      - A no-op write (same value as the current effective synthesizer)
+        does NOT emit — keeps the UI's optimistic-local-state path
+        from rebroadcasting redundant updates.
+    """
+    body = SetForesightInsightsConfigRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    previous_view = await _load_insights_config_view(workspace_id)
+    new_choice = body.synthesizer
+
+    # Upsert pattern — Beanie has no native upsert helper that returns
+    # the resulting doc, so split into find_one + insert / update. The
+    # workspace field is unique-indexed so a concurrent insert race
+    # would surface as a DuplicateKeyError; this admin-only write path
+    # treats that race as a 500 (no retry loop).
+    doc = await _ForesightWorkspaceConfigDoc.find_one(
+        {"workspace": workspace_id},
+    )
+    if doc is None:
+        doc = _ForesightWorkspaceConfigDoc(
+            workspace=workspace_id,
+            insights_synthesizer=new_choice,
+        )
+        await doc.insert()
+    else:
+        doc.insights_synthesizer = new_choice
+        await doc.save()
+
+    new_view = await _load_insights_config_view(workspace_id)
+    response = _to_insights_config_response(new_view)
+
+    if new_view.synthesizer != previous_view.synthesizer:
+        await emit(
+            ForesightInsightsConfigUpdated(
+                data={
+                    "workspace_id": workspace_id,
+                    "synthesizer": new_view.synthesizer,
+                    "previous_synthesizer": previous_view.synthesizer,
+                }
             )
         )
-        for insight in raw_insights
-    ]
-    return InsightsResponse(items=items)
+    # else: no-event: idempotent write (cloud rule #9 allows this with
+    # the inline comment); the GET still returns the resolved view so
+    # the client's PUT round-trip stays useful.
+    return response
+
+
+# ── end LLM insights (Team 3 wave 3) ─────────────────────────────────────
 
 
 # ---------------------------------------------------------------------------
@@ -3173,6 +3557,7 @@ __all__ = [
     "get_aggregate_rollup",
     "get_backtest",
     "get_insights",
+    "get_insights_config",
     "get_live_snapshot",
     "get_onboarding_gate",
     "get_scenario_run",
@@ -3183,5 +3568,6 @@ __all__ = [
     "list_scenario_runs",
     "list_scenarios",
     "pair_prediction",
+    "set_insights_config",
     "set_threshold",
 ]

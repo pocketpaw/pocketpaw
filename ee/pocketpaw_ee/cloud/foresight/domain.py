@@ -1,4 +1,9 @@
 # ee/pocketpaw_ee/cloud/foresight/domain.py
+# Updated: 2026-05-26 (feat/foresight-v10-insights-llm) — RFC 08 v1.0
+# adds ``InsightsConfigView`` for the per-workspace LLM-vs-pattern
+# synthesizer toggle. Workspace-scoped at construction per cloud rule
+# #3 — ``workspace_id`` is required positionally. The view mirrors the
+# DTO field-for-field so the service maps via Pydantic per cloud rule #8.
 # Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC 08
 # v1.0 wave 3 — adds workspace-scoped custom-scenario domain shapes:
 #   - ``CustomScenario`` — frozen value object mirroring the persisted
@@ -504,11 +509,46 @@ class ThresholdOverrideView:
 
 
 # ---------------------------------------------------------------------------
+# Per-workspace insights-synthesizer config view (RFC 08 v1.0 — LLM
+# insights PR). Workspace-scoped at construction per cloud rule #3.
+# Mirrors :class:`pocketpaw_ee.cloud.foresight.dto.ForesightInsightsConfigResponse`
+# field-for-field so the service maps via Pydantic's
+# ``model_validate(..., from_attributes=True)`` per cloud rule #8.
+#
 # Custom scenarios (RFC 08 v1.0 wave 3) — workspace-owned scenario YAML
 # storage. Sibling shape to ``ScenarioCatalogEntry`` (which enumerates
 # the bundled engine templates); ``CustomScenario`` is the persisted
 # operator-authored record.
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InsightsConfigView:
+    """The workspace's resolved insights-synthesizer configuration.
+
+    Composed by the service from
+    :class:`pocketpaw_ee.cloud.models.foresight_workspace_config.ForesightWorkspaceConfig`
+    plus the module constants from ``ee.foresight.insights_llm``. The
+    view is derived (recomputed on every GET / PUT) rather than a
+    persisted snapshot.
+
+    Fields:
+      - ``workspace_id``: tenancy key (required positional per cloud
+        rule #3).
+      - ``synthesizer``: ``"pattern"`` (the v0.5 deterministic five-rule
+        synthesizer; default) or ``"llm"`` (the v1.0 LLM-driven
+        synthesizer with a hard fallback to ``pattern`` on LLM failure).
+      - ``llm_cache_ttl_seconds``: the in-memory LRU TTL for the LLM
+        synthesizer. v1.0 echoes the module constant; v1.1 will expose
+        it as a per-workspace override.
+      - ``updated_at``: when the config row was last written; None when
+        no row exists.
+    """
+
+    workspace_id: str
+    synthesizer: Literal["pattern", "llm"]
+    llm_cache_ttl_seconds: int
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -568,6 +608,7 @@ __all__ = [
     "CustomScenario",
     "CustomScenarioParsedMeta",
     "InsightView",
+    "InsightsConfigView",
     "LiveAnomaly",
     "LiveSampledTrace",
     "LiveSnapshotView",
