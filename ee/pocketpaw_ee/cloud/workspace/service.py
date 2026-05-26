@@ -425,6 +425,21 @@ async def create_invite(
     if member_count >= doc.seats:
         raise SeatLimitError(doc.seats)
 
+    # Mongo TTL is the long-term GC; this pre-cleanup makes the
+    # collision check below honest about what's "still pending."
+    await _InviteDoc.find(
+        {
+            "workspace": workspace_id,
+            "email": body.email,
+            "group": body.group_id,
+            "$or": [
+                {"revoked": True},
+                {"accepted": True},
+                {"expires_at": {"$lt": datetime.now(UTC)}},
+            ],
+        }
+    ).delete()
+
     existing = await _InviteDoc.find_one(
         {
             "workspace": workspace_id,

@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 from beanie import Document, Indexed
 from pydantic import Field
+from pymongo import IndexModel
 
 
 def _default_expiry() -> datetime:
@@ -55,3 +56,9 @@ class Invite(Document):
 
     class Settings:
         name = "invites"
+        indexes = [
+            # Mongo auto-deletes documents whose expires_at is more than 14
+            # days in the past — gives the application a 7-day grace beyond
+            # the 7-day invite expiry for late accepts / audit, then GC's.
+            IndexModel([("expires_at", 1)], expireAfterSeconds=86400 * 14),
+        ]

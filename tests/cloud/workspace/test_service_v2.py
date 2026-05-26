@@ -11,7 +11,7 @@ Asserts on:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -613,7 +613,9 @@ async def test_preview_invite_revoked_expired_accepted(
     )
     exp_doc = await _InviteDoc.get(PydanticObjectId(expired_invite.id))
     assert exp_doc is not None
-    exp_doc.expires_at = datetime(2000, 1, 1, tzinfo=UTC)
+    # Past, but inside the 14-day TTL grace so mongomock doesn't reap the
+    # row before preview_invite can read it.
+    exp_doc.expires_at = datetime.now(UTC) - timedelta(days=1)
     await exp_doc.save()
     out = await workspace_service.preview_invite(expired_invite.token, viewer_user_id=None)
     assert out["state"] == "expired"
@@ -630,3 +632,51 @@ async def test_preview_invite_revoked_expired_accepted(
     out = await workspace_service.preview_invite(accepted_invite.token, viewer_user_id=None)
     assert out["state"] == "already_accepted"
     assert out["email"] == "acc@x.c"
+
+
+async def test_create_invite_cleans_up_expired_rows(owner, monkeypatch) -> None:
+    """A previously-expired invite must not block a fresh invite to the same email."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    first = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="dup@x.c")
+    )
+    # Push expires_at into the past but inside the 14-day TTL grace, so
+    # mongomock's TTL enforcer doesn't purge the row before we get to it.
+    doc = await _InviteDoc.get(PydanticObjectId(first.id))
+    assert doc is not None
+    doc.expires_at = datetime.now(UTC) - timedelta(days=1)
+    await doc.save()
+
+    # Should not collide; the dead row gets cleaned up first.
+    second = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="dup@x.c")
+    )
+    assert second.id != first.id
+    # Old expired row is gone.
+    assert await _InviteDoc.get(PydanticObjectId(first.id)) is None
+
+
+async def test_create_invite_cleans_up_revoked_rows(owner, monkeypatch) -> None:
+    """A revoked invite must not block a fresh invite to the same (email, group)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    first = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="dup@x.c")
+    )
+    await workspace_service.revoke_invite(ws.id, first.id)
+
+    second = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="dup@x.c")
+    )
+    assert second.id != first.id
+    # Old revoked row is gone.
+    assert await _InviteDoc.get(PydanticObjectId(first.id)) is None
