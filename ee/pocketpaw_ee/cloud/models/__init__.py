@@ -7,6 +7,7 @@ remains registered in ``get_all_documents()`` for Beanie init.
 
 from __future__ import annotations
 
+from pocketpaw_ee.calendar.models import _CalendarDoc, _EventDoc
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
@@ -121,6 +122,8 @@ def get_all_documents():
         AuditEvent,
         AuthSession,
         APIKey,
+        _CalendarDoc,
+        _EventDoc,
     ]
 
 
