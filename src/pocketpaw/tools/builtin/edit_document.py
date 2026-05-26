@@ -21,6 +21,12 @@ _edit_session_blocks: ContextVar[list[dict] | None] = ContextVar(
     "edit_session_blocks", default=None
 )
 
+# Per-request selected block ID for per-block editing mode.
+# When set, the tool enforces that only the selected block can be modified.
+_selected_block_id: ContextVar[str | None] = ContextVar(
+    "selected_block_id", default=None
+)
+
 # Module-level store keyed by file_id — used when blocks are synced from the
 # frontend editor (chat-initiated editing). The MCP handler falls back to this
 # when the ContextVar is empty.
@@ -38,6 +44,21 @@ def set_edit_session(blocks: list[dict]) -> None:
 def clear_edit_session() -> None:
     """Clear the editing session after the request completes."""
     _edit_session_blocks.set(None)
+
+
+def set_selected_block_id(block_id: str | None) -> None:
+    """Store the selected block ID for per-block editing enforcement."""
+    _selected_block_id.set(block_id)
+
+
+def get_selected_block_id() -> str | None:
+    """Get the selected block ID for the current editing session."""
+    return _selected_block_id.get()
+
+
+def clear_selected_block_id() -> None:
+    """Clear the selected block ID after the request completes."""
+    _selected_block_id.set(None)
 
 
 def get_edit_session() -> list[dict] | None:
@@ -110,11 +131,27 @@ def build_editor_prompt_context(
     block_lines = [_format_block_for_prompt(b, i) for i, b in enumerate(resolved)]
     block_summary = "\n".join(block_lines) if block_lines else "(empty document)"
 
-    selection_hint = ""
+    editing_mode_block = ""
     if selected_block_id:
-        selection_hint = (
-            f"\nThe user's cursor is on block with id={selected_block_id}. "
-            f"Focus your edit there unless the prompt says otherwise.\n"
+        editing_mode_block = (
+            "\n"
+            "============================================================\n"
+            "CRITICAL: PER-BLOCK EDITING MODE\n"
+            "============================================================\n"
+            "You are in per-block editing mode. You MUST follow these rules:\n"
+            "\n"
+            f"1. You are ONLY allowed to edit block id={selected_block_id}.\n"
+            "2. Do NOT modify, delete, move, or insert any other block.\n"
+            "3. Do NOT use the 'replaceAll' operation — it would overwrite\n"
+            "   the entire document and destroy content in other blocks.\n"
+            "4. Use ONLY the 'update' operation with id={selected_block_id}.\n"
+            "5. If the user's prompt asks you to modify other blocks or the\n"
+            "   whole document, politely explain that you can only edit the\n"
+            "   selected block. Suggest they use full-document editing instead.\n"
+            "\n"
+            f"Target block: id={selected_block_id}\n"
+            "Permitted operation: update (with id={selected_block_id}) only.\n"
+            "============================================================\n"
         )
 
     block_type_ref = (
@@ -151,13 +188,26 @@ def build_editor_prompt_context(
         "\n"
     )
 
+    replaceall_note = ""
+    final_instruction = "After making your edits, briefly tell the user what you changed."
+    if selected_block_id:
+        replaceall_note = (
+            "\n---\n"
+            "NOTE: 'replaceAll' is BLOCKED in per-block editing mode. "
+            "It will be rejected if you attempt it.\n"
+        )
+        final_instruction = (
+            "After making your edit to the target block, briefly tell "
+            "the user what you changed."
+        )
+
     return (
         "You are editing a document in PocketPaw's file editor.\n"
         "The document uses Editor.js block format. Each block has an id, type, and data.\n\n"
         f"{block_type_ref}\n"
         "## Current document\n\n"
         f"{block_summary}\n"
-        f"{selection_hint}\n"
+        f"{editing_mode_block}\n"
         "## How to edit\n\n"
         "Call the `edit_document` tool with an array of operations. "
         "You can call it multiple times — each call returns the updated state.\n\n"
@@ -166,8 +216,9 @@ def build_editor_prompt_context(
         '- insert: {"op":"insert", "type":"paragraph", "data":{...}, "index":0}\n'
         '- delete: {"op":"delete", "id":"<block_id>"}\n'
         '- move: {"op":"move", "id":"<block_id>", "toIndex":0}\n'
-        '- replaceAll: {"op":"replaceAll", "blocks":[...]}\n\n'
-        "After making your edits, briefly tell the user what you changed."
+        '- replaceAll: {"op":"replaceAll", "blocks":[...]}\n'
+        f"{replaceall_note}\n"
+        f"{final_instruction}"
     )
 
 
@@ -298,15 +349,47 @@ def _coerce_warning_data(data: dict) -> dict:
 def apply_operations(
     blocks: list[dict],
     operations: list[dict],
+    selected_block_id: str | None = None,
 ) -> tuple[list[dict], str]:
     """Apply edit operations to a blocks list. Mutates in place.
+
+    When *selected_block_id* is set, only ``update`` on that specific block
+    is permitted.  ``replaceAll`` is rejected outright; other operations
+    targeting different block IDs are skipped with an error message.
 
     Returns (blocks, summary) — blocks is the same list reference, mutated.
     """
     summaries: list[str] = []
 
+    # ── Pre-flight: reject replaceAll in per-block mode ──
+    if selected_block_id:
+        for op in operations:
+            if op.get("op") == "replaceAll":
+                return blocks, (
+                    "ERROR: replaceAll is not allowed in per-block editing mode. "
+                    "You may only update the selected block "
+                    f"(id={selected_block_id}). "
+                    "Use 'update' with the target block's id instead."
+                )
+
     for op in operations:
         op_type = op.get("op")
+
+        # ── Per-block editing enforcement ──
+        if selected_block_id and op_type != "update":
+            summaries.append(
+                f"SKIPPED: '{op_type}' is not allowed in per-block editing mode. "
+                f"Only 'update' is permitted (target block id={selected_block_id})."
+            )
+            continue
+
+        if selected_block_id and op.get("id") != selected_block_id:
+            summaries.append(
+                f"SKIPPED: update on block {op.get('id')} is not allowed in "
+                f"per-block editing mode. Target block is "
+                f"id={selected_block_id}."
+            )
+            continue
 
         if op_type == "update":
             block_id = op["id"]
@@ -466,7 +549,10 @@ class EditDocumentTool(BaseTool):
             return self._error("No document blocks loaded. Start an editing session first.")
 
         try:
-            updated, summary = apply_operations(self._blocks, operations)
+            selected_id = get_selected_block_id()
+            updated, summary = apply_operations(
+                self._blocks, operations, selected_block_id=selected_id
+            )
             result = json.dumps(updated, separators=(",", ":"))
             return f"{summary}\n\nUpdated blocks:\n{result}"
         except Exception as exc:
@@ -517,7 +603,8 @@ async def _edit_document_handler(args: dict) -> dict:
         return _edit_error("`operations` must be an array (list), not a single object.")
 
     try:
-        updated, summary = apply_operations(blocks, operations)
+        selected_id = get_selected_block_id()
+        updated, summary = apply_operations(blocks, operations, selected_block_id=selected_id)
         return {
             "content": [
                 {

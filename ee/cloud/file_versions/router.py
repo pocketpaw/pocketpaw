@@ -261,10 +261,17 @@ async def ai_edit_file(
     )
     # Store blocks in ContextVar AND the module-level dict so the MCP
     # handler can access them regardless of how the SDK dispatches the tool.
-    from pocketpaw.tools.builtin.edit_document import clear_edit_session, set_edit_session, set_editor_blocks
+    from pocketpaw.tools.builtin.edit_document import (
+        clear_edit_session,
+        clear_selected_block_id,
+        set_edit_session,
+        set_editor_blocks,
+        set_selected_block_id,
+    )
 
     set_edit_session(blocks)
     set_editor_blocks(file_id, blocks)
+    set_selected_block_id(body.selected_block_id)
 
     try:
         from pocketpaw.agents.pool import get_agent_pool
@@ -325,6 +332,7 @@ async def ai_edit_file(
         )
     finally:
         clear_edit_session()
+        clear_selected_block_id()
 
 
 # ---------------------------------------------------------------------------
