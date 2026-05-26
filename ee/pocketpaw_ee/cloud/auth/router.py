@@ -12,9 +12,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from beanie import PydanticObjectId
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordRequestForm
+from fastapi_users.router.common import ErrorCode
 from pydantic import BaseModel
 
+from pocketpaw.security.rate_limiter import mfa_challenge_limiter
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
@@ -35,6 +40,8 @@ from pocketpaw_ee.cloud.auth.dto import (
     SetWorkspaceRequest,
     auth_user_to_profile_out,
 )
+from pocketpaw_ee.cloud.auth.mfa_tokens import mint_mfa_pending, verify_mfa_pending
+from pocketpaw_ee.cloud.models.user import User
 
 router = APIRouter(tags=["Auth"])
 
@@ -46,17 +53,126 @@ _MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 # ---------------------------------------------------------------------------
-# fastapi-users sub-routers (login/logout/register)
+# MFA-gated login (Wave 3 Task 4)
+#
+# These two routes MUST be registered before the fastapi-users auth
+# sub-routers below — FastAPI matches the first route registered for a
+# path, so this is how we override the stock fastapi-users /auth/login
+# and /auth/bearer/login without forking the upstream router.
+#
+# Flow: authenticate via the user manager; if mfa_enabled, return a
+# short-lived `mfa_pending` JWT instead of minting the session cookie /
+# bearer token. The client then calls /auth/mfa/challenge with the
+# pending token + TOTP/backup code.
 #
 # Both transports stay live during the cookie+CSRF rollout (security
 # #1117 P1). Cookie is the long-term path for browser clients; Bearer
 # is retained for back-compat with the Tauri desktop client and any
 # automation / MCP tools that hold a token directly.
-#
-# Deprecation timeline: drop the ``/auth/bearer/*`` sub-router once the
-# Tauri client moves to the OS keychain flow (#1117 P2) and we've
-# audited internal scripts. Until then, removing Bearer would force a
-# coordinated multi-repo migration with no rollback path.
+# ---------------------------------------------------------------------------
+
+
+def _bad_credentials() -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=ErrorCode.LOGIN_BAD_CREDENTIALS,
+    )
+
+
+async def _authenticate_or_400(
+    credentials: OAuth2PasswordRequestForm,
+    manager: UserManager,
+) -> User:
+    user = await manager.authenticate(credentials)
+    if user is None or not user.is_active:
+        raise _bad_credentials()
+    return user
+
+
+@router.post("/auth/login", name="auth:cookie.login.mfa-gated")
+async def login_cookie(
+    request: Request,
+    credentials: OAuth2PasswordRequestForm = Depends(),
+    manager: UserManager = Depends(get_user_manager),
+):
+    user = await _authenticate_or_400(credentials, manager)
+    if user.mfa_enabled:
+        token, _ = mint_mfa_pending(str(user.id))
+        return JSONResponse({"mfa_required": True, "mfa_token": token})
+
+    strategy = cookie_backend.get_strategy()
+    response = await cookie_backend.login(strategy, user)
+    await manager.on_after_login(user, request, response)
+    return response
+
+
+@router.post("/auth/bearer/login", name="auth:bearer.login.mfa-gated")
+async def login_bearer(
+    request: Request,
+    credentials: OAuth2PasswordRequestForm = Depends(),
+    manager: UserManager = Depends(get_user_manager),
+):
+    user = await _authenticate_or_400(credentials, manager)
+    if user.mfa_enabled:
+        token, _ = mint_mfa_pending(str(user.id))
+        return JSONResponse({"mfa_required": True, "mfa_token": token})
+
+    strategy = bearer_backend.get_strategy()
+    response = await bearer_backend.login(strategy, user)
+    await manager.on_after_login(user, request, response)
+    return response
+
+
+class _MfaChallengeRequest(BaseModel):
+    mfa_token: str
+    code: str
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+@router.post("/auth/mfa/challenge")
+async def mfa_challenge(
+    body: _MfaChallengeRequest,
+    request: Request,
+    manager: UserManager = Depends(get_user_manager),
+):
+    decoded = verify_mfa_pending(body.mfa_token)
+    if decoded is None:
+        raise HTTPException(status_code=401, detail="invalid_mfa_token")
+    user_id, jti = decoded
+
+    limiter_key = f"{_client_ip(request)}|{jti}"
+    if not mfa_challenge_limiter.allow(limiter_key):
+        raise HTTPException(status_code=429, detail="mfa_too_many_attempts")
+
+    try:
+        user = await manager.get(PydanticObjectId(user_id))
+    except Exception as exc:  # noqa: BLE001 — UserNotExists/InvalidID both surface as 401
+        raise HTTPException(status_code=401, detail="invalid_mfa_token") from exc
+    if not user.is_active or not user.mfa_enabled:
+        raise HTTPException(status_code=401, detail="invalid_mfa_token")
+
+    ok = False
+    if user.mfa_totp_secret and mfa_service.verify_totp(user.mfa_totp_secret, body.code):
+        ok = True
+    elif mfa_service.consume_backup_code(user, body.code):
+        await user.save()
+        ok = True
+
+    if not ok:
+        raise HTTPException(status_code=401, detail="mfa_invalid_code")
+
+    strategy = cookie_backend.get_strategy()
+    response = await cookie_backend.login(strategy, user)
+    await manager.on_after_login(user, request, response)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# fastapi-users sub-routers (logout/register). The login routes are
+# overridden above; logout and register still come from upstream.
 # ---------------------------------------------------------------------------
 
 router.include_router(

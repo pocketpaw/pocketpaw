@@ -22,6 +22,7 @@ __all__ = [
     "api_limiter",
     "auth_limiter",
     "login_limiter",
+    "mfa_challenge_limiter",
     "ws_limiter",
     "get_api_key_limiter",
     "cleanup_all",
@@ -125,6 +126,8 @@ auth_limiter = RateLimiter(rate=1.0, capacity=5)
 # Login / register / bearer-login: 5 attempts per 15 min, keyed by (ip, email)
 # so attackers can't bypass the bucket by rotating the email field behind one IP.
 login_limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
+# MFA challenge: 5 wrong codes per 5 min, keyed by (ip, mfa_token_jti).
+mfa_challenge_limiter = RateLimiter(rate=5.0 / 300.0, capacity=5)
 ws_limiter = RateLimiter(rate=2.0, capacity=5)
 _api_key_limiter: RateLimiter | None = None
 
@@ -149,6 +152,7 @@ def cleanup_all() -> int:
         api_limiter.cleanup()
         + auth_limiter.cleanup()
         + login_limiter.cleanup()
+        + mfa_challenge_limiter.cleanup()
         + ws_limiter.cleanup()
     )
     if _api_key_limiter is not None:
