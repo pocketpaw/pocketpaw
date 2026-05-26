@@ -1,4 +1,16 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) —
+# RFC 08 v1.0 PR 10 adds the per-workspace threshold-override surface:
+#     - ``ForesightThresholdResponse`` — shape returned by both GET and
+#       PUT /api/v1/foresight/workspace/threshold. Carries the resolved
+#       view (current / default / is_overridden / updated_at) the
+#       paw-enterprise settings panel renders.
+#     - ``SetForesightThresholdRequest`` — PUT body. Single-field shape
+#       (``threshold: float | None``); float ∈ [0.5, 0.95] sets the
+#       override, ``None`` resets to the default. Bounds are DTO-level
+#       so a 422 fires before service code runs.
+#   Contract is locked against Team A2's settings panel; the response
+#   field names mirror the TypeScript surface that ships alongside.
 # Modified: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
 # RFC 08 v1.0 PR — three additions:
 #   1. ``LiveSnapshotResponse`` + nested ``TierMixActual`` / ``SampledTrace``
@@ -829,6 +841,76 @@ class LiveSnapshotResponse(BaseModel):
     anomalies: list[Anomaly] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Per-workspace onboarding-gate threshold override (RFC 08 v1.0 PR 10).
+#
+# Contract locked to paw-enterprise Team A2's settings panel — the
+# admin's "Foresight" preferences row reads the GET response to render
+# the current vs. default values, and the PUT body is the only mutation
+# surface the UI exposes (no inline edit on the Onboarding panel itself).
+# ---------------------------------------------------------------------------
+
+
+class ForesightThresholdResponse(BaseModel):
+    """Response shape for both
+    ``GET /api/v1/foresight/workspace/threshold`` and
+    ``PUT /api/v1/foresight/workspace/threshold``.
+
+    Carries the resolved view the UI renders:
+
+    - ``current_threshold``: the effective threshold the gate / backtest
+      scorer apply right now. When ``is_overridden=False`` this equals
+      ``default_threshold``; when ``is_overridden=True`` it equals the
+      admin-set override.
+    - ``default_threshold``: the global default
+      (``GATE_DEFAULT_THRESHOLD = 0.65``). Echoed back so the UI can
+      render "default 0.65" next to the override input without a second
+      round trip or a hard-coded constant on the frontend.
+    - ``is_overridden``: ``True`` when a per-workspace
+      :class:`pocketpaw_ee.cloud.models.foresight_workspace_config.ForesightWorkspaceConfig`
+      doc carries a non-null ``threshold_override``. ``False`` when no
+      doc exists or its override is ``None``.
+    - ``updated_at``: ISO-8601 UTC timestamp the override was last
+      written. ``None`` when ``is_overridden=False`` (no override → no
+      meaningful timestamp).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workspace_id: str
+    current_threshold: float = Field(..., ge=0.5, le=0.95)
+    default_threshold: float = Field(..., ge=0.5, le=0.95)
+    is_overridden: bool
+    updated_at: str | None = None
+
+
+class SetForesightThresholdRequest(BaseModel):
+    """``PUT /api/v1/foresight/workspace/threshold`` body.
+
+    Single-field shape:
+
+    - ``threshold: float | None`` — a float in the closed range
+      ``[0.5, 0.95]`` sets the workspace override; ``None`` resets the
+      workspace to the global default (deletes the override).
+
+    Bounds chosen for the captain-approved override window:
+      - Lower bound 0.5 keeps operators from relaxing the gate to a
+        meaningless level (random guessing on binary outcomes).
+      - Upper bound 0.95 keeps operators from setting an unreachable
+        bar (the v0.1 deterministic engine + a 10-anchor backtest can
+        cap below 1.0 due to mismatch noise).
+
+    The service emits ``foresight.threshold.updated`` whenever the
+    effective override changes (a no-op write that keeps the same value
+    does NOT emit — the UI's optimistic local state shouldn't get
+    rebroadcast for free).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    threshold: float | None = Field(default=None, ge=0.5, le=0.95)
+
+
 __all__ = [
     "AggregateRollupResponse",
     "Anomaly",
@@ -839,6 +921,7 @@ __all__ = [
     "CreateScenarioRequest",
     "ForesightInstinctProposalListResponse",
     "ForesightInstinctProposalResponse",
+    "ForesightThresholdResponse",
     "GateDecision",
     "HistoricalAnchorRequest",
     "InsightResponse",
@@ -857,5 +940,6 @@ __all__ = [
     "ScenarioCatalogResponse",
     "ScenarioRunListItemResponse",
     "ScenarioRunResponse",
+    "SetForesightThresholdRequest",
     "TierMixActual",
 ]

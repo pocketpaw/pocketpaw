@@ -450,6 +450,46 @@ class LiveSnapshotView:
     anomalies: tuple[LiveAnomaly, ...]
 
 
+# ---------------------------------------------------------------------------
+# Per-workspace threshold-override view (RFC 08 v1.0 PR 10).
+#
+# Workspace-scoped at construction per cloud rule #3 — ``workspace_id`` is
+# required positionally with no default. The view is derived state
+# (recomputed on every GET / PUT) rather than a persisted snapshot; the
+# Mongo doc carries only the override value, the service composes this
+# view by reading the doc + the GATE_DEFAULT_THRESHOLD constant.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ThresholdOverrideView:
+    """The workspace's resolved foresight threshold view.
+
+    Composed by the service from
+    :class:`pocketpaw_ee.cloud.models.foresight_workspace_config.ForesightWorkspaceConfig`
+    plus the global default constant. Mirrors
+    :class:`pocketpaw_ee.cloud.foresight.dto.ForesightThresholdResponse`
+    field-for-field so the service maps the two via Pydantic's
+    ``model_validate(..., from_attributes=True)`` per cloud rule #8.
+
+    Fields:
+      - ``workspace_id``: tenancy key (required positional per cloud rule #3).
+      - ``current_threshold``: the effective threshold — override when
+        set, default otherwise.
+      - ``default_threshold``: echoed default so the UI doesn't hard-code
+        the constant.
+      - ``is_overridden``: True when a per-workspace override exists.
+      - ``updated_at``: when the override was last written; None when
+        no override exists.
+    """
+
+    workspace_id: str
+    current_threshold: float
+    default_threshold: float
+    is_overridden: bool
+    updated_at: datetime | None = None
+
+
 __all__ = [
     "AggregateRollup",
     "BacktestRun",
@@ -468,4 +508,5 @@ __all__ = [
     "ScenarioCatalogEntry",
     "ScenarioRun",
     "ScenarioRunStatus",
+    "ThresholdOverrideView",
 ]
