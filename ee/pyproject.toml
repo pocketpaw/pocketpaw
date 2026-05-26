@@ -389,6 +389,7 @@ forbidden_modules = [
     "pocketpaw_ee.cloud.models.foresight_run",
     "pocketpaw_ee.cloud.models.foresight_backtest",
     "pocketpaw_ee.cloud.models.foresight_projected_decision",
+    "pocketpaw_ee.cloud.models.foresight_prediction_record",
 ]
 
 [[tool.importlinter.contracts]]
@@ -411,6 +412,7 @@ source_modules = [
     "pocketpaw_ee.cloud.models.foresight_run",
     "pocketpaw_ee.cloud.models.foresight_backtest",
     "pocketpaw_ee.cloud.models.foresight_projected_decision",
+    "pocketpaw_ee.cloud.models.foresight_prediction_record",
 ]
 forbidden_modules = [
     "pocketpaw_ee.foresight.persona",

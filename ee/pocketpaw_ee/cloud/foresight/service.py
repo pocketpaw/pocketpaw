@@ -1,4 +1,40 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) —
+# RFC 08 v1.0 PR 10 — calibration buffer migration to Mongo:
+#   - New ``emit_prediction_record(ctx, payload)`` — engine callback
+#     mirrors each per-(anchor × tick) projection into the
+#     ``foresight_prediction_records`` collection. Idempotent on
+#     (workspace, run_id, tick_id, anchor_id, persona_id).
+#   - New ``pair_prediction(ctx, record_id, observed_outcome,
+#     pair_delta)`` — flips an existing record to ``paired=True`` and
+#     stamps ``observed_at`` / ``observed_outcome`` / ``pair_delta``.
+#   - ``_run_engine_inline`` now wires ``on_prediction_record``
+#     alongside the existing ``on_projected_decision`` closure so the
+#     same engine pass persists BOTH collections (no extra engine work
+#     — the prediction-record path is a side-mirror of the projected-
+#     decision path).
+#   - ``_score_backtest`` now persists paired PredictionRecords for
+#     each backtest anchor before scoring, so the §11.5 rolling-accuracy
+#     read sees real data instead of the v0.5 ``ForesightBacktest.gate_decision.observed``
+#     proxy.
+#   - ``get_aggregate_rollup`` REWRITTEN — reads PredictionRecord docs
+#     (paired=True, captured_at in window), buckets by day for the
+#     rolling series, derives confidence drift from per-record
+#     ``confidence`` mean comparison, derives modal distribution from
+#     ``prediction.modal_outcome`` counts. Same response shape as PR
+#     #1241 (the wire contract is locked).
+#   - ``get_insights`` REWRITTEN — reads PredictionRecord docs (no
+#     proxy) and composes the synthesizer bundle. Per-persona
+#     calibration now comes from real captured records instead of
+#     ForesightProjectedDecision.confidence; per-anchor outlier
+#     detection has the real data it needs once a workspace runs
+#     enough backtests. Same response shape.
+#
+#   v0.5 → v1.0 behaviour delta: identical wire contract. The
+#   aggregate + insights endpoints return the same JSON shape; only
+#   the data source flipped from proxy reads to real PredictionRecord
+#   reads. Empty-workspace paths still collapse to zeros + empty
+#   arrays.
 # Updated: 2026-05-25 (feat/foresight-v15-scenarios-aggregate-insights) —
 # RFC 08 §11.2 / §11.5 / §11.6 backing service functions:
 #   - ``list_scenarios(ctx)`` — enumerates the bundled YAML templates
@@ -148,6 +184,7 @@ from pocketpaw_ee.cloud.foresight.domain import (
     InsightView,
     ModalOutcomeEntry,
     OnboardingGateState,
+    PredictionRecord,
     ProjectedDecision,
     RollingAccuracyPoint,
     ScenarioCatalogEntry,
@@ -178,6 +215,9 @@ from pocketpaw_ee.cloud.foresight.dto import (
 )
 from pocketpaw_ee.cloud.models.foresight_backtest import (
     ForesightBacktest as _ForesightBacktestDoc,
+)
+from pocketpaw_ee.cloud.models.foresight_prediction_record import (
+    ForesightPredictionRecord as _ForesightPredictionRecordDoc,
 )
 from pocketpaw_ee.cloud.models.foresight_projected_decision import (
     ForesightProjectedDecision as _ForesightProjectedDecisionDoc,
@@ -391,9 +431,31 @@ async def _run_engine_inline(
 
         callback = _on_projected_decision
 
+    # PR 10 — PredictionRecord mirror callback. Persists each
+    # per-(anchor × tick) projection into the
+    # ``foresight_prediction_records`` collection. The closure stays
+    # here (not in the runner) so the engine never statically imports
+    # the cloud — the import-linter contract holds. The callback is
+    # only wired when the cloud caller has already resolved a
+    # workspace; CLI smoke runs pass no workspace_id and the prediction
+    # buffer mirror stays a no-op (the in-engine
+    # ``RunResult.projected_decisions`` field still carries the same
+    # records for direct consumption).
+    prediction_callback = None
+    if workspace_id and run_id:
+
+        async def _on_prediction_record(payload: dict[str, Any]) -> None:
+            await emit_prediction_record(
+                workspace_id=workspace_id,
+                payload=payload,
+            )
+
+        prediction_callback = _on_prediction_record
+
     result = await run_scenario(
         config,
         on_projected_decision=callback,
+        on_prediction_record=prediction_callback,
         run_id=run_id,
     )
     return result.as_wire_dict()
@@ -669,18 +731,22 @@ async def _score_backtest(
     *,
     engine_result: dict[str, Any],
     threshold: float,
+    workspace_id: str | None = None,
+    backtest_run_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Pair the engine's projected outcomes against the operator-supplied
     actual outcomes, aggregate, and score against the threshold.
 
     Returns ``(summary_wire_dict, gate_decision_wire_dict)``.
 
-    v0.1 simulates the §10 pair-against-reality loop in-process — every
-    anchor in ``body.anchors`` produces one ``CalibrationPair`` whose
-    projected outcome comes from the engine's per-tick projection (when
-    available) or a placeholder ``{}`` (the engine doesn't fan
-    projections per anchor yet — PR 8 will). v1.0 wires the projection
-    stream end-to-end via the ``projected_decisions`` collection.
+    v0.1 simulated the §10 pair-against-reality loop in-process — every
+    anchor in ``body.anchors`` produced one ``CalibrationPair`` whose
+    projected outcome came from the engine's per-tick projection (when
+    available) or a placeholder ``{}``. PR 10 (v1.0) ALSO persists one
+    paired :class:`ForesightPredictionRecord` per anchor when
+    ``workspace_id`` + ``backtest_run_id`` are supplied — this is how
+    the §11.5 rolling-accuracy read sees historical backtest data
+    without falling back to the v0.5 gate-decision-observed proxy.
 
     The aggregator imports are lazy so the cloud module stays clean of
     the engine layer per the import-linter contract.
@@ -741,6 +807,52 @@ async def _score_backtest(
         predictions_by_id=index_predictions(records),
     )
     decision = accuracy_meets_threshold(summary, threshold=threshold)
+
+    # PR 10 — persist paired PredictionRecords for the rolling-accuracy
+    # read. Each anchor produces ONE Mongo row stamped with the
+    # pair_delta the in-memory aggregator already computed. Done after
+    # scoring so a scoring exception never half-persists the batch.
+    # Caller passes ``workspace_id`` + ``backtest_run_id`` when the
+    # backtest is real (i.e. ``create_backtest`` is calling us); test
+    # callers can leave them None to keep the legacy in-memory-only
+    # path.
+    if workspace_id and backtest_run_id:
+        for record, pair in zip(records, pairs, strict=True):
+            # Compute a per-pair match flag and surface it on the
+            # stored ``pair_delta`` payload so the rolling-accuracy
+            # read can count matches without re-running the aggregator.
+            # Pair-level match = no metric fell outside the numeric
+            # tolerance band (delegates to the aggregator's own
+            # ``_metric_matches`` semantics by counting per-metric
+            # match flags inside ``pair.delta``).
+            payload: dict[str, Any] = {
+                "anchor_id": record.anchor_object_id,
+                "persona_id": "",
+                "tick_id": 0,
+                "decision_text": str(
+                    projected_outcome_default.get("modal_outcome", "")
+                    or projected_outcome_default.get("outcome", "")
+                ),
+                "confidence": float(record.projection_confidence),
+                "sub_type": str(body.sub_type),
+                "scenario_id": str(body.name),
+                "run_id": backtest_run_id,
+                "prediction": dict(projected_outcome_default),
+            }
+            persisted = await emit_prediction_record(
+                workspace_id=workspace_id,
+                payload=payload,
+            )
+            # Stamp observed_outcome + pair_delta so the rolling-accuracy
+            # window read can filter on ``paired=True`` and reproduce
+            # the per-pair match flag without a second engine call.
+            await pair_prediction(
+                workspace_id=workspace_id,
+                record_id=persisted.id,
+                observed_outcome=dict(pair.actual_outcome),
+                pair_delta=dict(pair.delta),
+            )
+
     return summary.as_wire_dict(), decision.as_wire_dict()
 
 
@@ -830,6 +942,14 @@ async def create_backtest(ctx: RequestContext, body: CreateBacktestRequest) -> B
             body,
             engine_result=engine_result,
             threshold=threshold,
+            # PR 10 — pass tenancy + run id so paired PredictionRecord
+            # rows persist alongside the in-memory aggregator pass.
+            # Drives the §11.5 rolling-accuracy read off the new
+            # ``foresight_prediction_records`` collection instead of
+            # the v0.5 ``ForesightBacktest.gate_decision.observed``
+            # proxy.
+            workspace_id=workspace_id,
+            backtest_run_id=str(doc.id),
         )
     except Exception as exc:  # noqa: BLE001 — capture into the doc, never bubble
         error_message = f"{type(exc).__name__}: {exc}"
@@ -1195,6 +1315,164 @@ async def list_projected_decisions(
         offset=offset,
         has_more=(offset + len(items)) < total,
     )
+
+
+# ---------------------------------------------------------------------------
+# PredictionRecord persistence (RFC 08 §9.1 CAPTURE / §9.2 OBSERVE + PR 10)
+#
+# The cloud-side mirror of the engine's :class:`PredictionBuffer`. The
+# engine never imports cloud — the callbacks below are injected via
+# closure into ``run_scenario`` so the import direction stays
+# cloud → engine.
+#
+# Two writes happen here:
+#
+#   1. ``emit_prediction_record`` — one INSERT per (anchor × tick) bucket
+#      as the engine ticks the run forward. Idempotent on
+#      (workspace, run_id, tick_id, anchor_id, persona_id) so a re-emit
+#      of the same bucket replays without creating duplicate rows.
+#   2. ``pair_prediction`` — UPDATE flipping ``paired=True`` and
+#      stamping ``observed_at`` / ``observed_outcome`` / ``pair_delta``
+#      once reality lands. Backtests pair every anchor at scoring time;
+#      forward sims pair via the v1.1+ outcome-listener stream.
+# ---------------------------------------------------------------------------
+
+
+def _to_prediction_record_domain(
+    doc: _ForesightPredictionRecordDoc,
+) -> PredictionRecord:
+    return PredictionRecord(
+        id=str(doc.id),
+        workspace_id=doc.workspace,
+        anchor_id=doc.anchor_id,
+        persona_id=doc.persona_id,
+        scenario_id=doc.scenario_id,
+        run_id=doc.run_id,
+        tick_id=doc.tick_id,
+        prediction=dict(doc.prediction or {}),
+        confidence=doc.confidence,
+        captured_at=doc.captured_at,
+        observed_at=doc.observed_at,
+        observed_outcome=dict(doc.observed_outcome) if doc.observed_outcome else None,
+        paired=doc.paired,
+        pair_delta=dict(doc.pair_delta) if doc.pair_delta else None,
+    )
+
+
+async def emit_prediction_record(
+    *,
+    workspace_id: str,
+    payload: dict[str, Any],
+) -> PredictionRecord:
+    """Persist one PredictionRecord row, idempotent on the bucket key.
+
+    Called by the engine's per-tick callback (wired in
+    :func:`_run_engine_inline`). The bucket key is
+    ``(workspace, run_id, tick_id, anchor_id, persona_id)`` — the same
+    quintuple the engine's :class:`PredictionBuffer` uses to dedupe
+    in-memory. A re-emit of the same bucket (re-run of a fixed-seed
+    scenario, retry after a transient error) returns the existing row
+    instead of inserting a duplicate.
+
+    Tenancy:
+      - ``workspace_id`` is required (the closure in
+        :func:`_run_engine_inline` only wires when the cloud caller
+        has already resolved a workspace), so this function asserts
+        rather than validating.
+
+    No event is emitted — the engine's projected-decision fan-out
+    already fires :class:`ForesightProjectedDecisionEmitted` for the
+    same (anchor × tick) bucket, and downstream subscribers reading
+    that event have everything they need. Adding a parallel
+    "prediction_record.captured" event would double-fire without new
+    information.
+    """
+    if not workspace_id:
+        raise Forbidden(
+            "foresight.no_workspace",
+            "workspace required to emit a prediction record",
+        )
+
+    captured_at = datetime.now(UTC_TZ)
+    run_id = str(payload.get("run_id", ""))
+    tick_id = int(payload.get("tick_id", 0))
+    anchor_id = str(payload.get("anchor_id", ""))
+    persona_id = str(payload.get("persona_id", ""))
+
+    # Idempotence guard — read-before-write on the bucket quintuple.
+    # The query is bounded by the (workspace, anchor_id, captured_at)
+    # index; for a given run + tick + anchor + persona the result set
+    # is at most one row.
+    existing = await _ForesightPredictionRecordDoc.find_one(
+        {
+            "workspace": workspace_id,
+            "run_id": run_id,
+            "tick_id": tick_id,
+            "anchor_id": anchor_id,
+            "persona_id": persona_id,
+        }
+    )
+    if existing is not None:
+        return _to_prediction_record_domain(existing)
+
+    doc = _ForesightPredictionRecordDoc(
+        workspace=workspace_id,
+        anchor_id=anchor_id,
+        persona_id=persona_id,
+        scenario_id=str(payload.get("scenario_id", "")),
+        run_id=run_id,
+        tick_id=tick_id,
+        prediction=dict(payload.get("prediction") or {}),
+        confidence=float(payload.get("confidence", 0.0)),
+        captured_at=captured_at,
+    )
+    await doc.insert()
+    return _to_prediction_record_domain(doc)
+
+
+async def pair_prediction(
+    *,
+    workspace_id: str,
+    record_id: str,
+    observed_outcome: dict[str, Any],
+    pair_delta: dict[str, Any] | None = None,
+) -> PredictionRecord:
+    """Mark a captured PredictionRecord as paired with reality.
+
+    Flips ``paired=True`` and stamps ``observed_at`` /
+    ``observed_outcome`` / ``pair_delta``. The ``pair_delta`` is the
+    diff dict :func:`ee.foresight.calibration._compute_delta` produces;
+    callers (backtests, future outcome listeners) compute it via the
+    engine helper and hand the result in.
+
+    Tenancy: scoped by ``workspace_id`` so a cross-tenant id collapses
+    to NotFound — keeps existence non-leakable across tenants.
+
+    No event emitted — same rationale as :func:`emit_prediction_record`
+    (the projection / backtest path already fires the dominant event).
+    """
+    if not workspace_id:
+        raise Forbidden(
+            "foresight.no_workspace",
+            "workspace required to pair a prediction record",
+        )
+
+    try:
+        oid = PydanticObjectId(record_id)
+    except Exception:
+        raise NotFound("foresight_prediction_record", record_id) from None
+
+    doc = await _ForesightPredictionRecordDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        raise NotFound("foresight_prediction_record", record_id)
+
+    doc.observed_at = datetime.now(UTC_TZ)
+    doc.observed_outcome = dict(observed_outcome)
+    doc.paired = True
+    if pair_delta is not None:
+        doc.pair_delta = dict(pair_delta)
+    await doc.save()
+    return _to_prediction_record_domain(doc)
 
 
 # ---------------------------------------------------------------------------
@@ -1597,12 +1875,22 @@ async def list_scenarios(_ctx: RequestContext) -> ScenarioCatalogResponse:
 # ---------------------------------------------------------------------------
 # Aggregate rollup (RFC §11.5) — rolling accuracy + drift + modal dist.
 #
-# Reads the workspace's persisted backtest summaries + projected
-# decisions over the window. PR 4's calibration buffer didn't land a
-# Mongo collection for ``PredictionRecord``; the rollup proxies the
-# missing data via the backtest summaries (rolling accuracy +
-# confidence drift) and the projection collection (modal outcome
-# distribution). Documented limitation; v1.0 wires the real buffer.
+# PR 10 (v1.0) reads the workspace's persisted ``ForesightPredictionRecord``
+# docs over the window:
+#
+#   - Rolling accuracy: paired records bucketed by day; per-bucket
+#     accuracy is the share of records whose ``pair_delta`` shows every
+#     metric inside the 10% tolerance band.
+#   - Confidence drift: earliest vs latest record-mean ``confidence``
+#     within the window; ``rising`` / ``falling`` / ``flat`` per the
+#     §11.5 vocabulary with a 5% flat threshold.
+#   - Modal outcome distribution: ``prediction.modal_outcome`` tally
+#     normalised by total record count.
+#
+# v0.5 used proxies (``ForesightBacktest.gate_decision.observed`` for
+# rolling, ``ForesightProjectedDecision`` for modal dist). v1.0 reads
+# real PredictionRecord rows — wire shape locked, only data source
+# flipped.
 # ---------------------------------------------------------------------------
 
 
@@ -1633,96 +1921,108 @@ def _resolve_window_days(window_days: int | None) -> int:
     return window_days
 
 
-def _compose_rolling_accuracy(
-    backtest_docs: list[Any],
+def _pair_is_match(pair_delta: dict[str, Any] | None, tolerance: float = 0.10) -> bool:
+    """Decide whether one paired record's ``pair_delta`` counts as a
+    match (every metric inside the numeric tolerance band, every
+    string metric flagged ``match=True``, no ``missing_in`` markers).
+
+    Mirrors the semantics of
+    :func:`ee.foresight.calibration._metric_matches` but stays local
+    to the cloud module so we don't have to import the engine for a
+    1-line check. Empty / None pair_delta means we never observed
+    reality matching the projection — treat as non-match (False) so
+    such records don't inflate accuracy.
+    """
+    if not pair_delta:
+        return False
+    for delta_val in pair_delta.values():
+        if isinstance(delta_val, dict):
+            if "missing_in" in delta_val:
+                return False
+            if not bool(delta_val.get("match", False)):
+                return False
+        elif isinstance(delta_val, (int, float)):
+            if abs(delta_val) > tolerance:
+                return False
+        else:
+            return False
+    return True
+
+
+def _compose_rolling_accuracy_from_records(
+    paired_records: list[Any],
     *,
-    window_days: int,
     now: datetime,
 ) -> tuple[RollingAccuracyPoint, ...]:
-    """Bucket completed backtests by day and emit one point per bucket.
+    """Bucket paired PredictionRecord docs by day; emit one point per
+    bucket where the accuracy is the share of records flagged
+    ``match`` (every metric inside tolerance).
 
-    ``accuracy`` is the per-bucket mean of ``gate_decision.observed``
-    across the backtests that completed in the bucket; ``sample_count``
-    is the per-bucket backtest count (i.e. the proxy for prediction
-    pairs since PR 4's buffer is in-memory only). Empty buckets are
-    omitted from the points array — the UI's chart fills gaps from
-    the bucket end-timestamp grid.
+    Empty buckets are omitted — the UI fills gaps from the bucket
+    end-timestamp grid.
     """
-    buckets: dict[datetime, list[tuple[float, int]]] = {}
-    for doc in backtest_docs:
-        gate = doc.gate_decision or {}
-        observed = gate.get("observed")
-        if not isinstance(observed, (int, float)):
-            continue
-        ts = getattr(doc, "createdAt", None) or now
+    buckets: dict[datetime, list[bool]] = {}
+    for doc in paired_records:
+        ts = getattr(doc, "captured_at", None) or now
         if isinstance(ts, datetime) and ts.tzinfo is None:
             ts = ts.replace(tzinfo=UTC_TZ)
-        # Bucket at day boundary (UTC) so the wire ts is stable.
         bucket_ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
-        n_pairs = int(gate.get("n_pairs") or 0)
-        buckets.setdefault(bucket_ts, []).append((float(observed), max(n_pairs, 1)))
+        is_match = _pair_is_match(getattr(doc, "pair_delta", None))
+        buckets.setdefault(bucket_ts, []).append(is_match)
 
     points: list[RollingAccuracyPoint] = []
-    for ts, entries in sorted(buckets.items()):
-        if not entries:
+    for ts, flags in sorted(buckets.items()):
+        if not flags:
             continue
-        total_samples = sum(sc for _, sc in entries)
-        # Weighted average across the bucket so a backtest with 100
-        # anchors counts proportionally more than one with 5.
-        weighted = sum(acc * sc for acc, sc in entries)
-        avg_accuracy = weighted / total_samples if total_samples else 0.0
+        accuracy = sum(1 for f in flags if f) / len(flags)
         points.append(
             RollingAccuracyPoint(
                 ts=ts,
-                accuracy=round(max(0.0, min(1.0, avg_accuracy)), 4),
-                sample_count=total_samples,
+                accuracy=round(max(0.0, min(1.0, accuracy)), 4),
+                sample_count=len(flags),
             )
         )
     return tuple(points)
 
 
-def _compose_confidence_drift(
-    backtest_docs: list[Any],
+def _compose_confidence_drift_from_records(
+    all_records: list[Any],
     *,
     flat_threshold: float = 0.05,
 ) -> ConfidenceDrift:
-    """Compute the §11.5 confidence-drift summary.
+    """Compute the §11.5 confidence-drift summary from PredictionRecord
+    docs.
 
-    Compares the earliest vs latest completed backtest's
-    ``result.calibration_summary.confidence_calibration``. Empty input
-    returns a flat zero-magnitude record so the UI can render "no
-    data" without a separate path.
+    Compares the per-record ``confidence`` mean for the oldest day
+    bucket vs the newest day bucket in the window. Bucketing damps
+    single-outlier noise — a single low-confidence record on day 1
+    can't fake a "falling" trend by itself.
 
-    Vocabulary:
-      - ``rising``   — calibration improved (delta > flat_threshold)
-      - ``falling``  — calibration degraded (delta < -flat_threshold)
+    Vocabulary (RFC §11.5):
+      - ``rising``   — confidence improved (delta > flat_threshold)
+      - ``falling``  — confidence degraded (delta < -flat_threshold)
       - ``flat``     — within the flat band (or no data)
     """
-    if not backtest_docs:
+    if not all_records:
         return ConfidenceDrift(trend="flat", magnitude=0.0)
-    confidences: list[tuple[datetime, float]] = []
-    for doc in backtest_docs:
-        result = doc.result or {}
-        summary = result.get("calibration_summary") if isinstance(result, dict) else None
-        if not isinstance(summary, dict):
-            continue
-        conf = summary.get("confidence_calibration")
+    by_day: dict[datetime, list[float]] = {}
+    for doc in all_records:
+        conf = getattr(doc, "confidence", None)
         if not isinstance(conf, (int, float)):
             continue
-        ts = getattr(doc, "createdAt", None)
-        if isinstance(ts, datetime) and ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC_TZ)
-        if ts is None:
+        ts = getattr(doc, "captured_at", None)
+        if not isinstance(ts, datetime):
             continue
-        confidences.append((ts, float(conf)))
-    if len(confidences) < 2:
-        # Single point — can't compute drift. Flat zero so consumers
-        # can render the empty state.
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC_TZ)
+        bucket_ts = ts.replace(hour=0, minute=0, second=0, microsecond=0)
+        by_day.setdefault(bucket_ts, []).append(float(conf))
+    if len(by_day) < 2:
         return ConfidenceDrift(trend="flat", magnitude=0.0)
-    confidences.sort(key=lambda item: item[0])
-    earliest = confidences[0][1]
-    latest = confidences[-1][1]
-    delta = latest - earliest
+    days_sorted = sorted(by_day.items())
+    earliest_mean = sum(days_sorted[0][1]) / len(days_sorted[0][1])
+    latest_mean = sum(days_sorted[-1][1]) / len(days_sorted[-1][1])
+    delta = latest_mean - earliest_mean
     magnitude = abs(delta)
     trend: Literal["rising", "falling", "flat"]
     if magnitude < flat_threshold:
@@ -1734,19 +2034,19 @@ def _compose_confidence_drift(
     return ConfidenceDrift(trend=trend, magnitude=round(magnitude, 4))
 
 
-def _compose_modal_outcome_distribution(
-    projection_docs: list[Any],
+def _compose_modal_outcome_distribution_from_records(
+    records: list[Any],
 ) -> tuple[ModalOutcomeEntry, ...]:
-    """Tally projected-decision modal verbs into a normalised share map.
-
-    Each :class:`ForesightProjectedDecision` carries the modal verb
-    (``decision_text``); the distribution counts each unique verb and
-    normalises by the total record count. Empty input yields an empty
-    tuple.
+    """Tally ``prediction.modal_outcome`` verbs across PredictionRecord
+    docs and normalise into a share map. Records without a modal
+    outcome key collapse to no contribution.
     """
     counts: dict[str, int] = {}
-    for doc in projection_docs:
-        verb = (getattr(doc, "decision_text", "") or "").strip().lower()
+    for doc in records:
+        prediction = getattr(doc, "prediction", None) or {}
+        if not isinstance(prediction, dict):
+            continue
+        verb = str(prediction.get("modal_outcome", "")).strip().lower()
         if not verb:
             continue
         counts[verb] = counts.get(verb, 0) + 1
@@ -1763,38 +2063,46 @@ def _compose_modal_outcome_distribution(
     return tuple(entries)
 
 
-async def _fetch_aggregate_inputs(
+async def _fetch_prediction_records(
     workspace_id: str,
     *,
     window_days: int,
     now: datetime,
-) -> tuple[list[Any], list[Any]]:
-    """Read the workspace's persisted backtests + projection records
-    over the window. Returns ``(backtest_docs, projection_docs)``.
+    paired_only: bool = False,
+) -> list[Any]:
+    """Read PredictionRecord docs in the window. Tenant filter on every
+    read per cloud rule #7.
 
-    Tenant filter on every read per cloud rule #7. ``createdAt``
-    comparison uses a UTC-anchored lower bound so the window is
-    deterministic across deployments with different default tzs.
+    ``paired_only=True`` returns only records where the observation
+    landed — the §11.5 rolling-accuracy series uses this filter so
+    unpaired forward-sim projections don't inflate the denominator.
     """
     window_start = now - timedelta(days=window_days)
-    backtest_docs = await (
-        _ForesightBacktestDoc.find(
-            {
-                "workspace": workspace_id,
-                "status": "complete",
-                "createdAt": {"$gte": window_start},
-            }
-        )
-        .sort([("createdAt", 1), ("_id", 1)])  # type: ignore[list-item]
+    query: dict[str, Any] = {
+        "workspace": workspace_id,
+        "captured_at": {"$gte": window_start},
+    }
+    if paired_only:
+        query["paired"] = True
+    return await (
+        _ForesightPredictionRecordDoc.find(query)
+        .sort([("captured_at", 1), ("_id", 1)])  # type: ignore[list-item]
         .to_list()
     )
-    projection_docs = await _ForesightProjectedDecisionDoc.find(
-        {
-            "workspace": workspace_id,
-            "createdAt": {"$gte": window_start},
-        }
-    ).to_list()
-    return backtest_docs, projection_docs
+
+
+async def _fetch_latest_backtest(workspace_id: str) -> Any | None:
+    """Read the newest completed backtest in the workspace (for the
+    §11.6 ``threshold_unmet`` insight rule). Returns ``None`` when no
+    completed backtest exists — the rule then silently skips.
+    """
+    docs = await (
+        _ForesightBacktestDoc.find({"workspace": workspace_id, "status": "complete"})
+        .sort([("createdAt", -1), ("_id", -1)])  # type: ignore[list-item]
+        .limit(1)
+        .to_list()
+    )
+    return docs[0] if docs else None
 
 
 def _aggregate_to_response(rollup: AggregateRollup) -> AggregateRollupResponse:
@@ -1855,24 +2163,36 @@ async def get_aggregate_rollup(
     collapse to zeros + empty arrays so the UI never sees a 404 on
     new-tenant boot. Above the 90-day cap → 422
     ``foresight.invalid_window`` (validated in :func:`_resolve_window_days`).
+
+    PR 10 (v1.0): reads :class:`ForesightPredictionRecord` docs instead
+    of the v0.5 proxies. ``rolling_accuracy`` filters to paired
+    records (``paired=True``); ``confidence_drift`` reads per-record
+    ``confidence`` across all records (paired or not) over the
+    window; ``modal_outcome_distribution`` tallies the
+    ``prediction.modal_outcome`` vocabulary. Wire shape unchanged.
     """
     workspace_id = _require_workspace(ctx)
     effective_window = _resolve_window_days(window_days)
     now = datetime.now(UTC_TZ)
 
-    backtest_docs, projection_docs = await _fetch_aggregate_inputs(
+    # Two reads — paired-only for the rolling-accuracy series, full
+    # set for the confidence-drift + modal-distribution rollups.
+    paired_records = await _fetch_prediction_records(
         workspace_id,
         window_days=effective_window,
         now=now,
+        paired_only=True,
     )
-
-    rolling = _compose_rolling_accuracy(
-        backtest_docs,
+    all_records = await _fetch_prediction_records(
+        workspace_id,
         window_days=effective_window,
         now=now,
+        paired_only=False,
     )
-    drift = _compose_confidence_drift(backtest_docs)
-    distribution = _compose_modal_outcome_distribution(projection_docs)
+
+    rolling = _compose_rolling_accuracy_from_records(paired_records, now=now)
+    drift = _compose_confidence_drift_from_records(all_records)
+    distribution = _compose_modal_outcome_distribution_from_records(all_records)
 
     rollup = AggregateRollup(
         workspace_id=workspace_id,
@@ -1900,15 +2220,18 @@ INSIGHTS_DEFAULT_CAP: int = 20
 
 
 def _compose_per_persona_calibration(
-    projection_docs: list[Any],
+    prediction_records: list[Any],
     *,
     floor_threshold: float,
 ) -> list[Any]:
-    """Build the per-persona calibration proxy the synthesizer reads.
+    """Build the per-persona calibration view from PredictionRecord docs.
 
-    PR 4's CalibrationPair persistence didn't ship — the rule fires
-    on per-persona confidence levels read off the projection
-    collection as a proxy until the real buffer migrates to Mongo.
+    PR 10 (v1.0): reads real :class:`ForesightPredictionRecord` rows
+    instead of the v0.5 ``ForesightProjectedDecision.confidence``
+    proxy. The persona's mean per-record confidence becomes the
+    calibration figure; the persona_outlier rule downstream gates on
+    the floor_threshold so low-confidence personas surface as
+    insights.
 
     The synthesizer's ``PerPersonaCalibration`` dataclass lives in
     the engine namespace; we import it lazily inside the function so
@@ -1917,7 +2240,7 @@ def _compose_per_persona_calibration(
     from pocketpaw_ee.foresight.insights import PerPersonaCalibration
 
     per_persona: dict[str, list[float]] = {}
-    for doc in projection_docs:
+    for doc in prediction_records:
         persona_id = getattr(doc, "persona_id", "") or ""
         if not persona_id:
             continue
@@ -1930,15 +2253,11 @@ def _compose_per_persona_calibration(
     for persona_id, confidences in per_persona.items():
         if not confidences:
             continue
-        mean_conf = sum(confidences) / len(confidences)
-        # Synthesizer threshold gating happens in the rule itself;
-        # we surface every persona we have data for so a follow-up
-        # rule (or v1.0 LLM synthesizer) can re-evaluate without a
-        # second fetch.
         # Drop personas with samples below 2 to avoid noise from a
         # single low projection.
         if len(confidences) < 2:
             continue
+        mean_conf = sum(confidences) / len(confidences)
         out.append(
             PerPersonaCalibration(
                 persona_id=persona_id,
@@ -2002,19 +2321,18 @@ def _compose_tier_distribution_deltas(
 
 
 def _compose_latest_backtest_gate(
-    backtest_docs: list[Any],
+    latest_backtest: Any | None,
 ) -> Any | None:
-    """Build the synthesizer's ``LatestBacktestGate`` from the freshest
-    completed backtest. Returns ``None`` when no backtests exist —
-    the threshold_unmet rule then silently skips.
+    """Build the synthesizer's ``LatestBacktestGate`` from a single
+    backtest doc. Returns ``None`` when the doc is missing or its
+    gate payload is malformed — the threshold_unmet rule then silently
+    skips.
     """
     from pocketpaw_ee.foresight.insights import LatestBacktestGate
 
-    if not backtest_docs:
+    if latest_backtest is None:
         return None
-    # Backtest docs already arrive sorted ascending by createdAt from
-    # ``_fetch_aggregate_inputs``; the freshest is the last entry.
-    doc = backtest_docs[-1]
+    doc = latest_backtest
     gate = doc.gate_decision or {}
     observed = gate.get("observed")
     threshold = gate.get("threshold")
@@ -2031,6 +2349,33 @@ def _compose_latest_backtest_gate(
         observed=float(observed),
         threshold=float(threshold),
         completed_at=completed_at,
+    )
+
+
+async def _fetch_recent_backtest_docs(
+    workspace_id: str,
+    *,
+    window_days: int,
+    now: datetime,
+) -> list[Any]:
+    """Read completed backtest docs in the window — kept around for the
+    ``tier_distribution_deltas`` synthesizer field (each backtest's
+    ``result.tier_distribution`` reports the per-tier persona count
+    the run actually used). The rolling-accuracy series no longer
+    derives from backtests; it reads paired PredictionRecord rows
+    directly per PR 10.
+    """
+    window_start = now - timedelta(days=window_days)
+    return await (
+        _ForesightBacktestDoc.find(
+            {
+                "workspace": workspace_id,
+                "status": "complete",
+                "createdAt": {"$gte": window_start},
+            }
+        )
+        .sort([("createdAt", 1), ("_id", 1)])  # type: ignore[list-item]
+        .to_list()
     )
 
 
@@ -2055,41 +2400,58 @@ def _insight_to_response(view: InsightView) -> InsightResponse:
 async def get_insights(ctx: RequestContext) -> InsightsResponse:
     """Compose the workspace's Insights panel response.
 
-    Composes the synthesizer input bundle from the same aggregate
-    inputs the rollup endpoint reads, then delegates rule evaluation
-    to :func:`ee.foresight.insights.synthesize_insights`. Engine
-    import is lazy so the cloud module stays clean of the engine
-    layer per the import-linter contract.
+    Composes the synthesizer input bundle from PredictionRecord docs
+    (the same source the aggregate endpoint reads), then delegates
+    rule evaluation to :func:`ee.foresight.insights.synthesize_insights`.
+    Engine import is lazy so the cloud module stays clean of the
+    engine layer per the import-linter contract.
 
     Empty workspaces return ``items=[]`` — the synthesizer yields no
     rows when none of the five rules can fire.
+
+    PR 10 (v1.0): per-persona calibration + rolling accuracy + drift
+    now read PredictionRecord docs instead of the v0.5 proxies. The
+    ``tier_distribution_deltas`` + ``latest_backtest`` synthesizer
+    fields still source from backtest docs (those carry the per-run
+    tier mix + gate decision the prediction records don't echo).
     """
     workspace_id = _require_workspace(ctx)
     now = datetime.now(UTC_TZ)
 
-    # Reuse the aggregate window so the insights view is consistent
-    # with the rollup view the UI renders side-by-side.
-    backtest_docs, projection_docs = await _fetch_aggregate_inputs(
+    # Three reads — paired-only PredictionRecords for the rolling
+    # series, full PredictionRecords for the per-persona +
+    # confidence-drift + modal-distribution rollups, recent backtest
+    # docs for the tier_distribution_deltas + latest_backtest fields.
+    paired_records = await _fetch_prediction_records(
+        workspace_id,
+        window_days=AGGREGATE_DEFAULT_WINDOW_DAYS,
+        now=now,
+        paired_only=True,
+    )
+    all_records = await _fetch_prediction_records(
+        workspace_id,
+        window_days=AGGREGATE_DEFAULT_WINDOW_DAYS,
+        now=now,
+        paired_only=False,
+    )
+    backtest_docs = await _fetch_recent_backtest_docs(
         workspace_id,
         window_days=AGGREGATE_DEFAULT_WINDOW_DAYS,
         now=now,
     )
 
-    rolling = _compose_rolling_accuracy(
-        backtest_docs,
-        window_days=AGGREGATE_DEFAULT_WINDOW_DAYS,
-        now=now,
-    )
-    drift = _compose_confidence_drift(backtest_docs)
+    rolling = _compose_rolling_accuracy_from_records(paired_records, now=now)
+    drift = _compose_confidence_drift_from_records(all_records)
     per_persona = _compose_per_persona_calibration(
-        projection_docs,
+        all_records,
         floor_threshold=0.50,
     )
     tier_deltas = _compose_tier_distribution_deltas(
         backtest_docs,
         configured_default={"premium": 0.05, "mid": 0.15, "tail": 0.80},
     )
-    latest_gate = _compose_latest_backtest_gate(backtest_docs)
+    latest_backtest_doc = backtest_docs[-1] if backtest_docs else None
+    latest_gate = _compose_latest_backtest_gate(latest_backtest_doc)
 
     # Lazy import — the synthesizer module is pure but lives in the
     # engine namespace, so the import-linter forbids static imports
@@ -2148,6 +2510,7 @@ __all__ = [
     "INSIGHTS_DEFAULT_CAP",
     "create_backtest",
     "create_scenario_run",
+    "emit_prediction_record",
     "emit_projected_decision",
     "get_aggregate_rollup",
     "get_backtest",
@@ -2159,4 +2522,5 @@ __all__ = [
     "list_projected_decisions",
     "list_scenario_runs",
     "list_scenarios",
+    "pair_prediction",
 ]

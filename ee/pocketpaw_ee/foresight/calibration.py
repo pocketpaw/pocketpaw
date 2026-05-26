@@ -1,4 +1,18 @@
 # ee/pocketpaw_ee/foresight/calibration.py
+# Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) — RFC
+# 08 v1.0 PR 10:
+#   - ``PredictionBuffer`` accepts an optional ``on_capture`` /
+#     ``on_mark_observed`` callback pair. Legacy callers (CLI smoke,
+#     v0.5 tests) pass nothing and behaviour is unchanged. The cloud
+#     side hands in a closure that mirrors each capture into the new
+#     ``foresight_prediction_records`` Mongo collection and updates the
+#     same row when observation lands. The engine never imports cloud —
+#     the callbacks are injected at construction time so the import
+#     direction stays cloud → engine.
+#   - In-memory ring stays the canonical authority for the engine's
+#     own pairing path. Mongo is a side-mirror so the §11.5 aggregate
+#     + §11.6 insights endpoints can read paired records persistently
+#     across process restarts (which the in-memory ring loses).
 # Created: 2026-05-25 (feat/foresight-v03-calibration) — RFC 08 PR 3.
 #
 # Calibration loop — RFC 08 §9 "the moat".
@@ -80,18 +94,45 @@ class PredictionRecord:
 class PredictionBuffer:
     """In-memory ring of pending predictions.
 
-    PR 3 keeps this in-memory — PR 4's cloud-side path adds a
-    Beanie-backed equivalent under ``ee/pocketpaw_ee/cloud/foresight/``
-    (out of scope here per the parallel-leads lane split). The
-    interface is async to anticipate that swap.
+    PR 3 (v0.1) kept this in-memory only. v1.0 (PR 10) adds optional
+    ``on_capture`` / ``on_mark_observed`` callbacks so the cloud side
+    can mirror each capture / observation into the
+    ``foresight_prediction_records`` Mongo collection. The in-memory
+    ring stays the engine's authority — the callbacks are best-effort
+    side-mirrors. The engine never imports cloud; the cloud constructs
+    a buffer with callbacks baked in via closure.
+
+    Args:
+        on_capture: optional async callback invoked after a record is
+            captured. Receives the record. May be sync or async — the
+            buffer awaits when it returns a coroutine.
+        on_mark_observed: optional async callback invoked after a
+            record is marked observed. Receives ``(record,
+            observation)`` so the caller has both the original
+            prediction and the new outcome dict.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        on_capture: Any | None = None,
+        on_mark_observed: Any | None = None,
+    ) -> None:
         self._records: dict[UUID, PredictionRecord] = {}
         self._observed: dict[UUID, dict[str, Any]] = {}
+        self._on_capture = on_capture
+        self._on_mark_observed = on_mark_observed
 
     async def capture(self, record: PredictionRecord) -> None:
-        """Write a prediction to the buffer."""
+        """Write a prediction to the buffer.
+
+        Fires ``on_capture`` after the in-memory write lands so the
+        cloud-side mirror can persist a Mongo row. Callback exceptions
+        are intentionally NOT swallowed here — the engine treats the
+        buffer write as atomic with the side-mirror so a Mongo failure
+        surfaces to the runner (which logs + carries on per its own
+        contract). Sync + async callbacks both supported.
+        """
         self._records[record.id] = record
         logger.debug(
             "captured prediction id=%s anchor=%s observe_at=%s",
@@ -99,6 +140,10 @@ class PredictionBuffer:
             record.anchor_object_id,
             record.observe_at.isoformat(),
         )
+        if self._on_capture is not None:
+            maybe_coro = self._on_capture(record)
+            if hasattr(maybe_coro, "__await__"):
+                await maybe_coro
 
     async def pending(self, *, before: datetime | None = None) -> list[PredictionRecord]:
         """Return predictions whose ``observe_at`` has passed (or all
@@ -112,11 +157,21 @@ class PredictionBuffer:
         ]
 
     async def mark_observed(self, prediction_id: UUID, observation: dict[str, Any]) -> None:
-        """Record that reality has landed for this prediction."""
+        """Record that reality has landed for this prediction.
+
+        Fires ``on_mark_observed`` after the in-memory observation
+        lands so the cloud-side mirror can update the Mongo row's
+        ``observed_at`` / ``observed_outcome`` / ``paired`` fields.
+        """
         if prediction_id not in self._records:
             raise KeyError(f"unknown prediction id: {prediction_id}")
-        self._observed[prediction_id] = dict(observation)
+        observation_dict = dict(observation)
+        self._observed[prediction_id] = observation_dict
         logger.debug("marked observed prediction id=%s", prediction_id)
+        if self._on_mark_observed is not None:
+            maybe_coro = self._on_mark_observed(self._records[prediction_id], observation_dict)
+            if hasattr(maybe_coro, "__await__"):
+                await maybe_coro
 
     async def find_by_anchor(self, anchor_object_id: str) -> list[PredictionRecord]:
         """Find pending predictions anchored to a given Fabric object.

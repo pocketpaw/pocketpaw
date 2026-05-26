@@ -1,4 +1,17 @@
 # ee/pocketpaw_ee/cloud/foresight/domain.py
+# Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) — RFC
+# 08 v1.0 PR 10:
+#   - Added ``PredictionRecord`` frozen dataclass mirroring the persisted
+#     :class:`pocketpaw_ee.cloud.models.foresight_prediction_record.ForesightPredictionRecord`
+#     document 1-to-1 plus the cloud-rule-#3 tenancy invariant. The
+#     service layer maps this to the Mongo doc and back; the aggregate +
+#     insights endpoints read these records (filtering ``paired=True``
+#     for rolling-accuracy buckets) instead of the v0.5 backtest +
+#     projected-decision proxies.
+#   - The shape is frozen so the cloud service can hand it to the
+#     engine-side aggregator primitives (``ee.foresight.aggregator``)
+#     without import-direction violations — both sides see plain
+#     dataclasses with no Beanie / FastAPI / pydantic surface.
 # Updated: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) —
 # PR 5:
 #   - Rebuilt ``ProjectedDecision`` to match the persisted shape of
@@ -46,7 +59,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -124,6 +137,55 @@ class ProjectedDecision:
 
 
 BacktestRunStatus = Literal["queued", "running", "complete", "failed"]
+
+
+@dataclass(frozen=True)
+class PredictionRecord:
+    """One projected outcome held until reality lands.
+
+    Persisted equivalent of :class:`ee.foresight.calibration.PredictionRecord`
+    (engine in-memory shape) — the cloud's Mongo-backed mirror with the
+    cloud-rule-#3 tenancy invariant. Fields mirror
+    :class:`pocketpaw_ee.cloud.models.foresight_prediction_record.ForesightPredictionRecord`
+    1-to-1:
+
+    - ``id`` — Mongo ObjectId rendered as hex string.
+    - ``workspace_id`` — tenancy key (required positionally).
+    - ``anchor_id`` — sub-type-specific anchor identifier
+      (``decision:<name>`` / ``segment:<role>`` / ``rollout:<event>``).
+    - ``persona_id`` — the persona whose modal action drove the
+      projection (empty string when no persona acted).
+    - ``scenario_id`` — scenario name / template identifier.
+    - ``run_id`` — the ForesightRun / ForesightBacktest doc id.
+    - ``tick_id`` — zero-based tick index inside the run.
+    - ``prediction`` — projected-outcome payload (JSON dict).
+    - ``confidence`` — aggregate confidence in (0.0, 1.0).
+    - ``captured_at`` — server-side timestamp when the engine emitted
+      this prediction.
+    - ``observed_at`` — timestamp when reality landed (``None`` while
+      unpaired).
+    - ``observed_outcome`` — the actual outcome dict (``None`` while
+      unpaired).
+    - ``paired`` — ``True`` once observation lands. The §11.5
+      rolling-accuracy read filters on this so unpaired projections
+      never inflate the denominator.
+    - ``pair_delta`` — per-metric diff dict (``None`` until paired).
+    """
+
+    id: str
+    workspace_id: str
+    captured_at: datetime
+    anchor_id: str = ""
+    persona_id: str = ""
+    scenario_id: str = ""
+    run_id: str = ""
+    tick_id: int = 0
+    prediction: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    observed_at: datetime | None = None
+    observed_outcome: dict[str, Any] | None = None
+    paired: bool = False
+    pair_delta: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +375,7 @@ __all__ = [
     "InsightView",
     "ModalOutcomeEntry",
     "OnboardingGateState",
+    "PredictionRecord",
     "ProjectedDecision",
     "RollingAccuracyPoint",
     "ScenarioCatalogEntry",
