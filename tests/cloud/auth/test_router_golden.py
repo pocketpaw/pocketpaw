@@ -40,7 +40,7 @@ async def _seed_user() -> _UserDoc:
 
 @pytest_asyncio.fixture
 async def app_client(mongo_db) -> tuple[AsyncClient, _UserDoc]:
-    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth import current_active_user, current_optional_user
     from pocketpaw_ee.cloud.auth.router import router
 
     user_doc = await _seed_user()
@@ -49,6 +49,7 @@ async def app_client(mongo_db) -> tuple[AsyncClient, _UserDoc]:
     add_error_handler(app)
     app.include_router(router, prefix="/api/v1")
     app.dependency_overrides[current_active_user] = lambda: user_doc
+    app.dependency_overrides[current_optional_user] = lambda: user_doc
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:

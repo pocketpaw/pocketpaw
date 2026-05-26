@@ -26,6 +26,7 @@ from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth import sessions as sessions_service
+from pocketpaw_ee.cloud.auth.api_keys_router import router as api_keys_router
 from pocketpaw_ee.cloud.auth.core import (
     SECRET,
     UserCreate,
@@ -311,6 +312,8 @@ router.include_router(
     fastapi_users.get_register_router(UserRead, UserCreate),
     prefix="/auth",
 )
+
+router.include_router(api_keys_router)
 
 
 # ---------------------------------------------------------------------------
