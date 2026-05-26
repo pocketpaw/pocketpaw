@@ -1,6 +1,11 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
+    ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
+    still auto-installs; this flag toggles the chat-surface affordance
+    only. Read by the agent prompt assembler and the paw-enterprise
+    feature-flag echo. RFC 08 v1.0 wave 4.
   - 2026-05-22: Added ``source_refresh_min_interval_seconds`` (interval
     floor) and ``source_refresh_max_per_hour`` (per-pocket auto-refresh
     budget) — cost controls for pocket data-source interval / webhook
@@ -458,6 +463,24 @@ class Settings(BaseSettings):
             "or disable the template library entirely. Template install is "
             "best-effort: pocket creation still works (the specialist "
             "cold-generates) even when no template is installed."
+        ),
+    )
+    foresight_use_skill: bool = Field(
+        default=False,
+        description=(
+            "Activate the ``foresight-create-sim`` bundled skill in chat. "
+            "Default OFF — the SKILL.md still auto-installs to "
+            "``~/.claude/skills/`` (idempotent, harmless) but the chat "
+            "agent's prompt context builder and the cloud's chat surface "
+            "only surface the skill when this flag is True. Read by the "
+            "agent prompt assembler (``pocketpaw.bootstrap.context_builder`` "
+            "and the cloud's paw-enterprise feature-flag echo endpoint at "
+            "``/api/v1/config/features``); the foresight CRUD endpoints "
+            "themselves stay reachable regardless of this flag — the gate "
+            "is purely a chat-surface affordance toggle. Flip to True per "
+            "workspace once Foresight rollout completes; the flag is dev-"
+            "grade today and tightens to a per-workspace database setting "
+            "in a follow-up RFC."
         ),
     )
     deep_agents_skills: list[str] = Field(
