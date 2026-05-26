@@ -44,6 +44,7 @@ class Invite(Document):
     group: str | None = None
     accepted: bool = False
     revoked: bool = False
+    revoked_reason: str | None = None  # e.g. "declined" when invitee declines vs inviter-revoke
     accepted_at: datetime | None = None  # single-use stamp (Task 4)
     expires_at: datetime = Field(default_factory=_default_expiry)
 

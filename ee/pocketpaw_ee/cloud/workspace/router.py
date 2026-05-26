@@ -184,6 +184,13 @@ async def accept_invite(
     return {"ok": True}
 
 
+@router.post("/invites/{token}/decline", status_code=204)
+async def decline_invite_route(token: str) -> Response:
+    """Invitee-side decline. Public — the invitee may not have an account."""
+    await workspace_service.decline_invite(token)
+    return Response(status_code=204)
+
+
 @router.delete("/{workspace_id}/invites/{invite_id}", status_code=204)
 async def revoke_invite(
     workspace_id: str,

@@ -680,3 +680,78 @@ async def test_create_invite_cleans_up_revoked_rows(owner, monkeypatch) -> None:
     assert second.id != first.id
     # Old revoked row is gone.
     assert await _InviteDoc.get(PydanticObjectId(first.id)) is None
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 Task 3: decline_invite
+# ---------------------------------------------------------------------------
+
+
+async def test_decline_invite_marks_revoked_with_reason(owner, recording_bus, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="d@x.c")
+    )
+    recording_bus.events.clear()
+
+    await workspace_service.decline_invite(invite.token)
+
+    row = await _InviteDoc.get(PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.revoked is True
+    assert row.revoked_reason == "declined"
+    assert row.accepted is False
+
+    revoked_events = [e for e in recording_bus.events if isinstance(e, WorkspaceInviteRevoked)]
+    assert len(revoked_events) == 1
+    assert revoked_events[0].data.get("reason") == "declined"
+    assert revoked_events[0].data.get("workspace_id") == ws.id
+    assert revoked_events[0].data.get("invite_id") == invite.id
+
+
+async def test_decline_invite_404_unknown_token() -> None:
+    with pytest.raises(NotFound):
+        await workspace_service.decline_invite("not-a-real-token")
+
+
+async def test_decline_invite_409_already_accepted(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="acc@x.c")
+    )
+    invitee = await _seed_user(email="acc@x.c")
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+    with pytest.raises(ConflictError) as exc:
+        await workspace_service.decline_invite(invite.token)
+    assert exc.value.code == "invite.already_accepted"
+
+
+async def test_decline_invite_atomic_against_accept(owner, monkeypatch) -> None:
+    """After decline, accept must surface the revoked-branch in accept_invite."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="race@x.c")
+    )
+
+    await workspace_service.decline_invite(invite.token)
+
+    invitee = await _seed_user(email="race@x.c")
+    with pytest.raises(Forbidden) as exc:
+        await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+    assert exc.value.code == "invite.revoked"

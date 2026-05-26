@@ -682,6 +682,70 @@ async def revoke_invite(workspace_id: str, invite_id: str) -> None:
     await emit(WorkspaceInviteRevoked(data={"workspace_id": workspace_id, "invite_id": invite_id}))
 
 
+async def decline_invite(token: str) -> None:
+    """Invitee-side decline. No auth — the invitee may not have an account.
+
+    Atomically marks the invite revoked with ``revoked_reason="declined"`` so
+    audit can later distinguish an inviter-revoke from an invitee-decline.
+    Idempotent: declining an already-declined/revoked invite is a no-op (no
+    duplicate event). Refuses to decline an accepted invite (409).
+    """
+    th = hash_token(token)
+
+    invite_doc = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
+    if invite_doc is None:
+        invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
+    if invite_doc is None:
+        raise NotFound("invite")
+
+    if invite_doc.accepted:
+        raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+    if invite_doc.revoked:
+        return  # idempotent — already declined or revoked
+
+    collection = _InviteDoc.get_pymongo_collection()
+    claimed = await collection.find_one_and_update(
+        {"token_hash": th, "accepted": False, "revoked": False},
+        {"$set": {"revoked": True, "revoked_reason": "declined"}},
+        return_document=False,
+    )
+
+    if claimed is None:
+        # Race: re-read and disambiguate. Mirror accept_invite's fallback,
+        # including the legacy plaintext backfill path.
+        existing = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
+        if existing is None:
+            existing = await _InviteDoc.find_one(_InviteDoc.token == token)
+        if existing is None:
+            raise NotFound("invite")
+        if existing.accepted:
+            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+        if existing.revoked:
+            return  # somebody else just revoked/declined it — idempotent
+        existing.token_hash = th
+        existing.token = None
+        await existing.save()
+        claimed = await collection.find_one_and_update(
+            {"_id": existing.id, "accepted": False, "revoked": False},
+            {"$set": {"revoked": True, "revoked_reason": "declined"}},
+            return_document=False,
+        )
+        if claimed is None:
+            return  # raced again; treat as idempotent
+
+    workspace_id = claimed["workspace"]
+    invite_id = str(claimed["_id"])
+    await emit(
+        WorkspaceInviteRevoked(
+            data={
+                "workspace_id": workspace_id,
+                "invite_id": invite_id,
+                "reason": "declined",
+            }
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Realtime audience helpers — used as function refs by realtime/audience.py
 # ---------------------------------------------------------------------------
@@ -782,6 +846,7 @@ __all__ = [
     "accept_invite",
     "create",
     "create_invite",
+    "decline_invite",
     "delete",
     "get",
     "get_workspace_plan",
