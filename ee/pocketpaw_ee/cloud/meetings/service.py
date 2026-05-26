@@ -34,6 +34,14 @@ from pocketpaw_ee.cloud.shared.events import event_bus
 logger = logging.getLogger(__name__)
 
 
+# Bump when the VTT → KB pipeline changes shape (extractor strips cue tags,
+# mime is text/vtt, etc). The startup migration re-emits FileReady for
+# every transcript whose stored ``kb_indexed_version`` is below this so
+# kb-go re-ingests through the current cleaner. v1 (2026-05-26): added
+# _vtt_to_plain in LocalExtractor + mime=text/vtt on writes.
+TRANSCRIPT_KB_VERSION = 1
+
+
 # ---------------------------------------------------------------------------
 # Mapping helpers (rule §8 — same-file private helpers, not separate module)
 # ---------------------------------------------------------------------------
@@ -146,11 +154,19 @@ async def list_meetings(workspace_id: str, body: ListMeetingsRequest) -> list[Me
     if not docs:
         return []
 
-    # Bulk lookup: which meeting_ids have a transcript file?
+    # Bulk lookup: which meeting_ids have a USEFUL transcript file?
+    # Match get_transcript's gate (file_id AND entry_count > 0) so the
+    # panel's "ready" badge can't disagree with what the open action
+    # returns — a stale row with 0 entries used to show "ready" and
+    # then 404 on click.
     meeting_ids = [str(d.id) for d in docs]
     transcripts = await _TranscriptDoc.find(
         _TranscriptDoc.workspace == workspace_id,
-        {"meeting_id": {"$in": meeting_ids}, "file_id": {"$ne": None}},
+        {
+            "meeting_id": {"$in": meeting_ids},
+            "file_id": {"$ne": None},
+            "entry_count": {"$gt": 0},
+        },
     ).to_list()
     have_transcript = {t.meeting_id for t in transcripts}
 
@@ -181,7 +197,14 @@ async def get_meeting(workspace_id: str, meeting_id: str) -> MeetingDetailRespon
         _TranscriptDoc.workspace == workspace_id,
         _TranscriptDoc.meeting_id == str(doc.id),
     )
-    has_file = transcript_doc is not None and transcript_doc.file_id is not None
+    # "ready" means the open path will return content — same gate as
+    # get_transcript's fast path. file_id alone isn't enough: a stale
+    # row with 0 cues would show ready then 404 on click.
+    has_file = (
+        transcript_doc is not None
+        and transcript_doc.file_id is not None
+        and transcript_doc.entry_count > 0
+    )
     return _doc_to_detail(doc, transcript_available=has_file)
 
 
@@ -447,7 +470,11 @@ async def search_meetings(
     ids = [str(d.id) for d in matches]
     transcripts = await _TranscriptDoc.find(
         _TranscriptDoc.workspace == workspace_id,
-        {"meeting_id": {"$in": ids}, "file_id": {"$ne": None}},
+        {
+            "meeting_id": {"$in": ids},
+            "file_id": {"$ne": None},
+            "entry_count": {"$gt": 0},
+        },
     ).to_list()
     have_transcript = {t.meeting_id for t in transcripts}
     return [_doc_to_response(d, transcript_available=str(d.id) in have_transcript) for d in matches]
@@ -466,7 +493,11 @@ async def list_recent_meetings(workspace_id: str, *, limit: int = 10) -> list[Me
     ids = [str(d.id) for d in docs]
     transcripts = await _TranscriptDoc.find(
         _TranscriptDoc.workspace == workspace_id,
-        {"meeting_id": {"$in": ids}, "file_id": {"$ne": None}},
+        {
+            "meeting_id": {"$in": ids},
+            "file_id": {"$ne": None},
+            "entry_count": {"$gt": 0},
+        },
     ).to_list()
     have = {t.meeting_id for t in transcripts}
     return [_doc_to_response(d, transcript_available=str(d.id) in have) for d in docs]
@@ -644,10 +675,26 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
         folder_path="/transcripts",
         filename=filename,
         content=text,
-        mime="text/plain",
+        # text/vtt routes to the .vtt branch in LocalExtractor, which
+        # strips the WEBVTT header, timestamp lines, and <v Speaker> cue
+        # tags before KB ingest. Lying about the mime as text/plain dumps
+        # raw VTT (mostly noise) into the workspace KB.
+        mime="text/vtt",
     )
 
-    # Upsert the MeetingTranscript row.
+    # Derive cue + speaker counts from the freshly-written VTT so both
+    # upsert branches stay in lockstep with the empty-guard above (which
+    # uses the same "\n--> " or " --> " heuristic).
+    new_entry_count = text.count("\n--> ") + text.count(" --> ")
+    new_speaker_count = len({m.group(1) for m in _SPEAKER_RE.finditer(text)})
+
+    # Upsert the MeetingTranscript row. The else-branch USED TO refresh
+    # only file_id + fetched_at, leaving entry_count/speaker_count frozen
+    # at whatever an earlier (possibly empty) pass wrote. That left rows
+    # stuck at entry_count=0 forever — the meeting flipped to
+    # transcript_ready, the card lit up, but the open-gate (entry_count>0)
+    # kept saying "no transcript". Now both branches write all derived
+    # fields so a successful refetch heals the row.
     transcript = await _TranscriptDoc.find_one(
         _TranscriptDoc.workspace == workspace_id,
         _TranscriptDoc.meeting_id == str(meeting.id),
@@ -658,21 +705,27 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
             meeting_id=str(meeting.id),
             provider_transcript_id=meeting.provider_meeting_id,
             file_id=file_rec.id,
-            entry_count=text.count("\n--> "),  # cheap VTT-cue count
-            speaker_count=len({m.group(1) for m in _SPEAKER_RE.finditer(text)}),
+            entry_count=new_entry_count,
+            speaker_count=new_speaker_count,
             language=None,
             fetched_at=datetime.now(UTC),
             indexed_in_kb=False,
+            kb_indexed_version=TRANSCRIPT_KB_VERSION,
         )
         await transcript.insert()
     else:
         transcript.file_id = file_rec.id
+        transcript.entry_count = new_entry_count
+        transcript.speaker_count = new_speaker_count
         transcript.fetched_at = datetime.now(UTC)
+        transcript.kb_indexed_version = TRANSCRIPT_KB_VERSION
         await transcript.save()
 
     # Flip the meeting to ``transcript_ready`` so the desktop client
     # can refresh badges off this without re-fetching the transcript.
-    if meeting.status != "transcript_ready":
+    # Guard on the cue count so an empty fetch can't promote a meeting
+    # whose detail panel will then say "no transcript".
+    if new_entry_count > 0 and meeting.status != "transcript_ready":
         meeting.status = "transcript_ready"
         await meeting.save()
 
@@ -685,6 +738,107 @@ async def fetch_and_store_transcript(workspace_id: str, meeting_id: str) -> _Tra
         },
     )
     return transcript
+
+
+async def reindex_outdated_transcripts() -> dict:
+    """Re-emit FileReady for every transcript indexed under an older KB pipeline.
+
+    Idempotent. Walks all rows where ``kb_indexed_version <
+    TRANSCRIPT_KB_VERSION`` and ``file_id`` is set, re-emits FileReady
+    against the existing file (no Recall re-fetch), then bumps the
+    version. The FileReady listener re-runs the extraction chain — which
+    now routes ``text/vtt`` through ``_vtt_to_plain`` — and ingests the
+    cleaned text into the same workspace KB scope.
+
+    **Old noisy articles are NOT deleted.** kb-go (as of v0.1.0) has no
+    delete-by-source or per-article rm primitive — only ``kb clear``,
+    which would nuke the whole workspace scope. We accept the duplicates
+    and rely on rank dominance: the cleaner article scores higher on
+    real queries (no timestamp tokens, real speech vocabulary), so the
+    noisy one rarely surfaces. If kb-go ever gains ``kb rm --source X``,
+    add a pre-emit delete call here keyed off the file's filename.
+
+    Called fire-and-forget from ``dashboard_lifecycle.startup_event`` so
+    the dashboard never blocks on it. Safe to call repeatedly: the
+    version gate makes the second call a no-op.
+
+    Returns ``{"scanned": N, "republished": M, "skipped": K}`` so the
+    boot log can show what happened without sampling Mongo by hand.
+    """
+    from pocketpaw_ee.cloud._core.realtime.bus import get_bus
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import FileReady
+    from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileDoc
+
+    try:
+        get_bus()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("transcript reindex skipped: bus not ready: %s", exc)
+        return {"scanned": 0, "republished": 0, "skipped": 0}
+
+    # global-read: deployment-wide migration, cross-tenant by design.
+    docs = await _TranscriptDoc.find(
+        {
+            "kb_indexed_version": {"$lt": TRANSCRIPT_KB_VERSION},
+            "file_id": {"$ne": None},
+        }
+    ).to_list()
+    if not docs:
+        return {"scanned": 0, "republished": 0, "skipped": 0}
+
+    republished = 0
+    skipped = 0
+    for doc in docs:
+        if not doc.file_id:
+            skipped += 1
+            continue
+        # global-read: FileUpload is cross-workspace; we trust doc.workspace.
+        file_doc = await _FileDoc.find_one(_FileDoc.file_id == doc.file_id)
+        if file_doc is None:
+            logger.info(
+                "transcript reindex: file %s missing for meeting=%s — skipping",
+                doc.file_id,
+                doc.meeting_id,
+            )
+            skipped += 1
+            continue
+        try:
+            await emit(
+                FileReady(
+                    data={
+                        "workspace_id": doc.workspace,
+                        "file_id": file_doc.file_id,
+                        "filename": file_doc.filename,
+                        # Force text/vtt so the extractor's mime-first
+                        # routing hits _vtt_to_plain even when the row
+                        # was originally written as text/plain.
+                        "mime": "text/vtt",
+                        "size": file_doc.size,
+                        "storage_key": file_doc.storage_key,
+                        "url": f"/api/v1/uploads/{file_doc.file_id}",
+                    },
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "transcript reindex emit failed for meeting=%s file=%s",
+                doc.meeting_id,
+                doc.file_id,
+            )
+            skipped += 1
+            continue
+        doc.kb_indexed_version = TRANSCRIPT_KB_VERSION
+        await doc.save()
+        republished += 1
+
+    logger.info(
+        "transcript reindex: scanned=%d republished=%d skipped=%d (target version=%d)",
+        len(docs),
+        republished,
+        skipped,
+        TRANSCRIPT_KB_VERSION,
+    )
+    return {"scanned": len(docs), "republished": republished, "skipped": skipped}
 
 
 async def ingest_transcript_for_recall_bot(bot_id: str) -> bool:
