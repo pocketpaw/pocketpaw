@@ -84,6 +84,25 @@ async def revoke_api_key(key_id: str, workspace_id: str) -> APIKey:
     return doc
 
 
+async def revoke_keys_for_user_in_workspace(user_id: str, workspace_id: str) -> int:
+    """Revoke every active API key owned by ``user_id`` in ``workspace_id``.
+
+    Returns the number of keys flipped. Already-revoked keys are not
+    counted. Used by the member-removal cascade.
+    """
+    rows = await APIKey.find(
+        APIKey.owner_user_id == user_id,
+        APIKey.workspace == workspace_id,
+        APIKey.revoked == False,  # noqa: E712
+    ).to_list()
+    count = 0
+    for doc in rows:
+        doc.revoked = True
+        await doc.save()
+        count += 1
+    return count
+
+
 def _expires_in_days(days: int | None) -> datetime | None:
     if days is None:
         return None
@@ -159,6 +178,7 @@ __all__ = [
     "list_api_keys",
     "resolve_bearer",
     "revoke_api_key",
+    "revoke_keys_for_user_in_workspace",
     "_expires_in_days",
     "_reset_caches_for_tests",
 ]

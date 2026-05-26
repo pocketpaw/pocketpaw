@@ -120,6 +120,36 @@ async def revoke_all_others(user_id: str, current_jti: str) -> int:
     return count
 
 
+async def revoke_all_sessions_for_user(user_id: str) -> int:
+    """Revoke every active session row for ``user_id`` (no current-jti carve-out).
+
+    Used by the member-removal cascade — force re-login across the whole
+    system. Populates the Redis revocation set in a single SADD + EXPIRE.
+    Returns the count of newly revoked rows.
+    """
+    rows = await AuthSession.find(
+        AuthSession.user_id == user_id,
+        AuthSession.revoked == False,  # noqa: E712
+    ).to_list()
+    if not rows:
+        return 0
+    now = datetime.now(UTC)
+    jtis: list[str] = []
+    for row in rows:
+        row.revoked = True
+        row.revoked_at = now
+        await row.save()
+        jtis.append(row.jti)
+    try:
+        redis = redis_client.get_redis()
+        key = _revoked_key(user_id)
+        await redis.sadd(key, *jtis)  # type: ignore[misc]
+        await redis.expire(key, _REDIS_SET_TTL)  # type: ignore[misc]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("revoke_all_sessions_for_user Redis update failed: %s", exc)
+    return len(jtis)
+
+
 async def is_revoked(user_id: str, jti: str) -> bool:
     # TODO: cache per-request via contextvar; Redis SISMEMBER round-trip is
     # fine for now but every authenticated call pays it.
@@ -150,6 +180,7 @@ __all__ = [
     "list_sessions",
     "record_session",
     "revoke_all_others",
+    "revoke_all_sessions_for_user",
     "revoke_session",
     "touch_session",
 ]

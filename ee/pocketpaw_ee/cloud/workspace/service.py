@@ -479,6 +479,29 @@ async def update_member_role(
     )
 
 
+async def _revoke_invites_by_inviter(workspace_id: str, user_id: str) -> int:
+    """Revoke pending invites issued by ``user_id`` for ``workspace_id``.
+
+    Sets ``revoked=True`` + ``revoked_reason='inviter_removed'`` on every
+    matching row. Returns the count of newly revoked invites.
+    """
+    rows = await _InviteDoc.find(
+        {
+            "workspace": workspace_id,
+            "invited_by": user_id,
+            "accepted": False,
+            "revoked": False,
+        }
+    ).to_list()
+    count = 0
+    for invite in rows:
+        invite.revoked = True
+        invite.revoked_reason = "inviter_removed"
+        await invite.save()
+        count += 1
+    return count
+
+
 async def remove_member(
     workspace_id: str,
     target_user_id: str,
@@ -511,6 +534,51 @@ async def remove_member(
         user.active_workspace = None
     await user.save()
 
+    # Why: cascade revocations are best-effort — one failed step (e.g. Redis
+    # blip on session revocation) shouldn't undo the membership flip or block
+    # the other cascades. Each step logs + continues; the audit row captures
+    # whatever counts we did manage.
+    import logging as _logging
+
+    from pocketpaw_ee.cloud.auth import api_keys as _api_keys_service
+    from pocketpaw_ee.cloud.auth import sessions as _sessions_service
+
+    _logger = _logging.getLogger(__name__)
+
+    api_keys_revoked = 0
+    try:
+        api_keys_revoked = await _api_keys_service.revoke_keys_for_user_in_workspace(
+            target_user_id, workspace_id
+        )
+    except Exception:
+        _logger.warning(
+            "remove_member: api-key cascade failed for user=%s ws=%s",
+            target_user_id,
+            workspace_id,
+            exc_info=True,
+        )
+
+    sessions_revoked = 0
+    try:
+        sessions_revoked = await _sessions_service.revoke_all_sessions_for_user(target_user_id)
+    except Exception:
+        _logger.warning(
+            "remove_member: session cascade failed for user=%s",
+            target_user_id,
+            exc_info=True,
+        )
+
+    invites_revoked = 0
+    try:
+        invites_revoked = await _revoke_invites_by_inviter(workspace_id, target_user_id)
+    except Exception:
+        _logger.warning(
+            "remove_member: invite cascade failed for user=%s ws=%s",
+            target_user_id,
+            workspace_id,
+            exc_info=True,
+        )
+
     await event_bus.emit(
         "member.removed",
         {
@@ -522,7 +590,17 @@ async def remove_member(
     await emit(
         WorkspaceMemberRemoved(data={"workspace_id": workspace_id, "user_id": target_user_id})
     )
-    get_resolver().invalidate_workspace(workspace_id)
+
+    try:
+        resolver = get_resolver()
+        resolver.invalidate_workspace(workspace_id)
+        # Drop the user's peer cache so they stop receiving presence pings from
+        # this workspace's members on their next event tick.
+        invalidate_peers = getattr(resolver, "invalidate_user_peers", None)
+        if callable(invalidate_peers):
+            invalidate_peers(target_user_id)
+    except Exception:
+        _logger.warning("remove_member: realtime invalidation failed", exc_info=True)
 
     await audit_service.record(
         workspace_id,
@@ -530,6 +608,13 @@ async def remove_member(
         "workspace.member_removed",
         target_type="user",
         target_id=target_user_id,
+        metadata={
+            "cascade": {
+                "api_keys_revoked": api_keys_revoked,
+                "sessions_revoked": sessions_revoked,
+                "invites_revoked": invites_revoked,
+            },
+        },
     )
 
 
