@@ -331,7 +331,7 @@ async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
     )
     await invite_doc.insert()
 
-    invitee = await _seed_user(email="invitee@x.c")
+    invitee = await _seed_user(email="x@y.z")
     with pytest.raises(Forbidden) as exc:
         await workspace_service.accept_invite(_ctx(str(invitee.id)), "tok-revoked")
     assert exc.value.code == "invite.revoked"
@@ -480,3 +480,46 @@ async def test_accept_invite_concurrent_only_one_wins(mongo_db: Any, monkeypatch
     failures = [r for r in results if isinstance(r, ConflictError)]
     assert len(successes) == 1
     assert len(failures) == 1
+
+
+async def test_accept_invite_rejects_email_mismatch(mongo_db: Any, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    owner = await _seed_user(email="own3@x.c")
+    invitee = await _seed_user(email="invitee@x.c")
+    impostor = await _seed_user(email="impostor@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="EM", slug="em"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="invitee@x.c", role="admin"),
+    )
+    with pytest.raises(Forbidden, match="email"):
+        await workspace_service.accept_invite(_ctx(str(impostor.id)), invite.token)
+
+    # Invite is still usable by the real invitee — the rejected claim
+    # must NOT have consumed it.
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+
+async def test_accept_invite_case_insensitive_email(mongo_db: Any, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    owner = await _seed_user(email="own4@x.c")
+    invitee = await _seed_user(email="Mixed@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="CI", slug="ci"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="mixed@x.c", role="member"),
+    )
+    # Should succeed — email comparison is case-insensitive.
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)

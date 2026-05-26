@@ -504,6 +504,26 @@ async def validate_invite(token: str) -> tuple[Invite, str]:
 async def accept_invite(ctx: RequestContext, token: str) -> None:
     th = hash_token(token)
 
+    # Identity check: the logged-in user's email must match the invitee's.
+    # Comparison is case-insensitive (emails are case-insensitive at the
+    # mailbox level for all practical providers). The preview read does
+    # NOT mutate the invite, so a mismatch leaves the token usable by the
+    # rightful invitee.
+    viewer = await _UserDoc.get(PydanticObjectId(ctx.user_id))
+    if viewer is None:
+        raise NotFound("user", ctx.user_id)
+    preview = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
+    if preview is None:
+        preview = await _InviteDoc.find_one(_InviteDoc.token == token)
+    if preview is None:
+        raise NotFound("invite")
+    if preview.email.lower() != (viewer.email or "").lower():
+        raise Forbidden(
+            "invite.email_mismatch",
+            "This invite was sent to a different email address. "
+            "Sign in with the invited account to accept.",
+        )
+
     # Atomic claim: set accepted=True only if it's currently False.
     # Returns the original (BEFORE) doc on success, None on lose.
     collection = _InviteDoc.get_pymongo_collection()
