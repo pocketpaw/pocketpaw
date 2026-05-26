@@ -42,6 +42,7 @@ from fastapi_users.authentication import (
 )
 from fastapi_users_db_beanie import BeanieUserDatabase, ObjectIDIDMixin
 
+from pocketpaw_ee.cloud.auth.password_policy import validate_password_async
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,10 @@ async def get_user_db():
 class UserManager(ObjectIDIDMixin, BaseUserManager[User, PydanticObjectId]):
     reset_password_token_secret = SECRET
     verification_token_secret = SECRET
+
+    async def validate_password(self, password: str, user: Any) -> None:
+        email = getattr(user, "email", None) or ""
+        await validate_password_async(password, email=email)
 
     async def on_after_register(self, user: User, request: Request | None = None):
         logger.info("User registered: %s (%s)", user.email, user.id)
