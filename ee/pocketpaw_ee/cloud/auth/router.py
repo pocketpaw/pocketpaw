@@ -12,8 +12,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import jwt as pyjwt
 from beanie import PydanticObjectId
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi_users.router.common import ErrorCode
@@ -24,7 +25,9 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
 from pocketpaw_ee.cloud.auth import service as auth_service
+from pocketpaw_ee.cloud.auth import sessions as sessions_service
 from pocketpaw_ee.cloud.auth.core import (
+    SECRET,
     UserCreate,
     UserManager,
     UserRead,
@@ -41,6 +44,7 @@ from pocketpaw_ee.cloud.auth.dto import (
     auth_user_to_profile_out,
 )
 from pocketpaw_ee.cloud.auth.mfa_tokens import mint_mfa_pending, verify_mfa_pending
+from pocketpaw_ee.cloud.auth.sessions_dto import RevokeOthersResponse, SessionOut
 from pocketpaw_ee.cloud.models.user import User
 
 router = APIRouter(tags=["Auth"])
@@ -89,6 +93,48 @@ async def _authenticate_or_400(
     return user
 
 
+_JWT_AUDIENCE = ["fastapi-users:auth"]
+
+
+def _jti_from_token(token: str) -> str | None:
+    try:
+        payload = pyjwt.decode(
+            token,
+            SECRET,
+            audience=_JWT_AUDIENCE,
+            algorithms=["HS256"],
+        )
+    except pyjwt.PyJWTError:
+        return None
+    jti = payload.get("jti")
+    return jti if isinstance(jti, str) else None
+
+
+def _current_jti(request: Request) -> str | None:
+    token = request.cookies.get("paw_auth")
+    if not token:
+        authz = request.headers.get("authorization", "")
+        if authz.lower().startswith("bearer "):
+            token = authz[7:].strip()
+    if not token:
+        return None
+    try:
+        payload = pyjwt.decode(token, options={"verify_signature": False})
+    except pyjwt.PyJWTError:
+        return None
+    jti = payload.get("jti")
+    return jti if isinstance(jti, str) else None
+
+
+async def _mint_and_record(backend, user: User, request: Request) -> Response:
+    strategy = backend.get_strategy()
+    token = await strategy.write_token(user)
+    jti = _jti_from_token(token)
+    if jti:
+        await sessions_service.record_session(str(user.id), jti, request)
+    return await backend.transport.get_login_response(token)
+
+
 @router.post("/auth/login", name="auth:cookie.login.mfa-gated")
 async def login_cookie(
     request: Request,
@@ -100,8 +146,7 @@ async def login_cookie(
         token, _ = mint_mfa_pending(str(user.id))
         return JSONResponse({"mfa_required": True, "mfa_token": token})
 
-    strategy = cookie_backend.get_strategy()
-    response = await cookie_backend.login(strategy, user)
+    response = await _mint_and_record(cookie_backend, user, request)
     await manager.on_after_login(user, request, response)
     return response
 
@@ -117,8 +162,7 @@ async def login_bearer(
         token, _ = mint_mfa_pending(str(user.id))
         return JSONResponse({"mfa_required": True, "mfa_token": token})
 
-    strategy = bearer_backend.get_strategy()
-    response = await bearer_backend.login(strategy, user)
+    response = await _mint_and_record(bearer_backend, user, request)
     await manager.on_after_login(user, request, response)
     return response
 
@@ -164,15 +208,95 @@ async def mfa_challenge(
     if not ok:
         raise HTTPException(status_code=401, detail="mfa_invalid_code")
 
-    strategy = cookie_backend.get_strategy()
-    response = await cookie_backend.login(strategy, user)
+    response = await _mint_and_record(cookie_backend, user, request)
     await manager.on_after_login(user, request, response)
     return response
 
 
 # ---------------------------------------------------------------------------
-# fastapi-users sub-routers (logout/register). The login routes are
-# overridden above; logout and register still come from upstream.
+# Logout — flips session.revoked + adds jti to Redis set, then clears the
+# cookie / bearer 204 response. The fastapi-users sub-router's /auth/logout
+# is shadowed by these because they're registered first.
+# ---------------------------------------------------------------------------
+
+
+async def _revoke_current(request: Request, user: User) -> None:
+    jti = _current_jti(request)
+    if not jti:
+        return
+    try:
+        await sessions_service.revoke_session(str(user.id), jti, by_user_id=str(user.id))
+    except Exception:  # noqa: BLE001 — already-revoked / missing row is non-fatal
+        pass
+
+
+@router.post("/auth/logout", name="auth:cookie.logout.revoke")
+async def logout_cookie(
+    request: Request,
+    user: Any = Depends(current_active_user),
+):
+    await _revoke_current(request, user)
+    return await cookie_backend.transport.get_logout_response()
+
+
+@router.post("/auth/bearer/logout", name="auth:bearer.logout.revoke")
+async def logout_bearer(
+    request: Request,
+    user: Any = Depends(current_active_user),
+):
+    await _revoke_current(request, user)
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Session list + revoke endpoints (Wave 3 Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _session_to_out(doc, *, current_jti: str | None) -> SessionOut:
+    return SessionOut(
+        id=str(doc.id),
+        jti=doc.jti,
+        ip=doc.ip,
+        device_label=doc.device_label,
+        issued_at=doc.issued_at.isoformat() if doc.issued_at else None,
+        last_seen_at=doc.last_seen_at.isoformat() if doc.last_seen_at else None,
+        is_current=(doc.jti == current_jti),
+    )
+
+
+@router.get("/auth/sessions", response_model=list[SessionOut])
+async def list_my_sessions(
+    request: Request,
+    user: Any = Depends(current_active_user),
+) -> list[SessionOut]:
+    rows = await sessions_service.list_sessions(str(user.id))
+    cur = _current_jti(request)
+    return [_session_to_out(r, current_jti=cur) for r in rows]
+
+
+@router.delete("/auth/sessions/{jti}")
+async def revoke_my_session(
+    jti: str,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    await sessions_service.revoke_session(str(user.id), jti, by_user_id=str(user.id))
+    return {"ok": True}
+
+
+@router.post("/auth/sessions/revoke-others", response_model=RevokeOthersResponse)
+async def revoke_other_sessions(
+    request: Request,
+    user: Any = Depends(current_active_user),
+) -> RevokeOthersResponse:
+    cur = _current_jti(request) or ""
+    n = await sessions_service.revoke_all_others(str(user.id), cur)
+    return RevokeOthersResponse(revoked=n)
+
+
+# ---------------------------------------------------------------------------
+# fastapi-users sub-routers (logout/register). The login + logout routes
+# are overridden above; register still comes from upstream.
 # ---------------------------------------------------------------------------
 
 router.include_router(

@@ -28,8 +28,10 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any
 
+import jwt
 from beanie import PydanticObjectId
 from fastapi import Depends, Request
 from fastapi_users import BaseUserManager, FastAPIUsers
@@ -40,6 +42,7 @@ from fastapi_users.authentication import (
     CookieTransport,
     JWTStrategy,
 )
+from fastapi_users.jwt import generate_jwt
 from fastapi_users_db_beanie import BeanieUserDatabase, ObjectIDIDMixin
 
 from pocketpaw_ee.cloud.auth.password_policy import validate_password_async
@@ -104,8 +107,48 @@ cookie_transport = CookieTransport(
 bearer_transport = BearerTransport(tokenUrl="/api/v1/auth/login")
 
 
+class RevocableJWTStrategy(JWTStrategy):
+    """JWTStrategy that mints a ``jti`` and refuses revoked tokens.
+
+    The base strategy's ``write_token`` does not include ``jti``; we
+    override it to embed one so :mod:`pocketpaw_ee.cloud.auth.sessions`
+    can index per-session state. ``read_token`` short-circuits to None
+    when the jti is in the Redis revocation set for the user.
+    """
+
+    async def read_token(self, token, user_manager):  # type: ignore[override]
+        if token is None:
+            return None
+        from pocketpaw_ee.cloud.auth import sessions as sessions_service
+
+        try:
+            payload = jwt.decode(
+                token,
+                self.decode_key
+                if isinstance(self.decode_key, str)
+                else self.decode_key.get_secret_value(),
+                audience=self.token_audience,
+                algorithms=[self.algorithm],
+            )
+        except jwt.PyJWTError:
+            return None
+        jti = payload.get("jti")
+        user_id = payload.get("sub")
+        if jti and user_id and await sessions_service.is_revoked(user_id, jti):
+            return None
+        return await super().read_token(token, user_manager)
+
+    async def write_token(self, user) -> str:  # type: ignore[override]
+        data = {
+            "sub": str(user.id),
+            "aud": self.token_audience,
+            "jti": uuid.uuid4().hex,
+        }
+        return generate_jwt(data, self.encode_key, self.lifetime_seconds, algorithm=self.algorithm)
+
+
 def get_jwt_strategy() -> JWTStrategy:
-    return JWTStrategy(secret=SECRET, lifetime_seconds=TOKEN_LIFETIME)
+    return RevocableJWTStrategy(secret=SECRET, lifetime_seconds=TOKEN_LIFETIME)
 
 
 cookie_backend = AuthenticationBackend(

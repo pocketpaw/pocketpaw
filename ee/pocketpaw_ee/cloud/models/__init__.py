@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -50,6 +51,7 @@ __all__ = [
     "AgentConfig",
     "Attachment",
     "AuditEvent",
+    "AuthSession",
     "ChatRunDoc",
     "Comment",
     "CommentAuthor",
@@ -115,6 +117,7 @@ def get_all_documents():
         PlanSession,
         ChatRunDoc,
         AuditEvent,
+        AuthSession,
     ]
 
 
