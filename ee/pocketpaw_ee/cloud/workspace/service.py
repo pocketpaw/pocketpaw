@@ -50,6 +50,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceMemberRole,
     WorkspaceUpdated,
 )
+from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
 from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
@@ -231,6 +232,17 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     )
     get_resolver().invalidate_workspace(str(doc.id))
 
+    # Wave 2 Task 10: structured audit log. ip + user_agent threading is
+    # deferred to Wave 3 (needs RequestContext changes).
+    await audit_service.record(
+        str(doc.id),
+        ctx.user_id,
+        "workspace.created",
+        target_type="workspace",
+        target_id=str(doc.id),
+        metadata={"name": doc.name, "slug": doc.slug},
+    )
+
     return _workspace_to_domain(doc, member_count=1)
 
 
@@ -262,6 +274,15 @@ async def update(
     patched = body.model_dump(exclude_unset=True)
     await emit(WorkspaceUpdated(data={"workspace_id": workspace_id, **patched}))
 
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.updated",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"patched": patched},
+    )
+
     count = await _count_members(workspace_id)
     return _workspace_to_domain(doc, member_count=count)
 
@@ -288,6 +309,14 @@ async def delete(ctx: RequestContext, workspace_id: str) -> None:
 
     await emit(WorkspaceDeleted(data={"workspace_id": workspace_id}))
     get_resolver().invalidate_workspace(workspace_id)
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.deleted",
+        target_type="workspace",
+        target_id=workspace_id,
+    )
 
 
 async def list_for_user(ctx: RequestContext) -> list[Workspace]:
@@ -373,8 +402,10 @@ async def update_member_role(
     if user is None:
         raise NotFound("member", target_user_id)
     updated = False
+    from_role: str | None = None
     for m in user.workspaces:
         if m.workspace == workspace_id:
+            from_role = m.role
             m.role = role
             updated = True
             break
@@ -392,6 +423,15 @@ async def update_member_role(
         )
     )
     get_resolver().invalidate_workspace(workspace_id)
+
+    await audit_service.record(
+        workspace_id,
+        actor_user_id,
+        "workspace.member_role_changed",
+        target_type="user",
+        target_id=target_user_id,
+        metadata={"from_role": from_role, "to_role": role},
+    )
 
 
 async def remove_member(
@@ -438,6 +478,14 @@ async def remove_member(
         WorkspaceMemberRemoved(data={"workspace_id": workspace_id, "user_id": target_user_id})
     )
     get_resolver().invalidate_workspace(workspace_id)
+
+    await audit_service.record(
+        workspace_id,
+        actor_user_id,
+        "workspace.member_removed",
+        target_type="user",
+        target_id=target_user_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +583,15 @@ async def create_invite(
 
     await emit(WorkspaceInviteCreated(data=event_data))
 
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.invite_created",
+        target_type="invite",
+        target_id=invite.id,
+        metadata={"invite_id": invite.id, "email": body.email, "role": body.role},
+    )
+
     if invited_user_id:
         await notifications_service.create(
             workspace_id=workspace_id,
@@ -604,6 +661,15 @@ async def bulk_create_invites(
         if existing_user_id:
             event_data["user_id"] = existing_user_id
         await emit(WorkspaceInviteCreated(data=event_data))
+
+        await audit_service.record(
+            workspace_id,
+            ctx.user_id,
+            "workspace.invite_created",
+            target_type="invite",
+            target_id=invite.id,
+            metadata={"invite_id": invite.id, "email": email, "role": body.role},
+        )
 
         if existing_user_id:
             await notifications_service.create(
@@ -796,8 +862,21 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
     )
     get_resolver().invalidate_workspace(wid)
 
+    await audit_service.record(
+        wid,
+        ctx.user_id,
+        "workspace.invite_accepted",
+        target_type="invite",
+        target_id=invite.id,
+        metadata={"invite_id": invite.id, "email": invite.email},
+    )
 
-async def revoke_invite(workspace_id: str, invite_id: str) -> None:
+
+async def revoke_invite(
+    workspace_id: str,
+    invite_id: str,
+    actor_user_id: str | None = None,
+) -> None:
     try:
         invite_doc = await _InviteDoc.get(PydanticObjectId(invite_id))
     except Exception:
@@ -807,6 +886,16 @@ async def revoke_invite(workspace_id: str, invite_id: str) -> None:
     invite_doc.revoked = True
     await invite_doc.save()
     await emit(WorkspaceInviteRevoked(data={"workspace_id": workspace_id, "invite_id": invite_id}))
+
+    if actor_user_id is not None:
+        await audit_service.record(
+            workspace_id,
+            actor_user_id,
+            "workspace.invite_revoked",
+            target_type="invite",
+            target_id=invite_id,
+            metadata={"invite_id": invite_id, "reason": "revoked"},
+        )
 
 
 async def decline_invite(token: str) -> None:
@@ -870,6 +959,17 @@ async def decline_invite(token: str) -> None:
                 "reason": "declined",
             }
         )
+    )
+
+    # Decline is unauthed (the invitee may not have an account), so we
+    # log the invitee's email as the actor identifier.
+    await audit_service.record(
+        workspace_id,
+        f"email:{claimed.get('email', '')}",
+        "workspace.invite_declined",
+        target_type="invite",
+        target_id=invite_id,
+        metadata={"invite_id": invite_id, "email": claimed.get("email", "")},
     )
 
 

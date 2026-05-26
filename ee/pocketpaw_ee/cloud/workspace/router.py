@@ -222,5 +222,5 @@ async def revoke_invite(
     invite_id: str,
     user: User = Depends(require_action("invite.revoke")),
 ) -> Response:
-    await workspace_service.revoke_invite(workspace_id, invite_id)
+    await workspace_service.revoke_invite(workspace_id, invite_id, str(user.id))
     return Response(status_code=204)

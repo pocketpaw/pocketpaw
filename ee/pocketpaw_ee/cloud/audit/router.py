@@ -6,9 +6,15 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.deps import require_action
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.audit import service as audit_service
-from pocketpaw_ee.cloud.audit.dto import AuditListResponse, ListAuditRequest
+from pocketpaw_ee.cloud.audit.dto import (
+    AuditListResponse,
+    AuditPageResponse,
+    AuditQueryRequest,
+    ListAuditRequest,
+)
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
 
@@ -49,3 +55,44 @@ async def list_audit(
         cursor=cursor,
     )
     return await audit_service.agent_list_audit(ctx, body)
+
+
+# ---------------------------------------------------------------------------
+# Workspace-scoped audit log (Wave 2 Task 10).
+#
+# Separate router mounted under ``/workspaces/{workspace_id}/audit`` so the
+# admin-only ``audit.read`` guard binds to the path workspace, not the
+# active workspace on the user record.
+# ---------------------------------------------------------------------------
+
+
+workspace_router = APIRouter(
+    prefix="/workspaces",
+    tags=["Audit"],
+    dependencies=[Depends(require_license)],
+)
+
+
+@workspace_router.get(
+    "/{workspace_id}/audit",
+    response_model=AuditPageResponse,
+    dependencies=[Depends(require_action("audit.read"))],
+)
+async def list_workspace_audit(
+    workspace_id: str,
+    action: str | None = Query(default=None, max_length=120),
+    actor: str | None = Query(default=None, max_length=120),
+    since: str | None = Query(default=None),
+    until: str | None = Query(default=None),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> AuditPageResponse:
+    body = AuditQueryRequest(
+        action=action,
+        actor=actor,
+        since=since,
+        until=until,
+        cursor=cursor,
+        limit=limit,
+    )
+    return await audit_service.list_events_response(workspace_id, body)
