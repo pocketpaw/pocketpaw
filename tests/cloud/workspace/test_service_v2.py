@@ -1145,3 +1145,82 @@ async def test_resend_invite_rejects_revoked_invite(owner, monkeypatch) -> None:
     with pytest.raises(ConflictError) as exc:
         await workspace_service.resend_invite(_ctx(str(owner.id)), ws.id, original.id)
     assert exc.value.code == "invite.revoked"
+
+
+# ---------------------------------------------------------------------------
+# Delete preview (Wave 2 Task 19)
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_preview_counts_resources(owner, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
+    from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+    from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
+
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+
+    # 2 additional members → 3 total including owner.
+    for i in range(2):
+        u = await _seed_user(email=f"m{i}@x.c", full_name=f"M{i}")
+        await workspace_service._add_member(ws.id, str(u.id), role="member")
+
+    # 2 rooms.
+    for i in range(2):
+        await _GroupDoc(workspace=ws.id, name=f"g{i}", owner=str(owner.id)).insert()
+
+    # 1 agent.
+    await _AgentDoc(workspace=ws.id, name="bot", slug="bot", owner=str(owner.id)).insert()
+
+    # 4 file uploads, 256 bytes each → 1024 total.
+    for i in range(4):
+        await _FileUploadDoc(
+            file_id=f"f{i}",
+            storage_key=f"key/{i}",
+            filename=f"f{i}.txt",
+            mime="text/plain",
+            size=256,
+            workspace=ws.id,
+            owner=str(owner.id),
+        ).insert()
+
+    # 5 pending invites.
+    for i in range(5):
+        await workspace_service.create_invite(
+            _ctx(str(owner.id)), ws.id, CreateInviteRequest(email=f"inv{i}@x.c")
+        )
+
+    preview = await workspace_service.get_delete_preview(ws.id)
+
+    assert preview == {
+        "member_count": 3,
+        "room_count": 2,
+        "agent_count": 1,
+        "file_count": 4,
+        "invite_count": 5,
+        "total_bytes": 1024,
+    }
+
+
+async def test_delete_preview_zero_resources(owner) -> None:
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    preview = await workspace_service.get_delete_preview(ws.id)
+    # Owner counts as a member; everything else is zero.
+    assert preview["member_count"] == 1
+    assert preview["room_count"] == 0
+    assert preview["agent_count"] == 0
+    assert preview["file_count"] == 0
+    assert preview["invite_count"] == 0
+    assert preview["total_bytes"] == 0
+
+
+async def test_delete_preview_workspace_not_found() -> None:
+    bogus = str(PydanticObjectId())
+    with pytest.raises(NotFound):
+        await workspace_service.get_delete_preview(bogus)

@@ -37,6 +37,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     UpdateMemberRoleRequest,
     UpdateWorkspaceRequest,
     ValidateInviteOut,
+    WorkspaceDeletePreviewResponse,
     WorkspaceOut,
     invite_to_dto,
     invite_to_validate_dto,
@@ -102,6 +103,22 @@ async def delete_workspace(
 ) -> Response:
     await workspace_service.delete(ctx, workspace_id)
     return Response(status_code=204)
+
+
+@router.get(
+    "/{workspace_id}/delete-preview",
+    response_model=WorkspaceDeletePreviewResponse,
+)
+async def delete_preview(
+    workspace_id: str,
+    user: User = Depends(require_action("workspace.delete")),
+) -> dict:
+    """Blast-radius counts for the delete confirmation UI.
+
+    Gated by the same ``workspace.delete`` action as the destructive route —
+    seeing the preview implies you're the one who could pull the trigger.
+    """
+    return await workspace_service.get_delete_preview(workspace_id)
 
 
 # ---------------------------------------------------------------------------

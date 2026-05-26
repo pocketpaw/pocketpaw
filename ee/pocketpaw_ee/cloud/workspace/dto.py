@@ -133,6 +133,24 @@ class ValidateInviteOut(InviteOut):
     workspace_name: str
 
 
+class WorkspaceDeletePreviewResponse(BaseModel):
+    """GET /workspaces/{id}/delete-preview response — blast-radius before delete.
+
+    Counts the rows the cascade in ``workspace_service.delete`` will tear
+    through (members, chat groups, agents, files, pending invites) plus the
+    total file bytes attributable to the workspace. The UI uses this for a
+    "Deleting will remove X members, Y rooms, Z bytes — this cannot be
+    undone" confirmation step before the type-name-to-confirm prompt.
+    """
+
+    member_count: int
+    room_count: int
+    agent_count: int
+    file_count: int
+    invite_count: int
+    total_bytes: int
+
+
 class InvitePreviewResponse(BaseModel):
     """Typed preview of an invite token for the accept UI.
 
@@ -229,6 +247,7 @@ __all__ = [
     "UpdateMemberRoleRequest",
     "UpdateWorkspaceRequest",
     "ValidateInviteOut",
+    "WorkspaceDeletePreviewResponse",
     "WorkspaceOut",
     "invite_to_dto",
     "invite_to_validate_dto",

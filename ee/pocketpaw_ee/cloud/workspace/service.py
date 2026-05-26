@@ -319,6 +319,51 @@ async def delete(ctx: RequestContext, workspace_id: str) -> None:
     )
 
 
+async def get_delete_preview(workspace_id: str) -> dict:
+    """Return counts + total bytes for the cascade ``delete()`` would perform.
+
+    Mirrors the resources the workspace ``delete`` path (and its eventual
+    cascades) reaches: members, chat groups, agents, file uploads, and
+    pending invites. Used by the UI to show a blast-radius summary before
+    the type-name-to-confirm step. Owner-only at the route layer.
+
+    Uses ``find().count()`` rather than ``aggregate()`` because aggregation
+    cursors don't survive mongomock-motor in tests (see
+    reference_mongomock_quirks memory).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    # Local imports keep these documents off the cold-start path for callers
+    # that never touch the preview endpoint.
+    from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
+    from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+    from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
+
+    member_count = await _count_members(workspace_id)
+    room_count = await _GroupDoc.find({"workspace": workspace_id}).count()
+    agent_count = await _AgentDoc.find({"workspace": workspace_id}).count()
+    file_count = await _FileUploadDoc.find({"workspace": workspace_id, "deleted_at": None}).count()
+    invite_count = await _InviteDoc.find(
+        {"workspace": workspace_id, "accepted": False, "revoked": False}
+    ).count()
+
+    # Python-side reduction over the file rows; aggregate($sum) would be
+    # cheaper but mongomock-motor doesn't honour it reliably.
+    file_rows = await _FileUploadDoc.find({"workspace": workspace_id, "deleted_at": None}).to_list()
+    total_bytes = sum(int(getattr(r, "size", 0) or 0) for r in file_rows)
+
+    return {
+        "member_count": member_count,
+        "room_count": room_count,
+        "agent_count": agent_count,
+        "file_count": file_count,
+        "invite_count": invite_count,
+        "total_bytes": total_bytes,
+    }
+
+
 async def list_for_user(ctx: RequestContext) -> list[Workspace]:
     """List the user's non-deleted workspaces with member counts.
 
@@ -1148,6 +1193,7 @@ __all__ = [
     "decline_invite",
     "delete",
     "get",
+    "get_delete_preview",
     "get_workspace_plan",
     "legacy_ctx",
     "list_admin_ids",
