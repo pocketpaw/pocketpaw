@@ -89,7 +89,7 @@ class InviteOut(BaseModel):
     email: str
     role: str
     invitedBy: str  # noqa: N815 - camelCase wire key
-    token: str
+    token: str | None = None
     accepted: bool
     revoked: bool
     expired: bool
