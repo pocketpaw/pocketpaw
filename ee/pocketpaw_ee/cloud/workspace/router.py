@@ -16,6 +16,7 @@ from pocketpaw_ee.cloud._core.deps import (
     require_action,
     require_membership,
 )
+from pocketpaw_ee.cloud.auth.core import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.cloud.workspace import service as workspace_service
@@ -23,6 +24,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     CreateInviteRequest,
     CreateWorkspaceRequest,
     InviteOut,
+    InvitePreviewResponse,
     MemberOut,
     UpdateMemberRoleRequest,
     UpdateWorkspaceRequest,
@@ -153,6 +155,15 @@ async def create_invite(
 ) -> InviteOut:
     invite = await workspace_service.create_invite(ctx, workspace_id, body)
     return invite_to_dto(invite)
+
+
+@router.get("/invites/{token}/preview", response_model=InvitePreviewResponse)
+async def preview_invite_route(
+    token: str,
+    viewer: User | None = Depends(current_optional_user),
+) -> dict:
+    viewer_id = str(viewer.id) if viewer is not None else None
+    return await workspace_service.preview_invite(token, viewer_id)
 
 
 @router.get("/invites/{token}", response_model=ValidateInviteOut)

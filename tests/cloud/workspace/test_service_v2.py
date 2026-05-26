@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from beanie import PydanticObjectId
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.errors import (
     ConflictError,
@@ -523,3 +524,109 @@ async def test_accept_invite_case_insensitive_email(mongo_db: Any, monkeypatch) 
     )
     # Should succeed — email comparison is case-insensitive.
     await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+
+# ---------------------------------------------------------------------------
+# preview_invite — typed state for the accept UI
+# ---------------------------------------------------------------------------
+
+
+async def test_preview_invite_states(mongo_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _async_noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+
+    owner = await _seed_user(email="po@x.c")
+    matching_viewer = await _seed_user(email="pm@x.c")
+    other_viewer = await _seed_user(email="potherviewer@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="P", slug="pview"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="pm@x.c", role="member"),
+    )
+
+    # Anonymous viewer -> ready_new
+    out = await workspace_service.preview_invite(invite.token, viewer_user_id=None)
+    assert out["state"] == "ready_new"
+    assert out["email"] == "pm@x.c"
+    assert out["role"] == "member"
+    assert out["workspace_name"] == "P"
+    assert out["viewer_email"] is None
+    assert out["group_name"] is None
+
+    # Signed in as matching user -> ready_existing
+    out = await workspace_service.preview_invite(
+        invite.token, viewer_user_id=str(matching_viewer.id)
+    )
+    assert out["state"] == "ready_existing"
+    assert out["viewer_email"] == "pm@x.c"
+
+    # Signed in as wrong user -> ready_wrong_user
+    out = await workspace_service.preview_invite(invite.token, viewer_user_id=str(other_viewer.id))
+    assert out["state"] == "ready_wrong_user"
+    assert out["viewer_email"] == "potherviewer@x.c"
+
+    # Unknown token -> not_found
+    out = await workspace_service.preview_invite("not-a-real-token", viewer_user_id=None)
+    assert out["state"] == "not_found"
+
+
+async def test_preview_invite_revoked_expired_accepted(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _async_noop(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+
+    owner = await _seed_user(email="prv@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="PRV", slug="prv"),
+    )
+
+    # revoked
+    revoked_invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="rev@x.c", role="member"),
+    )
+    await workspace_service.revoke_invite(ws.id, revoked_invite.id)
+    out = await workspace_service.preview_invite(revoked_invite.token, viewer_user_id=None)
+    assert out["state"] == "revoked"
+    assert out["email"] == "rev@x.c"
+
+    # expired — mutate the underlying doc directly
+    expired_invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="exp@x.c", role="member"),
+    )
+    exp_doc = await _InviteDoc.get(PydanticObjectId(expired_invite.id))
+    assert exp_doc is not None
+    exp_doc.expires_at = datetime(2000, 1, 1, tzinfo=UTC)
+    await exp_doc.save()
+    out = await workspace_service.preview_invite(expired_invite.token, viewer_user_id=None)
+    assert out["state"] == "expired"
+    assert out["email"] == "exp@x.c"
+
+    # already_accepted — actually accept it with the matching user
+    accepted_invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="acc@x.c", role="member"),
+    )
+    acceptor = await _seed_user(email="acc@x.c")
+    await workspace_service.accept_invite(_ctx(str(acceptor.id)), accepted_invite.token)
+    out = await workspace_service.preview_invite(accepted_invite.token, viewer_user_id=None)
+    assert out["state"] == "already_accepted"
+    assert out["email"] == "acc@x.c"

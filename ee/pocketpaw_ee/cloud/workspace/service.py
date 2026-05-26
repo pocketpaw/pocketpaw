@@ -501,6 +501,50 @@ async def validate_invite(token: str) -> tuple[Invite, str]:
     return invite, ws_name
 
 
+async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
+    """Typed preview for the accept UI — never raises, returns a state dict."""
+    th = hash_token(token)
+    invite_doc = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
+    if invite_doc is None:
+        invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
+    if invite_doc is None:
+        return {"state": "not_found"}
+
+    if invite_doc.accepted:
+        return {"state": "already_accepted", "email": invite_doc.email}
+    if invite_doc.revoked:
+        return {"state": "revoked", "email": invite_doc.email}
+    if invite_doc.expired:
+        return {"state": "expired", "email": invite_doc.email}
+
+    ws_doc = await _fetch_workspace(invite_doc.workspace)
+    ws_name = ws_doc.name if ws_doc is not None else ""
+
+    viewer_email: str | None = None
+    state = "ready_new"
+    if viewer_user_id:
+        try:
+            viewer = await _UserDoc.get(PydanticObjectId(viewer_user_id))
+        except Exception:
+            viewer = None
+        if viewer is not None:
+            viewer_email = viewer.email
+            if (viewer.email or "").lower() == invite_doc.email.lower():
+                state = "ready_existing"
+            else:
+                state = "ready_wrong_user"
+
+    return {
+        "state": state,
+        "email": invite_doc.email,
+        "role": invite_doc.role,
+        "workspace_name": ws_name,
+        "group": invite_doc.group,
+        "group_name": None,
+        "viewer_email": viewer_email,
+    }
+
+
 async def accept_invite(ctx: RequestContext, token: str) -> None:
     th = hash_token(token)
 
@@ -733,6 +777,7 @@ __all__ = [
     "list_member_ids",
     "list_members",
     "list_peer_ids",
+    "preview_invite",
     "remove_member",
     "revoke_invite",
     "seed_default_workspace",

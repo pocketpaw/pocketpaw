@@ -11,6 +11,7 @@ existing wire shape consumed by paw-enterprise:
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -106,6 +107,36 @@ class ValidateInviteOut(InviteOut):
     workspace_name: str
 
 
+class InvitePreviewResponse(BaseModel):
+    """Typed preview of an invite token for the accept UI.
+
+    ``state`` is the single field the UI switches on:
+      - ``ready_new``         — token is valid, viewer is anonymous; show register form
+      - ``ready_existing``    — token is valid, viewer logged in with matching email
+      - ``ready_wrong_user``  — token is valid, viewer logged in with a DIFFERENT email
+      - ``expired``           — token expired
+      - ``revoked``           — token revoked by inviter
+      - ``already_accepted``  — token already redeemed
+      - ``not_found``         — token doesn't exist (or was tampered)
+    """
+
+    state: Literal[
+        "ready_new",
+        "ready_existing",
+        "ready_wrong_user",
+        "expired",
+        "revoked",
+        "already_accepted",
+        "not_found",
+    ]
+    email: str | None = None
+    role: str | None = None
+    workspace_name: str | None = None
+    group: str | None = None
+    group_name: str | None = None
+    viewer_email: str | None = None
+
+
 def workspace_to_dto(ws: Workspace) -> WorkspaceOut:
     return WorkspaceOut(
         id=ws.id,
@@ -164,6 +195,7 @@ __all__ = [
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
     "InviteOut",
+    "InvitePreviewResponse",
     "MemberOut",
     "UpdateMemberRoleRequest",
     "UpdateWorkspaceRequest",
