@@ -1,4 +1,31 @@
 # ee/pocketpaw_ee/cloud/foresight/service.py
+# Updated: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
+# RFC 08 v1.0 — three changes:
+#   1. New ``get_live_snapshot(ctx, run_id)`` — backs
+#      ``GET /api/v1/foresight/runs/{id}/live-snapshot``. Reads the
+#      run doc + projection list, derives the actual tier mix from
+#      ``run.result.tier_distribution``, samples up to 10 projections
+#      deterministically, and runs the three anomaly detectors from
+#      ``ee.cloud.foresight.live_snapshot``. Cross-tenant 404 via
+#      ``_fetch_in_workspace`` (same collapsing rule as the other
+#      run-scoped reads).
+#   2. ``gate_decision`` Pydantic sub-model integration —
+#      ``_compose_gate_decision`` builds a :class:`GateDecision` from
+#      the aggregator's :class:`ThresholdDecision.as_wire_dict()` plus
+#      a derived ``reason`` and ISO-8601 ``evaluated_at``. The two
+#      backtest response mappers (``_to_backtest_response`` /
+#      ``_to_backtest_list_item``) now hand back the structured model
+#      so the wire shape is strict-validated. Backward-compat —
+#      Pydantic's ``model_dump()`` produces the legacy dict shape any
+#      caller already keys on.
+#   3. ``precedent_seed`` POST plumbing — ``_run_engine_inline`` now
+#      threads ``body.precedent_seed`` / ``body.precedent_seeds`` into
+#      both the engine ``ScenarioConfig`` AND the cloud-side
+#      ``NoOpDecisionGraphRef`` so the persisted
+#      ``ForesightProjectedDecision.forward_precedent_decision_id``
+#      gets a synthetic, deterministic id whenever the operator opts
+#      in. The engine YAML's existing seed support (PR #1235) is
+#      preserved — body seeds simply layer onto the same machinery.
 # Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) —
 # RFC 08 v1.0 PR 10 — calibration buffer migration to Mongo:
 #   - New ``emit_prediction_record(ctx, payload)`` — engine callback
@@ -182,6 +209,8 @@ from pocketpaw_ee.cloud.foresight.domain import (
     BacktestRun,
     ConfidenceDrift,
     InsightView,
+    LiveAnomaly,
+    LiveSnapshotView,
     ModalOutcomeEntry,
     OnboardingGateState,
     PredictionRecord,
@@ -192,6 +221,7 @@ from pocketpaw_ee.cloud.foresight.domain import (
 )
 from pocketpaw_ee.cloud.foresight.dto import (
     AggregateRollupResponse,
+    Anomaly,
     BacktestRunListItemResponse,
     BacktestRunResponse,
     ConfidenceDriftDto,
@@ -199,8 +229,10 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CreateScenarioRequest,
     ForesightInstinctProposalListResponse,
     ForesightInstinctProposalResponse,
+    GateDecision,
     InsightResponse,
     InsightsResponse,
+    LiveSnapshotResponse,
     ModalOutcomeDistributionDto,
     ModalOutcomeEntryDto,
     OnboardingGateResponse,
@@ -208,10 +240,20 @@ from pocketpaw_ee.cloud.foresight.dto import (
     ProjectedDecisionResponse,
     RollingAccuracyPointDto,
     RollingAccuracySeriesDto,
+    SampledTrace,
     ScenarioCatalogItem,
     ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
+    TierMixActual,
+)
+from pocketpaw_ee.cloud.foresight.live_snapshot import (
+    DEFAULT_TIER_MIX as _LIVE_DEFAULT_TIER_MIX,
+)
+from pocketpaw_ee.cloud.foresight.live_snapshot import (
+    derive_tier_mix_actual,
+    detect_all_anomalies,
+    sample_traces,
 )
 from pocketpaw_ee.cloud.models.foresight_backtest import (
     ForesightBacktest as _ForesightBacktestDoc,
@@ -360,25 +402,38 @@ async def _run_engine_inline(
         )
         for p in body.personas
     ]
+    # v1.0 PR (§14.4 body plumbing) — pass the request's optional
+    # ``precedent_seed`` / ``precedent_seeds`` into the engine config so
+    # the runner's own NoOp ref construction matches what the cloud
+    # closure builds below. The two refs (engine-side + cloud-side) must
+    # agree on seeds so the per-record id the runner stamps on
+    # ``RunResult.projected_decisions`` matches the per-record id the
+    # cloud closure persists on ``ForesightProjectedDecision.forward_precedent_decision_id``.
+    seed_value = body.precedent_seed or ""
+    per_anchor_seeds = dict(body.precedent_seeds or {})
     config = ScenarioConfig(
         name=body.name,
         sub_type=body.sub_type,
         n_ticks=body.n_ticks,
         personas=personas,
+        precedent_seed=body.precedent_seed,
+        precedent_seeds=per_anchor_seeds,
     )
 
     # v14 (§14.4) — build a DecisionGraphRef mirroring the engine's
     # default so the cloud closure can stamp the same
     # ``forward_precedent_decision_id`` value the runner computes for
-    # ``RunResult.projected_decisions``. The cloud's
-    # ``CreateScenarioRequest`` body does not yet expose
-    # ``precedent_seed`` / ``precedent_seeds`` (engine YAML can carry
-    # them; cloud body extension lands later), so this ref is seeded
-    # empty by default — :class:`NoOpDecisionGraphRef` returns ``None``
-    # for every lookup in that case, preserving the v0.1 behaviour the
-    # callers expect. Real RFC 07 wiring drops in by swapping the
-    # implementation here once the Decision Graph lands in pocketpaw.
-    decision_graph_ref = NoOpDecisionGraphRef(seed="")
+    # ``RunResult.projected_decisions``. v1.0 lifts the body seeds onto
+    # this ref so a POST that supplies ``precedent_seed`` produces a
+    # synthetic, deterministic precedent id for every persisted
+    # projection. When no seed is supplied the ref behaves exactly as
+    # before — :class:`NoOpDecisionGraphRef` returns ``None`` for every
+    # lookup and the wire shape collapses to the v0.5 "always None"
+    # default.
+    decision_graph_ref = NoOpDecisionGraphRef(
+        seed=seed_value,
+        per_anchor_seeds=per_anchor_seeds,
+    )
 
     # Per-tick emission closure — only wired when the cloud caller
     # supplies the run id. CLI smoke runs pass no run_id and the
@@ -514,6 +569,10 @@ async def create_scenario_run(
                 )
                 for p in body.personas
             ],
+            # v1.0 PR (§14.4 body plumbing) — surface precedent-seed
+            # validation errors as 422 before opening a doc row.
+            precedent_seed=body.precedent_seed,
+            precedent_seeds=dict(body.precedent_seeds or {}),
         )
     except (TypeError, ValueError, NotImplementedError) as exc:
         raise ValidationError("foresight.invalid_scenario", str(exc)) from exc
@@ -646,7 +705,101 @@ def _to_backtest_domain(doc: _ForesightBacktestDoc) -> BacktestRun:
     )
 
 
+def _compose_gate_decision(
+    raw: dict[str, Any] | None,
+    *,
+    fallback_threshold: float,
+    fallback_evaluated_at: datetime | None,
+) -> GateDecision | None:
+    """Compose a :class:`GateDecision` from the persisted gate dict.
+
+    The persisted dict is the
+    :meth:`ee.foresight.aggregator.ThresholdDecision.as_wire_dict()`
+    payload (``passed`` / ``observed`` / ``threshold`` / ``margin`` /
+    ``n_pairs``). v1.0 promotes that loose dict to a structured
+    Pydantic model so the wire surface is strict-validated; this
+    helper builds the model with two derived fields:
+
+    - ``reason`` — short label derived from ``passed`` + ``n_pairs``.
+      Vocabulary: ``no_pairs`` (n_pairs == 0), ``threshold_met``
+      (passed=True), ``threshold_unmet`` (passed=False, n_pairs >= 1).
+    - ``evaluated_at`` — ISO-8601 UTC timestamp. Reads
+      ``raw["evaluated_at"]`` when the write path populated it (v1.0+);
+      falls back to the backtest doc's ``updatedAt`` (the moment the
+      doc flipped to status="complete"), and finally to "now" so the
+      field is always populated.
+    - ``modal_accuracy`` — alias for ``observed`` so the UI lead's
+      TypeScript shape stays readable. Same float on both fields so
+      they never diverge.
+
+    Returns ``None`` when the input is ``None`` (backtest still
+    queued/running/failed). Malformed input (missing required keys,
+    out-of-range floats) raises a ``ValidationError`` via Pydantic
+    — caught at the service write-site so a bad gate payload never
+    silently degrades the wire surface.
+    """
+    if raw is None:
+        return None
+
+    observed_value = raw.get("observed")
+    if observed_value is None:
+        observed_value = raw.get("modal_accuracy", 0.0)
+    threshold_value = raw.get("threshold", fallback_threshold)
+    n_pairs_value = int(raw.get("n_pairs", 0) or 0)
+    passed_value = bool(raw.get("passed", False))
+
+    if n_pairs_value == 0:
+        reason = "no_pairs"
+    elif passed_value:
+        reason = "threshold_met"
+    else:
+        reason = "threshold_unmet"
+    # Free-form override — a v1.0+ write path may pin a custom reason
+    # (e.g. a future "thin_sample" surface); honour it when present.
+    raw_reason = raw.get("reason")
+    if isinstance(raw_reason, str) and raw_reason:
+        reason = raw_reason
+
+    evaluated_at_raw = raw.get("evaluated_at")
+    evaluated_at_iso: str | None = None
+    if isinstance(evaluated_at_raw, str) and evaluated_at_raw:
+        evaluated_at_iso = evaluated_at_raw
+    elif isinstance(evaluated_at_raw, datetime):
+        evaluated_at_iso = iso_utc(evaluated_at_raw)
+    if not evaluated_at_iso:
+        evaluated_at_iso = iso_utc(fallback_evaluated_at) or iso_utc(datetime.now(UTC_TZ)) or ""
+
+    observed_float = float(observed_value or 0.0)
+    # Clamp the floats into [0, 1] — the aggregator already produces
+    # values in that range; the clamp guards against malformed
+    # historical writes (a stray "1.0001" would otherwise 422 the
+    # response which would be worse than rounding).
+    observed_clamped = max(0.0, min(1.0, observed_float))
+    threshold_clamped = max(0.0, min(1.0, float(threshold_value or 0.0)))
+    margin_value = raw.get("margin")
+    if isinstance(margin_value, (int, float)):
+        margin_float = float(margin_value)
+    else:
+        margin_float = observed_clamped - threshold_clamped
+
+    return GateDecision(
+        passed=passed_value,
+        threshold=threshold_clamped,
+        observed=observed_clamped,
+        modal_accuracy=observed_clamped,
+        margin=round(margin_float, 4),
+        n_pairs=n_pairs_value,
+        reason=reason,
+        evaluated_at=evaluated_at_iso,
+    )
+
+
 def _to_backtest_response(run: BacktestRun) -> BacktestRunResponse:
+    gate_decision = _compose_gate_decision(
+        run.gate_decision,
+        fallback_threshold=run.threshold,
+        fallback_evaluated_at=run.updated_at or run.created_at,
+    )
     return BacktestRunResponse(
         id=run.id,
         workspace_id=run.workspace_id,
@@ -657,12 +810,17 @@ def _to_backtest_response(run: BacktestRun) -> BacktestRunResponse:
         request=dict(run.request),
         threshold=run.threshold,
         result=dict(run.result) if run.result else None,
-        gate_decision=dict(run.gate_decision) if run.gate_decision else None,
+        gate_decision=gate_decision,
         error=run.error,
     )
 
 
 def _to_backtest_list_item(run: BacktestRun) -> BacktestRunListItemResponse:
+    gate_decision = _compose_gate_decision(
+        run.gate_decision,
+        fallback_threshold=run.threshold,
+        fallback_evaluated_at=run.updated_at or run.created_at,
+    )
     return BacktestRunListItemResponse(
         id=run.id,
         workspace_id=run.workspace_id,
@@ -671,7 +829,7 @@ def _to_backtest_list_item(run: BacktestRun) -> BacktestRunListItemResponse:
         created_at=iso_utc(run.created_at) or "",
         updated_at=iso_utc(run.updated_at),
         threshold=run.threshold,
-        gate_decision=dict(run.gate_decision) if run.gate_decision else None,
+        gate_decision=gate_decision,
         error=run.error,
     )
 
@@ -2503,6 +2661,192 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
     return InsightsResponse(items=items)
 
 
+# ---------------------------------------------------------------------------
+# Live snapshot (RFC 08 §11.3) — GET /api/v1/foresight/runs/{id}/live-snapshot.
+#
+# Backs the paw-enterprise LivePanel. Composes a compact "right now"
+# view of a run from the persisted ForesightRun doc + the run's
+# projection list. Cross-tenant 404 via ``_fetch_in_workspace`` so the
+# existence-leak rule that governs the other run-scoped endpoints
+# applies here too.
+#
+# Three data sources, three derivations:
+#
+#   - ``status`` / ``generated_at`` / ``run_id`` — read off the run doc.
+#     The wire vocabulary renames ``queued`` → ``created`` to match the
+#     paw-enterprise contract; everything else mirrors the persisted
+#     status one-to-one.
+#   - ``tier_mix_actual`` — derived from ``run.result.tier_distribution``
+#     when the engine reported one (the run completed and used a tier
+#     pool). Empty / in-flight runs land in the zero-triple branch.
+#   - ``sampled_traces`` — deterministic slice of the persisted
+#     :class:`ForesightProjectedDecision` rows. Sub-type-aware
+#     formatter mirrors the Instinct bridge labelling so the operator
+#     sees consistent text across the Tray + LivePanel.
+#   - ``anomalies`` — three v1.0 rules (tier_drift, confidence_spike,
+#     stalled_persona) evaluated by ``ee.cloud.foresight.live_snapshot``.
+#     Pure functions, easy to unit-test, easy to extend in v1.1.
+# ---------------------------------------------------------------------------
+
+
+# Status vocabulary the LivePanel speaks (paw-enterprise PR #267).
+# Maps the persisted ``ScenarioRunStatus`` shape to the wire status set
+# the UI expects. v0.5 calls the initial state ``queued``; PR #267
+# calls the same state ``created``. The mapping stays here rather than
+# on the wire DTO so the storage shape can keep its v0.5 vocabulary
+# uniform across the foresight surface.
+_LIVE_STATUS_MAP: dict[str, str] = {
+    "queued": "created",
+    "running": "running",
+    "complete": "complete",
+    "failed": "failed",
+}
+
+
+def _live_status_for(persisted_status: str) -> str:
+    """Map a persisted run status to the LivePanel wire vocabulary."""
+    return _LIVE_STATUS_MAP.get(persisted_status, "created")
+
+
+def _expected_persona_ids(run_request: dict[str, Any] | None) -> list[str]:
+    """Extract the persona name set the run was created with.
+
+    Used by the silent-persona ``critical`` detector — knowing the
+    full roster lets us flag personas with ZERO projections (not just
+    behind by 30s). v0.5 stores the request body verbatim under
+    ``ForesightRun.request`` so the persona names are recoverable
+    without re-running the engine.
+    """
+    if not isinstance(run_request, dict):
+        return []
+    personas = run_request.get("personas") or []
+    if not isinstance(personas, list):
+        return []
+    out: list[str] = []
+    for entry in personas:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            out.append(name)
+    return out
+
+
+def _live_view_to_response(view: LiveSnapshotView) -> LiveSnapshotResponse:
+    """Map the frozen-dataclass view onto the wire DTO.
+
+    Done by hand because the nested tuple-of-domain → list-of-pydantic
+    projection benefits from explicit shape mapping; every nested DTO
+    uses ``extra='forbid'`` so the Pydantic round-trip would refuse
+    superfluous keys anyway.
+    """
+    return LiveSnapshotResponse(
+        run_id=view.run_id,
+        generated_at=_iso_required(view.generated_at),
+        status=view.status,
+        tier_mix_actual=TierMixActual(
+            premium=view.tier_mix_actual.premium,
+            mid=view.tier_mix_actual.mid,
+            tail=view.tier_mix_actual.tail,
+        ),
+        sampled_traces=[
+            SampledTrace(
+                tick_id=t.tick_id,
+                persona_id=t.persona_id,
+                sub_type=t.sub_type,
+                action_summary=t.action_summary,
+                confidence=t.confidence,
+            )
+            for t in view.sampled_traces
+        ],
+        anomalies=[Anomaly(kind=a.kind, severity=a.severity, body=a.body) for a in view.anomalies],
+    )
+
+
+async def get_live_snapshot(
+    ctx: RequestContext,
+    run_id: str,
+) -> LiveSnapshotResponse:
+    """Compose the live snapshot for one Foresight run.
+
+    Workspace-scoped: an unknown / cross-tenant run id collapses to a
+    404 via :func:`_fetch_in_workspace` — the same existence-not-
+    leakable rule the other run-scoped reads enforce.
+
+    Read-only — no event emit, no Beanie writes (cloud rule #9).
+
+    The wire shape is locked to paw-enterprise PR #267; every field
+    name and nesting shape on :class:`LiveSnapshotResponse` mirrors
+    the TypeScript surface the LivePanel was built against.
+
+    Empty / in-flight runs collapse to a zero ``tier_mix_actual``
+    triple and an empty ``sampled_traces`` array — the UI's empty
+    state renders directly off those defaults without a separate 404
+    branch.
+    """
+    workspace_id = _require_workspace(ctx)
+
+    # 404-collapse first — an unknown run id must not leak a tier-mix
+    # or anomaly readout that could probe existence.
+    run_doc = await _fetch_in_workspace(workspace_id, run_id)
+
+    # Read the projection list for the run. Bounded — a run with a
+    # huge fanout would still serve a sub-cap slice. We pull a wide
+    # window (up to 500 rows, the projection list's hard cap) so the
+    # anomaly detectors and the sampler have a representative
+    # population without dragging the entire collection into memory.
+    projection_docs = (
+        await _ForesightProjectedDecisionDoc.find({"workspace": workspace_id, "run_id": run_id})
+        .sort([("tick_id", 1), ("anchor_id", 1)])  # type: ignore[list-item]
+        .limit(500)
+        .to_list()
+    )
+    projection_domains = [_to_projected_decision_domain(d) for d in projection_docs]
+
+    # Tier mix — driven from the engine's tier_distribution when the
+    # run reported one (completed runs with a tier pool); otherwise the
+    # zero triple. The fall-through path is also empty-runs / in-flight
+    # — the UI's LivePanel renders the empty state from zeros.
+    result_blob = dict(run_doc.result or {}) if run_doc.result else {}
+    tier_mix = derive_tier_mix_actual(
+        projections=projection_domains,
+        run_result=result_blob,
+    )
+
+    # Sampled traces — deterministic slice of up to 10 projections.
+    sampled = sample_traces(projection_domains)
+
+    # Anomaly detection — three rules + the silent-persona check.
+    # ``latest_tick_id`` is the max tick id seen across projections;
+    # ``latest_tick_ts`` is the corresponding ``createdAt`` (the run
+    # doesn't carry a per-tick timestamp on the doc itself in v0.5,
+    # so we derive it from the most recent projection's createdAt).
+    latest_tick_id: int | None = None
+    latest_tick_ts: datetime | None = None
+    if projection_domains:
+        latest = max(projection_domains, key=lambda p: p.tick_id)
+        latest_tick_id = latest.tick_id
+        latest_tick_ts = latest.created_at
+    anomalies: list[LiveAnomaly] = detect_all_anomalies(
+        tier_mix_actual=tier_mix,
+        projections=projection_domains,
+        expected_persona_ids=_expected_persona_ids(dict(run_doc.request or {})),
+        latest_tick_id=latest_tick_id,
+        latest_tick_ts=latest_tick_ts,
+        configured_mix=_LIVE_DEFAULT_TIER_MIX,
+    )
+
+    view = LiveSnapshotView(
+        run_id=run_id,
+        generated_at=datetime.now(UTC_TZ),
+        status=_live_status_for(run_doc.status),  # type: ignore[arg-type]
+        tier_mix_actual=tier_mix,
+        sampled_traces=tuple(sampled),
+        anomalies=tuple(anomalies),
+    )
+    return _live_view_to_response(view)
+
+
 __all__ = [
     "AGGREGATE_DEFAULT_WINDOW_DAYS",
     "AGGREGATE_MAX_WINDOW_DAYS",
@@ -2515,6 +2859,7 @@ __all__ = [
     "get_aggregate_rollup",
     "get_backtest",
     "get_insights",
+    "get_live_snapshot",
     "get_onboarding_gate",
     "get_scenario_run",
     "list_backtests",

@@ -1,4 +1,10 @@
 # tests/cloud/test_foresight_backtest_service.py — RFC 08 PR 4.
+# Updated: 2026-05-26 (feat/foresight-v10-live-snapshot-and-fixes) —
+#   ``gate_decision`` is now a :class:`GateDecision` Pydantic model
+#   instead of a free-form dict; updated the ``persists_backtest_with_tenancy``
+#   assertion to use attribute access. The legacy dict shape stays
+#   available via ``model_dump()`` so the rest of the suite (event
+#   payload reads via ``model_dump``) keeps working unchanged.
 # Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) —
 #   monkeypatched ``_score_backtest`` fakes accept ``**_kwargs`` to
 #   absorb the new ``workspace_id`` + ``backtest_run_id`` kwargs PR 10
@@ -94,8 +100,18 @@ async def test_create_persists_backtest_with_tenancy(recording_bus) -> None:
     assert out.result is not None
     assert "calibration_summary" in out.result
     assert out.gate_decision is not None
-    assert "passed" in out.gate_decision
-    assert "threshold" in out.gate_decision
+    # v1.0 promoted ``gate_decision`` from ``dict[str, Any]`` to a
+    # :class:`GateDecision` Pydantic model. The legacy field set
+    # (``passed`` / ``threshold``) is preserved on the model.
+    assert out.gate_decision.passed is not None
+    assert isinstance(out.gate_decision.threshold, float)
+    # Pydantic's ``model_dump`` exposes the legacy dict shape for any
+    # downstream caller that keyed on the flat dict.
+    serialized = out.gate_decision.model_dump()
+    assert "passed" in serialized
+    assert "threshold" in serialized
+    assert "reason" in serialized
+    assert "evaluated_at" in serialized
 
 
 async def test_create_emits_created_then_completed(recording_bus) -> None:
