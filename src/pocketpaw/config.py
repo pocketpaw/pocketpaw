@@ -466,19 +466,19 @@ class Settings(BaseSettings):
         ),
     )
     foresight_use_skill: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Activate the ``foresight-create-sim`` bundled skill in chat. "
-            "Default OFF — the SKILL.md still auto-installs to "
-            "``~/.claude/skills/`` (idempotent, harmless) but the chat "
-            "agent's prompt context builder and the cloud's chat surface "
-            "only surface the skill when this flag is True. Read by the "
-            "agent prompt assembler (``pocketpaw.bootstrap.context_builder`` "
-            "and the cloud's paw-enterprise feature-flag echo endpoint at "
+            "Default ON as of 2026-05-27 — the SKILL.md auto-installs to "
+            "``~/.claude/skills/`` (idempotent) and the chat agent's "
+            "prompt context builder + the cloud's foresight surface "
+            "handler include the skill-activation hint in the preamble. "
+            "Read by the agent prompt assembler "
+            "(``pocketpaw.bootstrap.context_builder``) and the cloud's "
+            "paw-enterprise feature-flag echo endpoint at "
             "``/api/v1/config/features``); the foresight CRUD endpoints "
             "themselves stay reachable regardless of this flag — the gate "
-            "is purely a chat-surface affordance toggle. Flip to True per "
-            "workspace once Foresight rollout completes; the flag is dev-"
+            "is purely a chat-surface affordance toggle. The flag is dev-"
             "grade today and tightens to a per-workspace database setting "
             "in a follow-up RFC."
         ),

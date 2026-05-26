@@ -31,6 +31,11 @@ class SurfaceMetaRequest(BaseModel):
     agent_id: str | None = None
     file_id: str | None = None
     route_path: str | None = None
+    # Foresight hints — mirror SurfaceMeta. Set by the paw-enterprise
+    # sidebar's surface stamp on /foresight routes. All optional.
+    run_id: str | None = None
+    scenario_id: str | None = None
+    panel: str | None = None
 
 
 class SurfaceRequest(BaseModel):
