@@ -1,4 +1,13 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-26 (feat/foresight-v12-skill-and-loopback-auth) — RFC 08
+# v1.0 wave 4. All foresight endpoints now resolve their RequestContext
+# via ``loopback_or_request_context`` (the JWT-or-loopback dep). The
+# local chat agent presents ``X-PocketPaw-Internal: true`` +
+# ``X-PocketPaw-Workspace-Id`` + ``X-PocketPaw-User-Id`` headers over a
+# loopback connection and skips JWT auth entirely; non-loopback or
+# missing-header callers fall through to the standard
+# ``current_optional_user`` flow (401 on no token). Endpoint signatures
+# are unchanged — only the dep swap is touched.
 # Modified: 2026-05-26 (feat/foresight-v10-insights-llm) — RFC 08 v1.0.
 # LLM-driven insights synthesizer toggle:
 #     GET /api/v1/foresight/workspace/insights-config
@@ -126,7 +135,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud._core.context import RequestContext, loopback_or_request_context
 from pocketpaw_ee.cloud.foresight import scenarios as foresight_scenarios
 from pocketpaw_ee.cloud.foresight import service as foresight_service
 from pocketpaw_ee.cloud.foresight.dto import (
@@ -163,7 +172,7 @@ router = APIRouter(
 @router.post("/scenarios", response_model=ScenarioRunResponse)
 async def create_scenario_run(
     body: CreateScenarioRequest,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ScenarioRunResponse:
     """Run a scenario inline and return the result.
 
@@ -190,7 +199,7 @@ async def create_scenario_run(
 @router.get("/runs/{run_id}", response_model=ScenarioRunResponse)
 async def get_run(
     run_id: str,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ScenarioRunResponse:
     """Fetch a stored run by id.
 
@@ -204,7 +213,7 @@ async def get_run(
 @router.get("/runs", response_model=list[ScenarioRunListItemResponse])
 async def list_runs(
     limit: int = Query(default=50, ge=1, le=200),
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> list[ScenarioRunListItemResponse]:
     """List runs in the caller's workspace, most recent first.
 
@@ -226,7 +235,7 @@ async def list_projected_decisions(
     anchor_id: str | None = Query(default=None, max_length=256),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ProjectedDecisionListResponse:
     """List projected decisions for one run.
 
@@ -265,7 +274,7 @@ async def list_projected_decisions(
 )
 async def get_live_snapshot(
     run_id: str,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> LiveSnapshotResponse:
     """Compact "right now" view of one Foresight run.
 
@@ -313,7 +322,7 @@ async def list_instinct_proposals(
     run_id: str,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ForesightInstinctProposalListResponse:
     """List the Instinct proposals spawned by one Foresight run.
 
@@ -354,7 +363,7 @@ async def list_instinct_proposals(
 @router.post("/backtests", response_model=BacktestRunResponse)
 async def create_backtest(
     body: CreateBacktestRequest,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> BacktestRunResponse:
     """Run a retroactive backtest inline, score it against the unlock
     threshold, and return the result + gate decision.
@@ -383,7 +392,7 @@ async def create_backtest(
 @router.get("/backtests/{backtest_id}", response_model=BacktestRunResponse)
 async def get_backtest(
     backtest_id: str,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> BacktestRunResponse:
     """Fetch a stored backtest by id.
 
@@ -397,7 +406,7 @@ async def get_backtest(
 @router.get("/backtests", response_model=list[BacktestRunListItemResponse])
 async def list_backtests(
     limit: int = Query(default=50, ge=1, le=200),
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> list[BacktestRunListItemResponse]:
     """List backtests in the caller's workspace, most recent first.
 
@@ -411,7 +420,7 @@ async def list_backtests(
 
 @router.get("/onboarding/gate", response_model=OnboardingGateResponse)
 async def get_onboarding_gate(
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> OnboardingGateResponse:
     """Return the workspace's onboarding unlock posture.
 
@@ -439,7 +448,7 @@ async def get_onboarding_gate(
 
 @router.get("/scenarios", response_model=ScenarioCatalogResponse)
 async def list_scenarios(
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ScenarioCatalogResponse:
     """Enumerate the bundled scenario templates (RFC 08 §11.2).
 
@@ -461,7 +470,7 @@ async def list_scenarios(
 @router.get("/aggregate", response_model=AggregateRollupResponse)
 async def get_aggregate_rollup(
     window_days: int = Query(default=30, ge=1, le=90),
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> AggregateRollupResponse:
     """Rolling rollup over the workspace's recent backtests + projections
     (RFC 08 §11.5).
@@ -489,7 +498,7 @@ async def get_aggregate_rollup(
 
 @router.get("/insights", response_model=InsightsResponse)
 async def get_insights(
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> InsightsResponse:
     """Pattern-based insight synthesizer output (RFC 08 §11.6).
 
@@ -518,7 +527,7 @@ async def get_insights(
     response_model=ForesightThresholdResponse,
 )
 async def get_workspace_threshold(
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ForesightThresholdResponse:
     """Return the workspace's resolved onboarding-gate threshold view.
 
@@ -542,7 +551,7 @@ async def get_workspace_threshold(
 )
 async def set_workspace_threshold(
     body: SetForesightThresholdRequest,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ForesightThresholdResponse:
     """Upsert the workspace's onboarding-gate threshold override.
 
@@ -587,7 +596,7 @@ async def set_workspace_threshold(
     response_model=ForesightInsightsConfigResponse,
 )
 async def get_workspace_insights_config(
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ForesightInsightsConfigResponse:
     """Return the workspace's resolved insights-synthesizer config.
 
@@ -611,7 +620,7 @@ async def get_workspace_insights_config(
 )
 async def set_workspace_insights_config(
     body: SetForesightInsightsConfigRequest,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> ForesightInsightsConfigResponse:
     """Upsert the workspace's insights-synthesizer choice.
 
@@ -650,7 +659,7 @@ async def list_custom_scenarios(
     sub_type: str | None = Query(default=None, max_length=64),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> CustomScenarioListResponse:
     """List workspace-scoped custom scenarios, most-recently-edited first.
 
@@ -677,7 +686,7 @@ async def list_custom_scenarios(
 )
 async def get_custom_scenario(
     scenario_id: str,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> CustomScenarioResponse:
     """Fetch one custom scenario by id.
 
@@ -695,7 +704,7 @@ async def get_custom_scenario(
 )
 async def create_custom_scenario(
     body: CreateCustomScenarioRequest,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> CustomScenarioResponse:
     """Save a new custom scenario YAML against the workspace.
 
@@ -724,7 +733,7 @@ async def create_custom_scenario(
 async def update_custom_scenario(
     scenario_id: str,
     body: CreateCustomScenarioRequest,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> CustomScenarioResponse:
     """Full-replace the custom scenario fields.
 
@@ -747,7 +756,7 @@ async def update_custom_scenario(
 )
 async def delete_custom_scenario(
     scenario_id: str,
-    ctx: RequestContext = Depends(request_context),
+    ctx: RequestContext = Depends(loopback_or_request_context),
 ) -> Response:
     """Remove the custom scenario row.
 

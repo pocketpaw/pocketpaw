@@ -24,7 +24,11 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.context import (
+    RequestContext,
+    ScopeKind,
+    loopback_or_request_context,
+)
 from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud._core.realtime.events import ForesightThresholdUpdated
@@ -335,7 +339,7 @@ def _build_app(workspace_id: str | None = "w1", user_id: str = "u1") -> FastAPI:
     async def _ctx_dep() -> RequestContext:
         return _ctx(workspace_id, user_id)
 
-    app.dependency_overrides[request_context] = _ctx_dep
+    app.dependency_overrides[loopback_or_request_context] = _ctx_dep
     app.dependency_overrides[require_license] = lambda: None
     return app
 

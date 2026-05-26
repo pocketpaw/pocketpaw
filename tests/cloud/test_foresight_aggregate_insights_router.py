@@ -16,7 +16,11 @@ from typing import Any
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
+from pocketpaw_ee.cloud._core.context import (
+    RequestContext,
+    ScopeKind,
+    loopback_or_request_context,
+)
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.foresight.router import router as foresight_router
 from pocketpaw_ee.cloud.license import require_license
@@ -40,7 +44,7 @@ def _build_app(workspace_id: str | None = "w1", user_id: str = "u1") -> FastAPI:
     async def _ctx() -> RequestContext:
         return _make_ctx(workspace_id, user_id)
 
-    app.dependency_overrides[request_context] = _ctx
+    app.dependency_overrides[loopback_or_request_context] = _ctx
     app.dependency_overrides[require_license] = lambda: None
     return app
 
