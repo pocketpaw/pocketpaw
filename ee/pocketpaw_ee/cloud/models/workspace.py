@@ -16,6 +16,17 @@ class WorkspaceSettings(BaseModel):
     retention_days: int | None = None  # None = keep forever
 
 
+class SsoConfig(BaseModel):
+    """Embedded OIDC SSO config — one per workspace, optional."""
+
+    provider: str  # okta | google | azure | generic_oidc
+    issuer: str
+    client_id: str
+    client_secret_encrypted: str  # Fernet ciphertext
+    allowed_domains: list[str] = Field(default_factory=list)
+    enforced: bool = False
+
+
 class Workspace(TimestampedDocument):
     """Organization workspace — one per enterprise deployment."""
 
@@ -25,6 +36,7 @@ class Workspace(TimestampedDocument):
     plan: str = "team"  # from license: team | business | enterprise
     seats: int = 5
     settings: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
+    sso_config: SsoConfig | None = None
     deleted_at: datetime | None = None
 
     class Settings:

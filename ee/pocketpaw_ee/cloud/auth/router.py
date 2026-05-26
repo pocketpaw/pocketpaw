@@ -26,9 +26,9 @@ from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.auth import mfa as mfa_service
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth import sessions as sessions_service
+from pocketpaw_ee.cloud.auth._login_helpers import mint_and_record as _mint_and_record
 from pocketpaw_ee.cloud.auth.api_keys_router import router as api_keys_router
 from pocketpaw_ee.cloud.auth.core import (
-    SECRET,
     UserCreate,
     UserManager,
     UserRead,
@@ -94,23 +94,6 @@ async def _authenticate_or_400(
     return user
 
 
-_JWT_AUDIENCE = ["fastapi-users:auth"]
-
-
-def _jti_from_token(token: str) -> str | None:
-    try:
-        payload = pyjwt.decode(
-            token,
-            SECRET,
-            audience=_JWT_AUDIENCE,
-            algorithms=["HS256"],
-        )
-    except pyjwt.PyJWTError:
-        return None
-    jti = payload.get("jti")
-    return jti if isinstance(jti, str) else None
-
-
 def _current_jti(request: Request) -> str | None:
     token = request.cookies.get("paw_auth")
     if not token:
@@ -125,15 +108,6 @@ def _current_jti(request: Request) -> str | None:
         return None
     jti = payload.get("jti")
     return jti if isinstance(jti, str) else None
-
-
-async def _mint_and_record(backend, user: User, request: Request) -> Response:
-    strategy = backend.get_strategy()
-    token = await strategy.write_token(user)
-    jti = _jti_from_token(token)
-    if jti:
-        await sessions_service.record_session(str(user.id), jti, request)
-    return await backend.transport.get_login_response(token)
 
 
 @router.post("/auth/login", name="auth:cookie.login.mfa-gated")
@@ -314,6 +288,10 @@ router.include_router(
 )
 
 router.include_router(api_keys_router)
+
+from pocketpaw_ee.cloud.auth.sso import router as sso_router  # noqa: E402
+
+router.include_router(sso_router)
 
 
 # ---------------------------------------------------------------------------
