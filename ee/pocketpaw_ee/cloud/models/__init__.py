@@ -11,6 +11,7 @@ from pocketpaw_ee.calendar.models import _CalendarDoc, _EventDoc
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
@@ -54,6 +55,7 @@ __all__ = [
     "AgentConfig",
     "Attachment",
     "AuditEvent",
+    "AuditWebhook",
     "AuthSession",
     "ChatRunDoc",
     "Comment",
@@ -120,6 +122,7 @@ def get_all_documents():
         PlanSession,
         ChatRunDoc,
         AuditEvent,
+        AuditWebhook,
         AuthSession,
         APIKey,
         _CalendarDoc,

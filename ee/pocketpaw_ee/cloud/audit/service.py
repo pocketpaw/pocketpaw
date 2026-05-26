@@ -4,6 +4,7 @@
 #   sourced from ctx.workspace_id. # no-event: read-only entity per Rule 9.
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -149,6 +150,12 @@ async def record(
         await doc.insert()
     except Exception:
         logger.warning("audit.record failed for %s/%s", workspace_id, action, exc_info=True)
+        return
+
+    # Fire-and-forget SIEM delivery — never blocks the audit write.
+    from pocketpaw_ee.cloud.audit import webhooks as _webhooks
+
+    _webhooks.schedule_delivery(doc)
 
 
 async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> AuditPage:
@@ -194,6 +201,60 @@ async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> Aud
     return AuditPage(items=[_doc_to_domain(d) for d in rows], next_cursor=next_cursor)
 
 
+async def stream_export_csv(
+    workspace_id: str,
+    *,
+    since: str | None = None,
+    until: str | None = None,
+):
+    """Async generator yielding CSV rows (header + one row per event).
+
+    No aggregation; mongomock-compatible find+sort. Buffer is flushed per
+    row so memory stays flat regardless of result count.
+    """
+    import csv
+    import io
+
+    mongo_filter: dict[str, Any] = {"workspace": workspace_id}
+    time_filter: dict[str, datetime] = {}
+    if since:
+        time_filter["$gte"] = _parse_iso(since, "since")
+    if until:
+        time_filter["$lte"] = _parse_iso(until, "until")
+    if time_filter:
+        mongo_filter["at"] = time_filter
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    def _flush() -> str:
+        out = buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        return out
+
+    writer.writerow(
+        ["at", "actor_id", "action", "target_type", "target_id", "ip", "user_agent", "metadata"]
+    )
+    yield _flush()
+
+    docs = await _AuditEventDoc.find(mongo_filter).sort([("at", -1), ("_id", -1)]).to_list()
+    for d in docs:
+        writer.writerow(
+            [
+                d.at.isoformat(),
+                d.actor_id,
+                d.action,
+                d.target_type,
+                d.target_id or "",
+                d.ip or "",
+                d.user_agent or "",
+                json.dumps(d.metadata or {}, default=str),
+            ]
+        )
+        yield _flush()
+
+
 async def list_events_response(
     workspace_id: str,
     query: AuditQueryRequest | dict,
@@ -215,4 +276,5 @@ __all__ = [
     "list_events",
     "list_events_response",
     "record",
+    "stream_export_csv",
 ]

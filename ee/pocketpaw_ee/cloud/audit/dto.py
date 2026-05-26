@@ -73,11 +73,47 @@ class AuditPageResponse(BaseModel):
     nextCursor: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# SIEM webhook DTOs (Wave 3 Task 15).
+# ---------------------------------------------------------------------------
+
+
+class CreateAuditWebhookRequest(BaseModel):
+    url: str = Field(..., max_length=2048)
+
+
+class UpdateAuditWebhookRequest(BaseModel):
+    enabled: bool | None = None
+
+
+class AuditWebhookOut(BaseModel):
+    id: str
+    workspaceId: str
+    url: str
+    enabled: bool
+    failureCount: int
+    lastDeliveryAt: str | None = None
+    lastStatus: int | None = None
+    lastError: str | None = None
+    createdBy: str
+    createdAt: str
+    secret: str | None = None  # populated only at creation / rotation
+
+
+class RotatedSecretResponse(BaseModel):
+    webhook: AuditWebhookOut
+    secret: str
+
+
 __all__ = [
     "AuditEntryDTO",
     "AuditEventOut",
     "AuditListResponse",
     "AuditPageResponse",
     "AuditQueryRequest",
+    "AuditWebhookOut",
+    "CreateAuditWebhookRequest",
     "ListAuditRequest",
+    "RotatedSecretResponse",
+    "UpdateAuditWebhookRequest",
 ]
