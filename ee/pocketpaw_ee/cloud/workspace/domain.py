@@ -55,7 +55,7 @@ class Invite:
     email: str
     role: str
     invited_by: str  # user_id
-    token: str
+    token: str | None
     group_id: str | None
     accepted: bool
     revoked: bool

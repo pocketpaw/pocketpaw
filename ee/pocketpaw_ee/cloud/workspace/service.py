@@ -51,6 +51,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceUpdated,
 )
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
@@ -88,14 +89,14 @@ def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Worksp
     )
 
 
-def _invite_to_domain(doc: _InviteDoc) -> Invite:
+def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) -> Invite:
     return Invite(
         id=str(doc.id),
         workspace_id=doc.workspace,
         email=doc.email,
         role=doc.role,
         invited_by=doc.invited_by,
-        token=doc.token,
+        token=plaintext_token,  # only populated on create; None on read
         group_id=doc.group,
         accepted=doc.accepted,
         revoked=doc.revoked,
@@ -439,16 +440,18 @@ async def create_invite(
         )
         raise ConflictError("invite.already_pending", msg)
 
+    plaintext = secrets.token_urlsafe(32)
     invite_doc = _InviteDoc(
         workspace=workspace_id,
         email=body.email,
         role=body.role,
         invited_by=ctx.user_id,
-        token=secrets.token_urlsafe(32),
+        token=None,  # plaintext never persisted for new invites
+        token_hash=hash_token(plaintext),
         group=body.group_id,
     )
     await invite_doc.insert()
-    invite = _invite_to_domain(invite_doc)
+    invite = _invite_to_domain(invite_doc, plaintext_token=plaintext)
 
     invited_user_id = await _find_user_id_by_email(body.email)
 
@@ -471,7 +474,7 @@ async def create_invite(
             body="",
             source=NotificationSource(
                 type="invite",
-                id=invite.token,
+                id=invite.id,  # the invite document id, not the token
                 room_id=invite.group_id,
             ),
         )
@@ -481,9 +484,17 @@ async def create_invite(
 
 async def validate_invite(token: str) -> tuple[Invite, str]:
     """Return ``(invite, workspace_name)``. Raises NotFound if unknown."""
-    invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
+    th = hash_token(token)
+    invite_doc = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
     if invite_doc is None:
-        raise NotFound("invite")
+        # Legacy: an invite created before hashing rollout. One-time
+        # backfill so the row stops being plaintext-readable.
+        invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
+        if invite_doc is None:
+            raise NotFound("invite")
+        invite_doc.token_hash = th
+        invite_doc.token = None
+        await invite_doc.save()
     invite = _invite_to_domain(invite_doc)
     ws_doc = await _fetch_workspace(invite.workspace_id)
     ws_name = ws_doc.name if ws_doc is not None else ""
@@ -491,9 +502,15 @@ async def validate_invite(token: str) -> tuple[Invite, str]:
 
 
 async def accept_invite(ctx: RequestContext, token: str) -> None:
-    invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
+    th = hash_token(token)
+    invite_doc = await _InviteDoc.find_one(_InviteDoc.token_hash == th)
     if invite_doc is None:
-        raise NotFound("invite")
+        invite_doc = await _InviteDoc.find_one(_InviteDoc.token == token)
+        if invite_doc is None:
+            raise NotFound("invite")
+        invite_doc.token_hash = th
+        invite_doc.token = None
+        await invite_doc.save()
     invite = _invite_to_domain(invite_doc)
     if invite.accepted:
         raise ConflictError("invite.already_accepted", "This invite has already been accepted")

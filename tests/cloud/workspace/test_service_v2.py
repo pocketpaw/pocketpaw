@@ -374,3 +374,60 @@ async def test_validate_invite_unknown_token_raises_not_found() -> None:
 
 async def _async_noop(*_args, **_kwargs):
     return None
+
+
+async def test_create_invite_hashes_token_at_rest(
+    mongo_db: Any, captured_legacy_events, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    owner = await _seed_user(email="o@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="W", slug="w"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="invitee@x.c", role="member"),
+    )
+
+    # The returned domain object carries the plaintext token (the
+    # only place it lives outside the email URL).
+    assert invite.token and len(invite.token) >= 32
+
+    # The DB row stores the HASH, not the plaintext.
+    from pocketpaw_ee.cloud.models.invite import Invite as _D
+    from pocketpaw_ee.cloud.models.invite import hash_token
+
+    row = await _D.find_one(_D.token_hash == hash_token(invite.token))
+    assert row is not None
+    assert row.token in (None, "")  # plaintext column is not populated for new invites
+
+
+async def test_validate_invite_accepts_plaintext_by_hash(
+    mongo_db: Any, captured_legacy_events, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    owner = await _seed_user(email="o2@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)),
+        CreateWorkspaceRequest(name="W2", slug="w2"),
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="i2@x.c", role="member"),
+    )
+
+    looked_up, ws_name = await workspace_service.validate_invite(invite.token)
+    assert looked_up.email == "i2@x.c"
+    assert ws_name == "W2"
+
+
+async def test_validate_invite_unknown_hash_404(mongo_db: Any) -> None:
+    with pytest.raises(NotFound):
+        await workspace_service.validate_invite("definitely-not-a-real-token")
