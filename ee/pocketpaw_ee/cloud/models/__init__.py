@@ -1,5 +1,10 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — added
+``ForesightWorkspaceScenario`` (RFC 08 v1.0 wave 3) to the registered
+docs + ``__all__`` so workspace-scoped custom scenarios are wired into
+``init_beanie``. Only ``ee.cloud.foresight.scenarios`` imports the doc
+class directly (import-linter contract).
 Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — added
 ``ForesightWorkspaceConfig`` to the registered docs + ``__all__`` so RFC 08
 v1.0's per-workspace onboarding threshold override is wired into
@@ -31,6 +36,9 @@ from pocketpaw_ee.cloud.models.foresight_projected_decision import (
 from pocketpaw_ee.cloud.models.foresight_run import ForesightRun
 from pocketpaw_ee.cloud.models.foresight_workspace_config import (
     ForesightWorkspaceConfig,
+)
+from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
+    ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.invite import Invite
@@ -80,6 +88,7 @@ __all__ = [
     "ForesightProjectedDecision",
     "ForesightRun",
     "ForesightWorkspaceConfig",
+    "ForesightWorkspaceScenario",
     "Group",
     "GroupAgent",
     "Invite",
@@ -138,6 +147,7 @@ def get_all_documents():
         ForesightProjectedDecision,
         ForesightPredictionRecord,
         ForesightWorkspaceConfig,
+        ForesightWorkspaceScenario,
     ]
 
 

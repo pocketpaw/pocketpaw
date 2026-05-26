@@ -1,4 +1,23 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC
+# 08 v1.0 wave 3 adds the workspace-scoped custom-scenario surface:
+#   - ``CustomScenarioParsedMetaDto`` — denormalized parse result on the
+#     wire (num_personas / num_ticks / tier_mix / precedent_seed).
+#   - ``CustomScenarioListItem`` + ``CustomScenarioListResponse`` —
+#     ``GET /api/v1/foresight/scenarios/custom`` paginated envelope.
+#   - ``CustomScenarioResponse`` —
+#     ``GET /api/v1/foresight/scenarios/custom/{id}`` plus the POST/PUT
+#     return shape (carries the full ``yaml_body``).
+#   - ``CreateCustomScenarioRequest`` — POST/PUT body (full replace on
+#     PUT; ``parsed_meta_override`` is accepted but ignored on the
+#     write path — the service always recomputes the parsed meta from
+#     the YAML body so the doc never drifts from its source-of-truth).
+#   - ``CreateScenarioRequest.custom_scenario_id`` — optional field on
+#     the run-create body that points at a workspace scenario; when
+#     present, ``personas`` may be omitted and the server loads the
+#     scenario's persona list from the saved YAML. ``sub_type`` /
+#     ``n_ticks`` likewise default to the saved values when the field
+#     is set, unless overridden on the request.
 # Modified: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) —
 # RFC 08 v1.0 PR 10 adds the per-workspace threshold-override surface:
 #     - ``ForesightThresholdResponse`` — shape returned by both GET and
@@ -75,7 +94,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -135,7 +154,22 @@ class CreateScenarioRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     sub_type: str = Field(default="decision_forecast", max_length=64)
     n_ticks: int = Field(default=1, ge=1, le=1000)
-    personas: list[PersonaSpecRequest] = Field(..., min_length=1, max_length=1000)
+    personas: list[PersonaSpecRequest] = Field(default_factory=list, max_length=1000)
+    custom_scenario_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Optional workspace-scoped custom scenario id (RFC 08 v1.0 "
+            "wave 3). When provided, the server loads the scenario's "
+            "saved YAML body and uses it for the run instead of looking "
+            "up by ``sub_type``. ``custom_scenario_id`` wins over the "
+            "request's ``sub_type`` / ``personas`` / ``n_ticks`` when "
+            "the YAML carries those fields. 422 "
+            "(``foresight.custom_scenario_not_found``) if the id is "
+            "unknown or cross-tenant. When the field is None (the "
+            "default), the v0.5 inline-personas path runs unchanged."
+        ),
+    )
     route_to_instinct: bool = Field(
         default=False,
         description=(
@@ -911,6 +945,145 @@ class SetForesightThresholdRequest(BaseModel):
     threshold: float | None = Field(default=None, ge=0.5, le=0.95)
 
 
+# ---------------------------------------------------------------------------
+# Custom scenarios (Team 1 wave 3) — workspace-scoped scenario YAML
+# storage + CRUD wire shapes (RFC 08 v1.0).
+#
+# Operators save their own scenario YAMLs against the workspace and
+# point runs at them via ``CreateScenarioRequest.custom_scenario_id``.
+# Three v1.0-supported ``sub_type`` values keep the surface aligned
+# with the engine's ``SUPPORTED_SUB_TYPES`` tuple; broaden in lockstep
+# when the engine adds more sub-types.
+# ---------------------------------------------------------------------------
+
+
+# The literal mirrors the engine's
+# ``pocketpaw_ee.foresight.subtypes.SUPPORTED_SUB_TYPES`` set. Keeping it
+# inline (rather than importing from the engine module) preserves the
+# import-linter contract "cloud → engine forbidden"; updates here must
+# stay in lockstep with the engine.
+CustomScenarioSubType = Literal["decision_forecast", "market_sim", "org_change_rehearsal"]
+
+
+class CustomScenarioParsedMetaDto(BaseModel):
+    """Denormalized parse result for a custom scenario.
+
+    Service stamps this onto the doc at write time so the list endpoint
+    can render ``num_personas`` / ``num_ticks`` / ``tier_mix`` without
+    re-parsing the YAML body on every read. ``precedent_seed`` is the
+    scenario-root seed if present in the YAML, else ``None``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    num_personas: int = Field(..., ge=0)
+    num_ticks: int = Field(..., ge=0)
+    tier_mix: dict[str, float] = Field(default_factory=dict)
+    precedent_seed: str | None = None
+
+
+class CustomScenarioListItem(BaseModel):
+    """Lighter shape for the list endpoint — drops the inline ``yaml_body``
+    blob so a workspace with dozens of saved scenarios serves the list
+    cheaply. The detail endpoint (``GET /scenarios/custom/{id}``) returns
+    the full :class:`CustomScenarioResponse`.
+
+    ``num_personas`` and ``num_ticks`` are surfaced flat (rather than
+    nested inside ``parsed_meta``) so the picker UI can sort / filter
+    without unpacking the meta block.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    sub_type: CustomScenarioSubType
+    description: str = ""
+    author: str = ""
+    num_personas: int = Field(..., ge=0)
+    num_ticks: int = Field(..., ge=0)
+    updated_at: str  # ISO-8601
+
+
+class CustomScenarioListResponse(BaseModel):
+    """``GET /api/v1/foresight/scenarios/custom`` paginated envelope.
+
+    Pagination is offset-based for parity with the other foresight list
+    endpoints (projected-decisions, instinct-proposals); ``limit`` is
+    capped at 100 at the router layer. ``has_more`` is a derived
+    boolean (``offset + len(items) < total``) so the picker UI doesn't
+    have to compute it client-side.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[CustomScenarioListItem]
+    total: int = Field(..., ge=0)
+    limit: int = Field(..., ge=1, le=100)
+    offset: int = Field(..., ge=0)
+    has_more: bool
+
+
+class CustomScenarioResponse(BaseModel):
+    """``GET /scenarios/custom/{id}`` plus POST/PUT return shape.
+
+    Carries the full ``yaml_body`` so the editor UI can re-populate its
+    Monaco / Codemirror buffer with one round trip. ``parsed_meta`` is
+    the denormalized parse result the service stamped at write time.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    workspace_id: str
+    name: str
+    sub_type: CustomScenarioSubType
+    description: str = ""
+    author: str = ""
+    created_at: str  # ISO-8601
+    updated_at: str  # ISO-8601
+    yaml_body: str
+    parsed_meta: CustomScenarioParsedMetaDto
+
+
+class CreateCustomScenarioRequest(BaseModel):
+    """POST/PUT body for ``/api/v1/foresight/scenarios/custom``.
+
+    ``parsed_meta_override`` is accepted but ignored on the write path
+    — the service always recomputes parsed meta from the YAML body so
+    the doc never drifts from its source of truth. The field is reserved
+    for forward-compat (a future "save without re-parsing" flow) and to
+    let the editor UI echo its locally-computed meta back without an
+    extra round trip.
+
+    Validation order (DTO → service):
+      - DTO enforces field-shape bounds: ``name`` ≤120, ``description``
+        ≤500, ``yaml_body`` ≤64 KB, ``sub_type`` in the engine's
+        supported set.
+      - Service parses the YAML; mismatches between the request
+        ``sub_type`` and the YAML's ``sub_type`` surface as
+        ``foresight.sub_type_mismatch`` (422). Persona / tick caps and
+        the tier-mix sum constraint surface as
+        ``foresight.invalid_scenario`` (422).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=120)
+    sub_type: CustomScenarioSubType = Field(default="decision_forecast")
+    description: str = Field(default="", max_length=500)
+    yaml_body: str = Field(..., min_length=1, max_length=65536)
+    parsed_meta_override: CustomScenarioParsedMetaDto | None = Field(
+        default=None,
+        description=(
+            "Optional client-side parsed-meta echo. Service ignores this "
+            "field on the write path — it always recomputes the parsed "
+            "meta from the YAML body so the doc never drifts from its "
+            "source of truth. Reserved for forward-compat."
+        ),
+    )
+
+
 __all__ = [
     "AggregateRollupResponse",
     "Anomaly",
@@ -918,7 +1091,13 @@ __all__ = [
     "BacktestRunResponse",
     "ConfidenceDriftDto",
     "CreateBacktestRequest",
+    "CreateCustomScenarioRequest",
     "CreateScenarioRequest",
+    "CustomScenarioListItem",
+    "CustomScenarioListResponse",
+    "CustomScenarioParsedMetaDto",
+    "CustomScenarioResponse",
+    "CustomScenarioSubType",
     "ForesightInstinctProposalListResponse",
     "ForesightInstinctProposalResponse",
     "ForesightThresholdResponse",
