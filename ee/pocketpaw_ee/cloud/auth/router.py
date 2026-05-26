@@ -8,20 +8,26 @@ endpoints stay here unchanged in behavior.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
+from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.auth import mfa as mfa_service
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.auth.core import (
     UserCreate,
+    UserManager,
     UserRead,
     bearer_backend,
     cookie_backend,
     current_active_user,
     fastapi_users,
+    get_user_manager,
 )
 from pocketpaw_ee.cloud.auth.dto import (
     ProfileOut,
@@ -101,6 +107,119 @@ async def set_active_workspace(
 ) -> dict:
     await auth_service.set_active_workspace(ctx, body.workspace_id)
     return {"ok": True, "activeWorkspace": body.workspace_id}
+
+
+# ---------------------------------------------------------------------------
+# MFA / TOTP enrollment (Wave 3 Task 3)
+# ---------------------------------------------------------------------------
+
+
+class _MfaVerifyRequest(BaseModel):
+    code: str
+
+
+class _MfaDisableRequest(BaseModel):
+    password: str
+    code: str
+
+
+async def _audit_mfa(workspace: str | None, user_id: str, action: str) -> None:
+    await audit_service.record(
+        workspace or "system",
+        user_id,
+        action,
+        target_type="user",
+        target_id=user_id,
+    )
+
+
+@router.post("/auth/mfa/setup")
+async def mfa_setup(
+    user: Any = Depends(current_active_user),
+) -> dict:
+    if user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="mfa_already_enabled")
+
+    secret = mfa_service.generate_secret()
+    user.mfa_totp_secret = secret
+    user.mfa_pending_setup = True
+    await user.save()
+
+    otpauth_url = mfa_service.build_otpauth_url(secret, user.email)
+    qr_svg = mfa_service.build_qr_svg(otpauth_url)
+    return {"secret": secret, "otpauth_url": otpauth_url, "qr_svg": qr_svg}
+
+
+@router.post("/auth/mfa/verify")
+async def mfa_verify(
+    body: _MfaVerifyRequest,
+    user: Any = Depends(current_active_user),
+) -> dict:
+    if user.mfa_enabled:
+        raise HTTPException(status_code=409, detail="mfa_already_enabled")
+    if not user.mfa_pending_setup or not user.mfa_totp_secret:
+        raise HTTPException(status_code=400, detail="mfa_setup_not_started")
+    if not mfa_service.verify_totp(user.mfa_totp_secret, body.code):
+        raise HTTPException(status_code=400, detail="mfa_invalid_code")
+
+    plaintext, hashed = mfa_service.generate_backup_codes()
+    user.mfa_enabled = True
+    user.mfa_pending_setup = False
+    user.mfa_verified_at = datetime.now(UTC)
+    user.mfa_backup_codes = hashed
+    await user.save()
+
+    await _audit_mfa(user.active_workspace, str(user.id), "mfa.enable")
+    return {"enabled": True, "backup_codes": plaintext}
+
+
+@router.post("/auth/mfa/disable")
+async def mfa_disable(
+    body: _MfaDisableRequest,
+    user: Any = Depends(current_active_user),
+    manager: UserManager = Depends(get_user_manager),
+) -> dict:
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="mfa_not_enabled")
+
+    verified, _ = manager.password_helper.verify_and_update(body.password, user.hashed_password)
+    if not verified:
+        raise HTTPException(status_code=400, detail="mfa_invalid_password")
+    if not mfa_service.verify_totp(user.mfa_totp_secret or "", body.code):
+        raise HTTPException(status_code=400, detail="mfa_invalid_code")
+
+    user.mfa_enabled = False
+    user.mfa_pending_setup = False
+    user.mfa_totp_secret = None
+    user.mfa_backup_codes = []
+    user.mfa_verified_at = None
+    await user.save()
+
+    await _audit_mfa(user.active_workspace, str(user.id), "mfa.disable")
+    return {"enabled": False}
+
+
+@router.post("/auth/mfa/backup-codes/regenerate")
+async def mfa_regenerate_backup_codes(
+    body: _MfaDisableRequest,
+    user: Any = Depends(current_active_user),
+    manager: UserManager = Depends(get_user_manager),
+) -> dict:
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="mfa_not_enabled")
+
+    verified, _ = manager.password_helper.verify_and_update(body.password, user.hashed_password)
+    if not verified:
+        raise HTTPException(status_code=400, detail="mfa_invalid_password")
+    if not mfa_service.verify_totp(user.mfa_totp_secret or "", body.code):
+        raise HTTPException(status_code=400, detail="mfa_invalid_code")
+
+    plaintext, hashed = mfa_service.generate_backup_codes()
+    user.mfa_backup_codes = hashed
+    await user.save()
+
+    await _audit_mfa(user.active_workspace, str(user.id), "mfa.backup_codes.regenerate")
+    return {"backup_codes": plaintext}
 
 
 # ---------------------------------------------------------------------------

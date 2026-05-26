@@ -47,6 +47,8 @@ dependencies = [
     # --- Auth (user management + OAuth2 + JWT with a Beanie backend) ---
     "fastapi-users[beanie,oauth]>=13.0.0",
     "pwdlib[argon2]>=0.2.0",
+    # --- MFA (TOTP) — secrets + code verification for /auth/mfa/* ---
+    "pyotp>=2.9.0",
     # --- Real-time / rate limiting / cache ---
     "python-socketio>=5.11.0",
     "slowapi>=0.1.9",
