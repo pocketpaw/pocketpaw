@@ -186,8 +186,18 @@ class MessageSent(Event):
 
 
 @dataclass
+class ThreadCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.created"
+
+
+@dataclass
 class ThreadReply(Event):
     EVENT_TYPE: ClassVar[str] = "thread.reply"
+
+
+@dataclass
+class ThreadClosed(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.closed"
 
 
 @dataclass
@@ -492,3 +502,9 @@ class ComposioConnectionVerified(Event):
 @dataclass
 class ComposioConnectionMismatch(Event):
     EVENT_TYPE: ClassVar[str] = "composio.connection.mismatch"
+
+
+# Activity
+@dataclass
+class ActivityLogged(Event):
+    EVENT_TYPE: ClassVar[str] = "activity.logged"
