@@ -209,6 +209,16 @@ class AudienceResolver:
                 recipients.extend(await self._workspace(wid))
             return list(set(recipients))
 
+        # --- Calls (LiveKit group call lifecycle) -------------------------------
+        # The room is per-group, so audience is every group member: the call
+        # panel needs to light up for the receiver and clear for everyone on
+        # end. Notes posting also fans out so peer tabs can scroll to the
+        # newly-created meeting-notes message without a manual refetch.
+        if t in {"call.started", "call.ended", "call.notes_posted"}:
+            if gid := d.get("group_id"):
+                return await self._group(gid)
+            return []
+
         # --- Connectors (workspace-scoped adapter rows) -------------------------
         if t in {
             "connector.enabled",
