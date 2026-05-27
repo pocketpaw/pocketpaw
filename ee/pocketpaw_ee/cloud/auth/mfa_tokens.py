@@ -12,6 +12,7 @@ claim). ``jti`` is exposed for the per-attempt rate limiter key.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import time
 from typing import Any
@@ -25,6 +26,19 @@ _LIFETIME_SECONDS = 300  # 5 min
 _ALGORITHM = "HS256"
 
 
+def _derived_secret() -> str:
+    """Domain-separate from the auth-JWT signing key.
+
+    Why: today the auth JWTStrategy uses a different audience, so a
+    forged token with the same SECRET still fails verification. But
+    sharing the key means any future strategy change (or accidental
+    audience drift) could let one token type substitute for the other.
+    Deriving via HMAC-SHA256 keeps the per-bucket entropy of SECRET
+    while making cross-bucket substitution structurally impossible.
+    """
+    return hashlib.sha256(SECRET.encode("utf-8") + b"|mfa-pending|v1").hexdigest()
+
+
 def mint_mfa_pending(user_id: str) -> tuple[str, str]:
     """Return (token, jti). The jti keys the per-challenge rate limiter."""
     jti = secrets.token_urlsafe(16)
@@ -36,14 +50,14 @@ def mint_mfa_pending(user_id: str) -> tuple[str, str]:
         "iat": now,
         "exp": now + _LIFETIME_SECONDS,
     }
-    token = jwt.encode(payload, SECRET, algorithm=_ALGORITHM)
+    token = jwt.encode(payload, _derived_secret(), algorithm=_ALGORITHM)
     return token, jti
 
 
 def verify_mfa_pending(token: str) -> tuple[str, str] | None:
     """Return (user_id, jti) on success, None on invalid/expired/wrong-type."""
     try:
-        payload = jwt.decode(token, SECRET, algorithms=[_ALGORITHM])
+        payload = jwt.decode(token, _derived_secret(), algorithms=[_ALGORITHM])
     except jwt.PyJWTError:
         return None
     if payload.get("type") != _TOKEN_TYPE:
