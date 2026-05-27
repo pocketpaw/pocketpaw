@@ -46,6 +46,7 @@ from pocketpaw_ee.cloud.auth.dto import (
 )
 from pocketpaw_ee.cloud.auth.mfa_tokens import mint_mfa_pending, verify_mfa_pending
 from pocketpaw_ee.cloud.auth.sessions_dto import RevokeOthersResponse, SessionOut
+from pocketpaw_ee.cloud.auth.ws_tickets import mint_ws_ticket
 
 router = APIRouter(tags=["Auth"])
 
@@ -185,6 +186,21 @@ async def mfa_challenge(
     response = await _mint_and_record(cookie_backend, user, request)
     await manager.on_after_login(user, request, response)
     return response
+
+
+# ---------------------------------------------------------------------------
+# WebSocket ticket — short-lived single-use JWT the SPA uses to authenticate
+# the /ws/cloud upgrade. The browser can't ride the HttpOnly paw_auth
+# cookie onto a cross-origin WS handshake (SameSite=Lax excludes script-
+# initiated cross-origin WS upgrades), so the SPA pays one REST round-trip
+# to swap its cookie session for a 30-second ticket consumed at upgrade.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/auth/ws/ticket")
+async def issue_ws_ticket(user: Any = Depends(current_active_user)) -> dict:
+    ticket = await mint_ws_ticket(str(user.id))
+    return {"ticket": ticket}
 
 
 # ---------------------------------------------------------------------------
