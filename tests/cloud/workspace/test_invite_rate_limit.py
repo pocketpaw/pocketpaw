@@ -52,6 +52,23 @@ async def test_invite_create_blocks_on_51st_per_actor_workspace():
     assert excinfo.value.code == "workspace.invite_rate_limited"
 
 
+async def test_bulk_consume_is_atomic_no_partial_burn():
+    """A bulk request that overflows the bucket must consume zero tokens.
+
+    The earlier loop-of-checks burnt as many tokens as it could before
+    raising; ``consume_invite_create_tokens`` now uses ``try_consume`` so
+    a failed bulk leaves the full budget for the next attempt.
+    """
+    # Bucket holds 50. Asking for 51 must fail without spending any.
+    with pytest.raises(RateLimited):
+        rate_limit_mod.consume_invite_create_tokens("user-a", "ws-1", 51)
+    # Followed by a 50-batch that should succeed because nothing was burnt.
+    rate_limit_mod.consume_invite_create_tokens("user-a", "ws-1", 50)
+    # And the 51st single token still fails.
+    with pytest.raises(RateLimited):
+        rate_limit_mod.consume_invite_create_tokens("user-a", "ws-1", 1)
+
+
 async def test_invite_create_buckets_per_actor_per_workspace():
     """Two workspaces and two actors each get their own bucket."""
     actor_a = _ctx("user-a")

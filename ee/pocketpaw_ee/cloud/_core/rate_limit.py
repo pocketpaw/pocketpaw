@@ -53,15 +53,18 @@ def consume_invite_create_tokens(user_id: str, workspace_id: str, count: int) ->
     one token, so the same 50/day cap covers batches too — a 100-email
     paste effectively spends two days of budget. That's intentional: bulk
     is for one-off onboarding, not steady-state invite traffic.
+
+    Atomic: if the bucket can't cover the full batch we raise without
+    consuming anything, so a failing batch doesn't silently drain the
+    day's budget for the rest of the workspace.
     """
     key = f"invite-create:{user_id}:{workspace_id}"
-    for _ in range(count):
-        info = _invite_create_limiter.check(key)
-        if not info.allowed:
-            raise RateLimited(
-                "workspace.invite_rate_limited",
-                "Too many invites created — try again later.",
-            )
+    info = _invite_create_limiter.try_consume(key, count)
+    if not info.allowed:
+        raise RateLimited(
+            "workspace.invite_rate_limited",
+            "Too many invites created — try again later.",
+        )
 
 
 async def rate_limit_invite_resend(

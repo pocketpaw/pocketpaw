@@ -110,6 +110,34 @@ class RateLimiter:
             reset_after = (1.0 - bucket.tokens) / self.rate if self.rate > 0 else 1.0
             return RateLimitInfo(False, self.capacity, 0, reset_after)
 
+    def try_consume(self, key: str, n: int) -> RateLimitInfo:
+        """Atomically consume ``n`` tokens if available — no partial consumption.
+
+        Why: callers that need N tokens (e.g. bulk-create endpoints) can't
+        use ``check()`` in a loop without burning the budget when the Nth
+        call fails. ``try_consume`` checks once and decrements all-or-nothing.
+        """
+        if n <= 0:
+            return self.check(key)
+        now = time.monotonic()
+        with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = _Bucket(self.capacity, now)
+            bucket = self._buckets[key]
+            elapsed = now - bucket.last_refill
+            bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
+            bucket.last_refill = now
+
+            if bucket.tokens >= float(n):
+                bucket.tokens -= float(n)
+                remaining = int(bucket.tokens)
+                reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
+                return RateLimitInfo(True, self.capacity, remaining, reset_after)
+
+            deficit = float(n) - bucket.tokens
+            reset_after = deficit / self.rate if self.rate > 0 else 1.0
+            return RateLimitInfo(False, self.capacity, int(bucket.tokens), reset_after)
+
     def cleanup(self, max_age: float = 3600.0) -> int:
         """Remove stale entries older than *max_age* seconds. Returns count removed."""
         now = time.monotonic()
