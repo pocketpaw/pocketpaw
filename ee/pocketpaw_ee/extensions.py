@@ -188,6 +188,29 @@ class CloudLifecycleHook:
             logger.info("Meeting reminder + auto-start loop started")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Failed to start meeting reminder loop: %s", exc)
+
+        # Re-index meeting transcripts that were ingested under an older
+        # KB-extraction pipeline (pre-VTT-cleaner). Fire-and-forget, gated
+        # by per-row version markers so repeated boots are no-ops.
+        try:
+            import asyncio
+
+            from pocketpaw_ee.cloud.meetings.service import reindex_outdated_transcripts
+
+            async def _reindex_meeting_transcripts() -> None:
+                try:
+                    summary = await reindex_outdated_transcripts()
+                    if summary.get("republished"):
+                        logger.info(
+                            "Meeting transcript KB reindex complete: %s",
+                            summary,
+                        )
+                except Exception:
+                    logger.exception("meeting transcript reindex failed")
+
+            asyncio.create_task(_reindex_meeting_transcripts())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to schedule transcript reindex: %s", exc)
         # Pocket interval-refresh scheduler (RFC 04 M3). A single asyncio
         # task that periodically re-runs pocket data sources whose refresh
         # policy includes `"interval"`. Self-gated on

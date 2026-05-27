@@ -446,35 +446,6 @@ async def startup_event(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to enumerate in-process MCP providers: %s", exc)
 
-    # Cloud-side one-shot migrations. Fire-and-forget so the dashboard
-    # never blocks on them, and gated by version markers on each row so
-    # repeated boots are no-ops. Today: re-index meeting transcripts that
-    # were ingested under an older KB-extraction pipeline (the pre-VTT-
-    # cleaner shape that dumped raw WEBVTT + cue tags into kb-go).
-    # Imports are lazy + guarded so an OSS-only install (no pocketpaw_ee)
-    # silently skips the block.
-    try:
-        from pocketpaw_ee.cloud.meetings.service import (  # noqa: PLC0415
-            reindex_outdated_transcripts,
-        )
-
-        async def _reindex_meeting_transcripts() -> None:
-            try:
-                summary = await reindex_outdated_transcripts()
-                if summary.get("republished"):
-                    logger.info(
-                        "Meeting transcript KB reindex complete: %s",
-                        summary,
-                    )
-            except Exception:
-                logger.exception("meeting transcript reindex failed")
-
-        asyncio.create_task(_reindex_meeting_transcripts())
-    except ImportError:
-        pass  # OSS-only install — no cloud meetings module.
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to schedule transcript reindex: %s", exc)
-
     # Wire MCP OAuth broadcast + auto-start enabled MCP servers (non-blocking)
     try:
         from pocketpaw.mcp.manager import get_mcp_manager, set_ws_broadcast
