@@ -30,7 +30,11 @@ def build_otpauth_url(secret: str, email: str, issuer: str = "PocketPaw") -> str
 
 
 def build_qr_svg(otpauth_url: str) -> str:
-    img = qrcode.make(otpauth_url, image_factory=qrcode.image.svg.SvgImage)
+    # SvgPathImage emits a single <path> with a viewBox; SvgImage emits
+    # <svg:rect> with an XML namespace prefix that the HTML parser
+    # misrenders when injected via Svelte's {@html ...}, leaving the QR
+    # blank. Path form works in any browser without prefix juggling.
+    img = qrcode.make(otpauth_url, image_factory=qrcode.image.svg.SvgPathImage)
     buf = io.BytesIO()
     img.save(buf)
     return buf.getvalue().decode("utf-8")
