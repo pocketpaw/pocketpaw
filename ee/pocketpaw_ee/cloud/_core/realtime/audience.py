@@ -209,6 +209,17 @@ class AudienceResolver:
                 recipients.extend(await self._workspace(wid))
             return list(set(recipients))
 
+        # --- Connectors (workspace-scoped adapter rows) -------------------------
+        if t in {
+            "connector.enabled",
+            "connector.disabled",
+            "connector.config_updated",
+            "connector.sync_recorded",
+        }:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Notifications ------------------------------------------------------
         if t in {"notification.new", "notification.read", "notification.cleared"}:
             return [d["user_id"]]

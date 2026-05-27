@@ -20,6 +20,10 @@ from pathlib import Path
 
 from pocketpaw.connectors.protocol import ExecutionMode
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    ConnectorEnabled,
+)
 from pocketpaw_ee.cloud.connectors.domain import AvailableConnector, WorkspaceConnector
 from pocketpaw_ee.cloud.connectors.dto import (
     ConnectorDetailResponse,
@@ -211,6 +215,15 @@ async def enable_connector(
     await event_bus.emit(
         "connector.enabled",
         {"workspace_id": workspace_id, "name": name, "scope": body.scope},
+    )
+    await emit(
+        ConnectorEnabled(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+                "scope": body.scope,
+            }
+        )
     )
     return _row_response(a, doc)
 

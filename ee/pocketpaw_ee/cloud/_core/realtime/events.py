@@ -525,6 +525,31 @@ class ComposioConnectionMismatch(Event):
     EVENT_TYPE: ClassVar[str] = "composio.connection.mismatch"
 
 
+# Connectors — per-workspace adapter state (enable / disable / config / sync).
+# Distinct from ``ComposioConnectionVerified`` above: those events describe a
+# per-user OAuth identity probe; these describe workspace-scoped adapter rows
+# in the WorkspaceConnector collection. Audience fans out to every member of
+# ``workspace_id`` so the connectors UI updates live in every open tab.
+@dataclass
+class ConnectorEnabled(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.enabled"
+
+
+@dataclass
+class ConnectorDisabled(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.disabled"
+
+
+@dataclass
+class ConnectorConfigUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.config_updated"
+
+
+@dataclass
+class ConnectorSyncRecorded(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
+
+
 # Activity
 @dataclass
 class ActivityLogged(Event):
