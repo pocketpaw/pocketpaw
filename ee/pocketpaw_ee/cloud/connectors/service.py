@@ -22,6 +22,7 @@ from pocketpaw.connectors.protocol import ExecutionMode
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
+    ConnectorDisabled,
     ConnectorEnabled,
 )
 from pocketpaw_ee.cloud.connectors.domain import AvailableConnector, WorkspaceConnector
@@ -247,6 +248,14 @@ async def disable_connector(workspace_id: str, name: str) -> ConnectorResponse:
     await event_bus.emit(
         "connector.disabled",
         {"workspace_id": workspace_id, "name": name},
+    )
+    await emit(
+        ConnectorDisabled(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+            }
+        )
     )
     return _row_response(available[name], doc)
 
