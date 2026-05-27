@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 _FAILURE_DISABLE_THRESHOLD = 10
 _DELIVERY_TIMEOUT_SECONDS = 5.0
 
+# Why: asyncio.create_task only keeps a weakref; if the event loop GCs the
+# task before it runs we silently lose deliveries (and Python logs a
+# RuntimeWarning). Holding strong refs in a module-level set keeps them
+# alive until done_callback discards.
+_inflight_deliveries: set[asyncio.Task[None]] = set()
+
 
 def mint_secret() -> str:
     return secrets.token_urlsafe(32)
@@ -323,10 +329,13 @@ async def deliver(event: AuditEvent) -> None:
 def schedule_delivery(event: AuditEvent) -> None:
     """Fire-and-forget wrapper used by the audit record() path."""
     try:
-        asyncio.create_task(deliver(event))
+        task = asyncio.create_task(deliver(event))
     except RuntimeError:
         # No running loop (sync caller, test harness without event loop).
         logger.debug("audit.webhook schedule_delivery: no running loop")
+        return
+    _inflight_deliveries.add(task)
+    task.add_done_callback(_inflight_deliveries.discard)
 
 
 __all__ = [
