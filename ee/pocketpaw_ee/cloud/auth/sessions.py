@@ -11,6 +11,7 @@ auto-trims (a revoked entry past the JWT exp is no longer reachable).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 
 from fastapi import Request
@@ -50,10 +51,23 @@ def _parse_device_label(user_agent: str | None) -> str:
     return browser or os_label
 
 
+def _trust_forwarded() -> bool:
+    """X-Forwarded-For is only honoured when this is set.
+
+    Without a trusted proxy, any client can spoof the header — the IP we
+    persist on AuthSession would then be attacker-controlled. Operators
+    explicitly opt in by setting ``POCKETPAW_TRUST_FORWARDED_FOR=true``
+    when the deploy actually sits behind a reverse proxy that strips
+    inbound XFF and appends the real client.
+    """
+    return os.environ.get("POCKETPAW_TRUST_FORWARDED_FOR", "false").lower() == "true"
+
+
 def _client_ip(request: Request) -> str | None:
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip() or None
+    if _trust_forwarded():
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip() or None
     return request.client.host if request.client else None
 
 
