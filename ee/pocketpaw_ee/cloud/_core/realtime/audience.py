@@ -185,6 +185,16 @@ class AudienceResolver:
         }:
             return await self._group(d["group_id"])
 
+        # --- Agent CRUD (workspace-scoped configs) ------------------------------
+        # An Agent doc lives in a workspace; visibility is private/workspace/public
+        # but the sidebar is per-workspace, so fan out to every workspace member.
+        # Public agents would ideally cross workspaces, but the realtime fan-out
+        # is bounded by workspace anyway (cross-tenant sockets aren't joined).
+        if t in {"agent.created", "agent.updated", "agent.deleted", "agent.scope_updated"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Pockets ------------------------------------------------------------
         # Audience is computed by the service (it's the only layer that knows
         # the pocket's visibility + shared_with) and shipped on the event:

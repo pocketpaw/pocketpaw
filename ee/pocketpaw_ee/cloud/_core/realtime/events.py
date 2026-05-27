@@ -336,6 +336,27 @@ class AgentToolUse(Event):
     EVENT_TYPE: ClassVar[str] = "agent.tool_use"
 
 
+# Agents (entity CRUD — distinct from agent.* runtime stream events above)
+@dataclass
+class AgentCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.created"
+
+
+@dataclass
+class AgentUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.updated"
+
+
+@dataclass
+class AgentDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.deleted"
+
+
+@dataclass
+class AgentScopeUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.scope_updated"
+
+
 # Pockets
 @dataclass
 class PocketCreated(Event):
