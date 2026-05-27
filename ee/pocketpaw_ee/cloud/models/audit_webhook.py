@@ -1,9 +1,10 @@
 """AuditWebhook document — SIEM delivery endpoint for workspace audit events.
 
 Wave 3 Task 15: external HTTPS endpoint that receives a POST per audit
-event, signed with HMAC-SHA256. Secret is stored plaintext because it
-must be used to sign every delivery (same pattern as Stripe / GitHub
-webhook secrets); admins see it once at create/rotate time.
+event, signed with HMAC-SHA256. The signing secret must be reversible
+(we need the raw bytes to compute the HMAC on each delivery) so it's
+stored Fernet-encrypted at rest rather than hashed. Admins see the
+plaintext once at create/rotate time; reads return None on the wire.
 """
 
 from __future__ import annotations

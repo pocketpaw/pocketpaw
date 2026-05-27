@@ -265,6 +265,24 @@ async def test_webhook_roundtrip(admin_client: AsyncClient) -> None:
     assert after.json() == []
 
 
+async def test_webhook_secret_encrypted_at_rest(admin_client: AsyncClient) -> None:
+    """Stored ``secret`` must round-trip through Fernet, never persist plaintext."""
+    create = await admin_client.post(
+        f"/api/v1/workspaces/{WS}/audit/webhooks",
+        json={"url": "https://siem.example.com/in"},
+    )
+    assert create.status_code == 200
+    wid = create.json()["id"]
+    plaintext = create.json()["secret"]
+
+    doc = await _AuditWebhookDoc.get(wid)
+    assert doc is not None
+    assert doc.secret != plaintext  # not stored as plaintext
+    assert doc.secret.startswith("gAAAAA")  # Fernet ciphertext marker
+    # Round-trip via the module's decrypt helper.
+    assert audit_webhooks._decrypt_secret(doc.secret) == plaintext
+
+
 async def test_rotate_secret_changes_value(admin_client: AsyncClient) -> None:
     create = await admin_client.post(
         f"/api/v1/workspaces/{WS}/audit/webhooks",

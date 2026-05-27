@@ -32,6 +32,7 @@ import httpx
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
+from pocketpaw_ee.cloud.auth.sso import crypto as _crypto
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 
@@ -43,6 +44,22 @@ _DELIVERY_TIMEOUT_SECONDS = 5.0
 
 def mint_secret() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _decrypt_secret(stored: str) -> str:
+    """Return the raw signing secret from the persisted column.
+
+    Why try/except: rows written before this change held the secret in
+    plaintext. Fernet ciphertext starts with ``gAAAAA`` (base64 ``\\x80\\x00\\x00...``);
+    legacy plaintext doesn't decode. On InvalidToken we treat the value
+    as a legacy plaintext secret so old webhooks keep delivering, and
+    log once so operators get nudged toward rotating.
+    """
+    try:
+        return _crypto.decrypt(stored)
+    except Exception:
+        logger.warning("audit.webhook: secret appears unencrypted; rotate to re-encrypt")
+        return stored
 
 
 # Names that point at internal infrastructure on common cloud platforms
@@ -156,7 +173,7 @@ async def create_webhook(
     doc = AuditWebhook(
         workspace=workspace_id,
         url=url,
-        secret=secret,
+        secret=_crypto.encrypt(secret),
         created_by=created_by,
     )
     await doc.insert()
@@ -196,7 +213,7 @@ async def delete_webhook(workspace_id: str, webhook_id: str) -> None:
 async def rotate_secret(workspace_id: str, webhook_id: str) -> tuple[AuditWebhook, str]:
     doc = await _get(workspace_id, webhook_id)
     new_secret = mint_secret()
-    doc.secret = new_secret
+    doc.secret = _crypto.encrypt(new_secret)
     await doc.save()
     return doc, new_secret
 
@@ -242,7 +259,7 @@ async def _deliver_one(
         await webhook.save()
         return
 
-    signature = _sign(webhook.secret, timestamp, body)
+    signature = _sign(_decrypt_secret(webhook.secret), timestamp, body)
     try:
         resp = await client.post(
             webhook.url,
