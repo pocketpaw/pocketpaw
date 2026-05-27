@@ -180,6 +180,60 @@ async def test_post_webhook_rejects_http(admin_client: AsyncClient) -> None:
     assert resp.json()["error"]["code"] == "webhooks.https_required"
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://localhost/in",
+        "https://127.0.0.1/in",
+        "https://10.0.0.1/in",
+        "https://169.254.169.254/latest/meta-data/",
+        "https://192.168.1.5/in",
+        "https://[::1]/in",
+        "https://metadata.google.internal/computeMetadata/v1/",
+    ],
+)
+async def test_post_webhook_rejects_private_address(admin_client: AsyncClient, url: str) -> None:
+    """SSRF guard: workspace admins can't aim webhooks at internal targets."""
+    resp = await admin_client.post(
+        f"/api/v1/workspaces/{WS}/audit/webhooks",
+        json={"url": url},
+    )
+    assert resp.status_code == 403, f"{url} should be rejected"
+    assert resp.json()["error"]["code"] == "webhooks.private_address"
+
+
+async def test_delivery_disables_webhook_if_url_flips_private(
+    admin_client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A webhook that resolved to a public IP at create time but flips to a
+    private IP later (DNS rebinding / takeover) gets auto-disabled on the
+    next delivery attempt without firing the POST."""
+    create = await admin_client.post(
+        f"/api/v1/workspaces/{WS}/audit/webhooks",
+        json={"url": "https://siem.example.com/in"},
+    )
+    assert create.status_code == 200
+    wid = create.json()["id"]
+
+    # Force the safety check to fail at delivery time.
+    def _always_unsafe(_url: str) -> None:
+        from pocketpaw_ee.cloud._core.errors import Forbidden
+
+        raise Forbidden("webhooks.private_address", "flipped")
+
+    monkeypatch.setattr(audit_webhooks, "_validate_url_safety", _always_unsafe)
+
+    # Use the real delivery path; httpx should never be called.
+    with patch("httpx.AsyncClient.post", new=AsyncMock()) as mock_post:
+        await audit_webhooks.deliver(_make_event())
+        assert mock_post.await_count == 0
+
+    refetched = await _AuditWebhookDoc.get(wid)
+    assert refetched is not None
+    assert refetched.enabled is False
+    assert refetched.last_error and "unsafe url" in refetched.last_error
+
+
 async def test_webhook_roundtrip(admin_client: AsyncClient) -> None:
     create = await admin_client.post(
         f"/api/v1/workspaces/{WS}/audit/webhooks",

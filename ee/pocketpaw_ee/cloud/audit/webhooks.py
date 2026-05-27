@@ -18,12 +18,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import secrets
+import socket
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from beanie import PydanticObjectId
@@ -42,9 +45,98 @@ def mint_secret() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _require_https(url: str) -> None:
+# Names that point at internal infrastructure on common cloud platforms
+# and on dev boxes. Reject these at create time even before DNS resolution.
+_FORBIDDEN_HOSTNAMES = frozenset(
+    {
+        "localhost",
+        "ip6-localhost",
+        "ip6-loopback",
+        "metadata",
+        "metadata.google.internal",
+        "metadata.goog",
+        "instance-data",
+    }
+)
+
+
+def _ip_is_unsafe(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolve_addresses(hostname: str) -> list[str] | None:
+    """Return all resolved IP strings, or None if DNS resolution failed.
+
+    Why None on failure: an unresolvable hostname will fail at HTTP time
+    anyway; raising here would also break dev/test setups that use made-up
+    domains like ``siem.example.com``.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+        return None
+    return [info[4][0] for info in infos]
+
+
+def _validate_url_safety(url: str) -> None:
+    """Reject non-https + URLs whose hostname targets internal/private space.
+
+    Defense against SSRF: a workspace admin should not be able to point
+    a webhook at ``https://169.254.169.254/...`` and have us POST signed
+    audit events into the cloud metadata service. Runs at create time
+    AND per-delivery (the second call catches DNS rebinding).
+    """
     if not url.startswith("https://"):
         raise Forbidden("webhooks.https_required", "Webhook URL must be https://")
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise Forbidden("webhooks.invalid_url", "Webhook URL is malformed") from exc
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise Forbidden("webhooks.invalid_url", "Webhook URL missing hostname")
+    if hostname in _FORBIDDEN_HOSTNAMES:
+        raise Forbidden(
+            "webhooks.private_address",
+            f"Webhook hostname '{hostname}' is not allowed",
+        )
+    # Literal IP — check directly without DNS.
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None:
+        if _ip_is_unsafe(literal_ip):
+            raise Forbidden(
+                "webhooks.private_address",
+                "Webhook URL points at a private/loopback address",
+            )
+        return
+    # Hostname — resolve and require every returned IP to be public.
+    addresses = _resolve_addresses(hostname)
+    if addresses is None:
+        return  # DNS failure; HTTP layer will surface the real error.
+    for addr in addresses:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if _ip_is_unsafe(ip):
+            raise Forbidden(
+                "webhooks.private_address",
+                f"Webhook hostname '{hostname}' resolves to a non-public address",
+            )
+
+
+# Back-compat alias for any external caller that imported the private helper.
+_require_https = _validate_url_safety
 
 
 def _resolve_id(webhook_id: str) -> PydanticObjectId:
@@ -59,7 +151,7 @@ async def create_webhook(
     url: str,
     created_by: str,
 ) -> tuple[AuditWebhook, str]:
-    _require_https(url)
+    _validate_url_safety(url)
     secret = mint_secret()
     doc = AuditWebhook(
         workspace=workspace_id,
@@ -137,6 +229,19 @@ async def _deliver_one(
     timestamp: str,
     client: httpx.AsyncClient,
 ) -> None:
+    # Re-check at delivery time so a hostname that flipped to a private
+    # IP after create (DNS rebinding, takeover) can't leak signed events.
+    try:
+        _validate_url_safety(webhook.url)
+    except Forbidden as exc:
+        webhook.failure_count += 1
+        webhook.last_status = None
+        webhook.last_error = f"unsafe url: {exc.message}"[:500]
+        webhook.last_delivery_at = datetime.now(UTC)
+        webhook.enabled = False  # never retry — the URL itself is the problem
+        await webhook.save()
+        return
+
     signature = _sign(webhook.secret, timestamp, body)
     try:
         resp = await client.post(
