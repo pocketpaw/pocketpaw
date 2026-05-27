@@ -16,6 +16,7 @@ All SDK imports are mocked.
 from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
@@ -45,6 +46,7 @@ def _strip_builtin_servers(result: dict) -> dict:
     out.pop(_TASKS_MCP_SERVER_NAME, None)
     out.pop(_PLANNER_MCP_SERVER_NAME, None)
     out.pop(_DECISIONS_MCP_SERVER_NAME, None)
+    out.pop(_MEETINGS_MCP_SERVER_NAME, None)
     return out
 
 
