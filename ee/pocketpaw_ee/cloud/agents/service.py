@@ -32,6 +32,7 @@ from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     AgentCreated,
+    AgentDeleted,
     AgentUpdated,
 )
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
@@ -321,7 +322,16 @@ async def delete(ctx: RequestContext, agent_id: str) -> None:
         raise NotFound("agent", agent_id)
     if doc.owner != ctx.user_id:
         raise Forbidden("agent.not_owner", "Only the agent owner can delete it")
+    workspace_id = doc.workspace
     await doc.delete()
+    await emit(
+        AgentDeleted(
+            data={
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+            }
+        )
+    )
 
 
 async def get_scopes(agent_id: str) -> list[str]:
