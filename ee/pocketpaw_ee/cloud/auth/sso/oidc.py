@@ -92,16 +92,28 @@ async def fetch_userinfo(userinfo_endpoint: str, access_token: str) -> dict[str,
         return resp.json()
 
 
-def parse_id_token(id_token: str, jwks_uri: str, audience: str) -> dict[str, Any]:
-    """Verify RS256 signature + audience + expiry, return claims dict."""
+def parse_id_token(
+    id_token: str,
+    jwks_uri: str,
+    *,
+    audience: str,
+    issuer: str,
+    nonce: str | None = None,
+) -> dict[str, Any]:
+    """Verify RS256 sig + aud + iss + exp + (optional) nonce, return claims."""
     jwks_client = pyjwt.PyJWKClient(jwks_uri)
     signing_key = jwks_client.get_signing_key_from_jwt(id_token).key
-    return pyjwt.decode(
+    claims = pyjwt.decode(
         id_token,
         signing_key,
         algorithms=["RS256"],
         audience=audience,
+        issuer=issuer,
+        options={"require": ["exp", "iat", "aud", "iss", "sub"]},
     )
+    if nonce is not None and claims.get("nonce") != nonce:
+        raise pyjwt.InvalidTokenError("nonce mismatch")
+    return claims
 
 
 def _clear_discovery_cache() -> None:

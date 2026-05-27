@@ -143,8 +143,14 @@ async def _fake_exchange_code(
     return {"id_token": "fake.id.token", "access_token": "fake-access-token"}
 
 
-def _fake_parse(id_token, jwks_uri, audience):
-    return {"email": "newuser@acme.com", "name": "New User", "aud": audience}
+def _fake_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+    return {
+        "email": "newuser@acme.com",
+        "name": "New User",
+        "aud": audience,
+        "iss": issuer,
+        "nonce": nonce,
+    }
 
 
 async def _fake_userinfo(userinfo_endpoint, access_token):
@@ -178,6 +184,9 @@ async def test_begin_login_stores_state_and_returns_authorize_url(env, monkeypat
     payload = json.loads(raw)
     assert payload["workspace_id"] == ws_id
     assert "code_verifier" in payload
+    assert "nonce" in payload
+    # Nonce must also ride the authorize URL so the provider echoes it.
+    assert f"nonce={payload['nonce']}" in url
 
 
 @pytest.mark.asyncio
@@ -202,7 +211,7 @@ async def test_complete_login_jit_provisions(env, monkeypatch):
     await fake.setex(
         "sso_state:abc123",
         600,
-        json.dumps({"workspace_id": ws_id, "code_verifier": "v"}),
+        json.dumps({"workspace_id": ws_id, "code_verifier": "v", "nonce": None}),
     )
     user = await sso_service.complete_login("auth-code", "abc123")
     assert user.email == "newuser@acme.com"
@@ -212,6 +221,40 @@ async def test_complete_login_jit_provisions(env, monkeypatch):
 
     # State was one-shot consumed.
     assert await fake.get("sso_state:abc123") is None
+
+
+@pytest.mark.asyncio
+async def test_complete_login_nonce_mismatch_rejects(env, monkeypatch):
+    _client, _admin_id, ws_id, fake = env
+    await sso_service.upsert_sso_config(
+        ws_id,
+        provider="okta",
+        issuer="https://acme.okta.com",
+        client_id="client-123",
+        client_secret_plain="super-secret",
+        allowed_domains=["acme.com"],
+    )
+    monkeypatch.setattr(oidc, "discover", _fake_discover)
+    monkeypatch.setattr(oidc, "exchange_code", _fake_exchange_code)
+    monkeypatch.setattr(oidc, "fetch_userinfo", _fake_userinfo)
+
+    # Token claims carry the wrong nonce — must reject before any user write.
+    def _bad_nonce_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+        import jwt as _pyjwt
+
+        raise _pyjwt.InvalidTokenError("nonce mismatch")
+
+    monkeypatch.setattr(oidc, "parse_id_token", _bad_nonce_parse)
+
+    import json
+
+    await fake.setex(
+        "sso_state:nonce-test",
+        600,
+        json.dumps({"workspace_id": ws_id, "code_verifier": "v", "nonce": "expected"}),
+    )
+    with pytest.raises(Exception):  # pyjwt.InvalidTokenError bubbles
+        await sso_service.complete_login("auth-code", "nonce-test")
 
 
 @pytest.mark.asyncio
@@ -235,8 +278,13 @@ async def test_complete_login_domain_mismatch_no_jit(env, monkeypatch):
     monkeypatch.setattr(oidc, "discover", _fake_discover)
     monkeypatch.setattr(oidc, "exchange_code", _fake_exchange_code)
 
-    def _outsider_parse(id_token, jwks_uri, audience):
-        return {"email": "stranger@outsider.com", "aud": audience}
+    def _outsider_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+        return {
+            "email": "stranger@outsider.com",
+            "aud": audience,
+            "iss": issuer,
+            "nonce": nonce,
+        }
 
     async def _outsider_userinfo(userinfo_endpoint, access_token):
         return {"email": "stranger@outsider.com"}
@@ -249,7 +297,7 @@ async def test_complete_login_domain_mismatch_no_jit(env, monkeypatch):
     await fake.setex(
         "sso_state:xyz",
         600,
-        json.dumps({"workspace_id": ws_id, "code_verifier": "v"}),
+        json.dumps({"workspace_id": ws_id, "code_verifier": "v", "nonce": None}),
     )
     with pytest.raises(Forbidden) as exc_info:
         await sso_service.complete_login("auth-code", "xyz")

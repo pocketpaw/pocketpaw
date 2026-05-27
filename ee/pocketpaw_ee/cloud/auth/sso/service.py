@@ -177,8 +177,11 @@ async def begin_login(workspace_slug: str) -> str:
 
     state = secrets.token_urlsafe(32)
     verifier, challenge = _pkce_pair()
+    nonce = secrets.token_urlsafe(32)
 
-    payload = json.dumps({"workspace_id": str(workspace.id), "code_verifier": verifier})
+    payload = json.dumps(
+        {"workspace_id": str(workspace.id), "code_verifier": verifier, "nonce": nonce}
+    )
     redis = redis_client.get_redis()
     await redis.setex(_state_key(state), _STATE_TTL_SECONDS, payload)
 
@@ -188,6 +191,7 @@ async def begin_login(workspace_slug: str) -> str:
         "redirect_uri": _redirect_uri(),
         "scope": " ".join(scopes),
         "state": state,
+        "nonce": nonce,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
@@ -262,7 +266,13 @@ async def complete_login(code: str, state: str) -> _UserDoc:
     if not id_token or not access_token:
         raise ValidationError("sso.token_response_missing_tokens", "provider returned no tokens")
 
-    claims = oidc.parse_id_token(id_token, jwks_uri, audience=cfg.client_id)
+    claims = oidc.parse_id_token(
+        id_token,
+        jwks_uri,
+        audience=cfg.client_id,
+        issuer=cfg.issuer,
+        nonce=state_payload.get("nonce"),
+    )
     userinfo = await oidc.fetch_userinfo(userinfo_endpoint, access_token)
 
     email = (userinfo.get("email") or claims.get("email") or "").lower()
