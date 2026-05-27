@@ -134,11 +134,19 @@ class MeetingTranscript(TimestampedDocument):
     language: str | None = None
     fetched_at: datetime | None = None
     indexed_in_kb: bool = False
+    # Version of the KB-extraction pipeline that last ingested this
+    # transcript. Bumped whenever the cleaner changes shape (e.g. the
+    # 2026-05-26 VTT-cue-stripper). The startup migration walks rows
+    # with version < TRANSCRIPT_KB_VERSION and re-emits FileReady so the
+    # newer extractor re-ingests cleaned text. Idempotent — runs once
+    # per row per upgrade.
+    kb_indexed_version: int = 0
 
     class Settings(TimestampedDocument.Settings):
         name = "meeting_transcripts"
         indexes = [
             [("workspace", 1), ("indexed_in_kb", 1)],
+            [("kb_indexed_version", 1)],
         ]
 
 

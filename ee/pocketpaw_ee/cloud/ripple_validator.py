@@ -43,6 +43,8 @@ from typing import Any
 
 from pocketpaw.ripple.manifest import (
     check_embed_nodes_in_spec,
+    find_unwired_live_buttons,
+    validate_action_verbs,
     validate_against_catalog,
 )
 
@@ -499,12 +501,176 @@ def validate_against_catalog_strict(
         raise CatalogViolationError(violations)
 
 
+# ---------------------------------------------------------------------------
+# Action-verb + unwired-live-button gate (2026-05-23).
+#
+# Closes a class of LLM "loophole" failures the prompt-side rule in
+# PR #1194 couldn't catch: the specialist authoring buttons with
+# fictitious action verbs (``action: "fetch"``) or live-labelled
+# Refresh buttons whose on_click is empty / inert. The pure walkers
+# live in OSS ``pocketpaw.ripple.manifest``; this layer adds the
+# strict / logged wiring + the agent-readable error formatting.
+# ---------------------------------------------------------------------------
+
+
+class ActionWiringViolationError(Exception):
+    """Raised by :func:`validate_action_wiring_strict` when a spec
+    carries an event handler with an unknown action verb or a
+    live-labelled button whose on_click is empty / inert.
+
+    Same shape as :class:`CatalogViolationError`: ``.violations`` plus
+    a class-level formatter so the chat agent's retry loop can surface
+    a focused corrective hint.
+    """
+
+    def __init__(self, violations: list[dict[str, Any]]) -> None:
+        self.violations = violations
+        super().__init__(self._format(violations))
+
+    @staticmethod
+    def _format(violations: list[dict[str, Any]]) -> str:
+        lines = [f"{len(violations)} action-wiring violation(s) in rippleSpec:"]
+        for v in violations[:20]:
+            if "action" in v:
+                hint = f" — did you mean '{v['suggestion']}'?" if v.get("suggestion") else ""
+                lines.append(
+                    f"  - [unknown_verb] {v['path']}: action '{v['action']}' "
+                    f"is not a recognized verb{hint}"
+                )
+            else:
+                lines.append(
+                    f"  - [unwired_live_button] {v['path']} (label={v.get('label')!r}): "
+                    f"{v['reason']}"
+                )
+        if len(violations) > 20:
+            lines.append(f"  - …and {len(violations) - 20} more")
+        return "\n".join(lines)
+
+
+def _collect_action_wiring_violations(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Run both action-wiring walks, return the combined list.
+
+    Unknown-verb issues first (cheaper to fix, also catch the inert
+    on_click failure mode at the same site), then unwired-button
+    issues. Deduplication by ``path`` so a verb violation on the same
+    handler that also fails the live-button check isn't reported
+    twice.
+    """
+    violations: list[dict[str, Any]] = []
+    violations.extend(validate_action_verbs(spec))
+    seen_paths = {v["path"] for v in violations}
+    for v in find_unwired_live_buttons(spec):
+        if v["path"] not in seen_paths:
+            violations.append(v)
+    return violations
+
+
+def format_action_violations_for_agent(violations: list[dict[str, Any]]) -> str:
+    """Build a compact, agent-readable summary of action-wiring violations.
+
+    Suitable as the ``error`` field on an MCP tool result so the
+    specialist sees specifically which handler / button failed and
+    can target its fix.
+    """
+    if not violations:
+        return ""
+    lines = ["The rippleSpec was rejected — event-handler wiring is broken:"]
+    for v in violations[:10]:
+        if "action" in v:
+            hint = (
+                f" Use '{v['suggestion']}' instead."
+                if v.get("suggestion")
+                else " Use one of: set, push, run_source, api, navigate, toast, emit."
+            )
+            lines.append(f"  • {v['path']}: action '{v['action']}' is not a recognized verb.{hint}")
+        else:
+            lines.append(f"  • {v['path']} (label={v.get('label')!r}): {v['reason']}")
+    if len(violations) > 10:
+        lines.append(f"  • …and {len(violations) - 10} more")
+    lines.append(
+        "Action verbs are a closed set — see ripple/event-dispatcher.ts. A button "
+        "labelled 'Refresh' / 'Sync' / 'Fetch' must call `run_source` with a "
+        "declared `sources` key OR `api` with a real `url`. An invented verb "
+        '(e.g. `action: "fetch"`) silently no-ops at runtime, which looks '
+        "like a working button but does nothing."
+    )
+    return "\n".join(lines)
+
+
+def validate_action_wiring_logged(
+    spec: dict[str, Any] | None,
+    *,
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Validate action-handler wiring, emit one ``log.warning`` per
+    violation, and return the violations list.
+
+    Use this on the human / import path — a violation is recorded for
+    triage but does NOT block the write (an older imported spec may
+    have wiring that's since become inert).
+    """
+    violations = _collect_action_wiring_violations(spec)
+    for v in violations:
+        if "action" in v:
+            log.warning(
+                "ripple_spec.unknown_action_verb",
+                extra={
+                    "pocket_id": pocket_id,
+                    "workspace_id": workspace_id,
+                    "field_path": v["path"],
+                    "action": v["action"],
+                    "suggestion": v.get("suggestion"),
+                },
+            )
+        else:
+            log.warning(
+                "ripple_spec.unwired_live_button",
+                extra={
+                    "pocket_id": pocket_id,
+                    "workspace_id": workspace_id,
+                    "field_path": v["path"],
+                    "label": v.get("label"),
+                    "reason": v.get("reason"),
+                },
+            )
+    return violations
+
+
+def validate_action_wiring_strict(
+    spec: dict[str, Any] | None,
+    *,
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Validate action-handler wiring; raise
+    :class:`ActionWiringViolationError` if any handler uses an
+    unknown verb or any live-labelled button is unwired.
+
+    Use this only on the agent-generation path where the caller can
+    handle a retry. Human / import callers should use
+    :func:`validate_action_wiring_logged` — strict mode would block a
+    legitimate import of an older spec.
+    """
+    violations = validate_action_wiring_logged(
+        spec,
+        pocket_id=pocket_id,
+        workspace_id=workspace_id,
+    )
+    if violations:
+        raise ActionWiringViolationError(violations)
+
+
 __all__ = [
+    "ActionWiringViolationError",
     "CatalogViolationError",
     "ExpressionWarning",
     "RippleSpecGrammarError",
+    "format_action_violations_for_agent",
     "format_violations_for_agent",
     "format_warnings_for_agent",
+    "validate_action_wiring_logged",
+    "validate_action_wiring_strict",
     "validate_against_catalog_logged",
     "validate_against_catalog_strict",
     "validate_ripple_spec",

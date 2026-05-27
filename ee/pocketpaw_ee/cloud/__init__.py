@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-05-24 (#1202) — Registers ``register_audit_bridge`` during
+    ``mount_cloud`` so every ``security.audit.AuditLogger.log()`` call from
+    EE cloud writers (pocket actions, source runs, skills config, …) is
+    mirrored into ``pocketpaw.audit.store.AuditStore`` — the SQLite sink
+    the ``GET /api/v1/audit`` reader actually queries. Without this the
+    JSONL and SQLite sinks lived in parallel and the GET surface always
+    returned 0 rows even when ``~/.pocketpaw/audit.jsonl`` was full.
 Updated: 2026-05-22 (feat/api-skills, Increment 2b) — mounts the Skills
     entity at ``/api/v1/skills`` (POST /skills/api-doc), the per-backend
     API-skill install endpoint that turns a pocket backend's OpenAPI
@@ -140,6 +147,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
+    from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.license import get_license_info
@@ -162,6 +170,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
@@ -456,6 +465,18 @@ def mount_cloud(app: FastAPI) -> None:
     # initialized".
     init_realtime()
 
+    # Bridge ``AuditLogger`` (JSONL) writes into ``AuditStore`` (SQLite).
+    # Cloud writers across the EE codebase (pockets/action_executor,
+    # pockets/source_executor, pockets/service, skills/service,
+    # agent/pocket_router) all call ``get_audit_logger().log(...)``, but the
+    # ``GET /api/v1/audit`` reader (``ee.cloud.audit.service``) reads from
+    # ``get_audit_store()`` — a totally separate sink. Without this bridge
+    # the reader returned 0 rows for every query (#1202). Idempotent via a
+    # module-level flag so re-mounting (tests) does not double-mirror.
+    from pocketpaw_ee.cloud.audit.listeners import register_audit_bridge
+
+    register_audit_bridge()
+
     # Register in-process bus subscribers (Stage 1.B "Files as Knowledge").
     # The FileReady listener drives KB indexing for every workspace upload.
     # Must run after ``init_realtime`` because subscriptions go on the
@@ -546,3 +567,15 @@ def mount_cloud(app: FastAPI) -> None:
         from pocketpaw.agents.pool import get_agent_pool
 
         await get_agent_pool().stop()
+
+    # Defence-in-depth drain. Under ``FastAPI(lifespan=...)`` (the host's
+    # default in ``src/pocketpaw/dashboard.py``) this hook is silently dropped
+    # — the real drain runs in ``dashboard_lifecycle.shutdown_event``. Kept
+    # here so a host that doesn't pass ``lifespan=`` still drains in-flight runs.
+    @app.on_event("shutdown")
+    async def _drain_chat_runs() -> None:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await executor.drain()

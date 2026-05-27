@@ -74,6 +74,16 @@ class MeetingResponse(BaseModel):
     bot_status: str | None = None
     bot_status_detail: str | None = None
     bot_status_at: datetime | None = None
+    # True when the meeting was minted by the calendar bridge from a
+    # Zoom/Meet URL detected in a calendar event description. Surfaced as
+    # a "From calendar" badge so users understand why a meeting they
+    # didn't manually schedule appeared in their list.
+    auto_created_from_calendar: bool = False
+    # When the meeting is linked to a calendar event (via the auto-create
+    # path), expose the calendar event id so /calendar can render a small
+    # "has recording" indicator next to the event. None for meetings that
+    # don't originate from a calendar event.
+    calendar_event_id: str | None = None
 
 
 class MeetingDetailResponse(MeetingResponse):

@@ -126,7 +126,10 @@ async def request_bot_for_meeting(workspace_id: str, meeting_id: str) -> dict[st
     # the `recording.done` webhook).
     transcript_cfg = await meetings_settings.resolve()
     if not meetings_settings.is_async_provider(transcript_cfg["provider"]):
-        body["recording_config"] = {"transcript": {"provider": {transcript_cfg["provider"]: {}}}}
+        options = _provider_options(transcript_cfg["provider"], transcript_cfg["model"])
+        body["recording_config"] = {
+            "transcript": {"provider": {transcript_cfg["provider"]: options}}
+        }
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -283,9 +286,7 @@ async def create_async_transcript(recording_id: str) -> str:
     service.start_async_transcript.
     """
     resolved = await meetings_settings.resolve()
-    options: dict[str, Any] = _auto_language_options(resolved["provider"])
-    if resolved["model"]:
-        options["model"] = resolved["model"]
+    options = _provider_options(resolved["provider"], resolved["model"])
 
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
@@ -363,15 +364,22 @@ def _segments_to_vtt(segments: Any) -> str:
     """Convert Recall.ai's transcript JSON into a single WebVTT blob.
 
     Recall's async transcript download is a list of speaker turns:
-    ``[{participant: {id, name}, words: [{text, start_timestamp:
-    {relative}, end_timestamp: {relative}}]}]``. One VTT cue per turn.
+    ``[{participant: {id, name}, language_code, words: [{text,
+    start_timestamp: {relative}, end_timestamp: {relative}}]}]``. One
+    VTT cue per turn.
     """
     if not isinstance(segments, list):
         return ""
     cues: list[str] = []
+    languages: set[str] = set()
+    turns_with_words = 0
+    turns_without_words = 0
     for seg in segments:
         if not isinstance(seg, dict):
             continue
+        lang = seg.get("language_code")
+        if isinstance(lang, str) and lang:
+            languages.add(lang)
         words = seg.get("words") or []
         text = " ".join(
             (w.get("text") or "").strip()
@@ -379,7 +387,9 @@ def _segments_to_vtt(segments: Any) -> str:
             if isinstance(w, dict) and (w.get("text") or "").strip()
         ).strip()
         if not text:
+            turns_without_words += 1
             continue
+        turns_with_words += 1
         participant = seg.get("participant") or {}
         speaker = participant.get("name") or f"Speaker {participant.get('id', '?')}"
         start = _word_ts(words[0], "start_timestamp")
@@ -389,6 +399,16 @@ def _segments_to_vtt(segments: Any) -> str:
         cues.append(
             f"{_seconds_to_vtt_ts(start)} --> {_seconds_to_vtt_ts(end)}\n<v {speaker}>{text}</v>"
         )
+    # Surface what Recall/Deepgram actually detected — the symptom of
+    # "wrong language" almost always shows up here as `languages={'en'}`
+    # for a non-English meeting (multilingual not configured) or as an
+    # all-empty turn list (recording captured no usable audio).
+    logger.info(
+        "Recall transcript turns: with_words=%d empty=%d detected_languages=%s",
+        turns_with_words,
+        turns_without_words,
+        sorted(languages) or "n/a",
+    )
     if not cues:
         return ""
     return "WEBVTT\n\n" + "\n\n".join(cues)
@@ -419,41 +439,77 @@ def _seconds_to_vtt_ts(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _auto_language_options(provider: str) -> dict[str, Any]:
-    """Per-provider 'auto language' options for create_async_transcript.
+def _provider_options(provider: str, model: str) -> dict[str, Any]:
+    """Build the provider-options object Recall expects, language + model.
 
-    Each Recall provider names the language field differently and
-    accepts different sentinel values for auto-detect / multilingual.
-    Sending the wrong field name is silently ignored by Recall and the
-    provider then defaults to English — which is how a Hinglish call
-    came back English-only despite a "multi" setting on a non-Deepgram
-    provider. Centralise the dispatch here so every provider gets the
-    right field with no caller-side knowledge.
+    Used by BOTH paths so realtime and async stay in sync:
+      * realtime bot creation — embedded in ``recording_config.transcript
+        .provider.{provider}``
+      * async post-call transcription — embedded in
+        ``provider.{provider}`` on ``create_transcript``
 
-    ``RECALL_TRANSCRIPT_LANGUAGE`` overrides the auto default — set it
-    to a single language code ("en", "hi", "es", …) when monolingual
-    accuracy matters more than coverage. The caller is responsible for
-    using a value the chosen provider understands.
+    Each Recall provider names the language field differently and accepts
+    different sentinel values for auto-detect / multilingual. Sending the
+    wrong field name is silently ignored by Recall and the provider then
+    defaults to English — which is how a Hinglish call came back English-
+    only despite a "multi" setting. ``RECALL_TRANSCRIPT_LANGUAGE`` is an
+    override; otherwise we pick a sensible auto/multilingual default per
+    provider. ``model`` (e.g. ``nova-3``) is merged in when set so the
+    realtime path no longer drops it on the floor.
     """
     override = os.environ.get("RECALL_TRANSCRIPT_LANGUAGE", "").strip()
-    if provider == "deepgram_async":
+    options: dict[str, Any] = {}
+
+    # --- Deepgram --------------------------------------------------------
+    if provider in ("deepgram_async", "deepgram_streaming"):
         # nova-3 multilingual; field name is `language`, value `multi`.
-        return {"language": override or "multi"}
-    if provider == "recallai_async":
+        options["language"] = override or "multi"
+
+    # --- Recall.ai's own STT --------------------------------------------
+    elif provider in ("recallai_async", "recallai_streaming"):
         # Recall's own; field `language_code`, value `auto` for detect.
-        return {"language_code": override or "auto"}
-    if provider == "gladia_v2_async":
-        # Gladia v2 (Whisper-based) auto-detects when language_code is
-        # omitted. Only emit the field if an override is set.
-        return {"language_code": override} if override else {}
-    if provider == "speechmatics_async":
-        return {"language": override or "auto"}
-    if provider == "assembly_ai_async":
-        # AssemblyAI Universal handles multi-lang without a language hint.
-        return {"language_code": override} if override else {}
-    # Unknown / new provider — let it run with provider defaults rather
-    # than guessing a field name that may be wrong.
-    return {"language": override} if override else {}
+        # Streaming additionally needs prioritize_accuracy for non-English
+        # / auto-detect — prioritize_low_latency is English-only.
+        options["language_code"] = override or "auto"
+        if provider == "recallai_streaming":
+            options["mode"] = "prioritize_accuracy"
+
+    # --- Gladia v2 -------------------------------------------------------
+    elif provider in ("gladia_v2_async", "gladia_v2_streaming"):
+        # Whisper-based; auto-detects when language_code is omitted. Only
+        # emit the field if an override is set.
+        if override:
+            options["language_code"] = override
+
+    # --- Speechmatics ----------------------------------------------------
+    elif provider in ("speechmatics_async", "speechmatics_streaming"):
+        options["language"] = override or "auto"
+
+    # --- AssemblyAI ------------------------------------------------------
+    elif provider in ("assembly_ai_async", "assembly_ai_v3_streaming"):
+        # Universal model handles multi-lang without a hint.
+        if override:
+            options["language_code"] = override
+
+    # --- ElevenLabs / AWS / Rev (streaming only today) -------------------
+    elif provider in (
+        "elevenlabs_streaming",
+        "aws_transcribe_streaming",
+        "rev_streaming",
+    ):
+        # No published unified field name. Pass `language` when overridden;
+        # otherwise let the provider default. Don't guess multilingual.
+        if override:
+            options["language"] = override
+
+    # --- Unknown / new --------------------------------------------------
+    else:
+        if override:
+            options["language"] = override
+
+    if model:
+        options["model"] = model
+    return options
 
 
 def _latest_status(bot_payload: dict[str, Any]) -> str:

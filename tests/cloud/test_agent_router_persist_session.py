@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from pocketpaw_ee.cloud.chat.agent_router import _persist_assistant_message, _persist_user_message
+from pocketpaw_ee.cloud.chat.agent_router import _persist_user_message
 from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
+from pocketpaw_ee.cloud.chat.runs.run_core import _persist_assistant_message
 
 
 def _session_ctx() -> ScopeContext:

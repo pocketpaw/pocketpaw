@@ -7,6 +7,10 @@
 #   workspace_id rollup + bound-param LIKE over action/description/context.
 #   The injection regression test (tests/test_audit_fts_security.py) proves
 #   a crafted ``q`` cannot corrupt the audit_log table.
+# Modified: 2026-05-24 (#1202) — Added ``log_entry_sync`` so the cloud
+#   ``AuditLogger`` → ``AuditStore`` bridge (``ee/pocketpaw_ee/cloud/audit/
+#   listeners.py``) can mirror events into SQLite from the sync
+#   ``AuditLogger.on_log`` fan-out callback without needing an event loop.
 
 from __future__ import annotations
 
@@ -156,6 +160,61 @@ class AuditStore:
             )
             conn.commit()
         logger.debug("audit: logged %s by %s (%s)", action, actor, entry.id)
+        return entry.id
+
+    def log_entry_sync(
+        self,
+        actor: str,
+        action: str,
+        category: str,
+        description: str,
+        pocket_id: str | None = None,
+        context: dict | None = None,
+        ai_recommendation: str | None = None,
+        outcome: str | None = None,
+        status: str = "completed",
+        metadata: dict | None = None,
+    ) -> str:
+        """Synchronous sibling of :meth:`log_entry`.
+
+        Exists for the cloud audit bridge (#1202): the
+        :class:`pocketpaw.security.audit.AuditLogger` fans events out to
+        its ``on_log`` callbacks synchronously from inside ``log()``,
+        with no event loop guaranteed to be running. The async method's
+        body is already a plain blocking sqlite call, so duplicating the
+        insert here keeps the bridge dependency-free (no
+        ``asyncio.run`` / ``run_coroutine_threadsafe`` gymnastics).
+        Returns the entry id so callers can correlate with their own
+        records.
+        """
+        self._ensure_schema()
+        entry = AuditEntry(
+            actor=actor,
+            action=action,
+            category=category,  # type: ignore[arg-type]
+            description=description,
+            pocket_id=pocket_id,
+            context=context or {},
+            ai_recommendation=ai_recommendation,
+            outcome=outcome,
+            status=status,  # type: ignore[arg-type]
+            metadata=metadata or {},
+        )
+        row = entry.to_db_row()
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_log
+                    (id, timestamp, pocket_id, actor, action, category,
+                     description, context, ai_recommendation, outcome, status, metadata)
+                VALUES
+                    (:id, :timestamp, :pocket_id, :actor, :action, :category,
+                     :description, :context, :ai_recommendation, :outcome, :status, :metadata)
+                """,
+                row,
+            )
+            conn.commit()
+        logger.debug("audit: logged %s by %s (%s) [sync]", action, actor, entry.id)
         return entry.id
 
     async def search_entries(

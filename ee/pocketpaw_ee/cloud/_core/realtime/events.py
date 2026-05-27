@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import ClassVar
 
+EVENT_REGISTRY: dict[str, type[Event]] = {}
+
 
 @dataclass
 class Event:
@@ -21,6 +23,41 @@ class Event:
         cls_type = getattr(type(self), "EVENT_TYPE", "")
         if cls_type:
             self.type = cls_type
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        # Register subclasses by their EVENT_TYPE discriminator so a
+        # cross-process consumer can reconstruct the original class from a
+        # JSON envelope. Subclasses without EVENT_TYPE (intermediate bases)
+        # are skipped.
+        evt_type = getattr(cls, "EVENT_TYPE", "")
+        if evt_type:
+            EVENT_REGISTRY[evt_type] = cls
+
+
+def rebuild_event(payload: dict) -> Event:
+    """Reconstruct an ``Event`` (or matching subclass) from a JSON envelope.
+
+    Unknown ``type`` values fall back to the base ``Event`` so a newer worker
+    shipping a fresh event type doesn't crash an older web consumer. Missing
+    ``ts`` defaults to now.
+    """
+    evt_type = str(payload.get("type") or "")
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        raise TypeError(f"event payload `data` must be a dict, got {type(data).__name__}")
+    ts_raw = payload.get("ts")
+    if ts_raw is None:
+        ts = datetime.now(UTC)
+    else:
+        ts = datetime.fromisoformat(str(ts_raw))
+    cls = EVENT_REGISTRY.get(evt_type, Event)
+    inst = cls(data=data, ts=ts)
+    # Subclasses overwrite `type` in __post_init__; the base Event needs the
+    # explicit value so listeners that match on the string still work.
+    if cls is Event:
+        inst.type = evt_type
+    return inst
 
 
 # Workspace

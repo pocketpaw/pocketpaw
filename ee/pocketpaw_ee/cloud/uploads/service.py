@@ -261,6 +261,7 @@ class EEUploadService:
 _PLANNER_EXTENSION_BY_MIME = {
     "text/markdown": "md",
     "text/plain": "txt",
+    "text/vtt": "vtt",
     "application/json": "json",
 }
 

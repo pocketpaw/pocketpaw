@@ -28,6 +28,19 @@ pocket-template slug) and the tool gains a top-level optional
 ``backend_summary`` (a non-secret ``{base_url, auth_type, configured}``
 summary — unused in 2a, declared now so 2b's API-skill loading does not
 re-touch the schema).
+Changes: 2026-05-23 (fix/pocket-edit-not-visible) — both handlers now
+mark the MCP response with ``is_error: True`` whenever the underlying
+``PocketSpecialist*Output.ok`` is False. Without this, a run whose
+ops were all rejected by the service (e.g. ``add_node`` with a stale
+``parent_id``) returned a *successful* tool result whose JSON body
+carried ``ok: false`` — the calling chat agent then frequently
+hallucinated a confident "applied" reply because, at the MCP layer,
+the tool had succeeded. Flipping ``is_error`` on ``ok=False`` makes
+the Claude tool-use framework treat the result as an error, so the
+chat agent surfaces the rejection reason instead of fabricating
+success while the canvas stays stale. The decline case
+(``ok=True, ops=[], warnings=[...]``) is intentionally NOT flagged —
+a planner that legitimately chose to do nothing is not a failure.
 """
 
 from __future__ import annotations
@@ -109,7 +122,13 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
-    return {
+    # Mark the MCP result as an error whenever the specialist itself
+    # reported ``ok=False``. The serialized output (with ``error``,
+    # ``warnings``, etc.) is still returned so the chat agent can surface
+    # the reason — flipping ``is_error`` only changes how the Claude
+    # tool-use framework presents the result to the model, which makes a
+    # silent rejection impossible to skip past.
+    response: dict[str, Any] = {
         "content": [
             {
                 "type": "text",
@@ -117,6 +136,14 @@ async def _create_handler(args: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
+    # Only the explicit ``failed`` action means the run errored — ``draft_kit``
+    # and ``redraft`` are legitimate ``ok=False`` protocol states (the
+    # agent-mode first-call handshake, and the create-validation retry loop)
+    # that the chat agent MUST receive and act on. Flagging those as
+    # ``is_error`` would silently break the two-call flow.
+    if getattr(out, "action", None) == "failed":
+        response["is_error"] = True
+    return response
 
 
 async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
@@ -197,7 +224,17 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
             "is_error": True,
         }
 
-    return {
+    # Mark the MCP result as an error whenever the edit run reported
+    # ``ok=False`` — typically: every supplied op was rejected by the
+    # service (e.g. ``add_node`` with a stale ``parent_id``), the
+    # specialist's backend stream errored, or no granular tool was
+    # invoked at all. Without this the chat agent saw a "successful"
+    # MCP tool call whose JSON body said ``ok: false`` and frequently
+    # fabricated a confident "applied" reply while the canvas stayed
+    # stale. A genuine decline (``ok=True, ops=[], warnings=[...]``)
+    # is intentionally NOT flagged — that is a planner choosing to do
+    # nothing, not a failure.
+    response: dict[str, Any] = {
         "content": [
             {
                 "type": "text",
@@ -205,6 +242,14 @@ async def _edit_handler(args: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
+    # Only the explicit ``failed`` action means the run errored — ``draft_kit``
+    # and ``redraft`` are legitimate ``ok=False`` protocol states (the
+    # agent-mode first-call handshake, and the create-validation retry loop)
+    # that the chat agent MUST receive and act on. Flagging those as
+    # ``is_error`` would silently break the two-call flow.
+    if getattr(out, "action", None) == "failed":
+        response["is_error"] = True
+    return response
 
 
 def build_pocket_specialist_server() -> Any:
