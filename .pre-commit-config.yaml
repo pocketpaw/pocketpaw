@@ -15,3 +15,9 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-push]
+      - id: gen-topics
+        name: regenerate paw-enterprise topics.gen.ts
+        entry: uv run python scripts/gen_topics.py
+        language: system
+        files: ^ee/pocketpaw_ee/cloud/_core/realtime/events\.py$
+        pass_filenames: false
