@@ -107,7 +107,7 @@ def set_csrf_cookie(response: Response, token: str, secure: bool = _COOKIE_SECUR
 def clear_csrf_cookie(response: Response) -> None:
     """Expire the ``paw_csrf`` cookie. Pairs with auth-cookie clear on logout."""
 
-    response.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=False)
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=_COOKIE_SECURE)
 
 
 def _path_is_exempt(path: str) -> bool:
@@ -203,7 +203,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # Only clear on a successful logout — leave the cookie alone if
         # fastapi-users rejected the request.
         if 200 <= response.status_code < 300:
-            response.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=False)
+            response.delete_cookie(
+                CSRF_COOKIE_NAME, path="/", samesite="lax", secure=_COOKIE_SECURE
+            )
 
 
 # ---------------------------------------------------------------------------
