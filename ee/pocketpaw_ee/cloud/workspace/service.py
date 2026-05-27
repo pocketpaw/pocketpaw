@@ -25,6 +25,7 @@ Changes: added get_workspace_plan helper for plan-feature gate dep.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -51,6 +52,10 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceUpdated,
 )
 from pocketpaw_ee.cloud.audit import service as audit_service
+from pocketpaw_ee.cloud.auth import api_keys as _api_keys_service
+from pocketpaw_ee.cloud.auth import sessions as _sessions_service
+from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
 from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
@@ -60,6 +65,7 @@ from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.shared.events import event_bus
+from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
 from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
 from pocketpaw_ee.cloud.workspace.dto import (
     BulkInviteRequest,
@@ -70,6 +76,9 @@ from pocketpaw_ee.cloud.workspace.dto import (
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.user import User
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +344,6 @@ async def get_delete_preview(workspace_id: str) -> dict:
     if doc is None:
         raise NotFound("workspace", workspace_id)
 
-    # Local imports keep these documents off the cold-start path for callers
-    # that never touch the preview endpoint.
-    from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
-    from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
-    from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
-
     member_count = await _count_members(workspace_id)
     room_count = await _GroupDoc.find({"workspace": workspace_id}).count()
     agent_count = await _AgentDoc.find({"workspace": workspace_id}).count()
@@ -538,20 +541,13 @@ async def remove_member(
     # blip on session revocation) shouldn't undo the membership flip or block
     # the other cascades. Each step logs + continues; the audit row captures
     # whatever counts we did manage.
-    import logging as _logging
-
-    from pocketpaw_ee.cloud.auth import api_keys as _api_keys_service
-    from pocketpaw_ee.cloud.auth import sessions as _sessions_service
-
-    _logger = _logging.getLogger(__name__)
-
     api_keys_revoked = 0
     try:
         api_keys_revoked = await _api_keys_service.revoke_keys_for_user_in_workspace(
             target_user_id, workspace_id
         )
     except Exception:
-        _logger.warning(
+        logger.warning(
             "remove_member: api-key cascade failed for user=%s ws=%s",
             target_user_id,
             workspace_id,
@@ -562,7 +558,7 @@ async def remove_member(
     try:
         sessions_revoked = await _sessions_service.revoke_all_sessions_for_user(target_user_id)
     except Exception:
-        _logger.warning(
+        logger.warning(
             "remove_member: session cascade failed for user=%s",
             target_user_id,
             exc_info=True,
@@ -572,7 +568,7 @@ async def remove_member(
     try:
         invites_revoked = await _revoke_invites_by_inviter(workspace_id, target_user_id)
     except Exception:
-        _logger.warning(
+        logger.warning(
             "remove_member: invite cascade failed for user=%s ws=%s",
             target_user_id,
             workspace_id,
@@ -600,7 +596,7 @@ async def remove_member(
         if callable(invalidate_peers):
             invalidate_peers(target_user_id)
     except Exception:
-        _logger.warning("remove_member: realtime invalidation failed", exc_info=True)
+        logger.warning("remove_member: realtime invalidation failed", exc_info=True)
 
     await audit_service.record(
         workspace_id,
@@ -1214,10 +1210,6 @@ async def seed_default_workspace(admin_id: str, *, name: str, slug: str) -> _Wor
     enterprise plan / 50 seats / explicit ``WorkspaceSettings()`` only
     apply to first-boot seeding.
     """
-    import logging
-
-    logger = logging.getLogger(__name__)
-
     admin = await _UserDoc.get(PydanticObjectId(admin_id))
     if admin is None:
         logger.debug("Admin %s not found — skipping workspace seed", admin_id)
