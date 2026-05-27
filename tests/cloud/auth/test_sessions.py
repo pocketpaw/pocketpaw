@@ -219,7 +219,7 @@ async def test_is_revoked_falls_back_to_mongo_on_redis_failure(env, monkeypatch)
     # Now simulate a Redis outage. Mongo still says revoked=True, so the
     # backstop should return True (not False as the old fail-open did).
     class _Broken:
-        async def sismember(self, *_a, **_k):
+        async def exists(self, *_a, **_k):
             raise RuntimeError("redis down")
 
     monkeypatch.setattr(redis_client, "get_redis", lambda: _Broken())

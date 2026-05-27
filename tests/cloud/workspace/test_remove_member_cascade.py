@@ -146,9 +146,9 @@ async def test_remove_member_cascades_revocations(fake_redis) -> None:
     assert len(sessions) == 2
     assert all(s.revoked for s in sessions)
 
-    # Redis revocation set carries both jtis.
-    revoked_set = await fake_redis.smembers(f"revoked_jti:{target.id}")
-    assert revoked_set == {"jti-1", "jti-2"}
+    # Redis carries one per-jti marker per revoked session.
+    assert await fake_redis.exists(f"revoked_jti:{target.id}:jti-1")
+    assert await fake_redis.exists(f"revoked_jti:{target.id}:jti-2")
 
     # Invite flipped revoked with the cascade reason.
     inv_refreshed = await _InviteDoc.get(inv.id)

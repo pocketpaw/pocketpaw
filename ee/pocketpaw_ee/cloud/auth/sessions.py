@@ -1,11 +1,15 @@
 """Per-user auth-session tracking + revocation.
 
 Persists one ``AuthSession`` row per minted JWT and maintains a Redis
-``revoked_jti:{user_id}`` set the :class:`RevocableJWTStrategy` consults
-on every token read.
+revocation marker per ``(user_id, jti)`` that :class:`RevocableJWTStrategy`
+consults on every token read.
 
-Redis set entries get a TTL roughly matching JWT lifetime so the set
-auto-trims (a revoked entry past the JWT exp is no longer reachable).
+Schema is a string key per revoked jti, ``revoked_jti:{user_id}:{jti}``,
+with TTL matching the JWT lifetime so each marker auto-expires the
+moment the underlying JWT would have stopped being accepted anyway.
+Earlier versions used one set per user with a single 7d EXPIRE; that
+was renewed on every SADD, which meant stale jtis accumulated past
+their actual JWT exp for active accounts.
 """
 
 from __future__ import annotations
@@ -23,11 +27,11 @@ from pocketpaw_ee.cloud.models.auth_session import AuthSession
 logger = logging.getLogger(__name__)
 
 # Must match auth.core.TOKEN_LIFETIME — kept duplicate to avoid circular import.
-_REDIS_SET_TTL = 60 * 60 * 24 * 7  # 7 days
+_REDIS_KEY_TTL = 60 * 60 * 24 * 7  # 7 days
 
 
-def _revoked_key(user_id: str) -> str:
-    return f"revoked_jti:{user_id}"
+def _revoked_key(user_id: str, jti: str) -> str:
+    return f"revoked_jti:{user_id}:{jti}"
 
 
 def _parse_device_label(user_agent: str | None) -> str:
@@ -93,11 +97,13 @@ async def list_sessions(user_id: str) -> list[AuthSession]:
     return rows
 
 
-async def _add_to_revoked_set(user_id: str, jti: str) -> None:
+async def _mark_revoked(user_id: str, jti: str) -> None:
     redis = redis_client.get_redis()
-    key = _revoked_key(user_id)
-    await redis.sadd(key, jti)  # type: ignore[misc]
-    await redis.expire(key, _REDIS_SET_TTL)  # type: ignore[misc]
+    await redis.set(_revoked_key(user_id, jti), "1", ex=_REDIS_KEY_TTL)  # type: ignore[misc]
+
+
+# Back-compat alias for any external caller.
+_add_to_revoked_set = _mark_revoked
 
 
 async def revoke_session(user_id: str, jti: str, *, by_user_id: str) -> AuthSession:
@@ -111,7 +117,7 @@ async def revoke_session(user_id: str, jti: str, *, by_user_id: str) -> AuthSess
         doc.revoked = True
         doc.revoked_at = datetime.now(UTC)
         await doc.save()
-    await _add_to_revoked_set(user_id, jti)
+    await _mark_revoked(user_id, jti)
     logger.info("revoked session jti=%s user=%s by=%s", jti, user_id, by_user_id)
     return doc
 
@@ -129,7 +135,7 @@ async def revoke_all_others(user_id: str, current_jti: str) -> int:
         row.revoked = True
         row.revoked_at = now
         await row.save()
-        await _add_to_revoked_set(user_id, row.jti)
+        await _mark_revoked(user_id, row.jti)
         count += 1
     return count
 
@@ -138,7 +144,7 @@ async def revoke_all_sessions_for_user(user_id: str) -> int:
     """Revoke every active session row for ``user_id`` (no current-jti carve-out).
 
     Used by the member-removal cascade — force re-login across the whole
-    system. Populates the Redis revocation set in a single SADD + EXPIRE.
+    system. Marks each jti in Redis individually so per-jti TTLs apply.
     Returns the count of newly revoked rows.
     """
     rows = await AuthSession.find(
@@ -154,13 +160,11 @@ async def revoke_all_sessions_for_user(user_id: str) -> int:
         row.revoked_at = now
         await row.save()
         jtis.append(row.jti)
-    try:
-        redis = redis_client.get_redis()
-        key = _revoked_key(user_id)
-        await redis.sadd(key, *jtis)  # type: ignore[misc]
-        await redis.expire(key, _REDIS_SET_TTL)  # type: ignore[misc]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("revoke_all_sessions_for_user Redis update failed: %s", exc)
+    for jti in jtis:
+        try:
+            await _mark_revoked(user_id, jti)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("revoke_all_sessions_for_user Redis update failed for %s: %s", jti, exc)
     return len(jtis)
 
 
@@ -177,7 +181,7 @@ async def is_revoked(user_id: str, jti: str) -> bool:
     # fine for now but every authenticated call pays it.
     try:
         redis = redis_client.get_redis()
-        return bool(await redis.sismember(_revoked_key(user_id), jti))  # type: ignore[misc]
+        return bool(await redis.exists(_revoked_key(user_id, jti)))  # type: ignore[misc]
     except Exception as exc:  # noqa: BLE001
         logger.warning("is_revoked Redis check failed; falling back to Mongo: %s", exc)
     try:
