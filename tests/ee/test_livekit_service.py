@@ -13,6 +13,31 @@ from pocketpaw_ee.cloud.livekit.service import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _install_recording_bus():
+    """Install an inert bus so service-side emit() calls don't AssertionError.
+
+    The shared cloud conftest.recording_bus fixture only covers tests/cloud/;
+    tests/ee/ files like this one need their own. The fixture is autouse so
+    every test in the module gets the bus without opting in.
+    """
+    from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
+
+    class _NullBus:
+        async def publish(self, _event):
+            return
+
+        def subscribe(self, _event_type, _handler):
+            return
+
+    prev = bus_mod._bus
+    bus_mod._bus = _NullBus()
+    try:
+        yield
+    finally:
+        bus_mod._bus = prev
+
+
 class TestRoomNameForGroup:
     def test_generates_deterministic_name(self):
         name = room_name_for_group("abc123")

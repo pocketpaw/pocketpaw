@@ -23,7 +23,7 @@ from livekit.protocol.room import (
 )
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallStarted
+from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallNotesPosted, CallStarted
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +442,16 @@ async def post_meeting_notes_to_group(
                 "content": content,
                 "mentions": [],
             },
+        )
+        await emit(
+            CallNotesPosted(
+                data={
+                    "group_id": group_id,
+                    "message_id": domain_msg.id,
+                    "duration_seconds": duration_seconds,
+                    "participant_count": len(participants),
+                }
+            )
         )
         logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
     except Exception as exc:
