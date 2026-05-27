@@ -144,6 +144,14 @@ async def resolve_bearer(token: str) -> tuple[str, str, list[str]] | None:
     if doc is None:
         return None
 
+    # Cheap expiry check first — skips the ~30ms argon2 verify when the
+    # key is already dead.
+    now = datetime.now(UTC)
+    if doc.expires_at is not None:
+        exp = doc.expires_at if doc.expires_at.tzinfo else doc.expires_at.replace(tzinfo=UTC)
+        if exp <= now:
+            return None
+
     # Why: argon2 verify is ~30ms, acceptable for API-key auth path.
     try:
         result = _password_hash.verify(secret, doc.hashed_secret)
@@ -155,12 +163,6 @@ async def resolve_bearer(token: str) -> tuple[str, str, list[str]] | None:
         valid = bool(result)
     if not valid:
         return None
-
-    now = datetime.now(UTC)
-    if doc.expires_at is not None:
-        exp = doc.expires_at if doc.expires_at.tzinfo else doc.expires_at.replace(tzinfo=UTC)
-        if exp <= now:
-            return None
 
     if _should_write_last_used(str(doc.id), time.monotonic()):
         try:
