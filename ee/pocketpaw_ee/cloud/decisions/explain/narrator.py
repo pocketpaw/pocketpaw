@@ -181,9 +181,7 @@ def _compress_decision(decision: Decision) -> dict[str, Any]:
             {
                 "status": decision.outcome.status,
                 "landed_at": (
-                    decision.outcome.landed_at.isoformat()
-                    if decision.outcome.landed_at
-                    else None
+                    decision.outcome.landed_at.isoformat() if decision.outcome.landed_at else None
                 ),
                 "metered": decision.outcome.metered,
             }
@@ -380,9 +378,7 @@ def _render_templated(root: Decision, trace: TraceResult) -> str:
         root.inputs[0] if root.inputs else None,
     )
     target_label = (
-        primary_input.label or primary_input.id
-        if primary_input
-        else "an unspecified target"
+        primary_input.label or primary_input.id if primary_input else "an unspecified target"
     )
 
     # 1. Headline — what / who / when
@@ -432,14 +428,10 @@ def _render_templated(root: Decision, trace: TraceResult) -> str:
     # 5. Outcome
     if root.outcome and root.outcome.status == "landed":
         landed_phrase = (
-            f" at {_format_dt(root.outcome.landed_at)}"
-            if root.outcome.landed_at
-            else ""
+            f" at {_format_dt(root.outcome.landed_at)}" if root.outcome.landed_at else ""
         )
         metered_phrase = " and was metered" if root.outcome.metered else ""
-        sentences.append(
-            f"The outcome landed{landed_phrase}{metered_phrase} [{root_short}]."
-        )
+        sentences.append(f"The outcome landed{landed_phrase}{metered_phrase} [{root_short}].")
     elif root.outcome and root.outcome.status == "rejected":
         sentences.append(
             f"The decision did not produce a landed outcome — it was rejected [{root_short}]."

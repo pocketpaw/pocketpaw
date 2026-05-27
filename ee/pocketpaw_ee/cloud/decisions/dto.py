@@ -30,7 +30,6 @@ from pocketpaw_ee.cloud.decisions.domain import (
     ScopeKind,
 )
 
-
 # ---------------------------------------------------------------------------
 # Approver / input / outcome wire shapes — minor flattenings of the domain
 # value objects so the wire schema doesn't leak Pydantic internals.

@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from pocketpaw.bundled_templates.installer import install_bundled_templates
@@ -63,11 +62,7 @@ _RFC03_SHAPE_ENUM = {
 }
 
 _BUNDLED_DIR = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "pocketpaw"
-    / "bundled_templates"
-    / "_bundled"
+    Path(__file__).resolve().parents[2] / "src" / "pocketpaw" / "bundled_templates" / "_bundled"
 )
 _SLUG = "decision-graph"
 

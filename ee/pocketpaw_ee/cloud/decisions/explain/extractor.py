@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -127,8 +127,7 @@ def _build_user_message(question: str) -> str:
     """Render the per-call user message. The few-shots are baked into the
     system prefix so the cache hit rate stays high across questions."""
     shots = "\n\n".join(
-        f"Question: {q}\nOutput: {json.dumps(out, separators=(',', ':'))}"
-        for q, out in _FEWSHOTS
+        f"Question: {q}\nOutput: {json.dumps(out, separators=(',', ':'))}" for q, out in _FEWSHOTS
     )
     return (
         f"Few-shot examples (do not echo):\n{shots}\n\n"
@@ -208,7 +207,9 @@ async def extract_entities(
             ],
         )
     except Exception:  # noqa: BLE001
-        logger.warning("explain extractor LLM call failed; falling back to templated", exc_info=True)
+        logger.warning(
+            "explain extractor LLM call failed; falling back to templated", exc_info=True
+        )
         return _templated_extract(question, scope)
 
     try:
@@ -276,8 +277,18 @@ def _parse_llm_output(raw: str) -> ExtractedEntities | None:
 # ---------------------------------------------------------------------------
 
 _MONTH_NAMES = {
-    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
-    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
 }
 
 _FABRIC_PREFIXES = ("lease", "case", "patient", "vendor", "tenant", "deal", "ticket")
@@ -340,7 +351,7 @@ def _templated_extract(question: str, scope: dict[str, Any]) -> ExtractedEntitie
     iso_match = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", question)
     if iso_match:
         y, mo, d = map(int, iso_match.groups())
-        start = datetime(y, mo, d, tzinfo=timezone.utc)
+        start = datetime(y, mo, d, tzinfo=UTC)
         out.time_range = (start, start + timedelta(days=1))
     else:
         mo_match = re.search(
@@ -351,8 +362,8 @@ def _templated_extract(question: str, scope: dict[str, Any]) -> ExtractedEntitie
         if mo_match:
             month = _MONTH_NAMES[mo_match.group(1).lower()]
             day = int(mo_match.group(2))
-            year = datetime.now(timezone.utc).year
-            start = datetime(year, month, day, tzinfo=timezone.utc)
+            year = datetime.now(UTC).year
+            start = datetime(year, month, day, tzinfo=UTC)
             out.time_range = (start, start + timedelta(days=1))
 
     # policy — "approve_per_row policy" or just "approve_per_row"

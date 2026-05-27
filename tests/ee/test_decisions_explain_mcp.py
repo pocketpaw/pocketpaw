@@ -29,8 +29,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from soul_protocol.spec.journal import Actor, EventEntry
-
 from pocketpaw_ee.agent.mcp_servers.decisions import (
     DECISIONS_EXPLAIN_TOOL_ID,
     DECISIONS_TOOL_IDS,
@@ -47,6 +45,7 @@ from pocketpaw_ee.cloud.decisions.service import (
     reset_projection_for_tests,
 )
 from pocketpaw_ee.cloud.decisions.store import DecisionStore, set_db_path
+from soul_protocol.spec.journal import Actor, EventEntry
 
 # ---------------------------------------------------------------------------
 # Fixtures — mirror test_decisions_mcp's pattern
@@ -146,7 +145,9 @@ def _seed_chain(
         "intent": f"chain-{corr.hex[:8]}",
         "action": "send_to_tenant",
         "pocket_id": pocket_id,
-        "inputs": [{"kind": "fabric_object", "id": "lease:LR-2026-117", "label": "Lease LR-2026-117"}],
+        "inputs": [
+            {"kind": "fabric_object", "id": "lease:LR-2026-117", "label": "Lease LR-2026-117"}
+        ],
     }
     events = [
         _event(
@@ -220,9 +221,7 @@ async def test_explain_handler_returns_grounded_envelope(
 async def test_explain_handler_requires_identity(graph) -> None:
     """Outside a chat stream, the workspace ContextVar is None and the
     handler returns the canonical "no active workspace" error."""
-    envelope = await _decisions_explain_handler(
-        {"question": "Why was LR-2026-117 approved?"}
-    )
+    envelope = await _decisions_explain_handler({"question": "Why was LR-2026-117 approved?"})
     assert envelope.get("is_error") is True
     assert "no active workspace" in envelope["content"][0]["text"]
 
@@ -233,18 +232,14 @@ async def test_explain_handler_requires_identity(graph) -> None:
 
 
 @pytest.mark.asyncio
-async def test_explain_handler_rejects_empty_question(
-    _identity_context, graph
-) -> None:
+async def test_explain_handler_rejects_empty_question(_identity_context, graph) -> None:
     envelope = await _decisions_explain_handler({"question": ""})
     assert envelope.get("is_error") is True
     assert "question is required" in envelope["content"][0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_explain_handler_rejects_missing_question(
-    _identity_context, graph
-) -> None:
+async def test_explain_handler_rejects_missing_question(_identity_context, graph) -> None:
     envelope = await _decisions_explain_handler({})
     assert envelope.get("is_error") is True
 

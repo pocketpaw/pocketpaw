@@ -122,9 +122,7 @@ def _maybe_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except (ValueError, TypeError) as exc:
-        raise CloudError(
-            400, "decisions.invalid_id", f"'{value}' is not a valid UUID"
-        ) from exc
+        raise CloudError(400, "decisions.invalid_id", f"'{value}' is not a valid UUID") from exc
 
 
 def _trace_to_response(result: TraceResult) -> DecisionTraceResponse:
