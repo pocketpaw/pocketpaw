@@ -520,6 +520,18 @@ async def seed_default_agent(
         workspace_id,
         agent.id,
     )
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
     return agent, True
 
 
