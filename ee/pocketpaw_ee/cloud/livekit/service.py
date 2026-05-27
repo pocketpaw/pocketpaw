@@ -23,7 +23,7 @@ from livekit.protocol.room import (
 )
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import CallStarted
+from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallStarted
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +320,8 @@ async def end_room(group_id: str) -> dict[str, Any]:
             else:
                 logger.error("Failed to delete LiveKit room: %s", exc)
                 raise
+
+    await emit(CallEnded(data={"group_id": group_id, "room_name": room_name}))
 
     return {
         "room_name": room_name,
