@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pocketpaw_ee.cloud.chat.schemas import WsInbound
-from pocketpaw_ee.cloud.realtime.events import TypingStart, TypingStop
+from pocketpaw_ee.cloud.realtime.events import MessageRead, TypingStart, TypingStop
 
 
 @pytest.mark.asyncio
@@ -80,3 +80,47 @@ async def test_ws_typing_non_member_does_not_emit(monkeypatch, recording_bus):
     )
 
     assert not [e for e in recording_bus.events if isinstance(e, TypingStart | TypingStop)]
+
+
+@pytest.mark.asyncio
+async def test_ws_read_ack_emits_message_read(monkeypatch, recording_bus):
+    router_mod = importlib.import_module("pocketpaw_ee.cloud.chat.router")
+
+    async def members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    async def fake_mark_read(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(router_mod.group_service, "list_member_ids", members)
+    monkeypatch.setattr(router_mod.unread_service, "mark_read", fake_mark_read)
+    monkeypatch.setattr(router_mod.manager, "send_to_room", AsyncMock())
+
+    await router_mod._ws_read_ack(
+        user_id="u1",
+        msg=WsInbound(type="read.ack", group_id="g1", message_id="m1"),
+    )
+
+    reads = [e for e in recording_bus.events if isinstance(e, MessageRead)]
+    assert len(reads) == 1
+    assert reads[0].data["group_id"] == "g1"
+    assert reads[0].data["user_id"] == "u1"
+    assert reads[0].data["message_id"] == "m1"
+
+
+@pytest.mark.asyncio
+async def test_ws_read_ack_non_member_does_not_emit(monkeypatch, recording_bus):
+    router_mod = importlib.import_module("pocketpaw_ee.cloud.chat.router")
+
+    async def members(_gid: str) -> list[str]:
+        return ["u1", "u2"]
+
+    monkeypatch.setattr(router_mod.group_service, "list_member_ids", members)
+    monkeypatch.setattr(router_mod.manager, "send_to_room", AsyncMock())
+
+    await router_mod._ws_read_ack(
+        user_id="intruder",
+        msg=WsInbound(type="read.ack", group_id="g1", message_id="m1"),
+    )
+
+    assert not [e for e in recording_bus.events if isinstance(e, MessageRead)]

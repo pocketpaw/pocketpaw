@@ -50,6 +50,7 @@ from pocketpaw_ee.cloud.chat.ws import PRESENCE_GRACE_SECONDS, manager
 from pocketpaw_ee.cloud.license import get_license, require_license
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
+    MessageRead,
     PresenceOffline,
     PresenceOnline,
     TypingStart,
@@ -788,4 +789,14 @@ async def _ws_read_ack(user_id: str, msg: WsInbound) -> None:
             },
         ),
         exclude_user=user_id,
+    )
+
+    await emit(
+        MessageRead(
+            data={
+                "group_id": msg.group_id,
+                "user_id": user_id,
+                "message_id": msg.message_id,
+            }
+        )
     )
