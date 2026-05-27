@@ -46,6 +46,19 @@ class WorkspaceMember:
 
 
 @dataclass(frozen=True)
+class VerifiedDomain:
+    """A claimed email domain on a workspace. Mirrors the embedded
+    persistence shape; DNS TXT verification flips ``verified``."""
+
+    domain: str
+    verification_token: str
+    verified: bool
+    verified_at: datetime | None
+    auto_join: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class Invite:
     """A workspace invite. ``expired`` is computed by the repository at
     read time so the domain doesn't carry a clock dependency."""
@@ -55,7 +68,7 @@ class Invite:
     email: str
     role: str
     invited_by: str  # user_id
-    token: str
+    token: str | None
     group_id: str | None
     accepted: bool
     revoked: bool
@@ -63,4 +76,4 @@ class Invite:
     expires_at: datetime
 
 
-__all__ = ["Invite", "Workspace", "WorkspaceMember"]
+__all__ = ["Invite", "VerifiedDomain", "Workspace", "WorkspaceMember"]

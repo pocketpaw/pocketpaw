@@ -107,6 +107,12 @@ class _FakeStore:
 
 def _dict_match(doc: _FakeDoc, filt: dict[str, Any]) -> bool:
     for key, value in filt.items():
+        # Handle $or — at least one sub-condition must match.
+        if key == "$or":
+            if not any(_dict_match(doc, sub) for sub in value):
+                return False
+            continue
+
         actual = getattr(doc, key, None)
         if isinstance(value, dict):
             for op, operand in value.items():
@@ -114,6 +120,15 @@ def _dict_match(doc: _FakeDoc, filt: dict[str, Any]) -> bool:
                     return False
                 elif op == "$gt" and not (actual is not None and actual > operand):
                     return False
+                elif op == "$ne":
+                    # MongoDB $ne: null matches when the field value is not
+                    # null (field is present with a truthy value).
+                    if operand is None:
+                        if actual is None:
+                            return False
+                    else:
+                        if actual == operand:
+                            return False
                 elif op == "$in":
                     # only used for attendees.email which is nested — caller
                     # never asks for that path in service-level tests.

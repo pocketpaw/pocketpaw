@@ -1,0 +1,26 @@
+# src/pocketpaw/bundled_templates/_bundled/decision-graph/template.pocket.yaml
+# Created: 2026-05-25 (RFC 07 Slice 3a) — the built-in Decision Graph
+# pocket. Visualizes every decision the org has made — by agent, by
+# human, by policy, by pocket — with full upstream and downstream
+# lineage. The narrator agent answers natural-language questions and
+# walks the relevant graph slice with grounded citations.
+#
+# Shape is `custom` (the Decision Graph widget is a Layer-2 SvelteFlow
+# render). Vertical is `core` — the cross-vertical bin for foundational
+# org-wide templates. Read-only: no actions, no connectors, no outcomes;
+# the Instinct rule blocks writes at the pocket boundary.
+name: decision-graph
+version: 0.1.0
+vertical: core
+shape: custom
+description: |
+  Visualize every decision the org has made — by agent, by human, by
+  policy, by pocket — with full upstream and downstream lineage. Ask
+  natural-language questions and watch the graph slice that answered
+  them. The audit log, but you can talk to it.
+state:
+  entity_type: Decision
+  columns: []
+actions: []
+connectors: []
+skills: []

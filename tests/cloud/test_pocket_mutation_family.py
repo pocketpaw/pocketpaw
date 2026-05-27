@@ -220,10 +220,12 @@ async def test_granular_op_still_emits_pocket_updated(mongo_db, agent_identity):
 def test_pocket_mutation_frame_to_wire_is_flat():
     """``PocketMutationFrame.to_wire`` flattens ``payload`` to the top
     level and adds the legacy ``action`` alias — so un-discriminated
-    consumers keep working byte-for-byte."""
+    consumers keep working byte-for-byte. The plain-English ``kind``
+    discriminant rides next to the A2UI ``family`` (RFC 06 position #2)."""
     from pocketpaw_ee.cloud.chat.agent_schemas import PocketMutationFrame, family_for_op
 
     frame = PocketMutationFrame(
+        kind="data",
         family="updateDataModel",
         op="state_set",
         pocket_id="p1",
@@ -233,6 +235,7 @@ def test_pocket_mutation_frame_to_wire_is_flat():
     assert wire == {
         "action": "state_set",
         "op": "state_set",
+        "kind": "data",
         "family": "updateDataModel",
         "pocket_id": "p1",
         "path": "filter",

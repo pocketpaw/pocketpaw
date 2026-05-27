@@ -48,6 +48,14 @@
       "pattern": "feed",
       "keywords": ["activity feed", "feed", "timeline", "changelog", "release notes", "history", "audit log", "activity log", "event stream", "milestones"],
       "connectors_hint": []
+    },
+    {
+      "slug": "decision-graph",
+      "title": "Decision Graph",
+      "shape": "custom",
+      "pattern": "app",
+      "keywords": ["decision graph", "decisions", "audit", "audit trail", "why did we", "explain", "lineage", "trace", "decision log", "decision history", "decision audit", "policy decisions", "approval graph"],
+      "connectors_hint": []
     }
   ]
 }

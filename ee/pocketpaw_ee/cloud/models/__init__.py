@@ -8,6 +8,10 @@ remains registered in ``get_all_documents()`` for Beanie init.
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+from pocketpaw_ee.cloud.models.api_key import APIKey
+from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
+from pocketpaw_ee.cloud.models.auth_session import AuthSession
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -37,6 +41,8 @@ from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
+_CalendarDoc: type = None  # type: ignore[assignment]
+_EventDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
@@ -50,10 +56,28 @@ def _ensure_file_upload():
     return FileUpload
 
 
+def _ensure_calendar_docs():
+    # Why: calendar.__init__ eagerly imports the router which transitively
+    # imports cloud.auth.current_active_user. Deferred to break the cycle
+    # when cloud.models is loaded during cloud.auth's own init.
+    global _CalendarDoc, _EventDoc
+    if _CalendarDoc is None:
+        from pocketpaw_ee.calendar.models import _CalendarDoc as _CD
+        from pocketpaw_ee.calendar.models import _EventDoc as _ED
+
+        _CalendarDoc = _CD
+        _EventDoc = _ED
+    return _CalendarDoc, _EventDoc
+
+
 __all__ = [
+    "APIKey",
     "Agent",
     "AgentConfig",
     "Attachment",
+    "AuditEvent",
+    "AuditWebhook",
+    "AuthSession",
     "ChatRunDoc",
     "Comment",
     "CommentAuthor",
@@ -99,12 +123,7 @@ __all__ = [
 def get_all_documents():
     """Get all Beanie documents, with lazy FileUpload loading."""
     _ensure_file_upload()
-    # Calendar lives in ee/pocketpaw_ee/calendar/ (sibling package, not
-    # under cloud/), so its docs are imported here and added to the list.
-    # Late import keeps the cloud models module free of a hard dep on
-    # the calendar package.
-    from pocketpaw_ee.calendar.models import _CalendarDoc, _EventDoc
-
+    cal_doc, evt_doc = _ensure_calendar_docs()
     return [
         User,
         Agent,
@@ -135,6 +154,12 @@ def get_all_documents():
         _CalendarDoc,
         _EventDoc,
         ChatRunDoc,
+        AuditEvent,
+        AuditWebhook,
+        AuthSession,
+        APIKey,
+        cal_doc,
+        evt_doc,
     ]
 
 

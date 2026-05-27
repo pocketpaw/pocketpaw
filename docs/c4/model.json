@@ -268,6 +268,13 @@
                 "description": "JavaScript-based utilities and client-side functionality.",
                 "technology": "JavaScript",
                 "kb_article": "deps-fastapi-dependency-injection-layer-for-cloud-router-authentication-and-auth"
+              },
+              {
+                "id": "decision-graph",
+                "name": "Decision Graph",
+                "description": "Materializes decision chains from journal events into queryable Decisions. Provides Python API for audit, trace, and explainability.",
+                "technology": "Python/SQLite",
+                "kb_article": "audit-decisions-materialized-graph-over-journal-event-chains-for-trace-and-explain"
               }
             ]
           }
@@ -396,6 +403,24 @@
         "source": "daemon",
         "target": "pocketpaw",
         "description": "imports pocketpaw",
+        "style": "sync"
+      },
+      {
+        "source": "decision-graph",
+        "target": "bus",
+        "description": "subscribes to journal events to fold decisions",
+        "style": "async"
+      },
+      {
+        "source": "decision-graph",
+        "target": "audit",
+        "description": "is the queryable audit log — decisions, traces, lineage",
+        "style": "sync"
+      },
+      {
+        "source": "api",
+        "target": "decision-graph",
+        "description": "exposes decisions via REST surface (Slice 2)",
         "style": "sync"
       },
       {
