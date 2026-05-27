@@ -29,6 +29,10 @@ from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    AgentCreated,
+)
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
 from pocketpaw_ee.cloud.agents.dto import (
     CreateAgentRequest,
@@ -228,6 +232,18 @@ async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentReques
     if agent.config.soul_enabled:
         await _try_eager_soul(agent)
 
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": agent.id,
+                "workspace_id": workspace_id,
+                "owner_id": ctx.user_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
     return agent
 
 
