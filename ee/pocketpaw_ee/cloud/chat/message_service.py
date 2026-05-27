@@ -45,8 +45,8 @@ from pocketpaw_ee.cloud.realtime.events import (
     MessageReaction,
     MessageSent,
     MessageUiStateUpdated,
+    ThreadClosed,
     ThreadCreated,
-    ThreadReply,
     UnreadUpdate,
 )
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound
@@ -1005,11 +1005,11 @@ async def close_thread(group_id: str, user_id: str, thread_id: str) -> None:
     await group.save()
 
     await emit(
-        ThreadReply(
+        ThreadClosed(
             data={
-                "type": "thread.closed",
                 "group_id": group_id,
                 "thread_id": thread_id,
+                "closed_by": user_id,
             }
         )
     )

@@ -22,6 +22,7 @@ from pocketpaw_ee.cloud.realtime.events import (
     MessageNew,
     MessageReaction,
     MessageSent,
+    ThreadClosed,
     ThreadCreated,
     UnreadUpdate,
 )
@@ -268,6 +269,24 @@ async def test_create_thread_emits_thread_created(mongo_db, recording_bus):
     assert ev.type == "thread.created"
     assert ev.data["group_id"] == str(group.id)
     assert ev.data["message_id"] == str(parent.id)
+
+
+@pytest.mark.asyncio
+async def test_close_thread_emits_thread_closed(mongo_db, recording_bus):
+    """close_thread must fire a typed ThreadClosed event."""
+    group = await _make_group(owner="u1", members=["u1"])
+    parent = await _make_message(group_id=str(group.id), sender="u1", content="parent")
+    await message_service.create_thread(str(group.id), "u1", str(parent.id))
+    recording_bus.events.clear()
+
+    await message_service.close_thread(str(group.id), "u1", str(parent.id))
+
+    closed = [e for e in recording_bus.events if isinstance(e, ThreadClosed)]
+    assert len(closed) == 1
+    ev = closed[0]
+    assert ev.type == "thread.closed"
+    assert ev.data["group_id"] == str(group.id)
+    assert ev.data["thread_id"] == str(parent.id)
 
 
 @pytest.mark.asyncio
