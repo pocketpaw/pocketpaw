@@ -250,13 +250,16 @@ class WorkItemResponse(BaseModel):
     description: str
     assignee_kind: AssigneeKind
     assignee_id: str
-    pocket_id: str | None = None
-    agent_id: str | None = None
     source_kind: str
     source_id: str
     priority: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    assignee_name: str = ""  # display name
+    agent_id: str | None = None
+    agent_name: str = ""  # display name
+    pocket_id: str | None = None
+    pocket_name: str = ""  # display name
     fabric_refs: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
 
@@ -272,13 +275,16 @@ def work_item_to_response(item: WorkItem) -> WorkItemResponse:
         description=item.description,
         assignee_kind=item.assignee_kind,
         assignee_id=item.assignee_id,
-        pocket_id=item.pocket_id,
-        agent_id=item.agent_id,
         source_kind=item.source_kind,
         source_id=item.source_id,
         priority=item.priority,
         created_at=item.created_at,
         updated_at=item.updated_at,
+        assignee_name=item.assignee_name,
+        agent_id=item.agent_id,
+        agent_name=item.agent_name,
+        pocket_id=item.pocket_id,
+        pocket_name=item.pocket_name,
         fabric_refs=list(item.fabric_refs),
         blocked_by=list(item.blocked_by),
     )
@@ -307,8 +313,10 @@ class ActivityEventResponse(BaseModel):
     workspace_id: str
     kind: str
     agent_id: str | None = None
+    agent_name: str = ""  # display name
     summary: str
     pocket_id: str | None = None
+    pocket_name: str = ""  # display name
     ts: float
 
 

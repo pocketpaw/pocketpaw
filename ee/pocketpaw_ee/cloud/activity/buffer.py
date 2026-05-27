@@ -69,6 +69,8 @@ class ActivityEvent:
     summary: str
     pocket_id: str | None
     ts: float  # unix seconds — used for TTL pruning + display
+    agent_name: str = ""  # display name
+    pocket_name: str = ""  # display name
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -217,8 +219,10 @@ async def _handle_agent_event(event: Event) -> None:
         workspace_id=str(workspace_id),
         kind=_extract_kind(event.type),
         agent_id=data.get("agent_id"),
+        agent_name=data.get("agent_name") or data.get("agent_id") or "",
         summary=_summarise(event),
         pocket_id=data.get("pocket_id"),
+        pocket_name=data.get("pocket_name") or data.get("pocket_id") or "",
         ts=time.time(),
         extra={"event_type": event.type, "raw": {k: v for k, v in data.items() if k != "raw"}},
     )
@@ -233,8 +237,10 @@ async def _handle_agent_event(event: Event) -> None:
                 "workspace_id": activity.workspace_id,
                 "kind": activity.kind,
                 "agent_id": activity.agent_id,
+                "agent_name": activity.agent_name,
                 "summary": activity.summary,
                 "pocket_id": activity.pocket_id,
+                "pocket_name": activity.pocket_name,
                 "ts": activity.ts,
             },
         )
