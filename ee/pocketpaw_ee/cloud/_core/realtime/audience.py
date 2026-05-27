@@ -117,7 +117,7 @@ class AudienceResolver:
             return await self._group(d["group_id"])
         if t == "message.sent":
             return [d["sender_id"]]
-        if t == "thread.reply":
+        if t in {"thread.reply", "thread.created", "thread.closed"}:
             return await self._group(d.get("group_id", ""))
         if t == "message.ui_state.updated":
             # Group-context messages fan out to every group member so a peer

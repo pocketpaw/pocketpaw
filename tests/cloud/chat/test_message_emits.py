@@ -22,6 +22,7 @@ from pocketpaw_ee.cloud.realtime.events import (
     MessageNew,
     MessageReaction,
     MessageSent,
+    ThreadCreated,
     UnreadUpdate,
 )
 
@@ -250,6 +251,23 @@ async def test_send_reply_does_not_bump_thread_count(mongo_db, recording_bus):
     assert refreshed_parent.thread_count == 0
     assert refreshed_parent.edited is False
     assert refreshed_parent.deleted is False
+
+
+@pytest.mark.asyncio
+async def test_create_thread_emits_thread_created(mongo_db, recording_bus):
+    """create_thread must fire a typed ThreadCreated event, not stuff
+    type="thread.created" into a ThreadReply data dict."""
+    group = await _make_group(owner="u1", members=["u1"])
+    parent = await _make_message(group_id=str(group.id), sender="u1", content="parent")
+
+    await message_service.create_thread(str(group.id), "u1", str(parent.id))
+
+    created = [e for e in recording_bus.events if isinstance(e, ThreadCreated)]
+    assert len(created) == 1
+    ev = created[0]
+    assert ev.type == "thread.created"
+    assert ev.data["group_id"] == str(group.id)
+    assert ev.data["message_id"] == str(parent.id)
 
 
 @pytest.mark.asyncio

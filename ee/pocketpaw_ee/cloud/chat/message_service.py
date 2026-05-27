@@ -45,6 +45,7 @@ from pocketpaw_ee.cloud.realtime.events import (
     MessageReaction,
     MessageSent,
     MessageUiStateUpdated,
+    ThreadCreated,
     ThreadReply,
     UnreadUpdate,
 )
@@ -886,11 +887,11 @@ async def create_thread(group_id: str, user_id: str, message_id: str) -> dict:
     wire = message_to_wire_dict(domain_msg)
 
     await emit(
-        ThreadReply(
+        ThreadCreated(
             data={
-                "type": "thread.created",
                 "group_id": group_id,
                 "message_id": message_id,
+                "creator_id": user_id,
                 "message": wire,
             }
         )
