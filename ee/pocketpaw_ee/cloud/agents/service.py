@@ -32,6 +32,7 @@ from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     AgentCreated,
+    AgentUpdated,
 )
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
 from pocketpaw_ee.cloud.agents.dto import (
@@ -296,6 +297,18 @@ async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -
     if new_config != _config_to_domain(doc.config):
         doc.config = _config_to_doc(new_config)
     await doc.save()
+
+    payload: dict[str, Any] = {
+        "agent_id": str(doc.id),
+        "workspace_id": doc.workspace,
+    }
+    if body.name is not None:
+        payload["name"] = doc.name
+    if body.avatar is not None:
+        payload["avatar"] = doc.avatar
+    if body.visibility is not None:
+        payload["visibility"] = doc.visibility
+    await emit(AgentUpdated(data=payload))
     return _to_domain(doc)
 
 
