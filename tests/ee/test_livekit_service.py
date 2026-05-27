@@ -53,6 +53,11 @@ class TestService:
         # Create the inner 'room' service mock
         mock_room_svc = MagicMock()
 
+        # Mock list_rooms for is_new detection (returns empty by default)
+        mock_list_resp = MagicMock()
+        mock_list_resp.rooms = []
+        mock_room_svc.list_rooms = AsyncMock(return_value=mock_list_resp)
+
         # Create the LiveKitAPI instance mock
         mock_api_instance = MagicMock()
         mock_api_instance.room = mock_room_svc

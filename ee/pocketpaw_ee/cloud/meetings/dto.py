@@ -32,6 +32,7 @@ class CreateMeetingRequest(BaseModel):
 
     source: MeetingSourceName = "recall"
     provider: MeetingProviderName | None = None
+    group_id: str | None = Field(default=None, description="Required for livekit — group scope")
     title: str = Field(min_length=1, max_length=300)
     scheduled_start: datetime | None = None
     duration_minutes: int = Field(default=30, ge=1, le=1440)
@@ -55,11 +56,13 @@ class MeetingResponse(BaseModel):
     source: MeetingSourceName = "recall"
     provider: MeetingProviderName | None = None
     provider_meeting_id: str
+    group_id: str | None = None
     title: str | None
     join_url: str
     organizer_email: str | None
     scheduled_start: datetime | None
     scheduled_end: datetime | None
+    duration_minutes: int = 30
     actual_start: datetime | None
     actual_end: datetime | None
     status: str

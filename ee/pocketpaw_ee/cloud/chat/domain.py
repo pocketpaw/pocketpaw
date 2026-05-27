@@ -102,6 +102,7 @@ class Message:
     group: str | None
     sender: str | None  # user_id
     sender_type: str  # user | agent
+    sender_name: str | None  # Friendly display name (e.g. "Meeting Notes")
     agent: str | None  # agent_id when sender_type == agent
     content: str
     mentions: tuple[Mention, ...] = field(default_factory=tuple)

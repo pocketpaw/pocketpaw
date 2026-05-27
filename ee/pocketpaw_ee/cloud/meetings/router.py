@@ -204,9 +204,10 @@ async def get_meeting(
 async def cancel_meeting(
     meeting_id: str,
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> MeetingResponse:
-    """Cancel a meeting via the provider."""
-    return await meetings_service.cancel_meeting(workspace_id, meeting_id)
+    """Cancel a meeting. Only the creator (or workspace admin) can cancel."""
+    return await meetings_service.cancel_meeting(workspace_id, meeting_id, user_id=user_id)
 
 
 @router.get("/{meeting_id}/transcript", response_model=TranscriptResponse)

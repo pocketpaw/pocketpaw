@@ -180,6 +180,14 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cloud chat-title listener registration failed: %s", exc)
 
+        # Start meeting reminder + auto-start background loop.
+        try:
+            from pocketpaw_ee.cloud.meetings.scheduling.reminders import start_reminder_loop
+
+            start_reminder_loop()
+            logger.info("Meeting reminder + auto-start loop started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to start meeting reminder loop: %s", exc)
         # Pocket interval-refresh scheduler (RFC 04 M3). A single asyncio
         # task that periodically re-runs pocket data sources whose refresh
         # policy includes `"interval"`. Self-gated on
@@ -214,6 +222,17 @@ class CloudLifecycleHook:
             logger.warning("xproc consumer start failed: %s", exc)
 
     async def on_shutdown(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        # Shut down the meeting APScheduler if it was started.
+        try:
+            from pocketpaw_ee.cloud.meetings.scheduling.reminders import shutdown_scheduler
+
+            await shutdown_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Meeting scheduler shutdown error: %s", exc)
+
         # Most cloud teardown is handled inside mount_cloud's own shutdown
         # hook. The interval-refresh scheduler is owned by this lifecycle
         # hook (it was started in on_startup), so it is cancelled here so

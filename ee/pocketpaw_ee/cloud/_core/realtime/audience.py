@@ -207,6 +207,22 @@ class AudienceResolver:
         if t in {"presence.online", "presence.offline"}:
             return await self._peers(d["user_id"])
 
+        # --- Calls ---------------------------------------------------------------
+        if t in {"call.started", "call.ended"}:
+            # Fan out to all group members so they see incoming/join notifications
+            gid = d.get("group_id")
+            if not gid:
+                return []
+            return await self._group(gid)
+
+        # --- Meetings ----------------------------------------------------------
+        if t in {"meeting.scheduled", "meeting.updated", "meeting.cancelled", "meeting.started"}:
+            # Fan out to all group members so they see meeting schedule/updates
+            gid = d.get("group_id")
+            if not gid:
+                return []
+            return await self._group(gid)
+
         # Room-scoped events (typing.*) are routed by the ConnectionManager directly,
         # not via this resolver. Falling through returns [] and the bus will no-op.
         return []

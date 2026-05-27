@@ -5,10 +5,13 @@ Endpoints:
 - ``POST /api/v1/livekit/token`` — generate participant access token
 - ``DELETE /api/v1/livekit/rooms/{group_id}`` — end a call
 - ``GET /api/v1/livekit/rooms/{group_id}`` — get room status
+- ``POST /api/v1/livekit/rooms/{group_id}/recording/start`` — start recording (owner only)
+- ``POST /api/v1/livekit/rooms/{group_id}/recording/stop`` — stop recording (owner only)
+- ``GET /api/v1/livekit/rooms/{group_id}/recording`` — get recording status
 
 All routes require an active enterprise license, user authentication,
-and group membership.
-"""
+and group membership. Recording endpoints additionally require workspace
+ownership."""
 
 from __future__ import annotations
 
@@ -17,12 +20,15 @@ import logging
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.chat.group_service import (
     _get_group_domain_or_404,
     _require_domain_group_member,
 )
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.livekit import service as livekit_service
+from pocketpaw_ee.cloud.realtime.emit import emit
+from pocketpaw_ee.cloud.realtime.events import CallEnded, CallStarted
 from pocketpaw_ee.cloud.shared.deps import current_user, current_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -45,6 +51,7 @@ class CreateRoomResponse(BaseModel):
     url: str
     bot_token: str
     created_at: str
+    is_new: bool = False
 
 
 class TokenRequest(BaseModel):
@@ -75,6 +82,34 @@ class EndCallResponse(BaseModel):
     ended_at: str
 
 
+class StartRecordingResponse(BaseModel):
+    egress_id: str
+    room_name: str
+    group_id: str
+    output_path: str
+    status: int = 0
+    started_at: int = 0
+
+
+class StopRecordingResponse(BaseModel):
+    egress_id: str
+    room_name: str
+    group_id: str
+    status: int = 0
+    output_files: list[dict] = []
+    ended_at: int = 0
+
+
+class RecordingInfoResponse(BaseModel):
+    egress_id: str | None = None
+    room_name: str = ""
+    group_id: str
+    status: str = "inactive"
+    is_active: bool = False
+    started_at: int = 0
+    ended_at: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -89,6 +124,33 @@ def _group_id_from_room_name(room_name: str) -> str | None:
     if room_name.startswith(prefix):
         return room_name[len(prefix) :]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Workspace owner guard for recording
+# ---------------------------------------------------------------------------
+
+
+async def _require_workspace_owner(
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+) -> None:
+    """Ensure the current user is the workspace owner.
+
+    Only workspace owners can start/stop call recordings.
+    """
+    from beanie import PydanticObjectId
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+
+    doc = await _WorkspaceDoc.get(PydanticObjectId(workspace_id))
+    if doc is None or doc.deleted_at is not None:
+        raise Forbidden("workspace.not_found", "Workspace not found")
+    if doc.owner != str(user.id):
+        raise Forbidden(
+            "workspace.not_owner",
+            "Only the workspace owner can manage recordings",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +176,26 @@ async def create_room(
     _require_domain_group_member(group, str(user.id))
 
     result = await livekit_service.create_room(body.group_id)
+
+    # Only emit call.started when the room was actually created (not when
+    # someone joins an existing room). The is_new flag is set atomically
+    # inside create_room to avoid race conditions.
+    if result.get("is_new"):
+        try:
+            await emit(
+                CallStarted(
+                    data={
+                        "group_id": body.group_id,
+                        "room_name": result["room_name"],
+                        "url": result["url"],
+                        "caller_id": str(user.id),
+                        "caller_name": getattr(user, "full_name", None) or str(user.id),
+                    }
+                )
+            )
+        except Exception:
+            logger.warning("Failed to emit CallStarted event for group %s", body.group_id)
+
     return CreateRoomResponse(**result)
 
 
@@ -203,4 +285,179 @@ async def end_call(
     _require_domain_group_member(group, str(user.id))
 
     result = await livekit_service.end_room(group_id)
+
+    # Emit realtime event so group members know the call ended
+    try:
+        await emit(
+            CallEnded(
+                data={
+                    "group_id": group_id,
+                    "room_name": result["room_name"],
+                }
+            )
+        )
+    except Exception:
+        logger.warning("Failed to emit CallEnded event for group %s", group_id)
+
     return EndCallResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Recording endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/rooms/{group_id}/recording/start", response_model=StartRecordingResponse)
+async def start_recording(
+    group_id: str,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Start recording the call for a group.
+
+    Only the workspace owner can start recordings. The recording is saved
+    as an MP4 composite video to the workspace's S3 bucket.
+    """
+    await require_license()
+
+    # Verify the caller is a member of the target group.
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
+    # Only workspace owner can record
+    await _require_workspace_owner(user=user, workspace_id=workspace_id)
+
+    try:
+        result = await livekit_service.start_room_recording(group_id)
+        return StartRecordingResponse(**result)
+    except RuntimeError as exc:
+        raise Forbidden("recording.already_active", str(exc))
+
+
+@router.post("/rooms/{group_id}/recording/stop", response_model=StopRecordingResponse)
+async def stop_recording(
+    group_id: str,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Stop an active call recording.
+
+    Only the workspace owner can stop recordings. The final MP4 will be
+    saved to S3 and linked in the /files page.
+    """
+    await require_license()
+
+    # Verify the caller is a member of the target group.
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
+    # Only workspace owner can stop recording
+    await _require_workspace_owner(user=user, workspace_id=workspace_id)
+
+    try:
+        result = await livekit_service.stop_room_recording(group_id)
+    except RuntimeError as exc:
+        raise Forbidden("recording.not_active", str(exc))
+
+    # Create a file record so the recording appears in the /files page
+    try:
+        room_name = livekit_service.room_name_for_group(group_id)
+        output_path = result.get("output_files", [{}])[0].get("filename", "")
+        if not output_path:
+            output_path = livekit_service._recording_output_path(group_id)
+
+        from datetime import UTC, datetime
+
+        from pocketpaw.uploads.file_store import FileRecord
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        file_record = FileRecord(
+            id=result.get("egress_id", group_id),
+            storage_key=output_path,
+            filename=f"call-recording-{room_name}.mp4",
+            mime="video/mp4",
+            size=0,  # Size unknown until file is fully written by LiveKit
+            owner_id=str(user.id),
+            chat_id=group_id,
+            created=datetime.now(UTC),
+        )
+        store = MongoFileStore()
+        await store.save_scoped(
+            record=file_record,
+            workspace=workspace_id,
+            folder_path="/recordings",
+        )
+        logger.info(
+            "Created file record for recording %s in workspace %s",
+            file_record.id,
+            workspace_id,
+        )
+    except Exception as exc:
+        logger.warning("Failed to create file record for recording: %s", exc)
+
+    return StopRecordingResponse(**result)
+
+
+@router.get("/rooms/{group_id}/recording", response_model=RecordingInfoResponse)
+async def get_recording_status(
+    group_id: str,
+    user=Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Get the status of a call recording.
+
+    Returns whether a recording is active and its current state.
+    """
+    await require_license()
+
+    # Verify the caller is a member of the target group.
+    group = await _get_group_domain_or_404(group_id)
+    _require_domain_group_member(group, str(user.id))
+
+    info = await livekit_service.get_recording_info(group_id)
+
+    # Check if it's really the owner (for UI purposes we show status to
+    # all members, but only owner can start/stop)
+    is_owner = False
+    try:
+        await _require_workspace_owner(user=user, workspace_id=workspace_id)
+        is_owner = True
+    except Forbidden:
+        pass
+
+    if info is None:
+        return RecordingInfoResponse(
+            group_id=group_id,
+            status="inactive",
+            is_active=is_owner and False,
+        )
+
+    # Map protobuf status int to readable string
+    # EgressStatus values:
+    #   EGRESS_STARTING = 0
+    #   EGRESS_ACTIVE = 1
+    #   EGRESS_ENDING = 2
+    #   EGRESS_COMPLETE = 3
+    #   EGRESS_FAILED = 4
+    #   EGRESS_ABORTED = 5
+    status_map = {
+        0: "starting",
+        1: "active",
+        2: "ending",
+        3: "complete",
+        4: "failed",
+        5: "aborted",
+    }
+    status_code = info.get("status", 0)
+    status_str = status_map.get(status_code, "unknown")
+    is_active = status_code in (0, 1, 2)  # starting, active, ending
+
+    return RecordingInfoResponse(
+        egress_id=info.get("egress_id"),
+        room_name=info.get("room_name", ""),
+        group_id=group_id,
+        status=status_str,
+        is_active=is_active,
+        started_at=info.get("started_at", 0),
+        ended_at=info.get("ended_at", 0),
+    )

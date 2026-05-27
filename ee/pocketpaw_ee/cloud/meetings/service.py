@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pocketpaw.connectors.protocol import ActionResult
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
@@ -54,11 +54,13 @@ def _doc_to_response(doc: _MeetingDoc, *, transcript_available: bool = False) ->
         source=getattr(doc, "source", "recall"),
         provider=doc.provider,
         provider_meeting_id=doc.provider_meeting_id,
+        group_id=payload.get("group_id"),
         title=doc.title,
         join_url=doc.join_url,
         organizer_email=doc.organizer_email,
         scheduled_start=doc.scheduled_start,
         scheduled_end=doc.scheduled_end,
+        duration_minutes=payload.get("duration_minutes", 30),
         actual_start=doc.actual_start,
         actual_end=doc.actual_end,
         status=doc.status,
@@ -323,6 +325,12 @@ async def create_meeting(
     provider_result = await provider_impl.create(ctx, body)
 
     provider_payload = provider_result.provider_payload or {}
+    # Persist duration_minutes + group_id so the response can include them.
+    if body.duration_minutes:
+        provider_payload["duration_minutes"] = body.duration_minutes
+    if body.group_id:
+        provider_payload["group_id"] = body.group_id
+
     provider_meeting_id = str(provider_payload.get("id") or provider_payload.get("name") or "")
     if body.source == "recall" and not provider_meeting_id:
         # External providers MUST return an id we can correlate webhooks
@@ -331,6 +339,18 @@ async def create_meeting(
             "meeting.provider_no_id",
             f"{body.provider} did not return a meeting ID",
         )
+
+    # Compute scheduled_end from scheduled_start + duration_minutes so the
+    # frontend can display duration without an extra field on the Beanie doc.
+    scheduled_end: datetime | None = None
+    if body.scheduled_start and body.duration_minutes:
+        try:
+            scheduled_end = body.scheduled_start.replace(
+                second=0,
+                microsecond=0,
+            ) + timedelta(minutes=body.duration_minutes)
+        except (ValueError, OverflowError):
+            scheduled_end = None
 
     doc = _MeetingDoc(
         workspace=workspace_id,
@@ -343,7 +363,7 @@ async def create_meeting(
         or str(provider_payload.get("join_url") or provider_payload.get("meetingUri") or ""),
         organizer_email=provider_payload.get("host_email"),
         scheduled_start=body.scheduled_start,
-        scheduled_end=None,
+        scheduled_end=scheduled_end,
         status="scheduled",
         participants=[],
         recording_file_ids=[],
@@ -352,6 +372,13 @@ async def create_meeting(
     )
     await doc.insert()
 
+    # Schedule APScheduler jobs for reminder (5 min before) + auto-start.
+    from pocketpaw_ee.cloud.meetings.scheduling.reminders import (
+        schedule_meeting_jobs,
+    )
+
+    schedule_meeting_jobs(doc)
+
     await event_bus.emit(
         "meeting.scheduled",
         {
@@ -359,34 +386,40 @@ async def create_meeting(
             "meeting_id": str(doc.id),
             "source": body.source,
             "provider": body.provider,
+            "group_id": body.group_id,
             "created_by": user_id,
         },
     )
+    # Also emit on the realtime bus so ALL connected clients (not just the
+    # creator) receive the event and update their sidebar.
+    try:
+        from pocketpaw_ee.cloud._core.realtime.emit import emit as _emit_realtime
+        from pocketpaw_ee.cloud.meetings.events import MeetingScheduled
+
+        await _emit_realtime(
+            MeetingScheduled(
+                data={
+                    "workspace_id": workspace_id,
+                    "meeting_id": str(doc.id),
+                    "source": body.source,
+                    "group_id": body.group_id,
+                }
+            )
+        )
+    except Exception:
+        logger.exception("Failed to emit realtime meeting.scheduled for %s", doc.id)
+
     return _doc_to_response(doc, transcript_available=False)
 
 
-async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
+async def cancel_meeting(workspace_id: str, meeting_id: str, user_id: str = "") -> MeetingResponse:
     """Cancel a scheduled meeting via the provider, then mark the row cancelled.
 
-    Meet has no native cancel — the adapter marks it cancelled locally
-    and the join URL keeps working (documented limitation). Zoom
-    actually deletes the meeting on its side.
+    Only the meeting creator can cancel. Meet has no native cancel — the
+    adapter marks it cancelled locally and the join URL keeps working
+    (documented limitation). Zoom actually deletes the meeting on its side.
     """
-    detail = await get_meeting(workspace_id, meeting_id)
-
-    # Dispatch the provider-specific cancel through the registry. For
-    # Recall this hits the Zoom/Meet adapter via RecallProvider.cancel();
-    # LiveKit's cancel is a no-op (nothing reserved server-side).
-    from types import SimpleNamespace
-
-    from pocketpaw_ee.cloud.meetings.providers import base as providers_base
-
-    source = getattr(detail, "source", "recall") or "recall"
-    provider_impl = providers_base.resolve(source)
-    ctx = SimpleNamespace(workspace_id=workspace_id, user_id="")
-    await provider_impl.cancel(ctx, detail)
-
-    # Fetch the Beanie doc (get_meeting returned a DTO) and patch status.
+    # Fetch the Beanie doc directly so we can check created_by_user_id.
     doc = await _MeetingDoc.find_one(
         _MeetingDoc.workspace == workspace_id,
         {"_id": meeting_id} if False else _MeetingDoc.id == meeting_id,
@@ -402,18 +435,43 @@ async def cancel_meeting(workspace_id: str, meeting_id: str) -> MeetingResponse:
         except Exception:
             doc = None
     if doc is None:
-        # Mid-flight delete — extremely unlikely, but raise so the
-        # client refetches instead of seeing stale data.
         raise NotFound("meeting", meeting_id)
+
+    # Permission check: only the creator can cancel.
+    if doc.created_by_user_id and doc.created_by_user_id != user_id:
+        from pocketpaw_ee.cloud._core.errors import Forbidden
+
+        raise Forbidden("meeting.not_owner", "Only the meeting creator can cancel")
+
+    # Dispatch the provider-specific cancel through the registry. For
+    # Recall this hits the Zoom/Meet adapter via RecallProvider.cancel();
+    # LiveKit's cancel is a no-op (nothing reserved server-side).
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.meetings.providers import base as providers_base
+
+    source = getattr(doc, "source", "recall") or "recall"
+    provider_impl = providers_base.resolve(source)
+    ctx = SimpleNamespace(workspace_id=workspace_id, user_id=user_id)
+    await provider_impl.cancel(ctx, doc)
+
+    # Patch status (doc already loaded above).
     doc.status = "cancelled"
     await doc.save()
+
+    # Remove APScheduler jobs so reminders / auto-start don't fire.
+    from pocketpaw_ee.cloud.meetings.scheduling.reminders import (
+        unschedule_meeting_jobs,
+    )
+
+    unschedule_meeting_jobs(meeting_id)
 
     await event_bus.emit(
         "meeting.cancelled",
         {
             "workspace_id": workspace_id,
             "meeting_id": str(doc.id),
-            "provider": detail.provider,
+            "provider": doc.provider,
         },
     )
     return _doc_to_response(doc, transcript_available=False)
