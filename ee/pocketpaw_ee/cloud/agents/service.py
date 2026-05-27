@@ -33,6 +33,7 @@ from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     AgentCreated,
     AgentDeleted,
+    AgentScopeUpdated,
     AgentUpdated,
 )
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
@@ -350,6 +351,15 @@ async def set_scopes(agent_id: str, scopes: list[str]) -> list[str]:
     new_config = replace(_config_to_domain(doc.config), scopes=tuple(cleaned))
     doc.config = _config_to_doc(new_config)
     await doc.save()
+    await emit(
+        AgentScopeUpdated(
+            data={
+                "agent_id": str(doc.id),
+                "workspace_id": doc.workspace,
+                "scopes": list(new_config.scopes),
+            }
+        )
+    )
     return list(new_config.scopes)
 
 
