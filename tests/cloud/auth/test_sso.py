@@ -307,6 +307,70 @@ async def test_complete_login_domain_mismatch_no_jit(env, monkeypatch):
     assert await User.find_one(User.email == "stranger@outsider.com") is None
 
 
+@pytest.mark.asyncio
+async def test_complete_login_existing_user_foreign_domain_rejected(env, monkeypatch):
+    """Pre-existing user (any other workspace) cannot squat in via SSO.
+
+    The earlier code unconditionally `_ensure_membership`'d any existing
+    user; an attacker who controlled the IdP identity for a user that
+    happened to exist in our DB could join the SSO-enabled workspace
+    even when their email domain was nowhere near the allowlist. The
+    gate now requires membership-of-this-workspace OR domain-in-allowlist.
+    """
+    _client, _admin_id, ws_id, fake = env
+    await sso_service.upsert_sso_config(
+        ws_id,
+        provider="okta",
+        issuer="https://acme.okta.com",
+        client_id="client-123",
+        client_secret_plain="super-secret",
+        allowed_domains=["acme.com"],
+    )
+
+    # Seed a foreign user that is NOT a member of ws_id.
+    foreign = User(
+        email="foreign@outsider.com",
+        hashed_password="x",
+        is_active=True,
+        is_verified=True,
+    )
+    await foreign.insert()
+
+    monkeypatch.setattr(oidc, "discover", _fake_discover)
+    monkeypatch.setattr(oidc, "exchange_code", _fake_exchange_code)
+
+    def _foreign_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+        return {
+            "email": "foreign@outsider.com",
+            "aud": audience,
+            "iss": issuer,
+            "nonce": nonce,
+        }
+
+    async def _foreign_userinfo(userinfo_endpoint, access_token):
+        return {"email": "foreign@outsider.com"}
+
+    monkeypatch.setattr(oidc, "parse_id_token", _foreign_parse)
+    monkeypatch.setattr(oidc, "fetch_userinfo", _foreign_userinfo)
+
+    import json
+
+    await fake.setex(
+        "sso_state:foreign",
+        600,
+        json.dumps({"workspace_id": ws_id, "code_verifier": "v", "nonce": None}),
+    )
+
+    with pytest.raises(Forbidden) as exc_info:
+        await sso_service.complete_login("auth-code", "foreign")
+    assert exc_info.value.code == "sso.domain_not_allowed"
+
+    # And the user was NOT silently added to ws_id.
+    refetched = await User.find_one(User.email == "foreign@outsider.com")
+    assert refetched is not None
+    assert all(m.workspace != ws_id for m in refetched.workspaces)
+
+
 # ---------------------------------------------------------------------------
 # test_connection
 # ---------------------------------------------------------------------------

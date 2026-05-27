@@ -280,10 +280,11 @@ async def complete_login(code: str, state: str) -> _UserDoc:
         raise Forbidden("sso.email_missing", "provider returned no email")
 
     existing = await _UserDoc.find_one(_UserDoc.email == email)
+    domain = _email_domain(email)
+    domain_allowed = domain in (cfg.allowed_domains or [])
     jit = False
     if existing is None:
-        domain = _email_domain(email)
-        if domain not in (cfg.allowed_domains or []):
+        if not domain_allowed:
             raise Forbidden(
                 "sso.domain_not_allowed",
                 f"email domain '{domain}' not in workspace allowlist",
@@ -300,8 +301,17 @@ async def complete_login(code: str, state: str) -> _UserDoc:
         jit = True
     else:
         user = existing
-        # Existing user signing in via SSO outside the allowlist is allowed
-        # if they're already a member; the allowlist only gates JIT creation.
+        # Existing user is allowed if they're already a member of THIS
+        # workspace (re-login) OR their domain is in the allowlist (cross-
+        # workspace auto-join). Otherwise refuse — without this gate a user
+        # from any other workspace could be silently auto-joined here just
+        # by hitting our /callback with their IdP-signed identity.
+        is_member = any(m.workspace == str(workspace.id) for m in user.workspaces)
+        if not (is_member or domain_allowed):
+            raise Forbidden(
+                "sso.domain_not_allowed",
+                f"email domain '{domain}' not in workspace allowlist",
+            )
 
     await _ensure_membership(user, str(workspace.id))
 
