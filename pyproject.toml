@@ -393,6 +393,8 @@ select = ["E", "F", "I", "UP"]
 # strings can't be wrapped without changing the rendered prompt.
 "src/pocketpaw/ripple/_pockets.py" = ["E501"]
 "src/pocketpaw/ripple/_design.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/decisions/explain/extractor.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/decisions/explain/narrator.py" = ["E501"]
 
 [dependency-groups]
 dev = [

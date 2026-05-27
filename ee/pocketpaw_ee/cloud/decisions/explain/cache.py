@@ -30,7 +30,7 @@ import logging
 import re
 import threading
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -159,7 +159,7 @@ class ExplainCache:
         """Fetch a cached explanation. Returns ``None`` on miss, expired
         entry, or shape error. Expired entries are not GC'd here — the
         sweeper does that lazily (cheap enough to skip on the hot path)."""
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         conn = self._store._conn  # noqa: SLF001
         if conn is None:
             return None
@@ -202,7 +202,7 @@ class ExplainCache:
         """Insert or replace the cache entry. ``decisions_walked`` is
         serialised as a JSON array string so the reverse-index search
         is a single LIKE-glob (good enough at expected scale)."""
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         expires = now + self._ttl
         walked_json = json.dumps([str(uid) for uid in explanation.decisions_walked])
         explanation_json = explanation.model_dump_json()
@@ -273,7 +273,7 @@ class ExplainCache:
     def sweep_expired(self, *, now: datetime | None = None) -> int:
         """Drop every expired row. Cheap to run periodically; not on
         the hot path (cache.get handles expiry inline for the hit row)."""
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         conn = self._store._conn  # noqa: SLF001
         if conn is None:
             return 0
@@ -289,9 +289,7 @@ class ExplainCache:
         conn = self._store._conn  # noqa: SLF001
         if conn is None:
             return 0
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM decision_explain_cache"
-        ).fetchone()
+        row = conn.execute("SELECT COUNT(*) AS n FROM decision_explain_cache").fetchone()
         return int(row["n"]) if row else 0
 
     # --- internals ---------------------------------------------------------

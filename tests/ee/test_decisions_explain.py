@@ -28,8 +28,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from soul_protocol.spec.journal import Actor, EventEntry
-
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.decisions.dto import ExplanationResponse
@@ -39,7 +37,6 @@ from pocketpaw_ee.cloud.decisions.explain import (
     narrate_decision,
 )
 from pocketpaw_ee.cloud.decisions.explain.cache import (
-    ExplainCache,
     build_cache_key,
     get_explain_cache,
     reset_explain_cache_for_tests,
@@ -56,7 +53,7 @@ from pocketpaw_ee.cloud.decisions.service import (
 )
 from pocketpaw_ee.cloud.decisions.store import DecisionStore, set_db_path
 from pocketpaw_ee.cloud.license import require_license
-
+from soul_protocol.spec.journal import Actor, EventEntry
 
 # ---------------------------------------------------------------------------
 # Fixtures — fresh projection + store + cache per test
@@ -173,7 +170,8 @@ def _seed_chain(
         "intent": intent,
         "action": action_name,
         "pocket_id": pocket_id,
-        "inputs": inputs or [{"kind": "fabric_object", "id": "lease:LR-2026-117", "label": "Lease LR-2026-117"}],
+        "inputs": inputs
+        or [{"kind": "fabric_object", "id": "lease:LR-2026-117", "label": "Lease LR-2026-117"}],
     }
     if precedents is not None:
         payload["precedents"] = precedents
@@ -362,12 +360,8 @@ async def test_llm_narrator_strips_ungrounded_sentences(projection, base_ts) -> 
     fake_client = MagicMock()
     fake_client.messages = fake_messages
 
-    with patch(
-        "anthropic.AsyncAnthropic", return_value=fake_client
-    ):
-        explanation = await narrate_decision(
-            root, trace, backend="llm", api_key="sk-fake"
-        )
+    with patch("anthropic.AsyncAnthropic", return_value=fake_client):
+        explanation = await narrate_decision(root, trace, backend="llm", api_key="sk-fake")
 
     # The grounded sentence is kept; the ungrounded one stripped.
     assert f"[{short}]" in explanation.narrative
@@ -394,9 +388,7 @@ async def test_llm_narrator_falls_back_on_sdk_error(projection, base_ts) -> None
     fake_client.messages.create = AsyncMock(side_effect=RuntimeError("api down"))
 
     with patch("anthropic.AsyncAnthropic", return_value=fake_client):
-        explanation = await narrate_decision(
-            root, trace, backend="llm", api_key="sk-fake"
-        )
+        explanation = await narrate_decision(root, trace, backend="llm", api_key="sk-fake")
 
     assert explanation.backend_used == "templated"
     assert str(root_id)[:8] in explanation.narrative
@@ -518,9 +510,7 @@ async def test_explain_cache_invalidated_by_new_event(graph, projection, base_ts
 
 
 @pytest.mark.asyncio
-async def test_explain_cache_invalidation_via_projection_hook(
-    graph, projection, base_ts
-) -> None:
+async def test_explain_cache_invalidation_via_projection_hook(graph, projection, base_ts) -> None:
     """Confirm the cache invalidation hook is registered on the projection
     and fires when a new decision lands whose id matches a cached walked
     entry. We synthesise a chain where the new decision IS the cached
@@ -552,9 +542,7 @@ async def test_explain_cache_invalidation_via_projection_hook(
 
 
 @pytest.mark.asyncio
-async def test_explain_scope_filter_hides_other_workspace(
-    graph, projection, base_ts
-) -> None:
+async def test_explain_scope_filter_hides_other_workspace(graph, projection, base_ts) -> None:
     """A workspace-B caller can't reach workspace-A decisions through
     the explain orchestrator — `requester_scopes` is the gate."""
     _seed_chain(projection, base_ts=base_ts, workspace="ws_a_test")
@@ -577,9 +565,7 @@ async def test_explain_scope_filter_hides_other_workspace(
 # ---------------------------------------------------------------------------
 
 
-def test_explain_route_returns_grounded_response(
-    client: TestClient, projection, base_ts
-) -> None:
+def test_explain_route_returns_grounded_response(client: TestClient, projection, base_ts) -> None:
     """Round-trip through the FastAPI route. Templated backend so the
     test is hermetic."""
     root_id = _seed_chain(projection, base_ts=base_ts)

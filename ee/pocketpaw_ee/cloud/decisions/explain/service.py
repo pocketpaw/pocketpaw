@@ -25,14 +25,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pocketpaw_ee.cloud.decisions.domain import Decision
 from pocketpaw_ee.cloud.decisions.explain.cache import (
-    build_cache_key,
-    get_explain_cache,
-)
-from pocketpaw_ee.cloud.decisions.explain.cache import (
     _hash_scope as hash_scope,
 )
 from pocketpaw_ee.cloud.decisions.explain.cache import (
     _normalize_question as normalize_question,
+)
+from pocketpaw_ee.cloud.decisions.explain.cache import (
+    build_cache_key,
+    get_explain_cache,
 )
 from pocketpaw_ee.cloud.decisions.explain.extractor import (
     ExtractedEntities,
@@ -44,7 +44,6 @@ from pocketpaw_ee.cloud.decisions.explain.narrator import (
 )
 from pocketpaw_ee.cloud.decisions.service import (
     DecisionGraph,
-    TraceResult,
     get_decision_graph,
 )
 

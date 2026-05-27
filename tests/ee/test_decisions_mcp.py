@@ -25,8 +25,6 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from soul_protocol.spec.journal import Actor, EventEntry
-
 from pocketpaw_ee.agent.mcp_servers.decisions import (
     _decisions_find_handler,
     _decisions_get_handler,
@@ -42,6 +40,7 @@ from pocketpaw_ee.cloud.decisions.service import (
     reset_projection_for_tests,
 )
 from pocketpaw_ee.cloud.decisions.store import DecisionStore, set_db_path
+from soul_protocol.spec.journal import Actor, EventEntry
 
 # ---------------------------------------------------------------------------
 # Identity context — set the per-stream ContextVars the MCP handlers read
@@ -289,9 +288,7 @@ async def test_decisions_trace_walks_precedents(graph, projection, base_ts) -> N
         precedents=[{"decision_id": str(prec_id), "weight": 0.9}],
     )
 
-    envelope = await _decisions_trace_handler(
-        {"decision_id": str(new_id), "depth": 2}
-    )
+    envelope = await _decisions_trace_handler({"decision_id": str(new_id), "depth": 2})
     body = _read_envelope(envelope)
     assert body["root"] == str(new_id)
     assert str(prec_id) in body["nodes"]

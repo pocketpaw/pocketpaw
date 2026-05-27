@@ -460,7 +460,7 @@ def build_decisions_context_server() -> tuple[str, Any] | None:
             "finds candidate decisions in the caller's scope, walks a "
             "depth-bounded trace upstream from the top candidate, and "
             "narrates the result with Sonnet (or a deterministic "
-            "templated narrator when `backend=\"templated\"` is set or "
+            'templated narrator when `backend="templated"` is set or '
             "the LLM call fails). Every sentence in the narrative cites "
             "a decision id; the response also surfaces "
             "`decisions_walked` (every node in the trace) and "

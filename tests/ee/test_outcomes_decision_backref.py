@@ -24,8 +24,6 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from soul_protocol.spec.journal import Actor, EventEntry
-
 from pocketpaw_ee.cloud.decisions.projection import DecisionProjection
 from pocketpaw_ee.cloud.decisions.service import (
     DecisionGraph,
@@ -34,7 +32,7 @@ from pocketpaw_ee.cloud.decisions.service import (
 from pocketpaw_ee.cloud.decisions.store import DecisionStore, set_db_path
 from pocketpaw_ee.cloud.outcomes import service as outcomes_service
 from pocketpaw_ee.cloud.outcomes.dto import OutcomeResponse
-
+from soul_protocol.spec.journal import Actor, EventEntry
 
 # ---------------------------------------------------------------------------
 # Fixtures

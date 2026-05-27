@@ -34,10 +34,6 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from soul_protocol.engine.journal import open_journal
-from soul_protocol.spec.journal import Actor, EventEntry
-
-from pocketpaw.journal_dep import get_journal, reset_journal_cache
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind, request_context
 from pocketpaw_ee.cloud._core.http import add_error_handler
 from pocketpaw_ee.cloud.decisions.projection import DecisionProjection
@@ -48,7 +44,10 @@ from pocketpaw_ee.cloud.decisions.service import (
 )
 from pocketpaw_ee.cloud.decisions.store import DecisionStore, set_db_path
 from pocketpaw_ee.cloud.license import require_license
+from soul_protocol.engine.journal import open_journal
+from soul_protocol.spec.journal import Actor, EventEntry
 
+from pocketpaw.journal_dep import get_journal, reset_journal_cache
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -293,9 +292,7 @@ def test_get_returns_404_when_scope_mismatch(
 
 def test_list_returns_decisions(client, projection, base_ts) -> None:
     _seed_chain(projection, base_ts=base_ts, actor_id="did:soul:a")
-    _seed_chain(
-        projection, base_ts=base_ts + timedelta(seconds=10), actor_id="did:soul:b"
-    )
+    _seed_chain(projection, base_ts=base_ts + timedelta(seconds=10), actor_id="did:soul:b")
     resp = client.get("/api/v1/decisions")
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -372,9 +369,7 @@ def test_list_rejects_workspace_id_query(client) -> None:
     assert resp.json()["error"]["code"] == "decisions.workspace_id_forbidden"
 
 
-def test_list_scope_filter_per_call(
-    client, app, projection, base_ts, workspace_b_id
-) -> None:
+def test_list_scope_filter_per_call(client, app, projection, base_ts, workspace_b_id) -> None:
     """Two-workspace tenant isolation — A's decisions invisible to B."""
     _seed_chain(projection, base_ts=base_ts, workspace="ws_a_test")
     _seed_chain(
@@ -576,9 +571,7 @@ def test_downstream_returns_404_for_missing_root(client) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_timeline_returns_journal_events(
-    client, projection, base_ts, journal_path: Path
-) -> None:
+def test_timeline_returns_journal_events(client, projection, base_ts, journal_path: Path) -> None:
     """The timeline endpoint reads the journal for events sharing the
     Decision's correlation_id and returns them in seq order."""
     # Seed a Decision via the projection — chain has a correlation_id.
