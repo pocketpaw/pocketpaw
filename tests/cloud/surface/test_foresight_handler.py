@@ -29,6 +29,27 @@ from pocketpaw_ee.cloud.surface.handlers import foresight as foresight_handler
 # ---------------------------------------------------------------------------
 
 
+async def test_preamble_includes_directive_surface_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preamble carries a directive block that asserts foresight-first
+    behavior. Captain caught (2026-05-27) the agent offering pocket
+    affordances on /foresight when the preamble was descriptive but not
+    directive. The fix is locked here so the guidance can't drop silently.
+    """
+    monkeypatch.setattr(foresight_handler, "_render_active_run", _async_return(""))
+    monkeypatch.setattr(foresight_handler, "_render_active_scenario", _async_return(""))
+    monkeypatch.setattr(foresight_handler, "_render_workspace_ambient", _async_return(""))
+    monkeypatch.setattr(foresight_handler, "_render_skill_hint", lambda: "")
+
+    out = await foresight_handler.build_preamble("ws_a", "user_a", SurfaceMeta())
+    assert "<surface-guidance>" in out
+    assert "PREFER Foresight affordances" in out
+    assert "DO NOT offer pocket creation" in out
+    assert "Rehearse a decision" in out
+    assert "Run a quick scenario" in out
+
+
 async def test_surface_tag_emits_with_panel(monkeypatch: pytest.MonkeyPatch) -> None:
     """The opening tag carries panel when one of the valid values is supplied.
 

@@ -39,7 +39,34 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         f'<surface kind="foresight" route="/foresight"'
         f'{f" panel=\"{panel}\"" if panel else ""} />'
     )
-    parts: list[str] = [surface_tag]
+    # Directive block — assert foresight-first behavior FIRST so the
+    # agent's default "let me offer some pocket buttons" pattern doesn't
+    # leak into the greeting. Captain caught this 2026-05-27: agent
+    # responded to "hi" on /foresight with [Build a pocket / List my
+    # pockets / Rehearse a decision] because the preamble was descriptive
+    # but not directive. This block is small + assertive — the agent
+    # reads it before the rest of the chat-agent system prompt's pocket
+    # guidance.
+    guidance = (
+        "<surface-guidance>\n"
+        "The user is on the Foresight rail (population simulation for\n"
+        "decision rehearsal). PREFER Foresight affordances:\n"
+        "  - Create / edit a scenario (use the foresight-create-sim skill).\n"
+        "  - Run a scenario + summarize results.\n"
+        "  - Explain projected decisions, calibration accuracy, insights.\n"
+        "  - Branch a run, promote a decision to an anchor.\n"
+        "DO NOT offer pocket creation, pocket lists, or generic canvas\n"
+        "actions in starter buttons here — those belong on /pockets, not\n"
+        "/foresight. If the user explicitly asks for a pocket, you may\n"
+        "redirect them; otherwise stay in the Foresight context. When\n"
+        "greeting, offer Foresight-shaped starter actions only:\n"
+        '  - "Rehearse a decision"\n'
+        '  - "Run a quick scenario"\n'
+        '  - "Show me my recent runs"\n'
+        '  - "Explain the latest insights"\n'
+        "</surface-guidance>"
+    )
+    parts: list[str] = [surface_tag, guidance]
 
     # Active run block. Pulled when the sidebar stamps run_id (e.g. on
     # /foresight when the rail is watching a specific run).
