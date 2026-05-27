@@ -158,6 +158,20 @@ async def verify_token(
 # ---------------------------------------------------------------------------
 
 
+_WS_AUTH_OPTIONAL_PATHS: tuple[str, ...] = ("/ws/cloud",)
+"""WebSocket paths whose route handler does its own auth.
+
+The cloud EE router authenticates ``/ws/cloud`` via a short-lived
+``ws_ticket`` JWT (aud=ws, type=ws_ticket) consumed atomically from
+Redis, or via the ``paw_auth`` HttpOnly cookie, or via a long-lived
+session JWT in ``?token=``. None of those formats are known to the OSS
+scope gate below, so accepting them here would require duplicating the
+EE verifier — instead we let the route handler reject with a typed
+close code, matching the existing HTTP ``auth_optional_prefixes``
+pattern for ``/api/v1/*``.
+"""
+
+
 def _ws_scope_auth_ok(scope: dict) -> bool:
     """Return True if the raw ASGI WebSocket *scope* carries valid auth.
 
@@ -166,9 +180,15 @@ def _ws_scope_auth_ok(scope: dict) -> bool:
     ``Sec-WebSocket-Protocol`` header, and genuine-localhost bypass.
 
     This runs *before* the WebSocket upgrade completes so that
-    unauthenticated connections are rejected immediately.
+    unauthenticated connections are rejected immediately. Paths listed
+    in ``_WS_AUTH_OPTIONAL_PATHS`` bypass this gate and rely on their
+    route handler's own auth.
     """
     from urllib.parse import parse_qs
+
+    path = scope.get("path", "")
+    if path in _WS_AUTH_OPTIONAL_PATHS:
+        return True
 
     current_token = get_access_token()
 
