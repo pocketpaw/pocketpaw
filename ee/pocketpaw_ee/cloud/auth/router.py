@@ -46,7 +46,6 @@ from pocketpaw_ee.cloud.auth.dto import (
 )
 from pocketpaw_ee.cloud.auth.mfa_tokens import mint_mfa_pending, verify_mfa_pending
 from pocketpaw_ee.cloud.auth.sessions_dto import RevokeOthersResponse, SessionOut
-from pocketpaw_ee.cloud.models.user import User
 
 router = APIRouter(tags=["Auth"])
 
@@ -87,7 +86,7 @@ def _bad_credentials() -> HTTPException:
 async def _authenticate_or_400(
     credentials: OAuth2PasswordRequestForm,
     manager: UserManager,
-) -> User:
+) -> Any:
     user = await manager.authenticate(credentials)
     if user is None or not user.is_active:
         raise _bad_credentials()
@@ -195,7 +194,7 @@ async def mfa_challenge(
 # ---------------------------------------------------------------------------
 
 
-async def _revoke_current(request: Request, user: User) -> None:
+async def _revoke_current(request: Request, user: Any) -> None:
     jti = _current_jti(request)
     if not jti:
         return

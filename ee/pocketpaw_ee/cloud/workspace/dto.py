@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
-from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.domain import Invite, VerifiedDomain, Workspace, WorkspaceMember
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -243,6 +243,17 @@ def invite_to_dto(inv: Invite) -> InviteOut:
     )
 
 
+def verified_domain_to_dto(d: VerifiedDomain) -> VerifiedDomainOut:
+    return VerifiedDomainOut(
+        domain=d.domain,
+        verification_token=d.verification_token,
+        verified=d.verified,
+        verified_at=iso_utc(d.verified_at),
+        auto_join=d.auto_join,
+        created_at=iso_utc(d.created_at),
+    )
+
+
 def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOut:
     return ValidateInviteOut(
         id=inv.id,
@@ -279,5 +290,6 @@ __all__ = [
     "invite_to_dto",
     "invite_to_validate_dto",
     "member_to_dto",
+    "verified_domain_to_dto",
     "workspace_to_dto",
 ]

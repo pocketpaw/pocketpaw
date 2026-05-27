@@ -21,11 +21,9 @@ from pocketpaw_ee.cloud._core.rate_limit import (
     rate_limit_invite_create,
     rate_limit_invite_resend,
 )
-from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.auth.core import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.user import User
-from pocketpaw_ee.cloud.models.workspace import VerifiedDomain
 from pocketpaw_ee.cloud.workspace import domains as domains_service
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.cloud.workspace.dto import (
@@ -48,6 +46,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     invite_to_dto,
     invite_to_validate_dto,
     member_to_dto,
+    verified_domain_to_dto,
     workspace_to_dto,
 )
 
@@ -255,17 +254,6 @@ async def revoke_invite(
 # ---------------------------------------------------------------------------
 
 
-def _domain_to_dto(entry: VerifiedDomain) -> VerifiedDomainOut:
-    return VerifiedDomainOut(
-        domain=entry.domain,
-        verification_token=entry.verification_token,
-        verified=entry.verified,
-        verified_at=iso_utc(entry.verified_at),
-        auto_join=entry.auto_join,
-        created_at=iso_utc(entry.created_at),
-    )
-
-
 @router.post("/{workspace_id}/domains", response_model=VerifiedDomainOut)
 async def add_workspace_domain(
     workspace_id: str,
@@ -273,7 +261,7 @@ async def add_workspace_domain(
     user: User = Depends(require_action("workspace.update")),
 ) -> VerifiedDomainOut:
     entry = await domains_service.add_domain(workspace_id, body.domain)
-    return _domain_to_dto(entry)
+    return verified_domain_to_dto(entry)
 
 
 @router.get("/{workspace_id}/domains", response_model=list[VerifiedDomainOut])
@@ -282,7 +270,7 @@ async def list_workspace_domains(
     user: User = Depends(require_action("workspace.update")),
 ) -> list[VerifiedDomainOut]:
     entries = await domains_service.list_domains(workspace_id)
-    return [_domain_to_dto(e) for e in entries]
+    return [verified_domain_to_dto(e) for e in entries]
 
 
 @router.post("/{workspace_id}/domains/{domain}/verify", response_model=VerifiedDomainOut)
@@ -292,7 +280,7 @@ async def verify_workspace_domain(
     user: User = Depends(require_action("workspace.update")),
 ) -> VerifiedDomainOut:
     entry = await domains_service.verify_domain(workspace_id, domain)
-    return _domain_to_dto(entry)
+    return verified_domain_to_dto(entry)
 
 
 @router.patch("/{workspace_id}/domains/{domain}", response_model=VerifiedDomainOut)
@@ -303,7 +291,7 @@ async def update_workspace_domain(
     user: User = Depends(require_action("workspace.update")),
 ) -> VerifiedDomainOut:
     entry = await domains_service.set_auto_join(workspace_id, domain, body.auto_join)
-    return _domain_to_dto(entry)
+    return verified_domain_to_dto(entry)
 
 
 @router.delete("/{workspace_id}/domains/{domain}", status_code=204)

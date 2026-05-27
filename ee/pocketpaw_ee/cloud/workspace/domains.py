@@ -21,8 +21,9 @@ from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.audit import service as audit_service
-from pocketpaw_ee.cloud.models.workspace import VerifiedDomain
+from pocketpaw_ee.cloud.models.workspace import VerifiedDomain as _VerifiedDomainDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
+from pocketpaw_ee.cloud.workspace.domain import VerifiedDomain
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +59,22 @@ async def _fetch_workspace(workspace_id: str) -> _WorkspaceDoc:
     return doc
 
 
-def _find_entry(doc: _WorkspaceDoc, domain: str) -> VerifiedDomain | None:
+def _find_entry(doc: _WorkspaceDoc, domain: str) -> _VerifiedDomainDoc | None:
     for entry in doc.verified_domains:
         if entry.domain == domain:
             return entry
     return None
+
+
+def _to_domain(doc: _VerifiedDomainDoc) -> VerifiedDomain:
+    return VerifiedDomain(
+        domain=doc.domain,
+        verification_token=doc.verification_token,
+        verified=doc.verified,
+        verified_at=doc.verified_at,
+        auto_join=doc.auto_join,
+        created_at=doc.created_at,
+    )
 
 
 async def add_domain(workspace_id: str, domain: str) -> VerifiedDomain:
@@ -73,9 +85,9 @@ async def add_domain(workspace_id: str, domain: str) -> VerifiedDomain:
     doc = await _fetch_workspace(workspace_id)
     existing = _find_entry(doc, normalized)
     if existing is not None:
-        return existing
+        return _to_domain(existing)
 
-    entry = VerifiedDomain(
+    entry = _VerifiedDomainDoc(
         domain=normalized,
         verification_token=mint_verification_token(),
     )
@@ -90,7 +102,7 @@ async def add_domain(workspace_id: str, domain: str) -> VerifiedDomain:
         target_id=workspace_id,
         metadata={"domain": normalized},
     )
-    return entry
+    return _to_domain(entry)
 
 
 async def remove_domain(workspace_id: str, domain: str) -> None:
@@ -114,7 +126,7 @@ async def remove_domain(workspace_id: str, domain: str) -> None:
 
 async def list_domains(workspace_id: str) -> list[VerifiedDomain]:
     doc = await _fetch_workspace(workspace_id)
-    return list(doc.verified_domains)
+    return [_to_domain(e) for e in doc.verified_domains]
 
 
 async def verify_domain(workspace_id: str, domain: str) -> VerifiedDomain:
@@ -161,7 +173,7 @@ async def verify_domain(workspace_id: str, domain: str) -> VerifiedDomain:
         target_id=workspace_id,
         metadata={"domain": normalized},
     )
-    return entry
+    return _to_domain(entry)
 
 
 async def set_auto_join(workspace_id: str, domain: str, auto_join: bool) -> VerifiedDomain:
@@ -181,7 +193,7 @@ async def set_auto_join(workspace_id: str, domain: str, auto_join: bool) -> Veri
         target_id=workspace_id,
         metadata={"domain": normalized, "auto_join": auto_join},
     )
-    return entry
+    return _to_domain(entry)
 
 
 async def find_workspace_by_verified_domain(email_domain: str) -> _WorkspaceDoc | None:
