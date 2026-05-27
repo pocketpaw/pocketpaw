@@ -7,10 +7,23 @@ POST per audit event. Signature scheme:
     sig  = HMAC-SHA256(secret, body)
 
 Headers:
-    X-Paw-Audit-Timestamp: <unix>
+    X-Paw-Audit-Timestamp: <unix-seconds>
     X-Paw-Audit-Signature: sha256=<hex>
 
-Auto-disable after 10 consecutive failures.
+Receiver guidance — what your SIEM endpoint must do to be safe:
+
+  1. Re-compute the HMAC with the shared secret over
+     ``f"{header_timestamp}.{raw_request_body}"`` and ``hmac.compare_digest``
+     it against the signature header. Treat any mismatch as a hard reject.
+  2. Verify the timestamp is fresh (recommended ≤ 5 minutes from "now").
+     Without this, an attacker who once captured a signed delivery can
+     replay it forever — the signature alone is timeless.
+  3. Treat the body as untrusted JSON; never echo it back into HTML
+     or shell contexts.
+
+Auto-disable after 10 consecutive failures. Secrets are encrypted at
+rest with the shared SSO Fernet key; URLs are revalidated per delivery
+to catch DNS rebinding mid-flight.
 """
 
 from __future__ import annotations
