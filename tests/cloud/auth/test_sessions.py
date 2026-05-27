@@ -189,3 +189,38 @@ async def test_revoke_unknown_jti_returns_404(env) -> None:
 
     resp = await client.delete("/api/v1/auth/sessions/does-not-exist", cookies={"paw_auth": cookie})
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_is_revoked_falls_back_to_mongo_on_redis_failure(env, monkeypatch) -> None:
+    """Revocation must still hold when Redis is unavailable.
+
+    Earlier behaviour returned False on Redis failure (fail-open), which
+    silently un-revoked every kicked/logged-out session for the duration
+    of the outage. The fallback now reads ``AuthSession.revoked`` from
+    Mongo so durable revocation state takes over.
+    """
+    from pocketpaw_ee.cloud._core import redis_client
+    from pocketpaw_ee.cloud.auth import sessions as _sessions
+
+    client = env
+    r1 = await _login(client)
+    cookie = r1.cookies["paw_auth"]
+
+    # Revoke the current session normally (touches both Redis + Mongo).
+    sessions_list = await client.get("/api/v1/auth/sessions", cookies={"paw_auth": cookie})
+    target_jti = sessions_list.json()[0]["jti"]
+    user_id = (await AuthSession.find_one(AuthSession.jti == target_jti)).user_id
+
+    # Confirm revocation visible via the normal Redis path.
+    await client.delete(f"/api/v1/auth/sessions/{target_jti}", cookies={"paw_auth": cookie})
+    assert await _sessions.is_revoked(user_id, target_jti) is True
+
+    # Now simulate a Redis outage. Mongo still says revoked=True, so the
+    # backstop should return True (not False as the old fail-open did).
+    class _Broken:
+        async def sismember(self, *_a, **_k):
+            raise RuntimeError("redis down")
+
+    monkeypatch.setattr(redis_client, "get_redis", lambda: _Broken())
+    assert await _sessions.is_revoked(user_id, target_jti) is True

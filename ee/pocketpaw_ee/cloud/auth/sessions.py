@@ -151,14 +151,32 @@ async def revoke_all_sessions_for_user(user_id: str) -> int:
 
 
 async def is_revoked(user_id: str, jti: str) -> bool:
+    """True if ``jti`` is in the revocation list — Redis primary, Mongo backstop.
+
+    Why a backstop: Redis is the fast path (every authenticated call
+    pays one SISMEMBER) but losing it must not silently un-revoke every
+    kicked / logged-out / password-reset session. On Redis error we fall
+    back to the durable ``AuthSession.revoked`` row so revocation still
+    holds; the cost is one Mongo round-trip during a Redis outage.
+    """
     # TODO: cache per-request via contextvar; Redis SISMEMBER round-trip is
     # fine for now but every authenticated call pays it.
     try:
         redis = redis_client.get_redis()
         return bool(await redis.sismember(_revoked_key(user_id), jti))  # type: ignore[misc]
     except Exception as exc:  # noqa: BLE001
-        logger.warning("is_revoked Redis check failed (fail-open): %s", exc)
+        logger.warning("is_revoked Redis check failed; falling back to Mongo: %s", exc)
+    try:
+        doc = await AuthSession.find_one(
+            AuthSession.user_id == user_id,
+            AuthSession.jti == jti,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Mongo down too — true fail-closed would lock everyone out. Keep
+        # the request flowing but make the failure loud.
+        logger.error("is_revoked Mongo backstop also failed: %s", exc)
         return False
+    return bool(doc and doc.revoked)
 
 
 async def touch_session(user_id: str, jti: str) -> None:
