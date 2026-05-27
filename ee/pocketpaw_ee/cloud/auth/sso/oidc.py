@@ -6,6 +6,7 @@ and keyed by issuer; tests reset it via ``_clear_discovery_cache``.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -34,6 +35,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
 
 _DISCOVERY_TTL_SECONDS = 3600
 _discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_jwks_clients: dict[str, pyjwt.PyJWKClient] = {}
 
 
 def _discovery_url(issuer: str, provider_key: str) -> str:
@@ -92,17 +94,20 @@ async def fetch_userinfo(userinfo_endpoint: str, access_token: str) -> dict[str,
         return resp.json()
 
 
-def parse_id_token(
+def _parse_id_token_sync(
     id_token: str,
     jwks_uri: str,
     *,
     audience: str,
     issuer: str,
-    nonce: str | None = None,
+    nonce: str | None,
 ) -> dict[str, Any]:
-    """Verify RS256 sig + aud + iss + exp + (optional) nonce, return claims."""
-    jwks_client = pyjwt.PyJWKClient(jwks_uri)
-    signing_key = jwks_client.get_signing_key_from_jwt(id_token).key
+    """Blocking portion of parse_id_token. Runs in a worker thread."""
+    client = _jwks_clients.get(jwks_uri)
+    if client is None:
+        client = pyjwt.PyJWKClient(jwks_uri)
+        _jwks_clients[jwks_uri] = client
+    signing_key = client.get_signing_key_from_jwt(id_token).key
     claims = pyjwt.decode(
         id_token,
         signing_key,
@@ -116,5 +121,31 @@ def parse_id_token(
     return claims
 
 
+async def parse_id_token(
+    id_token: str,
+    jwks_uri: str,
+    *,
+    audience: str,
+    issuer: str,
+    nonce: str | None = None,
+) -> dict[str, Any]:
+    """Verify RS256 sig + aud + iss + exp + (optional) nonce, return claims.
+
+    Wraps the blocking PyJWKClient + pyjwt.decode call in a worker thread
+    via ``asyncio.to_thread`` — PyJWKClient does sync HTTP (with internal
+    caching) and signature verification is CPU-bound, so neither belongs
+    on the event loop.
+    """
+    return await asyncio.to_thread(
+        _parse_id_token_sync,
+        id_token,
+        jwks_uri,
+        audience=audience,
+        issuer=issuer,
+        nonce=nonce,
+    )
+
+
 def _clear_discovery_cache() -> None:
     _discovery_cache.clear()
+    _jwks_clients.clear()

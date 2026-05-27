@@ -143,7 +143,7 @@ async def _fake_exchange_code(
     return {"id_token": "fake.id.token", "access_token": "fake-access-token"}
 
 
-def _fake_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+async def _fake_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
     return {
         "email": "newuser@acme.com",
         "name": "New User",
@@ -239,7 +239,7 @@ async def test_complete_login_nonce_mismatch_rejects(env, monkeypatch):
     monkeypatch.setattr(oidc, "fetch_userinfo", _fake_userinfo)
 
     # Token claims carry the wrong nonce — must reject before any user write.
-    def _bad_nonce_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+    async def _bad_nonce_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
         import jwt as _pyjwt
 
         raise _pyjwt.InvalidTokenError("nonce mismatch")
@@ -278,7 +278,7 @@ async def test_complete_login_domain_mismatch_no_jit(env, monkeypatch):
     monkeypatch.setattr(oidc, "discover", _fake_discover)
     monkeypatch.setattr(oidc, "exchange_code", _fake_exchange_code)
 
-    def _outsider_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+    async def _outsider_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
         return {
             "email": "stranger@outsider.com",
             "aud": audience,
@@ -339,7 +339,7 @@ async def test_complete_login_existing_user_foreign_domain_rejected(env, monkeyp
     monkeypatch.setattr(oidc, "discover", _fake_discover)
     monkeypatch.setattr(oidc, "exchange_code", _fake_exchange_code)
 
-    def _foreign_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
+    async def _foreign_parse(id_token, jwks_uri, *, audience, issuer, nonce=None):
         return {
             "email": "foreign@outsider.com",
             "aud": audience,

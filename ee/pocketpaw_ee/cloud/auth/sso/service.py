@@ -266,7 +266,7 @@ async def complete_login(code: str, state: str) -> _UserDoc:
     if not id_token or not access_token:
         raise ValidationError("sso.token_response_missing_tokens", "provider returned no tokens")
 
-    claims = oidc.parse_id_token(
+    claims = await oidc.parse_id_token(
         id_token,
         jwks_uri,
         audience=cfg.client_id,
