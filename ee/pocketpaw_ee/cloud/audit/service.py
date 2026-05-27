@@ -209,8 +209,9 @@ async def stream_export_csv(
 ):
     """Async generator yielding CSV rows (header + one row per event).
 
-    No aggregation; mongomock-compatible find+sort. Buffer is flushed per
-    row so memory stays flat regardless of result count.
+    Iterates the motor cursor with ``async for`` so memory stays flat
+    regardless of result count — ``.to_list()`` would buffer the entire
+    workspace's audit history before any row reached the client.
     """
     import csv
     import io
@@ -238,8 +239,8 @@ async def stream_export_csv(
     )
     yield _flush()
 
-    docs = await _AuditEventDoc.find(mongo_filter).sort([("at", -1), ("_id", -1)]).to_list()
-    for d in docs:
+    cursor = _AuditEventDoc.find(mongo_filter).sort([("at", -1), ("_id", -1)])
+    async for d in cursor:
         writer.writerow(
             [
                 d.at.isoformat(),
