@@ -22,6 +22,9 @@ from livekit.protocol.room import (
     ListRoomsRequest,
 )
 
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import CallStarted
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -241,6 +244,8 @@ async def create_room(group_id: str) -> dict[str, Any]:
         asyncio.create_task(_reap_agent_process(group_id, proc))
 
         logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
+
+    await emit(CallStarted(data={"group_id": group_id, "room_name": room_name}))
 
     return {
         "room_name": room_name,
@@ -505,6 +510,6 @@ def _format_joined_at(joined_at: Any) -> str | None:
         return None
     if hasattr(joined_at, "ToDatetime"):
         return joined_at.ToDatetime().isoformat()
-    if isinstance(joined_at, (int, float)):
+    if isinstance(joined_at, int | float):
         return datetime.fromtimestamp(joined_at, tz=UTC).isoformat()
     return str(joined_at)
