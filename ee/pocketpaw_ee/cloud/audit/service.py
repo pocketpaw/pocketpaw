@@ -162,11 +162,15 @@ async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> Aud
     """Cursor-paginated audit-event list, newest first."""
     body = AuditQueryRequest.model_validate(query or {})
 
-    mongo_filter: dict[str, Any] = {"workspace": workspace_id}
+    # Why uniform $and: piling fields into a flat dict works today but
+    # future patches that add another ``at`` clause (e.g. a tail-window
+    # filter alongside the cursor) would silently clobber the earlier
+    # one. ``$and`` of leaf clauses composes safely.
+    clauses: list[dict[str, Any]] = [{"workspace": workspace_id}]
     if body.action:
-        mongo_filter["action"] = body.action
+        clauses.append({"action": body.action})
     if body.actor:
-        mongo_filter["actor_id"] = body.actor
+        clauses.append({"actor_id": body.actor})
 
     time_filter: dict[str, datetime] = {}
     if body.since:
@@ -174,17 +178,20 @@ async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> Aud
     if body.until:
         time_filter["$lte"] = _parse_iso(body.until, "until")
     if time_filter:
-        mongo_filter["at"] = time_filter
+        clauses.append({"at": time_filter})
 
     if body.cursor:
         c_at, c_oid = _decode_cursor(body.cursor)
-        cursor_clause: dict[str, Any] = {
-            "$or": [
-                {"at": {"$lt": c_at}},
-                {"at": c_at, "_id": {"$lt": c_oid}},
-            ],
-        }
-        mongo_filter = {"$and": [mongo_filter, cursor_clause]}
+        clauses.append(
+            {
+                "$or": [
+                    {"at": {"$lt": c_at}},
+                    {"at": c_at, "_id": {"$lt": c_oid}},
+                ],
+            }
+        )
+
+    mongo_filter: dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
     # Per reference_mongomock_quirks: no .aggregate() — straight find+sort
     # with a composite sort key for stable ordering across pages.
