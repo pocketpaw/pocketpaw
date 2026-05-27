@@ -22,6 +22,7 @@ from pocketpaw.connectors.protocol import ExecutionMode
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
+    ConnectorConfigUpdated,
     ConnectorDisabled,
     ConnectorEnabled,
 )
@@ -278,6 +279,14 @@ async def update_config(
     await event_bus.emit(
         "connector.config_updated",
         {"workspace_id": workspace_id, "name": name},
+    )
+    await emit(
+        ConnectorConfigUpdated(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+            }
+        )
     )
     return _row_response(available[name], doc)
 
