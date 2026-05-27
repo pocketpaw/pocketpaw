@@ -110,7 +110,11 @@ async def validate_password_async(password: str, *, email: str) -> None:
         raise InvalidPasswordException(reason="missing_symbol")
 
     local_part = email.split("@", 1)[0] if email else ""
-    if local_part and password.lower() == local_part.lower():
+    # Substring (not equality): a password like ``Prakash123!`` for the
+    # email ``prakash@x.com`` is the same bad practice as ``prakash`` — the
+    # exact-match check we had before missed it. Length guard avoids
+    # flagging single-character local parts as forbidden.
+    if local_part and len(local_part) >= 3 and local_part.lower() in password.lower():
         raise InvalidPasswordException(reason="email_local_part")
 
     if _hibp_enabled() and await _is_breached(password):

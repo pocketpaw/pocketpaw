@@ -58,6 +58,22 @@ async def test_email_local_part(hibp_off: None) -> None:
     assert exc.value.reason == "email_local_part"
 
 
+async def test_email_local_part_substring_rejected(hibp_off: None) -> None:
+    """``prakash@x.com`` mustn't be able to set ``Prakash123!`` — the
+    local part still appears verbatim in the password, just with extra
+    characters tacked on. The earlier exact-equality check missed this."""
+    with pytest.raises(InvalidPasswordException) as exc:
+        await password_policy.validate_password_async("Prakash-2026!", email="prakash@x.com")
+    assert exc.value.reason == "email_local_part"
+
+
+async def test_short_local_part_does_not_block_unrelated_password(hibp_off: None) -> None:
+    """A 2-char local part like ``jo@x.com`` shouldn't poison every
+    password that happens to contain ``jo``."""
+    # No exception.
+    await password_policy.validate_password_async("StrongPass123!", email="jo@x.com")
+
+
 async def test_passing_with_hibp_disabled(hibp_off: None) -> None:
     await password_policy.validate_password_async("StrongPass123!", email="x@y.z")
 
