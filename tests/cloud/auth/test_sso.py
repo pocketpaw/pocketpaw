@@ -215,7 +215,9 @@ async def test_complete_login_jit_provisions(env, monkeypatch):
     )
     user = await sso_service.complete_login("auth-code", "abc123")
     assert user.email == "newuser@acme.com"
-    assert user.hashed_password == ""
+    # Sentinel — never plaintext-empty (that risked verifier-treats-as-OK).
+    assert user.hashed_password.startswith("!sso-only-")
+    assert len(user.hashed_password) > 32
     assert user.is_verified is True
     assert any(m.workspace == ws_id and m.role == "member" for m in user.workspaces)
 

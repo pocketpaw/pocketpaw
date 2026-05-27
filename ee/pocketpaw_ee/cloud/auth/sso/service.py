@@ -290,9 +290,14 @@ async def complete_login(code: str, state: str) -> _UserDoc:
                 f"email domain '{domain}' not in workspace allowlist",
             )
         full_name = userinfo.get("name") or claims.get("name") or ""
+        # Sentinel rather than "" so the password verifier deterministically
+        # fails — an empty hash could land in code paths that treat it as
+        # "no password set, allow anything." 64 random urlsafe bytes is
+        # unguessable and is never returned to a client.
+        sentinel_password = "!sso-only-" + secrets.token_urlsafe(48)
         user = _UserDoc(
             email=email,
-            hashed_password="",  # SSO-only; password login impossible
+            hashed_password=sentinel_password,
             full_name=full_name,
             is_active=True,
             is_verified=True,
