@@ -150,3 +150,126 @@ async def test_session_audience_single_user_when_no_peer():
 
     ev = SessionCreated(data={"session_id": "s1", "user_id": "u1"})
     assert await r.audience(ev) == ["u1"]
+
+
+# --- Gap-fill routing (A6) -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unread_update_routes_to_target_user():
+    from pocketpaw_ee.cloud._core.realtime.events import UnreadUpdate
+
+    r = AudienceResolver()
+    ev = UnreadUpdate(data={"group_id": "g1", "user_id": "u1", "delta": 1})
+    assert await r.audience(ev) == ["u1"]
+
+
+@pytest.mark.asyncio
+async def test_task_events_route_to_workspace_plus_recipients():
+    async def ws_members(_wid: str) -> list[str]:
+        return ["wm1", "wm2"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        TaskBlocked,
+        TaskClaimed,
+        TaskProposed,
+        TaskResolved,
+        TaskUpdated,
+    )
+
+    r = AudienceResolver(workspace_members=ws_members)
+    for cls in (TaskProposed, TaskUpdated, TaskClaimed, TaskResolved, TaskBlocked):
+        ev = cls(
+            data={
+                "task_id": "t1",
+                "workspace_id": "w1",
+                "recipient_ids": ["creator", "assignee"],
+            }
+        )
+        aud = await r.audience(ev)
+        assert set(aud) == {"wm1", "wm2", "creator", "assignee"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_cycle_events_route_to_workspace_members():
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b", "c"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        CycleClosed,
+        CycleCreated,
+        CycleSnapshotted,
+        CycleUpdated,
+    )
+
+    r = AudienceResolver(workspace_members=ws_members)
+    for cls in (CycleCreated, CycleUpdated, CycleClosed, CycleSnapshotted):
+        ev = cls(data={"cycle_id": "c1", "workspace_id": "w1"})
+        assert set(await r.audience(ev)) == {"a", "b", "c"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_project_events_route_to_workspace_members():
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        ProjectArchived,
+        ProjectCreated,
+        ProjectDeleted,
+        ProjectUpdated,
+    )
+
+    r = AudienceResolver(workspace_members=ws_members)
+    for cls in (ProjectCreated, ProjectUpdated, ProjectArchived, ProjectDeleted):
+        ev = cls(data={"project_id": "p1", "workspace_id": "w1"})
+        assert set(await r.audience(ev)) == {"a", "b"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_plan_events_route_to_workspace_members():
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        PlanGapResolved,
+        PlanGenerated,
+    )
+
+    r = AudienceResolver(workspace_members=ws_members)
+    for cls in (PlanGenerated, PlanGapResolved):
+        ev = cls(data={"plan_session_id": "s1", "workspace_id": "w1"})
+        assert set(await r.audience(ev)) == {"a", "b"}, cls.__name__
+
+
+@pytest.mark.asyncio
+async def test_pocket_outcome_routes_to_workspace_members():
+    async def ws_members(_wid: str) -> list[str]:
+        return ["a", "b"]
+
+    from pocketpaw_ee.cloud._core.realtime.events import PocketOutcomeEvent
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = PocketOutcomeEvent(
+        data={
+            "outcome": "renewal_completed",
+            "pocket_id": "p1",
+            "workspace_id": "w1",
+            "action": "renew",
+            "actor": "u1",
+        }
+    )
+    assert set(await r.audience(ev)) == {"a", "b"}
+
+
+@pytest.mark.asyncio
+async def test_composio_events_route_to_single_user():
+    from pocketpaw_ee.cloud._core.realtime.events import (
+        ComposioConnectionMismatch,
+        ComposioConnectionVerified,
+    )
+
+    r = AudienceResolver()
+    for cls in (ComposioConnectionVerified, ComposioConnectionMismatch):
+        ev = cls(data={"workspace_id": "w1", "user_id": "u1", "toolkit": "gmail"})
+        assert await r.audience(ev) == ["u1"], cls.__name__

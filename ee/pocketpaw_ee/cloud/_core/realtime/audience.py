@@ -234,6 +234,62 @@ class AudienceResolver:
         if t in {"notification.new", "notification.read", "notification.cleared"}:
             return [d["user_id"]]
 
+        # --- Unread (per-user counter delta) ------------------------------------
+        if t == "unread.update":
+            return [d["user_id"]]
+
+        # --- Tasks (Mission Control work items) ---------------------------------
+        # Payload carries explicit ``recipient_ids`` (creator + human assignee);
+        # fan out to those plus every workspace member so any operator with the
+        # Mission Control board open sees the row update live.
+        if t in {
+            "task.proposed",
+            "task.updated",
+            "task.claimed",
+            "task.resolved",
+            "task.blocked",
+        }:
+            recipients = list(d.get("recipient_ids") or [])
+            if wid := d.get("workspace_id"):
+                recipients.extend(await self._workspace(wid))
+            return list(set(recipients))
+
+        # --- Cycles (Mission Control time-boxed windows) ------------------------
+        if t in {"cycle.created", "cycle.updated", "cycle.closed", "cycle.snapshotted"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Projects (Linear-style scoping primitive) --------------------------
+        if t in {
+            "project.created",
+            "project.updated",
+            "project.archived",
+            "project.deleted",
+        }:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Planner (PRD materialization + gap resolution) ---------------------
+        if t in {"plan.generated", "plan.gap_resolved"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Pocket outcomes (named business events from write actions) ---------
+        # Workspace-scoped: the outcomes ledger dashboard watches every write.
+        if t == "pocket.outcome":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Composio (per-user OAuth identity probes) --------------------------
+        if t in {"composio.connection.verified", "composio.connection.mismatch"}:
+            if uid := d.get("user_id"):
+                return [uid]
+            return []
+
         # --- Presence -----------------------------------------------------------
         if t in {"presence.online", "presence.offline"}:
             return await self._peers(d["user_id"])
