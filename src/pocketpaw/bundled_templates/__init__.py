@@ -10,6 +10,12 @@
 # ``compile_template`` — the OSS-side template-to-runtime translation
 # seam. PR 2b implements ``data_sources[]`` only; other top-level
 # fields passthrough until PRs 2c-2g land their runtime executors.
+# Modified 2026-05-28 (feat/rfc-03-v2-cel-eval): re-exports the CEL
+# runtime evaluator (``evaluate_cel``, ``CelEvaluationError``) and the
+# identifier-resolver Protocol (``IdentifierResolver``,
+# ``TemplateIdentifierResolver``). PR 2c lays the foundation that
+# PR 2d (Instinct 5-step composer), PR 2f (temporal trigger sweeper),
+# and PR 2g (Fabric ``tier: registered`` linter) all consume.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -51,8 +57,16 @@ files and register it in ``_bundled/index.json``. The installer discovers
 directories via iteration — no installer code changes needed.
 """
 
+from pocketpaw.bundled_templates.cel_runtime import (
+    CelEvaluationError,
+    evaluate_cel,
+)
 from pocketpaw.bundled_templates.compile import compile_template
 from pocketpaw.bundled_templates.errors import TemplateValidationError
+from pocketpaw.bundled_templates.identifier_resolver import (
+    IdentifierResolver,
+    TemplateIdentifierResolver,
+)
 from pocketpaw.bundled_templates.installer import (
     TemplateInstallResult,
     install_bundled_templates,
@@ -77,9 +91,11 @@ from pocketpaw.bundled_templates.schema import (
 __all__ = [
     "ActionDef",
     "AgentDef",
+    "CelEvaluationError",
     "ColumnDef",
     "ConfirmDef",
     "DataSourceDef",
+    "IdentifierResolver",
     "InstinctRule",
     "InstinctRulesDef",
     "JoinedEntity",
@@ -87,10 +103,12 @@ __all__ = [
     "PocketTemplate",
     "SavedView",
     "StateBinding",
+    "TemplateIdentifierResolver",
     "TemplateInstallResult",
     "TemplateValidationError",
     "TriggerDef",
     "compile_template",
+    "evaluate_cel",
     "install_bundled_templates",
     "load_template",
 ]
