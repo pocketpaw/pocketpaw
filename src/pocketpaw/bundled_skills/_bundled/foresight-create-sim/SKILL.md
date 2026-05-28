@@ -90,6 +90,44 @@ carrying the cloud error code + message (e.g.
 ``foresight_custom_scenario.not_found``). Surface those codes to the
 user verbatim — they name the field to fix.
 
+## Read tools (results, accuracy, insights)
+
+Three additional tools cover the *result* side — what the run produced,
+how accurate the workspace has been, and what's worth flagging. Same
+workspace-context guarantee as the write tools (closed over the chat
+stream's workspace id; no env vars, no headers).
+
+  - ``mcp__pocketpaw_foresight__list_projected_decisions({run_id,
+    anchor_id?, limit?, offset?})`` — per-anchor, per-persona verdicts
+    for a single run. Returns ``{items[], total, limit, offset,
+    has_more}``. 404 (``foresight_run.not_found``) for unknown or
+    cross-tenant ids.
+
+    **When to use:** "show me the projections for run X", "what did
+    each persona decide", "break down the renewal sim by anchor".
+
+  - ``mcp__pocketpaw_foresight__get_aggregate({window_days?})`` —
+    workspace-level rolling accuracy + confidence drift + modal outcome
+    distribution over the trailing window. Defaults to 30 days, caps at
+    90; above the cap surfaces ``foresight.invalid_window``. Empty
+    workspaces return zeros + empty arrays (never 404).
+
+    **When to use:** "how accurate were we", "did we predict X
+    correctly", "show me our hit rate". Not the same surface as the
+    Backtest panel — backtests are per-scenario; this is the
+    workspace-wide rollup.
+
+  - ``mcp__pocketpaw_foresight__get_insights({})`` — narrative insights
+    synthesized over recent PredictionRecords + backtests (accuracy
+    drops, persona outliers, tier imbalances, threshold misses). Empty
+    workspaces yield ``items=[]`` — the synthesizer fires no rows when
+    no patterns match. Each item carries ``severity`` (``info`` |
+    ``warning`` | ``critical``) — surface it verbatim so the user sees
+    the same colour the dashboard renders.
+
+    **When to use:** "what mattered in the last run", "explain the
+    insights", "anything worth flagging".
+
 ## The four-phase workflow
 
 Every interaction with Foresight from chat follows this loop:

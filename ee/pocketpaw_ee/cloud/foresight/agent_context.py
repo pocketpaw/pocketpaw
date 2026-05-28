@@ -23,10 +23,16 @@
 #     (``custom_scenario_id`` required). Inline-personas runs are still
 #     reachable via the REST surface; we don't expose two run shapes on
 #     the chat surface because mixing them is the bug we're fixing.
-#   - The list-runs wrapper carries ``offset`` for parity with the brief
-#     signature, then slices client-side because
-#     ``list_scenario_runs`` itself doesn't yet take an offset arg.
-#     Cheap on small workspaces; document the limitation.
+#   - The list-runs wrapper now passes ``offset`` through to the service
+#     (added 2026-05-28 alongside the read-tools follow-up) so Mongo's
+#     ``.skip()`` does the pagination at source instead of over-fetching
+#     and slicing client-side.
+#
+# 2026-05-28 update: added three read wrappers
+# (``list_projected_decisions_for_agent``, ``get_aggregate_for_agent``,
+# ``get_insights_for_agent``) for the results / accuracy / insights MCP
+# tools. Same identity-resolution + CloudError-collapse shape as the
+# existing scenarios + runs wrappers.
 
 from __future__ import annotations
 
@@ -325,11 +331,9 @@ async def run_scenario_for_agent(
 async def list_runs_for_agent(limit: int = 10, offset: int = 0) -> dict[str, Any]:
     """List recent scenario runs in the active workspace, newest first.
 
-    Note: ``ee.cloud.foresight.service.list_scenario_runs`` doesn't yet
-    accept an ``offset`` kwarg, so we fetch ``limit + offset`` and slice
-    client-side. Adequate for the chat surface (the agent rarely scrolls
-    back; sessions average single-digit runs) — a server-side offset is
-    a separate follow-up.
+    ``offset`` is passed through to the service so pagination happens at
+    Mongo's ``.skip()`` step rather than over-fetching and slicing
+    client-side.
 
     Shape on success: ``{"ok": True, "items": [...], "limit": int,
     "offset": int}``.
@@ -343,11 +347,11 @@ async def list_runs_for_agent(limit: int = 10, offset: int = 0) -> dict[str, Any
 
     ctx = _build_request_context(workspace_id, user_id)
     try:
-        runs = await foresight_service.list_scenario_runs(ctx, limit=limit + offset)
+        runs = await foresight_service.list_scenario_runs(ctx, limit=limit, offset=offset)
     except CloudError as exc:
         return _cloud_error_payload(exc)
 
-    items = [run.model_dump() for run in runs[offset : offset + limit]]
+    items = [run.model_dump() for run in runs]
     return {"ok": True, "items": items, "limit": limit, "offset": offset}
 
 
@@ -375,12 +379,118 @@ async def get_run_for_agent(run_id: str) -> dict[str, Any]:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Result reads — projected decisions, aggregate rollup, insights
+# ---------------------------------------------------------------------------
+
+
+async def list_projected_decisions_for_agent(
+    run_id: str,
+    *,
+    anchor_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List projected decisions for a run, optionally filtered by anchor.
+
+    The service collapses unknown / cross-tenant ``run_id`` into
+    ``foresight_run.not_found`` via ``_fetch_in_workspace`` — surface
+    that as ``{ok: False, error: 'foresight_run.not_found', ...}`` so
+    the agent retries with a valid id rather than fabricating one.
+
+    Shape on success: ``{"ok": True, "items": [...], "total": N,
+    "limit": int, "offset": int, "has_more": bool}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.list_projected_decisions(
+            ctx, run_id, anchor_id=anchor_id, limit=limit, offset=offset
+        )
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
+async def get_aggregate_for_agent(*, window_days: int | None = None) -> dict[str, Any]:
+    """Return the workspace's rolling-accuracy + confidence-drift +
+    modal-outcome rollup over the trailing ``window_days`` window.
+
+    ``window_days`` defaults to the service's 30-day window; values
+    above the 90-day cap raise ``foresight.invalid_window`` which we
+    collapse to ``{ok: False, error: 'foresight.invalid_window', ...}``.
+
+    Shape on success: ``{"ok": True, "workspace_id": ...,
+    "window_days": N, "rolling_accuracy": {...},
+    "confidence_drift": {...}, "modal_outcome_distribution": [...],
+    "generated_at": iso}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.get_aggregate_rollup(ctx, window_days=window_days)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
+async def get_insights_for_agent() -> dict[str, Any]:
+    """Return the workspace's Insights panel — narrative rows the
+    five-rule synthesizer (or the v1.0 LLM synthesizer, depending on
+    workspace config) emits over the same window the aggregate uses.
+
+    Empty workspaces collapse to ``items=[]`` — the synthesizer yields
+    no rows when none of the patterns can fire, so the agent should
+    treat an empty list as "nothing notable yet", not a 404.
+
+    Shape on success: ``{"ok": True, "items": [...], "generated_at":
+    iso, ...}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.get_insights(ctx)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
 __all__ = [
     "NO_WORKSPACE_ERROR",
     "NO_WORKSPACE_MESSAGE",
     "delete_scenario_for_agent",
+    "get_aggregate_for_agent",
+    "get_insights_for_agent",
     "get_run_for_agent",
     "get_scenario_for_agent",
+    "list_projected_decisions_for_agent",
     "list_runs_for_agent",
     "list_scenarios_for_agent",
     "run_scenario_for_agent",

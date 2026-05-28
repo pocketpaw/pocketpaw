@@ -812,7 +812,7 @@ async def get_scenario_run(ctx: RequestContext, run_id: str) -> ScenarioRunRespo
 
 
 async def list_scenario_runs(
-    ctx: RequestContext, *, limit: int = 50
+    ctx: RequestContext, *, limit: int = 50, offset: int = 0
 ) -> list[ScenarioRunListItemResponse]:
     """List runs in the caller's workspace, most recent first.
 
@@ -821,6 +821,13 @@ async def list_scenario_runs(
     :class:`ScenarioRunListItemResponse` shape drops the inline
     ``result`` blob so a workspace with a hundred runs still serves
     the list endpoint in tens of kilobytes rather than megabytes.
+
+    ``offset`` is the server-side cursor for pagination. Defaults to
+    ``0`` so existing single-page callers stay correct; negative values
+    raise ``foresight.invalid_offset`` (same pattern as
+    :func:`list_projected_decisions`). Mongo's ``.skip(offset)`` runs
+    inside the same sort + tenant filter so the ordering stays stable
+    across pages.
     """
     workspace_id = _require_workspace(ctx)
     if limit < 1:
@@ -829,6 +836,8 @@ async def list_scenario_runs(
         # Hard cap so a misconfigured caller can't drag the entire
         # collection into memory; the frontend never asks for more.
         limit = 200
+    if offset < 0:
+        raise ValidationError("foresight.invalid_offset", "offset must be >= 0")
 
     # Tenant filter on every read per cloud rule #7. Sort newest first
     # so the Scenarios panel renders most-recent-on-top without a
@@ -839,6 +848,7 @@ async def list_scenario_runs(
     docs = (
         await _ForesightRunDoc.find({"workspace": workspace_id})
         .sort([("createdAt", -1), ("_id", -1)])  # type: ignore[list-item]
+        .skip(offset)
         .limit(limit)
         .to_list()
     )
