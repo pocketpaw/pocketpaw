@@ -310,6 +310,28 @@ def test_shape_chart_with_default_view_rejected() -> None:
         PocketTemplate.model_validate(bad)
 
 
+def test_shape_custom_allows_empty_columns() -> None:
+    """``shape: custom`` renders via a bespoke widget that doesn't
+    project rows into columns. Empty ``state.columns`` is allowed."""
+    good = _minimal_v2_dict()
+    good["shape"] = "custom"
+    good["state"]["columns"] = []
+    # Must not raise.
+    template = PocketTemplate.model_validate(good)
+    assert template.shape == "custom"
+    assert template.state.columns == []
+
+
+def test_shape_non_custom_requires_at_least_one_column() -> None:
+    """Every non-custom shape projects rows into columns; empty
+    ``state.columns`` is rejected with a meaningful error."""
+    bad = _minimal_v2_dict()
+    bad["shape"] = "data-grid"
+    bad["state"]["columns"] = []
+    with pytest.raises(Exception, match="state.columns must declare at least one column"):
+        PocketTemplate.model_validate(bad)
+
+
 def test_outcomes_emitted_subset_of_top_level_outcomes() -> None:
     """An action's ``outcomes_emitted`` must be a subset of the
     template-level ``outcomes[]``."""

@@ -192,7 +192,7 @@ class StateBinding(BaseModel):
         description="Row identifier column. Defaults to implicit 'id'.",
     )
     joined_entities: list[JoinedEntity] = Field(default_factory=list)
-    columns: list[ColumnDef] = Field(..., min_length=1)
+    columns: list[ColumnDef] = Field(default_factory=list)
     default_view: DefaultViewT | None = None
     saved_views: list[SavedView] = Field(default_factory=list)
 
@@ -426,6 +426,23 @@ class PocketTemplate(BaseModel):
             raise ValueError(
                 f"shape={self.shape!r} does not allow default_view="
                 f"{self.state.default_view!r}; allowed: {sorted(allowed)}"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _columns_required_unless_custom(self) -> PocketTemplate:
+        """``state.columns`` must have at least one entry unless
+        ``shape == "custom"``. Custom-shape templates render via a
+        bespoke widget (e.g. the Decision Graph's SvelteFlow surface)
+        and do not project rows into columns, so the columns
+        declaration is metadata-only and may be empty."""
+        if self.shape == "custom":
+            return self
+        if not self.state.columns:
+            raise ValueError(
+                f"state.columns must declare at least one column for "
+                f"shape={self.shape!r}; only shape='custom' may declare "
+                f"an empty columns list"
             )
         return self
 
