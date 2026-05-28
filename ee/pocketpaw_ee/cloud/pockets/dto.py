@@ -49,6 +49,13 @@ BulkBlockedRowDTO for the new
 request carries ``rows`` (per-row dicts); the response surfaces the
 RFC 03 v2 bucketing — ``executions`` / ``blocked`` /
 ``batch_approval_id`` — plus the consolidated ``approval_row_ids``.
+Updated: 2026-05-28 (feat/wave-3e-template-slug) — added the optional
+``template_slug`` (aliased ``templateSlug``) field on
+``CreatePocketRequest`` / ``UpdatePocketRequest`` / ``PocketResponse``.
+When supplied on create, the service loads the named bundled template,
+compiles it, and merges the runtime-shaped dict into the pocket's
+``rippleSpec`` (compile-on-install). Legacy callers that omit it see
+the same shape they always have.
 """
 
 from __future__ import annotations
@@ -71,6 +78,11 @@ class CreatePocketRequest(BaseModel):
     ripple_spec: dict | None = Field(default=None, alias="rippleSpec")
     widgets: list[dict] = Field(default_factory=list)  # Initial widget definitions
     project_id: str | None = Field(default=None, alias="projectId")
+    # RFC 03 v2 (Wave 3e) — the bundled-template slug this pocket is
+    # instantiated from. When set, the service loads + compiles the
+    # template at create time and merges the result into ``rippleSpec``.
+    # Omitting it preserves the pre-Wave-3e behaviour.
+    template_slug: str | None = Field(default=None, alias="templateSlug")
 
     model_config = {"populate_by_name": True}
 
@@ -84,6 +96,11 @@ class UpdatePocketRequest(BaseModel):
     visibility: str | None = None
     ripple_spec: dict | None = Field(default=None, alias="rippleSpec")
     project_id: str | None = Field(default=None, alias="projectId")
+    # When provided, the service treats this as "switch / set the template
+    # for this pocket" — re-loads + recompiles + merges into rippleSpec.
+    # Pass the same slug to force a recompile (template content edited
+    # out-of-band). ``None`` (the default) means "leave it alone."
+    template_slug: str | None = Field(default=None, alias="templateSlug")
 
     model_config = {"populate_by_name": True}
 
@@ -158,6 +175,9 @@ class PocketResponse(BaseModel):
     share_link_access: str = "view"
     shared_with: list[str]
     project_id: str | None = None
+    # RFC 03 v2 (Wave 3e) — the bundled-template slug, or ``None`` for
+    # legacy pockets / cold-generated rippleSpecs.
+    template_slug: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -471,6 +491,9 @@ def pocket_to_wire_dict(p) -> dict:
         "shareLinkAccess": p.share_link_access,
         "sharedWith": list(p.shared_with),
         "projectId": p.project_id,
+        # RFC 03 v2 (Wave 3e) — the bundled-template slug the pocket was
+        # instantiated from. ``None`` for legacy / cold-generated pockets.
+        "templateSlug": getattr(p, "template_slug", None),
         "createdAt": iso_utc(p.created_at),
         "updatedAt": iso_utc(p.updated_at),
     }

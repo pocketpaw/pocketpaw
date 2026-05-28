@@ -775,12 +775,12 @@ async def dispatch_bulk_action_route(
       exactly ONE InstinctApproval row covers every approval-needing
       row in the batch (RFC mandate — never N approvals).
 
-    Out of scope for this PR: the per-pocket template resolver. The
-    paw-enterprise UI / a follow-up PR will resolve the
-    :class:`PocketTemplate` from the pocket's persisted template
-    reference; this route surfaces ``400`` until that lookup lands so
-    the contract is observable but the endpoint is not yet
-    silently-broken.
+    Wave 3e — template resolution is now wired through
+    ``pockets.service.resolve_pocket_template`` which reads the pocket's
+    ``template_slug`` and loads the OSS bundled template. A pocket with
+    no slug, an unknown slug, or a stale on-disk template surfaces as
+    ``404 pocket_template.not_found`` so the operator can fix the
+    template binding rather than receive a generic 500.
     """
     body = body or DispatchBulkRequest(
         pocket_id=pocket_id,
@@ -793,21 +793,29 @@ async def dispatch_bulk_action_route(
     body_dict["pocket_id"] = pocket_id
     body_dict["action_name"] = action_name
 
-    # Template resolution is a follow-up: the pocket needs a stable
-    # ``template_slug`` field plus a service-level loader that maps
-    # slug → :class:`PocketTemplate`. Returning 400 here keeps the
-    # endpoint observable in OpenAPI without leaking a half-wired
-    # behaviour onto the wire.
-    raise CloudError(
-        400,
-        "bulk_action.template_resolver_pending",
-        (
-            "Bulk dispatch HTTP route requires the per-pocket template "
-            "resolver (Wave 3b follow-up); call "
-            "pockets.service.dispatch_bulk_action(..., template=...) "
-            "directly from library / job callers."
-        ),
+    # Wave 3e — resolve the pocket's RFC 03 v2 template. ``None`` means
+    # the pocket has no slug, the slug is unknown, or the on-disk
+    # template is stale; treat as 404 so the operator is signalled to
+    # fix the binding (vs. a 500 / generic error).
+    template = await pockets_service.resolve_pocket_template(workspace_id, pocket_id)
+    if template is None:
+        raise CloudError(
+            404,
+            "pocket_template.not_found",
+            (
+                "No RFC 03 v2 template is bound to this pocket — set "
+                "``template_slug`` on the pocket before dispatching a "
+                "bulk action."
+            ),
+        )
+
+    result_wire = await pockets_service.dispatch_bulk_action(
+        workspace_id,
+        user_id,
+        body_dict,
+        template=template,
     )
+    return BulkDispatchResponse(**result_wire)
 
 
 # ---------------------------------------------------------------------------
