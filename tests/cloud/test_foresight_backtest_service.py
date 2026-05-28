@@ -379,6 +379,30 @@ async def test_list_rejects_invalid_limit() -> None:
         await foresight_service.list_backtests(ctx, limit=0)
 
 
+async def test_list_offset_skips_initial_backtests() -> None:
+    """``offset`` mirrors the cursor pattern on ``list_scenario_runs``
+    so the agent_context wrapper paginates server-side instead of
+    over-fetching and slicing. Five backtests in newest-first order:
+    ``skip=2, limit=2`` returns backtests 3-4 — i.e. the third and fourth
+    newest, after the latest two were skipped."""
+    ctx = _ctx()
+    backtests = []
+    for i in range(5):
+        backtests.append(await foresight_service.create_backtest(ctx, _body(name=f"bt-{i}")))
+
+    page = await foresight_service.list_backtests(ctx, limit=2, offset=2)
+    # Newest-first: backtests[4], backtests[3], backtests[2], backtests[1],
+    # backtests[0]. offset=2 drops the first two (backtests[4],
+    # backtests[3]); limit=2 returns backtests[2], backtests[1].
+    assert [item.id for item in page] == [backtests[2].id, backtests[1].id]
+
+
+async def test_list_rejects_negative_offset() -> None:
+    ctx = _ctx()
+    with pytest.raises(ValidationError):
+        await foresight_service.list_backtests(ctx, offset=-1)
+
+
 # ---------------------------------------------------------------------------
 # get_onboarding_gate state machine
 # ---------------------------------------------------------------------------

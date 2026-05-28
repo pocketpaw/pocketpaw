@@ -1516,7 +1516,7 @@ async def get_backtest(ctx: RequestContext, backtest_id: str) -> BacktestRunResp
 
 
 async def list_backtests(
-    ctx: RequestContext, *, limit: int = 50
+    ctx: RequestContext, *, limit: int = 50, offset: int = 0
 ) -> list[BacktestRunListItemResponse]:
     """List backtests in the caller's workspace, most recent first.
 
@@ -1524,16 +1524,26 @@ async def list_backtests(
     DTO that drops the inline result blob but keeps ``gate_decision`` so
     the Aggregate panel can render the unlock label per row without
     needing the detail endpoint.
+
+    ``offset`` is the server-side cursor for pagination — mirrors the
+    cursor added to :func:`list_scenario_runs` so the agent_context
+    wrapper paginates at Mongo's ``.skip()`` step rather than
+    over-fetching and slicing client-side. Defaults to ``0`` so every
+    existing caller (router, tests) stays correct; negative values
+    raise ``foresight.invalid_offset``.
     """
     workspace_id = _require_workspace(ctx)
     if limit < 1:
         raise ValidationError("foresight.invalid_limit", "limit must be >= 1")
     if limit > 200:
         limit = 200
+    if offset < 0:
+        raise ValidationError("foresight.invalid_offset", "offset must be >= 0")
 
     docs = (
         await _ForesightBacktestDoc.find({"workspace": workspace_id})
         .sort([("createdAt", -1), ("_id", -1)])  # type: ignore[list-item]
+        .skip(offset)
         .limit(limit)
         .to_list()
     )
