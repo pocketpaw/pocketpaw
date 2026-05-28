@@ -1,6 +1,14 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-05-28: Wave 4b — `template lint` now also enforces Fabric
+                `tier: registered` policy via
+                `validate_template_with_registry`. Defaults to
+                `NullFabricRegistry` (synthetic-tier templates lint
+                clean; registered-tier surfaces errors). New top-level
+                `--registry <path>` flag loads a JSONFileFabricRegistry
+                mock so developers can lint against a synthetic Fabric
+                without standing up the EE backend.
   - 2026-05-28: Added `template publish / install / upgrade` subactions
                 for RFC 03 v2 Wave 4a — content-addressed, optionally
                 signed (Ed25519) template bundles. Local-file only —
@@ -211,6 +219,7 @@ def _handle_early_command(args) -> int | None:
             destination=getattr(args, "dest", None),
             verify_key_path=getattr(args, "verify_key", None),
             no_prompt=getattr(args, "no_prompt", False),
+            registry_path=getattr(args, "registry", None),
         )
 
     return None
@@ -415,6 +424,18 @@ Examples:
         help=(
             "Refuse to apply a destructive template upgrade rather than "
             "prompting interactively (exit code 2)"
+        ),
+    )
+    # ── Wave 4b lint flag ──
+    parser.add_argument(
+        "--registry",
+        type=str,
+        default=None,
+        dest="registry",
+        help=(
+            "JSON Fabric-registry file for `template lint`. Defaults to "
+            "NullFabricRegistry (synthetic-tier templates lint clean; "
+            "registered-tier surfaces errors)."
         ),
     )
 

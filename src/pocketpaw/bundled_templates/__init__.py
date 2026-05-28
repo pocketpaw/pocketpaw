@@ -37,6 +37,12 @@
 # ``BulkExecutionError``). PR 2e is the LAST library-layer piece —
 # composes the per-row composer (PR 2d) into the batch-approval
 # contract from RFC §"Bulk action execution model".
+# Modified 2026-05-28 (feat/wave-4b-lint-fabric): re-exports
+# ``JSONFileFabricRegistry`` — the OSS-side JSON-backed
+# :class:`FabricRegistry` implementation that powers ``pocketpaw
+# template lint --registry <path>``. Wave 4c will replace it with the
+# live EE FabricRegistry; until then, this is the developer-facing mock
+# for ``tier: registered`` lint workflows.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -117,6 +123,10 @@ from pocketpaw.bundled_templates.instinct_composer import (
     InstinctVerdict,
     resolve_instinct,
 )
+from pocketpaw.bundled_templates.json_registry import (
+    JSONFileFabricRegistry,
+    JSONFileFabricRegistryError,
+)
 from pocketpaw.bundled_templates.loader import load_template
 from pocketpaw.bundled_templates.schema import (
     ActionDef,
@@ -161,6 +171,8 @@ __all__ = [
     "InstinctRule",
     "InstinctRulesDef",
     "InstinctVerdict",
+    "JSONFileFabricRegistry",
+    "JSONFileFabricRegistryError",
     "JoinedEntity",
     "NullFabricRegistry",
     "PermissionsDef",

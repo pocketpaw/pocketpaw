@@ -4,6 +4,15 @@
 # Modified 2026-05-25 (feat/rfc-03-v2-compile): added tests for the
 # new ``compile`` subaction — JSON (default) + YAML (--yaml) output,
 # end-to-end through the dispatch path, plus argparse wiring sanity.
+# Modified 2026-05-28 (feat/wave-4b-lint-fabric): added Wave 4b
+# ``lint`` Fabric-tier coverage. ``_run_lint`` now calls
+# ``validate_template_with_registry`` after the Pydantic chokepoint
+# passes, defaulting to ``NullFabricRegistry`` and accepting a
+# ``--registry <path>`` JSON override. The new tests cover:
+#   * synthetic-tier templates (no joins) lint clean against Null;
+#   * registered-tier templates fail against Null (correct loud signal);
+#   * a JSON registry mock unblocks the same template;
+#   * ``--json`` output gains a ``fabric_validations`` array.
 # These cover the six contract pillars from RFC 03 v2 "Style and tooling
 # notes":
 #   1. lint on a clean v2 fixture exits 0 and reports schema_version.
@@ -116,8 +125,30 @@ def _write_json(path: Path, data: dict) -> Path:
 # ===========================================================================
 
 
-def test_lint_clean_v2_fixture_exits_zero_and_reports_schema_version() -> None:
-    rc, out = _capture(run_template_cmd, subaction="lint", file1=str(_LEASE_V2))
+def test_lint_clean_v2_fixture_exits_zero_and_reports_schema_version(tmp_path: Path) -> None:
+    # Wave 4b: lease-renewal-v2 declares joined_entities (registered
+    # tier), so the default NullFabricRegistry would fail it. Pass an
+    # explicit JSON registry mock that satisfies the joins so the test
+    # exercises the "clean v2 fixture" path it originally targeted.
+    reg = tmp_path / "fabric.json"
+    reg.write_text(
+        json.dumps(
+            {
+                "entity_types": ["Lease", "Tenant", "Property"],
+                "links": [
+                    {"from": "Lease", "to": "Tenant", "name": "lease_tenant"},
+                    {"from": "Lease", "to": "Property", "name": "lease_property"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_LEASE_V2),
+        registry_path=str(reg),
+    )
     assert rc == 0
     assert "valid" in out.lower()
     # surfaces both the schema version and the slug name
@@ -962,3 +993,165 @@ def test_argparse_template_no_prompt_flag(tmp_path: Path) -> None:
     _resolve_subargs(args)
     assert args.subaction == "upgrade"
     assert getattr(args, "no_prompt", False) is True
+
+
+# ===========================================================================
+# Wave 4b — pocketpaw template lint Fabric ``tier: registered`` enforcement
+# ===========================================================================
+#
+# After Pydantic validation succeeds, ``_run_lint`` now calls
+# ``validate_template_with_registry``. The default registry is
+# ``NullFabricRegistry`` — synthetic-tier templates (no dot-paths, no
+# joined entities) lint clean; registered-tier templates surface errors,
+# which is the correct loud signal that Fabric isn't wired. A
+# ``--registry <path>`` flag accepts a JSON file describing entity
+# types + links so a developer can lint against a mock Fabric before
+# the EE registry ships.
+# ===========================================================================
+
+
+_BUNDLED_DECISION_GRAPH = _BUNDLED_DIR / "decision-graph" / "template.pocket.yaml"
+
+
+def _lease_registry_json() -> dict:
+    """A JSON manifest that satisfies the lease-renewal fixture."""
+    return {
+        "entity_types": ["Lease", "Tenant", "Property"],
+        "links": [
+            {"from": "Lease", "to": "Tenant", "name": "lease_tenant"},
+            {"from": "Lease", "to": "Property", "name": "lease_property"},
+        ],
+    }
+
+
+def test_lint_synthetic_v2_passes_with_null_registry() -> None:
+    """``todo-task-tracker`` declares no joins / dot-paths — clean
+    against the default NullFabricRegistry."""
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_TODO_V2),
+        as_json=True,
+    )
+    assert rc == 0, out
+    data = json.loads(out)
+    assert data["valid"] is True
+    assert data["fabric_validations"] == []
+
+
+def test_lint_decision_graph_template_passes_with_null_registry() -> None:
+    """``decision-graph`` ships ``shape: custom`` with no joins — must
+    stay clean against the Null default."""
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_BUNDLED_DECISION_GRAPH),
+        as_json=True,
+    )
+    assert rc == 0, out
+    data = json.loads(out)
+    assert data["valid"] is True
+    assert data["fabric_validations"] == []
+
+
+def test_lint_registered_tier_template_fails_with_null_registry() -> None:
+    """The lease-renewal fixture declares ``joined_entities`` — Null
+    can't satisfy that, so lint must exit 1 with Fabric errors."""
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_LEASE_V2),
+        as_json=True,
+    )
+    assert rc == 1, out
+    data = json.loads(out)
+    assert data["valid"] is False
+    fab = data["fabric_validations"]
+    assert isinstance(fab, list)
+    assert len(fab) > 0
+    # Each entry exposes the documented contract surface.
+    for entry in fab:
+        assert set(entry) >= {"severity", "message", "path", "data"}
+        assert entry["severity"] == "error"
+
+
+def test_lint_registered_tier_template_passes_with_json_registry(tmp_path: Path) -> None:
+    """The same lease fixture, against a JSON-registry mock that knows
+    the entity types + via_links, lints clean."""
+    reg_path = tmp_path / "fabric.json"
+    reg_path.write_text(json.dumps(_lease_registry_json()), encoding="utf-8")
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_LEASE_V2),
+        registry_path=str(reg_path),
+        as_json=True,
+    )
+    assert rc == 0, out
+    data = json.loads(out)
+    assert data["valid"] is True
+    assert data["fabric_validations"] == []
+
+
+def test_lint_human_output_surfaces_fabric_errors() -> None:
+    """Human-readable lint must render Fabric errors when they fire —
+    the JSON path is for scripting; the default path needs operator-
+    legible failure lines."""
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_LEASE_V2),
+    )
+    assert rc == 1, out
+    lower = out.lower()
+    assert "fabric" in lower or "via_link" in lower or "registered" in lower
+
+
+def test_lint_missing_registry_file_exits_one(tmp_path: Path) -> None:
+    """``--registry <path>`` where the path doesn't exist surfaces a
+    clean lint failure (exit 1) rather than crashing."""
+    rc, _out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_TODO_V2),
+        registry_path=str(tmp_path / "missing.json"),
+    )
+    assert rc == 1
+
+
+def test_lint_malformed_registry_file_exits_one(tmp_path: Path) -> None:
+    """A registry file with malformed JSON also surfaces as a lint
+    failure rather than a crash."""
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ this is :: not json", encoding="utf-8")
+    rc, out = _capture(
+        run_template_cmd,
+        subaction="lint",
+        file1=str(_TODO_V2),
+        registry_path=str(bad),
+        as_json=True,
+    )
+    assert rc == 1
+    data = json.loads(out)
+    # The error surfaces in the top-level errors list — registry-load
+    # failures are not Fabric-validation failures (different lifecycle).
+    assert data["valid"] is False
+    assert any("registry" in e.lower() or "json" in e.lower() for e in data["errors"])
+
+
+def test_argparse_template_lint_registry_flag(tmp_path: Path) -> None:
+    """``--registry <path>`` parses through argparse alongside the
+    template subcommand."""
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    reg = tmp_path / "fabric.json"
+    args, unknown = parser.parse_known_args(
+        ["template", "lint", str(_LEASE_V2), "--registry", str(reg)]
+    )
+    if unknown:
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
+    _resolve_subargs(args)
+    assert args.subaction == "lint"
+    assert args.file1 == str(_LEASE_V2)
+    assert getattr(args, "registry", None) == str(reg)
