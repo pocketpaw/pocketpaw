@@ -259,6 +259,31 @@ class CloudPocketSpecialistMcpProvider:
         return list(POCKET_SPECIALIST_TOOL_IDS)
 
 
+class CloudForesightMcpProvider:
+    """`pocketpaw.mcp_servers` — the cloud Foresight scenario CRUD + run server.
+
+    Closes the bug where the bundled ``foresight-create-sim`` skill told
+    the chat agent to call the loopback REST surface with
+    ``$WORKSPACE_ID`` / ``$USER_ID`` env vars the ``claude_agent_sdk``
+    backend never sets. The typed MCP tools close over the chat session's
+    workspace id (read from ``ee.cloud.chat.agent_service`` ContextVars)
+    so the agent literally cannot save to the wrong workspace.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.foresight import build_foresight_server
+
+            return build_foresight_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+
+        return list(FORESIGHT_TOOL_IDS)
+
+
 class CloudAgentExtension:
     """`pocketpaw.agent_extensions` — EE additions to the core agent runtime.
 
