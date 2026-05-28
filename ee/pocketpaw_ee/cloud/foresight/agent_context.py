@@ -33,6 +33,14 @@
 # ``get_insights_for_agent``) for the results / accuracy / insights MCP
 # tools. Same identity-resolution + CloudError-collapse shape as the
 # existing scenarios + runs wrappers.
+#
+# 2026-05-28 update 2: added three backtest-read wrappers
+# (``list_backtests_for_agent``, ``get_backtest_for_agent``,
+# ``get_onboarding_gate_for_agent``). These are READ-ONLY — backtest
+# creation stays UI-initiated per RFC 08 §13.1 because it needs
+# ground-truth anchors the chat surface can't reliably produce. The chat
+# agent can answer "did we backtest yet?" / "what was the gate
+# decision?" / "are we unlocked?" without a curl fallback.
 
 from __future__ import annotations
 
@@ -482,14 +490,111 @@ async def get_insights_for_agent() -> dict[str, Any]:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Backtest reads + onboarding gate — read-only per RFC 08 §13.1 (backtest
+# creation stays UI-initiated; the chat surface can't reliably produce the
+# ground-truth anchors a backtest needs).
+# ---------------------------------------------------------------------------
+
+
+async def list_backtests_for_agent(*, limit: int = 10, offset: int = 0) -> dict[str, Any]:
+    """List backtests in the active workspace, newest first.
+
+    ``list_backtests`` returns a list (not a paginated envelope DTO), so
+    we build the response dict by hand here — mirrors the shape of
+    :func:`list_runs_for_agent`.
+
+    Shape on success: ``{"ok": True, "items": [...], "limit": int,
+    "offset": int}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        backtests = await foresight_service.list_backtests(ctx, limit=limit, offset=offset)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    items = [bt.model_dump() for bt in backtests]
+    return {"ok": True, "items": items, "limit": limit, "offset": offset}
+
+
+async def get_backtest_for_agent(backtest_id: str) -> dict[str, Any]:
+    """Fetch a single backtest by id with the full result + gate decision.
+
+    Unknown / malformed / cross-tenant ids collapse to ``{ok: False,
+    error: 'foresight_backtest.not_found', ...}`` via the service's
+    ``_fetch_backtest_in_workspace`` guard.
+
+    Shape on success: ``{"ok": True, "id": ..., "status": ...,
+    "gate_decision": ..., "threshold": ..., "result": ..., ...}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.get_backtest(ctx, backtest_id)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
+async def get_onboarding_gate_for_agent() -> dict[str, Any]:
+    """Return the workspace's onboarding gate state — unlocked / reason /
+    last-backtest reference, plus the effective threshold.
+
+    Read-only: ``get_onboarding_gate`` has no error path past the
+    missing-workspace guard. Empty workspaces collapse to
+    ``unlocked=False, reason='no_backtest'`` rather than 404 so the chat
+    agent can explain the gate state without retrying.
+
+    Shape on success: ``{"ok": True, "workspace_id": ...,
+    "unlocked": bool, "threshold": float, "reason": str,
+    "last_backtest_id": ..., "last_backtest_accuracy": ...,
+    "last_backtest_at": ...}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.get_onboarding_gate(ctx)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
 __all__ = [
     "NO_WORKSPACE_ERROR",
     "NO_WORKSPACE_MESSAGE",
     "delete_scenario_for_agent",
     "get_aggregate_for_agent",
+    "get_backtest_for_agent",
     "get_insights_for_agent",
+    "get_onboarding_gate_for_agent",
     "get_run_for_agent",
     "get_scenario_for_agent",
+    "list_backtests_for_agent",
     "list_projected_decisions_for_agent",
     "list_runs_for_agent",
     "list_scenarios_for_agent",
