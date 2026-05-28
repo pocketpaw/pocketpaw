@@ -22,8 +22,16 @@
 #   * ``upgrade``  — diff an installed template against a new bundle
 #                    (or installed-slug pair), prompt for destructive
 #                    changes, apply non-destructive updates silently.
-# Fabric tier:registered + via_link enforcement in lint is deferred to
-# the Fabric integration PR (PR 2g).
+# Modified 2026-05-28 (feat/wave-4b-lint-fabric): ``lint`` now also
+# calls ``validate_template_with_registry`` after Pydantic validation
+# passes. Default registry is :class:`NullFabricRegistry` (synthetic-
+# tier templates lint clean; registered-tier templates surface errors —
+# the correct loud signal that Fabric isn't wired). New
+# ``registry_path`` parameter (CLI ``--registry <path>``) loads a JSON-
+# backed mock via :class:`JSONFileFabricRegistry` so developers can
+# lint registered-tier templates without standing up the EE
+# FabricRegistry. ``--json`` output gains a ``fabric_validations``
+# array; warnings keep exit 0, any severity=error fails with exit 1.
 """``pocketpaw template`` — author-side template tooling.
 
 Seven sub-subcommands: ``lint``, ``migrate``, ``diff``, ``compile``,
@@ -142,6 +150,7 @@ def run_template_cmd(
     destination: str | None = None,
     verify_key_path: str | None = None,
     no_prompt: bool = False,
+    registry_path: str | None = None,
 ) -> int:
     """Dispatch ``pocketpaw template <subaction>`` to the right handler.
 
@@ -160,9 +169,13 @@ def run_template_cmd(
 
     if subaction == "lint":
         if not file1:
-            _usage_error("pocketpaw template lint <file>", as_json)
+            _usage_error("pocketpaw template lint <file> [--registry FILE]", as_json)
             return 2
-        return _run_lint(Path(file1), as_json=as_json)
+        return _run_lint(
+            Path(file1),
+            as_json=as_json,
+            registry_path=Path(registry_path) if registry_path else None,
+        )
 
     if subaction == "migrate":
         if not file1:
@@ -243,7 +256,12 @@ def _usage_error(usage: str, as_json: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _run_lint(path: Path, *, as_json: bool) -> int:
+def _run_lint(
+    path: Path,
+    *,
+    as_json: bool,
+    registry_path: Path | None = None,
+) -> int:
     """Validate one template file.
 
     Steps:
@@ -251,16 +269,20 @@ def _run_lint(path: Path, *, as_json: bool) -> int:
       2. If v1, run the loader's private ``_promote_v1_to_v2`` and remember
          that a rewrite would apply.
       3. Try ``PocketTemplate.model_validate(merged)``.
-      4. Compute heuristic warnings (pattern × shape only — Fabric
-         ``via_link`` registry enforcement is out of scope).
-      5. Print human-readable or JSON output.
+      4. Load the Fabric registry — :class:`NullFabricRegistry` by
+         default, :class:`JSONFileFabricRegistry` when ``registry_path``
+         is supplied — and call ``validate_template_with_registry``.
+      5. Compute heuristic warnings (pattern × shape pairings).
+      6. Print human-readable or JSON output. Exit code: 0 when every
+         Fabric finding has severity=warning (and Pydantic passed); 1
+         on any severity=error finding.
     """
 
     # Phase 1 — read + parse
     try:
         meta = _parse_file(path)
     except ValueError as exc:
-        return _lint_fail(path, [str(exc)], [], False, as_json)
+        return _lint_fail(path, [str(exc)], [], [], False, as_json)
 
     promoted_from_v1 = _is_v1(meta)
 
@@ -275,17 +297,64 @@ def _run_lint(path: Path, *, as_json: bool) -> int:
 
         from pocketpaw.bundled_templates.schema import PocketTemplate  # noqa: PLC0415
 
-        PocketTemplate.model_validate(merged)
+        template = PocketTemplate.model_validate(merged)
     except ValidationError as exc:
         errors = _format_pydantic_errors(exc)
-        return _lint_fail(path, errors, [], promoted_from_v1, as_json)
+        return _lint_fail(path, errors, [], [], promoted_from_v1, as_json)
     except Exception as exc:  # noqa: BLE001 — defensive
-        return _lint_fail(path, [f"unexpected error: {exc}"], [], promoted_from_v1, as_json)
+        return _lint_fail(path, [f"unexpected error: {exc}"], [], [], promoted_from_v1, as_json)
 
-    # Phase 4 — heuristic warnings (Pydantic already passed)
+    # Phase 4 — Fabric tier:registered validation
+    from pocketpaw.bundled_templates.fabric_registry import (  # noqa: PLC0415
+        NullFabricRegistry,
+    )
+
+    registry: Any
+    if registry_path is None:
+        registry = NullFabricRegistry()
+    else:
+        from pocketpaw.bundled_templates.json_registry import (  # noqa: PLC0415
+            JSONFileFabricRegistry,
+            JSONFileFabricRegistryError,
+        )
+
+        try:
+            registry = JSONFileFabricRegistry(registry_path)
+        except JSONFileFabricRegistryError as exc:
+            return _lint_fail(path, [str(exc)], [], [], promoted_from_v1, as_json)
+
+    from pocketpaw.bundled_templates.fabric_validator import (  # noqa: PLC0415
+        validate_template_with_registry,
+    )
+
+    fabric_findings = validate_template_with_registry(template, registry)
+    fabric_payload = [
+        {
+            "severity": f.severity,
+            "message": f.message,
+            "path": f.path,
+            "data": dict(f.data),
+        }
+        for f in fabric_findings
+    ]
+    fabric_errors = [f for f in fabric_findings if f.severity == "error"]
+    fabric_warnings = [f for f in fabric_findings if f.severity == "warning"]
+
+    # Phase 5 — heuristic warnings (Pydantic already passed)
     warnings = _compute_warnings(merged)
 
-    # Phase 5 — output
+    # Phase 6 — output. Exit 1 only when Fabric surfaces a severity=error
+    # finding; warnings stay informational.
+    if fabric_errors:
+        return _lint_fail(
+            path,
+            [_format_fabric_error(f) for f in fabric_errors],
+            warnings,
+            fabric_payload,
+            promoted_from_v1,
+            as_json,
+        )
+
     name = merged.get("name", "<unknown>")
     if as_json:
         output_json(
@@ -296,6 +365,7 @@ def _run_lint(path: Path, *, as_json: bool) -> int:
                 "warnings": warnings,
                 "schema_version": "v2",
                 "promoted_from_v1": promoted_from_v1,
+                "fabric_validations": fabric_payload,
             }
         )
     else:
@@ -308,6 +378,8 @@ def _run_lint(path: Path, *, as_json: bool) -> int:
             )
         for w in warnings:
             print_warn(w)
+        for f in fabric_warnings:
+            print_warn(f"fabric: {_format_fabric_error(f)}")
     return 0
 
 
@@ -315,6 +387,7 @@ def _lint_fail(
     path: Path,
     errors: list[str],
     warnings: list[str],
+    fabric_payload: list[dict[str, Any]],
     promoted_from_v1: bool,
     as_json: bool,
 ) -> int:
@@ -327,6 +400,7 @@ def _lint_fail(
                 "warnings": warnings,
                 "schema_version": "v2",
                 "promoted_from_v1": promoted_from_v1,
+                "fabric_validations": fabric_payload,
             }
         )
         return 1
@@ -336,6 +410,12 @@ def _lint_fail(
     for w in warnings:
         print_warn(w)
     return 1
+
+
+def _format_fabric_error(finding: Any) -> str:
+    """Render a :class:`FabricValidationError` as a one-line lint string
+    matching the Pydantic-error format (``"at <path>: <message>"``)."""
+    return f"at {finding.path!r}: {finding.message}"
 
 
 def _format_pydantic_errors(exc: Any) -> list[str]:
