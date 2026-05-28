@@ -23,10 +23,16 @@
 #     (``custom_scenario_id`` required). Inline-personas runs are still
 #     reachable via the REST surface; we don't expose two run shapes on
 #     the chat surface because mixing them is the bug we're fixing.
-#   - The list-runs wrapper carries ``offset`` for parity with the brief
-#     signature, then slices client-side because
-#     ``list_scenario_runs`` itself doesn't yet take an offset arg.
-#     Cheap on small workspaces; document the limitation.
+#   - The list-runs wrapper now passes ``offset`` through to the service
+#     (added 2026-05-28 alongside the read-tools follow-up) so Mongo's
+#     ``.skip()`` does the pagination at source instead of over-fetching
+#     and slicing client-side.
+#
+# 2026-05-28 update: added three read wrappers
+# (``list_projected_decisions_for_agent``, ``get_aggregate_for_agent``,
+# ``get_insights_for_agent``) for the results / accuracy / insights MCP
+# tools. Same identity-resolution + CloudError-collapse shape as the
+# existing scenarios + runs wrappers.
 
 from __future__ import annotations
 
@@ -325,11 +331,9 @@ async def run_scenario_for_agent(
 async def list_runs_for_agent(limit: int = 10, offset: int = 0) -> dict[str, Any]:
     """List recent scenario runs in the active workspace, newest first.
 
-    Note: ``ee.cloud.foresight.service.list_scenario_runs`` doesn't yet
-    accept an ``offset`` kwarg, so we fetch ``limit + offset`` and slice
-    client-side. Adequate for the chat surface (the agent rarely scrolls
-    back; sessions average single-digit runs) — a server-side offset is
-    a separate follow-up.
+    ``offset`` is passed through to the service so pagination happens at
+    Mongo's ``.skip()`` step rather than over-fetching and slicing
+    client-side.
 
     Shape on success: ``{"ok": True, "items": [...], "limit": int,
     "offset": int}``.
@@ -343,11 +347,11 @@ async def list_runs_for_agent(limit: int = 10, offset: int = 0) -> dict[str, Any
 
     ctx = _build_request_context(workspace_id, user_id)
     try:
-        runs = await foresight_service.list_scenario_runs(ctx, limit=limit + offset)
+        runs = await foresight_service.list_scenario_runs(ctx, limit=limit, offset=offset)
     except CloudError as exc:
         return _cloud_error_payload(exc)
 
-    items = [run.model_dump() for run in runs[offset : offset + limit]]
+    items = [run.model_dump() for run in runs]
     return {"ok": True, "items": items, "limit": limit, "offset": offset}
 
 
