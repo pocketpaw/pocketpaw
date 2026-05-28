@@ -110,7 +110,7 @@ now = datetime(2026, 5, 28, tzinfo=timezone.utc)
 
 # Example A — auto / notify_only action blocked by top-level rule
 row_a = {"rent_proposed": 1800.0, "rent_current": 2000.0, "renewal_stage": "sent",
-         "days_remaining": 25, "tenant": {"late_payment_count_12mo": 0}, "expires_at": "2026-12-01T00:00:00Z",
+         "days_remaining": 25, "tenant": {"late_payment_count_12mo": 0}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
          "rent_proposed_delta_pct": 2.5}
 d_a = resolve_instinct(template, "mark_renewed", row_a, now=now)
 print(f"  A: mark_renewed + 5% cut → {d_a.verdict} ({d_a.reason})")
@@ -118,7 +118,7 @@ assert d_a.verdict == "BLOCK"
 
 # Example B — auto action promoted to approval by overlay rule
 row_b = {"rent_proposed": 2050.0, "rent_current": 2000.0, "renewal_stage": "sent",
-         "days_remaining": 25, "tenant": {"late_payment_count_12mo": 4}, "expires_at": "2026-12-01T00:00:00Z",
+         "days_remaining": 25, "tenant": {"late_payment_count_12mo": 4}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
          "rent_proposed_delta_pct": 2.5}
 d_b = resolve_instinct(template, "send_to_tenant", row_b, now=now)
 print(f"  B: send_to_tenant + 4 late payments → {d_b.verdict} ({d_b.reason})")
@@ -126,7 +126,7 @@ assert d_b.verdict == "ESCALATE_APPROVAL"
 
 # Example C — require_approval per-action floor with no rule match
 row_c = {"rent_proposed": 2050.0, "rent_current": 2000.0, "renewal_stage": None,
-         "days_remaining": 60, "tenant": {"late_payment_count_12mo": 1}, "expires_at": "2026-12-01T00:00:00Z",
+         "days_remaining": 60, "tenant": {"late_payment_count_12mo": 1}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
          "rent_proposed_delta_pct": 2.5}
 d_c = resolve_instinct(template, "bulk_draft", row_c, now=now)
 print(f"  C: bulk_draft + no rules match → {d_c.verdict} ({d_c.reason})")
@@ -242,13 +242,13 @@ now = datetime(2026, 5, 28, tzinfo=timezone.utc)
 # - lease-3: rent_proposed < rent_current * 0.95 → BLOCK
 rows = [
     {"id": "lease-1", "rent_proposed": 2050.0, "rent_current": 2000.0, "renewal_stage": None,
-     "days_remaining": 60, "tenant": {"late_payment_count_12mo": 1}, "expires_at": "2026-12-01T00:00:00Z",
+     "days_remaining": 60, "tenant": {"late_payment_count_12mo": 1}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
      "rent_proposed_delta_pct": 2.5},
     {"id": "lease-2", "rent_proposed": 1900.0, "rent_current": 2000.0, "renewal_stage": None,
-     "days_remaining": 45, "tenant": {"late_payment_count_12mo": 0}, "expires_at": "2026-12-01T00:00:00Z",
+     "days_remaining": 45, "tenant": {"late_payment_count_12mo": 0}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
      "rent_proposed_delta_pct": 5.0},
     {"id": "lease-3", "rent_proposed": 1700.0, "rent_current": 2000.0, "renewal_stage": None,
-     "days_remaining": 30, "tenant": {"late_payment_count_12mo": 0}, "expires_at": "2026-12-01T00:00:00Z",
+     "days_remaining": 30, "tenant": {"late_payment_count_12mo": 0}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
      "rent_proposed_delta_pct": 15.0},
 ]
 
@@ -300,7 +300,7 @@ print(f"  ✓ Compiled: sources={list(runtime['sources'].keys())}, actions={len(
 # Pick a row and ask the composer what should happen for one action
 now = datetime(2026, 5, 28, tzinfo=timezone.utc)
 row = {"id": "lease-1", "rent_proposed": 2050.0, "rent_current": 2000.0, "renewal_stage": None,
-       "days_remaining": 60, "tenant": {"late_payment_count_12mo": 4}, "expires_at": "2026-12-01T00:00:00Z",
+       "days_remaining": 60, "tenant": {"late_payment_count_12mo": 4}, "expires_at": datetime(2026, 12, 1, tzinfo=timezone.utc),
        "rent_proposed_delta_pct": 2.5}
 decision = resolve_instinct(template, "send_to_tenant", row, now=now)
 print(f"  ✓ Instinct decision for send_to_tenant: {decision.verdict} ({decision.reason})")

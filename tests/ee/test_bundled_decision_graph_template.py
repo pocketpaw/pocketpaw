@@ -36,26 +36,44 @@ import yaml
 from pocketpaw.bundled_templates.installer import install_bundled_templates
 from pocketpaw.bundled_templates.loader import load_template
 
-# Mirrors the RFC 03 schema constants in tests/unit/test_bundled_templates.py
+# Mirrors the RFC 03 v2 schema constants in tests/unit/test_bundled_templates.py
 # so the decision-graph template is held to the same field set.
+# Updated 2026-05-28 (feat/rfc-03-v2-integration): widened to v2 after the
+# chokepoint landed — added schema_version, pattern, display_name,
+# skill_refs (replacing v1 skills), and the gantt/treemap/network shapes.
 _RFC03_ALLOWED_FIELDS = {
+    "schema_version",
     "name",
     "version",
     "vertical",
+    "pattern",
+    "display_name",
     "shape",
     "state",
     "actions",
     "connectors",
-    "skills",
+    "skill_refs",
     "description",
 }
-_RFC03_REQUIRED_FIELDS = {"name", "version", "vertical", "shape", "state", "description"}
+_RFC03_REQUIRED_FIELDS = {
+    "schema_version",
+    "name",
+    "version",
+    "vertical",
+    "pattern",
+    "shape",
+    "state",
+    "description",
+}
 _RFC03_SHAPE_ENUM = {
     "data-grid",
     "kanban",
     "calendar",
     "map",
     "timeline",
+    "gantt",
+    "treemap",
+    "network",
     "tree",
     "chart",
     "custom",
@@ -86,10 +104,10 @@ def test_template_yaml_matches_rfc03_field_set() -> None:
     missing = _RFC03_REQUIRED_FIELDS - fields
     assert not missing, f"decision-graph: missing required fields {missing}"
 
-    # Read-only — no actions; no connectors; no skills.
+    # Read-only — no actions; no connectors; no skill_refs (v2 spelling).
     assert meta["actions"] == []
     assert meta["connectors"] == []
-    assert meta["skills"] == []
+    assert meta["skill_refs"] == []
     # No `agents` / `triggers` / `outcomes` / `instinct_rules` until the
     # Pocket Template Schema admits them. The narrator backend + read-
     # only enforcement live as runtime defaults, not template metadata.

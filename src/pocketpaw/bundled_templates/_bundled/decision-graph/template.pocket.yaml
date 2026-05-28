@@ -9,9 +9,19 @@
 # render). Vertical is `core` — the cross-vertical bin for foundational
 # org-wide templates. Read-only: no actions, no connectors, no outcomes;
 # the Instinct rule blocks writes at the pocket boundary.
+# Modified 2026-05-28 (feat/rfc-03-v2-integration): migrated v1 -> v2.
+# Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. ``display_name`` matches the gallery title in index.json.
+# A single placeholder ``columns`` entry satisfies the v2 schema's
+# min-1 invariant; the Decision Graph widget is ``shape: custom`` and
+# renders via SvelteFlow, so the column declaration is metadata-only
+# and never drives the UI.
+schema_version: "2"
 name: decision-graph
 version: 0.1.0
 vertical: core
+pattern: app
+display_name: Decision Graph
 shape: custom
 description: |
   Visualize every decision the org has made — by agent, by human, by
@@ -20,7 +30,8 @@ description: |
   them. The audit log, but you can talk to it.
 state:
   entity_type: Decision
-  columns: []
+  columns:
+    - { field: id, widget: text }
 actions: []
 connectors: []
-skills: []
+skill_refs: []
