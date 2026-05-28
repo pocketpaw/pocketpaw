@@ -16,9 +16,13 @@
 #   - ``build_foresight_server`` returns ``None`` when claude_agent_sdk
 #     isn't installed (same import-guard pattern the sibling servers use)
 #
-# Tools (11): list_scenarios, get_scenario, save_scenario, update_scenario,
+# Tools (14): list_scenarios, get_scenario, save_scenario, update_scenario,
 # delete_scenario, run_scenario, list_runs, get_run, plus the 2026-05-28
-# result-side reads — list_projected_decisions, get_aggregate, get_insights.
+# result-side reads — list_projected_decisions, get_aggregate,
+# get_insights — and the 2026-05-28 backtest-read tools —
+# list_backtests, get_backtest, get_onboarding_gate. The backtest tools
+# are READ-ONLY by design (RFC 08 §13.1 — backtest creation needs
+# ground-truth anchors and ships through the dashboard Aggregate panel).
 
 from __future__ import annotations
 
@@ -44,6 +48,14 @@ GET_RUN_TOOL_ID = f"mcp__{SERVER_NAME}__get_run"
 LIST_PROJECTED_DECISIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_projected_decisions"
 GET_AGGREGATE_TOOL_ID = f"mcp__{SERVER_NAME}__get_aggregate"
 GET_INSIGHTS_TOOL_ID = f"mcp__{SERVER_NAME}__get_insights"
+# Backtest-side reads — 2026-05-28 follow-up. Read-only per RFC 08 §13.1
+# (backtest creation stays UI-initiated; the chat surface can't reliably
+# produce ground-truth anchors). list_backtests + get_backtest cover the
+# "did we backtest yet?" / "show me past backtests" / "what was the gate
+# decision?" path; get_onboarding_gate covers "are we unlocked?".
+LIST_BACKTESTS_TOOL_ID = f"mcp__{SERVER_NAME}__list_backtests"
+GET_BACKTEST_TOOL_ID = f"mcp__{SERVER_NAME}__get_backtest"
+GET_ONBOARDING_GATE_TOOL_ID = f"mcp__{SERVER_NAME}__get_onboarding_gate"
 
 FORESIGHT_TOOL_IDS = (
     LIST_SCENARIOS_TOOL_ID,
@@ -57,6 +69,9 @@ FORESIGHT_TOOL_IDS = (
     LIST_PROJECTED_DECISIONS_TOOL_ID,
     GET_AGGREGATE_TOOL_ID,
     GET_INSIGHTS_TOOL_ID,
+    LIST_BACKTESTS_TOOL_ID,
+    GET_BACKTEST_TOOL_ID,
+    GET_ONBOARDING_GATE_TOOL_ID,
 )
 
 _SUB_TYPE_ENUM = ["decision_forecast", "market_sim", "org_change_rehearsal"]
@@ -252,6 +267,42 @@ async def _get_insights_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import get_insights_for_agent
 
     return _result_payload(await get_insights_for_agent())
+
+
+# ---------------------------------------------------------------------------
+# Backtest-side handlers — read-only per RFC 08 §13.1. Backtest creation
+# stays in the dashboard Aggregate panel because it needs ground-truth
+# anchors the chat surface can't reliably produce.
+# ---------------------------------------------------------------------------
+
+
+async def _list_backtests_handler(args: dict) -> dict:
+    from pocketpaw_ee.cloud.foresight.agent_context import list_backtests_for_agent
+
+    limit = args.get("limit", 10)
+    offset = args.get("offset", 0)
+    return _result_payload(await list_backtests_for_agent(limit=limit, offset=offset))
+
+
+async def _get_backtest_handler(args: dict) -> dict:
+    from pocketpaw_ee.cloud.foresight.agent_context import get_backtest_for_agent
+
+    backtest_id = args.get("backtest_id")
+    if not backtest_id or not isinstance(backtest_id, str):
+        return _error(
+            "get_backtest requires a `backtest_id` (string). Find it via "
+            "list_backtests."
+        )
+    return _result_payload(await get_backtest_for_agent(backtest_id))
+
+
+async def _get_onboarding_gate_handler(args: dict) -> dict:
+    # Intentionally ignores ``args`` — the gate read takes no parameters
+    # (the workspace is inferred from the active chat stream).
+    del args
+    from pocketpaw_ee.cloud.foresight.agent_context import get_onboarding_gate_for_agent
+
+    return _result_payload(await get_onboarding_gate_for_agent())
 
 
 # ---------------------------------------------------------------------------
@@ -568,9 +619,83 @@ def build_foresight_server() -> tuple[str, Any] | None:
     async def get_insights(args):  # type: ignore[no-untyped-def]
         return await _get_insights_handler(args)
 
+    @tool(
+        "list_backtests",
+        (
+            "Trailing list of past backtests in the active workspace, most "
+            "recent first. Use this when the user asks 'did we backtest yet' "
+            "/ 'show me past backtests' / 'when was the last backtest'. "
+            "Backtests are UI-initiated (ground-truth anchors anchor the "
+            "scoring); this tool is READ-ONLY — to start a new backtest, "
+            "redirect the user to the dashboard Aggregate panel. Returns "
+            "``{items[]}`` (id, scenario_name, status, gate_decision, "
+            "threshold, created_at) plus the ``limit`` / ``offset`` echo "
+            "for pagination."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max items (default 10, cap 200)."},
+                "offset": {"type": "integer", "description": "Pagination offset (default 0)."},
+            },
+            "required": [],
+        },
+    )
+    async def list_backtests(args):  # type: ignore[no-untyped-def]
+        return await _list_backtests_handler(args)
+
+    @tool(
+        "get_backtest",
+        (
+            "Fetch a single backtest by id with the full result blob, gate "
+            "decision, and per-anchor calibration. Use this when the user "
+            "asks 'what was the gate decision on backtest X' / 'show me the "
+            "details of that backtest' / 'why did backtest X fail the gate'. "
+            "Find ids via list_backtests. 404 "
+            "(``foresight_backtest.not_found``) for unknown / malformed / "
+            "cross-tenant ids. READ-ONLY — backtest creation ships through "
+            "the dashboard."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "backtest_id": {
+                    "type": "string",
+                    "description": "Id from list_backtests items.",
+                }
+            },
+            "required": ["backtest_id"],
+        },
+    )
+    async def get_backtest(args):  # type: ignore[no-untyped-def]
+        return await _get_backtest_handler(args)
+
+    @tool(
+        "get_onboarding_gate",
+        (
+            "Workspace's foresight onboarding gate state — unlock status + "
+            "reason + last backtest reference. Use when the user asks 'are "
+            "we unlocked yet' / 'what's the gate' / 'why is foresight "
+            "gated'. Empty workspaces return ``unlocked=False, "
+            "reason='no_backtest'`` (not a 404) so the agent can explain "
+            "why the gate is still closed. ``reason`` is one of "
+            "``no_backtest`` | ``in_flight`` | ``below_threshold`` | "
+            "``unlocked`` — surface it verbatim. READ-ONLY — to flip the "
+            "gate, the user runs a backtest from the dashboard Aggregate "
+            "panel."
+        ),
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    )
+    async def get_onboarding_gate(args):  # type: ignore[no-untyped-def]
+        return await _get_onboarding_gate_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.1.0",
+        version="1.2.0",
         tools=[
             list_scenarios,
             get_scenario,
@@ -583,6 +708,9 @@ def build_foresight_server() -> tuple[str, Any] | None:
             list_projected_decisions,
             get_aggregate,
             get_insights,
+            list_backtests,
+            get_backtest,
+            get_onboarding_gate,
         ],
     )
     return SERVER_NAME, server
@@ -592,9 +720,12 @@ __all__ = [
     "DELETE_SCENARIO_TOOL_ID",
     "FORESIGHT_TOOL_IDS",
     "GET_AGGREGATE_TOOL_ID",
+    "GET_BACKTEST_TOOL_ID",
     "GET_INSIGHTS_TOOL_ID",
+    "GET_ONBOARDING_GATE_TOOL_ID",
     "GET_RUN_TOOL_ID",
     "GET_SCENARIO_TOOL_ID",
+    "LIST_BACKTESTS_TOOL_ID",
     "LIST_PROJECTED_DECISIONS_TOOL_ID",
     "LIST_RUNS_TOOL_ID",
     "LIST_SCENARIOS_TOOL_ID",
