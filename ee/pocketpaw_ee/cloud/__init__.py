@@ -238,6 +238,16 @@ def mount_cloud(app: FastAPI) -> None:
     # exposes the operator-facing read + decision surface.
     app.include_router(instinct_approvals_router, prefix="/api/v1")
 
+    # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
+    # for the persisted (trigger, row) state matrix; the actual sweep
+    # is driven by the in-process scheduler at
+    # ``cloud._core.temporal_scheduler`` and the per-pocket dispatcher
+    # at ``cloud.pockets.temporal_dispatcher``. No "sweep now" route in
+    # v0 (deferred).
+    from pocketpaw_ee.cloud.temporal_sweeps.router import router as temporal_sweeps_router
+
+    app.include_router(temporal_sweeps_router, prefix="/api/v1")
+
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
     # use the canonical `Depends(current_active_user)` auth chain without

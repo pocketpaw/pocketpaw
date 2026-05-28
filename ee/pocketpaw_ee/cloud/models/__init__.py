@@ -30,6 +30,7 @@ from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
+from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
@@ -102,6 +103,7 @@ __all__ = [
     "Task",
     "TaskAssignee",
     "TaskSource",
+    "TemporalSweepStateDoc",
     "User",
     "Widget",
     "WidgetPosition",
@@ -136,6 +138,7 @@ def get_all_documents():
         Message,
         ReadState,
         Task,
+        TemporalSweepStateDoc,
         Cycle,
         Project,
         PlanSession,

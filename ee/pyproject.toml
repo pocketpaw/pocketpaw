@@ -204,12 +204,33 @@ source_modules = [
     # ``action_executor.run_action`` calls. Never imports a Beanie
     # document class directly.
     "pocketpaw_ee.cloud.pockets.bulk_dispatch",
+    # RFC 03 v2 Wave 3d — the per-pocket temporal trigger dispatcher.
+    # Calls the pure OSS ``sweep_temporal_triggers`` planner, the
+    # ``temporal_sweeps.service`` writer, ``instinct_dispatch``, and
+    # ``action_executor.run_action``. Never imports a Beanie document
+    # class directly.
+    "pocketpaw_ee.cloud.pockets.temporal_dispatcher",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
     "pocketpaw_ee.cloud.models.pocket_backend",
     "pocketpaw_ee.cloud.models.session",
 ]
+
+[[tool.importlinter.contracts]]
+name = "TemporalSweeps — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.temporal_sweeps.router",
+    "pocketpaw_ee.cloud.temporal_sweeps.dto",
+    "pocketpaw_ee.cloud.temporal_sweeps.domain",
+    # The cron driver scans pockets through ``pockets.service`` and
+    # dispatches through ``temporal_dispatcher``; it never touches a
+    # Beanie document directly.
+    "pocketpaw_ee.cloud._core.temporal_scheduler",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.temporal_sweep_state"]
 
 [[tool.importlinter.contracts]]
 name = "InstinctApprovals — Beanie writes only from service.py"
