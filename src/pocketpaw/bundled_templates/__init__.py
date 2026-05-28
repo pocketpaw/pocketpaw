@@ -31,6 +31,12 @@
 # ``validate_template_with_registry`` (lint entry point). The concrete
 # EE-side ``FabricRegistry`` implementation lives in ``ee/fabric/`` and
 # is supplied at wiring time; PR 2g is OSS library-only.
+# Modified 2026-05-28 (feat/rfc-03-v2-bulk): re-exports the bulk
+# fan-out planner (``plan_bulk_execution``, ``BulkPlan``,
+# ``RowExecution``, ``BlockedRow``, ``BulkApprovalRequest``,
+# ``BulkExecutionError``). PR 2e is the LAST library-layer piece —
+# composes the per-row composer (PR 2d) into the batch-approval
+# contract from RFC §"Bulk action execution model".
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -72,6 +78,15 @@ files and register it in ``_bundled/index.json``. The installer discovers
 directories via iteration — no installer code changes needed.
 """
 
+from pocketpaw.bundled_templates.bulk_executor import (
+    BlockedRow,
+    BulkApprovalRequest,
+    BulkExecutionError,
+    BulkPlan,
+    ExecutionVerdict,
+    RowExecution,
+    plan_bulk_execution,
+)
 from pocketpaw.bundled_templates.cel_runtime import (
     CelEvaluationError,
     collect_free_identifiers,
@@ -128,10 +143,15 @@ from pocketpaw.bundled_templates.temporal_sweeper import (
 __all__ = [
     "ActionDef",
     "AgentDef",
+    "BlockedRow",
+    "BulkApprovalRequest",
+    "BulkExecutionError",
+    "BulkPlan",
     "CelEvaluationError",
     "ColumnDef",
     "ConfirmDef",
     "DataSourceDef",
+    "ExecutionVerdict",
     "FabricRegistry",
     "FabricResolver",
     "FabricValidationError",
@@ -145,6 +165,7 @@ __all__ = [
     "NullFabricRegistry",
     "PermissionsDef",
     "PocketTemplate",
+    "RowExecution",
     "SavedView",
     "StateBinding",
     "SweepResult",
@@ -159,6 +180,7 @@ __all__ = [
     "evaluate_cel",
     "install_bundled_templates",
     "load_template",
+    "plan_bulk_execution",
     "resolve_instinct",
     "sweep_temporal_triggers",
     "validate_template_with_registry",
