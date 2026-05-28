@@ -42,15 +42,12 @@ Pocket-scope routing arrives in Stage 3.E: the listener will check
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import mimetypes
-import tempfile
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
 from pocketpaw_ee.cloud._core.realtime.events import Event, FileReady
+from pocketpaw_ee.cloud.uploads.resolver import materialize_to_local_path
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +78,17 @@ async def index_uploaded_file(event: Event) -> None:
         )
         return
 
-    async with _path_for_extraction(storage_key, mime, filename) as path:
+    adapter = _resolve_adapter()
+    if adapter is None or not storage_key:
+        logger.info(
+            "skipping KB index: no adapter or storage_key for file_id=%s",
+            file_id,
+        )
+        return
+
+    async with materialize_to_local_path(
+        adapter, storage_key, mime=mime, filename=filename
+    ) as path:
         if path is None:
             logger.info(
                 "skipping KB index: no path for file_id=%s storage_key=%r",
@@ -315,75 +322,6 @@ async def _write_vector_to_kb(
             logger.debug("temp vec cleanup failed for %s", tmp.name)
 
 
-@contextlib.asynccontextmanager
-async def _path_for_extraction(
-    storage_key: str | None,
-    mime: str,
-    filename: str,
-) -> AsyncIterator[Path | None]:
-    """Yield a Path the extraction chain can read.
-
-    Local-disk adapter: yields the on-disk path unchanged (zero extra I/O).
-    Remote adapter (S3, GCS): streams the blob into a NamedTemporaryFile,
-    yields its Path, then deletes the file on exit. The temp suffix
-    matches the original filename so suffix-routed extractors (pypdf for
-    .pdf, python-docx for .docx, etc.) keep working.
-
-    Yields ``None`` when neither path works — the listener treats that as
-    "skip this upload, log, and move on".
-    """
-    if not storage_key:
-        yield None
-        return
-
-    direct = _resolve_local_path(storage_key)
-    if direct is not None:
-        yield direct
-        return
-
-    adapter = _resolve_adapter()
-    if adapter is None:
-        yield None
-        return
-
-    suffix = _extension_for(filename, mime)
-    tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115 — manual lifecycle
-        prefix="paw-extract-",
-        suffix=suffix,
-        delete=False,
-    )
-    tmp_path = Path(tmp.name)
-    try:
-        try:
-            async for chunk in adapter.open(storage_key):
-                tmp.write(chunk)
-        except Exception:
-            logger.exception("stream-to-temp failed for storage_key=%r", storage_key)
-            yield None
-            return
-        finally:
-            tmp.close()
-
-        yield tmp_path
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("temp cleanup failed for %s", tmp_path)
-
-
-def _resolve_local_path(storage_key: str) -> Path | None:
-    """Return the adapter's on-disk path for ``storage_key`` if available."""
-    adapter = _resolve_adapter()
-    if adapter is None:
-        return None
-    try:
-        return adapter.local_path(storage_key)
-    except Exception:
-        logger.exception("local_path lookup failed for storage_key=%r", storage_key)
-        return None
-
-
 def _resolve_adapter():
     """Look up the EE upload singleton's storage adapter.
 
@@ -399,23 +337,6 @@ def _resolve_adapter():
     except Exception:
         logger.exception("upload adapter import failed")
         return None
-
-
-def _extension_for(filename: str, mime: str) -> str:
-    """Pick a temp-file suffix the extractors will route correctly.
-
-    Prefers the original filename's extension (matches what the user
-    uploaded). Falls back to ``mimetypes.guess_extension`` and finally to
-    an empty string when the MIME isn't registered. Suffix matters because
-    ``LocalExtractor`` routes by ``path.suffix`` (pypdf for .pdf, docx for
-    .docx, pytesseract for .png/.jpg) and ``GeminiFlashExtractor`` checks
-    MIME directly so extension is forgiven there.
-    """
-    suffix = Path(filename).suffix
-    if suffix:
-        return suffix
-    guessed = mimetypes.guess_extension(mime, strict=False) or ""
-    return guessed
 
 
 def register_upload_listeners() -> None:
