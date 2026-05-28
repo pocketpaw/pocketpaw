@@ -194,12 +194,27 @@ source_modules = [
     # through `pockets.service` and the Instinct store; it never touches
     # Beanie document classes directly.
     "pocketpaw_ee.cloud.pockets.instinct_bridge",
+    # RFC 03 v2 Wave 3a — the template-level instinct dispatch wrapper.
+    # Calls the pure OSS composer and the `instinct_approvals.service`
+    # Beanie writer; never imports the pockets/session/backend docs.
+    "pocketpaw_ee.cloud.pockets.instinct_dispatch",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
     "pocketpaw_ee.cloud.models.pocket_backend",
     "pocketpaw_ee.cloud.models.session",
 ]
+
+[[tool.importlinter.contracts]]
+name = "InstinctApprovals — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.instinct_approvals.router",
+    "pocketpaw_ee.cloud.instinct_approvals.dto",
+    "pocketpaw_ee.cloud.instinct_approvals.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
 
 [[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"

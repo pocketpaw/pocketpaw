@@ -19,6 +19,7 @@ from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
@@ -84,6 +85,7 @@ __all__ = [
     "FileUpload",
     "Group",
     "GroupAgent",
+    "InstinctApproval",
     "Invite",
     "Mention",
     "Message",
@@ -130,6 +132,7 @@ def get_all_documents():
         ComposioConnection,
         Invite,
         Group,
+        InstinctApproval,
         Message,
         ReadState,
         Task,
