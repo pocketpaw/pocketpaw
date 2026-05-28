@@ -22,9 +22,12 @@ class TestForesightMcpServerRegistration:
             DELETE_SCENARIO_TOOL_ID,
             FORESIGHT_TOOL_IDS,
             GET_AGGREGATE_TOOL_ID,
+            GET_BACKTEST_TOOL_ID,
             GET_INSIGHTS_TOOL_ID,
+            GET_ONBOARDING_GATE_TOOL_ID,
             GET_RUN_TOOL_ID,
             GET_SCENARIO_TOOL_ID,
+            LIST_BACKTESTS_TOOL_ID,
             LIST_PROJECTED_DECISIONS_TOOL_ID,
             LIST_RUNS_TOOL_ID,
             LIST_SCENARIOS_TOOL_ID,
@@ -51,7 +54,12 @@ class TestForesightMcpServerRegistration:
         )
         assert GET_AGGREGATE_TOOL_ID == "mcp__pocketpaw_foresight__get_aggregate"
         assert GET_INSIGHTS_TOOL_ID == "mcp__pocketpaw_foresight__get_insights"
-        assert len(FORESIGHT_TOOL_IDS) == 11
+        # Backtest-side reads — 2026-05-28 follow-up #2. Read-only per
+        # RFC 08 §13.1 (backtest creation stays UI-initiated).
+        assert LIST_BACKTESTS_TOOL_ID == "mcp__pocketpaw_foresight__list_backtests"
+        assert GET_BACKTEST_TOOL_ID == "mcp__pocketpaw_foresight__get_backtest"
+        assert GET_ONBOARDING_GATE_TOOL_ID == "mcp__pocketpaw_foresight__get_onboarding_gate"
+        assert len(FORESIGHT_TOOL_IDS) == 14
         # Every id is published — the claude_sdk allowlist loop reads
         # this tuple.
         for tid in (
@@ -66,6 +74,9 @@ class TestForesightMcpServerRegistration:
             LIST_PROJECTED_DECISIONS_TOOL_ID,
             GET_AGGREGATE_TOOL_ID,
             GET_INSIGHTS_TOOL_ID,
+            LIST_BACKTESTS_TOOL_ID,
+            GET_BACKTEST_TOOL_ID,
+            GET_ONBOARDING_GATE_TOOL_ID,
         ):
             assert tid in FORESIGHT_TOOL_IDS
 
@@ -551,6 +562,161 @@ class TestGetInsightsHandler:
             new=AsyncMock(return_value=fake),
         ):
             out = await foresight_mcp._get_insights_handler({})
+
+        assert out.get("is_error") is True
+        assert "no_workspace_context" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Backtest-read handlers — 2026-05-28 follow-up #2 (read-only per
+# RFC 08 §13.1; no create_backtest tool exists).
+# ---------------------------------------------------------------------------
+
+
+class TestListBacktestsHandler:
+    @pytest.mark.asyncio
+    async def test_delegates_with_pagination(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {
+            "ok": True,
+            "items": [{"id": "bt1", "scenario_name": "q3-backtest", "status": "complete"}],
+            "limit": 5,
+            "offset": 0,
+        }
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.list_backtests_for_agent",
+            new=AsyncMock(return_value=fake),
+        ) as mock:
+            out = await foresight_mcp._list_backtests_handler({"limit": 5, "offset": 0})
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["items"][0]["id"] == "bt1"
+        mock.assert_awaited_once_with(limit=5, offset=0)
+
+    @pytest.mark.asyncio
+    async def test_default_args_when_omitted(self) -> None:
+        """No args → default limit=10, offset=0 — mirrors list_runs."""
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.list_backtests_for_agent",
+            new=AsyncMock(return_value={"ok": True, "items": [], "limit": 10, "offset": 0}),
+        ) as mock:
+            out = await foresight_mcp._list_backtests_handler({})
+
+        assert not out.get("is_error")
+        mock.assert_awaited_once_with(limit=10, offset=0)
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_surfaces_as_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {"ok": False, "error": "no_workspace_context", "message": "stream missing"}
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.list_backtests_for_agent",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await foresight_mcp._list_backtests_handler({})
+
+        assert out.get("is_error") is True
+        assert "no_workspace_context" in out["content"][0]["text"]
+
+
+class TestGetBacktestHandler:
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_backtest(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {
+            "ok": True,
+            "id": "bt1",
+            "scenario_name": "q3-backtest",
+            "status": "complete",
+            "threshold": 0.65,
+            "gate_decision": {"passed": True, "observed": 0.82},
+            "result": {"calibration_summary": {}},
+        }
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_backtest_for_agent",
+            new=AsyncMock(return_value=fake),
+        ) as mock:
+            out = await foresight_mcp._get_backtest_handler({"backtest_id": "bt1"})
+
+        body = _decode_payload(out)
+        assert body["id"] == "bt1"
+        assert body["gate_decision"]["passed"] is True
+        mock.assert_awaited_once_with("bt1")
+
+    @pytest.mark.asyncio
+    async def test_missing_backtest_id_is_rejected_locally(self) -> None:
+        """Arg validation runs before the agent_context call so a missing
+        backtest_id never reaches the cloud — same guard pattern as
+        get_run + list_projected_decisions."""
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        mock = AsyncMock()
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_backtest_for_agent",
+            new=mock,
+        ):
+            out = await foresight_mcp._get_backtest_handler({})
+
+        assert out.get("is_error") is True
+        assert "backtest_id" in out["content"][0]["text"]
+        mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_surfaces_as_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {"ok": False, "error": "no_workspace_context", "message": "stream missing"}
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_backtest_for_agent",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await foresight_mcp._get_backtest_handler({"backtest_id": "bt1"})
+
+        assert out.get("is_error") is True
+        assert "no_workspace_context" in out["content"][0]["text"]
+
+
+class TestGetOnboardingGateHandler:
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_gate_state(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {
+            "ok": True,
+            "workspace_id": "w1",
+            "unlocked": False,
+            "threshold": 0.65,
+            "reason": "no_backtest",
+            "last_backtest_id": None,
+        }
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_onboarding_gate_for_agent",
+            new=AsyncMock(return_value=fake),
+        ) as mock:
+            out = await foresight_mcp._get_onboarding_gate_handler({})
+
+        body = _decode_payload(out)
+        assert body["reason"] == "no_backtest"
+        assert body["unlocked"] is False
+        # No-arg call — the gate read takes no parameters.
+        mock.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_surfaces_as_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {"ok": False, "error": "no_workspace_context", "message": "stream missing"}
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_onboarding_gate_for_agent",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await foresight_mcp._get_onboarding_gate_handler({})
 
         assert out.get("is_error") is True
         assert "no_workspace_context" in out["content"][0]["text"]
