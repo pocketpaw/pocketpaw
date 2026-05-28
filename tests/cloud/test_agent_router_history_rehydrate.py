@@ -2,14 +2,15 @@
 
 The agent backends keep in-process conversation state keyed by ``session_key``.
 That state doesn't survive a backend restart or an ``AgentPool`` LRU eviction,
-so the router must rehydrate history from the persisted ``Message`` collection
-before calling ``pool.run``. Before this fix, ``history=None`` was passed
-unconditionally and the agent replied with no memory of prior turns after any
-process restart.
+so the POST endpoint must rehydrate history from the persisted ``Message``
+collection and ship it on the ``RunSpec`` to the executor. Before this fix,
+``history=None`` was passed unconditionally and the agent replied with no
+memory of prior turns after any process restart.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -23,6 +24,26 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     load_history_for_scope,
     session_key_for,
 )
+
+
+class _StubTransport:
+    """Yields one ``stream_end`` so the SSE generator finishes immediately."""
+
+    async def request_cancel(self, run_id: str) -> None:  # noqa: ARG002
+        return None
+
+    def read_events(self, run_id: str, *, after: str = "0", block_ms: int = 15000) -> AsyncIterator:  # noqa: ARG002
+        async def _gen() -> AsyncIterator:
+            from pocketpaw_ee.cloud.chat.runs.transport import StreamEvent
+
+            yield StreamEvent(
+                entry_id="1-0",
+                event="stream_end",
+                data={"assistant_message_id": None, "usage": {}, "cancelled": False},
+            )
+
+        return _gen()
+
 
 # ---------------------------------------------------------------------------
 # Helper: the message-collection accessor we patch. Stubs stand in for Beanie
@@ -171,55 +192,43 @@ async def test_load_history_returns_empty_on_mongo_error(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Integration test: post_agent_chat forwards history to pool.run
+# Integration test: post_agent_chat ships history on the RunSpec to the executor
 # ---------------------------------------------------------------------------
 
 
-class _RecordingPool:
-    """Captures the ``history`` kwarg that ``pool.run`` receives."""
-
-    def __init__(self):
-        self.history_seen: list[dict[str, str]] | None = None
-
-    async def get(self, agent_id):
-        return SimpleNamespace(agent_id=agent_id, agent_name="Agent " + agent_id)
-
-    async def run(self, agent_id, message, session_key, history=None, knowledge_context=""):
-        self.history_seen = history
-        yield SimpleNamespace(type="message", content="ok", metadata={})
-        yield SimpleNamespace(type="done", content="", metadata={})
-
-    async def observe(self, agent_id, user_input, agent_output):
-        return None
-
-
 @pytest.mark.asyncio
-async def test_post_agent_chat_rehydrates_history_into_pool_run(
+async def test_post_agent_chat_ships_history_on_runspec_to_executor(
     cloud_app_client: AsyncClient,
+    mongo_db,  # noqa: ARG001 — Beanie init for create_run
 ):
-    fake_ctx = _session_ctx()
-    fake_pool = _RecordingPool()
+    """POST must rehydrate prior turns and put them on the RunSpec the executor receives."""
+    fake_ctx = SimpleNamespace(
+        kind=SimpleNamespace(value="session"),
+        scope_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_tool_specs=[],
+        session_id=None,
+        pocket_id=None,
+        intent=None,
+    )
 
-    async def fake_resolver(**kwargs):
+    captured_specs: list = []
+
+    class _RecordingExecutor:
+        async def submit(self, spec):
+            captured_specs.append(spec)
+
+    async def fake_resolver(**_):
         return fake_ctx
 
-    async def fake_persist(ctx, body):
+    async def fake_persist(_ctx, _body):
         return "user_msg_id_1"
 
-    async def fake_ensure_session(ctx):
-        return None
-
-    class _FakeMsg:
-        id = "assistant_msg_id_1"
-        createdAt = __import__("datetime").datetime.now(__import__("datetime").UTC)
-
-    async def fake_persist_assistant(ctx, content, attachments):
-        return _FakeMsg()
-
-    async def fake_broadcast_new(ctx, message_id, content, attachments, created_at):
-        return None
-
-    async def fake_broadcast_typing(ctx, active):
+    async def fake_ensure_session(_ctx):
         return None
 
     prior_history = [
@@ -227,33 +236,30 @@ async def test_post_agent_chat_rehydrates_history_into_pool_run(
         {"role": "assistant", "content": "got it — hi Rohit"},
     ]
 
-    async def fake_loader(ctx, *, limit=50):
+    async def fake_loader(ctx, *, limit=50):  # noqa: ARG001
         assert ctx is fake_ctx
         return list(prior_history)
 
-    # Patch on both modules — the router imported the name at import time, so
-    # replacing it on agent_service alone wouldn't affect the router's view.
+    # Patch the loader on both modules — the router imported the name at
+    # import time, so replacing it on agent_service alone wouldn't affect
+    # the router's view.
     with (
         patch.object(router_mod, "resolve_scope_context", fake_resolver),
         patch.object(router_mod, "load_history_for_scope", fake_loader),
         patch.object(agent_service, "load_history_for_scope", fake_loader),
         patch.object(router_mod, "_persist_user_message", fake_persist),
         patch.object(router_mod, "_ensure_scope_session", fake_ensure_session),
-        patch.object(router_mod, "_persist_assistant_message", fake_persist_assistant),
-        patch.object(router_mod, "_broadcast_message_new", fake_broadcast_new),
-        patch.object(router_mod, "_broadcast_agent_typing", fake_broadcast_typing),
-        patch.object(router_mod, "get_agent_pool", lambda: fake_pool),
+        patch.object(router_mod, "get_executor", lambda: _RecordingExecutor()),
+        patch.object(router_mod, "get_stream_transport", lambda: _StubTransport()),
     ):
-        async with cloud_app_client.stream(
-            "POST",
+        resp = await cloud_app_client.post(
             "/cloud/chat/session/s1/agent",
-            json={"content": "what's my name?"},
-        ) as resp:
-            assert resp.status_code == 200
-            # Drain the stream so the generator finishes (and observe() is called).
-            await resp.aread()
+            json={"content": "what's my name?", "client_message_id": "c-rehydrate"},
+        )
 
-    assert fake_pool.history_seen == prior_history, (
-        "pool.run must receive rehydrated history so the agent remembers "
-        "prior turns across backend restarts / pool evictions."
+    assert resp.status_code == 200
+    assert len(captured_specs) == 1
+    assert captured_specs[0].history == prior_history, (
+        "The RunSpec handed to the executor must carry rehydrated history so "
+        "the agent remembers prior turns across backend restarts / pool evictions."
     )

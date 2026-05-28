@@ -41,6 +41,16 @@ class User(BeanieBaseUser, Document):  # type: ignore[misc]
     last_seen: datetime = Field(default_factory=lambda: datetime.now(UTC))
     oauth_accounts: list[OAuthAccount] = Field(default_factory=list)
 
+    # MFA / TOTP state (Wave 3 Task 3). pending_setup + enabled form a
+    # tri-state: (False, False) never set up; (True, False) secret minted
+    # but not yet verified; (*, True) active. Backup codes stored as
+    # sha256 of the plaintext "xxxx-xxxx" form.
+    mfa_totp_secret: str | None = None
+    mfa_enabled: bool = False
+    mfa_backup_codes: list[str] = Field(default_factory=list)
+    mfa_verified_at: datetime | None = None
+    mfa_pending_setup: bool = False
+
     class Settings:
         name = "users"
         email_collation = None

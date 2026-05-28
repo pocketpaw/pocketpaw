@@ -19,6 +19,17 @@
 #   not match the caller's workspace. The ledger file is already keyed by
 #   workspace, so this is defense-in-depth: a corrupt or hand-edited line
 #   carrying a foreign tenant id is no longer counted into the totals.
+# Updated: 2026-05-25 (RFC 07 Slice 2 — outcomes back-reference) —
+#   `emit_pocket_outcome` now accepts an optional `decision_id` and the
+#   bus listener (`record_outcome`) threads it onto the ledger row AND
+#   feeds a synthetic `decision.outcome_attached` event into the
+#   in-process DecisionProjection so the Decision row in the decision
+#   graph mutates its outcome field in place. The journal subscription
+#   that would do the same end-to-end is deferred to a follow-up; in
+#   this PR the back-reference flows synchronously from the outcome
+#   listener so the test suite can pin the contract.
+#   `"decision.outcome_attached"` is used as a STRING LITERAL (the
+#   namespace registration in soul-protocol is parallel work — Slice 0).
 from __future__ import annotations
 
 import json
@@ -26,6 +37,7 @@ import logging
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import UUID, uuid4
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import PocketOutcomeEvent
@@ -65,6 +77,7 @@ async def emit_pocket_outcome(
     actor: str,
     via_instinct: bool,
     instinct_action_id: str | None = None,
+    decision_id: str | None = None,
 ) -> None:
     """Emit a ``pocket.outcome`` event for a successful write action.
 
@@ -79,6 +92,12 @@ async def emit_pocket_outcome(
 
     ``outcome_value`` / ``outcome_unit`` are emitted as ``None`` — Layer 4
     (billing) is reserved and this build never assigns a monetary value.
+
+    ``decision_id`` is the RFC 07 Slice 2 back-reference — pass the id
+    of the Decision in the decision graph that this outcome resolved,
+    when the caller has one in hand. ``None`` is fine for writers that
+    don't yet know their Decision (legacy producers); the listener
+    only fires the back-reference path when the id is present.
     """
     if not outcome:
         # No declared outcome — nothing to meter. The write still
@@ -98,6 +117,8 @@ async def emit_pocket_outcome(
                 # Layer 4 reserved — billing is not wired in this build.
                 "outcome_value": None,
                 "outcome_unit": None,
+                # RFC 07 Slice 2 — back-reference to the decision graph.
+                "decision_id": decision_id,
             }
         )
     )
@@ -124,6 +145,9 @@ async def record_outcome(event) -> None:  # type: ignore[no-untyped-def]
         logger.warning("pocket.outcome event dropped — missing workspace_id or outcome")
         return
 
+    decision_id_raw = data.get("decision_id")
+    decision_id = str(decision_id_raw) if decision_id_raw else None
+
     record = OutcomeRecord(
         outcome=str(outcome),
         pocket_id=str(data.get("pocket_id") or ""),
@@ -136,6 +160,8 @@ async def record_outcome(event) -> None:  # type: ignore[no-untyped-def]
         # Layer 4 reserved — never set here.
         outcome_value=None,
         outcome_unit=None,
+        # RFC 07 Slice 2 — back-reference into the decision graph.
+        decision_id=decision_id,
     )
     path = _ledger_path(record.workspace_id)
     try:
@@ -144,6 +170,97 @@ async def record_outcome(event) -> None:  # type: ignore[no-untyped-def]
             fh.write(json.dumps(asdict(record), separators=(",", ":")) + "\n")
     except OSError:
         logger.warning("failed to append pocket.outcome to ledger %s", path, exc_info=True)
+
+    # RFC 07 Slice 2 — back-reference flow. When the producer passed a
+    # decision_id, fold a synthetic `decision.outcome_attached` event
+    # into the in-process DecisionProjection so the Decision row mutates
+    # its outcome field. The journal subscription that would do the same
+    # end-to-end is deferred to a follow-up; for now the back-reference
+    # rides on the outcome listener itself.
+    if decision_id:
+        await _attach_outcome_to_decision(record=record)
+
+
+async def _attach_outcome_to_decision(*, record: OutcomeRecord) -> None:
+    """Fold a synthetic `decision.outcome_attached` event into the
+    decision projection so the Decision row's outcome field mutates
+    in place.
+
+    The projection's `_apply_outcome_attached` handler (see
+    `decisions/projection.py`) looks up the Decision by the
+    `decision_id` carried in the event payload, then writes the
+    outcome via `store.update_outcome`. The hash chain stays valid —
+    outcome is intentionally excluded from the hash material.
+
+    Imports are local so the outcomes service stays importable in
+    environments where the decisions module isn't wired (e.g. unit
+    tests that mock the cloud bootstrap). Failures here are logged
+    and swallowed — a bad back-reference can never break the write
+    that already succeeded.
+    """
+    if not record.decision_id or not record.outcome:
+        return
+
+    try:
+        decision_uuid = UUID(record.decision_id)
+    except (TypeError, ValueError):
+        logger.warning(
+            "outcomes back-reference: decision_id %r is not a UUID — dropped",
+            record.decision_id,
+        )
+        return
+
+    try:
+        from soul_protocol.spec.journal import Actor, EventEntry
+
+        from pocketpaw_ee.cloud.decisions.service import get_decision_graph
+    except Exception:  # noqa: BLE001
+        logger.debug("decisions module unavailable — skipping outcome back-reference")
+        return
+
+    occurred_at: datetime
+    try:
+        occurred_at = datetime.fromisoformat(record.occurred_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        occurred_at = datetime.now(UTC)
+
+    # The projection treats `decision.outcome_attached` as the late-
+    # attach signal. Only the payload's `decision_id` is load-bearing;
+    # the rest of the payload feeds the OutcomeRef the projection
+    # writes (status, landed_at, metered).
+    event = EventEntry(
+        id=uuid4(),
+        ts=occurred_at,
+        actor=Actor(
+            kind="system",
+            id="system:outcomes",
+            scope_context=[f"workspace:{record.workspace_id}"],
+        ),
+        action="decision.outcome_attached",  # string literal — namespace in Slice 0
+        scope=[f"workspace:{record.workspace_id}"],
+        payload={
+            "decision_id": record.decision_id,
+            # Stable id from the decision_id so re-emits are idempotent.
+            # `_apply_outcome_attached` uses this if present, else mints
+            # its own uuid — either way the Decision row converges to
+            # the same outcome state.
+            "outcome_id": str(decision_uuid),
+            "status": "landed",
+            "landed_at": record.occurred_at,
+            "metered": record.outcome_value is not None,
+        },
+    )
+
+    try:
+        graph = get_decision_graph()
+        graph.projection.apply(event)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "outcomes back-reference: failed to fold decision.outcome_attached "
+            "for decision %s — outcome ledger row still written",
+            record.decision_id,
+            exc_info=True,
+        )
 
 
 async def count_outcomes(

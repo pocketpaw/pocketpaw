@@ -885,10 +885,31 @@ async def set_member_role(
     return role
 
 
+async def _require_agent_in_workspace(agent_id: str, workspace_id: str) -> None:
+    """Raise ``NotFound`` unless the agent exists and belongs to ``workspace_id``.
+
+    Keeps existence opaque to attackers — a leaked ``agent_id`` from a foreign
+    workspace surfaces as a 404, never a 403 (which would confirm the agent
+    lives somewhere). Used by the group-agent add / update / remove paths to
+    block cross-tenant wiring.
+    """
+    from pocketpaw_ee.cloud.models.agent import Agent as AgentModel
+
+    try:
+        agent_oid = PydanticObjectId(agent_id)
+    except Exception as exc:  # noqa: BLE001 - surface as NotFound
+        raise NotFound("agent", agent_id) from exc
+
+    agent_doc = await AgentModel.get(agent_oid)
+    if agent_doc is None or agent_doc.workspace != workspace_id:
+        raise NotFound("agent", agent_id)
+
+
 async def add_agent(group_id: str, user_id: str, body: AddGroupAgentRequest) -> None:
     """Add an agent to a group. Owner only."""
     group = await _get_group_domain_or_404(group_id)
     _require_domain_group_admin(group, user_id)
+    await _require_agent_in_workspace(body.agent_id, group.workspace_id)
 
     for existing in group.agents:
         if existing.agent_id == body.agent_id:
@@ -917,6 +938,7 @@ async def update_agent(
     """Update an agent's respond_mode in a group. Owner only."""
     group = await _get_group_domain_or_404(group_id)
     _require_domain_group_admin(group, user_id)
+    await _require_agent_in_workspace(agent_id, group.workspace_id)
 
     result = await _update_group_agent_respond_mode_doc(group_id, agent_id, body.respond_mode)
     if result is None:
@@ -936,6 +958,7 @@ async def remove_agent(group_id: str, user_id: str, agent_id: str) -> None:
     """Remove an agent from a group. Owner only."""
     group = await _get_group_domain_or_404(group_id)
     _require_domain_group_admin(group, user_id)
+    await _require_agent_in_workspace(agent_id, group.workspace_id)
 
     result = await _remove_group_agent_doc(group_id, agent_id)
     if result is None:

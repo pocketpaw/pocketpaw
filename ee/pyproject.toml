@@ -47,10 +47,18 @@ dependencies = [
     # --- Auth (user management + OAuth2 + JWT with a Beanie backend) ---
     "fastapi-users[beanie,oauth]>=13.0.0",
     "pwdlib[argon2]>=0.2.0",
+    # --- MFA (TOTP) — secrets + code verification for /auth/mfa/* ---
+    "pyotp>=2.9.0",
     # --- Real-time / rate limiting / cache ---
     "python-socketio>=5.11.0",
     "slowapi>=0.1.9",
     "redis[hiredis]>=5.0.0",
+    # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
+    "dnspython>=2.6.0",
+    # --- Background worker (Tier 2 resumable chat runs) ---
+    # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
+    # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
+    "arq>=0.26.0",
     # --- File storage (S3 + GCS) ---
     "boto3>=1.34.0",
     "google-cloud-storage>=2.14.0",
@@ -132,6 +140,7 @@ cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
 tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
 planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
+decisions = "pocketpaw_ee.extensions:CloudDecisionsMcpProvider"
 pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
 composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 
@@ -365,6 +374,38 @@ source_modules = [
     "pocketpaw_ee.cloud.audit.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.audit"]
+
+# Decisions — Beanie writes only from service.py (RFC 07 Slice 1).
+# The decision-graph entity has no Beanie document of its own — it
+# materializes into SQLite (`~/.soul/decisions.db`) via DecisionStore,
+# not MongoDB. The contract is included for consistency with the other
+# entities and to forbid any future Beanie creep. `domain.py`, `dto.py`,
+# `router.py`, `projection.py`, and `store.py` must never import the
+# cloud models.* tree — only `service.py` may (it doesn't yet, but the
+# contract pins the rule for future maintenance).
+[[tool.importlinter.contracts]]
+name = "Decisions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.decisions.router",
+    "pocketpaw_ee.cloud.decisions.dto",
+    "pocketpaw_ee.cloud.decisions.domain",
+    "pocketpaw_ee.cloud.decisions.projection",
+    "pocketpaw_ee.cloud.decisions.store",
+    "pocketpaw_ee.cloud.decisions.explain.extractor",
+    "pocketpaw_ee.cloud.decisions.explain.narrator",
+    "pocketpaw_ee.cloud.decisions.explain.cache",
+    "pocketpaw_ee.cloud.decisions.explain.service",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.session",
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.agent",
+    "pocketpaw_ee.cloud.models.workspace",
+]
 
 # Increment 3 — the pocket execution router. The classifier is PURE: a
 # rule-based ``classify(intent, ripple_spec)`` with no I/O. It must never

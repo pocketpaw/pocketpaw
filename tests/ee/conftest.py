@@ -20,11 +20,14 @@ import importlib.util
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
+os.environ.setdefault("POCKETPAW_HIBP_ENABLED", "false")
+
+from collections.abc import AsyncIterator, Awaitable, Callable  # noqa: E402
+from typing import Any  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
+
+import pytest  # noqa: E402
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
@@ -221,7 +224,9 @@ def user_token_pair(http: AsyncClient) -> UserTokenPair:
     mongomock database is thrown away at teardown).
     """
 
-    async def _factory(email: str | None = None, password: str = "Password1!") -> dict[str, Any]:
+    async def _factory(
+        email: str | None = None, password: str = "StrongPass123!"
+    ) -> dict[str, Any]:
         email = email or f"ee-fixture-{uuid.uuid4().hex[:8]}@test.example"
 
         reg = await http.post(

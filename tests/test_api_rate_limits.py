@@ -2,7 +2,12 @@
 # Created: 2026-02-20
 
 
-from pocketpaw.security.rate_limiter import RateLimiter, RateLimitInfo, get_api_key_limiter
+from pocketpaw.security.rate_limiter import (
+    RateLimiter,
+    RateLimitInfo,
+    get_api_key_limiter,
+    login_limiter,
+)
 
 
 class TestRateLimiter:
@@ -55,6 +60,39 @@ class TestRateLimiter:
         limiter = get_api_key_limiter()
         assert limiter.capacity == 60
         assert limiter.rate == 60 / 60.0  # capacity / 60s
+
+
+class TestLoginLimiter:
+    """The login_limiter caps brute-force attempts on /auth/login etc."""
+
+    def test_login_limiter_blocks_after_5_attempts_per_ip_email(self):
+        """6 hits on the same (ip, email) key — 6th returns denied with Retry-After."""
+        # Use a fresh limiter so global state from earlier tests doesn't pollute.
+        limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
+        key = "login:1.2.3.4:bob@x.c"
+        for _ in range(5):
+            info = limiter.check(key)
+            assert info.allowed is True
+        info = limiter.check(key)
+        assert info.allowed is False
+        assert "Retry-After" in info.headers()
+
+    def test_login_limiter_separate_emails_isolated(self):
+        """Rotating the email field behind one IP gets its own bucket."""
+        limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
+        ip = "1.2.3.4"
+        # Exhaust bob's bucket.
+        for _ in range(5):
+            limiter.check(f"login:{ip}:bob@x.c")
+        assert limiter.check(f"login:{ip}:bob@x.c").allowed is False
+        # alice still has her full bucket — keying lets the (ip, email) tuple
+        # distinguish a normal user from a brute-force rotating emails.
+        assert limiter.check(f"login:{ip}:alice@x.c").allowed is True
+
+    def test_login_limiter_module_singleton_configured(self):
+        """The exported login_limiter is 5 / 15 min."""
+        assert login_limiter.capacity == 5
+        assert abs(login_limiter.rate - 5.0 / 900.0) < 1e-9
 
 
 class TestRateLimitInfo:

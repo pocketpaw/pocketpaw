@@ -394,6 +394,8 @@ select = ["E", "F", "I", "UP"]
 # strings can't be wrapped without changing the rendered prompt.
 "src/pocketpaw/ripple/_pockets.py" = ["E501"]
 "src/pocketpaw/ripple/_design.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/decisions/explain/extractor.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/decisions/explain/narrator.py" = ["E501"]
 
 [dependency-groups]
 dev = [
@@ -438,6 +440,7 @@ dev = [
     "moto[s3]>=5.0.0",
     "types-aiofiles>=25.1.0.20260409",
     "import-linter>=2.11",
+    "fakeredis>=2.21.0",
 ]
 
 # Enterprise layer — opt-in. `uv sync --dev --group ee` installs the
@@ -487,4 +490,7 @@ ignore_imports = [
     "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.service",
     "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.agent_context",
     "pocketpaw.tools.cli -> pocketpaw_ee.agent.pocket_specialist.cli_tool",
+    # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
+    # try/except runtime import; the OSS core never imports EE statically.
+    "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
 ]

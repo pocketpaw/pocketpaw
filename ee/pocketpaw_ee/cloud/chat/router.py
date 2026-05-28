@@ -499,9 +499,14 @@ router.include_router(agent_router)
 
 
 @router.websocket("/ws/cloud")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    """Cloud WebSocket -- authenticate via JWT token, then handle typed JSON messages."""
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)):
+    """Cloud WebSocket -- authenticate via short-lived ws_ticket (browser
+    SPA, single-use), HttpOnly paw_auth cookie (same-origin / older clients),
+    or long-lived session JWT in ?token= (Tauri / native). Then handle
+    typed JSON messages."""
     import jwt as pyjwt
+
+    from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
 
     # Gate realtime behind the enterprise license (parity with REST /chat routes).
     lic = get_license()
@@ -509,16 +514,35 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4003, reason="Enterprise license required")
         return
 
-    secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
-    try:
-        payload = pyjwt.decode(token, secret, algorithms=["HS256"], audience=["fastapi-users:auth"])
-        user_id = payload.get("sub")
-        if not user_id:
+    user_id: str | None = None
+
+    # Path 1 — single-use ticket (cross-origin SPA). Try first because it
+    # only succeeds when the client explicitly minted one for this connect.
+    if token:
+        user_id = await consume_ws_ticket(token)
+
+    # Path 2 — HttpOnly cookie or long-lived JWT in ?token=. Same-origin
+    # browsers and Tauri use this. Skipped if a ticket already authenticated.
+    if user_id is None:
+        jwt_token = websocket.cookies.get("paw_auth") or token
+        if not jwt_token:
+            await websocket.close(code=4001, reason="Missing token")
+            return
+        secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
+        try:
+            payload = pyjwt.decode(
+                jwt_token,
+                secret,
+                algorithms=["HS256"],
+                audience=["fastapi-users:auth"],
+            )
+            user_id = payload.get("sub")
+            if not user_id:
+                await websocket.close(code=4001, reason="Invalid token")
+                return
+        except Exception:
             await websocket.close(code=4001, reason="Invalid token")
             return
-    except Exception:
-        await websocket.close(code=4001, reason="Invalid token")
-        return
 
     # Accept and register connection. If this was the user's first active
     # socket, announce them as online so every workspace peer's UI flips
