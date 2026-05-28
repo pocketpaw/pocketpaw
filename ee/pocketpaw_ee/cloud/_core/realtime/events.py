@@ -4,6 +4,11 @@
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
 #   (type="pocket.outcome"), emitted after a successful write action whose
 #   binding declared a named `outcome`. Feeds the outcomes JSONL ledger.
+# Updated: 2026-05-28 (feat/wave-3a-instinct-dispatch) — added the three
+#   instinct.approval.* events (created / approved / rejected) for the
+#   RFC 03 v2 template-level approval queue. Emitted by
+#   ``instinct_approvals.service`` on every state-mutating function per
+#   the EE cloud rule 9 (``emit on every write``).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -492,3 +497,24 @@ class ComposioConnectionVerified(Event):
 @dataclass
 class ComposioConnectionMismatch(Event):
     EVENT_TYPE: ClassVar[str] = "composio.connection.mismatch"
+
+
+# Instinct approval queue (RFC 03 v2 / Wave 3a). Fires on every
+# ``instinct_approvals.service`` state-mutating call. Created on the
+# initial gate-result persistence; approved / rejected on operator
+# decision. ``data`` carries the approval id + workspace + pocket
+# context so a downstream WS fan-out can target the right operator
+# inbox without re-reading the doc.
+@dataclass
+class InstinctApprovalCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.created"
+
+
+@dataclass
+class InstinctApprovalApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.approved"
+
+
+@dataclass
+class InstinctApprovalRejected(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
