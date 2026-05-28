@@ -16,8 +16,9 @@
 #   - ``build_foresight_server`` returns ``None`` when claude_agent_sdk
 #     isn't installed (same import-guard pattern the sibling servers use)
 #
-# Tools (8): list_scenarios, get_scenario, save_scenario, update_scenario,
-# delete_scenario, run_scenario, list_runs, get_run.
+# Tools (11): list_scenarios, get_scenario, save_scenario, update_scenario,
+# delete_scenario, run_scenario, list_runs, get_run, plus the 2026-05-28
+# result-side reads — list_projected_decisions, get_aggregate, get_insights.
 
 from __future__ import annotations
 
@@ -38,6 +39,11 @@ DELETE_SCENARIO_TOOL_ID = f"mcp__{SERVER_NAME}__delete_scenario"
 RUN_SCENARIO_TOOL_ID = f"mcp__{SERVER_NAME}__run_scenario"
 LIST_RUNS_TOOL_ID = f"mcp__{SERVER_NAME}__list_runs"
 GET_RUN_TOOL_ID = f"mcp__{SERVER_NAME}__get_run"
+# Result reads — added 2026-05-28 follow-up to PR #1266. Closes the same
+# "agent fell back to curl with bad env vars" gap on the read side.
+LIST_PROJECTED_DECISIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_projected_decisions"
+GET_AGGREGATE_TOOL_ID = f"mcp__{SERVER_NAME}__get_aggregate"
+GET_INSIGHTS_TOOL_ID = f"mcp__{SERVER_NAME}__get_insights"
 
 FORESIGHT_TOOL_IDS = (
     LIST_SCENARIOS_TOOL_ID,
@@ -48,6 +54,9 @@ FORESIGHT_TOOL_IDS = (
     RUN_SCENARIO_TOOL_ID,
     LIST_RUNS_TOOL_ID,
     GET_RUN_TOOL_ID,
+    LIST_PROJECTED_DECISIONS_TOOL_ID,
+    GET_AGGREGATE_TOOL_ID,
+    GET_INSIGHTS_TOOL_ID,
 )
 
 _SUB_TYPE_ENUM = ["decision_forecast", "market_sim", "org_change_rehearsal"]
@@ -204,6 +213,45 @@ async def _get_run_handler(args: dict) -> dict:
     if not run_id or not isinstance(run_id, str):
         return _error("get_run requires a `run_id` (string).")
     return _result_payload(await get_run_for_agent(run_id))
+
+
+async def _list_projected_decisions_handler(args: dict) -> dict:
+    from pocketpaw_ee.cloud.foresight.agent_context import list_projected_decisions_for_agent
+
+    run_id = args.get("run_id")
+    if not run_id or not isinstance(run_id, str):
+        return _error(
+            "list_projected_decisions requires a `run_id` (string). Find it "
+            "via list_runs or capture it from run_scenario's response."
+        )
+    anchor_id = args.get("anchor_id")
+    if anchor_id is not None and not isinstance(anchor_id, str):
+        return _error("list_projected_decisions `anchor_id` must be a string when set.")
+    limit = args.get("limit", 50)
+    offset = args.get("offset", 0)
+    return _result_payload(
+        await list_projected_decisions_for_agent(
+            run_id, anchor_id=anchor_id, limit=limit, offset=offset
+        )
+    )
+
+
+async def _get_aggregate_handler(args: dict) -> dict:
+    from pocketpaw_ee.cloud.foresight.agent_context import get_aggregate_for_agent
+
+    window_days = args.get("window_days")
+    if window_days is not None and not isinstance(window_days, int):
+        return _error("get_aggregate `window_days` must be an integer when set.")
+    return _result_payload(await get_aggregate_for_agent(window_days=window_days))
+
+
+async def _get_insights_handler(args: dict) -> dict:
+    # Intentionally ignores ``args`` — get_insights takes no parameters
+    # (the synthesizer reads the workspace's full window).
+    del args
+    from pocketpaw_ee.cloud.foresight.agent_context import get_insights_for_agent
+
+    return _result_payload(await get_insights_for_agent())
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +483,94 @@ def build_foresight_server() -> tuple[str, Any] | None:
     async def get_run(args):  # type: ignore[no-untyped-def]
         return await _get_run_handler(args)
 
+    @tool(
+        "list_projected_decisions",
+        (
+            "List projected decisions for a run — the per-anchor, per-persona "
+            "verdicts the engine emitted. Use this when the user asks 'what "
+            "did each persona decide' / 'show me the projections for run X' / "
+            "'break down the renewal sim by anchor'. ``run_id`` is required; "
+            "filter by ``anchor_id`` to drill into one decision. 404 "
+            "(``foresight_run.not_found``) for unknown or cross-tenant ids. "
+            "Returns ``{items[], total, limit, offset, has_more}``."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "Run id from run_scenario / list_runs.",
+                },
+                "anchor_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional filter on a single anchor (e.g. 'rollout:training'). "
+                        "Omit to list across all anchors in the run."
+                    ),
+                },
+                "limit": {"type": "integer", "description": "Max items (default 50, cap 500)."},
+                "offset": {"type": "integer", "description": "Pagination offset (default 0)."},
+            },
+            "required": ["run_id"],
+        },
+    )
+    async def list_projected_decisions(args):  # type: ignore[no-untyped-def]
+        return await _list_projected_decisions_handler(args)
+
+    @tool(
+        "get_aggregate",
+        (
+            "Workspace-level rolling accuracy + confidence drift + modal "
+            "outcome distribution over the trailing window. Use this when the "
+            "user asks 'how accurate were we' / 'did we predict X correctly' "
+            "/ 'show me our hit rate'. Reads PredictionRecord docs across the "
+            "whole workspace — not backtests; the dashboard's Backtest panel "
+            "is a different surface. Empty workspaces return zeros + empty "
+            "arrays (never 404). ``window_days`` defaults to 30 and caps at "
+            "90 — above the cap surfaces ``foresight.invalid_window``."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "window_days": {
+                    "type": "integer",
+                    "description": (
+                        "Trailing window in days (default 30, cap 90). Omit for the default."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    )
+    async def get_aggregate(args):  # type: ignore[no-untyped-def]
+        return await _get_aggregate_handler(args)
+
+    @tool(
+        "get_insights",
+        (
+            "Narrative insights synthesized over the workspace's recent "
+            "PredictionRecords + backtests — accuracy drops, persona "
+            "outliers, tier imbalances, threshold misses. Use this when the "
+            "user asks 'what mattered in the last run' / 'explain the "
+            "insights' / 'anything worth flagging'. Five-rule v0.5 "
+            "synthesizer by default; LLM v1.0 synthesizer opt-in via "
+            "workspace config (wire shape unchanged). Empty workspaces yield "
+            "``items=[]`` — the synthesizer fires no rows when no patterns "
+            "match. Surface ``severity`` (info | warning | critical) verbatim "
+            "so the user sees the same colour the dashboard does."
+        ),
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    )
+    async def get_insights(args):  # type: ignore[no-untyped-def]
+        return await _get_insights_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.0.0",
+        version="1.1.0",
         tools=[
             list_scenarios,
             get_scenario,
@@ -447,6 +580,9 @@ def build_foresight_server() -> tuple[str, Any] | None:
             run_scenario,
             list_runs,
             get_run,
+            list_projected_decisions,
+            get_aggregate,
+            get_insights,
         ],
     )
     return SERVER_NAME, server
@@ -455,8 +591,11 @@ def build_foresight_server() -> tuple[str, Any] | None:
 __all__ = [
     "DELETE_SCENARIO_TOOL_ID",
     "FORESIGHT_TOOL_IDS",
+    "GET_AGGREGATE_TOOL_ID",
+    "GET_INSIGHTS_TOOL_ID",
     "GET_RUN_TOOL_ID",
     "GET_SCENARIO_TOOL_ID",
+    "LIST_PROJECTED_DECISIONS_TOOL_ID",
     "LIST_RUNS_TOOL_ID",
     "LIST_SCENARIOS_TOOL_ID",
     "RUN_SCENARIO_TOOL_ID",

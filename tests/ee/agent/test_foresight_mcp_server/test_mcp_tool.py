@@ -21,8 +21,11 @@ class TestForesightMcpServerRegistration:
         from pocketpaw_ee.agent.mcp_servers.foresight import (
             DELETE_SCENARIO_TOOL_ID,
             FORESIGHT_TOOL_IDS,
+            GET_AGGREGATE_TOOL_ID,
+            GET_INSIGHTS_TOOL_ID,
             GET_RUN_TOOL_ID,
             GET_SCENARIO_TOOL_ID,
+            LIST_PROJECTED_DECISIONS_TOOL_ID,
             LIST_RUNS_TOOL_ID,
             LIST_SCENARIOS_TOOL_ID,
             RUN_SCENARIO_TOOL_ID,
@@ -41,7 +44,14 @@ class TestForesightMcpServerRegistration:
         assert RUN_SCENARIO_TOOL_ID == "mcp__pocketpaw_foresight__run_scenario"
         assert LIST_RUNS_TOOL_ID == "mcp__pocketpaw_foresight__list_runs"
         assert GET_RUN_TOOL_ID == "mcp__pocketpaw_foresight__get_run"
-        assert len(FORESIGHT_TOOL_IDS) == 8
+        # Result-side reads — 2026-05-28 follow-up.
+        assert (
+            LIST_PROJECTED_DECISIONS_TOOL_ID
+            == "mcp__pocketpaw_foresight__list_projected_decisions"
+        )
+        assert GET_AGGREGATE_TOOL_ID == "mcp__pocketpaw_foresight__get_aggregate"
+        assert GET_INSIGHTS_TOOL_ID == "mcp__pocketpaw_foresight__get_insights"
+        assert len(FORESIGHT_TOOL_IDS) == 11
         # Every id is published — the claude_sdk allowlist loop reads
         # this tuple.
         for tid in (
@@ -53,6 +63,9 @@ class TestForesightMcpServerRegistration:
             RUN_SCENARIO_TOOL_ID,
             LIST_RUNS_TOOL_ID,
             GET_RUN_TOOL_ID,
+            LIST_PROJECTED_DECISIONS_TOOL_ID,
+            GET_AGGREGATE_TOOL_ID,
+            GET_INSIGHTS_TOOL_ID,
         ):
             assert tid in FORESIGHT_TOOL_IDS
 
@@ -374,3 +387,170 @@ class TestGetRunHandler:
 
         body = _decode_payload(out)
         assert body["id"] == "r1"
+
+
+# ---------------------------------------------------------------------------
+# Read-tool handlers — 2026-05-28 follow-up to PR #1266
+# ---------------------------------------------------------------------------
+
+
+class TestListProjectedDecisionsHandler:
+    @pytest.mark.asyncio
+    async def test_happy_path_delegates_with_args(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {
+            "ok": True,
+            "items": [{"id": "pd1", "anchor_id": "rollout:training"}],
+            "total": 1,
+            "limit": 50,
+            "offset": 0,
+            "has_more": False,
+        }
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.list_projected_decisions_for_agent",
+            new=AsyncMock(return_value=fake),
+        ) as mock:
+            out = await foresight_mcp._list_projected_decisions_handler(
+                {
+                    "run_id": "r1",
+                    "anchor_id": "rollout:training",
+                    "limit": 50,
+                    "offset": 0,
+                }
+            )
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["items"][0]["id"] == "pd1"
+        mock.assert_awaited_once_with(
+            "r1", anchor_id="rollout:training", limit=50, offset=0
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_run_id_is_rejected_locally(self) -> None:
+        """The run_id validation runs before the agent_context call so a
+        missing field never reaches the cloud — same guard pattern the
+        existing get_run handler uses."""
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        mock = AsyncMock()
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.list_projected_decisions_for_agent",
+            new=mock,
+        ):
+            out = await foresight_mcp._list_projected_decisions_handler({})
+
+        assert out.get("is_error") is True
+        assert "run_id" in out["content"][0]["text"]
+        mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_surfaces_as_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {"ok": False, "error": "no_workspace_context", "message": "stream missing"}
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.list_projected_decisions_for_agent",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await foresight_mcp._list_projected_decisions_handler({"run_id": "r1"})
+
+        assert out.get("is_error") is True
+        assert "no_workspace_context" in out["content"][0]["text"]
+
+
+class TestGetAggregateHandler:
+    @pytest.mark.asyncio
+    async def test_happy_path_passes_window(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {
+            "ok": True,
+            "window_days": 7,
+            "generated_at": "2026-05-28T12:00:00Z",
+            "rolling_accuracy": {"points": []},
+            "confidence_drift": {"points": []},
+            "modal_outcome_distribution": {"entries": []},
+        }
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_aggregate_for_agent",
+            new=AsyncMock(return_value=fake),
+        ) as mock:
+            out = await foresight_mcp._get_aggregate_handler({"window_days": 7})
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        assert body["window_days"] == 7
+        mock.assert_awaited_once_with(window_days=7)
+
+    @pytest.mark.asyncio
+    async def test_default_window_when_omitted(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_aggregate_for_agent",
+            new=AsyncMock(return_value={"ok": True, "window_days": 30}),
+        ) as mock:
+            out = await foresight_mcp._get_aggregate_handler({})
+
+        assert not out.get("is_error")
+        mock.assert_awaited_once_with(window_days=None)
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_surfaces_as_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {"ok": False, "error": "no_workspace_context", "message": "stream missing"}
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_aggregate_for_agent",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await foresight_mcp._get_aggregate_handler({})
+
+        assert out.get("is_error") is True
+        assert "no_workspace_context" in out["content"][0]["text"]
+
+
+class TestGetInsightsHandler:
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_items(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {
+            "ok": True,
+            "items": [
+                {
+                    "id": "i1",
+                    "kind": "accuracy_drop",
+                    "title": "Accuracy dropped",
+                    "body": "...",
+                    "severity": "warning",
+                    "anchor_refs": [],
+                    "generated_at": "2026-05-28T12:00:00Z",
+                }
+            ],
+        }
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_insights_for_agent",
+            new=AsyncMock(return_value=fake),
+        ) as mock:
+            out = await foresight_mcp._get_insights_handler({})
+
+        body = _decode_payload(out)
+        assert body["items"][0]["severity"] == "warning"
+        mock.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_surfaces_as_is_error(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import foresight as foresight_mcp
+
+        fake = {"ok": False, "error": "no_workspace_context", "message": "stream missing"}
+        with patch(
+            "pocketpaw_ee.cloud.foresight.agent_context.get_insights_for_agent",
+            new=AsyncMock(return_value=fake),
+        ):
+            out = await foresight_mcp._get_insights_handler({})
+
+        assert out.get("is_error") is True
+        assert "no_workspace_context" in out["content"][0]["text"]
