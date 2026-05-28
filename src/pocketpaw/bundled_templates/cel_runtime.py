@@ -280,7 +280,34 @@ def _to_python(value: Any) -> Any:
     return value
 
 
+def collect_free_identifiers(expression: str) -> list[str]:
+    """Parse ``expression`` as CEL and return its leftmost-segment
+    free identifiers in source order, deduplicated.
+
+    Public helper for lint-side consumers (PR 2g's
+    :func:`fabric_validator.validate_template_with_registry`) that need
+    the same identifier set the evaluator walks at runtime — without
+    having to import any celpy types or duplicate the AST walker.
+
+    Returns an empty list for expressions that fail to parse; the
+    schema chokepoint (:class:`pocketpaw.bundled_templates.expressions.CelExpression`)
+    already rejects malformed CEL at validation time, so a parse error
+    here means a caller has fed in an unvalidated string and shouldn't
+    block validation on that case.
+    """
+    # Lazy import — same rationale as in ``evaluate_cel``.
+    import celpy  # noqa: PLC0415
+
+    env = celpy.Environment()
+    try:
+        ast = env.compile(expression)
+    except Exception:  # noqa: BLE001 — celpy raises a wide hierarchy
+        return []
+    return _collect_free_identifiers(ast)
+
+
 __all__ = [
     "CelEvaluationError",
+    "collect_free_identifiers",
     "evaluate_cel",
 ]
