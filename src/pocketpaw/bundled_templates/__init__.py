@@ -16,6 +16,10 @@
 # ``TemplateIdentifierResolver``). PR 2c lays the foundation that
 # PR 2d (Instinct 5-step composer), PR 2f (temporal trigger sweeper),
 # and PR 2g (Fabric ``tier: registered`` linter) all consume.
+# Modified 2026-05-28 (feat/rfc-03-v2-instinct-exec): re-exports the
+# Instinct 5-step composer (``resolve_instinct``, ``InstinctDecision``,
+# ``InstinctResolutionError``). PR 2d builds the pure decision
+# function; the EE runtime invokes it per row and dispatches.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -71,6 +75,12 @@ from pocketpaw.bundled_templates.installer import (
     TemplateInstallResult,
     install_bundled_templates,
 )
+from pocketpaw.bundled_templates.instinct_composer import (
+    InstinctDecision,
+    InstinctResolutionError,
+    InstinctVerdict,
+    resolve_instinct,
+)
 from pocketpaw.bundled_templates.loader import load_template
 from pocketpaw.bundled_templates.schema import (
     ActionDef,
@@ -96,8 +106,11 @@ __all__ = [
     "ConfirmDef",
     "DataSourceDef",
     "IdentifierResolver",
+    "InstinctDecision",
+    "InstinctResolutionError",
     "InstinctRule",
     "InstinctRulesDef",
+    "InstinctVerdict",
     "JoinedEntity",
     "PermissionsDef",
     "PocketTemplate",
@@ -111,4 +124,5 @@ __all__ = [
     "evaluate_cel",
     "install_bundled_templates",
     "load_template",
+    "resolve_instinct",
 ]
