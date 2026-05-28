@@ -128,6 +128,47 @@ stream's workspace id; no env vars, no headers).
     **When to use:** "what mattered in the last run", "explain the
     insights", "anything worth flagging".
 
+## Backtest reads + gate state
+
+Three more tools cover the backtest *read* side and the onboarding
+gate. **These three tools are read-only.** Backtest creation still
+ships through the dashboard Aggregate panel — it needs ground-truth
+anchors the chat surface can't reliably produce. The hard rule below
+("NEVER call ``/api/v1/foresight/backtests`` from this skill") stays
+in force; these tools don't contradict it — they expose only the
+list / get / gate reads.
+
+  - ``mcp__pocketpaw_foresight__list_backtests({limit?, offset?})`` —
+    trailing list of past backtests, most recent first. Each item
+    carries ``id, scenario_name, status, gate_decision, threshold,
+    created_at``. Pagination shape mirrors ``list_runs``.
+
+    **When to use:** "did we backtest yet", "show me past backtests",
+    "when was the last backtest".
+
+  - ``mcp__pocketpaw_foresight__get_backtest({backtest_id})`` — single
+    backtest with the full result blob, gate decision, and per-anchor
+    calibration. Find ids via ``list_backtests``. 404
+    (``foresight_backtest.not_found``) for unknown / cross-tenant ids.
+
+    **When to use:** "what was the gate decision on backtest X", "show
+    me the details of that backtest", "why did backtest X fail the
+    gate".
+
+  - ``mcp__pocketpaw_foresight__get_onboarding_gate({})`` — workspace's
+    onboarding gate state (unlock status + reason + last backtest
+    reference + effective threshold). Empty workspaces return
+    ``unlocked=False, reason='no_backtest'`` (not a 404). ``reason`` is
+    one of ``no_backtest`` | ``in_flight`` | ``below_threshold`` |
+    ``unlocked`` — surface it verbatim.
+
+    **When to use:** "are we unlocked", "what's the gate", "why is
+    foresight gated".
+
+If the user asks to *create* a backtest, redirect them to the
+dashboard's Aggregate panel — that surface anchors the historical
+pairing the engine needs.
+
 ## The four-phase workflow
 
 Every interaction with Foresight from chat follows this loop:
@@ -602,10 +643,14 @@ you'll lose fields the user added through the UI. Always read first.
   - **NEVER** invent error codes. If a tool returns
     ``foresight.invalid_scenario``, surface that exact code; don't
     paraphrase it as "validation failed".
-  - **NEVER** call ``/api/v1/foresight/backtests`` from this skill. The
-    backtest path needs ground-truth anchors and ships through the UI's
-    Aggregate panel. If the user asks for a backtest, redirect them
-    there.
+  - **NEVER** call ``/api/v1/foresight/backtests`` (POST) from this
+    skill. The backtest path needs ground-truth anchors and ships
+    through the UI's Aggregate panel. If the user asks to *create* a
+    backtest, redirect them there. The ``list_backtests`` /
+    ``get_backtest`` / ``get_onboarding_gate`` MCP tools above are
+    read-only and don't contradict this rule — they answer "did we
+    backtest yet" / "what was the gate decision" / "are we unlocked"
+    without touching the create path.
   - **ALWAYS** echo the response shape verbatim when surfacing a run
     result — the operator's Live panel binds to the same field names.
 
