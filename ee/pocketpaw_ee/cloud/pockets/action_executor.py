@@ -46,6 +46,20 @@
 #       limit / base-URL / SSRF / allowlist / DNS / M2b.1 park / HTTP).
 #   When no template is passed (all current callers; backward-compat)
 #   the gate is skipped — every existing flow is byte-identical.
+# Updated: 2026-05-28 (feat/wave-3c-outcomes) — RFC 03 v2 template-level
+#   outcome event emission. On the HTTP 2xx SUCCESS path, AFTER the
+#   success audit and BEFORE the return, if a `template` is threaded
+#   through the executor calls `outcomes_emitter.emit_outcomes(...)`.
+#   The emitter fires one bus event per name declared in the action's
+#   `outcomes_emitted[]`. Failure / blocked / pending-approval / from-
+#   instinct paths do NOT emit — outcomes are billable, so only
+#   confirmed direct success counts (the post-approval re-entry that
+#   actually fires the HTTP call also emits, since `template` is
+#   threaded through `instinct_bridge.execute_approved_write` callers
+#   that pass it).
+#   Emitter failures must never break the executor's return — the call
+#   is wrapped so a bus or audit hiccup logs a warning but the
+#   action's success result still propagates to the caller.
 #
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
@@ -691,6 +705,35 @@ async def run_action(
         status="success",
         base_url=base_url,
     )
+
+    # ── RFC 03 v2 outcome event emission ────────────────────────────────
+    # On a confirmed HTTP 2xx success, fire one ``OutcomeEmitted`` event
+    # per name declared in the action's ``outcomes_emitted[]``. Wave 3c.
+    # Emission is gated on a threaded ``template`` — every legacy caller
+    # that doesn't pass one is byte-identical (zero events emitted).
+    # The emit is wrapped so a bus / audit hiccup never propagates back
+    # into the caller's success path; the action genuinely succeeded.
+    if template is not None:
+        from pocketpaw_ee.cloud.pockets import outcomes_emitter
+
+        try:
+            await outcomes_emitter.emit_outcomes(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=pocket_id,
+                template=template,
+                action_name=action,
+                row_id=row_id,
+                row_context=row_context or {},
+            )
+        except Exception:  # noqa: BLE001 — emission must never break the success path
+            logger.warning(
+                "outcome emission failed for action=%s pocket=%s",
+                action,
+                pocket_id,
+                exc_info=True,
+            )
+
     return {
         "ok": True,
         "action": action,
