@@ -198,6 +198,12 @@ source_modules = [
     # Calls the pure OSS composer and the `instinct_approvals.service`
     # Beanie writer; never imports the pockets/session/backend docs.
     "pocketpaw_ee.cloud.pockets.instinct_dispatch",
+    # RFC 03 v2 Wave 3b — the bulk fan-out dispatcher. Calls the pure
+    # OSS ``plan_bulk_execution`` planner and the
+    # ``instinct_approvals.service`` writer; orchestrates per-row
+    # ``action_executor.run_action`` calls. Never imports a Beanie
+    # document class directly.
+    "pocketpaw_ee.cloud.pockets.bulk_dispatch",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",

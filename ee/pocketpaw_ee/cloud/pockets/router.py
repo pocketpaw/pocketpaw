@@ -83,7 +83,9 @@ from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
+    BulkDispatchResponse,
     CreatePocketRequest,
+    DispatchBulkRequest,
     HomePocketResponse,
     PocketBackendConfigRequest,
     PocketBackendConfigResponse,
@@ -745,6 +747,67 @@ async def run_pocket_action(
     wire = {k: v for k, v in result.items() if k not in ("_park", "outcome")}
     assert "_park" not in wire, "executor `_park` blob must be stripped before the wire response"
     return RunActionResponse(**wire)
+
+
+@router.post(
+    "/{pocket_id}/actions/{action_name}/dispatch-bulk",
+    dependencies=[Depends(require_pocket_action_run)],
+)
+async def dispatch_bulk_action_route(
+    pocket_id: str,
+    action_name: str,
+    body: DispatchBulkRequest | None = None,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> BulkDispatchResponse:
+    """Fan out a ``kind: bulk`` action across the rows in ``body.rows``
+    (RFC 03 v2 Wave 3b).
+
+    The path parameters carry the pocket id + the bulk action name;
+    ``body.rows`` carries the per-row payloads the operator selected.
+    Bucketing follows the RFC contract:
+
+    * ``executions`` — rows ready to fire (verdict ``EXECUTE`` or
+      ``NOTIFY_AND_EXECUTE``). Fired through the action executor with
+      the gate skipped (the OSS planner already evaluated it).
+    * ``blocked`` — rows the Instinct composer blocked.
+    * ``batch_approval_id`` — set when ANY row escalated to approval;
+      exactly ONE InstinctApproval row covers every approval-needing
+      row in the batch (RFC mandate — never N approvals).
+
+    Out of scope for this PR: the per-pocket template resolver. The
+    paw-enterprise UI / a follow-up PR will resolve the
+    :class:`PocketTemplate` from the pocket's persisted template
+    reference; this route surfaces ``400`` until that lookup lands so
+    the contract is observable but the endpoint is not yet
+    silently-broken.
+    """
+    body = body or DispatchBulkRequest(
+        pocket_id=pocket_id,
+        action_name=action_name,
+        rows=[],
+    )
+    # Mirror the URL params onto the body (the body model carries them
+    # so internal callers can hit the service directly).
+    body_dict = body.model_dump()
+    body_dict["pocket_id"] = pocket_id
+    body_dict["action_name"] = action_name
+
+    # Template resolution is a follow-up: the pocket needs a stable
+    # ``template_slug`` field plus a service-level loader that maps
+    # slug → :class:`PocketTemplate`. Returning 400 here keeps the
+    # endpoint observable in OpenAPI without leaking a half-wired
+    # behaviour onto the wire.
+    raise CloudError(
+        400,
+        "bulk_action.template_resolver_pending",
+        (
+            "Bulk dispatch HTTP route requires the per-pocket template "
+            "resolver (Wave 3b follow-up); call "
+            "pockets.service.dispatch_bulk_action(..., template=...) "
+            "directly from library / job callers."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

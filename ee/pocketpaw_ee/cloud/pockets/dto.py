@@ -42,6 +42,13 @@ RunActionResponse is now ``extra="forbid"`` so an executor-internal key
 (``_park``, ``outcome``) that the router fails to strip raises on
 construction instead of leaking the resolved write path/params onto the
 wire.
+Updated: 2026-05-28 (feat/wave-3b-action-pipeline) — added
+DispatchBulkRequest / BulkDispatchResponse / BulkExecutionResultDTO /
+BulkBlockedRowDTO for the new
+``POST /pockets/{id}/actions/{action}/dispatch-bulk`` endpoint. The
+request carries ``rows`` (per-row dicts); the response surfaces the
+RFC 03 v2 bucketing — ``executions`` / ``blocked`` /
+``batch_approval_id`` — plus the consolidated ``approval_row_ids``.
 """
 
 from __future__ import annotations
@@ -349,6 +356,82 @@ class SetApprovalRouteRequest(BaseModel):
     """
 
     route: ApprovalRouteDTO | None = None
+
+
+# ---------------------------------------------------------------------------
+# Bulk action dispatch (RFC 03 v2 / Wave 3b)
+# ---------------------------------------------------------------------------
+
+
+class DispatchBulkRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/actions/{action}/dispatch-bulk``.
+
+    ``rows`` is the per-row payloads the operator selected. Each entry
+    is a free-form dict — the OSS planner threads it through
+    ``resolve_instinct`` per-row, so the keys the template's CEL rules
+    reference must be present.
+
+    ``pocket_id`` and ``action_name`` are mirrored from the URL onto
+    the body to make the service-level call shape symmetric with
+    other entries in this module (rule 5 — every service takes a
+    typed ``body``). The router fills them in from the path
+    parameters; internal callers (jobs, MCP tools) pass them directly.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    pocket_id: str = Field(min_length=1)
+    action_name: str = Field(min_length=1)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BulkExecutionResultDTO(BaseModel):
+    """One row's execution slot on the wire.
+
+    ``response`` is the executor's full result dict for that row — the
+    same shape ``RunActionResponse`` carries for single-row calls,
+    serialized as a plain dict so the wire surface stays narrow.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    row_id: str
+    verdict: str
+    response: dict[str, Any]
+
+
+class BulkBlockedRowDTO(BaseModel):
+    """One row that the Instinct composer blocked.
+
+    Block reasons + the offending rule's ``when`` expression travel
+    on the wire so the operator can see WHY a row didn't run, without
+    leaking the full ``InstinctDecision`` audit blob.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    row_id: str
+    reason: str
+    rule_when: str
+
+
+class BulkDispatchResponse(BaseModel):
+    """Wire response for ``POST /pockets/{id}/actions/{action}/dispatch-bulk``.
+
+    Mirrors the ``BulkDispatchResult`` library shape. ``batch_approval_id``
+    is set when ANY row escalated to approval — exactly ONE id covers
+    every approval-needing row in the batch (RFC mandate).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    pocket_id: str
+    action_name: str
+    total_rows: int
+    executions: list[BulkExecutionResultDTO] = Field(default_factory=list)
+    blocked: list[BulkBlockedRowDTO] = Field(default_factory=list)
+    batch_approval_id: str | None = None
+    approval_row_ids: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
