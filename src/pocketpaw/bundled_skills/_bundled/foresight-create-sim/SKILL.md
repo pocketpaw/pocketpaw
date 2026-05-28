@@ -1,15 +1,17 @@
 ---
 name: foresight-create-sim
 description: |
-  Create, edit, and run Foresight scenarios via the workspace's REST API.
-  Triggered when the user asks to rehearse / simulate / project / forecast
-  / branch a decision — "rehearse the renewal", "what if we cut price
-  10%", "simulate the org change before we announce", "forecast Q3 churn",
-  "branch the launch decision". The skill teaches the chat agent how to
-  discover existing scenarios, synthesize the YAML body, save it via
-  PUT/POST, and (on explicit user confirmation) execute the run. Calls the
-  cloud's existing ``/api/v1/foresight/*`` endpoints with the internal
-  loopback headers — no engine code is touched.
+  Create, edit, and run Foresight scenarios via the workspace's typed
+  MCP tools (with a curl fallback for power users / SDKs without the
+  in-process server). Triggered when the user asks to rehearse /
+  simulate / project / forecast / branch a decision — "rehearse the
+  renewal", "what if we cut price 10%", "simulate the org change before
+  we announce", "forecast Q3 churn", "branch the launch decision". The
+  skill teaches the chat agent how to discover existing scenarios,
+  synthesize the YAML body, save it via the ``save_scenario`` MCP tool,
+  and (on explicit user confirmation) execute the run via
+  ``run_scenario``. Workspace context is automatic — no env vars, no
+  headers.
 ---
 
 # Foresight Scenario Workflow
@@ -52,15 +54,52 @@ planning.
 - The user wants a **dashboard / canvas** of metrics — that's the
   ``pocketpaw-create-pocket`` skill.
 
+## MCP tool reference (PREFER THESE)
+
+The dashboard runs an in-process MCP server (``pocketpaw_foresight``)
+that closes over the chat session's workspace id. **Always use these
+tools instead of curl** — they cannot save to the wrong workspace
+because the workspace context is read from the active chat stream, not
+from env vars or headers you have to plumb yourself.
+
+  - ``mcp__pocketpaw_foresight__list_scenarios({limit?, offset?, sub_type?})``
+    — list saved custom scenarios in the active workspace. Returns
+    ``{items[], total, limit, offset, has_more}``.
+  - ``mcp__pocketpaw_foresight__get_scenario({scenario_id})`` — full
+    detail (yaml_body + parsed_meta).
+  - ``mcp__pocketpaw_foresight__save_scenario({name, sub_type,
+    yaml_body, description?})`` — create. Returns the new scenario
+    object with its ``id``. **CAPTURE THE ID** for the run step.
+  - ``mcp__pocketpaw_foresight__update_scenario({scenario_id, name,
+    sub_type, yaml_body, description?})`` — PUT-style full replace.
+  - ``mcp__pocketpaw_foresight__delete_scenario({scenario_id})`` —
+    remove. Ask the user first; no undo.
+  - ``mcp__pocketpaw_foresight__run_scenario({name, custom_scenario_id,
+    route_to_instinct?, precedent_seed?})`` — execute a saved scenario.
+    ``custom_scenario_id`` is REQUIRED (the chat surface only supports
+    the saved-scenario path so the run stays re-runnable from the
+    dashboard).
+  - ``mcp__pocketpaw_foresight__list_runs({limit?, offset?})`` —
+    recent runs, newest first.
+  - ``mcp__pocketpaw_foresight__get_run({run_id})`` — single run with
+    full result blob.
+
+Each tool returns either a JSON body (success) or an MCP error envelope
+carrying the cloud error code + message (e.g.
+``foresight.invalid_yaml``, ``foresight.sub_type_mismatch``,
+``foresight_custom_scenario.not_found``). Surface those codes to the
+user verbatim — they name the field to fix.
+
 ## The four-phase workflow
 
 Every interaction with Foresight from chat follows this loop:
 
   1. **Discover** — does a scenario like this already exist?
   2. **Synthesize** — build (or modify) the YAML body.
-  3. **Save** — POST (new) or PUT (replace) the custom scenario.
-  4. **Run** — POST /scenarios with ``custom_scenario_id``, ONLY if the
-     user explicitly confirms.
+  3. **Save** — call ``save_scenario`` (new) or ``update_scenario``
+     (replace).
+  4. **Run** — call ``run_scenario`` with ``custom_scenario_id``, ONLY
+     if the user explicitly confirms.
 
 Skipping phases is the most common failure mode. If you jump straight to
 "run" without saving, you can't re-run the same scenario. If you skip
@@ -68,15 +107,11 @@ Skipping phases is the most common failure mode. If you jump straight to
 
 ## STEP 1 — Discover (list before you create)
 
-Always GET the workspace's saved scenarios first. The user may have
+Always list the workspace's saved scenarios first. The user may have
 already built something close to what they want.
 
-```bash
-curl -s -X GET \
-  -H "X-PocketPaw-Internal: true" \
-  -H "X-PocketPaw-Workspace-Id: $WORKSPACE_ID" \
-  -H "X-PocketPaw-User-Id: $USER_ID" \
-  "http://localhost:8000/api/v1/foresight/scenarios/custom?limit=20"
+```
+mcp__pocketpaw_foresight__list_scenarios({"limit": 20})
 ```
 
 Returns ``{items, total, limit, offset, has_more}``. Each item carries
@@ -143,105 +178,67 @@ forward-compat for v2.0 fields).
 
 ### Anchors (for backtests, not forward sims)
 
-Forward sims (POST /scenarios) don't carry inline anchors — the engine
-fans personas across the ticks and emits one ProjectedDecision per
-(tick, anchor inferred from role). **Backtests** (POST /backtests) are
-where anchors are required:
-
-  ```json
-  {
-    "anchors": [
-      {
-        "anchor_object_id": "decision:renewal_q2_2026",
-        "actual_outcome": {"renewed": true, "discount_pct": 8},
-        "scenario_template": "decision_forecast.yaml",
-        "projection_confidence": 0.5
-      }
-    ]
-  }
-  ```
+Forward sims (the ``run_scenario`` tool) don't carry inline anchors —
+the engine fans personas across the ticks and emits one
+ProjectedDecision per (tick, anchor inferred from role). **Backtests**
+are where anchors are required, and they currently ship through the
+REST surface only (``POST /api/v1/foresight/backtests``); see the
+"Endpoint reference (fallback)" section below.
 
 This skill focuses on **forward sims**. If the user asks for a backtest
-("did we predict the Q2 renewals correctly?"), redirect to the backtest
-endpoint and surface the ``gate_decision`` from the response. The chat
-agent rarely needs to build backtests by hand — the UI's Aggregate panel
-does that.
+("did we predict the Q2 renewals correctly?"), redirect to the
+Aggregate panel in the UI and surface the ``gate_decision`` from the
+response. The chat agent rarely needs to build backtests by hand.
 
 ## STEP 3 — Save the scenario
 
-### Create (POST)
+### Create
 
-```bash
-YAML_BODY=$(cat <<'EOF'
-name: rehearse-q3-renewals
-sub_type: decision_forecast
-n_ticks: 1
-tier_mix:
-  premium: 0.05
-  mid: 0.15
-  tail: 0.80
-personas:
-  - name: tenant-maria
-    role: tenant
-    ocean:
-      conscientiousness: 0.4
-      agreeableness: 0.5
-  - name: approver-prakash
-    role: approver
-    ocean:
-      conscientiousness: 1.2
-EOF
-)
+Build the YAML body as a string and call ``save_scenario``. The tool
+returns the full scenario object including the new ``id`` — **capture
+it** for the run step.
 
-# Escape the YAML for JSON
-YAML_JSON=$(jq -Rs <<<"$YAML_BODY")
-
-curl -s -X POST \
-  -H "X-PocketPaw-Internal: true" \
-  -H "X-PocketPaw-Workspace-Id: $WORKSPACE_ID" \
-  -H "X-PocketPaw-User-Id: $USER_ID" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"name\": \"Rehearse Q3 Renewals\",
-    \"sub_type\": \"decision_forecast\",
-    \"description\": \"Renewal cohort with one approver.\",
-    \"yaml_body\": $YAML_JSON
-  }" \
-  http://localhost:8000/api/v1/foresight/scenarios/custom
+```
+mcp__pocketpaw_foresight__save_scenario({
+  "name": "Rehearse Q3 Renewals",
+  "sub_type": "decision_forecast",
+  "description": "Renewal cohort with one approver.",
+  "yaml_body": "name: rehearse-q3-renewals\nsub_type: decision_forecast\nn_ticks: 1\ntier_mix:\n  premium: 0.05\n  mid: 0.15\n  tail: 0.80\npersonas:\n  - name: tenant-maria\n    role: tenant\n    ocean:\n      conscientiousness: 0.4\n      agreeableness: 0.5\n  - name: approver-prakash\n    role: approver\n    ocean:\n      conscientiousness: 1.2\n"
+})
 ```
 
-Returns 201 with the full scenario object (id, parsed_meta, yaml_body).
-**Capture the ``id``** — you need it for the run step.
+Returns the scenario object: ``{id, name, sub_type, description,
+yaml_body, parsed_meta, created_at, updated_at, ...}``. **Capture the
+``id``** — you need it for the run step. The cloud rejects bodies
+where the request ``sub_type`` doesn't match the YAML's
+``sub_type:`` (422 ``foresight.sub_type_mismatch``); keep them in sync.
 
 ### Edit (PUT — full replace)
 
-```bash
-curl -s -X PUT \
-  -H "X-PocketPaw-Internal: true" \
-  -H "X-PocketPaw-Workspace-Id: $WORKSPACE_ID" \
-  -H "X-PocketPaw-User-Id: $USER_ID" \
-  -H "Content-Type: application/json" \
-  -d "{\"name\": ..., \"sub_type\": ..., \"yaml_body\": $YAML_JSON}" \
-  "http://localhost:8000/api/v1/foresight/scenarios/custom/$SCENARIO_ID"
+```
+mcp__pocketpaw_foresight__update_scenario({
+  "scenario_id": "<id>",
+  "name": "...",
+  "sub_type": "...",
+  "yaml_body": "<full yaml>",
+  "description": "..."
+})
 ```
 
-PUT is **full replace** — every field on the body overwrites the saved
-doc. Read-modify-write: GET the current state first, modify only the
-fields the user asked to change, then PUT. NEVER blank out a field the
+``update_scenario`` is **full replace** — every field on the body
+overwrites the saved doc. Read-modify-write: ``get_scenario`` first,
+modify only the fields the user asked to change, then call
+``update_scenario`` with the complete body. NEVER blank out a field the
 user didn't mention.
 
 ### Delete
 
-```bash
-curl -s -X DELETE \
-  -H "X-PocketPaw-Internal: true" \
-  -H "X-PocketPaw-Workspace-Id: $WORKSPACE_ID" \
-  -H "X-PocketPaw-User-Id: $USER_ID" \
-  "http://localhost:8000/api/v1/foresight/scenarios/custom/$SCENARIO_ID"
+```
+mcp__pocketpaw_foresight__delete_scenario({"scenario_id": "<id>"})
 ```
 
-Returns 204. **Always confirm with the user before deleting** — the
-operation is irreversible (no audit log undo).
+**Always confirm with the user before deleting** — the operation is
+irreversible (no audit log undo).
 
 ## STEP 4 — Run (only on explicit confirm)
 
@@ -249,62 +246,34 @@ After the save lands, ask the user:
 
   > "Saved as `<name>`. Want me to run it now?"
 
-Wait for an explicit "yes" / "run it" / "go" before calling POST.
-Foresight runs cost LLM tokens — never auto-run on save.
+Wait for an explicit "yes" / "run it" / "go" before calling
+``run_scenario``. Foresight runs cost LLM tokens — never auto-run on
+save.
 
-```bash
-curl -s -X POST \
-  -H "X-PocketPaw-Internal: true" \
-  -H "X-PocketPaw-Workspace-Id: $WORKSPACE_ID" \
-  -H "X-PocketPaw-User-Id: $USER_ID" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"name\": \"$SCENARIO_NAME\",
-    \"custom_scenario_id\": \"$SCENARIO_ID\"
-  }" \
-  http://localhost:8000/api/v1/foresight/scenarios
+```
+mcp__pocketpaw_foresight__run_scenario({
+  "name": "Q3 Renewals",
+  "custom_scenario_id": "<id-from-save_scenario>",
+  "route_to_instinct": false
+})
 ```
 
-The v0.1 deterministic-fake backend completes synchronously — POST
-returns the full run record (``status: complete``) on the same response.
-Future versions return ``status: queued`` plus a websocket URL; this
-skill assumes synchronous for now.
+The v0.1 deterministic-fake backend completes synchronously — the call
+returns the full run record (``status: complete``) on the same
+response. Future versions return ``status: queued`` plus a websocket
+URL; this skill assumes synchronous for now.
 
 Response carries ``id``, ``status``, ``result.aggregates``,
 ``result.projected_decisions[]``. Surface the run id and a one-line
 verdict drawn from ``result.aggregates``.
 
-For richer details, GET the per-anchor projections:
+For richer details, look up the run via ``get_run`` (or use the
+``/api/v1/foresight/runs/{id}/projected-decisions`` REST endpoint for
+the per-anchor list).
 
-```bash
-curl -s -X GET \
-  -H "X-PocketPaw-Internal: true" \
-  -H "X-PocketPaw-Workspace-Id: $WORKSPACE_ID" \
-  -H "X-PocketPaw-User-Id: $USER_ID" \
-  "http://localhost:8000/api/v1/foresight/runs/$RUN_ID/projected-decisions"
 ```
-
-## Endpoint reference
-
-  - ``GET    /api/v1/foresight/scenarios/custom`` — list saved scenarios
-    (workspace-scoped, paginated; optional ``?sub_type=`` filter).
-  - ``GET    /api/v1/foresight/scenarios/custom/{id}`` — fetch one,
-    returns full yaml_body + parsed_meta.
-  - ``POST   /api/v1/foresight/scenarios/custom`` — create. Body:
-    ``{name, sub_type, description, yaml_body}``. Returns 201 with the id.
-  - ``PUT    /api/v1/foresight/scenarios/custom/{id}`` — full replace.
-    Returns 200.
-  - ``DELETE /api/v1/foresight/scenarios/custom/{id}`` — remove (204).
-    Idempotency: a second DELETE on the same id returns 404.
-  - ``POST   /api/v1/foresight/scenarios`` — run. Body: ``{name,
-    custom_scenario_id, route_to_instinct?, precedent_seed?}`` OR the
-    inline-personas grammar (skip custom_scenario_id and embed
-    ``sub_type``, ``personas[]``, ``n_ticks`` directly).
-  - ``GET    /api/v1/foresight/runs/{id}`` — fetch one run with full
-    result blob.
-  - ``GET    /api/v1/foresight/runs/{id}/projected-decisions`` —
-    paginated list of per-anchor projections, optional
-    ``?anchor_id=`` filter.
+mcp__pocketpaw_foresight__get_run({"run_id": "<id>"})
+```
 
 ## Three worked examples
 
@@ -354,9 +323,16 @@ personas:
 
 Save then run:
 
-```bash
-ID=$(curl -s -X POST ... /scenarios/custom | jq -r .id)
-curl -s -X POST ... /scenarios -d "{\"name\":\"Q3 Renewals\",\"custom_scenario_id\":\"$ID\"}"
+```
+saved = mcp__pocketpaw_foresight__save_scenario({
+  "name": "Q3 Enterprise Renewals",
+  "sub_type": "decision_forecast",
+  "yaml_body": "<the yaml above>"
+})
+mcp__pocketpaw_foresight__run_scenario({
+  "name": "Q3 Renewals",
+  "custom_scenario_id": saved.id
+})
 ```
 
 ### Example 2 — Market Sim (pricing stress test)
@@ -460,29 +436,24 @@ personas:
 After the run, surface ``aggregates.per_event`` (adoption / resistance /
 exit / escalation rates) and ``totals.queue_depth``.
 
-## Error handling — the 422 envelope
+## Error handling — the codes you'll see
 
-The cloud returns errors in a stable envelope:
+When an MCP tool fails, the envelope carries ``is_error: true`` and the
+text starts with ``Error: <code>``. Four codes matter:
 
-```json
-{ "error": { "code": "foresight.invalid_yaml", "message": "..." } }
-```
-
-Four error codes you'll see:
-
-  - **422 ``foresight.invalid_yaml``** — YAML failed to parse. Read the
+  - **``foresight.invalid_yaml``** — YAML failed to parse. Read the
     message, identify the field (often a colon / indentation issue),
     fix, retry. NEVER swallow the error and present a fake success.
-  - **422 ``foresight.sub_type_mismatch``** — the ``sub_type`` in the
-    request body differs from the ``sub_type:`` declared inside the
-    YAML. Pick one; they must match. The body's sub_type wins as the
+  - **``foresight.sub_type_mismatch``** — the ``sub_type`` in the
+    request differs from the ``sub_type:`` declared inside the YAML.
+    Pick one; they must match. The request's sub_type wins as the
     intent declaration; rewrite the YAML to match.
-  - **422 ``foresight.invalid_scenario``** — YAML parsed but engine
-    grammar / cap failed (persona count > 100, n_ticks > 1000, tier_mix
-    doesn't sum to 1.0, etc.). Read the message — it names the field —
-    and adjust.
-  - **404 ``foresight_custom_scenario.not_found``** — the scenario id
-    is unknown or belongs to another workspace (tenancy collapse). On a
+  - **``foresight.invalid_scenario``** — YAML parsed but engine
+    grammar / cap failed (persona count > 100, n_ticks > 1000,
+    tier_mix doesn't sum to 1.0, etc.). Read the message — it names
+    the field — and adjust.
+  - **``foresight_custom_scenario.not_found``** — the scenario id is
+    unknown or belongs to another workspace (tenancy collapse). On a
     PUT/DELETE/GET retry, this means the id is stale; refresh the list.
 
 Surface the error message to the user verbatim — do not paraphrase. The
@@ -490,27 +461,41 @@ message names the field; the user can fix it directly. If the error
 recurs after one retry, stop and ask for clarification rather than
 looping.
 
-## Auth headers
+## Endpoint reference (fallback)
 
-Calls go to ``http://localhost:8000`` (the local dashboard's loopback
-address). The agent runs on the same host as the dashboard and uses
-internal-trust headers — NO user JWT needed.
+The MCP tools above are the preferred surface. The cloud also exposes a
+REST API for power users, SDKs without the in-process MCP server, and
+backtests (which the chat surface doesn't yet expose):
 
-Required on every call:
+  - ``GET    /api/v1/foresight/scenarios/custom`` — list saved scenarios
+    (workspace-scoped, paginated; optional ``?sub_type=`` filter).
+  - ``GET    /api/v1/foresight/scenarios/custom/{id}`` — fetch one.
+  - ``POST   /api/v1/foresight/scenarios/custom`` — create.
+  - ``PUT    /api/v1/foresight/scenarios/custom/{id}`` — full replace.
+  - ``DELETE /api/v1/foresight/scenarios/custom/{id}`` — remove (204).
+  - ``POST   /api/v1/foresight/scenarios`` — run. Body: ``{name,
+    custom_scenario_id, route_to_instinct?, precedent_seed?}`` OR the
+    inline-personas grammar.
+  - ``GET    /api/v1/foresight/runs/{id}`` — fetch one run.
+  - ``GET    /api/v1/foresight/runs/{id}/projected-decisions`` —
+    paginated per-anchor projections, optional ``?anchor_id=`` filter.
+  - ``POST   /api/v1/foresight/backtests`` — retroactive run scored
+    against known historical anchors. Not exposed via MCP; ship
+    backtests through the UI's Aggregate panel.
+
+## Auth headers (REST fallback only)
+
+The MCP tools handle workspace identity automatically — no headers
+required. The REST fallback is loopback-only and uses internal-trust
+headers:
 
   - ``X-PocketPaw-Internal: true``
   - ``X-PocketPaw-Workspace-Id: <id>``
   - ``X-PocketPaw-User-Id: <id>``
 
-The workspace + user ids come from the **chat surface stamp** the
-dashboard threads into the agent's context. Look for ``$WORKSPACE_ID``
-and ``$USER_ID`` env vars or a system-prompt block named ``<surface>``
-that carries them. If neither is present, ask the user to switch to a
-specific workspace before continuing.
-
-If the loopback bypass is misconfigured (wrong host, missing headers,
-or feature flag off), the cloud returns 401 — surface the error and
-tell the user the dashboard auth path needs attention.
+Prefer the MCP tools whenever possible; the REST surface exists for
+SDK callers, the backtest path, and edge cases where the in-process
+server isn't available.
 
 ## Run pattern — ask, then go
 
@@ -527,21 +512,22 @@ After the run completes (synchronous in v0.1):
 
   - One-line verdict drawn from ``result.aggregates``.
   - The run id + a hint: "Open the Live panel for the full breakdown."
-  - For richer detail, optionally GET ``/runs/{id}/projected-decisions``
-    and surface the highest-confidence projections.
+  - For richer detail, call ``get_run`` (or hit
+    ``/runs/{id}/projected-decisions``) and surface the
+    highest-confidence projections.
 
 ## Edit pattern — read, modify, replace
 
 When the user asks to change a saved scenario:
 
-  1. GET the scenario by id to capture the current state.
+  1. Call ``get_scenario`` by id to capture the current state.
   2. Parse the ``yaml_body`` into your working copy.
   3. Modify ONLY the fields the user named. Leave everything else
      verbatim — including comments, ordering, and tier_mix.
-  4. PUT the full body back.
+  4. Call ``update_scenario`` with the full body back.
 
-NEVER PUT a body assembled from memory — you'll lose fields the user
-added through the UI. Always read first.
+NEVER call ``update_scenario`` with a body assembled from memory —
+you'll lose fields the user added through the UI. Always read first.
 
 ## Conversation conventions
 
@@ -567,12 +553,16 @@ added through the UI. Always read first.
 
 ## Hard rules
 
-  - **NEVER** call POST /scenarios without first GETing the workspace
-    scenario list. Discovery prevents duplicates.
+  - **PREFER** ``mcp__pocketpaw_foresight__*`` tools over curl — they
+    always use the correct workspace_id.
+  - **NEVER** call ``run_scenario`` without first calling
+    ``list_scenarios`` (or ``get_scenario`` on a known id). Discovery
+    prevents duplicates.
   - **NEVER** run on save — always ask first.
-  - **NEVER** PUT a partial body — full replace means full state.
-  - **NEVER** invent error codes. If the cloud returns ``422
-    foresight.invalid_scenario``, surface that exact code; don't
+  - **NEVER** call ``update_scenario`` with a partial body — PUT
+    semantics mean full replace.
+  - **NEVER** invent error codes. If a tool returns
+    ``foresight.invalid_scenario``, surface that exact code; don't
     paraphrase it as "validation failed".
   - **NEVER** call ``/api/v1/foresight/backtests`` from this skill. The
     backtest path needs ground-truth anchors and ships through the UI's
