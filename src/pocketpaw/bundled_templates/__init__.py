@@ -24,6 +24,13 @@
 # temporal trigger sweeper (``sweep_temporal_triggers``, ``SweepResult``,
 # ``TemporalRisingEdge``, ``TemporalSweepError``). PR 2f is the pure
 # OSS-side decision function the EE sweeper calls on each tick.
+# Modified 2026-05-28 (feat/rfc-03-v2-fabric): re-exports the Fabric
+# tier-registered surface — ``FabricRegistry`` Protocol +
+# ``NullFabricRegistry`` no-op default, ``FabricResolver`` (strict
+# runtime resolver), ``FabricValidationError`` and
+# ``validate_template_with_registry`` (lint entry point). The concrete
+# EE-side ``FabricRegistry`` implementation lives in ``ee/fabric/`` and
+# is supplied at wiring time; PR 2g is OSS library-only.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -67,10 +74,20 @@ directories via iteration — no installer code changes needed.
 
 from pocketpaw.bundled_templates.cel_runtime import (
     CelEvaluationError,
+    collect_free_identifiers,
     evaluate_cel,
 )
 from pocketpaw.bundled_templates.compile import compile_template
 from pocketpaw.bundled_templates.errors import TemplateValidationError
+from pocketpaw.bundled_templates.fabric_registry import (
+    FabricRegistry,
+    NullFabricRegistry,
+)
+from pocketpaw.bundled_templates.fabric_resolver import FabricResolver
+from pocketpaw.bundled_templates.fabric_validator import (
+    FabricValidationError,
+    validate_template_with_registry,
+)
 from pocketpaw.bundled_templates.identifier_resolver import (
     IdentifierResolver,
     TemplateIdentifierResolver,
@@ -115,6 +132,9 @@ __all__ = [
     "ColumnDef",
     "ConfirmDef",
     "DataSourceDef",
+    "FabricRegistry",
+    "FabricResolver",
+    "FabricValidationError",
     "IdentifierResolver",
     "InstinctDecision",
     "InstinctResolutionError",
@@ -122,6 +142,7 @@ __all__ = [
     "InstinctRulesDef",
     "InstinctVerdict",
     "JoinedEntity",
+    "NullFabricRegistry",
     "PermissionsDef",
     "PocketTemplate",
     "SavedView",
@@ -133,10 +154,12 @@ __all__ = [
     "TemporalRisingEdge",
     "TemporalSweepError",
     "TriggerDef",
+    "collect_free_identifiers",
     "compile_template",
     "evaluate_cel",
     "install_bundled_templates",
     "load_template",
     "resolve_instinct",
     "sweep_temporal_triggers",
+    "validate_template_with_registry",
 ]
