@@ -1,6 +1,12 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-05-28: Added `template publish / install / upgrade` subactions
+                for RFC 03 v2 Wave 4a — content-addressed, optionally
+                signed (Ed25519) template bundles. Local-file only —
+                no Registry transport in v0. New top-level flags:
+                `--output`, `--key`, `--unsigned`, `--dest`,
+                `--verify-key`, `--no-prompt`.
   - 2026-05-25: Added `template compile <file>` subaction next to lint /
                 migrate / diff (RFC 03 v2 PR 2b). Compile prints the
                 runtime-shaped rippleSpec dict the template produces —
@@ -199,6 +205,12 @@ def _handle_early_command(args) -> int | None:
             yes=getattr(args, "yes", False),
             no_backup=getattr(args, "no_backup", False),
             as_yaml=getattr(args, "yaml", False),
+            output_path=getattr(args, "output", None),
+            key_path=getattr(args, "key", None),
+            unsigned=getattr(args, "unsigned", False),
+            destination=getattr(args, "dest", None),
+            verify_key_path=getattr(args, "verify_key", None),
+            no_prompt=getattr(args, "no_prompt", False),
         )
 
     return None
@@ -362,6 +374,48 @@ Examples:
         "--yaml",
         action="store_true",
         help="Emit YAML instead of JSON (for template compile)",
+    )
+    # ── Wave 4a registry flags (template publish / install / upgrade) ──
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Output directory for template publish (default: ./)",
+    )
+    parser.add_argument(
+        "--key",
+        type=str,
+        default=None,
+        help=("Ed25519 signing key file (raw 32 bytes or 64-char hex) for template publish"),
+    )
+    parser.add_argument(
+        "--unsigned",
+        action="store_true",
+        help="Explicitly publish an unsigned bundle (mutually exclusive with --key)",
+    )
+    parser.add_argument(
+        "--dest",
+        "-d",
+        type=str,
+        default=None,
+        help="Destination directory for template install / upgrade",
+    )
+    parser.add_argument(
+        "--verify-key",
+        type=str,
+        default=None,
+        dest="verify_key",
+        help="Ed25519 public key file for template install signature verification",
+    )
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        dest="no_prompt",
+        help=(
+            "Refuse to apply a destructive template upgrade rather than "
+            "prompting interactively (exit code 2)"
+        ),
     )
 
     return parser

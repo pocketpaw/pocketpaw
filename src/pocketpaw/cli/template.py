@@ -12,15 +12,24 @@
 # ``compile_template`` produces (JSON by default, YAML under --yaml).
 # Author-facing inspection only — installation is NOT part of this
 # path (that's Bucket C / Registry).
-# Publish / install / upgrade are intentionally NOT here — they belong
-# to the registry PR (Bucket C). Fabric tier:registered + via_link
-# enforcement in lint is deferred to the Fabric integration PR (PR 2g).
+# Modified 2026-05-28 (feat/wave-4a-cli-registry): added the Wave 4a
+# Registry subactions:
+#   * ``publish``  — pack a template directory / YAML into a signed,
+#                    content-addressed ``<slug>-<version>.template.tar.gz``.
+#                    No Registry transport in v0 — bundles are local files.
+#   * ``install``  — unpack a bundle, verify hash + (optional) signature,
+#                    materialize into ``~/.pocketpaw/templates/<slug>/``.
+#   * ``upgrade``  — diff an installed template against a new bundle
+#                    (or installed-slug pair), prompt for destructive
+#                    changes, apply non-destructive updates silently.
+# Fabric tier:registered + via_link enforcement in lint is deferred to
+# the Fabric integration PR (PR 2g).
 """``pocketpaw template`` — author-side template tooling.
 
-Four sub-subcommands: ``lint``, ``migrate``, ``diff``, ``compile``.
-Dispatched from the top-level argparse parser via
-``__main__._handle_early_command`` so the template subcommand never
-pays the agent / settings boot cost.
+Seven sub-subcommands: ``lint``, ``migrate``, ``diff``, ``compile``,
+``publish``, ``install``, ``upgrade``. Dispatched from the top-level
+argparse parser via ``__main__._handle_early_command`` so the template
+subcommand never pays the agent / settings boot cost.
 
 Imports of ``pocketpaw.bundled_templates`` are lazy — invoking ``--help``
 or any of the unrelated CLI commands must not pull Pydantic, YAML, or
@@ -127,14 +136,22 @@ def run_template_cmd(
     yes: bool = False,
     no_backup: bool = False,
     as_yaml: bool = False,
+    output_path: str | None = None,
+    key_path: str | None = None,
+    unsigned: bool = False,
+    destination: str | None = None,
+    verify_key_path: str | None = None,
+    no_prompt: bool = False,
 ) -> int:
     """Dispatch ``pocketpaw template <subaction>`` to the right handler.
 
     Returns an exit code: 0 on success, 1 on validation / I/O failure,
-    2 on usage error (unknown subaction, missing required positional).
+    2 on usage error (unknown subaction, missing required positional) or
+    on a destructive upgrade attempted under ``--no-prompt``.
     """
-    if subaction not in {"lint", "migrate", "diff", "compile"}:
-        msg = f"unknown subcommand {subaction!r}. Expected one of: lint, migrate, diff, compile."
+    valid = {"lint", "migrate", "diff", "compile", "publish", "install", "upgrade"}
+    if subaction not in valid:
+        msg = f"unknown subcommand {subaction!r}. Expected one of: {', '.join(sorted(valid))}."
         if as_json:
             output_json({"error": msg})
         else:
@@ -163,6 +180,49 @@ def run_template_cmd(
             _usage_error("pocketpaw template compile <file> [--yaml]", as_json)
             return 2
         return _run_compile(Path(file1), as_yaml=as_yaml)
+
+    if subaction == "publish":
+        if not file1:
+            _usage_error(
+                "pocketpaw template publish <file-or-dir> [--output DIR] [--key FILE | --unsigned]",
+                as_json,
+            )
+            return 2
+        return _run_publish(
+            Path(file1),
+            output_path=Path(output_path) if output_path else None,
+            key_path=Path(key_path) if key_path else None,
+            unsigned=unsigned,
+            as_json=as_json,
+        )
+
+    if subaction == "install":
+        if not file1:
+            _usage_error(
+                "pocketpaw template install <bundle.tar.gz> [--dest DIR] [--verify-key FILE]",
+                as_json,
+            )
+            return 2
+        return _run_install(
+            Path(file1),
+            destination=Path(destination) if destination else None,
+            verify_key_path=Path(verify_key_path) if verify_key_path else None,
+            as_json=as_json,
+        )
+
+    if subaction == "upgrade":
+        if not file1:
+            _usage_error(
+                "pocketpaw template upgrade <slug-or-bundle> [--dest DIR] [--no-prompt]",
+                as_json,
+            )
+            return 2
+        return _run_upgrade(
+            file1,
+            destination=Path(destination) if destination else None,
+            no_prompt=no_prompt,
+            as_json=as_json,
+        )
 
     # subaction == "diff"
     if not file1 or not file2:
@@ -606,6 +666,432 @@ def _run_compile(path: Path, *, as_yaml: bool) -> int:
     else:
         sys.stdout.write(json.dumps(spec, indent=2, default=str) + "\n")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: publish
+# ---------------------------------------------------------------------------
+
+
+def _default_install_root() -> Path:
+    """The default per-user templates dir (``~/.pocketpaw/templates``)."""
+
+    return Path.home() / ".pocketpaw" / "templates"
+
+
+def _read_key_bytes(path: Path, *, label: str) -> bytes:
+    """Read a key file. Accepts raw 32 bytes or 64 hex chars."""
+    data = path.read_bytes().strip()
+    return data
+
+
+def _run_publish(
+    source: Path,
+    *,
+    output_path: Path | None,
+    key_path: Path | None,
+    unsigned: bool,
+    as_json: bool,
+) -> int:
+    """Pack a template into a content-addressed, optionally-signed tarball.
+
+    Wave 4a ships no Registry transport — the bundle is written to the
+    local filesystem. Operators ship the resulting ``.template.tar.gz``
+    however they like; ``pocketpaw template install`` reads it back.
+    """
+
+    if key_path and unsigned:
+        msg = "--key and --unsigned are mutually exclusive"
+        if as_json:
+            output_json({"error": msg})
+        else:
+            print_fail(msg)
+        return 2
+
+    signing_key: bytes | None = None
+    if key_path is not None:
+        try:
+            signing_key = _read_key_bytes(key_path, label="signing key")
+        except OSError as exc:
+            msg = f"failed to read signing key {key_path}: {exc}"
+            if as_json:
+                output_json({"error": msg})
+            else:
+                print_fail(msg)
+            return 1
+
+    from pocketpaw.bundled_templates.bundler import (  # noqa: PLC0415
+        BundleError,
+        pack_template,
+    )
+
+    try:
+        bundle = pack_template(
+            source,
+            output_path=output_path,
+            signing_key=signing_key,
+        )
+    except BundleError as exc:
+        if as_json:
+            output_json({"error": str(exc)})
+        else:
+            print_fail(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001 — surface unexpected errors cleanly
+        if as_json:
+            output_json({"error": f"unexpected error: {exc}"})
+        else:
+            print_fail(f"unexpected error: {exc}")
+        return 1
+
+    if signing_key is None:
+        if not as_json:
+            print_warn(
+                "bundle is unsigned — consumers will install on hash trust only. "
+                "Pass --key <file> to sign with an Ed25519 private key."
+            )
+
+    if as_json:
+        output_json(
+            {
+                "bundle": str(bundle),
+                "signed": signing_key is not None,
+            }
+        )
+    else:
+        print_ok(f"wrote {bundle}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: install
+# ---------------------------------------------------------------------------
+
+
+def _run_install(
+    bundle_path: Path,
+    *,
+    destination: Path | None,
+    verify_key_path: Path | None,
+    as_json: bool,
+) -> int:
+    """Unpack + verify a bundle, materialize into ``destination/<slug>/``."""
+
+    if destination is None:
+        destination = _default_install_root()
+
+    verify_key: bytes | None = None
+    if verify_key_path is not None:
+        try:
+            verify_key = _read_key_bytes(verify_key_path, label="verify key")
+        except OSError as exc:
+            msg = f"failed to read verify key {verify_key_path}: {exc}"
+            if as_json:
+                output_json({"error": msg})
+            else:
+                print_fail(msg)
+            return 1
+
+    from pocketpaw.bundled_templates.bundler import (  # noqa: PLC0415
+        BundleError,
+        unpack_template,
+    )
+
+    try:
+        result = unpack_template(bundle_path, destination, verify_key=verify_key)
+    except BundleError as exc:
+        if as_json:
+            output_json({"error": str(exc)})
+        else:
+            print_fail(str(exc))
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        if as_json:
+            output_json({"error": f"unexpected error: {exc}"})
+        else:
+            print_fail(f"unexpected error: {exc}")
+        return 1
+
+    if as_json:
+        output_json(
+            {
+                "slug": result.slug,
+                "version": result.version,
+                "destination": str(result.destination),
+                "hash_verified": result.hash_verified,
+                "signature_verified": result.signature_verified,
+            }
+        )
+    else:
+        print_ok(f"installed {result.slug}@{result.version} -> {result.destination}")
+        if result.signature_verified is True:
+            print("  signature: verified")
+        elif result.signature_verified is False:
+            print_warn("bundle is unsigned or signature did not match the supplied verify key")
+        # signature_verified is None -> no verify key supplied; stay quiet
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Subcommand: upgrade
+# ---------------------------------------------------------------------------
+
+
+def _run_upgrade(
+    target: str,
+    *,
+    destination: Path | None,
+    no_prompt: bool,
+    as_json: bool,
+) -> int:
+    """Diff an installed template against a new copy, apply or prompt.
+
+    ``target`` is either:
+      - A bundle path (ends with ``.tar.gz``) — diff against the
+        installed slug recorded in the bundle's manifest.
+      - A bare slug (e.g. ``demo-pocket``) — looks up
+        ``<destination>/<slug>/`` and re-reads the template. Useful for
+        comparing after manual edits.
+
+    Destructive changes (removed action / outcome, changed instinct
+    policy) prompt unless ``--no-prompt`` is set. Under ``--no-prompt``
+    a destructive upgrade fails with exit code 2 so CI scripts can
+    detect the case without hanging.
+    """
+
+    if destination is None:
+        destination = _default_install_root()
+
+    target_path = Path(target)
+    is_bundle = target_path.suffix == ".gz" or target_path.suffix == ".tgz"
+
+    from pocketpaw.bundled_templates.bundler import (  # noqa: PLC0415
+        BundleError,
+        compute_template_diff,
+        unpack_template,
+    )
+
+    new_yaml: dict[str, Any]
+    slug: str
+
+    if is_bundle:
+        # Inspect the bundle without permanently installing — unpack to
+        # a sibling staging dir, read its YAML, then either commit or
+        # roll back.
+        if not target_path.is_file():
+            _usage_error(f"bundle not found: {target_path}", as_json)
+            return 2
+
+        staging = destination / ".__upgrade_staging__"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        try:
+            result = unpack_template(target_path, staging)
+        except BundleError as exc:
+            if as_json:
+                output_json({"error": str(exc)})
+            else:
+                print_fail(str(exc))
+            shutil.rmtree(staging, ignore_errors=True)
+            return 1
+
+        slug = result.slug
+        new_yaml_path = result.destination / "template.pocket.yaml"
+        try:
+            new_yaml = _parse_file(new_yaml_path)
+        except ValueError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            if as_json:
+                output_json({"error": str(exc)})
+            else:
+                print_fail(str(exc))
+            return 1
+
+        installed_yaml_path = destination / slug / "template.pocket.yaml"
+        if not installed_yaml_path.is_file():
+            shutil.rmtree(staging, ignore_errors=True)
+            msg = (
+                f"no installed template at {installed_yaml_path} — run "
+                f"`pocketpaw template install` first"
+            )
+            if as_json:
+                output_json({"error": msg})
+            else:
+                print_fail(msg)
+            return 1
+        try:
+            installed_yaml = _parse_file(installed_yaml_path)
+        except ValueError as exc:
+            shutil.rmtree(staging, ignore_errors=True)
+            if as_json:
+                output_json({"error": str(exc)})
+            else:
+                print_fail(str(exc))
+            return 1
+    else:
+        # Slug-mode: caller already installed two versions side by side,
+        # or pointed us at a bare slug. We don't support that in v1 to
+        # keep the surface small — surface a clear usage error.
+        msg = (
+            "upgrade by slug requires a bundle path; pass a "
+            "<slug>-<version>.template.tar.gz instead"
+        )
+        if as_json:
+            output_json({"error": msg})
+        else:
+            print_fail(msg)
+        return 2
+
+    diff = compute_template_diff(installed_yaml, new_yaml)
+
+    # Decision time
+    if not diff.is_destructive:
+        # Non-destructive — apply silently
+        _apply_upgrade(staging_src=result.destination, dest=destination / slug)
+        shutil.rmtree(staging, ignore_errors=True)
+        if as_json:
+            output_json(
+                {
+                    "slug": slug,
+                    "applied": True,
+                    "destructive": False,
+                    "diff": _diff_to_dict(diff),
+                }
+            )
+        else:
+            print_ok(f"upgraded {slug} (non-destructive)")
+            _render_diff_summary(diff)
+        return 0
+
+    # Destructive — render diff + prompt
+    if not as_json:
+        print_warn("destructive changes detected:")
+        _render_diff_summary(diff)
+
+    if no_prompt:
+        shutil.rmtree(staging, ignore_errors=True)
+        if as_json:
+            output_json(
+                {
+                    "slug": slug,
+                    "applied": False,
+                    "destructive": True,
+                    "diff": _diff_to_dict(diff),
+                    "reason": "destructive change refused under --no-prompt",
+                }
+            )
+        else:
+            print_fail("refusing to apply destructive upgrade under --no-prompt")
+        return 2
+
+    # Interactive prompt
+    sys.stdout.write(f"Apply destructive upgrade to {slug}? [y/N] ")
+    sys.stdout.flush()
+    try:
+        reply = input("")
+    except EOFError:
+        reply = ""
+    if reply.strip().lower() not in {"y", "yes"}:
+        shutil.rmtree(staging, ignore_errors=True)
+        if as_json:
+            output_json(
+                {
+                    "slug": slug,
+                    "applied": False,
+                    "destructive": True,
+                    "diff": _diff_to_dict(diff),
+                    "reason": "user declined",
+                }
+            )
+        else:
+            print("  Aborted — no changes applied.")
+        return 0
+
+    _apply_upgrade(staging_src=result.destination, dest=destination / slug)
+    shutil.rmtree(staging, ignore_errors=True)
+    if as_json:
+        output_json(
+            {
+                "slug": slug,
+                "applied": True,
+                "destructive": True,
+                "diff": _diff_to_dict(diff),
+            }
+        )
+    else:
+        print_ok(f"upgraded {slug} (destructive — confirmed)")
+    return 0
+
+
+def _apply_upgrade(*, staging_src: Path, dest: Path) -> None:
+    """Replace ``dest``'s contents with the contents of ``staging_src``.
+
+    We intentionally remove + recopy rather than overlay so removed
+    files actually disappear (e.g. a screenshot dropped from the new
+    version shouldn't linger). Both paths are inside the user's
+    templates dir.
+    """
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    for src in staging_src.rglob("*"):
+        if not src.is_file():
+            continue
+        relative = src.relative_to(staging_src)
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(src.read_bytes())
+
+
+def _render_diff_summary(diff: Any) -> None:
+    """Print a compact summary of the structured diff to stdout."""
+
+    def _line(label: str, items: list[Any]) -> None:
+        if not items:
+            return
+        rendered = ", ".join(str(x) for x in items)
+        print(f"  {label}: {rendered}")
+
+    _line("actions added", diff.actions_added)
+    _line("actions removed", diff.actions_removed)
+    _line("triggers added", diff.triggers_added)
+    _line("triggers removed", diff.triggers_removed)
+    _line("outcomes added", diff.outcomes_added)
+    _line("outcomes removed", diff.outcomes_removed)
+    _line("instinct rules added", diff.instinct_rules_added)
+    _line("instinct rules removed", diff.instinct_rules_removed)
+    for entry in diff.actions_changed:
+        tag = " [destructive]" if entry.get("destructive") else ""
+        print(f"  changed{tag}: {entry['path']}: {entry['old']!r} -> {entry['new']!r}")
+    for entry in diff.triggers_changed:
+        tag = " [destructive]" if entry.get("destructive") else ""
+        print(f"  changed{tag}: {entry['path']}: {entry['old']!r} -> {entry['new']!r}")
+    for entry in diff.instinct_rules_changed:
+        tag = " [destructive]" if entry.get("destructive") else ""
+        print(f"  changed{tag}: {entry['path']}: {entry['old']!r} -> {entry['new']!r}")
+
+
+def _diff_to_dict(diff: Any) -> dict[str, Any]:
+    """Serialize the TemplateDiff dataclass for ``--json`` output."""
+
+    return {
+        "added_fields": diff.added_fields,
+        "removed_fields": diff.removed_fields,
+        "changed_fields": diff.changed_fields,
+        "actions_added": diff.actions_added,
+        "actions_removed": diff.actions_removed,
+        "actions_changed": diff.actions_changed,
+        "triggers_added": diff.triggers_added,
+        "triggers_removed": diff.triggers_removed,
+        "triggers_changed": diff.triggers_changed,
+        "instinct_rules_added": diff.instinct_rules_added,
+        "instinct_rules_removed": diff.instinct_rules_removed,
+        "instinct_rules_changed": diff.instinct_rules_changed,
+        "outcomes_added": diff.outcomes_added,
+        "outcomes_removed": diff.outcomes_removed,
+        "is_destructive": diff.is_destructive,
+    }
 
 
 __all__ = ["run_template_cmd"]
