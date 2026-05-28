@@ -160,6 +160,7 @@ tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
 planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
 pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
+foresight = "pocketpaw_ee.extensions:CloudForesightMcpProvider"
 composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 
 [project.entry-points."pocketpaw.agent_extensions"]
