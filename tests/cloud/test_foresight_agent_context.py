@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -347,3 +348,122 @@ async def test_get_insights_returns_items_envelope(bound_identity: None) -> None
     assert out["ok"] is True
     assert "items" in out
     assert isinstance(out["items"], list)
+
+
+# ---------------------------------------------------------------------------
+# Backtest reads + onboarding gate — read-only per RFC 08 §13.1
+# ---------------------------------------------------------------------------
+
+
+def _backtest_body(name: str = "agent-ctx-backtest") -> Any:
+    """Minimal legal backtest body — one persona, one anchor. Mirrors
+    the helper in ``test_foresight_backtest_service.py`` but local to
+    avoid coupling test files."""
+    from pocketpaw_ee.cloud.foresight.dto import (
+        CreateBacktestRequest,
+        HistoricalAnchorRequest,
+        PersonaSpecRequest,
+    )
+
+    return CreateBacktestRequest(
+        name=name,
+        sub_type="decision_forecast",
+        n_ticks=1,
+        personas=[PersonaSpecRequest(name="Anne", role="approver", ocean={})],
+        anchors=[
+            HistoricalAnchorRequest(
+                anchor_object_id=f"lease:LR-{i}",
+                actual_outcome={"outcome": "accept"},
+            )
+            for i in range(10)
+        ],
+    )
+
+
+async def test_list_backtests_without_workspace_returns_clean_error() -> None:
+    out = await agent_context.list_backtests_for_agent()
+    assert out == {
+        "ok": False,
+        "error": agent_context.NO_WORKSPACE_ERROR,
+        "message": agent_context.NO_WORKSPACE_MESSAGE,
+    }
+
+
+async def test_get_backtest_without_workspace_returns_clean_error() -> None:
+    out = await agent_context.get_backtest_for_agent("abc")
+    assert out["ok"] is False
+    assert out["error"] == agent_context.NO_WORKSPACE_ERROR
+
+
+async def test_get_onboarding_gate_without_workspace_returns_clean_error() -> None:
+    out = await agent_context.get_onboarding_gate_for_agent()
+    assert out["ok"] is False
+    assert out["error"] == agent_context.NO_WORKSPACE_ERROR
+
+
+async def test_list_backtests_returns_items_envelope(bound_identity: None) -> None:
+    """Drive the wrapper against a real backtest the service created.
+    Verifies the wrapper threads identity correctly and builds the
+    paginated envelope by hand (``list_backtests`` returns a list, not a
+    paginated DTO)."""
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = RequestContext(
+        user_id="prakash",
+        workspace_id="w1",
+        request_id="seed",
+        scope=ScopeKind.WORKSPACE,
+        started_at=datetime.now(UTC),
+    )
+    await foresight_service.create_backtest(ctx, _backtest_body(name="bt-list"))
+
+    out = await agent_context.list_backtests_for_agent(limit=5)
+    assert out["ok"] is True
+    assert out["limit"] == 5
+    assert out["offset"] == 0
+    assert isinstance(out["items"], list)
+    assert any(item["scenario_name"] == "bt-list" for item in out["items"])
+
+
+async def test_get_backtest_returns_full_payload(bound_identity: None) -> None:
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = RequestContext(
+        user_id="prakash",
+        workspace_id="w1",
+        request_id="seed",
+        scope=ScopeKind.WORKSPACE,
+        started_at=datetime.now(UTC),
+    )
+    created = await foresight_service.create_backtest(ctx, _backtest_body(name="bt-detail"))
+
+    out = await agent_context.get_backtest_for_agent(created.id)
+    assert out["ok"] is True
+    assert out["id"] == created.id
+    assert out["scenario_name"] == "bt-detail"
+    assert "threshold" in out
+    assert "gate_decision" in out
+
+
+async def test_get_backtest_unknown_id_returns_not_found(bound_identity: None) -> None:
+    """Stale / cross-tenant ids collapse to a clean envelope rather than
+    raising — same shape the scenario read-tools surface."""
+    out = await agent_context.get_backtest_for_agent("507f1f77bcf86cd799439011")
+    assert out["ok"] is False
+    assert out["error"] == "foresight_backtest.not_found"
+
+
+async def test_get_onboarding_gate_reports_no_backtest_for_fresh_workspace(
+    bound_identity: None,
+) -> None:
+    """Fresh workspace → ``unlocked=False, reason='no_backtest'`` with
+    the effective threshold echoed back (default 0.65)."""
+    out = await agent_context.get_onboarding_gate_for_agent()
+    assert out["ok"] is True
+    assert out["workspace_id"] == "w1"
+    assert out["unlocked"] is False
+    assert out["reason"] == "no_backtest"
+    assert out["threshold"] == 0.65
+    assert out["last_backtest_id"] is None
