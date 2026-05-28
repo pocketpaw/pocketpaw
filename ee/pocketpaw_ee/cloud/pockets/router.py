@@ -83,7 +83,9 @@ from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
+    BulkDispatchResponse,
     CreatePocketRequest,
+    DispatchBulkRequest,
     HomePocketResponse,
     PocketBackendConfigRequest,
     PocketBackendConfigResponse,
@@ -745,6 +747,75 @@ async def run_pocket_action(
     wire = {k: v for k, v in result.items() if k not in ("_park", "outcome")}
     assert "_park" not in wire, "executor `_park` blob must be stripped before the wire response"
     return RunActionResponse(**wire)
+
+
+@router.post(
+    "/{pocket_id}/actions/{action_name}/dispatch-bulk",
+    dependencies=[Depends(require_pocket_action_run)],
+)
+async def dispatch_bulk_action_route(
+    pocket_id: str,
+    action_name: str,
+    body: DispatchBulkRequest | None = None,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> BulkDispatchResponse:
+    """Fan out a ``kind: bulk`` action across the rows in ``body.rows``
+    (RFC 03 v2 Wave 3b).
+
+    The path parameters carry the pocket id + the bulk action name;
+    ``body.rows`` carries the per-row payloads the operator selected.
+    Bucketing follows the RFC contract:
+
+    * ``executions`` — rows ready to fire (verdict ``EXECUTE`` or
+      ``NOTIFY_AND_EXECUTE``). Fired through the action executor with
+      the gate skipped (the OSS planner already evaluated it).
+    * ``blocked`` — rows the Instinct composer blocked.
+    * ``batch_approval_id`` — set when ANY row escalated to approval;
+      exactly ONE InstinctApproval row covers every approval-needing
+      row in the batch (RFC mandate — never N approvals).
+
+    Wave 3e — template resolution is now wired through
+    ``pockets.service.resolve_pocket_template`` which reads the pocket's
+    ``template_slug`` and loads the OSS bundled template. A pocket with
+    no slug, an unknown slug, or a stale on-disk template surfaces as
+    ``404 pocket_template.not_found`` so the operator can fix the
+    template binding rather than receive a generic 500.
+    """
+    body = body or DispatchBulkRequest(
+        pocket_id=pocket_id,
+        action_name=action_name,
+        rows=[],
+    )
+    # Mirror the URL params onto the body (the body model carries them
+    # so internal callers can hit the service directly).
+    body_dict = body.model_dump()
+    body_dict["pocket_id"] = pocket_id
+    body_dict["action_name"] = action_name
+
+    # Wave 3e — resolve the pocket's RFC 03 v2 template. ``None`` means
+    # the pocket has no slug, the slug is unknown, or the on-disk
+    # template is stale; treat as 404 so the operator is signalled to
+    # fix the binding (vs. a 500 / generic error).
+    template = await pockets_service.resolve_pocket_template(workspace_id, pocket_id)
+    if template is None:
+        raise CloudError(
+            404,
+            "pocket_template.not_found",
+            (
+                "No RFC 03 v2 template is bound to this pocket — set "
+                "``template_slug`` on the pocket before dispatching a "
+                "bulk action."
+            ),
+        )
+
+    result_wire = await pockets_service.dispatch_bulk_action(
+        workspace_id,
+        user_id,
+        body_dict,
+        template=template,
+    )
+    return BulkDispatchResponse(**result_wire)
 
 
 # ---------------------------------------------------------------------------

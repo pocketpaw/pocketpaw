@@ -19,6 +19,7 @@ from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
@@ -29,6 +30,7 @@ from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
+from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
@@ -84,6 +86,7 @@ __all__ = [
     "FileUpload",
     "Group",
     "GroupAgent",
+    "InstinctApproval",
     "Invite",
     "Mention",
     "Message",
@@ -100,6 +103,7 @@ __all__ = [
     "Task",
     "TaskAssignee",
     "TaskSource",
+    "TemporalSweepStateDoc",
     "User",
     "Widget",
     "WidgetPosition",
@@ -130,9 +134,11 @@ def get_all_documents():
         ComposioConnection,
         Invite,
         Group,
+        InstinctApproval,
         Message,
         ReadState,
         Task,
+        TemporalSweepStateDoc,
         Cycle,
         Project,
         PlanSession,

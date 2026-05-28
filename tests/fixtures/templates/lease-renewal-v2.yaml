@@ -1,0 +1,177 @@
+# lease-renewal-v2.yaml
+# RFC 03 worked example rewritten in the reconciled v2 schema.
+# Key v2 additions vs the current RFC example:
+#   - schema_version: "2" (NEW required field)
+#   - pattern: app (NEW required field — orthogonal to shape)
+#   - skill_refs (was: in some shipped templates as `skills`; v2 canonical name)
+#   - state.joined_entities (NEW — multi-entity support via Q4 pick (a))
+#   - state.id_field (NEW — explicit row-identity field per gap A11)
+#   - All filter / when expressions are valid CEL per Q2 pick
+#   - confirm widened from bool to object per gap A15
+#   - Instinct resolution order documented in the RFC (Q3 pick (c));
+#     this file's per-action instinct_policy + top-level instinct_rules
+#     COMPOSE per that order.
+
+schema_version: "2"
+name: lease-renewal-v1
+version: 1.0.0
+pattern: app
+vertical: property-management
+display_name: Lease Renewal
+description: |
+  Surfaces every lease expiring in the next 90 days. Drafts a renewal
+  packet per tenant, sends through Gmail with the property manager copied,
+  calendars the signature deadline, and marks the lease renewed in Yardi
+  when the tenant returns the signed PDF.
+icon: home
+color: "#7c9c63"
+
+shape: data-grid
+
+state:
+  entity_type: Lease                     # primary entity — row identity
+  id_field: id                           # NEW — explicit
+  joined_entities:                       # NEW — closes Q4 / gap A6
+    - { name: tenant,   entity_type: Tenant,   via_link: lease_tenant }
+    - { name: property, entity_type: Property, via_link: lease_property }
+  default_view: list
+  columns:
+    - { field: tenant.name,         label: Tenant,   widget: text }
+    - { field: property.address,    label: Property, widget: text }
+    - { field: expiry_date,         label: Expires,  widget: date,             sort: asc }
+    - { field: rent_current,        label: Rent,     widget: currency }
+    - { field: rent_proposed,       label: Proposed, widget: currency_editable }
+    - { field: renewal_stage,       label: Stage,    widget: status_dot,       options: { palette: stages } }
+    - { field: days_remaining,      label: Days,     widget: trend,            options: { invert: true } }
+    - { field: packet_status,       label: Packet,   widget: badge }
+  saved_views:
+    # All filter expressions are CEL (Q2 pick). Dot-paths resolve
+    # through joined_entities; flat names resolve against the primary
+    # entity OR a declared column.
+    - { name: "Expiring 30 days", filter: "days_remaining <= 30",                       group_by: property.address, default: true }
+    - { name: "Awaiting tenant",  filter: "renewal_stage == 'sent'" }
+    - { name: "Past due",         filter: "days_remaining < 0",                         group_by: property.address }
+    - { name: "All open",         filter: "renewal_stage != 'completed'" }
+    - { name: "Risky tenants",    filter: "tenant.late_payment_count_12mo >= 3" }       # NEW — uses joined entity
+    - { name: "Expiring soon",    filter: "within(expires_at, duration('60d'))" }       # NEW — uses CEL temporal helper
+
+connectors:
+  - yardi
+  - gmail
+  - gcalendar
+
+data_sources:
+  - name: expiring_leases
+    method: GET
+    path: /leases?expiry_within=90d
+    bind: state.leases
+    refresh: [pocket_open, manual, interval:1h]
+  - name: tenant_responses
+    method: GET
+    path: /messages?label=lease-renewal&unread=true
+    bind: state.tenant_responses
+    refresh: [pocket_open, signal:gmail.inbox.update]
+
+actions:
+  - name: draft_renewal
+    label: Draft renewal
+    kind: single-row
+    instinct_policy: auto                # author intent — auto-run unless an operator overlay escalates
+    connectors_required: [yardi]
+    agent_required: renewal-drafter
+    outcomes_emitted: [lease_drafted]
+    description: Generates a renewal packet from the lease terms.
+  - name: send_to_tenant
+    label: Send to tenant
+    kind: single-row
+    instinct_policy: require_approval    # author intent — gated; floor cannot be lowered by overlay
+    connectors_required: [gmail, gcalendar]
+    agent_required: renewal-drafter
+    outcomes_emitted: [renewal_sent]
+    confirm:                             # widened from bool per gap A15
+      message: "Send packet to {tenant.name} at {tenant.email}?"
+      destructive: false
+    description: Sends the packet, copies the property manager, calendars the deadline.
+  - name: bulk_draft
+    label: Draft all expiring
+    kind: bulk                            # fan-out: one execution per selected row; one approval blesses the batch
+    instinct_policy: require_approval
+    connectors_required: [yardi]
+    agent_required: renewal-drafter
+    outcomes_emitted: [lease_drafted]
+  - name: mark_renewed
+    label: Mark renewed
+    kind: single-row
+    instinct_policy: notify_only          # author intent — runs, pings operator
+    connectors_required: [yardi]
+    outcomes_emitted: [renewal_completed]
+    description: Writes the renewal back to Yardi and closes the row.
+  - name: refresh_data
+    label: Refresh
+    kind: global
+    instinct_policy: auto
+
+agents:
+  - name: renewal-drafter
+    backend: claude_sdk
+    system_prompt: |
+      You draft lease renewal packets in the voice of the property
+      manager. Cite the current lease terms. Never propose a rent
+      change without surfacing comp data. When the tenant has a history
+      of late payments, flag for human review and do not auto-send.
+    tools: [yardi_read, gmail_compose, gcalendar_write, kb_lookup]
+    skill_refs: [skills/lease-renewal-policy, skills/yardi-helpers]
+    soul_snippet: property-manager-baseline
+
+triggers:
+  - type: cron
+    schedule: "0 8 * * MON"
+    action: bulk_draft
+  - type: source_change
+    source: tenant_responses
+    action: mark_renewed
+  - type: temporal                        # NEW trigger type closing gap A7
+    when: "within(expires_at, duration('60d')) && renewal_stage == null"
+    action: draft_renewal
+  - type: manual
+
+outcomes:
+  - lease_drafted
+  - renewal_sent
+  - renewal_completed
+
+kb_scope: pocket
+
+skill_refs:                               # v2 canonical name (was `skills` in v1)
+  - skills/lease-renewal-policy
+  - skills/yardi-helpers
+  - skills/gmail-templates
+
+instinct_rules:
+  escalation: property-manager
+  # All `when` expressions are CEL (Q2 pick). Top-level rules COMPOSE
+  # with per-action instinct_policy per the resolution order in Q3:
+  #   1. block rules always win — no policy can override them
+  #   2. require_approval rules promote auto → approval (cannot demote)
+  #   3. per-action instinct_policy applies if no rule matched
+  #   4. notify rules fire alongside non-blocking
+  rules:
+    - when: "rent_proposed_delta_pct > 8"
+      action: require_approval
+    - when: "tenant.late_payment_count_12mo >= 3"
+      action: require_approval
+    - when: "rent_proposed < rent_current * 0.95"
+      action: block
+    - when: "within(expires_at, duration('7d')) && renewal_stage == null"
+      action: notify                       # informational — pings escalation target
+
+permissions:
+  scope: workspace
+  roles_allowed: [admin, member]
+  actions_role_map:
+    bulk_draft: [admin]
+    mark_renewed: [admin, member]
+
+screenshots:
+  - assets/lease-renewal-grid.png
+  - assets/lease-renewal-drafter.png

@@ -205,6 +205,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
+    from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
@@ -231,6 +232,21 @@ def mount_cloud(app: FastAPI) -> None:
     # the real REST surface (get/find/trace/downstream/timeline/explain)
     # lands in RFC 07 Slice 2.
     app.include_router(decisions_router, prefix="/api/v1")
+    # Instinct approvals — RFC 03 v2 template-level approval queue
+    # (Wave 3a). The dispatch wrapper persists rows when the OSS
+    # ``resolve_instinct`` returns ``ESCALATE_APPROVAL``; this router
+    # exposes the operator-facing read + decision surface.
+    app.include_router(instinct_approvals_router, prefix="/api/v1")
+
+    # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
+    # for the persisted (trigger, row) state matrix; the actual sweep
+    # is driven by the in-process scheduler at
+    # ``cloud._core.temporal_scheduler`` and the per-pocket dispatcher
+    # at ``cloud.pockets.temporal_dispatcher``. No "sweep now" route in
+    # v0 (deferred).
+    from pocketpaw_ee.cloud.temporal_sweeps.router import router as temporal_sweeps_router
+
+    app.include_router(temporal_sweeps_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can

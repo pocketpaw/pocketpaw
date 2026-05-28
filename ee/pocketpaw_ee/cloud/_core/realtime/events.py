@@ -4,6 +4,33 @@
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added PocketOutcomeEvent
 #   (type="pocket.outcome"), emitted after a successful write action whose
 #   binding declared a named `outcome`. Feeds the outcomes JSONL ledger.
+# Updated: 2026-05-28 (feat/wave-3a-instinct-dispatch) — added the three
+#   instinct.approval.* events (created / approved / rejected) for the
+#   RFC 03 v2 template-level approval queue. Emitted by
+#   ``instinct_approvals.service`` on every state-mutating function per
+#   the EE cloud rule 9 (``emit on every write``).
+# Updated: 2026-05-28 (feat/wave-3b-action-pipeline) — added
+#   ``BulkActionDispatched`` (type="pocket.bulk_action.dispatched"),
+#   emitted by ``pockets.service.dispatch_bulk_action`` after a bulk
+#   fan-out completes. Carries the dispatch summary (counts + optional
+#   batch approval id) so downstream listeners (audit, analytics) can
+#   key off a single event per dispatch call.
+# Updated: 2026-05-28 (feat/wave-3c-outcomes) — added ``OutcomeEmitted``
+#   (type="pocket.outcome_emitted"), emitted by
+#   ``pockets.outcomes_emitter.emit_outcomes`` for EACH name declared in
+#   an action's ``outcomes_emitted[]`` after a successful write. RFC 03
+#   v2's template-driven outcomes catalog is distinct from M2b.2's
+#   binding-driven ``PocketOutcomeEvent``: the template-level emit fires
+#   per declared catalog event (multiple per action allowed), the M2b.2
+#   binding-level emit fires the single ``binding.outcome`` name. Both
+#   coexist on the bus under different EVENT_TYPE strings.
+# Updated: 2026-05-28 (feat/wave-3d-temporal-scheduler) — added
+#   ``TemporalSweepCompleted`` (type="pocket.temporal_sweep_completed"),
+#   emitted once per per-pocket sweep tick by
+#   ``temporal_sweeps.service.upsert_state``. Carries the sweep tally
+#   (edges_fired / blocked / escalated / errors / sweep_duration_ms) so
+#   audit + dashboards listen to one event per dispatch rather than N
+#   per-row events, the same shape ``BulkActionDispatched`` uses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -573,3 +600,96 @@ class CallNotesPosted(Event):
 @dataclass
 class ActivityLogged(Event):
     EVENT_TYPE: ClassVar[str] = "activity.logged"
+
+
+# Instinct approval queue (RFC 03 v2 / Wave 3a). Fires on every
+# ``instinct_approvals.service`` state-mutating call. Created on the
+# initial gate-result persistence; approved / rejected on operator
+# decision. ``data`` carries the approval id + workspace + pocket
+# context so a downstream WS fan-out can target the right operator
+# inbox without re-reading the doc.
+@dataclass
+class InstinctApprovalCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.created"
+
+
+@dataclass
+class InstinctApprovalApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.approved"
+
+
+@dataclass
+class InstinctApprovalRejected(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
+
+
+# Bulk action dispatch (RFC 03 v2 / Wave 3b). Emitted by
+# ``pockets.service.dispatch_bulk_action`` after a fan-out call resolves —
+# one event per dispatch, regardless of how many rows were processed.
+# ``data`` carries: ``workspace_id``, ``pocket_id``, ``action_name``,
+# ``total_rows``, ``executed`` (count of EXECUTE / NOTIFY_AND_EXECUTE
+# rows fired), ``blocked`` (count of BLOCK rows), ``approval_needed``
+# (count of rows that escalated into the batch approval), and an
+# optional ``batch_approval_id`` (str | None) — set when ``approval_needed``
+# is non-zero.
+@dataclass
+class BulkActionDispatched(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.bulk_action.dispatched"
+
+
+# Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write
+# action's ``run_action`` returns ``ok:true`` on the HTTP 2xx success
+# path AND the action's ``outcomes_emitted[]`` declares one or more
+# names. One event per declared name (bulk emits per row). Feeds the
+# downstream Outcomes meter (out of scope for Wave 3c — bus emit is
+# the seam).
+#
+# Payload (``data``):
+#   event_name             — the declared outcome name (str), one of
+#                            ``actions[].outcomes_emitted``.
+#   workspace_id           — tenancy.
+#   pocket_id              — the pocket the action ran on.
+#   action_name            — the action that fired.
+#   row_id                 — the stable row identifier (empty when the
+#                            action does not bind to a row, e.g. a
+#                            page-level action).
+#   row_context_snapshot   — the row dict at emit time. Captures
+#                            payload state for downstream audit.
+#   emitted_at             — ISO-8601 UTC timestamp.
+#   template_name          — pocket template name (provenance for the
+#                            outcomes catalog).
+#   template_version       — pocket template version.
+#
+# Distinct from ``PocketOutcomeEvent`` (M2b.2): the M2b.2 event is
+# binding-driven (single ``binding.outcome`` field), this event is
+# template-driven (per-action ``outcomes_emitted[]`` list — multiple
+# emits per action allowed). Both coexist.
+@dataclass
+class OutcomeEmitted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.outcome_emitted"
+
+
+# Temporal sweep completion event (RFC 03 v2 Wave 3d).
+# Fired by ``temporal_sweeps.service.upsert_state`` once per (workspace,
+# pocket) sweep, with the sweep's tally: edges_fired (how many rising-
+# edge transitions dispatched), blocked (how many Instinct blocked),
+# escalated (how many escalated to approval), errors (per-row eval
+# failures), and the wall-clock duration. Downstream listeners (audit,
+# dashboards) key off this single event instead of N per-row events,
+# the same way ``BulkActionDispatched`` is one event per dispatch.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id        — tenancy.
+#   pocket_id           — pocket whose temporal triggers were swept.
+#   edges_fired         — count of rising edges that dispatched.
+#   blocked             — count of edges whose Instinct gate returned
+#                         BLOCK (action_executor never called).
+#   escalated           — count of edges whose Instinct gate returned
+#                         ESCALATE_APPROVAL (one InstinctApproval row
+#                         persisted per row).
+#   errors              — count of per-row CEL eval failures.
+#   sweep_duration_ms   — wall-clock ms the sweep ran for. Forensic /
+#                         dashboard signal; long sweeps deserve a look.
+@dataclass
+class TemporalSweepCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.temporal_sweep_completed"

@@ -3,9 +3,18 @@
 # Pocket Template Schema metadata for the built-in CRM record list.
 # ``shape`` is ``custom`` because RFC 03's shape enum does not carry a
 # ``master-detail`` value; the master-detail *pattern* is in index.json.
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): migrated v1 ->
+# v2. Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. ``pattern: browser`` per the sibling index.json row.
+# ``display_name`` matches the gallery title in index.json (preserves the
+# CRM acronym; the loader's title-case fallback only fires when
+# display_name is absent).
+schema_version: "2"
 name: crm-record-list
 version: 1.0.0
 vertical: sales
+pattern: browser
+display_name: CRM Record List
 shape: custom
 description: |
   A CRM record browser. A searchable list of contacts on the left, the
@@ -22,4 +31,4 @@ state:
     - { field: email, widget: text }
 actions: []
 connectors: []
-skills: []
+skill_refs: []

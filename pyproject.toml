@@ -70,6 +70,7 @@ dependencies = [
     "soul-protocol[engine]>=0.3.1",
     # NOTE: livekit-agents / livekit-plugins-deepgram moved to ee/pyproject.toml
     # in the OSS-EE split (Phase 4) — only ee/pocketpaw_ee/cloud/livekit imports them.
+    "cel-python>=0.5.0",
 ]
 
 [project.optional-dependencies]

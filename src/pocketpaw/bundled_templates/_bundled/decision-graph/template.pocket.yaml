@@ -9,9 +9,18 @@
 # render). Vertical is `core` — the cross-vertical bin for foundational
 # org-wide templates. Read-only: no actions, no connectors, no outcomes;
 # the Instinct rule blocks writes at the pocket boundary.
+# Modified 2026-05-28 (feat/rfc-03-v2-integration): migrated v1 -> v2.
+# Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. ``display_name`` matches the gallery title in index.json.
+# ``state.columns`` is empty because shape:custom renders via SvelteFlow,
+# not via a column projection. The v2 schema permits empty columns when
+# shape == "custom" (see schema.py:_columns_required_unless_custom).
+schema_version: "2"
 name: decision-graph
 version: 0.1.0
 vertical: core
+pattern: app
+display_name: Decision Graph
 shape: custom
 description: |
   Visualize every decision the org has made — by agent, by human, by
@@ -23,4 +32,4 @@ state:
   columns: []
 actions: []
 connectors: []
-skills: []
+skill_refs: []

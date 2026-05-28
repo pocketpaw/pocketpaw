@@ -1,9 +1,15 @@
 # src/pocketpaw/bundled_templates/_bundled/calendar-planner/template.pocket.yaml
 # Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
 # Pocket Template Schema metadata for the built-in calendar planner.
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): migrated v1 ->
+# v2. Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. No behavioural change.
+schema_version: "2"
 name: calendar-planner
 version: 1.0.0
 vertical: productivity
+pattern: app
+display_name: Calendar Planner
 shape: calendar
 description: |
   A month-view calendar planner. Each entry is a dated event with a
@@ -18,4 +24,4 @@ state:
     - { field: category, widget: badge }
 actions: []
 connectors: []
-skills: []
+skill_refs: []
