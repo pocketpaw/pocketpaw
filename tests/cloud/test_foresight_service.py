@@ -232,3 +232,27 @@ async def test_list_rejects_invalid_limit() -> None:
     ctx = _ctx()
     with pytest.raises(ValidationError):
         await foresight_service.list_scenario_runs(ctx, limit=0)
+
+
+async def test_list_offset_skips_initial_runs() -> None:
+    """``offset`` is the server-side cursor used by both the agent-context
+    wrapper and any future paginated UI surface. Five runs in newest-first
+    order: ``skip=2, limit=2`` returns runs 3-4 (the third and fourth
+    newest) — i.e. the second and third creates after the latest two
+    were skipped."""
+    ctx = _ctx()
+    runs = []
+    for i in range(5):
+        runs.append(await foresight_service.create_scenario_run(ctx, _body(name=f"run-{i}")))
+
+    page = await foresight_service.list_scenario_runs(ctx, limit=2, offset=2)
+    # Newest-first: runs[4], runs[3], runs[2], runs[1], runs[0].
+    # offset=2 drops the first two (runs[4], runs[3]); limit=2 returns
+    # runs[2], runs[1] in that order.
+    assert [item.id for item in page] == [runs[2].id, runs[1].id]
+
+
+async def test_list_rejects_negative_offset() -> None:
+    ctx = _ctx()
+    with pytest.raises(ValidationError):
+        await foresight_service.list_scenario_runs(ctx, offset=-1)
