@@ -250,3 +250,100 @@ async def test_list_runs_returns_workspace_runs(
     assert out["ok"] is True
     assert len(out["items"]) >= 1
     assert any(item["scenario_name"] == "lr-target" for item in out["items"])
+
+
+# ---------------------------------------------------------------------------
+# Read wrappers — projected decisions, aggregate, insights
+# ---------------------------------------------------------------------------
+
+
+async def test_list_projected_decisions_without_workspace_returns_clean_error() -> None:
+    out = await agent_context.list_projected_decisions_for_agent("run-1")
+    assert out == {
+        "ok": False,
+        "error": agent_context.NO_WORKSPACE_ERROR,
+        "message": agent_context.NO_WORKSPACE_MESSAGE,
+    }
+
+
+async def test_get_aggregate_without_workspace_returns_clean_error() -> None:
+    out = await agent_context.get_aggregate_for_agent()
+    assert out["ok"] is False
+    assert out["error"] == agent_context.NO_WORKSPACE_ERROR
+
+
+async def test_get_insights_without_workspace_returns_clean_error() -> None:
+    out = await agent_context.get_insights_for_agent()
+    assert out["ok"] is False
+    assert out["error"] == agent_context.NO_WORKSPACE_ERROR
+
+
+async def test_list_projected_decisions_unknown_run_returns_not_found(
+    bound_identity: None,
+) -> None:
+    """``list_projected_decisions`` runs ``_fetch_in_workspace`` first so
+    a stale / cross-tenant run id surfaces as ``foresight_run.not_found``
+    rather than an empty list (which would hide the bug)."""
+    out = await agent_context.list_projected_decisions_for_agent("507f1f77bcf86cd799439011")
+    assert out["ok"] is False
+    assert out["error"] == "foresight_run.not_found"
+
+
+async def test_list_projected_decisions_returns_items_for_real_run(
+    bound_identity: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save = await agent_context.save_scenario_for_agent(
+        name="lpd-target",
+        sub_type="decision_forecast",
+        yaml_body=_decision_forecast_yaml("lpd-target"),
+    )
+
+    async def _fake_engine(body: Any, *, workspace_id: str, run_id: str, route_to_instinct: bool):
+        return {"aggregates": {}, "projected_decisions": []}
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.foresight.service._run_engine_inline", _fake_engine)
+    run = await agent_context.run_scenario_for_agent(
+        name="lpd-target", custom_scenario_id=save["id"]
+    )
+
+    out = await agent_context.list_projected_decisions_for_agent(run["id"], limit=10)
+    assert out["ok"] is True
+    # Empty projections list is the legitimate empty-result shape for
+    # this minimal engine stub — what we're testing is that the wrapper
+    # threads identity correctly and surfaces the typed response.
+    assert "items" in out
+    assert "total" in out
+    assert out["limit"] == 10
+    assert out["offset"] == 0
+
+
+async def test_get_aggregate_returns_rollup_envelope(bound_identity: None) -> None:
+    """Empty workspace collapses to zeros + empty arrays per the service
+    contract — no 404, no exception, so the agent gets a usable rollup."""
+    out = await agent_context.get_aggregate_for_agent()
+    assert out["ok"] is True
+    assert out["window_days"] >= 1
+    assert "rolling_accuracy" in out
+    assert "confidence_drift" in out
+    assert "modal_outcome_distribution" in out
+    assert "generated_at" in out
+
+
+async def test_get_aggregate_surfaces_invalid_window_as_ok_false(
+    bound_identity: None,
+) -> None:
+    """``window_days`` above the 90-day cap raises
+    ``foresight.invalid_window`` from the service; the wrapper collapses
+    it into the agent envelope without raising."""
+    out = await agent_context.get_aggregate_for_agent(window_days=999)
+    assert out["ok"] is False
+    assert out["error"] == "foresight.invalid_window"
+
+
+async def test_get_insights_returns_items_envelope(bound_identity: None) -> None:
+    """Empty workspace yields ``items=[]`` — the synthesizer fires no
+    rows when no PredictionRecords / backtests exist yet."""
+    out = await agent_context.get_insights_for_agent()
+    assert out["ok"] is True
+    assert "items" in out
+    assert isinstance(out["items"], list)

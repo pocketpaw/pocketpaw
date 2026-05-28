@@ -379,12 +379,118 @@ async def get_run_for_agent(run_id: str) -> dict[str, Any]:
     return payload
 
 
+# ---------------------------------------------------------------------------
+# Result reads — projected decisions, aggregate rollup, insights
+# ---------------------------------------------------------------------------
+
+
+async def list_projected_decisions_for_agent(
+    run_id: str,
+    *,
+    anchor_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """List projected decisions for a run, optionally filtered by anchor.
+
+    The service collapses unknown / cross-tenant ``run_id`` into
+    ``foresight_run.not_found`` via ``_fetch_in_workspace`` — surface
+    that as ``{ok: False, error: 'foresight_run.not_found', ...}`` so
+    the agent retries with a valid id rather than fabricating one.
+
+    Shape on success: ``{"ok": True, "items": [...], "total": N,
+    "limit": int, "offset": int, "has_more": bool}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.list_projected_decisions(
+            ctx, run_id, anchor_id=anchor_id, limit=limit, offset=offset
+        )
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
+async def get_aggregate_for_agent(*, window_days: int | None = None) -> dict[str, Any]:
+    """Return the workspace's rolling-accuracy + confidence-drift +
+    modal-outcome rollup over the trailing ``window_days`` window.
+
+    ``window_days`` defaults to the service's 30-day window; values
+    above the 90-day cap raise ``foresight.invalid_window`` which we
+    collapse to ``{ok: False, error: 'foresight.invalid_window', ...}``.
+
+    Shape on success: ``{"ok": True, "workspace_id": ...,
+    "window_days": N, "rolling_accuracy": {...},
+    "confidence_drift": {...}, "modal_outcome_distribution": [...],
+    "generated_at": iso}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.get_aggregate_rollup(ctx, window_days=window_days)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
+async def get_insights_for_agent() -> dict[str, Any]:
+    """Return the workspace's Insights panel — narrative rows the
+    five-rule synthesizer (or the v1.0 LLM synthesizer, depending on
+    workspace config) emits over the same window the aggregate uses.
+
+    Empty workspaces collapse to ``items=[]`` — the synthesizer yields
+    no rows when none of the patterns can fire, so the agent should
+    treat an empty list as "nothing notable yet", not a 404.
+
+    Shape on success: ``{"ok": True, "items": [...], "generated_at":
+    iso, ...}``.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import service as foresight_service
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_service.get_insights(ctx)
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
 __all__ = [
     "NO_WORKSPACE_ERROR",
     "NO_WORKSPACE_MESSAGE",
     "delete_scenario_for_agent",
+    "get_aggregate_for_agent",
+    "get_insights_for_agent",
     "get_run_for_agent",
     "get_scenario_for_agent",
+    "list_projected_decisions_for_agent",
     "list_runs_for_agent",
     "list_scenarios_for_agent",
     "run_scenario_for_agent",
