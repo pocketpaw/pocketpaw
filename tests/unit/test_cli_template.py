@@ -835,6 +835,65 @@ class TestInstallSubcommand:
         )
         assert rc == 1
 
+    def test_install_unsigned_bundle_with_verify_key_fails_closed(self, tmp_path: Path) -> None:
+        """When --verify-key is supplied AND the bundle is unsigned (or the
+        signature doesn't match), the install must fail-closed. Explicit
+        --verify-key is an assertion that the bundle is signed by that key;
+        if we can't satisfy it, refuse to install. Smoke-finding fix for
+        pocketpaw#1283."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+
+        bundle = self._make_bundle(tmp_path)  # unsigned
+        verify_key_file = tmp_path / "verify.key"
+        pub = Ed25519PrivateKey.generate().public_key().public_bytes_raw()
+        verify_key_file.write_bytes(pub)
+
+        rc, out = _capture(
+            run_template_cmd,
+            subaction="install",
+            file1=str(bundle),
+            destination=str(tmp_path / "installed"),
+            verify_key_path=str(verify_key_file),
+        )
+        assert rc == 1, f"expected fail-closed exit 1, got {rc}; out={out!r}"
+
+
+class TestArgKeyResolutionRegression:
+    """Regression guard for the smoke-finding ``--key`` drop bug.
+
+    ``_resolve_subargs`` used to unconditionally reset ``args.key = None``
+    after argparse parsed ``--key <file>``. Effect: ``pocketpaw template
+    publish --key ed25519.seed`` silently wrote an UNSIGNED bundle. Fixed
+    by removing the unconditional reset; the ``config`` branch still
+    sets ``args.key`` from positional subargs when needed.
+    """
+
+    def test_template_publish_key_flag_survives_resolve_subargs(self) -> None:
+        from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+        parser = _build_parser()
+        args = parser.parse_args(["template", "publish", "/tmp/some.yaml", "--key", "/tmp/key.bin"])
+        assert args.key == "/tmp/key.bin"
+        _resolve_subargs(args)
+        assert args.key == "/tmp/key.bin", (
+            f"--key was dropped by _resolve_subargs; got {args.key!r}"
+        )
+
+    def test_config_set_positional_key_still_works(self) -> None:
+        """Sibling check: the config command's positional key/value path
+        must still populate args.key from subargs[1]. This is the case
+        the original reset was trying to cover."""
+        from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+        parser = _build_parser()
+        args = parser.parse_args(["config", "set", "POCKETPAW_FOO", "bar"])
+        _resolve_subargs(args)
+        assert args.subaction == "set"
+        assert args.key == "POCKETPAW_FOO"
+        assert args.value == "bar"
+
 
 # ===========================================================================
 # pocketpaw template upgrade <slug-or-bundle>

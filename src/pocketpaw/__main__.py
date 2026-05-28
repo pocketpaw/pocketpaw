@@ -451,7 +451,12 @@ def _resolve_subargs(args) -> None:
     subargs = args.subargs or []
     args.subaction = None
     args.query = None
-    args.key = None
+    # NB: do NOT reset args.key here. ``--key`` is an argparse flag used by
+    # ``template publish`` to point at an Ed25519 signing key file; argparse
+    # already populates it (default=None). The ``config`` branch below
+    # overwrites it from positional subargs[1] when that command is used.
+    # Unconditionally resetting here silently dropped the signing key —
+    # see the smoke-test finding for pocketpaw#1283.
     args.value = None
     args.file1 = None
     args.file2 = None

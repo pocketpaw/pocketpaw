@@ -909,6 +909,15 @@ def _run_install(
         elif result.signature_verified is False:
             print_warn("bundle is unsigned or signature did not match the supplied verify key")
         # signature_verified is None -> no verify key supplied; stay quiet
+
+    # Fail-closed when the operator explicitly supplied --verify-key but the
+    # bundle either lacks a signature or carries one that doesn't match the
+    # key. An explicit verify-key is an assertion ("this bundle should be
+    # signed by THIS key") — if we can't satisfy it, the install should not
+    # silently succeed. Without --verify-key, signature_verified is None
+    # and we stay exit 0 (hash-trust install).
+    if verify_key is not None and result.signature_verified is False:
+        return 1
     return 0
 
 

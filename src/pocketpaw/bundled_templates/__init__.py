@@ -93,6 +93,14 @@ from pocketpaw.bundled_templates.bulk_executor import (
     RowExecution,
     plan_bulk_execution,
 )
+from pocketpaw.bundled_templates.bundler import (
+    BundleError,
+    InstallResult,
+    TemplateDiff,
+    compute_template_diff,
+    pack_template,
+    unpack_template,
+)
 from pocketpaw.bundled_templates.cel_runtime import (
     CelEvaluationError,
     collect_free_identifiers,
@@ -157,6 +165,7 @@ __all__ = [
     "BulkApprovalRequest",
     "BulkExecutionError",
     "BulkPlan",
+    "BundleError",
     "CelEvaluationError",
     "ColumnDef",
     "ConfirmDef",
@@ -166,6 +175,7 @@ __all__ = [
     "FabricResolver",
     "FabricValidationError",
     "IdentifierResolver",
+    "InstallResult",
     "InstinctDecision",
     "InstinctResolutionError",
     "InstinctRule",
@@ -181,6 +191,7 @@ __all__ = [
     "SavedView",
     "StateBinding",
     "SweepResult",
+    "TemplateDiff",
     "TemplateIdentifierResolver",
     "TemplateInstallResult",
     "TemplateValidationError",
@@ -189,11 +200,14 @@ __all__ = [
     "TriggerDef",
     "collect_free_identifiers",
     "compile_template",
+    "compute_template_diff",
     "evaluate_cel",
     "install_bundled_templates",
     "load_template",
+    "pack_template",
     "plan_bulk_execution",
     "resolve_instinct",
     "sweep_temporal_triggers",
+    "unpack_template",
     "validate_template_with_registry",
 ]

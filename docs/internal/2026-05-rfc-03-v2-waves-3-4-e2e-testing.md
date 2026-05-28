@@ -153,8 +153,11 @@ cp /tmp/rfc03-e2e/kanban-board-1.0.0.template.tar.gz /tmp/rfc03-e2e/tampered.tar
 printf 'X' | dd of=/tmp/rfc03-e2e/tampered.tar.gz bs=1 seek=200 count=1 conv=notrunc 2>/dev/null
 uv run pocketpaw template install /tmp/rfc03-e2e/tampered.tar.gz --dest /tmp/rfc03-e2e/tampered_install
 echo exit=$?
-# Expected: [FAIL] hash mismatch
-# exit 1
+# Expected: [FAIL] with a rejection message — exit 1.
+# Corrupting a byte at offset 200 typically lands inside the gzip frame,
+# so unpack fails earlier with a zlib error rather than the inner-hash
+# mismatch. Both are correct rejections (refuses to install a corrupt
+# bundle); the exact error string depends on which byte you flip.
 ```
 
 ### 3.4 Sign + verify round-trip (Ed25519)
@@ -185,25 +188,42 @@ echo exit=$?
 
 ### 3.5 Upgrade with destructive-diff prompt
 
+The bundled `kanban-board` template ships with no `outcomes` or `actions`, so
+dropping a section there only exercises the non-destructive path. To trigger
+the destructive prompt, start from the lease-renewal v2 fixture (which has
+real outcomes + actions + instinct rules) and drop one.
+
 ```bash
-# Modify the installed copy + republish to simulate an upgrade
-cp -r /tmp/rfc03-e2e/installed/kanban-board /tmp/rfc03-e2e/v2-src
-# Remove an action (destructive change)
+# Stage the fixture as an installable directory + a tweaked v1.1.0 copy
+mkdir -p /tmp/rfc03-e2e/lease-src /tmp/rfc03-e2e/lease-v2-src
+cp tests/fixtures/templates/lease-renewal-v2.yaml /tmp/rfc03-e2e/lease-src/template.pocket.yaml
+cp tests/fixtures/templates/lease-renewal-v2.yaml /tmp/rfc03-e2e/lease-v2-src/template.pocket.yaml
+
+# Publish v1.0.0, install it, then prepare a destructive v1.1.0 (drops one outcome).
+uv run pocketpaw template publish /tmp/rfc03-e2e/lease-src/ \
+  --output /tmp/rfc03-e2e/lease-bundle/ --unsigned
+uv run pocketpaw template install \
+  /tmp/rfc03-e2e/lease-bundle/lease-renewal-v1-1.0.0.template.tar.gz \
+  --dest /tmp/rfc03-e2e/lease-installed/
+
 python3 -c "
 import yaml
-p = '/tmp/rfc03-e2e/v2-src/template.pocket.yaml'
+p = '/tmp/rfc03-e2e/lease-v2-src/template.pocket.yaml'
 data = yaml.safe_load(open(p).read())
-# Bump version + drop an outcome to make a destructive diff
 data['version'] = '1.1.0'
-data['outcomes'] = [o for o in data.get('outcomes', []) if o]
+# Destructive: drop one outcome from the catalog.
+data['outcomes'] = data.get('outcomes', [])[:-1]
 open(p, 'w').write(yaml.safe_dump(data, sort_keys=False))
 "
-uv run pocketpaw template publish /tmp/rfc03-e2e/v2-src/ --output /tmp/rfc03-e2e/v2-bundle/ --unsigned
+uv run pocketpaw template publish /tmp/rfc03-e2e/lease-v2-src/ \
+  --output /tmp/rfc03-e2e/lease-v2-bundle/ --unsigned
 
-# Upgrade — should prompt because of removed outcomes (if any). With --no-prompt + destructive → exit 2.
-uv run pocketpaw template upgrade /tmp/rfc03-e2e/v2-bundle/kanban-board-1.1.0.template.tar.gz \
+# --no-prompt + destructive → exit 2.
+uv run pocketpaw template upgrade \
+  /tmp/rfc03-e2e/lease-v2-bundle/lease-renewal-v1-1.1.0.template.tar.gz \
   --no-prompt 2>&1 || echo "exit=$?"
-# Either exit 0 (no destructive diff) or exit 2 (destructive without --yes)
+# Expected: structured diff lists the removed outcome with destructive=true,
+# the upgrade refuses, exit=2.
 ```
 
 ## §4 — Pocket creation with `template_slug`
@@ -424,6 +444,9 @@ from pocketpaw.bundled_templates import (
     validate_template_with_registry, NullFabricRegistry, JSONFileFabricRegistry,
     pack_template, unpack_template,
 )
+# Note: pack_template / unpack_template were re-exported from the package
+# __init__ in the smoke-finding follow-up; they originally lived only at
+# pocketpaw.bundled_templates.bundler.
 
 # 1. Load + validate
 template = PocketTemplate.model_validate(yaml.safe_load(open("tests/fixtures/templates/lease-renewal-v2.yaml").read()))
