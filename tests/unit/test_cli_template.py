@@ -650,3 +650,315 @@ def test_argparse_template_compile_yaml_flag() -> None:
     assert args.subaction == "compile"
     assert args.file1 == str(_TODO_V2)
     assert getattr(args, "yaml", False) is True
+
+
+# ===========================================================================
+# pocketpaw template publish <file-or-dir>
+#
+# Wave 4a — content-addressed bundles, Ed25519 signatures, local-only
+# (no Registry server). The CLI just dispatches to
+# ``pocketpaw.bundled_templates.bundler.pack_template``.
+# ===========================================================================
+
+
+def _bundler_minimal_v2_dict() -> dict:
+    """Local copy of the bundler-test fixture — keeps the two test files
+    independent (so reordering or skipping one doesn't break the other)."""
+    return {
+        "schema_version": "2",
+        "name": "demo-pocket",
+        "version": "1.0.0",
+        "pattern": "app",
+        "vertical": "productivity",
+        "display_name": "Demo Pocket",
+        "description": "A minimal template used only by publish/install/upgrade tests.",
+        "shape": "data-grid",
+        "icon": "list",
+        "color": "#7c9c63",
+        "state": {
+            "entity_type": "Task",
+            "columns": [
+                {"field": "title", "widget": "text"},
+                {"field": "status", "widget": "badge"},
+            ],
+        },
+        "actions": [],
+        "connectors": [],
+        "skill_refs": [],
+    }
+
+
+def _write_publishable_dir(root: Path, data: dict, slug: str = "demo-pocket") -> Path:
+    source = root / slug
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "template.pocket.yaml").write_text(
+        yaml.safe_dump(data, sort_keys=False), encoding="utf-8"
+    )
+    return source
+
+
+class TestPublishSubcommand:
+    def test_publish_directory_writes_bundle(self, tmp_path: Path) -> None:
+        source = _write_publishable_dir(tmp_path, _bundler_minimal_v2_dict())
+        rc, out = _capture(
+            run_template_cmd,
+            subaction="publish",
+            file1=str(source),
+            output_path=str(tmp_path / "dist"),
+        )
+        assert rc == 0, out
+        bundle = tmp_path / "dist" / "demo-pocket-1.0.0.template.tar.gz"
+        assert bundle.exists()
+        assert str(bundle) in out
+
+    def test_publish_yaml_file_writes_bundle(self, tmp_path: Path) -> None:
+        source = _write_publishable_dir(tmp_path, _bundler_minimal_v2_dict())
+        yaml_file = source / "template.pocket.yaml"
+        rc, out = _capture(
+            run_template_cmd,
+            subaction="publish",
+            file1=str(yaml_file),
+            output_path=str(tmp_path / "dist"),
+        )
+        assert rc == 0, out
+        assert (tmp_path / "dist" / "demo-pocket-1.0.0.template.tar.gz").exists()
+
+    def test_publish_invalid_template_exits_one(self, tmp_path: Path) -> None:
+        bad = _bundler_minimal_v2_dict()
+        del bad["version"]
+        source = _write_publishable_dir(tmp_path, bad)
+        rc, _out = _capture(
+            run_template_cmd,
+            subaction="publish",
+            file1=str(source),
+            output_path=str(tmp_path / "dist"),
+        )
+        assert rc == 1
+
+    def test_publish_missing_file_exits_one(self, tmp_path: Path) -> None:
+        rc, _out = _capture(
+            run_template_cmd,
+            subaction="publish",
+            file1=str(tmp_path / "nope"),
+            output_path=str(tmp_path / "dist"),
+        )
+        assert rc == 1
+
+
+# ===========================================================================
+# pocketpaw template install <bundle.tar.gz>
+# ===========================================================================
+
+
+class TestInstallSubcommand:
+    def _make_bundle(self, tmp_path: Path) -> Path:
+        from pocketpaw.bundled_templates.bundler import pack_template
+
+        source = _write_publishable_dir(tmp_path, _bundler_minimal_v2_dict())
+        return pack_template(source, output_path=tmp_path / "dist")
+
+    def test_install_unpacks_into_destination(self, tmp_path: Path) -> None:
+        bundle = self._make_bundle(tmp_path)
+        dest = tmp_path / "installed"
+        rc, out = _capture(
+            run_template_cmd,
+            subaction="install",
+            file1=str(bundle),
+            destination=str(dest),
+        )
+        assert rc == 0, out
+        assert (dest / "demo-pocket" / "template.pocket.yaml").exists()
+        assert (dest / "demo-pocket" / "manifest.json").exists()
+
+    def test_install_rejects_tampered_bundle(self, tmp_path: Path) -> None:
+        import tarfile as _tar
+
+        bundle = self._make_bundle(tmp_path)
+        tampered_dir = tmp_path / "tampered"
+        tampered_dir.mkdir()
+        with _tar.open(bundle, "r:gz") as tar:
+            tar.extractall(tampered_dir, filter="data")
+        (tampered_dir / "template.pocket.yaml").write_text(
+            "schema_version: '2'\nname: nope\n", encoding="utf-8"
+        )
+        tampered_bundle = tmp_path / "tampered.tar.gz"
+        with _tar.open(tampered_bundle, "w:gz") as tar:
+            for path in sorted(tampered_dir.rglob("*")):
+                if path.is_file():
+                    tar.add(path, arcname=str(path.relative_to(tampered_dir)))
+
+        rc, _out = _capture(
+            run_template_cmd,
+            subaction="install",
+            file1=str(tampered_bundle),
+            destination=str(tmp_path / "installed"),
+        )
+        assert rc == 1
+
+    def test_install_missing_bundle_exits_one(self, tmp_path: Path) -> None:
+        rc, _out = _capture(
+            run_template_cmd,
+            subaction="install",
+            file1=str(tmp_path / "missing.tar.gz"),
+            destination=str(tmp_path / "installed"),
+        )
+        assert rc == 1
+
+
+# ===========================================================================
+# pocketpaw template upgrade <slug-or-bundle>
+# ===========================================================================
+
+
+class TestUpgradeSubcommand:
+    def _install_v1(self, tmp_path: Path) -> Path:
+        """Pack and install a v1 template, return the destination root."""
+        from pocketpaw.bundled_templates.bundler import (
+            pack_template,
+            unpack_template,
+        )
+
+        source = _write_publishable_dir(tmp_path / "src1", _bundler_minimal_v2_dict())
+        bundle = pack_template(source, output_path=tmp_path / "dist1")
+        dest = tmp_path / "installed"
+        unpack_template(bundle, dest)
+        return dest
+
+    def _make_v2_bundle_with_added_outcome(self, tmp_path: Path) -> Path:
+        """Pack a non-destructive upgrade (adds an outcome)."""
+        from pocketpaw.bundled_templates.bundler import pack_template
+
+        data = _bundler_minimal_v2_dict()
+        data["version"] = "1.1.0"
+        data["actions"] = [
+            {
+                "name": "do_it",
+                "label": "Do it",
+                "kind": "single-row",
+                "instinct_policy": "auto",
+                "outcomes_emitted": ["finished"],
+            }
+        ]
+        data["outcomes"] = ["finished"]
+        source = _write_publishable_dir(tmp_path / "src2", data)
+        return pack_template(source, output_path=tmp_path / "dist2")
+
+    def _make_v2_bundle_destructive(self, tmp_path: Path) -> Path:
+        """Pack a destructive upgrade — adds an action, then upgrade to a
+        version that REMOVES it. We use a two-step setup."""
+        from pocketpaw.bundled_templates.bundler import pack_template
+
+        data = _bundler_minimal_v2_dict()
+        data["version"] = "2.0.0"
+        # Original installed copy will be re-installed first to have an action;
+        # this bundle removes it.
+        source = _write_publishable_dir(tmp_path / "src3", data)
+        return pack_template(source, output_path=tmp_path / "dist3")
+
+    def test_upgrade_non_destructive_applies(self, tmp_path: Path) -> None:
+        dest = self._install_v1(tmp_path)
+        bundle = self._make_v2_bundle_with_added_outcome(tmp_path)
+        rc, out = _capture(
+            run_template_cmd,
+            subaction="upgrade",
+            file1=str(bundle),
+            destination=str(dest),
+            no_prompt=True,
+        )
+        assert rc == 0, out
+        new_yaml = yaml.safe_load(
+            (dest / "demo-pocket" / "template.pocket.yaml").read_text(encoding="utf-8")
+        )
+        assert new_yaml["version"] == "1.1.0"
+
+    def test_upgrade_destructive_without_prompt_exits_two(self, tmp_path: Path) -> None:
+        """An upgrade that removes an action without --no-prompt would
+        prompt; in non-interactive mode the contract is exit 2."""
+        from pocketpaw.bundled_templates.bundler import pack_template, unpack_template
+
+        # Install a copy WITH an action first
+        data_with_action = _bundler_minimal_v2_dict()
+        data_with_action["actions"] = [
+            {
+                "name": "kill_me",
+                "label": "Kill me",
+                "kind": "single-row",
+                "instinct_policy": "auto",
+            }
+        ]
+        source = _write_publishable_dir(tmp_path / "src_a", data_with_action)
+        bundle_a = pack_template(source, output_path=tmp_path / "dist_a")
+        dest = tmp_path / "installed"
+        unpack_template(bundle_a, dest)
+
+        # Now create a NEW bundle that removes the action — destructive
+        data_clean = _bundler_minimal_v2_dict()
+        data_clean["version"] = "2.0.0"
+        source_b = _write_publishable_dir(tmp_path / "src_b", data_clean)
+        bundle_b = pack_template(source_b, output_path=tmp_path / "dist_b")
+
+        rc, out = _capture(
+            run_template_cmd,
+            subaction="upgrade",
+            file1=str(bundle_b),
+            destination=str(dest),
+            no_prompt=True,
+        )
+        assert rc == 2, f"expected exit 2 on destructive --no-prompt; got {rc}: {out}"
+        # Original still in place
+        yaml_now = yaml.safe_load(
+            (dest / "demo-pocket" / "template.pocket.yaml").read_text(encoding="utf-8")
+        )
+        assert yaml_now["actions"], "destructive upgrade must not apply under --no-prompt"
+
+
+def test_argparse_template_publish_subcommand(tmp_path: Path) -> None:
+    """``pocketpaw template publish <file>`` resolves through argparse."""
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    args, unknown = parser.parse_known_args(["template", "publish", str(_TODO_V2)])
+    if unknown:
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
+    _resolve_subargs(args)
+    assert args.command == "template"
+    assert args.subaction == "publish"
+    assert args.file1 == str(_TODO_V2)
+
+
+def test_argparse_template_install_subcommand(tmp_path: Path) -> None:
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    bundle = "demo-1.0.0.template.tar.gz"
+    args, unknown = parser.parse_known_args(["template", "install", bundle])
+    if unknown:
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
+    _resolve_subargs(args)
+    assert args.subaction == "install"
+    assert args.file1 == bundle
+
+
+def test_argparse_template_upgrade_subcommand(tmp_path: Path) -> None:
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    args, unknown = parser.parse_known_args(["template", "upgrade", "demo-pocket"])
+    if unknown:
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
+    _resolve_subargs(args)
+    assert args.subaction == "upgrade"
+    assert args.file1 == "demo-pocket"
+
+
+def test_argparse_template_no_prompt_flag(tmp_path: Path) -> None:
+    """The new ``--no-prompt`` flag parses at the top level."""
+    from pocketpaw.__main__ import _build_parser, _resolve_subargs
+
+    parser = _build_parser()
+    args, unknown = parser.parse_known_args(["template", "upgrade", "--no-prompt", "demo-pocket"])
+    if unknown:
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
+    _resolve_subargs(args)
+    assert args.subaction == "upgrade"
+    assert getattr(args, "no_prompt", False) is True
