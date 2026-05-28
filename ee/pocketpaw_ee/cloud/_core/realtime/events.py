@@ -15,6 +15,15 @@
 #   fan-out completes. Carries the dispatch summary (counts + optional
 #   batch approval id) so downstream listeners (audit, analytics) can
 #   key off a single event per dispatch call.
+# Updated: 2026-05-28 (feat/wave-3c-outcomes) — added ``OutcomeEmitted``
+#   (type="pocket.outcome_emitted"), emitted by
+#   ``pockets.outcomes_emitter.emit_outcomes`` for EACH name declared in
+#   an action's ``outcomes_emitted[]`` after a successful write. RFC 03
+#   v2's template-driven outcomes catalog is distinct from M2b.2's
+#   binding-driven ``PocketOutcomeEvent``: the template-level emit fires
+#   per declared catalog event (multiple per action allowed), the M2b.2
+#   binding-level emit fires the single ``binding.outcome`` name. Both
+#   coexist on the bus under different EVENT_TYPE strings.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -538,3 +547,35 @@ class InstinctApprovalRejected(Event):
 @dataclass
 class BulkActionDispatched(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.bulk_action.dispatched"
+
+
+# Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write
+# action's ``run_action`` returns ``ok:true`` on the HTTP 2xx success
+# path AND the action's ``outcomes_emitted[]`` declares one or more
+# names. One event per declared name (bulk emits per row). Feeds the
+# downstream Outcomes meter (out of scope for Wave 3c — bus emit is
+# the seam).
+#
+# Payload (``data``):
+#   event_name             — the declared outcome name (str), one of
+#                            ``actions[].outcomes_emitted``.
+#   workspace_id           — tenancy.
+#   pocket_id              — the pocket the action ran on.
+#   action_name            — the action that fired.
+#   row_id                 — the stable row identifier (empty when the
+#                            action does not bind to a row, e.g. a
+#                            page-level action).
+#   row_context_snapshot   — the row dict at emit time. Captures
+#                            payload state for downstream audit.
+#   emitted_at             — ISO-8601 UTC timestamp.
+#   template_name          — pocket template name (provenance for the
+#                            outcomes catalog).
+#   template_version       — pocket template version.
+#
+# Distinct from ``PocketOutcomeEvent`` (M2b.2): the M2b.2 event is
+# binding-driven (single ``binding.outcome`` field), this event is
+# template-driven (per-action ``outcomes_emitted[]`` list — multiple
+# emits per action allowed). Both coexist.
+@dataclass
+class OutcomeEmitted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.outcome_emitted"

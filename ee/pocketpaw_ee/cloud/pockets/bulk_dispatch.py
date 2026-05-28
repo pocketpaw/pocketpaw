@@ -30,10 +30,18 @@
 #   a follow-up PR will iterate ``row_data`` and re-run each row with
 #   ``from_instinct=True``. THIS module ships the persistence so the
 #   re-run code has data to work with.
-# * Outcome event emission per executed row (Wave 3c).
 # * UI for triggering bulk runs (paw-enterprise concern).
 # * Per-agent concurrency / rate-limiting (production hardening).
 # * Idempotency keys for retried bulk batches.
+#
+# Wave 3c addition (2026-05-28): outcome event emission per executed row
+# is wired here, NOT via the per-row ``run_action`` invocation. The bulk
+# path deliberately does NOT thread ``template`` into ``run_action`` (the
+# planner already ran the gate; re-threading would re-evaluate it and
+# risk a duplicate approval row). The outcome emitter therefore runs
+# from the bulk wrapper directly, once per row whose ``run_action``
+# returned ``ok:true``. Rows that fail (``ok:false``) skip emission, the
+# same invariant the executor's success-path emit enforces.
 #
 # Import-linter posture: this module is Beanie-PURE. It calls
 # ``instinct_approvals.service.create_approval`` (a permitted writer)
@@ -218,10 +226,16 @@ async def dispatch_bulk(
     # cause an idempotent re-eval at minimum and a race-created duplicate
     # approval at worst. Wave 3a wired the gate at the per-row entry; the
     # bulk path runs the gate ONCE per row via the planner instead.
+    #
+    # ``template`` IS still passed through to ``_fire_executions`` for
+    # the Wave 3c outcome emission — the bulk path emits outcomes per
+    # successful row directly (NOT through ``run_action``'s template-
+    # gated emit) because ``run_action`` here doesn't see the template.
     executions: list[ExecutionResult] = await _fire_executions(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
+        template=template,
         plan=plan,
         pocket=pocket,
         action_executor=action_executor,
@@ -324,6 +338,7 @@ async def _fire_executions(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
+    template: PocketTemplate,
     plan: Any,
     pocket: dict,
     action_executor: Any,
@@ -393,6 +408,9 @@ async def _fire_executions(
     raw_path = raw_action.get("path") or "/"
     raw_params = raw_action.get("params") if isinstance(raw_action.get("params"), dict) else {}
 
+    # Lazy import to keep this module's static import graph minimal.
+    from pocketpaw_ee.cloud.pockets import outcomes_emitter
+
     results: list[ExecutionResult] = []
     for row in plan.executions:
         result_dict = await action_executor.run_action(
@@ -412,6 +430,32 @@ async def _fire_executions(
             # the planner already produced the verdict. See the comment
             # block in ``dispatch_bulk`` for the reasoning.
         )
+        # ── Wave 3c: per-row outcome emission ──────────────────────
+        # Each row that returns ``ok:true`` fires its declared
+        # outcomes. Failure / ``ok:false`` rows skip emission (same
+        # invariant the executor's success-path emit enforces).
+        # Emission is wrapped so a hiccup in the bus / audit layer
+        # never breaks the bulk dispatch return value.
+        if result_dict.get("ok"):
+            try:
+                await outcomes_emitter.emit_outcomes(
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    pocket_id=pocket_id,
+                    template=template,
+                    action_name=plan.action_name,
+                    row_id=row.row_id,
+                    row_context=dict(row.row),
+                )
+            except Exception:  # noqa: BLE001 — emission must not break dispatch
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "outcome emission failed for action=%s row=%s",
+                    plan.action_name,
+                    row.row_id,
+                    exc_info=True,
+                )
         results.append(
             ExecutionResult(
                 row_id=row.row_id,
