@@ -24,6 +24,13 @@
 #   per declared catalog event (multiple per action allowed), the M2b.2
 #   binding-level emit fires the single ``binding.outcome`` name. Both
 #   coexist on the bus under different EVENT_TYPE strings.
+# Updated: 2026-05-28 (feat/wave-3d-temporal-scheduler) — added
+#   ``TemporalSweepCompleted`` (type="pocket.temporal_sweep_completed"),
+#   emitted once per per-pocket sweep tick by
+#   ``temporal_sweeps.service.upsert_state``. Carries the sweep tally
+#   (edges_fired / blocked / escalated / errors / sweep_duration_ms) so
+#   audit + dashboards listen to one event per dispatch rather than N
+#   per-row events, the same shape ``BulkActionDispatched`` uses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -579,3 +586,29 @@ class BulkActionDispatched(Event):
 @dataclass
 class OutcomeEmitted(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.outcome_emitted"
+
+
+# Temporal sweep completion event (RFC 03 v2 Wave 3d).
+# Fired by ``temporal_sweeps.service.upsert_state`` once per (workspace,
+# pocket) sweep, with the sweep's tally: edges_fired (how many rising-
+# edge transitions dispatched), blocked (how many Instinct blocked),
+# escalated (how many escalated to approval), errors (per-row eval
+# failures), and the wall-clock duration. Downstream listeners (audit,
+# dashboards) key off this single event instead of N per-row events,
+# the same way ``BulkActionDispatched`` is one event per dispatch.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id        — tenancy.
+#   pocket_id           — pocket whose temporal triggers were swept.
+#   edges_fired         — count of rising edges that dispatched.
+#   blocked             — count of edges whose Instinct gate returned
+#                         BLOCK (action_executor never called).
+#   escalated           — count of edges whose Instinct gate returned
+#                         ESCALATE_APPROVAL (one InstinctApproval row
+#                         persisted per row).
+#   errors              — count of per-row CEL eval failures.
+#   sweep_duration_ms   — wall-clock ms the sweep ran for. Forensic /
+#                         dashboard signal; long sweeps deserve a look.
+@dataclass
+class TemporalSweepCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.temporal_sweep_completed"

@@ -16,6 +16,14 @@ pocket interval-refresh scheduler in ``on_startup`` and cancels it in
 scope inside ``cloud.pockets.refresh_scheduler``; it is self-gated on
 ``POCKETPAW_POCKET_REFRESH_SCHEDULER_ENABLED`` so the start call is a
 no-op unless a deployment opts in.
+
+Updated: 2026-05-28 (feat/wave-3d-temporal-scheduler) — ``CloudLifecycleHook``
+also starts the RFC 03 v2 temporal trigger sweep scheduler in
+``on_startup`` and cancels it in ``on_shutdown``. The scheduler lives at
+``cloud._core.temporal_scheduler`` and is self-gated on
+``POCKETPAW_TEMPORAL_SWEEP_ENABLED`` (default OFF) so pytest runs and
+multi-replica deployments don't double-fire. Cadence is configurable via
+``POCKETPAW_TEMPORAL_SWEEP_INTERVAL_SECONDS`` (default 3600, floor 60).
 """
 
 from __future__ import annotations
@@ -194,6 +202,24 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler start failed: %s", exc)
 
+        # RFC 03 v2 temporal trigger sweep scheduler (Wave 3d). A single
+        # asyncio task that periodically sweeps every pocket with a
+        # ``type: temporal`` trigger, detects rising edges, and
+        # dispatches the trigger's action through the Wave 3a gate.
+        # Self-gated on ``POCKETPAW_TEMPORAL_SWEEP_ENABLED`` (default
+        # OFF — a pytest run never spawns it; a multi-replica deploy
+        # runs it on exactly one replica). The task lives at module
+        # scope inside the scheduler so this no-``app`` lifecycle hook
+        # can still own it.
+        try:
+            from pocketpaw_ee.cloud._core.temporal_scheduler import (
+                start_scheduler as start_temporal_scheduler,
+            )
+
+            await start_temporal_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Temporal sweep scheduler start failed: %s", exc)
+
         # Stale-run sweeper. Marks queued/running ChatRunDocs whose backend
         # process died as ``interrupted`` so clients render a retry instead
         # of subscribing to a stream nobody is writing to. One pass at boot
@@ -227,6 +253,15 @@ class CloudLifecycleHook:
             await stop_scheduler()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pocket interval-refresh scheduler stop failed: %s", exc)
+
+        try:
+            from pocketpaw_ee.cloud._core.temporal_scheduler import (
+                stop_scheduler as stop_temporal_scheduler,
+            )
+
+            await stop_temporal_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Temporal sweep scheduler stop failed: %s", exc)
 
         try:
             await stop_run_sweeper()
