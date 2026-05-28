@@ -608,7 +608,9 @@ def build_foresight_server() -> tuple[str, Any] | None:
             "workspace config (wire shape unchanged). Empty workspaces yield "
             "``items=[]`` — the synthesizer fires no rows when no patterns "
             "match. Surface ``severity`` (info | warning | critical) verbatim "
-            "so the user sees the same colour the dashboard does."
+            "so the user sees the same colour the dashboard does. Response "
+            "carries `synth_source` ('pattern' | 'llm') so the agent can "
+            "disclose which synthesizer produced the rows."
         ),
         {
             "type": "object",
