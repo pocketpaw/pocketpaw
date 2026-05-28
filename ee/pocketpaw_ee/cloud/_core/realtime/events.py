@@ -9,6 +9,12 @@
 #   RFC 03 v2 template-level approval queue. Emitted by
 #   ``instinct_approvals.service`` on every state-mutating function per
 #   the EE cloud rule 9 (``emit on every write``).
+# Updated: 2026-05-28 (feat/wave-3b-action-pipeline) — added
+#   ``BulkActionDispatched`` (type="pocket.bulk_action.dispatched"),
+#   emitted by ``pockets.service.dispatch_bulk_action`` after a bulk
+#   fan-out completes. Carries the dispatch summary (counts + optional
+#   batch approval id) so downstream listeners (audit, analytics) can
+#   key off a single event per dispatch call.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -518,3 +524,17 @@ class InstinctApprovalApproved(Event):
 @dataclass
 class InstinctApprovalRejected(Event):
     EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
+
+
+# Bulk action dispatch (RFC 03 v2 / Wave 3b). Emitted by
+# ``pockets.service.dispatch_bulk_action`` after a fan-out call resolves —
+# one event per dispatch, regardless of how many rows were processed.
+# ``data`` carries: ``workspace_id``, ``pocket_id``, ``action_name``,
+# ``total_rows``, ``executed`` (count of EXECUTE / NOTIFY_AND_EXECUTE
+# rows fired), ``blocked`` (count of BLOCK rows), ``approval_needed``
+# (count of rows that escalated into the batch approval), and an
+# optional ``batch_approval_id`` (str | None) — set when ``approval_needed``
+# is non-zero.
+@dataclass
+class BulkActionDispatched(Event):
+    EVENT_TYPE: ClassVar[str] = "pocket.bulk_action.dispatched"

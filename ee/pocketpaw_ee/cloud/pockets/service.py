@@ -3093,6 +3093,90 @@ async def rotate_webhook_secret(workspace_id: str, user_id: str, pocket_id: str)
     return doc.webhook_secret
 
 
+# ---------------------------------------------------------------------------
+# Bulk action dispatch (RFC 03 v2 / Wave 3b)
+# ---------------------------------------------------------------------------
+
+
+async def dispatch_bulk_action(
+    workspace_id: str,
+    user_id: str,
+    body: dict | Any,
+    *,
+    template: Any | None = None,
+    now: Any | None = None,
+) -> dict:
+    """Fan out a ``kind: bulk`` action across the rows in ``body.rows``.
+
+    Service-level entry point that:
+
+    1. Re-validates the body via ``DispatchBulkRequest.model_validate``
+       (rule 6 — internal callers re-parse the schema).
+    2. Delegates the orchestration to ``bulk_dispatch.dispatch_bulk``,
+       which calls the pure OSS planner, persists ONE batch approval
+       if any row escalated, and fires each ready-to-run row through
+       ``action_executor.run_action``.
+    3. Emits a ``BulkActionDispatched`` event with the dispatch
+       summary (counts + optional batch approval id) — rule 9.
+
+    ``template`` is threaded through for internal callers (the future
+    paw-enterprise UI fetches the template from its pocket and passes
+    it here). Library tests pass it explicitly. A missing template
+    raises ``ValidationError`` — we cannot fan out a bulk action
+    without the template-level rules to evaluate.
+
+    Returns a wire dict (rule 5) so the router can construct
+    ``BulkDispatchResponse`` directly.
+    """
+    from pocketpaw_ee.cloud._core.realtime.events import BulkActionDispatched
+    from pocketpaw_ee.cloud.pockets import bulk_dispatch
+    from pocketpaw_ee.cloud.pockets.dto import DispatchBulkRequest
+
+    body = DispatchBulkRequest.model_validate(body)
+
+    if template is None:
+        raise ValidationError(
+            "bulk_action.template_required",
+            "dispatch_bulk_action requires the resolved PocketTemplate",
+        )
+
+    result = await bulk_dispatch.dispatch_bulk(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=body.pocket_id,
+        template=template,
+        action_name=body.action_name,
+        selected_rows=body.rows,
+        now=now,
+    )
+
+    # Wire-friendly dict — frozen Pydantic models serialize cleanly.
+    wire = result.model_dump()
+    # Emit ONE event per dispatch call. Per EE rule 9, every state-
+    # mutating service function emits its event on the way out. The
+    # batch approval write inside ``dispatch_bulk`` already fired its
+    # own ``InstinctApprovalCreated``; this event summarises the bulk
+    # call so downstream audit / analytics listeners can key off a
+    # single event per dispatch.
+    approval_needed = len(result.approval_row_ids)
+    await emit(
+        BulkActionDispatched(
+            data={
+                "workspace_id": workspace_id,
+                "pocket_id": body.pocket_id,
+                "action_name": body.action_name,
+                "total_rows": result.total_rows,
+                "executed": len(result.executions),
+                "blocked": len(result.blocked),
+                "approval_needed": approval_needed,
+                "batch_approval_id": result.batch_approval_id,
+                "actor": user_id,
+            }
+        )
+    )
+    return wire
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -3123,6 +3207,7 @@ __all__ = [
     "create_from_ripple_spec",
     "create_pocket_and_session",
     "delete",
+    "dispatch_bulk_action",
     "generate_share_link",
     "get",
     "get_pocket_backend",
