@@ -10,6 +10,13 @@ rippleSpec subtree for a single tile (e.g. a ``chart`` node with a real
 ``data`` series). The home grid renders a ``widgets[]`` entry from its
 ``spec``; the home agent's ``add_widget`` MCP tool populates it. Native
 widgets leave it ``None``.
+Updated: 2026-05-28 (feat/wave-3e-template-slug) — added the optional
+``Pocket.template_slug`` field: the kebab-case slug of the RFC 03 v2
+:class:`PocketTemplate` this pocket was instantiated from. Optional so
+legacy pockets (no template) read back as ``None`` without a Mongo
+migration. ``pockets.service.resolve_pocket_template`` reads this field
+and feeds the resolved template to the bulk dispatcher + temporal
+scheduler.
 """
 
 from __future__ import annotations
@@ -74,6 +81,13 @@ class Pocket(TimestampedDocument):
     # No pattern restriction — frontend sends data, deep-work, etc.
     # ``type="home"`` marks the per-user pocket that backs the home page.
     type: str = "custom"
+    # Optional RFC 03 v2 template slug — the bundled-template this pocket
+    # was instantiated from (e.g. ``"todo-task-tracker"``). When set,
+    # ``pockets.service.resolve_pocket_template`` loads + validates the
+    # template so the bulk dispatcher / temporal scheduler can fan out
+    # actions against it. Legacy pockets (no template) read as ``None``
+    # — no Mongo migration needed for adding an optional field.
+    template_slug: str | None = None
     icon: str = ""
     color: str = ""
     owner: str

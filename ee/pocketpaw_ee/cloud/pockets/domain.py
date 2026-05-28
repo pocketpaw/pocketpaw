@@ -4,6 +4,11 @@ Pure-Python frozen dataclasses. ``pockets/service.py`` owns the
 conversion between these and the Beanie ``Pocket`` / ``Widget``
 documents — domain objects are what every consumer outside the service
 sees on read paths.
+
+Updated: 2026-05-28 (feat/wave-3e-template-slug) — added optional
+``Pocket.template_slug`` so the wire layer + bulk dispatcher can read
+the RFC 03 v2 template the pocket was instantiated from. ``None`` for
+legacy pockets.
 """
 
 from __future__ import annotations
@@ -86,6 +91,10 @@ class Pocket:
     shared_with: tuple[str, ...]
     tool_specs: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     project_id: str | None = None
+    # RFC 03 v2 (Wave 3e) — the bundled-template slug the pocket was
+    # instantiated from (e.g. ``"todo-task-tracker"``). ``None`` for
+    # cold-generated or legacy pockets.
+    template_slug: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

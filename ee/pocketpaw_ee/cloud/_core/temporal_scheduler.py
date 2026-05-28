@@ -36,11 +36,11 @@
 #   * Cron syntax for non-1h intervals. Env var is a simple integer
 #     second count.
 #   * Manual "sweep now" route. Future PR.
-#   * Per-pocket template resolution. The pocket Beanie doc has no
-#     ``template_slug`` field yet (same gap the bulk dispatcher has);
-#     the scheduler skips pockets for which no template can be
-#     resolved. The architectural seam is here for the day the
-#     resolver lands.
+#   * (Closed 2026-05-28, Wave 3e) Per-pocket template resolution now
+#     goes through ``pockets.service.resolve_pocket_template`` — the
+#     scheduler still skips pockets without a resolvable template, but
+#     pockets that DO carry a ``template_slug`` get a real
+#     ``PocketTemplate`` here.
 #
 # Hard constraint: this module imports the ``temporal_dispatcher`` +
 # ``pockets.service`` (for the workspace + pocket scan). It MUST NOT
@@ -120,25 +120,25 @@ async def _resolve_pocket_template_and_rows(
 ) -> tuple[object | None, list[dict]]:
     """Return ``(template, rows)`` for one pocket, or ``(None, [])``.
 
-    v0: the Pocket Beanie doc has no ``template_slug`` field, so the
-    scheduler can't resolve a ``PocketTemplate`` for an arbitrary
-    pocket. The scan helper accepts this — a pocket whose template
-    can't be resolved is a no-op for the sweeper.
-
-    The architectural seam is here for the day a template resolver
-    lands (likely as a service-level helper on
-    ``pockets.service.get_pocket_template``). When that ships, this
-    function returns ``(template, [])`` (rows still empty in v0) and
-    the dispatcher does real work.
+    Wave 3e — wired through ``pockets.service.resolve_pocket_template``.
+    A pocket with no ``template_slug``, an unknown slug, or a stale
+    on-disk template still returns ``(None, [])`` so the scheduler's
+    skip-cheaply behaviour for unresolvable pockets is unchanged. A
+    pocket that DOES carry a resolvable slug returns
+    ``(template, [])`` — ``rows`` stays empty in v0 (the OSS sweeper
+    is row-driven; a future PR will wire a materialized row source
+    like the data-sources cache or Fabric).
 
     Returning ``(None, [])`` short-circuits the dispatcher's early-
     return path: it does no row work, persists no state, and emits
     no completion event.
     """
-    # No template resolution available in v0. Tests that want to
-    # exercise the dispatch path patch this function directly.
-    _ = workspace_id, pocket_id
-    return None, []
+    # Lazy import — keep the scheduler's static import graph minimal
+    # for the import-linter contract (this module is Beanie-pure).
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    template = await pockets_service.resolve_pocket_template(workspace_id, pocket_id)
+    return template, []
 
 
 async def run_one_pass() -> int:
