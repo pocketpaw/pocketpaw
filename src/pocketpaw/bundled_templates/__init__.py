@@ -20,6 +20,10 @@
 # Instinct 5-step composer (``resolve_instinct``, ``InstinctDecision``,
 # ``InstinctResolutionError``). PR 2d builds the pure decision
 # function; the EE runtime invokes it per row and dispatches.
+# Modified 2026-05-28 (feat/rfc-03-v2-temporal): re-exports the
+# temporal trigger sweeper (``sweep_temporal_triggers``, ``SweepResult``,
+# ``TemporalRisingEdge``, ``TemporalSweepError``). PR 2f is the pure
+# OSS-side decision function the EE sweeper calls on each tick.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -97,6 +101,12 @@ from pocketpaw.bundled_templates.schema import (
     StateBinding,
     TriggerDef,
 )
+from pocketpaw.bundled_templates.temporal_sweeper import (
+    SweepResult,
+    TemporalRisingEdge,
+    TemporalSweepError,
+    sweep_temporal_triggers,
+)
 
 __all__ = [
     "ActionDef",
@@ -116,13 +126,17 @@ __all__ = [
     "PocketTemplate",
     "SavedView",
     "StateBinding",
+    "SweepResult",
     "TemplateIdentifierResolver",
     "TemplateInstallResult",
     "TemplateValidationError",
+    "TemporalRisingEdge",
+    "TemporalSweepError",
     "TriggerDef",
     "compile_template",
     "evaluate_cel",
     "install_bundled_templates",
     "load_template",
     "resolve_instinct",
+    "sweep_temporal_triggers",
 ]
