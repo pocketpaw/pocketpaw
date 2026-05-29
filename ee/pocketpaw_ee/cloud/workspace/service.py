@@ -234,6 +234,16 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
 
     await _add_member(str(doc.id), ctx.user_id, role="owner", set_active=True)
 
+    # Seed the default "pocketpaw" agent so the new workspace has a DM target
+    # immediately. Idempotent; non-fatal — the boot-time back-fill is the
+    # safety net if this raises. Mirrors auth/core.py:seed_workspace().
+    from pocketpaw_ee.cloud.agents import service as agents_service
+
+    try:
+        await agents_service.seed_default_agent(str(doc.id), ctx.user_id)
+    except Exception as exc:
+        logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
+
     await emit(
         WorkspaceMemberAdded(
             data={"workspace_id": str(doc.id), "user_id": ctx.user_id, "role": "owner"}
