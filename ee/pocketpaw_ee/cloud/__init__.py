@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
+    Mounts the Foresight router at ``/api/v1/foresight/*`` alongside the
+    other domain routers. Routes delegate to ``ee.cloud.foresight.service``
+    which owns Beanie writes against the ``foresight_runs`` collection.
+    The engine itself (vendored OASIS substrate + CAMEL adapter) lives at
+    ``ee/pocketpaw_ee/foresight/``; the cloud surface is a thin shell over
+    persistence + event emission.
 Modified: 2026-05-24 (#1202) — Registers ``register_audit_bridge`` during
     ``mount_cloud`` so every ``security.audit.AuditLogger.log()`` call from
     EE cloud writers (pocket actions, source runs, skills config, …) is
@@ -141,6 +148,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Eager-import ripple_sources so @register decorators run at startup
     # rather than on first pocket get(). Keeps ``_REGISTRY`` populated
     # for any startup self-checks that inspect it.
+    # Same pattern for meeting providers: importing the package runs the
+    # provider's `base.register(...)` side effect so the MeetingProvider
+    # registry is populated before the first /api/v1/meetings request.
+    import pocketpaw_ee.cloud.meetings.providers.livekit  # noqa: F401
+    import pocketpaw_ee.cloud.meetings.providers.recall  # noqa: F401
     import pocketpaw_ee.cloud.ripple_sources  # noqa: F401
 
     # Import and mount domain routers
@@ -152,7 +164,12 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.license import get_license_info
+    from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
+        router as meetings_webhooks_router,
+    )
+    from pocketpaw_ee.cloud.meetings.router import router as meetings_router
     from pocketpaw_ee.cloud.planner.router import router as planner_router
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
@@ -178,8 +195,17 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
+    # Foresight — RFC 08 scenario-run surface (POST /foresight/scenarios,
+    # GET /foresight/runs[/{id}]). Mounted alongside cycles so the
+    # Mission Control rail can launch / inspect simulation runs from the
+    # same surface as live cycles. Persistence lands in the
+    # ``foresight_runs`` Mongo collection via ``ee.cloud.foresight.service``.
+    app.include_router(foresight_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
+    app.include_router(meetings_router, prefix="/api/v1")
+    # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
+    app.include_router(meetings_webhooks_router, prefix="/api/v1")
 
     # Phase 1 PR-8: register the connector bus listener so local-mode
     # CLI actions (firebase, gcp, …) get picked up by the in-process
@@ -528,6 +554,21 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.tasks.listeners import register_task_listeners
 
     register_task_listeners()
+
+    # Meeting bridges — meeting.* events → in-app notifications, and
+    # calendar.event.created → auto-create a recall-source Meeting when
+    # the calendar event carries a Zoom/Meet URL. Source-agnostic on
+    # the notification side (LiveKit meetings get notifications too when
+    # they emit meeting.scheduled).
+    from pocketpaw_ee.cloud.meetings.bridges.calendar import (
+        register_meeting_calendar_listeners,
+    )
+    from pocketpaw_ee.cloud.meetings.bridges.notifications import (
+        register_meeting_notification_listeners,
+    )
+
+    register_meeting_notification_listeners()
+    register_meeting_calendar_listeners()
 
     # In-process daily-snapshot scheduler — opt-in via env var.
     #

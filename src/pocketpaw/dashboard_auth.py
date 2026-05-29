@@ -445,6 +445,7 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/api/v1/openapi.json",
         "/webhook/whatsapp",
         "/webhook/inbound",
+        "/api/v1/meetings/webhooks/",
         "/api/whatsapp/qr",
         "/api/v1/whatsapp/qr",
         "/oauth/callback",

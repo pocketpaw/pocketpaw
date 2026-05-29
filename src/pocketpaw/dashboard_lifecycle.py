@@ -407,6 +407,45 @@ async def startup_event(
     except Exception as e:
         logger.warning("Failed to ensure built-in PawKits: %s", e)
 
+    # In-process MCP servers (entry-point `pocketpaw.mcp_servers`). These
+    # are the claude_agent_sdk SDK servers contributed by extension wheels
+    # — tasks, planner, pocket, pocket_specialist, composio, meetings, …
+    # An empty list almost always means `pocketpaw-ee` wasn't installed
+    # (so no entry points registered), which silently disables every cloud
+    # MCP tool on the agent. Loud-log it once at boot.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        names: list[str] = []
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            try:
+                built = provider.build_server()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("In-process MCP provider %r failed to build: %s", provider, exc)
+                continue
+            if built is None:
+                # None means the provider chose to soft-disable itself —
+                # could be claude_agent_sdk missing, an unconfigured
+                # integration (composio with no toolkits), or no work to do.
+                # Distinguishing them is the provider's job; we just note it.
+                logger.info(
+                    "In-process MCP provider %s soft-disabled (build_server returned None)",
+                    type(provider).__name__,
+                )
+                continue
+            names.append(built[0])
+        if names:
+            logger.info("In-process MCP servers registered: %s", sorted(names))
+        else:
+            logger.warning(
+                "No in-process MCP servers registered — cloud tools (meetings, "
+                "tasks, pockets, composio, …) will be unavailable to the agent. "
+                "Install pocketpaw-ee (uv sync --dev --group ee) and the "
+                "claude_agent_sdk."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to enumerate in-process MCP providers: %s", exc)
+
     # Wire MCP OAuth broadcast + auto-start enabled MCP servers (non-blocking)
     try:
         from pocketpaw.mcp.manager import get_mcp_manager, set_ws_broadcast

@@ -44,7 +44,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # How long to wait (seconds) after the last participant leaves before ending
-_CALL_END_GRACE_SECONDS = 30
+_CALL_END_GRACE_SECONDS = 5
+
+# How often (seconds) to poll room state
+_MONITOR_POLL_INTERVAL = 5
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +78,7 @@ class CallMeetingAgent:
         # Accumulated transcript segments
         self.transcript_segments: list[dict[str, Any]] = []
         self._participant_identities: set[str] = set()
+        self._has_ever_had_humans: bool = False
         self._call_start_time: float = 0.0
 
         # Tasks
@@ -497,31 +501,54 @@ class CallMeetingAgent:
         while self._running:
             try:
                 info = await get_room_info(self.group_id)
-                participant_count = info["participant_count"] if info else 0
 
-                # Track participant identities from room info
+                # Count human participants only (exclude the call-bot agent
+                # itself, since the agent is always in the room as long as
+                # this subprocess is alive).
+                human_count = 0
                 if info and info.get("participants"):
                     for p in info["participants"]:
                         pid = p.get("identity", "")
                         if pid and pid != "call-bot":
+                            human_count += 1
                             self._participant_identities.add(pid)
+                            self._has_ever_had_humans = True
 
-                if participant_count == 0:
-                    if empty_since is None:
+                if human_count == 0:
+                    # Don't start the empty-room timer until at least one
+                    # human has ever been in the room.  Without this guard,
+                    # the 5-second grace period begins as soon as the bot
+                    # joins (before participants connect), which can destroy
+                    # the room while people are still joining.
+                    if not self._has_ever_had_humans:
+                        empty_since = None
+                    elif empty_since is None:
                         empty_since = time.time()
                         logger.info(
-                            "Room %s is empty, will end in %ds",
+                            "Room %s has no human participants, will end in %ds",
                             self.room_name,
                             _CALL_END_GRACE_SECONDS,
                         )
                     elif time.time() - empty_since > _CALL_END_GRACE_SECONDS:
                         logger.info(
-                            "Room %s has been empty for %ds, ending call",
+                            "Room %s has been empty of humans for %ds, ending call",
                             self.room_name,
                             _CALL_END_GRACE_SECONDS,
                         )
-                        await self.stop()
-                        # Clean up the LiveKit room
+                        # Disconnect the agent from the room, then clean up.
+                        # NOTE: do NOT call self.stop() here — stop() cancels
+                        # _monitor_task, which is the current task, causing a
+                        # self-cancellation that prevents _cleanup_room() from
+                        # ever running.
+                        await self._disconnect_rtc()
+                        self._running = False
+                        if self._transcribe_task:
+                            self._transcribe_task.cancel()
+                            try:
+                                await self._transcribe_task
+                            except asyncio.CancelledError:
+                                pass
+                        await self._finalize_notes()
                         await self._cleanup_room()
                         return
                 else:
@@ -534,10 +561,10 @@ class CallMeetingAgent:
                     exc,
                 )
                 if "not found" in str(exc).lower() or "does not exist" in str(exc).lower():
-                    await self.stop()
+                    self._running = False
                     return
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(_MONITOR_POLL_INTERVAL)
 
     async def _cleanup_room(self) -> None:
         """Delete the LiveKit room after a natural call end."""
@@ -575,6 +602,7 @@ class CallMeetingAgent:
 
     async def _finalize_notes(self) -> None:
         """Generate and post meeting notes to the group."""
+        logger.warning("Agent: _finalize_notes called")
         duration = int(time.time() - self._call_start_time)
 
         # Collect participant names from segments + room info
@@ -589,10 +617,16 @@ class CallMeetingAgent:
 
             transcript_text = "\n".join(transcript_lines)
 
-            # Generate AI summary
-            summary, action_items = await self._generate_summary(
-                transcript_text,
-            )
+            # Generate AI summary — non-fatal if it fails; notes still post
+            # with raw transcript (or a fallback message).
+            try:
+                summary, action_items = await self._generate_summary(
+                    transcript_text,
+                )
+            except Exception:
+                logger.exception("Agent: AI summarization failed — posting notes without summary")
+                summary = "AI summarization unavailable."
+                action_items = ["Transcript captured but summarization failed."]
         else:
             transcript_text = ""
             summary = "Call ended with no speech detected."
@@ -601,15 +635,26 @@ class CallMeetingAgent:
         # Merge participant identities from room tracking + transcript
         all_participants = list(self._participant_identities | speakers_seen)
 
-        from pocketpaw_ee.cloud.livekit.service import post_meeting_notes_to_group
-
-        await post_meeting_notes_to_group(
-            group_id=self.group_id,
-            transcript=transcript_text,
-            summary=summary,
-            action_items=action_items,
-            participants=all_participants,
-            duration_seconds=duration,
+        # ── Emit notes payload to stdout ──
+        # Instead of calling post_meeting_notes_to_group directly (which
+        # requires Beanie/MongoDB initialized in this subprocess), we write
+        # the payload as a JSON line to stdout.  The parent process reads
+        # this line and handles the DB write where Beanie is already set up.
+        payload = json.dumps(
+            {
+                "type": "meeting_notes",
+                "group_id": self.group_id,
+                "transcript": transcript_text,
+                "summary": summary,
+                "action_items": action_items,
+                "participants": all_participants,
+                "duration_seconds": duration,
+            }
+        )
+        print(payload, flush=True)
+        logger.info(
+            "Agent: meeting notes payload written to stdout for group %s",
+            self.group_id,
         )
 
     # ------------------------------------------------------------------
@@ -764,6 +809,7 @@ if __name__ == "__main__":
     supervisord, Docker).
     """
     import argparse
+    import signal as _signal
 
     parser = argparse.ArgumentParser(description="LiveKit Meeting Notes Agent")
     parser.add_argument("--group", required=True, help="Group ID to post notes to")
@@ -784,8 +830,50 @@ if __name__ == "__main__":
             bot_token=args.token,
             livekit_url=args.url,
         )
+
+        # ── SIGTERM handler ──
+        # The parent server sends SIGTERM when end_room() is called manually.
+        # Gracefully finalise notes so the meeting summary is posted before
+        # we exit.  The parent (end_room) handles room deletion; we must NOT
+        # call _cleanup_room here or it races with the parent's DeleteRoomRequest.
+        _sigterm_received = False
+
+        def _on_sigterm() -> None:
+            nonlocal _sigterm_received
+            _sigterm_received = True
+            logger.info("Agent: SIGTERM received — finalising notes")
+
+        _signal.signal(_signal.SIGTERM, lambda sig, frame: _on_sigterm())
+
         await agent.start()
         while agent._running:
+            if _sigterm_received:
+                logger.info("Agent: SIGTERM — finalising notes")
+                agent._running = False
+                await agent._disconnect_rtc()
+                if agent._transcribe_task:
+                    agent._transcribe_task.cancel()
+                    try:
+                        await agent._transcribe_task
+                    except asyncio.CancelledError:
+                        pass
+                await agent._finalize_notes()
+                # Do NOT clean up the room here — the parent process
+                # (end_room) handles room deletion after the agent exits.
+                # Calling _cleanup_room would race with the parent's
+                # DeleteRoomRequest.
+                break
+
             await asyncio.sleep(1)
+
+        # Wait for the monitor task (natural end) to finish its finalise
+        # + cleanup chain before exiting. Without this, asyncio.run()
+        # cancels pending tasks the moment _main() returns, which kills
+        # the monitor task mid-_finalize_notes().
+        if agent._monitor_task and not agent._monitor_task.done():
+            try:
+                await agent._monitor_task
+            except asyncio.CancelledError:
+                pass
 
     asyncio.run(_main())

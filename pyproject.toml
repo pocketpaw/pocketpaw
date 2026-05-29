@@ -385,6 +385,25 @@ only-include = ["src/pocketpaw"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Skip vendored third-party code. The OASIS fork at
+# ee/pocketpaw_ee/foresight/substrate/oasis/ is upstream code under
+# Apache-2.0; we treat it as a frozen snapshot and don't reformat it
+# (see substrate/oasis/README-FORK.md for the drift policy). Any
+# behavioural edits we make in future PRs carry a per-file
+# "Modified by PocketPaw" notice and can be linted then.
+extend-exclude = [
+    "ee/pocketpaw_ee/foresight/substrate/oasis",
+]
+
+[tool.mypy]
+# Same rationale as the ruff extend-exclude above. The vendored OASIS
+# fork at substrate/oasis/ carries upstream type-checking debt we
+# inherited (implicit Optionals, unannotated variables, narrow
+# subclass-vs-base mismatches). We don't fix upstream — see the drift
+# policy in substrate/oasis/README-FORK.md.
+exclude = [
+    "ee/pocketpaw_ee/foresight/substrate/oasis/.*",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
@@ -451,6 +470,20 @@ ee = ["pocketpaw-ee"]
 
 [tool.uv.sources]
 pocketpaw-ee = { path = "ee", editable = true }
+# RFC 08 PR 3 — Foresight CAMEL hard-dep promotion.
+#
+# camel-ai is required by pocketpaw-ee (the vendored OASIS fork at
+# ee/pocketpaw_ee/foresight/substrate/oasis/ imports from camel.agents,
+# camel.messages, camel.models, etc.). The QBTRIX fork at
+# pocketpaw/v01-relax-caps removes the psutil<6 cap that collides with
+# livekit-agents (an ee/ dep at psutil>=7). The source override is
+# duplicated in ee/pyproject.toml (which is the one uv reads when
+# resolving pocketpaw-ee's deps); keeping this entry here too means a
+# root-level `uv sync` honors the same pin if anyone ever depends on
+# camel-ai directly from the OSS side. See
+# ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for full
+# vendoring rationale and the psutil/openai cap audit.
+camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

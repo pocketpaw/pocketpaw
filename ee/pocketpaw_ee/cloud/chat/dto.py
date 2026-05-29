@@ -56,6 +56,7 @@ def message_to_wire_dict(m: Message, *, parent: Message | None = None) -> dict[s
         "group": m.group,
         "sender": m.sender,
         "senderType": m.sender_type,
+        "senderName": m.sender_name,
         "agent": m.agent,
         "content": m.content,
         "mentions": [

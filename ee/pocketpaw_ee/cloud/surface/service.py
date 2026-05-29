@@ -61,6 +61,9 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
     from pocketpaw_ee.cloud.surface.handlers import (
         chat as chat_handler,
     )
+    from pocketpaw_ee.cloud.surface.handlers import (
+        foresight as foresight_handler,
+    )
 
     return {
         SurfaceKind.HOME: home.build_preamble,
@@ -79,6 +82,7 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
         SurfaceKind.QUICKASK: quickask.build_preamble,
         SurfaceKind.SETTINGS: settings.build_preamble,
         SurfaceKind.SIDEPANEL: sidepanel.build_preamble,
+        SurfaceKind.FORESIGHT: foresight_handler.build_preamble,
         SurfaceKind.GENERIC: generic.build_preamble,
     }
 
@@ -108,6 +112,9 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         agent_id=req.agent_id,
         file_id=req.file_id,
         route_path=req.route_path,
+        run_id=req.run_id,
+        scenario_id=req.scenario_id,
+        panel=req.panel,
     )
 
 

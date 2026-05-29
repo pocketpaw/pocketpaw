@@ -42,6 +42,7 @@ class SurfaceKind(StrEnum):
     QUICKASK = "quickask"
     SETTINGS = "settings"
     SIDEPANEL = "sidepanel"
+    FORESIGHT = "foresight"  # /foresight + /foresight/scenarios/* routes
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
@@ -61,6 +62,15 @@ class SurfaceMeta:
     agent_id: str | None = None
     file_id: str | None = None
     route_path: str | None = None
+    # Foresight surface hints — set by the paw-enterprise sidebar's
+    # surface stamp on /foresight routes. ``run_id`` is the active
+    # ScenarioRun being viewed; ``scenario_id`` is the custom scenario
+    # being edited; ``panel`` is the active rail tab ("scenarios" |
+    # "live" | "results" | "aggregate" | "insights" | "editor"). All
+    # optional — the handler degrades gracefully when absent.
+    run_id: str | None = None
+    scenario_id: str | None = None
+    panel: str | None = None
 
 
 @dataclass(frozen=True)

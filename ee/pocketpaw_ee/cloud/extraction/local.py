@@ -25,7 +25,7 @@ class LocalExtractor:
     requires_network = False
 
     async def extract(self, path: Path, mime: str) -> ExtractionResult:
-        text = await _extract_text(path)
+        text = await _extract_text(path, mime)
         return ExtractionResult(
             text=text,
             metadata={"path": str(path), "mime": mime},
@@ -33,15 +33,19 @@ class LocalExtractor:
         )
 
 
-async def _extract_text(path: Path) -> str:
-    """Extract text from PDF, DOCX, image, or fall back to raw read.
+async def _extract_text(path: Path, mime: str = "") -> str:
+    """Extract text from PDF, DOCX, image, VTT, or fall back to raw read.
 
-    Matches the previous `_extract_file` implementation byte-for-byte so the
-    output of `LocalExtractor.extract(...).text` is identical to what callers
-    used to get from `await _extract_file(file_path)`.
+    Routing precedence: explicit ``mime`` first, then file suffix. Mime
+    wins because callers sometimes hand us a temp file whose extension
+    doesn't match the source (e.g. a transcript stored under storage_key
+    ``planner-XXXX.txt`` is really WebVTT — only the mime tells us to
+    strip cue tags). Suffix is the fallback for legacy callers and for
+    files where mime isn't reliably set (uploaded blobs).
     """
     file_path = str(path)
     suffix = path.suffix.lower()
+    norm_mime = (mime or "").split(";", 1)[0].strip().lower()
 
     if suffix == ".pdf":
         try:
@@ -72,4 +76,67 @@ async def _extract_text(path: Path) -> str:
                 "pytesseract not installed — run: pip install pytesseract Pillow"
             ) from exc
 
+    if suffix == ".vtt" or norm_mime == "text/vtt":
+        return _vtt_to_plain(path.read_text(encoding="utf-8", errors="replace"))
+
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _vtt_to_plain(vtt: str) -> str:
+    """Strip a WebVTT blob down to readable speech for KB indexing.
+
+    Keeps speaker-prefixed lines (``Speaker: text``) and drops the
+    ``WEBVTT`` header, ``NOTE`` blocks, cue identifiers, and
+    ``00:00:01.234 --> 00:00:05.678`` timestamp lines. Cue tags
+    (``<v Speaker>...</v>``) are unwrapped into ``Speaker: ...``.
+    Adjacent same-speaker turns are collapsed.
+
+    The raw VTT remains the on-disk artifact for download; only the KB
+    extraction sees the cleaned text. Embeddings + keyword search then
+    score against speech instead of timestamps + markup noise.
+    """
+    import re
+
+    cue_re = re.compile(r"<v\s+([^>]+)>([\s\S]*?)</v>", re.MULTILINE)
+    timestamp_re = re.compile(r"^\s*\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*")
+
+    lines: list[str] = []
+    last_speaker: str | None = None
+    in_note = False
+    for raw in vtt.splitlines():
+        line = raw.strip()
+        if not line:
+            in_note = False
+            continue
+        if line == "WEBVTT" or line.startswith("WEBVTT "):
+            continue
+        if line.startswith("NOTE"):
+            in_note = True
+            continue
+        if in_note:
+            continue
+        if timestamp_re.match(line):
+            continue
+
+        m = cue_re.search(line)
+        if m:
+            speaker = m.group(1).strip()
+            text = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+            if not text:
+                continue
+            if speaker == last_speaker and lines:
+                lines[-1] = f"{lines[-1]} {text}"
+            else:
+                lines.append(f"{speaker}: {text}")
+                last_speaker = speaker
+            continue
+
+        # Plain line (no cue tag) — likely a single-speaker VTT. Keep it,
+        # but drop bare cue identifiers (a single integer or short slug
+        # on its own line, which VTT uses to label cues).
+        if line.isdigit() or (len(line) <= 32 and "-" in line and " " not in line):
+            continue
+        lines.append(line)
+        last_speaker = None
+
+    return "\n".join(lines).strip()

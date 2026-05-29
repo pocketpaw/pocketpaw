@@ -188,6 +188,37 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Cloud chat-title listener registration failed: %s", exc)
 
+        # Start meeting reminder + auto-start background loop.
+        try:
+            from pocketpaw_ee.cloud.meetings.scheduling.reminders import start_reminder_loop
+
+            start_reminder_loop()
+            logger.info("Meeting reminder + auto-start loop started")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to start meeting reminder loop: %s", exc)
+
+        # Re-index meeting transcripts that were ingested under an older
+        # KB-extraction pipeline (pre-VTT-cleaner). Fire-and-forget, gated
+        # by per-row version markers so repeated boots are no-ops.
+        try:
+            import asyncio
+
+            from pocketpaw_ee.cloud.meetings.service import reindex_outdated_transcripts
+
+            async def _reindex_meeting_transcripts() -> None:
+                try:
+                    summary = await reindex_outdated_transcripts()
+                    if summary.get("republished"):
+                        logger.info(
+                            "Meeting transcript KB reindex complete: %s",
+                            summary,
+                        )
+                except Exception:
+                    logger.exception("meeting transcript reindex failed")
+
+            asyncio.create_task(_reindex_meeting_transcripts())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to schedule transcript reindex: %s", exc)
         # Pocket interval-refresh scheduler (RFC 04 M3). A single asyncio
         # task that periodically re-runs pocket data sources whose refresh
         # policy includes `"interval"`. Self-gated on
@@ -240,6 +271,17 @@ class CloudLifecycleHook:
             logger.warning("xproc consumer start failed: %s", exc)
 
     async def on_shutdown(self) -> None:
+        import logging
+
+        logger = logging.getLogger(__name__)
+        # Shut down the meeting APScheduler if it was started.
+        try:
+            from pocketpaw_ee.cloud.meetings.scheduling.reminders import shutdown_scheduler
+
+            await shutdown_scheduler()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Meeting scheduler shutdown error: %s", exc)
+
         # Most cloud teardown is handled inside mount_cloud's own shutdown
         # hook. The interval-refresh scheduler is owned by this lifecycle
         # hook (it was started in on_startup), so it is cancelled here so
@@ -347,6 +389,25 @@ class CloudTasksMcpProvider:
         return list(TASK_TOOL_IDS)
 
 
+class CloudMeetingsMcpProvider:
+    """`pocketpaw.mcp_servers` — the meetings in-process server.
+
+    Exposes schedule / list / cancel / search / find-transcript / send-bot
+    tools so the agent can run Zoom + Google Meet meetings (and dispatch a
+    Recall.ai recording bot) natively from chat.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.meetings import build_meetings_context_server
+
+        return build_meetings_context_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.meetings import MEETING_TOOL_IDS
+
+        return list(MEETING_TOOL_IDS)
+
+
 class CloudPlannerMcpProvider:
     """`pocketpaw.mcp_servers` — the cloud Planner in-process server."""
 
@@ -416,6 +477,31 @@ class CloudPocketSpecialistMcpProvider:
         from pocketpaw_ee.agent.pocket_specialist.mcp_tool import POCKET_SPECIALIST_TOOL_IDS
 
         return list(POCKET_SPECIALIST_TOOL_IDS)
+
+
+class CloudForesightMcpProvider:
+    """`pocketpaw.mcp_servers` — the cloud Foresight scenario CRUD + run server.
+
+    Closes the bug where the bundled ``foresight-create-sim`` skill told
+    the chat agent to call the loopback REST surface with
+    ``$WORKSPACE_ID`` / ``$USER_ID`` env vars the ``claude_agent_sdk``
+    backend never sets. The typed MCP tools close over the chat session's
+    workspace id (read from ``ee.cloud.chat.agent_service`` ContextVars)
+    so the agent literally cannot save to the wrong workspace.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.foresight import build_foresight_server
+
+            return build_foresight_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+
+        return list(FORESIGHT_TOOL_IDS)
 
 
 class CloudAgentExtension:

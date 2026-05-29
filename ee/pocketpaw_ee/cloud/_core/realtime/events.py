@@ -535,6 +535,159 @@ class PlanGapResolved(Event):
     EVENT_TYPE: ClassVar[str] = "plan.gap_resolved"
 
 
+# Calls — LiveKit group call lifecycle
+@dataclass
+class CallStarted(Event):
+    EVENT_TYPE: ClassVar[str] = "call.started"
+
+
+@dataclass
+class CallEnded(Event):
+    EVENT_TYPE: ClassVar[str] = "call.ended"
+
+
+# Meetings — scheduled group meeting lifecycle
+@dataclass
+class MeetingScheduled(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.scheduled"
+
+
+@dataclass
+class MeetingUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.updated"
+
+
+@dataclass
+class MeetingCancelled(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.cancelled"
+
+
+@dataclass
+class MeetingStarted(Event):
+    EVENT_TYPE: ClassVar[str] = "meeting.started"
+
+
+# Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a
+# scenario run document is first inserted (status="queued"); the engine
+# then ticks the run (in PR 7 it stays synchronous, in v1.0 it fans to a
+# background task) and fires either ``ForesightRunCompleted`` once the
+# run lands a wire-dict ``result`` or ``ForesightRunFailed`` if the
+# engine raises. Listeners use these to refresh the UI rail's Live +
+# Results panels (RFC §11.3 / §11.4) and, in v1.0, to seed the
+# calibration loop's prediction buffer (RFC §9.1).
+@dataclass
+class ForesightRunCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.created"
+
+
+@dataclass
+class ForesightRunCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.completed"
+
+
+@dataclass
+class ForesightRunFailed(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.run.failed"
+
+
+# Foresight backtests — RFC 08 §10 + §13.1 gate 7. A backtest is the
+# retroactive variant of a scenario run: it scores projected outcomes
+# against known actual outcomes pulled from the customer's historical
+# data and produces an accuracy summary that gates forward sims.
+# ``ForesightBacktestCreated`` fires when the backtest doc is inserted
+# (status="queued"); ``ForesightBacktestCompleted`` fires once the
+# aggregator's gate decision lands; ``ForesightBacktestFailed`` fires
+# when the engine raises. Listeners use these to refresh the UI's
+# Onboarding + Aggregate panels (RFC §10 + §11.4) and, when the
+# gate flips from closed to open, fire the
+# ``ForesightOnboardingUnlocked`` companion event so the chat agent's
+# onboarding skill can move the customer to the Scenarios panel.
+@dataclass
+class ForesightBacktestCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.created"
+
+
+@dataclass
+class ForesightBacktestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.completed"
+
+
+@dataclass
+class ForesightBacktestFailed(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.backtest.failed"
+
+
+@dataclass
+class ForesightOnboardingUnlocked(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.onboarding.unlocked"
+
+
+# Foresight per-workspace configuration — RFC 08 v1.0 PR 10. Fires when
+# an admin tightens the workspace's onboarding gate threshold via the
+# PUT /foresight/workspace/threshold endpoint, or resets it back to the
+# global default. Listeners can refresh the Aggregate / Onboarding panels
+# in the UI without polling the GET endpoint.
+@dataclass
+class ForesightThresholdUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.threshold.updated"
+
+
+# Foresight insights-synthesizer config — RFC 08 v1.0 (LLM insights PR).
+# Fires when an admin flips the workspace's synthesizer choice between
+# "pattern" (the v0.5 deterministic synthesizer) and "llm" (the v1.0
+# LLM-driven synthesizer with a hard fallback). Listeners can clear
+# any per-workspace LLM insight cache and refresh the Insights panel
+# without polling.
+@dataclass
+class ForesightInsightsConfigUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.insights_config.updated"
+
+
+# Foresight per-anchor projection fanout — RFC 08 §7.7 + PR 5. Fires
+# once per (anchor × tick) bucket as the engine ticks the run forward;
+# the UI's Live panel consumes these to render the projection timeline
+# without polling the GET /runs/{id}/projected-decisions endpoint.
+# v1.0's calibration loop will subscribe so each projection lands in
+# the prediction buffer (RFC §9.1) as it is minted, not at the end of
+# the run.
+@dataclass
+class ForesightProjectedDecisionEmitted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.projected_decision.emitted"
+
+
+# Foresight → Instinct approval loop — RFC 08 §8. Fires when a
+# ProjectedDecision opts into the Instinct queue (via the scenario's
+# ``route_to_instinct=true`` flag) and the cloud-side fan-out creates
+# one Instinct ``Action`` row. The proposal is EVIDENCE — the Instinct
+# policy that already gates the underlying real decision still owns
+# the predicate; approving the proposal acknowledges the forecast but
+# does NOT trigger any executing side-effect. Listeners use this event
+# to refresh the Tray feed without polling.
+@dataclass
+class ForesightInstinctProposalCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.instinct_proposal.created"
+
+
+# Foresight workspace-scoped custom scenarios — RFC 08 v1.0 wave 3.
+# Fires when an operator saves, edits, or deletes a custom scenario
+# YAML via the ``/api/v1/foresight/scenarios/custom`` surface. The
+# Scenarios panel uses these to refresh its list without polling; the
+# audit log subscribes for create/update/delete records.
+@dataclass
+class ForesightCustomScenarioCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.created"
+
+
+@dataclass
+class ForesightCustomScenarioUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.updated"
+
+
+@dataclass
+class ForesightCustomScenarioDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "foresight.custom_scenario.deleted"
+
+
 # Composio — per-user OAuth integrations (Gmail, Slack, GitHub, …)
 # verified via per-toolkit identity probes. ``ComposioConnectionVerified``
 # fires when a probe succeeds and the stored identity matches (or first
