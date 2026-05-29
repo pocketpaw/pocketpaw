@@ -41,6 +41,11 @@
 # ground-truth anchors the chat surface can't reliably produce. The chat
 # agent can answer "did we backtest yet?" / "what was the gate
 # decision?" / "are we unlocked?" without a curl fallback.
+#
+# 2026-05-29 update: added ``list_rehearsals_for_agent`` — the joined
+# scenarios-with-runs view that backs the v2 ``/foresight`` landing.
+# The chat surface uses it to answer "which rehearsals have I actually
+# run?" without an N+1 follow-up tool call per scenario.
 
 from __future__ import annotations
 
@@ -129,6 +134,42 @@ async def list_scenarios_for_agent(
     ctx = _build_request_context(workspace_id, user_id)
     try:
         response = await foresight_scenarios.list_custom_scenarios(
+            ctx, sub_type=sub_type, limit=limit, offset=offset
+        )
+    except CloudError as exc:
+        return _cloud_error_payload(exc)
+
+    payload = response.model_dump()
+    payload["ok"] = True
+    return payload
+
+
+async def list_rehearsals_for_agent(
+    limit: int = 20, offset: int = 0, sub_type: str | None = None
+) -> dict[str, Any]:
+    """List the workspace's rehearsals (custom scenarios + joined run
+    metadata) for the active stream.
+
+    Returns the same items as ``list_scenarios_for_agent`` plus a
+    ``run_count`` integer and an inline ``last_run`` summary per item
+    (id / status / ran_at / verdict_summary) so the chat agent can
+    answer "which rehearsals have I actually run?" without an N+1
+    follow-up tool call per scenario.
+
+    Shape on success: ``{"ok": True, "items": [...], "total": N,
+    "limit": int, "offset": int, "has_more": bool}``. Errors collapse to
+    the standard ``{"ok": False, "error", "message"}`` envelope.
+    """
+    workspace_id, user_id = _resolve_identity()
+    if not workspace_id or not user_id:
+        return _no_workspace_error()
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.foresight import scenarios as foresight_scenarios
+
+    ctx = _build_request_context(workspace_id, user_id)
+    try:
+        response = await foresight_scenarios.list_rehearsals(
             ctx, sub_type=sub_type, limit=limit, offset=offset
         )
     except CloudError as exc:

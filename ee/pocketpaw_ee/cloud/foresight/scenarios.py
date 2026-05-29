@@ -1,4 +1,22 @@
 # ee/pocketpaw_ee/cloud/foresight/scenarios.py
+# Modified: 2026-05-29 (feat/foresight-rehearsals-joined) — v2 landing
+# card hydration. Adds ``list_rehearsals(ctx, *, limit, offset, sub_type)``
+# — joins ``ForesightWorkspaceScenario`` (custom scenarios) with
+# ``ForesightRun`` (runs) so the v2 ``/foresight`` landing can render
+# ``run_count`` + a "last run was X" badge per scenario without N+1
+# fetches from the frontend.
+#
+# Strategy: two-read group (Option B) — list the scenarios page, then
+# fetch matching runs via ``request.custom_scenario_id`` ``$in`` query
+# scoped to the same workspace. Grouped client-side. Avoids Mongo
+# ``$lookup`` aggregation gymnastics; re-evaluate when page-size growth
+# pushes us past ~500 docs per page.
+#
+# Verdict summary derivation is best-effort: the engine's wire dict
+# carries ``result["modal_outcome"]`` (a dict when the sub-type is
+# Decision Forecast) at the top level or under ``result["aggregate"]``.
+# We stringify compactly when present; fall back to "Run complete" on
+# success and the persisted error message on failure.
 # Created: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC 08
 # v1.0 wave 3. Workspace-scoped custom scenario CRUD service.
 #
@@ -66,6 +84,12 @@ from pocketpaw_ee.cloud.foresight.dto import (
     CustomScenarioListResponse,
     CustomScenarioParsedMetaDto,
     CustomScenarioResponse,
+    RehearsalLastRun,
+    RehearsalListItem,
+    RehearsalListResponse,
+)
+from pocketpaw_ee.cloud.models.foresight_run import (
+    ForesightRun as _ForesightRunDoc,
 )
 from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario as _ForesightWorkspaceScenarioDoc,
@@ -591,6 +615,273 @@ async def load_workspace_scenario(workspace_id: str, scenario_id: str) -> Custom
     return _to_domain(doc)
 
 
+# ---------------------------------------------------------------------------
+# Rehearsals listing — joined view of custom scenarios + their runs.
+#
+# Why here (and not in ``service.py``): the rehearsal landing endpoint
+# is conceptually "list scenarios with run metadata", so the read drives
+# off the scenario collection (workspace-scenarios) and joins runs in.
+# ``scenarios.py`` already owns the workspace-scenarios reads; adding
+# the runs read here keeps the joined query in one module rather than
+# splitting it across ``service.py`` and ``scenarios.py``.
+#
+# Strategy notes:
+#   - Two-read group (Option B), not Mongo ``$lookup`` aggregation.
+#     v2 landing caps at 50 items per page; client-side group across
+#     50 scenario ids stays well under one millisecond.
+#   - Filter runs by ``request.custom_scenario_id`` (the scenario id is
+#     persisted INSIDE the run doc's ``request`` blob — see
+#     ``service.create_scenario_run`` where ``request=body.model_dump()``).
+#     The ``$in`` query is workspace-scoped so cross-tenant leakage
+#     can't happen even when scenario ids collide across tenants.
+#   - Verdict summary is best-effort. The engine wire dict shape varies
+#     across sub-types; we look at ``result["modal_outcome"]`` first
+#     (top-level, set by ``RunResult.as_wire_dict`` for Decision Forecast),
+#     then ``result["aggregate"]["modal_outcome"]`` (other sub-types).
+#     Fallbacks: "Run complete" on a successful run with no surfaced
+#     verdict, and the persisted error message on failure.
+# ---------------------------------------------------------------------------
+
+
+# Verdict summary cap — the wire field is capped at 120 chars; keep the
+# helper one ceiling lower so callers don't trip the DTO max_length.
+_VERDICT_SUMMARY_MAX: int = 120
+
+
+def _wire_run_status(raw_status: str) -> str:
+    """Normalize the persisted run status onto the v2 rehearsals
+    vocabulary (``queued`` | ``running`` | ``complete`` | ``failed``).
+
+    Defensive identity map — the ForesightRun doc's pattern already
+    constrains the persisted value to that set, but explicit handling
+    keeps the DTO Literal validator from crashing on a corrupt row.
+    """
+    if raw_status in ("queued", "running", "complete", "failed"):
+        return raw_status
+    # Collapse anything unexpected into ``running``; the UI's "in flight"
+    # state is the safest fallback for an unknown status (a misclassified
+    # ``complete`` would mislabel the verdict badge).
+    return "running"
+
+
+def _extract_modal_outcome_from_result(result: dict[str, Any] | None) -> Any:
+    """Return the raw ``modal_outcome`` value from a run's result blob, or
+    ``None`` when neither the top-level field nor the ``aggregate`` block
+    carries one.
+
+    Decision Forecast surfaces ``modal_outcome`` at the top level via
+    :meth:`pocketpaw_ee.foresight.scenarios.runner.RunResult.as_wire_dict`;
+    other sub-types nest it under ``aggregate``. The two read paths are
+    additive — try top-level first.
+    """
+    if not isinstance(result, dict):
+        return None
+    top = result.get("modal_outcome")
+    if top:
+        return top
+    aggregate = result.get("aggregate")
+    if isinstance(aggregate, dict):
+        return aggregate.get("modal_outcome")
+    return None
+
+
+def _format_verdict_summary(doc: _ForesightRunDoc) -> str | None:
+    """Build a short one-line verdict for a run, best-effort.
+
+    Rules:
+      - ``failed`` → the persisted ``error`` (truncated). Operator wants
+        to see WHY it failed, not "Run complete".
+      - ``running`` / ``queued`` → ``None``; the UI renders an in-flight
+        spinner from ``status`` instead.
+      - ``complete`` with a non-empty modal outcome → stringify it
+        compactly (``"approve"`` / ``"action=approve"`` / ``"approved 78%"``).
+      - ``complete`` with no surfaced verdict → ``"Run complete"``.
+
+    Truncation: caps at ``_VERDICT_SUMMARY_MAX - 1`` chars to leave room
+    for the ellipsis suffix.
+    """
+    status = _wire_run_status(doc.status)
+    if status == "failed":
+        # Take the first line of the error so the badge stays one row.
+        error_message = (doc.error or "Run failed").splitlines()[0]
+        if len(error_message) > _VERDICT_SUMMARY_MAX:
+            return error_message[: _VERDICT_SUMMARY_MAX - 1] + "…"
+        return error_message
+    if status in ("queued", "running"):
+        return None
+
+    modal = _extract_modal_outcome_from_result(doc.result)
+    if isinstance(modal, dict) and modal:
+        # Compact representation — keep keys deterministic so the UI
+        # doesn't get badge-text churn across re-fetches.
+        parts = [f"{k}={v}" for k, v in sorted(modal.items())]
+        text = ", ".join(parts)
+    elif isinstance(modal, str) and modal.strip():
+        text = modal.strip()
+    elif modal is not None and not isinstance(modal, dict | str):
+        text = str(modal)
+    else:
+        text = "Run complete"
+
+    if len(text) > _VERDICT_SUMMARY_MAX:
+        return text[: _VERDICT_SUMMARY_MAX - 1] + "…"
+    return text
+
+
+def _to_rehearsal_last_run(doc: _ForesightRunDoc) -> RehearsalLastRun:
+    """Map a :class:`ForesightRun` doc onto the inline
+    :class:`RehearsalLastRun` summary shape. ``ran_at`` is the run's
+    ``createdAt`` (when the operator kicked it off) — matches the
+    semantics of the cloud surface's other run lists.
+    """
+    return RehearsalLastRun(
+        id=str(doc.id),
+        status=_wire_run_status(doc.status),  # type: ignore[arg-type]
+        ran_at=iso_utc(doc.createdAt) or "",
+        verdict_summary=_format_verdict_summary(doc),
+    )
+
+
+def _to_rehearsal_list_item(
+    scenario: CustomScenario,
+    runs_for_scenario: list[_ForesightRunDoc],
+) -> RehearsalListItem:
+    """Build one ``RehearsalListItem`` from a scenario + the list of runs
+    that targeted it. ``runs_for_scenario`` is the runs grouped by
+    ``request.custom_scenario_id`` for this scenario; an empty list is
+    the "draft" state (``run_count=0``, ``last_run=None``).
+    """
+    last_run: RehearsalLastRun | None = None
+    if runs_for_scenario:
+        # Sort newest-first so the head is the most recent run; the
+        # caller already passes a workspace-scoped page so cross-tenant
+        # leakage can't happen via this list.
+        latest_doc = max(
+            runs_for_scenario,
+            key=lambda d: (d.createdAt, str(d.id)),
+        )
+        last_run = _to_rehearsal_last_run(latest_doc)
+
+    return RehearsalListItem(
+        id=scenario.id,
+        name=scenario.name,
+        sub_type=scenario.sub_type,  # type: ignore[arg-type]
+        description=scenario.description,
+        num_personas=scenario.parsed_meta.num_personas,
+        num_ticks=scenario.parsed_meta.num_ticks,
+        updated_at=iso_utc(scenario.updated_at) or "",
+        run_count=len(runs_for_scenario),
+        last_run=last_run,
+    )
+
+
+async def list_rehearsals(
+    ctx: RequestContext,
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    sub_type: str | None = None,
+) -> RehearsalListResponse:
+    """List the workspace's custom scenarios with joined run metadata.
+
+    Backs ``GET /api/v1/foresight/rehearsals`` — the v2 ``/foresight``
+    landing card hydration endpoint. Returns the same scenarios as
+    ``list_custom_scenarios`` plus ``run_count`` and an inline
+    ``last_run`` summary so the landing card can render its "draft vs.
+    ran" state badge without an N+1 client-side fetch.
+
+    Implementation strategy (Option B — two-read group):
+      1. Fetch the scenarios page (same query + sort as
+         ``list_custom_scenarios``: workspace + optional sub_type filter,
+         most-recently-edited first, capped at ``limit``).
+      2. Pull ALL runs in this workspace whose
+         ``request.custom_scenario_id`` matches one of the scenario ids
+         on the page. Single ``$in`` query; the workspace filter keeps
+         the scan tenant-scoped (cloud rule #7).
+      3. Group runs by scenario id client-side, count + pick the most
+         recent per group.
+
+    Why Option B over a Mongo ``$lookup`` aggregation: at v2 page sizes
+    (≤100), client-side grouping over a single query batch is faster to
+    reason about and easier to debug than a multi-stage pipeline. The
+    bottleneck would be the unindexed ``request.custom_scenario_id``
+    filter; for the in-process Mongo mock + the workspace cardinality
+    we ship at v1.0, the cost is acceptable. Re-evaluate once a
+    workspace accumulates more than ~500 active scenarios.
+
+    Pagination / tenancy / validation rules match
+    :func:`list_custom_scenarios` so the v2 landing's data hook can
+    reuse the cursor logic without divergence.
+    """
+    workspace_id = _require_workspace(ctx)
+    if limit < 1:
+        raise ValidationError("foresight.invalid_limit", "limit must be >= 1")
+    if limit > 100:
+        limit = 100
+    if offset < 0:
+        raise ValidationError("foresight.invalid_offset", "offset must be >= 0")
+
+    # Step 1: scenarios page. Same query shape as ``list_custom_scenarios``
+    # so the rehearsals list stays in lock-step with the editor picker.
+    scenario_query: dict[str, Any] = {"workspace_id": workspace_id}
+    if sub_type:
+        scenario_query["sub_type"] = sub_type
+
+    total = await _ForesightWorkspaceScenarioDoc.find(scenario_query).count()
+    scenario_docs = (
+        await _ForesightWorkspaceScenarioDoc.find(scenario_query)
+        .sort([("updatedAt", -1), ("_id", -1)])  # type: ignore[list-item]
+        .skip(offset)
+        .limit(limit)
+        .to_list()
+    )
+
+    if not scenario_docs:
+        return RehearsalListResponse(
+            items=[],
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=False,
+        )
+
+    scenarios: list[CustomScenario] = [_to_domain(doc) for doc in scenario_docs]
+    scenario_ids: list[str] = [scenario.id for scenario in scenarios]
+
+    # Step 2: pull runs that target any scenario on the page. Tenant
+    # filter is the leading clause (cloud rule #7) so the ``$in`` scan
+    # never crosses a workspace boundary even when scenario ids collide.
+    run_docs: list[_ForesightRunDoc] = await _ForesightRunDoc.find(
+        {
+            "workspace": workspace_id,
+            "request.custom_scenario_id": {"$in": scenario_ids},
+        }
+    ).to_list()
+
+    # Step 3: group runs by scenario id client-side. Each value list is
+    # the unsorted set of runs for that scenario; the per-item mapper
+    # picks the most recent.
+    runs_by_scenario: dict[str, list[_ForesightRunDoc]] = {sid: [] for sid in scenario_ids}
+    for run_doc in run_docs:
+        request_blob = run_doc.request or {}
+        raw_sid = request_blob.get("custom_scenario_id")
+        if isinstance(raw_sid, str) and raw_sid in runs_by_scenario:
+            runs_by_scenario[raw_sid].append(run_doc)
+
+    items = [
+        _to_rehearsal_list_item(scenario, runs_by_scenario.get(scenario.id, []))
+        for scenario in scenarios
+    ]
+
+    return RehearsalListResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=offset + len(items) < total,
+    )
+
+
 __all__ = [
     "DEFAULT_TIER_MIX",
     "MAX_PERSONAS",
@@ -600,6 +891,7 @@ __all__ = [
     "delete_custom_scenario",
     "get_custom_scenario",
     "list_custom_scenarios",
+    "list_rehearsals",
     "load_workspace_scenario",
     "update_custom_scenario",
 ]
