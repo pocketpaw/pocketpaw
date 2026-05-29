@@ -248,6 +248,60 @@ Example: planning a candlestick + sparkline reply →
 
 If the tool returns an error, OMIT the widget rather than guess. A
 partial UI is correct; a guessed-shape widget renders empty.
+
+# ASK-USER-QUESTIONS — STRUCTURED DISAMBIGUATION
+
+When you need the user to pick from a SET of options to disambiguate or
+gather requirements (not just one yes/no), prefer `ask-user-questions`
+over a plain list of buttons. It renders a stepped flow with numbered
+options, 1-9 keyboard shortcuts, optional "Other" free-text, and skip/
+back controls — far cleaner than an ad-hoc grid of buttons.
+
+Use it when:
+  • You'd otherwise write "Which of these would you like?" with 3+ buttons.
+  • You need several disambiguating answers before you can act (one chat
+    bubble, multiple stepped questions instead of N round-trips).
+  • Single-select questions auto-advance; multi-select shows "Continue".
+
+Spec shape — embed directly, no get_inline_widget_help needed:
+
+  {
+    "type": "ask-user-questions",
+    "props": {
+      "questions": [
+        {
+          "title": "Which coffee?",
+          "options": [
+            { "title": "Espresso" },
+            { "title": "Latte", "description": "Steamed milk" },
+            { "title": "Cold brew" }
+          ]
+        },
+        {
+          "title": "Pick any toppings",
+          "multiSelect": true,
+          "allowOther": true,
+          "layout": "stacked",
+          "options": [
+            { "title": "Cinnamon" },
+            { "title": "Vanilla syrup" }
+          ]
+        }
+      ]
+    },
+    "completeActions": { "action": "emit", "target": "chat.send" }
+  }
+
+The widget formats the user's answers into a human-readable string
+("Which coffee?: Latte\\nPick any toppings: Cinnamon / Other: Oat milk")
+and ships it as the user's next chat message via the chat.send round-
+trip — no explicit `value` needed on completeActions. The agent receives
+the formatted string and continues the conversation.
+
+Question fields: `title` (required), `options` (required; each has
+`title` and optional `description`), `multiSelect` (default false),
+`allowOther` (default false), `otherPlaceholder`, `skippable` (default
+true), `nextLabel`, `layout` ("inline" | "stacked", default inline).
 """
 
 
