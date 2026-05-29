@@ -308,16 +308,25 @@ async def write_text_file(
     payload = content.encode("utf-8") if isinstance(content, str) else content
     storage_key = new_storage_key("planner", _PLANNER_EXTENSION_BY_MIME.get(mime, "bin"))
 
+    # We always write UTF-8 here, so tell storage as much. Without an explicit
+    # charset the object is served as bare ``text/vtt`` and a browser opening
+    # the signed URL guesses an 8-bit codepage (Windows-1252) — non-ASCII text
+    # (Hindi, etc.) renders as mojibake. The base mime is still what we persist
+    # to Mongo so the FE's exact-match mime checks stay intact.
+    content_type = mime
+    if mime.startswith("text/") or mime == "application/json":
+        content_type = f"{mime}; charset=utf-8"
+
     async def _body() -> AsyncIterator[bytes]:
         yield payload
 
-    obj = await adapter.put(storage_key, _body(), mime)
+    obj = await adapter.put(storage_key, _body(), content_type)
 
     rec = FileRecord(
         id=uuid4().hex,
         storage_key=obj.key,
         filename=filename,
-        mime=obj.mime,
+        mime=mime,
         size=obj.size,
         owner_id=owner_id,
         chat_id=None,

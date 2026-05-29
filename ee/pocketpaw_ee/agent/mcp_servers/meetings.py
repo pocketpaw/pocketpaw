@@ -29,6 +29,7 @@ LIST_TOOL_ID = f"mcp__{SERVER_NAME}__list_meetings"
 CANCEL_TOOL_ID = f"mcp__{SERVER_NAME}__cancel_meeting"
 SEARCH_TOOL_ID = f"mcp__{SERVER_NAME}__search_meetings"
 TRANSCRIPT_TOOL_ID = f"mcp__{SERVER_NAME}__find_meeting_transcript"
+READ_TRANSCRIPT_TOOL_ID = f"mcp__{SERVER_NAME}__read_meeting_transcript"
 SEND_BOT_TOOL_ID = f"mcp__{SERVER_NAME}__send_bot_to_meeting"
 CHECK_BOT_TOOL_ID = f"mcp__{SERVER_NAME}__check_meeting_bot"
 
@@ -38,9 +39,16 @@ MEETING_TOOL_IDS = (
     CANCEL_TOOL_ID,
     SEARCH_TOOL_ID,
     TRANSCRIPT_TOOL_ID,
+    READ_TRANSCRIPT_TOOL_ID,
     SEND_BOT_TOOL_ID,
     CHECK_BOT_TOOL_ID,
 )
+
+# Cap on transcript text returned to the model. A long meeting can run to
+# tens of KB of speech; past this we truncate and flag it so the agent can
+# tell the user it summarized a partial transcript rather than silently
+# dropping the tail.
+_TRANSCRIPT_TEXT_MAX_CHARS = 24_000
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -289,6 +297,81 @@ async def _find_transcript_handler(args: dict) -> dict:
     return _success_response(body)
 
 
+async def _read_transcript_handler(args: dict) -> dict:
+    """Return the actual transcript SPEECH as plain text, not just metadata.
+
+    ``find_meeting_transcript`` hands back the ``file_id`` + counts; this
+    tool resolves that blob and returns the readable text so the agent can
+    actually summarize / answer questions about what was said. The VTT is
+    stripped to ``Speaker: text`` lines (timestamps + cue markup dropped),
+    the same cleaning the KB indexer applies. Falls through to the shared
+    'not ready' explanation when there's no stored transcript yet.
+    """
+    workspace_id, _ = _identity()
+    if not workspace_id:
+        return _error_response("no active workspace")
+
+    meeting_id = args.get("meeting_id")
+    if not isinstance(meeting_id, str) or not meeting_id:
+        return _error_response("meeting_id is required (string)")
+
+    from pocketpaw_ee.cloud._core.errors import CloudError, NotFound
+    from pocketpaw_ee.cloud.meetings import service as ms
+
+    try:
+        meta = await ms.get_transcript(workspace_id, meeting_id)
+    except NotFound:
+        return await _transcript_not_ready_response(workspace_id, meeting_id)
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("read_meeting_transcript metadata lookup failed", exc_info=True)
+        return _error_response(f"read_meeting_transcript failed: {exc}")
+
+    if not meta.file_id:
+        return await _transcript_not_ready_response(workspace_id, meeting_id)
+
+    # Resolve the stored blob → bytes → UTF-8 → plain speech. Workspace-scoped
+    # read, matching find_meeting_transcript's trust model (no per-user gate;
+    # the transcript is a workspace resource).
+    try:
+        from pathlib import Path
+
+        from pocketpaw.uploads.factory import build_adapter
+        from pocketpaw_ee.cloud.extraction.local import _vtt_to_plain
+        from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+        rec = await MongoFileStore().get_scoped(meta.file_id, workspace=workspace_id)
+        if rec is None:
+            return _error_response("transcript file is missing from storage")
+
+        adapter = build_adapter(Path.home() / ".pocketpaw" / "uploads")
+        chunks: list[bytes] = [chunk async for chunk in adapter.open(rec.storage_key)]
+        raw = b"".join(chunks).decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("read_meeting_transcript blob read failed", exc_info=True)
+        return _error_response(f"could not read transcript content: {exc}")
+
+    text = _vtt_to_plain(raw)
+    if not text.strip():
+        return _error_response("transcript file held no readable speech")
+
+    truncated = len(text) > _TRANSCRIPT_TEXT_MAX_CHARS
+    if truncated:
+        text = text[:_TRANSCRIPT_TEXT_MAX_CHARS]
+
+    return _success_response(
+        {
+            "meeting_id": meeting_id,
+            "language": meta.language,
+            "speaker_count": meta.speaker_count,
+            "entry_count": meta.entry_count,
+            "truncated": truncated,
+            "text": text,
+        }
+    )
+
+
 # Map a Recall bot status to a coarse transcript state + ETA hint.
 # Used when the transcript isn't on disk yet so the agent can choose
 # the right thing to say instead of guessing.
@@ -501,6 +584,25 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
         return await _find_transcript_handler(args)
 
     @tool(
+        "read_meeting_transcript",
+        (
+            "Read the actual SPOKEN CONTENT of a meeting's transcript as plain "
+            "text — use this whenever the user asks you to summarize a meeting, "
+            "pull action items / decisions, or answer questions about what was "
+            "said. ``find_meeting_transcript`` only returns metadata (file_id, "
+            "counts); THIS tool returns the words. The text is cleaned to "
+            "``Speaker: utterance`` lines (timestamps and markup stripped). If "
+            "the transcript isn't ready, you'll get the same ``ready``/``state`` "
+            "explanation as find_meeting_transcript — relay it instead of "
+            "inventing a summary. ``truncated: true`` means the meeting was long "
+            "and you only received the opening portion — say so to the user."
+        ),
+        {"meeting_id": str},
+    )
+    async def read_meeting_transcript(args):  # type: ignore[no-untyped-def]
+        return await _read_transcript_handler(args)
+
+    @tool(
         "send_bot_to_meeting",
         (
             "Send a Recall.ai bot to a meeting to capture audio and "
@@ -542,6 +644,7 @@ def build_meetings_context_server() -> tuple[str, Any] | None:
             cancel_meeting,
             search_meetings,
             find_meeting_transcript,
+            read_meeting_transcript,
             send_bot_to_meeting,
             check_meeting_bot,
         ],
@@ -554,6 +657,7 @@ __all__ = [
     "CHECK_BOT_TOOL_ID",
     "LIST_TOOL_ID",
     "MEETING_TOOL_IDS",
+    "READ_TRANSCRIPT_TOOL_ID",
     "SCHEDULE_TOOL_ID",
     "SEARCH_TOOL_ID",
     "SEND_BOT_TOOL_ID",
