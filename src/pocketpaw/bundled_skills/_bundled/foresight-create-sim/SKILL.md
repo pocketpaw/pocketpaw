@@ -123,7 +123,10 @@ stream's workspace id; no env vars, no headers).
     workspaces yield ``items=[]`` — the synthesizer fires no rows when
     no patterns match. Each item carries ``severity`` (``info`` |
     ``warning`` | ``critical``) — surface it verbatim so the user sees
-    the same colour the dashboard renders.
+    the same colour the dashboard renders. Response carries
+    ``synth_source`` (``"pattern"`` | ``"llm"``) — surface this when
+    reporting findings so the user knows whether they came from the
+    deterministic five-rule synthesizer or the v1.0 LLM synth.
 
     **When to use:** "what mattered in the last run", "explain the
     insights", "anything worth flagging".

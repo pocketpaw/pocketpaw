@@ -2989,6 +2989,11 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
     config_view = await _load_insights_config_view(workspace_id)
 
     raw_insights: list[Any]
+    # Track which synthesizer ACTUALLY produced the wire output so the
+    # response envelope can disclose it. Default "pattern" covers the
+    # untoggled workspace + the LLM-empty fallback path; only a
+    # non-empty LLM run flips this to "llm".
+    actual_source: Literal["pattern", "llm"] = "pattern"
     if config_view.synthesizer == "llm":
         # Try LLM. On ANY failure (timeout, malformed output, rate
         # limit, missing backend) fall back to the pattern synthesizer
@@ -3008,10 +3013,13 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
         )
         if llm_insights:
             raw_insights = list(llm_insights)
+            actual_source = "llm"
         else:
             # Empty LLM output — likely a failure or a quiet workspace.
             # Either way the pattern rules are the safe default; if
             # they also produce nothing the response is correctly empty.
+            # ``actual_source`` stays "pattern" — the user is reading
+            # pattern-synthesizer rows regardless of the config toggle.
             logger.warning(
                 "foresight.insights.llm_empty_falling_back_to_pattern",
                 extra={"workspace_id": workspace_id},
@@ -3052,7 +3060,7 @@ async def get_insights(ctx: RequestContext) -> InsightsResponse:
         )
         for insight in raw_insights
     ]
-    return InsightsResponse(items=items)
+    return InsightsResponse(items=items, synth_source=actual_source)
 
 
 # ── LLM insights (Team 3 wave 3) ──────────────────────────────────────────

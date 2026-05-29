@@ -783,11 +783,26 @@ class InsightsResponse(BaseModel):
     (pagination lands in v1.0 once the LLM synthesizer can fan
     finer-grained rules). Items are sorted by severity descending
     (critical > warning > info) then ``generated_at`` descending.
+
+    ``synth_source`` reports which synthesizer ACTUALLY produced the
+    rows the caller is reading:
+
+      - ``"pattern"`` (default) — the deterministic v0.5 five-rule
+        synthesizer ran. This is the default for any workspace that
+        hasn't opted into the LLM synth, AND for the fallback path
+        when an LLM run returned empty / failed.
+      - ``"llm"`` — the v1.0 LLM synthesizer produced the rows.
+
+    Dashboard + chat agent surfaces this so users can tell whether
+    they're reading deterministic rule output or an LLM narrative.
+    Defaulting to ``"pattern"`` keeps existing callers / fixtures
+    that construct ``InsightsResponse`` without the field working.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     items: list[InsightResponse]
+    synth_source: Literal["pattern", "llm"] = "pattern"
 
 
 # ---------------------------------------------------------------------------

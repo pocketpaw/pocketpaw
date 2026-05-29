@@ -319,6 +319,83 @@ async def test_get_insights_with_llm_caches_repeat_calls() -> None:
     assert len(backend.calls) == 1
 
 
+# ---------------------------------------------------------------------------
+# synth_source wire field — tracks the synthesizer that ACTUALLY produced
+# the rows the caller is reading. Default "pattern" covers the untoggled
+# workspace + the LLM-empty fallback path; only a non-empty LLM run flips
+# it to "llm".
+# ---------------------------------------------------------------------------
+
+
+async def test_get_insights_default_synth_source_is_pattern() -> None:
+    """No config doc → response advertises ``synth_source = "pattern"``."""
+    response = await foresight_service.get_insights(_ctx())
+    assert response.synth_source == "pattern"
+
+
+async def test_get_insights_pattern_when_config_pattern() -> None:
+    """Config explicitly set to "pattern" → ``synth_source = "pattern"``."""
+    await foresight_service.set_insights_config(
+        _ctx(),
+        SetForesightInsightsConfigRequest(synthesizer="pattern"),
+    )
+    response = await foresight_service.get_insights(_ctx())
+    assert response.synth_source == "pattern"
+
+
+async def test_get_insights_llm_source_when_llm_produces_output() -> None:
+    """Config "llm" + LLM returns non-empty → ``synth_source = "llm"``."""
+    # Seed records so the LLM helper has something to summarize. The
+    # canned payload is what determines the response items; the seeds
+    # just keep the helper from short-circuiting on empty input.
+    captured_at = datetime.now(UTC) - timedelta(days=1)
+    for i in range(3):
+        await _seed_record(
+            persona_id="alice",
+            confidence=0.4,
+            run_id=f"r-{i}",
+            tick_id=i,
+            captured_at=captured_at,
+        )
+
+    await foresight_service.set_insights_config(
+        _ctx(),
+        SetForesightInsightsConfigRequest(synthesizer="llm"),
+    )
+    backend = _StubLLMBackend(responses=[_valid_llm_payload()])
+    foresight_service._set_llm_backend_for_testing(backend)
+
+    response = await foresight_service.get_insights(_ctx())
+    assert response.synth_source == "llm"
+    # Sanity: an item with the llm_ id prefix is in there — proves the
+    # LLM path ran, not just the toggle reading.
+    assert any(i.id.startswith("llm_") for i in response.items)
+
+
+async def test_get_insights_pattern_source_when_llm_returns_empty() -> None:
+    """Config "llm" + LLM returns ``[]`` → fallback → ``synth_source = "pattern"``.
+
+    The user is reading pattern-synthesizer rows (or none, if both
+    paths are empty) regardless of the config toggle; the wire source
+    has to match what the user actually sees.
+    """
+    await foresight_service.set_insights_config(
+        _ctx(),
+        SetForesightInsightsConfigRequest(synthesizer="llm"),
+    )
+    # LLM helper collapses `{"insights": []}` into an empty list,
+    # which the service then treats as "fallback to pattern".
+    backend = _StubLLMBackend(responses=[json.dumps({"insights": []})])
+    foresight_service._set_llm_backend_for_testing(backend)
+
+    response = await foresight_service.get_insights(_ctx())
+    assert response.synth_source == "pattern"
+    # Items reflect the pattern synthesizer. With no seeded records the
+    # pattern path also produces nothing — the response is correctly
+    # empty AND correctly labelled as the pattern source.
+    assert all(not i.id.startswith("llm_") for i in response.items)
+
+
 async def test_get_insights_requires_workspace_under_llm_path() -> None:
     """The tenancy guard still fires on the LLM branch."""
     from pocketpaw_ee.cloud._core.errors import Forbidden
