@@ -58,6 +58,47 @@ def test_ws_inbound_message_send():
     assert msg.type == "message.send"
 
 
+def test_ws_inbound_envelope_lift_flattens_bus_payload():
+    """``{type, data: {...}}`` (browser bus shape) parses the same as flat."""
+    from pocketpaw_ee.cloud.chat.router import _normalize_ws_inbound
+
+    payload = {
+        "type": "message.send",
+        "data": {
+            "group_id": "g1",
+            "content": "hello",
+            "attachments": [{"type": "file", "url": "/api/v1/uploads/u1", "name": "x.pdf"}],
+        },
+    }
+    flat = _normalize_ws_inbound(payload)
+    msg = WsInbound.model_validate(flat)
+    assert msg.type == "message.send"
+    assert msg.group_id == "g1"
+    assert msg.content == "hello"
+    assert msg.attachments == [{"type": "file", "url": "/api/v1/uploads/u1", "name": "x.pdf"}]
+
+
+def test_ws_inbound_envelope_lift_is_noop_for_flat():
+    from pocketpaw_ee.cloud.chat.router import _normalize_ws_inbound
+
+    payload = {"type": "typing.start", "group_id": "g1"}
+    assert _normalize_ws_inbound(payload) == payload
+
+
+def test_ws_inbound_envelope_lift_prefers_top_level_on_conflict():
+    """Explicit top-level ``group_id`` wins over a nested duplicate."""
+    from pocketpaw_ee.cloud.chat.router import _normalize_ws_inbound
+
+    payload = {
+        "type": "message.send",
+        "group_id": "explicit",
+        "data": {"group_id": "nested", "content": "hi"},
+    }
+    flat = _normalize_ws_inbound(payload)
+    assert flat["group_id"] == "explicit"
+    assert flat["content"] == "hi"
+
+
 def test_ws_inbound_typing():
     msg = WsInbound.model_validate({"type": "typing.start", "group_id": "g1"})
     assert msg.type == "typing.start"
