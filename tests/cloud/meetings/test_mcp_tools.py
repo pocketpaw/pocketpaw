@@ -16,6 +16,7 @@ from pocketpaw_ee.agent.mcp_servers.meetings import (
     _check_bot_handler,
     _find_transcript_handler,
     _list_meetings_handler,
+    _read_transcript_handler,
     _schedule_meeting_handler,
     _search_meetings_handler,
     _send_bot_handler,
@@ -327,6 +328,97 @@ async def test_find_transcript_returns_not_ready_when_provider_empty(chat_identi
     assert payload["state"] == "no_bot"
     assert "no recording bot" in payload["message"].lower()
     assert payload["bot"]["has_bot"] is False
+
+
+async def test_read_transcript_returns_plain_speech(chat_identity):
+    """read_meeting_transcript returns cleaned speech, and non-ASCII (Hindi)
+    survives the store→read→decode round-trip intact (no mojibake)."""
+    import json
+
+    from pocketpaw_ee.cloud.meetings import service as ms
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+
+    from pocketpaw.connectors.protocol import ActionResult
+
+    meeting = _MD(
+        workspace="ws-alpha",
+        provider="zoom",
+        provider_meeting_id="zoom-mtg-read",
+        title="Hindi sync",
+        join_url="https://zoom.us/j/9",
+    )
+    await meeting.insert()
+
+    vtt = (
+        "WEBVTT\n\n"
+        "00:00:00.000 --> 00:00:02.000\n<v Rohit>इसमें आवाज़ नहीं जा रहा</v>\n\n"
+        "00:00:02.000 --> 00:00:04.000\n<v Amritesh>हाँ बहुत slow है</v>"
+    )
+
+    class _FakeAdapter:
+        async def execute(self, action, params):
+            assert action == "transcript_get"
+            return ActionResult(success=True, data=vtt, records_affected=1)
+
+    async def _factory(workspace_id, provider):
+        return _FakeAdapter()
+
+    prev = ms._set_adapter_factory(_factory)
+    try:
+        # Prime the stored transcript blob (writes via write_text_file).
+        await ms.get_transcript("ws-alpha", str(meeting.id))
+        result = await _read_transcript_handler({"meeting_id": str(meeting.id)})
+    finally:
+        ms._set_adapter_factory(prev)
+
+    assert result.get("is_error") is not True, result
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["truncated"] is False
+    assert "Rohit: इसमें आवाज़ नहीं जा रहा" in payload["text"]
+    assert "Amritesh: हाँ बहुत slow है" in payload["text"]
+    # The mojibake signature must NOT appear — proves clean UTF-8 round-trip.
+    assert "à¤" not in payload["text"]
+
+
+async def test_read_transcript_not_ready_when_no_transcript(chat_identity):
+    """No transcript yet → structured not-ready payload, not an error."""
+    import json
+
+    from pocketpaw_ee.cloud.meetings import service as ms
+    from pocketpaw_ee.cloud.models.meeting import Meeting as _MD
+
+    from pocketpaw.connectors.protocol import ActionResult
+
+    meeting = _MD(
+        workspace="ws-alpha",
+        provider="zoom",
+        provider_meeting_id="zoom-mtg-empty-read",
+        title="Nothing yet",
+        join_url="https://zoom.us/j/10",
+    )
+    await meeting.insert()
+
+    class _EmptyAdapter:
+        async def execute(self, action, params):
+            return ActionResult(success=True, data="", records_affected=0)
+
+    async def _factory(workspace_id, provider):
+        return _EmptyAdapter()
+
+    prev = ms._set_adapter_factory(_factory)
+    try:
+        result = await _read_transcript_handler({"meeting_id": str(meeting.id)})
+    finally:
+        ms._set_adapter_factory(prev)
+
+    assert result.get("is_error") is not True, result
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["ready"] is False
+
+
+async def test_read_transcript_requires_id(chat_identity):
+    result = await _read_transcript_handler({})
+    assert result["is_error"] is True
 
 
 async def test_cancel_meeting_requires_id(chat_identity):
