@@ -767,11 +767,29 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        settings_override: dict[str, Any] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``settings_override`` (RFC 11): a per-call dict of ``Settings`` field
+        overrides from an inference-gateway provider — model tier, provider,
+        ``smart_routing_enabled=False``, DeepSeek env, etc. It is applied as a
+        ``model_copy`` for this call only; ``self.settings`` (the warm pool
+        instance) is never mutated. When ``None`` the run reads ``self.settings``
+        directly and behaves exactly as before.
         """
+        # Per-call effective settings — model_copy so a gateway override never
+        # mutates the warm-pool instance. Everything in run() that previously
+        # read ``self.settings`` reads ``effective`` instead, so the override
+        # shapes provider resolution, the subprocess env (ANTHROPIC_BASE_URL),
+        # and the smart-routing suppression in one place.
+        effective = (
+            self.settings.model_copy(update=settings_override)
+            if settings_override
+            else self.settings
+        )
         if not self._sdk_available:
             yield AgentEvent(
                 type="error",
@@ -833,8 +851,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # See: https://code.claude.com/docs/en/legal-and-compliance
             from pocketpaw.llm.client import resolve_llm_client
 
-            provider = self.settings.claude_sdk_provider or "anthropic"
-            llm = resolve_llm_client(self.settings, force_provider=provider)
+            provider = effective.claude_sdk_provider or "anthropic"
+            llm = resolve_llm_client(effective, force_provider=provider)
 
             # ── API key check for Anthropic provider ──────────────
             # Skip if using a non-Anthropic provider, or if the active
@@ -870,10 +888,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # All messages go through the Claude Code CLI subprocess, which
             # handles conversation compaction automatically (PreCompact hook).
             selection = None
-            if self.settings.smart_routing_enabled and not is_non_anthropic:
+            if effective.smart_routing_enabled and not is_non_anthropic:
                 from pocketpaw.agents.model_router import ModelRouter
 
-                model_router = ModelRouter(self.settings)
+                model_router = ModelRouter(effective)
                 selection = model_router.classify(message)
                 logger.info(
                     "Smart routing: %s -> %s (%s)",
@@ -1022,7 +1040,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 "setting_sources": ["user", "project"],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
-                "max_turns": self.settings.claude_sdk_max_turns or None,
+                "max_turns": effective.claude_sdk_max_turns or None,
             }
 
             # Configure LLM provider for the Claude CLI subprocess.
@@ -1091,14 +1109,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # 2. Explicit claude_sdk_model — user-chosen fixed model
             # 3. Neither set — let Claude Code CLI auto-select (recommended)
             if not is_non_anthropic:
-                if self.settings.smart_routing_enabled:
+                if effective.smart_routing_enabled:
                     from pocketpaw.agents.model_router import ModelRouter
 
-                    model_router = ModelRouter(self.settings)
+                    model_router = ModelRouter(effective)
                     selection = model_router.classify(message)
                     options_kwargs["model"] = selection.model
-                elif self.settings.claude_sdk_model:
-                    options_kwargs["model"] = self.settings.claude_sdk_model
+                elif effective.claude_sdk_model:
+                    options_kwargs["model"] = effective.claude_sdk_model
 
             # Capture stderr for better error diagnostics
             def _on_stderr(line: str) -> None:
