@@ -1,4 +1,13 @@
 # ee/pocketpaw_ee/cloud/foresight/router.py
+# Modified: 2026-05-29 (feat/foresight-rehearsals-joined) — v2 landing
+# card hydration. Adds the joined ``/rehearsals`` listing endpoint:
+#     GET /api/v1/foresight/rehearsals?limit=50&offset=0&sub_type=...
+#       → RehearsalListResponse (paginated; each item carries
+#         ``run_count`` + optional ``last_run`` summary so the v2
+#         landing card can render without N+1 fetches).
+#   Delegates to ``ee.cloud.foresight.scenarios.list_rehearsals`` per
+#   cloud rule #2 (the joined read lives next to the workspace-scenarios
+#   reads it builds on).
 # Modified: 2026-05-26 (feat/foresight-v12-skill-and-loopback-auth) — RFC 08
 # v1.0 wave 4. All foresight endpoints now resolve their RequestContext
 # via ``loopback_or_request_context`` (the JWT-or-loopback dep). The
@@ -154,6 +163,7 @@ from pocketpaw_ee.cloud.foresight.dto import (
     LiveSnapshotResponse,
     OnboardingGateResponse,
     ProjectedDecisionListResponse,
+    RehearsalListResponse,
     ScenarioCatalogResponse,
     ScenarioRunListItemResponse,
     ScenarioRunResponse,
@@ -767,6 +777,48 @@ async def delete_custom_scenario(
     """
     await foresight_scenarios.delete_custom_scenario(ctx, scenario_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Rehearsals listing (v2 landing card hydration)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/rehearsals",
+    response_model=RehearsalListResponse,
+)
+async def list_rehearsals(
+    sub_type: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    ctx: RequestContext = Depends(loopback_or_request_context),
+) -> RehearsalListResponse:
+    """List the workspace's custom scenarios with joined run metadata.
+
+    Backs the v2 ``/foresight`` landing's RehearsalCard hydration —
+    every card needs ``run_count`` + a "last run was X" badge, and the
+    landing renders ~10-50 cards on first paint. Doing this client-side
+    would require an N+1 (list scenarios, then for each, list its runs);
+    this endpoint folds the join into one round trip.
+
+    Response shape mirrors :class:`CustomScenarioListResponse` (items /
+    total / limit / offset / has_more) so the v2 landing's data hook
+    can reuse the cursor logic. ``limit`` defaults to 50 (the v2
+    landing's first-paint quota) and is hard-capped at 100.
+
+    Optional ``sub_type`` filter narrows to ``decision_forecast`` /
+    ``market_sim`` / ``org_change_rehearsal`` — same vocabulary the
+    sibling ``/scenarios/custom`` endpoint accepts. Tenancy: 403 when
+    no active workspace; runs from other workspaces never leak via the
+    joined ``$in`` query (workspace filter is the leading clause).
+    """
+    return await foresight_scenarios.list_rehearsals(
+        ctx,
+        limit=limit,
+        offset=offset,
+        sub_type=sub_type,
+    )
 
 
 __all__ = ["router"]
