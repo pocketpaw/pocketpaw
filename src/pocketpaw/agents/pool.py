@@ -161,6 +161,7 @@ class AgentPool:
         history: list[dict] | None = None,
         knowledge_context: str = "",
         instructions: str = "",
+        settings_override: dict[str, Any] | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -173,6 +174,14 @@ class AgentPool:
 
         ``knowledge_context`` remains reference material (KB snippets +
         per-turn scope/participants tags). Kept under the wrapper.
+
+        ``settings_override`` is a per-call dict of ``Settings`` field
+        overrides supplied by an inference-gateway provider (RFC 11). It is
+        applied inside the backend's ``run()`` as a ``model_copy`` for this
+        call only — the warm pool instance and its ``self.settings`` are
+        never mutated. It is passed to the backend only when non-empty, so
+        backends that don't accept the kwarg (every backend except the
+        Claude SDK lane) keep working when no gateway is registered.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -249,12 +258,18 @@ class AgentPool:
         # LRU evictor honor.
         instance.active_runs += 1
         try:
-            async for event in instance.backend.run(
-                message,
-                system_prompt=system_prompt,
-                history=history,
-                session_key=session_key,
-            ):
+            # Only thread ``settings_override`` to the backend when a gateway
+            # actually supplied one. Backends other than the Claude SDK lane
+            # don't accept the kwarg; passing it unconditionally would raise
+            # TypeError on the OSS-default direct path (no gateway registered).
+            run_kwargs: dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "history": history,
+                "session_key": session_key,
+            }
+            if settings_override:
+                run_kwargs["settings_override"] = settings_override
+            async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
         finally:

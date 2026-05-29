@@ -45,6 +45,27 @@ def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
 
 
+def usage_from_token_event(event: Any) -> dict[str, Any]:
+    """Map a ``token_usage`` AgentEvent's metadata into the wire ``usage`` dict.
+
+    ``claude_sdk.py`` emits a ``token_usage`` event carrying input/output token
+    counts and cost in ``event.metadata`` (RFC 11). This was previously dropped,
+    leaving the ``stream_end`` frame's ``usage`` field empty. Returns ``{}`` when
+    there's no metadata, and coerces missing numeric fields to zero so a partial
+    event still produces a usable record.
+    """
+    meta = getattr(event, "metadata", None)
+    if not isinstance(meta, dict) or not meta:
+        return {}
+    return {
+        "input_tokens": int(meta.get("input_tokens") or 0),
+        "output_tokens": int(meta.get("output_tokens") or 0),
+        "cached_input_tokens": int(meta.get("cached_input_tokens") or 0),
+        "cost_usd": float(meta.get("total_cost_usd") or 0.0),
+        "model": meta.get("model") or "",
+    }
+
+
 async def _persist_assistant_message(
     ctx: ScopeContext, content: str, attachments: list[dict[str, Any]]
 ) -> Any:
@@ -432,6 +453,24 @@ async def _drive_agent_loop(
     handled_pocket_ids: set[str] = set()
     next_event_task: asyncio.Task[Any] | None = None
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
+    # Inference-gateway hook (RFC 11). When a closed pocketpaw_igw package is
+    # installed it registers a provider under ``pocketpaw.inference_gateway``;
+    # we ask it for per-run Settings overrides (model tier, provider, env) and
+    # keep the handle for token metering on the ``token_usage`` event. When no
+    # provider is registered ``first(...)`` returns None and the path is
+    # byte-for-byte today's behaviour — zero overhead, fully opt-in.
+    from pocketpaw import _registry  # type: ignore[import-untyped]
+
+    _igw = _registry.first("pocketpaw.inference_gateway")
+    settings_override: dict[str, Any] | None = None
+    if _igw is not None:
+        try:
+            override = _igw.settings_override(ctx)
+            settings_override = override or None
+        except Exception:
+            logger.exception("inference gateway settings_override failed; using defaults")
+            settings_override = None
+
     try:
         session_key = session_key_for(ctx)
         agent_iter = pool.run(
@@ -441,6 +480,7 @@ async def _drive_agent_loop(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
+            settings_override=settings_override,
         ).__aiter__()
 
         async def _next_event() -> Any:
@@ -514,6 +554,26 @@ async def _drive_agent_loop(
                     handled_pocket_ids=handled_pocket_ids,
                 )
                 yield ("tool_result", {"tool": name, "output": output})
+            elif etype == "token_usage":
+                # RFC 11: the backend emits this once per run with token counts
+                # and cost. Previously unhandled, which is why the stream_end
+                # frame always carried ``usage: {}``. Capture it, forward to the
+                # inference gateway for per-actor budgeting (best-effort), and
+                # surface it to ``execute_run`` via a ``usage`` tuple so the
+                # stream_end frame can report real numbers.
+                _last_usage = usage_from_token_event(event)
+                if _igw is not None and _last_usage:
+                    try:
+                        _igw.record_usage(
+                            ctx,
+                            model=_last_usage.get("model", ""),
+                            input_tokens=_last_usage.get("input_tokens", 0),
+                            output_tokens=_last_usage.get("output_tokens", 0),
+                            cost_usd=_last_usage.get("cost_usd", 0.0),
+                        )
+                    except Exception:
+                        logger.exception("inference gateway record_usage failed")
+                yield ("usage", _last_usage)
             elif etype == "error":
                 # Surface backend-yielded errors instead of silently dropping
                 # them — a misconfigured backend (codex_cli without
@@ -638,11 +698,20 @@ async def execute_run(spec: RunSpec) -> None:
     cancelled = False
     error: Exception | None = None
     backend_error_message: str | None = None
+    # RFC 11: token usage captured from the ``token_usage`` event (relayed as a
+    # ``usage`` tuple by ``_drive_agent_loop``). Stays ``{}`` when the backend
+    # emits no usage, preserving the prior stream_end shape.
+    last_usage: dict[str, Any] = {}
     try:
         async for event_name, event_data in _iter_agent_events(spec, ctx):
             if await transport.is_cancelled(spec.run_id):
                 cancelled = True
                 break
+            if event_name == "usage":
+                # Internal relay only — capture and don't write it to the
+                # client stream (the wire protocol exposes usage on stream_end).
+                last_usage = event_data if isinstance(event_data, dict) else {}
+                continue
             if event_name == "chunk":
                 content = event_data.get("content", "")
                 if isinstance(content, str):
@@ -732,7 +801,7 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.append_event(
             spec.run_id,
             "stream_end",
-            {"assistant_message_id": None, "usage": {}, "cancelled": cancelled},
+            {"assistant_message_id": None, "usage": last_usage, "cancelled": cancelled},
         )
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
@@ -748,6 +817,6 @@ async def execute_run(spec: RunSpec) -> None:
     await transport.append_event(
         spec.run_id,
         "stream_end",
-        {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
+        {"assistant_message_id": assistant_id, "usage": last_usage, "cancelled": False},
     )
     await transport.set_ttl(spec.run_id, _stream_ttl())

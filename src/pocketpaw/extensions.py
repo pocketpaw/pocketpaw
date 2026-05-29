@@ -202,6 +202,39 @@ class PocketWriter(Protocol):
 
 
 @runtime_checkable
+class InferenceGatewayProvider(Protocol):
+    """Entry-point group: ``pocketpaw.inference_gateway``
+
+    Sits between the cloud run path and the model backend. For each run it
+    returns a set of ``Settings`` field overrides (model tier, provider,
+    routing, env) applied per-call, and records the run's token usage for
+    per-actor budgeting. A closed ``pocketpaw_igw`` package registers the
+    real implementation; an OSS install registers none, so the cloud path
+    runs unchanged with no override and no metering (see RFC 11).
+    """
+
+    def settings_override(self, ctx: Any) -> dict[str, Any]:
+        """Per-run ``Settings`` field overrides for this request — e.g.
+        ``{"claude_sdk_model": ..., "claude_sdk_provider": ...,
+        "smart_routing_enabled": False}``. An empty dict means no override
+        (the run uses the agent's own settings)."""
+        ...
+
+    def record_usage(
+        self,
+        ctx: Any,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Record the token usage and cost of a completed run against the
+        actor/workspace in ``ctx`` (per-actor budget + ledger)."""
+        ...
+
+
+@runtime_checkable
 class ComposioToolProvider(Protocol):
     """Entry-point group: ``pocketpaw.composio_tools``
 
