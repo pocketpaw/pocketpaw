@@ -216,8 +216,11 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     )
     await message_service.send_message(str(group.id), "sender", body)
 
-    recipients = sorted(n["recipient"] for n in created_notifs)
-    assert recipients == ["u2", "u3"]  # no duplicate u2
+    # @u2 and @everyone both target u2; the mention fan-out must dedupe to a
+    # single mention per recipient. (The general per-member "message" notif is
+    # a separate kind and isn't what this test guards.)
+    mention_recipients = sorted(n["recipient"] for n in created_notifs if n["kind"] == "mention")
+    assert mention_recipients == ["u2", "u3"]  # no duplicate u2
 
 
 @pytest.mark.asyncio

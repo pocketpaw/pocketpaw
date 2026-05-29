@@ -730,20 +730,9 @@ class ConnectorSyncRecorded(Event):
     EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
 
 
-# Calls — LiveKit group call lifecycle. The cloud livekit/ module owns the
-# room/agent subprocess, but the FE domain is "calls per group", so the
-# wire types are `call.*` not `livekit.*`. Audience is the group's members
-# (everyone in the room should see the call panel light up / clear).
-@dataclass
-class CallStarted(Event):
-    EVENT_TYPE: ClassVar[str] = "call.started"
-
-
-@dataclass
-class CallEnded(Event):
-    EVENT_TYPE: ClassVar[str] = "call.ended"
-
-
+# Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
+# are defined above with the rest of the LiveKit group-call types; this is the
+# post-call notes fan-out, audience = the group's members.
 @dataclass
 class CallNotesPosted(Event):
     EVENT_TYPE: ClassVar[str] = "call.notes_posted"

@@ -58,6 +58,9 @@ def mock_lk_api():
 async def test_create_room_emits_call_started(recording_bus, mock_lk_api) -> None:
     from pocketpaw_ee.cloud.livekit import service
 
+    # create_room lists existing rooms first; return none so it takes the
+    # create path. Both LiveKit room calls are awaited, so AsyncMock both.
+    mock_lk_api.list_rooms = AsyncMock(return_value=MagicMock(rooms=[]))
     mock_lk_api.create_room = AsyncMock(return_value=MagicMock(name="group-call-g1"))
 
     # Pre-populate _active_agents so create_room skips the subprocess spawn path.
