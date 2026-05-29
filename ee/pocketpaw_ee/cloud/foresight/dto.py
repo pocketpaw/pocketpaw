@@ -1,4 +1,17 @@
 # ee/pocketpaw_ee/cloud/foresight/dto.py
+# Modified: 2026-05-29 (feat/foresight-rehearsals-joined) — v2 landing
+# card hydration. Adds the joined rehearsals surface:
+#   - ``RehearsalLastRun`` — compact summary of the most recent run
+#     (id / status / ran_at / verdict_summary) embedded inline on each
+#     list item so the v2 landing card can render without an N+1.
+#   - ``RehearsalListItem`` — one card on the v2 ``/foresight`` landing.
+#     Mirrors the existing ``CustomScenarioListItem`` field set plus
+#     ``run_count`` + optional ``last_run`` for the "draft vs. ran"
+#     state badge.
+#   - ``RehearsalListResponse`` — paginated envelope; same shape as the
+#     ``CustomScenarioListResponse`` (items / total / limit / offset /
+#     has_more) so the picker UI can swap the source endpoint without
+#     reshaping the store.
 # Modified: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — RFC
 # 08 v1.0 wave 3 adds the workspace-scoped custom-scenario surface:
 #   - ``CustomScenarioParsedMetaDto`` — denormalized parse result on the
@@ -1152,6 +1165,86 @@ class CreateCustomScenarioRequest(BaseModel):
     )
 
 
+# ---------------------------------------------------------------------------
+# Rehearsals (v2 landing) — joined view of custom scenarios + their latest
+# run, used by the paw-enterprise ``/foresight`` landing's RehearsalCard so
+# each card can render ``run_count`` + a "last run was X" badge without an
+# N+1 client-side fetch per card.
+#
+# The shape is intentionally close to ``CustomScenarioListItem`` so the
+# editor picker UI can keep its sorts / filters wired; the additions
+# (``run_count`` / ``last_run``) are additive.
+# ---------------------------------------------------------------------------
+
+
+class RehearsalLastRun(BaseModel):
+    """Compact summary of a rehearsal's most recent run.
+
+    Embedded on each :class:`RehearsalListItem` so the v2 landing card can
+    render the "last run was X" badge without a separate fetch per
+    scenario. ``verdict_summary`` is a best-effort one-line string derived
+    from ``ForesightRun.result`` (modal outcome when present, else a
+    generic "Run complete"); it is intentionally short (≤120 chars) so
+    the card layout stays predictable. ``None`` when the run is still
+    in flight (status ``running``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    status: Literal["queued", "running", "complete", "failed"]
+    ran_at: str  # ISO-8601 UTC; sourced from the run doc's ``createdAt``.
+    verdict_summary: str | None = Field(default=None, max_length=120)
+
+
+class RehearsalListItem(BaseModel):
+    """One row on the v2 ``/foresight`` landing.
+
+    Mirrors :class:`CustomScenarioListItem` field set + two joined fields
+    the landing card needs to render its state badge:
+
+      - ``run_count`` — total number of runs ever spawned from this
+        scenario in the workspace. ``0`` means the scenario is a draft.
+      - ``last_run`` — compact summary of the most recent run (or
+        ``None`` when ``run_count == 0``).
+
+    Field-name fidelity with the sibling ``CustomScenarioListItem`` is
+    deliberate: paw-enterprise's editor picker can swap source endpoints
+    (``/scenarios/custom`` ↔ ``/rehearsals``) without reshaping the store
+    — only the two new fields layer on.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    sub_type: CustomScenarioSubType
+    description: str = ""
+    num_personas: int = Field(..., ge=0)
+    num_ticks: int = Field(..., ge=0)
+    updated_at: str  # ISO-8601
+    run_count: int = Field(default=0, ge=0)
+    last_run: RehearsalLastRun | None = None
+
+
+class RehearsalListResponse(BaseModel):
+    """``GET /api/v1/foresight/rehearsals`` paginated envelope.
+
+    Same pagination shape as :class:`CustomScenarioListResponse` (items /
+    total / limit / offset / has_more) so the v2 landing's data hook can
+    reuse the cursor logic. ``limit`` is capped at 100 at the router
+    layer; the default 50 matches the v2 landing's first-paint quota.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[RehearsalListItem]
+    total: int = Field(..., ge=0)
+    limit: int = Field(..., ge=1, le=100)
+    offset: int = Field(..., ge=0)
+    has_more: bool
+
+
 __all__ = [
     "AggregateRollupResponse",
     "Anomaly",
@@ -1181,6 +1274,9 @@ __all__ = [
     "PersonaSpecRequest",
     "ProjectedDecisionListResponse",
     "ProjectedDecisionResponse",
+    "RehearsalLastRun",
+    "RehearsalListItem",
+    "RehearsalListResponse",
     "RollingAccuracyPointDto",
     "RollingAccuracySeriesDto",
     "SampledTrace",
