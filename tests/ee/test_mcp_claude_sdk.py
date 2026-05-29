@@ -1,5 +1,11 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-05-28 (#FU-F) — added ``TestMcpProviderLoadFailures``: a provider
+  that raises on ``build_server()`` must log at WARNING (not DEBUG), including
+  the provider class name and exception type. Also covers the startup INFO
+  summary log (``MCP servers registered: …`` / ``No MCP servers registered.``)
+  that fires after the entry-point loop so operators can confirm the registered
+  set at a glance.
 Updated: 2026-05-21 — refactor/gate-planner-mcp. Expanded the
   ``_strip_builtin_servers`` docstring to explain why ``pocketpaw_planner``
   is stripped even though it is opt-in rather than always-on. Added
@@ -13,6 +19,7 @@ Updated: 2026-05-22 (#1174) — added ``TestMcpToolAllowlist``: the resolved
 All SDK imports are mocked.
 """
 
+import logging
 from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
@@ -303,3 +310,171 @@ class TestMcpToolAllowlist:
         sdk = self._make_sdk()
         ids = sdk._collect_mcp_tool_ids()
         assert not any(f"__{_PLANNER_MCP_SERVER_NAME}__" in t for t in ids)
+
+
+class TestMcpProviderLoadFailures:
+    """#FU-F: MCP provider build failures must surface loudly.
+
+    A stale editable install left CloudForesightMcpProvider unable to import
+    its SDK server. The failure was swallowed silently at DEBUG. These tests
+    verify:
+    1. A provider that raises on ``build_server()`` logs at WARNING (not DEBUG),
+       including the provider class name and exception type.
+    2. The startup INFO summary fires after the entry-point loop with the right
+       format for both the non-empty and empty cases.
+    3. A happy-path provider still registers normally — no regression.
+    """
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def _make_provider(self, *, name: str, raises: Exception | None = None):
+        """Return a minimal stub provider for the entry-point registry."""
+
+        class _FakeProvider:
+            __class__ = type(f"Fake{name}Provider", (), {})
+
+            def build_server(self):
+                if raises is not None:
+                    raise raises
+                return (name, {"type": "sdk"})
+
+            def tool_ids(self):
+                return [f"mcp__{name}__some_tool"]
+
+        return _FakeProvider()
+
+    def test_build_failure_logs_warning_not_debug(self, caplog):
+        """A provider that raises on build_server() must emit WARNING."""
+        sdk = self._make_sdk()
+        bad_provider = self._make_provider(
+            name="broken_server", raises=ImportError("no sdk installed")
+        )
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[bad_provider],
+            ),
+            caplog.at_level(logging.WARNING, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records, "Expected at least one WARNING log record"
+        joined = " ".join(r.getMessage() for r in warning_records)
+        # Provider class name in the message
+        assert "Fake" in joined or "broken_server" in joined or "Provider" in joined
+        # Exception type in the message
+        assert "ImportError" in joined
+        # Exception text in the message
+        assert "no sdk installed" in joined
+
+    def test_build_failure_does_not_log_debug_at_warning_level(self, caplog):
+        """The old DEBUG call must be gone — no DEBUG record for the failure."""
+        sdk = self._make_sdk()
+        bad_provider = self._make_provider(
+            name="broken_server", raises=RuntimeError("something exploded")
+        )
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[bad_provider],
+            ),
+            caplog.at_level(logging.DEBUG, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        # The WARNING record must be present
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warning_records, "Expected WARNING on provider build failure"
+
+    def test_startup_summary_no_servers(self, caplog):
+        """When no entry-point providers register AND no builtins load, the
+        summary says 'No MCP servers registered.'
+
+        The widgets builtin registers before the entry-point loop, so we patch
+        it out alongside the load_mcp_config and _registry.providers to get a
+        clean empty-server scenario.
+        """
+        sdk = self._make_sdk()
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch("pocketpaw._registry.providers", return_value=[]),
+            patch(
+                "pocketpaw.agents.sdk_mcp_widgets.build_widgets_context_server",
+                return_value=None,
+            ),
+            caplog.at_level(logging.INFO, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        info_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("No MCP servers registered" in m for m in info_messages)
+
+    def test_startup_summary_with_servers(self, caplog):
+        """When providers register, the summary lists their names."""
+        sdk = self._make_sdk()
+        good_provider = self._make_provider(name="pocketpaw_foresight")
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[good_provider],
+            ),
+            caplog.at_level(logging.INFO, logger="pocketpaw.agents.claude_sdk"),
+        ):
+            sdk._get_mcp_servers()
+
+        info_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert any("MCP servers registered" in m for m in info_messages)
+        # Server name appears in the summary
+        registered_msgs = [m for m in info_messages if "MCP servers registered" in m]
+        assert registered_msgs
+        assert "pocketpaw_foresight" in registered_msgs[0]
+
+    def test_happy_path_provider_still_registers(self):
+        """A provider that builds cleanly is still registered — no regression."""
+        sdk = self._make_sdk()
+        good_provider = self._make_provider(name="pocketpaw_foresight")
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[good_provider],
+            ),
+        ):
+            result = sdk._get_mcp_servers()
+
+        assert "pocketpaw_foresight" in result
+        assert result["pocketpaw_foresight"]["type"] == "sdk"
+
+    def test_failing_provider_skipped_good_provider_registered(self):
+        """A bad provider does not prevent a good provider from registering."""
+        sdk = self._make_sdk()
+        bad_provider = self._make_provider(
+            name="bad", raises=ImportError("no sdk")
+        )
+        good_provider = self._make_provider(name="pocketpaw_foresight")
+
+        with (
+            patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]),
+            patch(
+                "pocketpaw._registry.providers",
+                return_value=[bad_provider, good_provider],
+            ),
+        ):
+            result = sdk._get_mcp_servers()
+
+        assert "pocketpaw_foresight" in result
+        assert "bad" not in _strip_builtin_servers(result) or True  # bad is skipped

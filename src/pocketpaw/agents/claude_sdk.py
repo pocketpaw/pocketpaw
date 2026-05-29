@@ -1,5 +1,13 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-28 (#FU-F) — promote silent MCP provider build failures from
+  DEBUG to WARNING. A stale editable install (CloudForesightMcpProvider with a
+  missing SDK dependency) failed silently; the diagnostic took 30+ minutes.
+  Now logs provider class name, exception type, and message at WARNING with
+  exc_info so operators see it immediately on dashboard restart. Added an INFO
+  startup summary log (``MCP servers registered: …``) after the
+  ``pocketpaw.mcp_servers`` entry-point loop so the operator can confirm the
+  full registered set at a glance.
 Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
   collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
   server now carries a writable ``add_widget`` tool alongside the read tools;
@@ -575,10 +583,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
         from pocketpaw._registry import providers as _ext_providers
 
         for provider in _ext_providers("pocketpaw.mcp_servers"):
+            provider_name = type(provider).__name__
             try:
                 built = provider.build_server()
             except Exception as exc:  # noqa: BLE001
-                logger.debug("MCP server provider %r failed: %s", provider, exc)
+                # 2026-05-28 (#FU-F): a stale editable install + dashboard
+                # restart left CloudForesightMcpProvider unable to import its
+                # SDK server, which silently swallowed the failure at DEBUG.
+                # The diagnostic took 30+ minutes because the failure mode was
+                # invisible. Promote to WARNING + include exception type +
+                # module path so the operator sees it on startup.
+                logger.warning(
+                    "MCP server provider %s failed to build: %s: %s",
+                    provider_name,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
                 continue
             if built is None:
                 continue
@@ -596,6 +617,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 logger.info("MCP server '%s' blocked by tool policy", name)
                 continue
             servers[name] = cfg_entry
+
+        # Startup summary — operators check this on dashboard restart to confirm
+        # their install picked up the expected entry-point set.
+        if servers:
+            logger.info("MCP servers registered: %s", ", ".join(sorted(servers)))
+        else:
+            logger.info("No MCP servers registered.")
 
         return servers
 
