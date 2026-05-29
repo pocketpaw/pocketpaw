@@ -111,6 +111,8 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Email (Mailtrap transactional + sandbox for dev/test) ---
+    "mailtrap>=2.0.0",
 ]
 
 [project.optional-dependencies]

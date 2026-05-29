@@ -1,0 +1,131 @@
+"""Mail service — thin wrapper around the Mailtrap Python SDK.
+
+Best-effort delivery: mail failures are logged but never propagate to the
+caller. Invite creation (or any future mail-triggering action) must never
+fail because the mail provider is down.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+# ---------------------------------------------------------------------------
+# Configuration (env vars — no Pydantic Settings dependency needed here)
+# ---------------------------------------------------------------------------
+
+
+def _env_bool(key: str, default: bool = True) -> bool:
+    val = os.environ.get(key, str(default)).lower()
+    return val in ("1", "true", "yes", "on")
+
+
+_MAILTRAP_API_TOKEN = os.environ.get("POCKETPAW_MAILTRAP_API_TOKEN")
+_SENDER_EMAIL = os.environ.get("POCKETPAW_MAILTRAP_SENDER_EMAIL", "noreply@pocketpaw.ai")
+_SENDER_NAME = os.environ.get("POCKETPAW_MAILTRAP_SENDER_NAME", "PocketPaw")
+_USE_SANDBOX = _env_bool("POCKETPAW_MAILTRAP_USE_SANDBOX", True)
+_INBOX_ID_RAW = os.environ.get("POCKETPAW_MAILTRAP_INBOX_ID")
+_INBOX_ID: int | None = int(_INBOX_ID_RAW) if _INBOX_ID_RAW and _INBOX_ID_RAW.isdigit() else None
+
+# ---------------------------------------------------------------------------
+# Lazy client
+# ---------------------------------------------------------------------------
+
+_client: object | None = None  # MailtrapClient | None (lazy to avoid import crash)
+
+
+def _get_client():
+    """Return (or create) the shared MailtrapClient.
+
+    Lazy so a missing API token doesn't crash the import path — the
+    workspace service can still load even when mail is not configured.
+    """
+    global _client
+    if _client is not None:
+        return _client
+    if not _MAILTRAP_API_TOKEN:
+        raise RuntimeError("POCKETPAW_MAILTRAP_API_TOKEN is not set")
+    import mailtrap as mt  # noqa: PLC0415 — lazy import
+
+    _client = mt.MailtrapClient(
+        token=_MAILTRAP_API_TOKEN,
+        sandbox=_USE_SANDBOX,
+        inbox_id=_INBOX_ID,
+    )
+    return _client
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+async def send_invite_email(
+    to_email: str,
+    workspace_name: str,
+    invite_token: str,
+    inviter_name: str = "Someone",
+) -> None:
+    """Send a workspace-invitation email via Mailtrap.
+
+    Builds a plain-text + HTML email with the invite link.
+
+    Failures are logged at WARNING level — the caller (workspace service)
+    must NOT let a mail blip abort the invite creation.
+    """
+    import asyncio  # noqa: PLC0415
+
+    base_url = os.environ.get("POCKETPAW_CLOUD_BASE_URL").rstrip("/")
+    invite_url = f"{base_url}/invite/{invite_token}"
+
+    subject = f"{inviter_name} invited you to join {workspace_name} on PocketPaw"
+
+    text_body = (
+        f"Hi,\n\n"
+        f"{inviter_name} has invited you to join the workspace "
+        f"{workspace_name!r} on PocketPaw.\n\n"
+        f"Accept the invite here:\n{invite_url}\n\n"
+        f"This invite expires in 7 days.\n\n"
+        f"— The PocketPaw Team"
+    )
+
+    template = (_TEMPLATES_DIR / "send_invite.html").read_text()
+    html_body = template.format(
+        inviter_name=inviter_name,
+        workspace_name=workspace_name,
+        invite_url=invite_url,
+    )
+
+    try:
+        client = await asyncio.to_thread(_get_client)
+    except RuntimeError:
+        logger.warning("Mailtrap not configured — skipping invite email to %s", to_email)
+        return
+    except Exception:
+        logger.warning("Failed to initialise Mailtrap client", exc_info=True)
+        return
+
+    try:
+        import mailtrap as mt  # noqa: PLC0415
+
+        mail = mt.Mail(
+            sender=mt.Address(email=_SENDER_EMAIL, name=_SENDER_NAME),
+            to=[mt.Address(email=to_email)],
+            subject=subject,
+            text=text_body,
+            html=html_body,
+        )
+        await asyncio.to_thread(client.send, mail)
+        logger.info("Invite email sent to %s for workspace %r", to_email, workspace_name)
+    except Exception:
+        logger.warning(
+            "Failed to send invite email to %s for workspace %r",
+            to_email,
+            workspace_name,
+            exc_info=True,
+        )

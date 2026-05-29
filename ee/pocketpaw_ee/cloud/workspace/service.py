@@ -61,6 +61,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 from pocketpaw_ee.cloud.audit import service as audit_service
 from pocketpaw_ee.cloud.auth import api_keys as _api_keys_service
 from pocketpaw_ee.cloud.auth import sessions as _sessions_service
+from pocketpaw_ee.cloud.mail import send_invite_email
 from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
@@ -738,6 +739,17 @@ async def _mint_invite_for_email(
     return _invite_to_domain(invite_doc, plaintext_token=plaintext)
 
 
+async def _lookup_user_name(user_id: str) -> str:
+    """Return the user's display name, or 'Someone' on failure."""
+    try:
+        user = await _UserDoc.get(PydanticObjectId(user_id))
+        if user is not None:
+            return user.full_name or "Someone"
+    except Exception:
+        pass
+    return "Someone"
+
+
 async def create_invite(
     ctx: RequestContext,
     workspace_id: str,
@@ -787,6 +799,17 @@ async def create_invite(
                 room_id=invite.group_id,
             ),
         )
+
+    try:
+        name = await _lookup_user_name(ctx.user_id)
+        await send_invite_email(
+            to_email=body.email,
+            workspace_name=doc.name,
+            invite_token=invite.token or "",
+            inviter_name=name,
+        )
+    except Exception:
+        logger.warning("Invite email failed for %s", body.email, exc_info=True)
 
     return invite
 
@@ -868,6 +891,17 @@ async def bulk_create_invites(
             )
 
         created.append(invite)
+
+        try:
+            name = await _lookup_user_name(ctx.user_id)
+            await send_invite_email(
+                to_email=email,
+                workspace_name=doc.name,
+                invite_token=invite.token or "",
+                inviter_name=name,
+            )
+        except Exception:
+            logger.warning("Invite email failed for %s", email, exc_info=True)
 
     return {"created": created, "skipped": skipped}
 
@@ -1134,6 +1168,25 @@ async def resend_invite(
             "resend_count": invite_doc.resend_count,
         },
     )
+
+    # Best-effort: re-send invite email with the fresh token.
+    try:
+        ws_doc = await _fetch_workspace(workspace_id)
+        workspace_name = ws_doc.name if ws_doc is not None else "your workspace"
+        name = await _lookup_user_name(ctx.user_id)
+        await send_invite_email(
+            to_email=invite_doc.email,
+            workspace_name=workspace_name,
+            invite_token=plaintext,
+            inviter_name=name,
+        )
+    except Exception:
+        logger.warning(
+            "Invite email failed for %s (ws=%s)",
+            invite_doc.email,
+            workspace_id,
+            exc_info=True,
+        )
 
     return {
         "invite_id": invite_id,
