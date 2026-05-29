@@ -147,8 +147,10 @@ def mount_cloud(app: FastAPI) -> None:
     # Import and mount domain routers
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
+    from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
+    from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
@@ -167,7 +169,9 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(workspace_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
+    app.include_router(audit_workspace_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
@@ -214,6 +218,8 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
+    from pocketpaw_ee.cloud.decisions.router import router as decisions_router
+    from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
@@ -236,6 +242,25 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(livekit_router, prefix="/api/v1")
     # Pocket outcomes — GET /api/v1/outcomes count surface (RFC 05 M2b.2).
     app.include_router(outcomes_router, prefix="/api/v1")
+    # Decision graph — Slice 1 ships only GET /api/v1/decisions/_ping;
+    # the real REST surface (get/find/trace/downstream/timeline/explain)
+    # lands in RFC 07 Slice 2.
+    app.include_router(decisions_router, prefix="/api/v1")
+    # Instinct approvals — RFC 03 v2 template-level approval queue
+    # (Wave 3a). The dispatch wrapper persists rows when the OSS
+    # ``resolve_instinct`` returns ``ESCALATE_APPROVAL``; this router
+    # exposes the operator-facing read + decision surface.
+    app.include_router(instinct_approvals_router, prefix="/api/v1")
+
+    # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
+    # for the persisted (trigger, row) state matrix; the actual sweep
+    # is driven by the in-process scheduler at
+    # ``cloud._core.temporal_scheduler`` and the per-pocket dispatcher
+    # at ``cloud.pockets.temporal_dispatcher``. No "sweep now" route in
+    # v0 (deferred).
+    from pocketpaw_ee.cloud.temporal_sweeps.router import router as temporal_sweeps_router
+
+    app.include_router(temporal_sweeps_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -495,6 +520,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     _get_bus().subscribe("pocket.outcome", _outcomes_service.record_outcome)
 
+    # Decision graph projection (RFC 07 Slice 1). Lazy-init the
+    # singleton DecisionGraph + projection so `GET /api/v1/decisions/_ping`
+    # and the in-process Python API (`get_decision_graph()`) work from
+    # process start. Slice 1 ships the substrate only — Slice 2 wires
+    # the journal-to-projection subscription that keeps the store live.
+    from pocketpaw_ee.cloud.decisions.service import init_decisions_projection
+
+    init_decisions_projection()
+
     # Tasks → notifications fan-out. When a Task is proposed to a human
     # assignee, drop an in-app notification so they see it even without
     # Mission Control open. Agent assignees skip this path — they pick
@@ -552,3 +586,15 @@ def mount_cloud(app: FastAPI) -> None:
         from pocketpaw.agents.pool import get_agent_pool
 
         await get_agent_pool().stop()
+
+    # Defence-in-depth drain. Under ``FastAPI(lifespan=...)`` (the host's
+    # default in ``src/pocketpaw/dashboard.py``) this hook is silently dropped
+    # — the real drain runs in ``dashboard_lifecycle.shutdown_event``. Kept
+    # here so a host that doesn't pass ``lifespan=`` still drains in-flight runs.
+    @app.on_event("shutdown")
+    async def _drain_chat_runs() -> None:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await executor.drain()

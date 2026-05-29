@@ -12,8 +12,19 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from pocketpaw_ee.calendar.domain import Attendee, Event, Recurrence
 from pocketpaw_ee.calendar.models import _EventDoc
+
+
+def _utc_if_naive(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC). MongoDB stores datetimes
+    as UTC but Beanie returns them as naive. Without this, Pydantic
+    serializes naive datetimes without a timezone suffix in the JSON
+    response, and the frontend cannot correctly convert back to local
+    time."""
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
 
 
 def _doc_to_event(doc: _EventDoc) -> Event:
@@ -26,8 +37,8 @@ def _doc_to_event(doc: _EventDoc) -> Event:
         calendar_id=doc.calendar_id,
         title=doc.title,
         description=doc.description or "",
-        starts_at=doc.starts_at,
-        ends_at=doc.ends_at,
+        starts_at=_utc_if_naive(doc.starts_at),
+        ends_at=_utc_if_naive(doc.ends_at),
         timezone=doc.timezone,
         # H-NEW-1: hydrate the creator field so check_event_modify works
         # on Events returned by conflict scans (and any other domain
@@ -39,8 +50,8 @@ def _doc_to_event(doc: _EventDoc) -> Event:
         fabric_object_id=doc.fabric_object_id,
         source_connector=doc.source_connector,
         source_external_id=doc.source_external_id,
-        created_at=doc.created_at,
-        updated_at=doc.updated_at,
+        created_at=_utc_if_naive(doc.created_at),
+        updated_at=_utc_if_naive(doc.updated_at),
     )
 
 

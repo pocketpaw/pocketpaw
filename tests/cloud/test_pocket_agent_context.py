@@ -296,13 +296,13 @@ async def test_generate_session_title_writes_placeholder_then_haiku():
     followed by a Haiku-generated title that overwrites it."""
     import asyncio
 
-    from pocketpaw_ee.cloud.chat.agent_router import _generate_session_title
     from pocketpaw_ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,
         attach_sse_event_sink,
         detach_sse_event_sink,
     )
+    from pocketpaw_ee.cloud.chat.runs.run_core import _generate_session_title
 
     ctx = ScopeContext(
         kind=ScopeKind.SESSION,
@@ -327,7 +327,7 @@ async def test_generate_session_title_writes_placeholder_then_haiku():
     try:
         with (
             patch(
-                "pocketpaw_ee.cloud.chat.agent_router._set_session_title_in_mongo",
+                "pocketpaw_ee.cloud.chat.runs.run_core._set_session_title_in_mongo",
                 side_effect=_fake_write,
             ),
             patch(
@@ -362,13 +362,13 @@ async def test_generate_session_title_uses_message_when_haiku_fails():
     persisted title — that's the fallback the user asked for."""
     import asyncio
 
-    from pocketpaw_ee.cloud.chat.agent_router import _generate_session_title
     from pocketpaw_ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,
         attach_sse_event_sink,
         detach_sse_event_sink,
     )
+    from pocketpaw_ee.cloud.chat.runs.run_core import _generate_session_title
 
     ctx = ScopeContext(
         kind=ScopeKind.SESSION,
@@ -391,7 +391,7 @@ async def test_generate_session_title_uses_message_when_haiku_fails():
     try:
         with (
             patch(
-                "pocketpaw_ee.cloud.chat.agent_router._set_session_title_in_mongo",
+                "pocketpaw_ee.cloud.chat.runs.run_core._set_session_title_in_mongo",
                 side_effect=_fake_write,
             ),
             patch(
@@ -747,8 +747,8 @@ def test_normalizer_passes_through_already_wrapped_ui():
 
 @pytest.mark.asyncio
 async def test_generate_session_title_skips_when_no_session_id():
-    from pocketpaw_ee.cloud.chat.agent_router import _generate_session_title
     from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
+    from pocketpaw_ee.cloud.chat.runs.run_core import _generate_session_title
 
     ctx = ScopeContext(
         kind=ScopeKind.POCKET,

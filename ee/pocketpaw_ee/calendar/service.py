@@ -72,6 +72,7 @@ from pocketpaw_ee.calendar.events import (
 )
 from pocketpaw_ee.calendar.freebusy import compute_freebusy
 from pocketpaw_ee.calendar.models import _CalendarDoc, _EventDoc
+from pocketpaw_ee.calendar.recurrence import expand_recurrence
 from pocketpaw_ee.cloud.shared.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud.shared.events import event_bus
 
@@ -284,8 +285,8 @@ async def update_event(
     if body.attendees is not None:
         doc.attendees = [a.model_dump() for a in body.attendees]
         changed_fields.append("attendees")
-    if body.recurrence is not None:
-        doc.recurrence = body.recurrence.model_dump()
+    if "recurrence" in body.model_fields_set:
+        doc.recurrence = body.recurrence.model_dump() if body.recurrence is not None else None
         changed_fields.append("recurrence")
 
     # Cross-field validation after the partial merge — starts_at < ends_at.
@@ -369,12 +370,19 @@ async def list_events(ctx: RequestContext, body: ListEventsRequest) -> EventList
     query: dict = {
         "workspace": ctx.workspace_id,
         "starts_at": {"$lt": body.starts_before},
-        "ends_at": {"$gt": body.starts_after},
+        "$or": [
+            {"ends_at": {"$gt": body.starts_after}},
+            {"recurrence": {"$ne": None}},
+        ],
     }
     if body.calendar_id is not None:
         query["calendar_id"] = body.calendar_id
 
-    docs = await _EventDoc.find(query).limit(body.limit).to_list()
+    # Use the max allowed limit on the raw query so recurring events are
+    # not silently dropped before expansion. The final result is capped
+    # to body.limit after expansion and sort below.
+    query_limit = max(body.limit, 500)
+    docs = await _EventDoc.find(query).limit(query_limit).to_list()
 
     # Resolve the set of unique calendar_ids in the result and check
     # read access in one pass. Cache per-calendar decisions so the
@@ -391,8 +399,24 @@ async def list_events(ctx: RequestContext, body: ListEventsRequest) -> EventList
         if accessible[cid]:
             visible_docs.append(d)
 
-    events = [_doc_to_response(d) for d in visible_docs]
-    return EventListResponse(events=events, total=len(events))
+    # Map to domain events and expand recurrences into the query window.
+    # The request boundaries are timezone-naive (FastAPI default). Stamp
+    # them as UTC so they compare with the timezone-aware datetimes
+    # produced by _doc_to_event.
+    range_start = body.starts_after.replace(tzinfo=UTC)
+    range_end = body.starts_before.replace(tzinfo=UTC)
+    expanded: list[Event] = []
+    for d in visible_docs:
+        event = _doc_to_event(d)
+        if event.recurrence is not None:
+            expanded.extend(expand_recurrence(event, range_start, range_end))
+        elif event.ends_at > range_start and event.starts_at < range_end:
+            expanded.append(event)
+
+    # Sort by starts_at and cap to the requested limit.
+    expanded.sort(key=lambda e: e.starts_at)
+    events = [_event_to_response(e) for e in expanded[: body.limit]]
+    return EventListResponse(events=events, total=len(expanded))
 
 
 async def get_freebusy(ctx: RequestContext, body: FreeBusyRequest) -> FreeBusyResponse:

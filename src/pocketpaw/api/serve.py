@@ -56,32 +56,14 @@ def create_api_app():
         openapi_url="/api/v1/openapi.json",
     )
 
-    # --- Middleware (order matters: last added = outermost = runs first) --
-    # Auth must be added BEFORE CORS so that CORS is outermost and handles
-    # OPTIONS preflight requests before auth can reject them.
+    # --- Auth middleware (innermost) ------------------------------------
+    # CORS is registered AFTER router mounting below so it's outermost in
+    # the final stack — any rejection (CSRF 403, exception, etc.) added by
+    # `mount_cloud()` still ships Access-Control-Allow-Origin on its way
+    # back out.
     from pocketpaw.dashboard_auth import AuthMiddleware
 
     app.add_middleware(AuthMiddleware)
-
-    _BUILTIN_ORIGINS = [
-        "tauri://localhost",
-        "https://tauri.localhost",
-        "http://localhost:1420",
-    ]
-    try:
-        _custom = Settings.load().api_cors_allowed_origins
-    except Exception:
-        _custom = []
-    _ORIGINS = list(set(_BUILTIN_ORIGINS + _custom))
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_ORIGINS,
-        allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
 
     # --- Mount Mission Control + Deep Work routers ----------------------
     from pocketpaw.deep_work.api import router as deep_work_router
@@ -105,6 +87,31 @@ def create_api_app():
 
     # --- Mount all /api/v1/ routers -------------------------------------
     mount_v1_routers(app)
+
+    # --- CORS (outermost) -----------------------------------------------
+    # Registered LAST so it wraps every other middleware — including the
+    # CSRFMiddleware added inside `mount_cloud()`. Without this, a CSRF
+    # 403 short-circuits before CORS can attach Access-Control-Allow-
+    # Origin and the browser reports a misleading CORS error.
+    _BUILTIN_ORIGINS = [
+        "tauri://localhost",
+        "https://tauri.localhost",
+        "http://localhost:1420",
+    ]
+    try:
+        _custom = Settings.load().api_cors_allowed_origins
+    except Exception:
+        _custom = []
+    _ORIGINS = list(set(_BUILTIN_ORIGINS + _custom))
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_ORIGINS,
+        allow_origin_regex=r"^https?://([a-z]+\.)?localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # --- WebSocket handler helper ----------------------------------------
     async def _handle_ws(

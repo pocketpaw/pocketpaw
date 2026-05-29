@@ -7,10 +7,11 @@ Beanie reads/writes against an isolated mongomock-motor DB.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.auth import service as auth_service
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership
@@ -84,8 +85,10 @@ async def test_update_profile_partial_only_full_name() -> None:
 
 async def test_set_active_workspace_persists() -> None:
     doc = await _seed_user()
-    out = await auth_service.set_active_workspace(_ctx(str(doc.id)), "w42")
-    assert out.active_workspace == "w42"
+    # _seed_user defaults the user to membership in "w1"; the caller must be
+    # a member of the workspace they're pinning.
+    out = await auth_service.set_active_workspace(_ctx(str(doc.id)), "w1")
+    assert out.active_workspace == "w1"
 
 
 async def test_set_active_workspace_empty_raises_validation() -> None:
@@ -98,3 +101,31 @@ async def test_set_avatar_path_persists() -> None:
     doc = await _seed_user()
     out = await auth_service.set_avatar_path(_ctx(str(doc.id)), "/api/v1/auth/avatar/u1.png")
     assert out.avatar == "/api/v1/auth/avatar/u1.png"
+
+
+async def test_set_active_workspace_rejects_non_member(mongo_db: Any) -> None:
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WS
+
+    user = await _seed_user(email="alice@x.c")
+    other_owner = await _seed_user(email="bob@x.c")
+    ws = _WS(name="Bob's WS", slug="bobs", owner=str(other_owner.id))
+    await ws.insert()
+
+    ctx = _ctx(str(user.id))
+    with pytest.raises(Forbidden):
+        await auth_service.set_active_workspace(ctx, str(ws.id))
+
+
+async def test_set_active_workspace_accepts_member(mongo_db: Any) -> None:
+    from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _M
+    from pocketpaw_ee.cloud.models.workspace import Workspace as _WS
+
+    user = await _seed_user(email="alice@x.c")
+    ws = _WS(name="Alice's WS", slug="alices", owner=str(user.id))
+    await ws.insert()
+    user.workspaces.append(_M(workspace=str(ws.id), role="owner", joined_at=datetime.now(UTC)))
+    await user.save()
+
+    ctx = _ctx(str(user.id))
+    profile = await auth_service.set_active_workspace(ctx, str(ws.id))
+    assert profile.active_workspace == str(ws.id)

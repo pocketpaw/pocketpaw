@@ -21,6 +21,11 @@ remains registered in ``get_all_documents()`` for Beanie init.
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+from pocketpaw_ee.cloud.models.api_key import APIKey
+from pocketpaw_ee.cloud.models.audit_event import AuditEvent
+from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
+from pocketpaw_ee.cloud.models.auth_session import AuthSession
+from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
@@ -41,6 +46,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
     ForesightWorkspaceScenario,
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
@@ -51,12 +57,15 @@ from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
+from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
+_CalendarDoc: type = None  # type: ignore[assignment]
+_EventDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
@@ -70,10 +79,29 @@ def _ensure_file_upload():
     return FileUpload
 
 
+def _ensure_calendar_docs():
+    # Why: calendar.__init__ eagerly imports the router which transitively
+    # imports cloud.auth.current_active_user. Deferred to break the cycle
+    # when cloud.models is loaded during cloud.auth's own init.
+    global _CalendarDoc, _EventDoc
+    if _CalendarDoc is None:
+        from pocketpaw_ee.calendar.models import _CalendarDoc as _CD
+        from pocketpaw_ee.calendar.models import _EventDoc as _ED
+
+        _CalendarDoc = _CD
+        _EventDoc = _ED
+    return _CalendarDoc, _EventDoc
+
+
 __all__ = [
+    "APIKey",
     "Agent",
     "AgentConfig",
     "Attachment",
+    "AuditEvent",
+    "AuditWebhook",
+    "AuthSession",
+    "ChatRunDoc",
     "Comment",
     "CommentAuthor",
     "CommentTarget",
@@ -91,6 +119,7 @@ __all__ = [
     "ForesightWorkspaceScenario",
     "Group",
     "GroupAgent",
+    "InstinctApproval",
     "Invite",
     "Mention",
     "Message",
@@ -107,6 +136,7 @@ __all__ = [
     "Task",
     "TaskAssignee",
     "TaskSource",
+    "TemporalSweepStateDoc",
     "User",
     "Widget",
     "WidgetPosition",
@@ -120,6 +150,7 @@ __all__ = [
 def get_all_documents():
     """Get all Beanie documents, with lazy FileUpload loading."""
     _ensure_file_upload()
+    cal_doc, evt_doc = _ensure_calendar_docs()
     return [
         User,
         Agent,
@@ -136,9 +167,11 @@ def get_all_documents():
         ComposioConnection,
         Invite,
         Group,
+        InstinctApproval,
         Message,
         ReadState,
         Task,
+        TemporalSweepStateDoc,
         Cycle,
         Project,
         PlanSession,
@@ -148,6 +181,13 @@ def get_all_documents():
         ForesightPredictionRecord,
         ForesightWorkspaceConfig,
         ForesightWorkspaceScenario,
+        ChatRunDoc,
+        AuditEvent,
+        AuditWebhook,
+        AuthSession,
+        APIKey,
+        cal_doc,
+        evt_doc,
     ]
 
 

@@ -37,4 +37,83 @@ class AuditListResponse(BaseModel):
     total: int
 
 
-__all__ = ["ListAuditRequest", "AuditListResponse", "AuditEntryDTO"]
+# ---------------------------------------------------------------------------
+# Workspace audit-event DTOs (Wave 2 Task 10).
+#
+# Wire shape uses camelCase to match the rest of the workspace surface
+# (memberOut, inviteOut, etc.). Request / response classes are kept
+# distinct per cloud Rule 4.
+# ---------------------------------------------------------------------------
+
+
+class AuditEventOut(BaseModel):
+    id: str
+    workspaceId: str
+    actorId: str
+    action: str
+    targetType: str
+    targetId: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    ip: str | None = None
+    userAgent: str | None = None
+    at: str  # ISO-8601
+
+
+class AuditQueryRequest(BaseModel):
+    action: str | None = Field(default=None, max_length=120)
+    actor: str | None = Field(default=None, max_length=120)
+    since: str | None = None  # ISO-8601 — parsed in service
+    until: str | None = None  # ISO-8601
+    cursor: str | None = None  # opaque, composite ``{at_iso}|{oid}``
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class AuditPageResponse(BaseModel):
+    items: list[AuditEventOut]
+    nextCursor: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# SIEM webhook DTOs (Wave 3 Task 15).
+# ---------------------------------------------------------------------------
+
+
+class CreateAuditWebhookRequest(BaseModel):
+    url: str = Field(..., max_length=2048)
+
+
+class UpdateAuditWebhookRequest(BaseModel):
+    enabled: bool | None = None
+
+
+class AuditWebhookOut(BaseModel):
+    id: str
+    workspaceId: str
+    url: str
+    enabled: bool
+    failureCount: int
+    lastDeliveryAt: str | None = None
+    lastStatus: int | None = None
+    lastError: str | None = None
+    createdBy: str
+    createdAt: str
+    secret: str | None = None  # populated only at creation / rotation
+
+
+class RotatedSecretResponse(BaseModel):
+    webhook: AuditWebhookOut
+    secret: str
+
+
+__all__ = [
+    "AuditEntryDTO",
+    "AuditEventOut",
+    "AuditListResponse",
+    "AuditPageResponse",
+    "AuditQueryRequest",
+    "AuditWebhookOut",
+    "CreateAuditWebhookRequest",
+    "ListAuditRequest",
+    "RotatedSecretResponse",
+    "UpdateAuditWebhookRequest",
+]

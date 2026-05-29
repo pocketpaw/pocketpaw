@@ -40,7 +40,7 @@ async def _seed_user() -> _UserDoc:
 
 @pytest_asyncio.fixture
 async def app_client(mongo_db) -> tuple[AsyncClient, _UserDoc]:
-    from pocketpaw_ee.cloud.auth import current_active_user
+    from pocketpaw_ee.cloud.auth import current_active_user, current_optional_user
     from pocketpaw_ee.cloud.auth.router import router
 
     user_doc = await _seed_user()
@@ -49,6 +49,7 @@ async def app_client(mongo_db) -> tuple[AsyncClient, _UserDoc]:
     add_error_handler(app)
     app.include_router(router, prefix="/api/v1")
     app.dependency_overrides[current_active_user] = lambda: user_doc
+    app.dependency_overrides[current_optional_user] = lambda: user_doc
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://t") as client:
@@ -89,13 +90,15 @@ async def test_patch_me_updates_full_name(app_client) -> None:
 
 async def test_set_active_workspace(app_client) -> None:
     client, user_doc = app_client
-    resp = await client.post("/api/v1/auth/set-active-workspace", json={"workspace_id": "w42"})
+    # The seeded user is a member of "w1" — pinning to a workspace the user
+    # isn't a member of is rejected by the service (cross-tenant guard).
+    resp = await client.post("/api/v1/auth/set-active-workspace", json={"workspace_id": "w1"})
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "activeWorkspace": "w42"}
+    assert resp.json() == {"ok": True, "activeWorkspace": "w1"}
 
     refreshed = await _UserDoc.get(user_doc.id)
     assert refreshed is not None
-    assert refreshed.active_workspace == "w42"
+    assert refreshed.active_workspace == "w1"
 
 
 async def test_set_active_workspace_empty_returns_422(app_client) -> None:

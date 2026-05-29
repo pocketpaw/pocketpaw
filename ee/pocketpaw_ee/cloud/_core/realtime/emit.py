@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
 from pocketpaw_ee.cloud._core.realtime.events import Event
 
@@ -18,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 async def emit(event: Event) -> None:
+    # Tier 2: when running inside the arq worker, the local InProcessBus has
+    # no subscribers (every listener lives in the web process). Ship the
+    # event over the cross-process bridge instead — the web's xproc consumer
+    # publishes it to its own local bus, where the real listeners are wired.
+    if xproc.is_worker():
+        await xproc.publish_bus_envelope(event)
+        return
+
     bus = get_bus()  # raises AssertionError if not initialized (programmer error)
     try:
         await bus.publish(event)

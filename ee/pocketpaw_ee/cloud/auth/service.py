@@ -24,7 +24,7 @@ from __future__ import annotations
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.auth.domain import AuthUser, WorkspaceMembershipRef
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
@@ -89,6 +89,11 @@ async def set_active_workspace(ctx: RequestContext, workspace_id: str) -> AuthUs
     doc = await _UserDoc.get(PydanticObjectId(ctx.user_id))
     if doc is None:
         raise NotFound("user", ctx.user_id)
+    if not any(m.workspace == workspace_id for m in doc.workspaces):
+        raise Forbidden(
+            "workspace.not_a_member",
+            "You are not a member of that workspace.",
+        )
     doc.active_workspace = workspace_id
     await doc.save()
     return _to_domain(doc)

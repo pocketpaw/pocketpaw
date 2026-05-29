@@ -587,6 +587,20 @@ async def shutdown_event(*, _stop_channel_adapter_fn=None):
     except Exception as exc:
         logger.warning("Agent pool stop failed: %s", exc)
 
+    # Drain in-flight cloud chat runs. Under ``FastAPI(lifespan=...)`` this
+    # is the only shutdown hook that fires — ``@app.on_event("shutdown")``
+    # handlers in ``mount_cloud`` are silently dropped. ``drain()`` waits for
+    # tasks to finish naturally (no cancellation); ``_bounded`` caps the wait
+    # so a stuck run can't wedge exit.
+    try:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await _bounded("cloud_run_drain", executor.drain(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Cloud run drain skipped: %s", exc)
+
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):

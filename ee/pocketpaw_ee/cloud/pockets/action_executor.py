@@ -31,6 +31,35 @@
 #   keys are swept opportunistically under the existing lock. Previously
 #   the map grew one permanent entry per `(pocket, user)` pair that ever
 #   ran a write — an unbounded memory leak in a long-running worker.
+# Updated: 2026-05-28 (feat/wave-3a-instinct-dispatch) — RFC 03 v2
+#   template-level Instinct gate. `run_action` accepts an optional
+#   `template` parameter; when present and `from_instinct=False` the
+#   executor calls `instinct_dispatch.gate_action(...)` BEFORE any of
+#   the existing security guards (it's the cheapest possible failure
+#   point — pure CEL evaluation, no I/O, no HTTP). The gate returns
+#   one of three branches:
+#     * blocked → return the new `instinct_blocked` sentinel; NO call.
+#     * pending_approval → persist an `InstinctApproval` row via the
+#       new EE-side service, return `instinct_pending` carrying the
+#       `approval_id`; NO call.
+#     * proceed → fall through into the existing gate stack (rate
+#       limit / base-URL / SSRF / allowlist / DNS / M2b.1 park / HTTP).
+#   When no template is passed (all current callers; backward-compat)
+#   the gate is skipped — every existing flow is byte-identical.
+# Updated: 2026-05-28 (feat/wave-3c-outcomes) — RFC 03 v2 template-level
+#   outcome event emission. On the HTTP 2xx SUCCESS path, AFTER the
+#   success audit and BEFORE the return, if a `template` is threaded
+#   through the executor calls `outcomes_emitter.emit_outcomes(...)`.
+#   The emitter fires one bus event per name declared in the action's
+#   `outcomes_emitted[]`. Failure / blocked / pending-approval / from-
+#   instinct paths do NOT emit — outcomes are billable, so only
+#   confirmed direct success counts (the post-approval re-entry that
+#   actually fires the HTTP call also emits, since `template` is
+#   threaded through `instinct_bridge.execute_approved_write` callers
+#   that pass it).
+#   Emitter failures must never break the executor's return — the call
+#   is wrapped so a bus or audit hiccup logs a warning but the
+#   action's success result still propagates to the caller.
 #
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
@@ -70,7 +99,7 @@ import logging
 import time
 import urllib.parse
 import uuid
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -85,6 +114,12 @@ from pocketpaw_ee.cloud.pockets._http_guard import (
     _resolve_url,
     _strip_query,
 )
+
+if TYPE_CHECKING:
+    # ``PocketTemplate`` ships in OSS (no EE import here, just typing).
+    # Importing under TYPE_CHECKING keeps the runtime import graph
+    # unchanged for callers that don't thread a template through.
+    from pocketpaw.bundled_templates import PocketTemplate
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +360,10 @@ async def run_action(
     allowed_writes: list[dict[str, Any]],
     idempotency_key: str | None = None,
     from_instinct: bool = False,
+    template: PocketTemplate | None = None,
+    row_context: dict[str, Any] | None = None,
+    workspace_context: dict[str, Any] | None = None,
+    row_id: str = "",
 ) -> dict:
     """Run ONE pocket write action against its configured backend.
 
@@ -392,6 +431,79 @@ async def run_action(
 
     on_error = binding.on_error
     method = binding.method
+
+    # ── 1.5. RFC 03 v2 template-level Instinct gate ─────────────────────
+    # When a template is threaded through (and we're not re-entering
+    # post-approval), evaluate `resolve_instinct` via the dispatch
+    # wrapper. The wrapper is the only impure layer that talks to the
+    # `instinct_approvals` Beanie collection — this module stays pure
+    # of Beanie imports (import-linter contract).
+    #
+    # The gate is the CHEAPEST failure mode in the stack: pure CEL eval
+    # on the row + workspace context, no HTTP, no SSRF resolve, no DNS
+    # lookup. A BLOCK / ESCALATE_APPROVAL verdict short-circuits every
+    # downstream guard.
+    if template is not None and not from_instinct:
+        from pocketpaw_ee.cloud.pockets import instinct_dispatch
+
+        park = {
+            "action": action,
+            "method": method,
+            "path": path,
+            "params": params,
+            "idempotency_key": idempotency_key,
+            "outcome": binding.outcome,
+        }
+        gate = await instinct_dispatch.gate_action(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            template=template,
+            action_name=action,
+            row_context=row_context or {},
+            workspace_context=workspace_context,
+            row_id=row_id,
+            park=park,
+        )
+        if gate.next_step == "blocked":
+            _audit_action_run(
+                actor=user_id,
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                action=action,
+                status="instinct-blocked",
+                base_url=base_url,
+            )
+            return {
+                "ok": False,
+                "code": "instinct_blocked",
+                "action": action,
+                "error": "action blocked by Instinct rule",
+                "reason": gate.decision.reason,
+                "on_error": on_error,
+            }
+        if gate.next_step == "pending_approval":
+            _audit_action_run(
+                actor=user_id,
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                action=action,
+                status="instinct-pending",
+                base_url=base_url,
+            )
+            return {
+                "ok": True,
+                "code": "instinct_pending",
+                "action": action,
+                "approval_id": gate.approval_id,
+                "reason": gate.decision.reason,
+                "_park": park,
+                "on_success": [],
+                "on_error": [],
+            }
+        # gate.next_step == "proceed" — fall through into the existing
+        # gate stack. Notify rules are dropped on the floor here; Wave
+        # 3c wires the side-effect dispatcher.
 
     # ── 2. write rate limit ─────────────────────────────────────────────
     if await _action_rate_limited(pocket_id, user_id):
@@ -593,6 +705,35 @@ async def run_action(
         status="success",
         base_url=base_url,
     )
+
+    # ── RFC 03 v2 outcome event emission ────────────────────────────────
+    # On a confirmed HTTP 2xx success, fire one ``OutcomeEmitted`` event
+    # per name declared in the action's ``outcomes_emitted[]``. Wave 3c.
+    # Emission is gated on a threaded ``template`` — every legacy caller
+    # that doesn't pass one is byte-identical (zero events emitted).
+    # The emit is wrapped so a bus / audit hiccup never propagates back
+    # into the caller's success path; the action genuinely succeeded.
+    if template is not None:
+        from pocketpaw_ee.cloud.pockets import outcomes_emitter
+
+        try:
+            await outcomes_emitter.emit_outcomes(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=pocket_id,
+                template=template,
+                action_name=action,
+                row_id=row_id,
+                row_context=row_context or {},
+            )
+        except Exception:  # noqa: BLE001 — emission must never break the success path
+            logger.warning(
+                "outcome emission failed for action=%s pocket=%s",
+                action,
+                pocket_id,
+                exc_info=True,
+            )
+
     return {
         "ok": True,
         "action": action,

@@ -24,6 +24,16 @@ historical un-discriminated consumers keep working; the coarse
 ``PocketUpdated`` realtime event the service layer emits is untouched
 (it remains the refetch fallback). Still one ``pocket_mutation`` push
 per op — purely additive enrichment, not a second event.
+Changes: 2026-05-24 (RFC 06 position #2 follow-up) — every
+``pocket_mutation`` frame now also carries a plain-English ``kind``
+discriminant: ``"structure"`` for node ops, ``"data"`` for state ops,
+``"replace"`` for the full-document push from ``_push_replace`` (top-
+level field updates, widget add/remove, sources/actions mutations).
+The ``replace`` push previously had no discriminant at all, so this
+closes the only remaining gap. ``kind`` is the simpler client-facing
+label; ``family`` is kept untouched on the granular-op frames for
+back-compat. See ``ee/docs/architecture/pocket-mutation-channel.md``
+for the full channel contract.
 """
 
 from __future__ import annotations
@@ -206,7 +216,14 @@ async def _push_replace(pocket_view: dict[str, Any]) -> None:
     """Push a ``pocket_mutation`` event for a successful update / widget
     change. Imported lazily so the cloud-chat dependency stays optional
     for callers that never go through the SSE path. The frontend gets a
-    resolved spec; the agent's caller still has the raw view."""
+    resolved spec; the agent's caller still has the raw view.
+
+    The frame carries ``kind == "replace"`` (RFC 06 position #2): the
+    full-document push isn't a granular structure-vs-data op — the whole
+    pocket goes over the wire — so it gets its own value rather than
+    folding into "structure". Clients can branch on ``kind == "replace"``
+    to do a full re-render and skip the in-place patch path.
+    """
     resolved = await _resolved_view_for_frontend(pocket_view)
     try:
         from pocketpaw_ee.cloud.chat.agent_service import push_pocket_mutation
@@ -214,6 +231,8 @@ async def _push_replace(pocket_view: dict[str, Any]) -> None:
         push_pocket_mutation(
             {
                 "action": "replace",
+                "op": "replace",
+                "kind": "replace",
                 "pocket_id": resolved.get("_id", ""),
                 "pocket": resolved,
             }
@@ -227,33 +246,44 @@ def _push_mutation_frame(op: str, pocket_view: dict[str, Any], payload: dict[str
     and push it as the ``pocket_mutation`` SSE event.
 
     ``op`` is the granular op identifier (``node_added`` / ``state_set`` /
-    …). It resolves to a mutation ``family`` — ``updateComponents`` for a
-    node/structure op, ``updateDataModel`` for a state/data op — which is
-    the RFC-06 split letting the canvas patch only the layer that
-    changed. The frame is emitted FLAT (``to_wire``) so the historical
+    …). It resolves to two parallel discriminants — both carrying the
+    same structure/data split:
+
+    * ``kind`` (plain-English, RFC 06 position #2): ``"structure"`` for a
+      node/component-tree op, ``"data"`` for a state op.
+    * ``family`` (A2UI vocabulary, back-compat): ``"updateComponents"``
+      for structure ops, ``"updateDataModel"`` for data ops.
+
+    The frame is emitted FLAT (``to_wire``) so the historical
     un-discriminated consumers, which read ``action`` + flat payload
     keys, keep working byte-for-byte.
 
     Exactly one ``pocket_mutation`` push per op — the coarse
     ``PocketUpdated`` realtime event the service layer emits on the same
-    write is the separate refetch fallback for clients that ignore
-    ``family``. An op whose identifier has no known family falls back to
-    the legacy flat frame (no ``family`` key) rather than dropping the
-    push.
+    write is the separate refetch fallback for clients that ignore both
+    discriminants. An op whose identifier has no known kind falls back
+    to the legacy flat frame (no ``kind`` / ``family`` keys) rather than
+    dropping the push.
     """
-    from pocketpaw_ee.cloud.chat.agent_schemas import PocketMutationFrame, family_for_op
+    from pocketpaw_ee.cloud.chat.agent_schemas import (
+        PocketMutationFrame,
+        family_for_op,
+        kind_for_op,
+    )
     from pocketpaw_ee.cloud.chat.agent_service import push_pocket_mutation
 
     pocket_id = pocket_view.get("_id", "")
     family = family_for_op(op)
+    kind = kind_for_op(op)
     try:
-        if family is None:
+        if family is None or kind is None:
             # Unknown op — keep the legacy flat frame so the canvas still
             # gets a signal; only the discriminant is missing.
-            logger.debug("no mutation family for op %r — emitting legacy flat frame", op)
+            logger.debug("no mutation kind for op %r — emitting legacy flat frame", op)
             push_pocket_mutation({"action": op, "pocket_id": pocket_id, **payload})
             return
         frame = PocketMutationFrame(
+            kind=kind,
             family=family,
             op=op,
             pocket_id=pocket_id,

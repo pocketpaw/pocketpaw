@@ -39,6 +39,8 @@ from fastapi import APIRouter, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from pocketpaw_ee.cloud.auth.core import _COOKIE_SECURE, TOKEN_LIFETIME
+
 logger = logging.getLogger(__name__)
 
 # Cookie + header names — kept module-level so tests can introspect.
@@ -46,16 +48,16 @@ CSRF_COOKIE_NAME: Final = "paw_csrf"
 CSRF_HEADER_NAME: Final = "X-CSRF-Token"
 AUTH_COOKIE_NAME: Final = "paw_auth"
 
-# Verbs the browser can be tricked into firing cross-origin without a
-# preflight (or that mutate state). The middleware checks CSRF on these
-# and lets the rest through unmodified.
+# Lifetime mirrors the auth cookie so they expire together.
+CSRF_COOKIE_MAX_AGE: Final = TOKEN_LIFETIME
+
+# Verbs that mutate or can be cross-origin fired without preflight.
 _PROTECTED_METHODS: Final = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-# Path prefixes that bypass CSRF entirely. ``/auth/login`` and
-# ``/auth/logout`` are the bootstrap endpoints — login mints the auth
-# cookie in the same response, so requiring a CSRF token to call login
-# would be a chicken-and-egg. ``/auth/csrf`` itself is GET-only but
-# listed for clarity. ``/health`` is a liveness probe.
+# Why: pre-auth or out-of-band-state endpoints can't carry a paired CSRF
+# token. Login + MFA + password reset + SSO callback all bootstrap or
+# rotate the session; they carry their own anti-replay state (form
+# credentials, mfa_pending JWT, reset token, OIDC state).
 _EXEMPT_PATH_PREFIXES: Final = (
     "/api/v1/auth/login",
     "/api/v1/auth/logout",
@@ -63,14 +65,49 @@ _EXEMPT_PATH_PREFIXES: Final = (
     "/api/v1/auth/bearer/logout",
     "/api/v1/auth/csrf",
     "/api/v1/auth/register",
+    "/api/v1/auth/mfa/challenge",
+    "/api/v1/auth/forgot-password",
+    "/api/v1/auth/reset-password",
+    "/api/v1/auth/request-verify-token",
+    "/api/v1/auth/verify",
+    "/api/v1/auth/sso/callback",
     "/health",
 )
 
 
-def _generate_token() -> str:
+def mint_csrf_token() -> str:
     """Return a URL-safe random token suitable for double-submit CSRF."""
 
     return secrets.token_urlsafe(32)
+
+
+# Back-compat alias for the previously-private helper.
+_generate_token = mint_csrf_token
+
+
+def set_csrf_cookie(response: Response, token: str, secure: bool = _COOKIE_SECURE) -> None:
+    """Attach the non-HttpOnly ``paw_csrf`` cookie to a response.
+
+    Why: JS reads this and echoes it back as ``X-CSRF-Token`` — the
+    secret is the match between cookie and header, not either value
+    alone, so httponly must stay False.
+    """
+
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        max_age=CSRF_COOKIE_MAX_AGE,
+        secure=secure,
+        httponly=False,
+        samesite="lax",
+        path="/",
+    )
+
+
+def clear_csrf_cookie(response: Response) -> None:
+    """Expire the ``paw_csrf`` cookie. Pairs with auth-cookie clear on logout."""
+
+    response.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=_COOKIE_SECURE)
 
 
 def _path_is_exempt(path: str) -> bool:
@@ -166,7 +203,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # Only clear on a successful logout — leave the cookie alone if
         # fastapi-users rejected the request.
         if 200 <= response.status_code < 300:
-            response.delete_cookie(CSRF_COOKIE_NAME, path="/", samesite="lax", secure=False)
+            response.delete_cookie(
+                CSRF_COOKIE_NAME, path="/", samesite="lax", secure=_COOKIE_SECURE
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -192,32 +231,21 @@ async def get_csrf_token(request: Request, response: Response) -> dict[str, str]
     the same token survives login.
     """
 
-    # Reuse the existing cookie if the caller already has one. Rotating
-    # on every fetch would invalidate any in-flight request that grabbed
-    # the previous value from /auth/csrf milliseconds earlier.
-    token = request.cookies.get(CSRF_COOKIE_NAME) or _generate_token()
-
-    # cookie_secure mirrors the auth cookie's posture so dev / prod
-    # stays consistent. Importing inside the function keeps this module
-    # free of an auth.core import cycle.
-    from pocketpaw_ee.cloud.auth.core import _COOKIE_SECURE
-
-    response.set_cookie(
-        key=CSRF_COOKIE_NAME,
-        value=token,
-        max_age=60 * 60 * 24 * 7,  # 7 days — match JWT lifetime
-        secure=_COOKIE_SECURE,
-        httponly=False,  # JS must read this to echo it back as a header
-        samesite="lax",
-        path="/",
-    )
+    # Why: rotating on every fetch would invalidate an in-flight request
+    # that just grabbed the previous token milliseconds earlier.
+    token = request.cookies.get(CSRF_COOKIE_NAME) or mint_csrf_token()
+    set_csrf_cookie(response, token)
     return {"csrf_token": token}
 
 
 __all__ = [
     "AUTH_COOKIE_NAME",
     "CSRF_COOKIE_NAME",
+    "CSRF_COOKIE_MAX_AGE",
     "CSRF_HEADER_NAME",
     "CSRFMiddleware",
     "csrf_router",
+    "clear_csrf_cookie",
+    "mint_csrf_token",
+    "set_csrf_cookie",
 ]

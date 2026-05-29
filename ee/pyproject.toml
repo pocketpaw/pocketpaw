@@ -47,10 +47,18 @@ dependencies = [
     # --- Auth (user management + OAuth2 + JWT with a Beanie backend) ---
     "fastapi-users[beanie,oauth]>=13.0.0",
     "pwdlib[argon2]>=0.2.0",
+    # --- MFA (TOTP) — secrets + code verification for /auth/mfa/* ---
+    "pyotp>=2.9.0",
     # --- Real-time / rate limiting / cache ---
     "python-socketio>=5.11.0",
     "slowapi>=0.1.9",
     "redis[hiredis]>=5.0.0",
+    # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
+    "dnspython>=2.6.0",
+    # --- Background worker (Tier 2 resumable chat runs) ---
+    # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
+    # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
+    "arq>=0.26.0",
     # --- File storage (S3 + GCS) ---
     "boto3>=1.34.0",
     "google-cloud-storage>=2.14.0",
@@ -159,6 +167,7 @@ cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
 tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
 planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
+decisions = "pocketpaw_ee.extensions:CloudDecisionsMcpProvider"
 pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
 foresight = "pocketpaw_ee.extensions:CloudForesightMcpProvider"
 composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
@@ -229,12 +238,54 @@ source_modules = [
     # through `pockets.service` and the Instinct store; it never touches
     # Beanie document classes directly.
     "pocketpaw_ee.cloud.pockets.instinct_bridge",
+    # RFC 03 v2 Wave 3a — the template-level instinct dispatch wrapper.
+    # Calls the pure OSS composer and the `instinct_approvals.service`
+    # Beanie writer; never imports the pockets/session/backend docs.
+    "pocketpaw_ee.cloud.pockets.instinct_dispatch",
+    # RFC 03 v2 Wave 3b — the bulk fan-out dispatcher. Calls the pure
+    # OSS ``plan_bulk_execution`` planner and the
+    # ``instinct_approvals.service`` writer; orchestrates per-row
+    # ``action_executor.run_action`` calls. Never imports a Beanie
+    # document class directly.
+    "pocketpaw_ee.cloud.pockets.bulk_dispatch",
+    # RFC 03 v2 Wave 3d — the per-pocket temporal trigger dispatcher.
+    # Calls the pure OSS ``sweep_temporal_triggers`` planner, the
+    # ``temporal_sweeps.service`` writer, ``instinct_dispatch``, and
+    # ``action_executor.run_action``. Never imports a Beanie document
+    # class directly.
+    "pocketpaw_ee.cloud.pockets.temporal_dispatcher",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
     "pocketpaw_ee.cloud.models.pocket_backend",
     "pocketpaw_ee.cloud.models.session",
 ]
+
+[[tool.importlinter.contracts]]
+name = "TemporalSweeps — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.temporal_sweeps.router",
+    "pocketpaw_ee.cloud.temporal_sweeps.dto",
+    "pocketpaw_ee.cloud.temporal_sweeps.domain",
+    # The cron driver scans pockets through ``pockets.service`` and
+    # dispatches through ``temporal_dispatcher``; it never touches a
+    # Beanie document directly.
+    "pocketpaw_ee.cloud._core.temporal_scheduler",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.temporal_sweep_state"]
+
+[[tool.importlinter.contracts]]
+name = "InstinctApprovals — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.instinct_approvals.router",
+    "pocketpaw_ee.cloud.instinct_approvals.dto",
+    "pocketpaw_ee.cloud.instinct_approvals.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
 
 [[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"
@@ -462,6 +513,38 @@ source_modules = [
     "pocketpaw_ee.cloud.audit.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.audit"]
+
+# Decisions — Beanie writes only from service.py (RFC 07 Slice 1).
+# The decision-graph entity has no Beanie document of its own — it
+# materializes into SQLite (`~/.soul/decisions.db`) via DecisionStore,
+# not MongoDB. The contract is included for consistency with the other
+# entities and to forbid any future Beanie creep. `domain.py`, `dto.py`,
+# `router.py`, `projection.py`, and `store.py` must never import the
+# cloud models.* tree — only `service.py` may (it doesn't yet, but the
+# contract pins the rule for future maintenance).
+[[tool.importlinter.contracts]]
+name = "Decisions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.decisions.router",
+    "pocketpaw_ee.cloud.decisions.dto",
+    "pocketpaw_ee.cloud.decisions.domain",
+    "pocketpaw_ee.cloud.decisions.projection",
+    "pocketpaw_ee.cloud.decisions.store",
+    "pocketpaw_ee.cloud.decisions.explain.extractor",
+    "pocketpaw_ee.cloud.decisions.explain.narrator",
+    "pocketpaw_ee.cloud.decisions.explain.cache",
+    "pocketpaw_ee.cloud.decisions.explain.service",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.session",
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.agent",
+    "pocketpaw_ee.cloud.models.workspace",
+]
 
 # Increment 3 — the pocket execution router. The classifier is PURE: a
 # rule-based ``classify(intent, ripple_spec)`` with no I/O. It must never

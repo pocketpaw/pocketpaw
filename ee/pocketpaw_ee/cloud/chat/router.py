@@ -493,15 +493,39 @@ router.include_router(agent_router)
 # ---------------------------------------------------------------------------
 
 
+def _normalize_ws_inbound(payload: Any) -> Any:
+    """Unwrap the ``{type, data: {...}}`` bus envelope into a flat shape.
+
+    The browser bus (``paw-enterprise/src/lib/core/shared/bus.svelte.ts``)
+    nests every send under ``data`` to mirror the outbound :class:`WsOutbound`
+    envelope, while :class:`WsInbound` is flat for historical native clients.
+    Lift the nested keys into the top level so both shapes parse cleanly.
+    Top-level keys win when both sides set the same field — this preserves
+    explicit overrides and is a no-op for legacy flat payloads.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return payload
+    out = dict(payload)
+    nested = out.pop("data")
+    for k, v in nested.items():
+        out.setdefault(k, v)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
 
 
 @router.websocket("/ws/cloud")
-async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
-    """Cloud WebSocket -- authenticate via JWT token, then handle typed JSON messages."""
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(None)):
+    """Cloud WebSocket -- authenticate via short-lived ws_ticket (browser
+    SPA, single-use), HttpOnly paw_auth cookie (same-origin / older clients),
+    or long-lived session JWT in ?token= (Tauri / native). Then handle
+    typed JSON messages."""
     import jwt as pyjwt
+
+    from pocketpaw_ee.cloud.auth.ws_tickets import consume_ws_ticket
 
     # Gate realtime behind the enterprise license (parity with REST /chat routes).
     lic = get_license()
@@ -509,16 +533,35 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await websocket.close(code=4003, reason="Enterprise license required")
         return
 
-    secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
-    try:
-        payload = pyjwt.decode(token, secret, algorithms=["HS256"], audience=["fastapi-users:auth"])
-        user_id = payload.get("sub")
-        if not user_id:
+    user_id: str | None = None
+
+    # Path 1 — single-use ticket (cross-origin SPA). Try first because it
+    # only succeeds when the client explicitly minted one for this connect.
+    if token:
+        user_id = await consume_ws_ticket(token)
+
+    # Path 2 — HttpOnly cookie or long-lived JWT in ?token=. Same-origin
+    # browsers and Tauri use this. Skipped if a ticket already authenticated.
+    if user_id is None:
+        jwt_token = websocket.cookies.get("paw_auth") or token
+        if not jwt_token:
+            await websocket.close(code=4001, reason="Missing token")
+            return
+        secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
+        try:
+            payload = pyjwt.decode(
+                jwt_token,
+                secret,
+                algorithms=["HS256"],
+                audience=["fastapi-users:auth"],
+            )
+            user_id = payload.get("sub")
+            if not user_id:
+                await websocket.close(code=4001, reason="Invalid token")
+                return
+        except Exception:
             await websocket.close(code=4001, reason="Invalid token")
             return
-    except Exception:
-        await websocket.close(code=4001, reason="Invalid token")
-        return
 
     # Accept and register connection. If this was the user's first active
     # socket, announce them as online so every workspace peer's UI flips
@@ -547,7 +590,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
-                msg = WsInbound.model_validate(data)
+                msg = WsInbound.model_validate(_normalize_ws_inbound(data))
             except Exception:
                 await websocket.send_json(
                     WsOutbound(
