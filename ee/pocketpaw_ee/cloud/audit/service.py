@@ -28,6 +28,47 @@ from pocketpaw_ee.cloud.models.audit_event import AuditEvent as _AuditEventDoc
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_actor_names(
+    items: list[dict[str, Any]],
+    workspace_id: str,
+    key: str = "actor",
+) -> list[dict[str, Any]]:
+    """Resolve user IDs in audit entries to names via workspace membership.
+
+    For ``key="actor"`` (activity endpoint): resolves ``user:<id>`` and
+    bare ObjectIds to ``user:<name>``.  ``agent:`` / ``system`` left as-is.
+
+    For ``key="actorId"`` (audit endpoint): resolves bare ObjectIds to names.
+    """
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        users = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
+    except Exception:
+        logger.warning("audit: failed to resolve actor names for workspace %s", workspace_id, exc_info=True)
+        return items
+
+    name_by_id: dict[str, str] = {str(u.id): u.full_name for u in users if u.full_name}
+    if not name_by_id:
+        return items
+
+    for item in items:
+        actor = item.get(key, "")
+        if not isinstance(actor, str) or not actor:
+            continue
+
+        if key == "actor":
+            if actor.startswith("agent:") or actor == "system":
+                continue
+            user_id = actor[5:] if actor.startswith("user:") else actor
+            if user_id in name_by_id:
+                item[key] = f"user:{name_by_id[user_id]}"
+        elif key == "actorId":
+            if actor in name_by_id:
+                item[key] = name_by_id[actor]
+    return items
+
+
 async def agent_list_audit(
     ctx: RequestContext,
     body: ListAuditRequest | dict | None = None,
@@ -53,6 +94,12 @@ async def agent_list_audit(
         logger.error("audit.list failed", exc_info=True)
         raise Internal("audit.list_failed", "audit query failed") from exc
     dtos = [AuditEntryDTO.model_validate(e, from_attributes=True) for e in entries]
+
+    if dtos and ctx.workspace_id:
+        dicts = [dto.model_dump() for dto in dtos]
+        dicts = await _resolve_actor_names(dicts, ctx.workspace_id, key="actor")
+        dtos = [AuditEntryDTO.model_validate(d) for d in dicts]
+
     return AuditListResponse(entries=dtos, total=len(dtos))
 
 
@@ -273,8 +320,15 @@ async def list_events_response(
     so the router stays a thin adapter.
     """
     page = await list_events(workspace_id, query)
+    items: list[AuditEventOut] = [_domain_to_wire(d) for d in page.items]
+
+    if items:
+        dicts = [item.model_dump() for item in items]
+        dicts = await _resolve_actor_names(dicts, workspace_id, key="actorId")
+        items = [AuditEventOut.model_validate(d) for d in dicts]
+
     return AuditPageResponse(
-        items=[_domain_to_wire(d) for d in page.items],
+        items=items,
         nextCursor=page.next_cursor,
     )
 
