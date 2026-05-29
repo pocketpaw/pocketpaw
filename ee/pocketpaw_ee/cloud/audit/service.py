@@ -45,7 +45,11 @@ async def _resolve_actor_names(
     try:
         users = await _UserDoc.find({"workspaces.workspace": workspace_id}).to_list()
     except Exception:
-        logger.warning("audit: failed to resolve actor names for workspace %s", workspace_id, exc_info=True)
+        logger.warning(
+            "audit: failed to resolve actor names for workspace %s",
+            workspace_id,
+            exc_info=True,
+        )
         return items
 
     name_by_id: dict[str, str] = {str(u.id): u.full_name for u in users if u.full_name}
