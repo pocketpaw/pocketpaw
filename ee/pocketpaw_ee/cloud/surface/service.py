@@ -41,7 +41,6 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
         audit,
         calendar,
         files,
-        foresight as foresight_handler,
         generic,
         home,
         knowledge,
@@ -61,6 +60,9 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
     )
     from pocketpaw_ee.cloud.surface.handlers import (
         chat as chat_handler,
+    )
+    from pocketpaw_ee.cloud.surface.handlers import (
+        foresight as foresight_handler,
     )
 
     return {

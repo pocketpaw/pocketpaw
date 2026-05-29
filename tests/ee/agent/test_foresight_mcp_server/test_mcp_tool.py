@@ -49,8 +49,7 @@ class TestForesightMcpServerRegistration:
         assert GET_RUN_TOOL_ID == "mcp__pocketpaw_foresight__get_run"
         # Result-side reads — 2026-05-28 follow-up.
         assert (
-            LIST_PROJECTED_DECISIONS_TOOL_ID
-            == "mcp__pocketpaw_foresight__list_projected_decisions"
+            LIST_PROJECTED_DECISIONS_TOOL_ID == "mcp__pocketpaw_foresight__list_projected_decisions"
         )
         assert GET_AGGREGATE_TOOL_ID == "mcp__pocketpaw_foresight__get_aggregate"
         assert GET_INSIGHTS_TOOL_ID == "mcp__pocketpaw_foresight__get_insights"
@@ -434,9 +433,7 @@ class TestListProjectedDecisionsHandler:
         assert not out.get("is_error")
         body = _decode_payload(out)
         assert body["items"][0]["id"] == "pd1"
-        mock.assert_awaited_once_with(
-            "r1", anchor_id="rollout:training", limit=50, offset=0
-        )
+        mock.assert_awaited_once_with("r1", anchor_id="rollout:training", limit=50, offset=0)
 
     @pytest.mark.asyncio
     async def test_missing_run_id_is_rejected_locally(self) -> None:

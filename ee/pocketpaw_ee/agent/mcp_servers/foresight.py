@@ -289,10 +289,7 @@ async def _get_backtest_handler(args: dict) -> dict:
 
     backtest_id = args.get("backtest_id")
     if not backtest_id or not isinstance(backtest_id, str):
-        return _error(
-            "get_backtest requires a `backtest_id` (string). Find it via "
-            "list_backtests."
-        )
+        return _error("get_backtest requires a `backtest_id` (string). Find it via list_backtests.")
     return _result_payload(await get_backtest_for_agent(backtest_id))
 
 

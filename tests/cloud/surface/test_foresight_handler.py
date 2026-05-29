@@ -23,7 +23,6 @@ import pytest
 from pocketpaw_ee.cloud.surface.domain import SurfaceKind, SurfaceMeta
 from pocketpaw_ee.cloud.surface.handlers import foresight as foresight_handler
 
-
 # ---------------------------------------------------------------------------
 # Surface tag + panel rendering
 # ---------------------------------------------------------------------------
@@ -227,9 +226,7 @@ async def test_service_wrapper_absorbs_handler_exception(
     handlers[SurfaceKind.FORESIGHT] = _boom
     surface_service._HANDLERS = handlers  # type: ignore[attr-defined]
 
-    ctx = await surface_service.resolve_surface_context(
-        "ws_a", "user_a", {"surface": "foresight"}
-    )
+    ctx = await surface_service.resolve_surface_context("ws_a", "user_a", {"surface": "foresight"})
     # GENERIC fallback per service.py contract — chat send still works.
     assert ctx.kind == SurfaceKind.GENERIC
     assert ctx.preamble == ""

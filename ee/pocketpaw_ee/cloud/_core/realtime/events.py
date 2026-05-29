@@ -534,6 +534,8 @@ class MeetingCancelled(Event):
 @dataclass
 class MeetingStarted(Event):
     EVENT_TYPE: ClassVar[str] = "meeting.started"
+
+
 # Foresight — RFC 08 scenario runs. ``ForesightRunCreated`` fires when a
 # scenario run document is first inserted (status="queued"); the engine
 # then ticks the run (in PR 7 it stays synchronous, in v1.0 it fans to a

@@ -35,10 +35,8 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
     not yet seeded) doesn't drop the whole preamble.
     """
     panel = meta.panel if meta.panel in _VALID_PANELS else None
-    surface_tag = (
-        f'<surface kind="foresight" route="/foresight"'
-        f'{f" panel=\"{panel}\"" if panel else ""} />'
-    )
+    panel_attr = f' panel="{panel}"' if panel else ""
+    surface_tag = f'<surface kind="foresight" route="/foresight"{panel_attr} />'
     # Directive block — assert foresight-first behavior FIRST so the
     # agent's default "let me offer some pocket buttons" pattern doesn't
     # leak into the greeting. Captain caught this 2026-05-27: agent
@@ -144,9 +142,7 @@ async def _render_active_run(workspace_id: str, run_id: str) -> str:
     # answer "how many decisions has this run produced so far?" without
     # round-tripping a separate query.
     try:
-        decisions = await foresight_service.list_projected_decisions(
-            ctx, run_id, limit=1, offset=0
-        )
+        decisions = await foresight_service.list_projected_decisions(ctx, run_id, limit=1, offset=0)
         decision_count = getattr(decisions, "total", 0) if decisions else 0
     except Exception:
         decision_count = 0
@@ -227,10 +223,7 @@ async def _render_workspace_ambient(workspace_id: str) -> str:
     except Exception:
         gate_state = "unknown"
 
-    return (
-        f'<workspace-summary recent_runs="{run_count}" '
-        f'onboarding_gate="{gate_state}" />'
-    )
+    return f'<workspace-summary recent_runs="{run_count}" onboarding_gate="{gate_state}" />'
 
 
 def _render_skill_hint() -> str:
