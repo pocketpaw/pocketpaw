@@ -814,10 +814,11 @@ async def build_knowledge_context(
     mentions: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the per-turn knowledge context — dynamic scope/participants
-    tags + KB hits. Static behavioral rules are NOT included here; the
-    caller must inject them via ``pool.run(instructions=...)`` so they
-    land outside the "Your Knowledge Base" framing that makes the model
-    treat them as reference data instead of rules."""
+    tags + KB hits + inlined attachment text. Static behavioral rules are
+    NOT included here; the caller must inject them via
+    ``pool.run(instructions=...)`` so they land outside the "Your Knowledge
+    Base" framing that makes the model treat them as reference data
+    instead of rules."""
     scope_block = build_dynamic_context(ctx)
     query = (user_message or "").strip()
     refs = _file_reference_terms(attachments=attachments, mentions=mentions)
@@ -829,18 +830,34 @@ async def build_knowledge_context(
             )
         ref_line = ", ".join(refs[:12])
         query = f"{query}\nReferenced uploads: {ref_line}" if query else ref_line
-    if not query:
-        return scope_block
 
+    sections: list[str] = []
+
+    attachments_block = await _build_attachments_block(ctx, attachments)
+    if attachments_block:
+        sections.append(attachments_block)
+
+    if query:
+        kb_block = await _build_kb_snippets_block(ctx, query)
+        if kb_block:
+            sections.append(kb_block)
+
+    if not sections:
+        return scope_block
+    return f"{scope_block}\n\n" + "\n\n".join(sections)
+
+
+async def _build_kb_snippets_block(ctx: ScopeContext, query: str) -> str:
+    """Search KB scopes for ``query`` and return a ``<knowledge-base>`` block."""
     scopes = _kb_scopes_for_context(ctx)
     if not scopes:
-        return scope_block
+        return ""
 
     try:
         from pocketpaw_ee.cloud.agents.knowledge import KnowledgeService
     except Exception:
-        logger.debug("KnowledgeService unavailable; using scope block only", exc_info=True)
-        return scope_block
+        logger.debug("KnowledgeService unavailable; skipping KB block", exc_info=True)
+        return ""
 
     snippets: list[tuple[str, str]] = []
     for scope in scopes:
@@ -854,7 +871,7 @@ async def build_knowledge_context(
             snippets.append((scope, cleaned))
 
     if not snippets:
-        return scope_block
+        return ""
 
     kb_lines = [
         "<knowledge-base>",
@@ -863,7 +880,117 @@ async def build_knowledge_context(
     for scope, text in snippets:
         kb_lines.append(f"### {scope}\n{text}")
     kb_lines.append("</knowledge-base>")
-    return f"{scope_block}\n\n" + "\n\n".join(kb_lines)
+    return "\n".join(kb_lines)
+
+
+# Bounds for inlined attachment text. Per-file cap keeps a single huge PDF
+# from eating the budget; total cap keeps a batch of files from blowing the
+# context window. Image/binary attachments typically yield empty text and
+# get a stub entry so the agent at least knows they exist.
+_ATTACHMENT_MAX_FILES = 5
+_ATTACHMENT_PER_FILE_CHARS = 8000
+_ATTACHMENT_TOTAL_CHARS = 30000
+
+
+async def _build_attachments_block(
+    ctx: ScopeContext,
+    attachments: list[dict[str, Any]] | None,
+) -> str:
+    """Inline extracted text from each upload URL in ``attachments``.
+
+    Resolves each attachment via :class:`EEUploadResolver`, runs the
+    configured extraction chain on the resulting local path (streaming
+    from S3 into a temp file when needed), and emits an
+    ``<uploaded-files>`` block the model can read directly. Failures are
+    isolated per-file: a single broken extraction or unresolvable URL
+    drops only that entry.
+    """
+    if not attachments or not ctx.workspace_id:
+        return ""
+
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw_ee.cloud.extraction import build_chain
+        from pocketpaw_ee.cloud.uploads.resolver import default_resolver
+    except Exception:
+        logger.debug("attachment extraction deps unavailable", exc_info=True)
+        return ""
+
+    try:
+        resolver = default_resolver()
+    except Exception:
+        logger.debug("default_resolver unavailable; skipping attachments", exc_info=True)
+        return ""
+
+    chain = None
+    entries: list[str] = []
+    used_chars = 0
+    processed = 0
+
+    for att in attachments:
+        if processed >= _ATTACHMENT_MAX_FILES:
+            break
+        if used_chars >= _ATTACHMENT_TOTAL_CHARS:
+            break
+        if not isinstance(att, dict):
+            continue
+        url = att.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+
+        try:
+            cm = resolver.open_local_for_url(url, workspace=ctx.workspace_id)
+            async with cm as resolved:
+                if resolved is None:
+                    continue
+                rec, path = resolved
+                if chain is None:
+                    try:
+                        chain = build_chain(get_settings())
+                    except Exception:
+                        logger.exception("build_chain failed; skipping attachments")
+                        return ""
+                try:
+                    result = await chain.run(path, rec.mime)
+                except Exception:
+                    logger.warning(
+                        "extraction failed for attachment %s (file_id=%s)",
+                        rec.filename,
+                        rec.id,
+                        exc_info=True,
+                    )
+                    continue
+
+                text = (result.text or "").strip()
+                header = f"### {rec.filename} ({rec.mime}, {rec.size} bytes)"
+                if not text:
+                    entries.append(f"{header}\n(no text extracted)")
+                    processed += 1
+                    continue
+
+                remaining = _ATTACHMENT_TOTAL_CHARS - used_chars
+                per_file_cap = min(_ATTACHMENT_PER_FILE_CHARS, remaining)
+                if len(text) > per_file_cap:
+                    text = text[:per_file_cap].rstrip() + "\n…[truncated]"
+                entries.append(f"{header}\n{text}")
+                used_chars += len(text)
+                processed += 1
+        except Exception:
+            logger.warning("attachment resolve failed for url=%s", url, exc_info=True)
+            continue
+
+    if not entries:
+        return ""
+
+    lines = [
+        "<uploaded-files>",
+        "The user attached the following file(s) to this turn. "
+        "Their extracted contents are inlined below — treat them as part "
+        "of the user's message, not as external reference.",
+    ]
+    lines.extend(entries)
+    lines.append("</uploaded-files>")
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

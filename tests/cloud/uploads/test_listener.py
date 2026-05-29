@@ -212,7 +212,7 @@ async def test_remote_adapter_streams_into_temp_then_extracts(monkeypatch):
     temp_path, mime = chain.calls[0]
     assert mime == "image/png"
     assert temp_path.suffix == ".png", temp_path
-    assert temp_path.name.startswith("paw-extract-"), temp_path
+    assert temp_path.name.startswith("paw-upload-"), temp_path
     # File was wiped after the context manager exited.
     assert not temp_path.exists()
     # The temp file held both chunks before extraction ran. We can't peek
