@@ -5,6 +5,14 @@
 # template.pocket.yaml, the validity of each ripple_spec.json, and the
 # create-specialist wiring (``_build_system_prompt`` template splice +
 # ``AgentModeAdapter`` template short-circuit).
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): widened
+# ``_RFC03_ALLOWED_FIELDS`` + required-set to the v2 shape, swapped the
+# ``skills`` field name for ``skill_refs``, dropped the ``actions: []``
+# / ``omit instinct/outcomes/triggers/agents`` assertions (the bundled
+# templates are post-migration v2 now and may carry these blocks once
+# Instinct/Outcomes wire up), and added a parametrised Pydantic
+# round-trip test that calls ``PocketTemplate.model_validate(...)`` on
+# every shipped bundled template.
 """Tests for the ``pocketpaw.bundled_templates`` package and its wiring.
 
 The installer + loader tests mirror into a ``tmp_path`` destination so
@@ -41,29 +49,48 @@ _EXPECTED_SLUGS = {
     "decision-graph",
 }
 
-# RFC 03 Pocket Template Schema — the field set a seed template may
-# carry. Seed templates ship ``actions: []`` and omit
-# ``outcomes / instinct_rules / triggers / agents`` (Instinct + Outcomes
-# are not wired yet — dead declarations are worse than none).
+# RFC 03 v2 Pocket Template Schema — the field set a seed template may
+# carry after the v1 -> v2 migration. Seed templates still ship
+# ``actions: []`` and omit ``outcomes / instinct_rules / triggers /
+# agents`` (Instinct + Outcomes are not wired yet — dead declarations
+# are worse than none). What v2 adds: ``schema_version``, ``pattern``,
+# and ``display_name`` (all required at v2 except display_name); the
+# rename ``skills`` -> ``skill_refs`` lands at the same time.
 _RFC03_ALLOWED_FIELDS = {
+    "schema_version",
     "name",
     "version",
     "vertical",
+    "pattern",
+    "display_name",
     "shape",
     "state",
     "actions",
     "connectors",
-    "skills",
+    "skill_refs",
     "description",
 }
-_RFC03_REQUIRED_FIELDS = {"name", "version", "vertical", "shape", "state", "description"}
-# RFC 03 shape enum — the fixed set of Ripple Layer 2 widget shapes.
+_RFC03_REQUIRED_FIELDS = {
+    "schema_version",
+    "name",
+    "version",
+    "vertical",
+    "pattern",
+    "shape",
+    "state",
+    "description",
+}
+# RFC 03 v2 shape enum — the fixed set of Ripple Layer 2 widget shapes.
+# v2 adds ``gantt``, ``treemap``, ``network`` to the original v1 enum.
 _RFC03_SHAPE_ENUM = {
     "data-grid",
     "kanban",
     "calendar",
     "map",
     "timeline",
+    "gantt",
+    "treemap",
+    "network",
     "tree",
     "chart",
     "custom",
@@ -404,6 +431,34 @@ async def test_agent_mode_skips_draft_kit_when_template_id_set(tmp_path: Path, m
     assert "ui" in spec and "state" in spec
     # Authoring-only keys are stripped before persist.
     assert "_placeholder_note" not in spec
+
+
+# ---------------------------------------------------------------------------
+# Pydantic v2 chokepoint — every bundled template passes the new model
+# (post-migration v2 shape). This is the defense-in-depth assertion
+# layered over the field-set check above: the field set proves the YAML
+# uses the allowed keys; the Pydantic validation proves the values pass
+# the cross-field rules (shape x default_view matrix, id_field resolves,
+# outcomes_emitted subset, CEL filters parse, etc.).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("slug", sorted(_EXPECTED_SLUGS))
+def test_bundled_template_passes_pydantic_validation(slug: str) -> None:
+    """Each migrated v2 bundled template validates against the
+    ``PocketTemplate`` Pydantic model. This is the chokepoint enforced
+    by RFC 03 v2 — any bundled YAML that drifts off-schema fails here
+    before it ever ships."""
+    import yaml
+
+    from pocketpaw.bundled_templates.schema import PocketTemplate
+
+    meta_path = _BUNDLED_DIR / slug / "template.pocket.yaml"
+    meta = yaml.safe_load(meta_path.read_text(encoding="utf-8"))
+
+    template = PocketTemplate.model_validate(meta)
+    assert template.name == slug
+    assert template.schema_version == "2"
 
 
 @pytest.mark.asyncio

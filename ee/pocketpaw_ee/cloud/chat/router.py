@@ -493,6 +493,25 @@ router.include_router(agent_router)
 # ---------------------------------------------------------------------------
 
 
+def _normalize_ws_inbound(payload: Any) -> Any:
+    """Unwrap the ``{type, data: {...}}`` bus envelope into a flat shape.
+
+    The browser bus (``paw-enterprise/src/lib/core/shared/bus.svelte.ts``)
+    nests every send under ``data`` to mirror the outbound :class:`WsOutbound`
+    envelope, while :class:`WsInbound` is flat for historical native clients.
+    Lift the nested keys into the top level so both shapes parse cleanly.
+    Top-level keys win when both sides set the same field — this preserves
+    explicit overrides and is a no-op for legacy flat payloads.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return payload
+    out = dict(payload)
+    nested = out.pop("data")
+    for k, v in nested.items():
+        out.setdefault(k, v)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # WebSocket endpoint
 # ---------------------------------------------------------------------------
@@ -571,7 +590,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
-                msg = WsInbound.model_validate(data)
+                msg = WsInbound.model_validate(_normalize_ws_inbound(data))
             except Exception:
                 await websocket.send_json(
                     WsOutbound(

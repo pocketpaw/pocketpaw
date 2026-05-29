@@ -1,5 +1,12 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
+    Mounts the Foresight router at ``/api/v1/foresight/*`` alongside the
+    other domain routers. Routes delegate to ``ee.cloud.foresight.service``
+    which owns Beanie writes against the ``foresight_runs`` collection.
+    The engine itself (vendored OASIS substrate + CAMEL adapter) lives at
+    ``ee/pocketpaw_ee/foresight/``; the cloud surface is a thin shell over
+    persistence + event emission.
 Modified: 2026-05-24 (#1202) — Registers ``register_audit_bridge`` during
     ``mount_cloud`` so every ``security.audit.AuditLogger.log()`` call from
     EE cloud writers (pocket actions, source runs, skills config, …) is
@@ -151,6 +158,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.license import get_license_info
     from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
         router as meetings_webhooks_router,
@@ -181,6 +189,12 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
+    # Foresight — RFC 08 scenario-run surface (POST /foresight/scenarios,
+    # GET /foresight/runs[/{id}]). Mounted alongside cycles so the
+    # Mission Control rail can launch / inspect simulation runs from the
+    # same surface as live cycles. Persistence lands in the
+    # ``foresight_runs`` Mongo collection via ``ee.cloud.foresight.service``.
+    app.include_router(foresight_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
@@ -217,6 +231,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(pockets_journal_stream_router, prefix="/api/v1")
 
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
+    from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
@@ -243,6 +258,21 @@ def mount_cloud(app: FastAPI) -> None:
     # the real REST surface (get/find/trace/downstream/timeline/explain)
     # lands in RFC 07 Slice 2.
     app.include_router(decisions_router, prefix="/api/v1")
+    # Instinct approvals — RFC 03 v2 template-level approval queue
+    # (Wave 3a). The dispatch wrapper persists rows when the OSS
+    # ``resolve_instinct`` returns ``ESCALATE_APPROVAL``; this router
+    # exposes the operator-facing read + decision surface.
+    app.include_router(instinct_approvals_router, prefix="/api/v1")
+
+    # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
+    # for the persisted (trigger, row) state matrix; the actual sweep
+    # is driven by the in-process scheduler at
+    # ``cloud._core.temporal_scheduler`` and the per-pocket dispatcher
+    # at ``cloud.pockets.temporal_dispatcher``. No "sweep now" route in
+    # v0 (deferred).
+    from pocketpaw_ee.cloud.temporal_sweeps.router import router as temporal_sweeps_router
+
+    app.include_router(temporal_sweeps_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can

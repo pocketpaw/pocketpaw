@@ -1,5 +1,18 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — added
+``ForesightWorkspaceScenario`` (RFC 08 v1.0 wave 3) to the registered
+docs + ``__all__`` so workspace-scoped custom scenarios are wired into
+``init_beanie``. Only ``ee.cloud.foresight.scenarios`` imports the doc
+class directly (import-linter contract).
+Updated: 2026-05-26 (feat/foresight-v10-threshold-override-cloud) — added
+``ForesightWorkspaceConfig`` to the registered docs + ``__all__`` so RFC 08
+v1.0's per-workspace onboarding threshold override is wired into
+``init_beanie``. Only ``ee.cloud.foresight.service`` imports the doc class
+directly (import-linter contract).
+Updated: 2026-05-26 (feat/foresight-v10-prediction-record-persist) — added
+``ForesightPredictionRecord`` to the registered docs + ``__all__`` so the
+RFC 08 §9 calibration buffer's Mongo persistence is wired into ``init_beanie``.
 Updated: 2026-05-21 (PR #1177 security pass) — dropped PocketBackendCredential
 from ``__all__`` so it cannot be star-imported into routers/DTOs/domains; it
 remains registered in ``get_all_documents()`` for Beanie init.
@@ -18,7 +31,22 @@ from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.file import FileObj
+from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
+from pocketpaw_ee.cloud.models.foresight_prediction_record import (
+    ForesightPredictionRecord,
+)
+from pocketpaw_ee.cloud.models.foresight_projected_decision import (
+    ForesightProjectedDecision,
+)
+from pocketpaw_ee.cloud.models.foresight_run import ForesightRun
+from pocketpaw_ee.cloud.models.foresight_workspace_config import (
+    ForesightWorkspaceConfig,
+)
+from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
+    ForesightWorkspaceScenario,
+)
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
+from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
@@ -35,6 +63,7 @@ from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
+from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
@@ -88,8 +117,15 @@ __all__ = [
     "FileFolder",
     "FileObj",
     "FileUpload",
+    "ForesightBacktest",
+    "ForesightPredictionRecord",
+    "ForesightProjectedDecision",
+    "ForesightRun",
+    "ForesightWorkspaceConfig",
+    "ForesightWorkspaceScenario",
     "Group",
     "GroupAgent",
+    "InstinctApproval",
     "Invite",
     "Meeting",
     "MeetingProviderCredentials",
@@ -110,6 +146,7 @@ __all__ = [
     "Task",
     "TaskAssignee",
     "TaskSource",
+    "TemporalSweepStateDoc",
     "User",
     "Widget",
     "WidgetPosition",
@@ -140,9 +177,11 @@ def get_all_documents():
         ComposioConnection,
         Invite,
         Group,
+        InstinctApproval,
         Message,
         ReadState,
         Task,
+        TemporalSweepStateDoc,
         Cycle,
         Project,
         PlanSession,
@@ -153,6 +192,12 @@ def get_all_documents():
         # Calendar — sibling enterprise package.
         _CalendarDoc,
         _EventDoc,
+        ForesightRun,
+        ForesightBacktest,
+        ForesightProjectedDecision,
+        ForesightPredictionRecord,
+        ForesightWorkspaceConfig,
+        ForesightWorkspaceScenario,
         ChatRunDoc,
         AuditEvent,
         AuditWebhook,

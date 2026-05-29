@@ -74,6 +74,16 @@ Changes: 2026-05-22 (#1174) — widgets carry an optional ``spec`` field (a
 per-tile rippleSpec subtree the home grid renders). ``_build_widget_doc``,
 ``_widget_to_domain``, the REST ``add_widget``, and ``agent_update_widget``
 thread it through; the home agent's ``add_widget`` MCP tool populates it.
+Changes: 2026-05-28 (feat/wave-3e-template-slug) — wired the RFC 03 v2
+``template_slug`` field end-to-end: ``create`` / ``update`` load + compile
+the bundled template (via OSS ``load_template`` + ``compile_template``)
+and **merge** the compile output into ``rippleSpec`` (option B —
+user-customized fields survive a re-apply). Added the
+``resolve_pocket_template(workspace_id, pocket_id)`` helper the bulk
+dispatcher + temporal scheduler call to obtain a typed ``PocketTemplate``
+from a pocket. A stale / missing slug never breaks pocket creation: the
+loader's ``strict=False`` mode returns ``None`` and the rippleSpec is
+left unmodified so a later resolver run can retry.
 """
 
 from __future__ import annotations
@@ -83,6 +93,7 @@ import copy
 import logging
 import secrets
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -190,6 +201,8 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         shared_with=tuple(doc.shared_with),
         tool_specs=tuple(doc.tool_specs),
         project_id=getattr(doc, "project_id", None),
+        # Wave 3e — optional. ``getattr`` for legacy docs that pre-date the field.
+        template_slug=getattr(doc, "template_slug", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -500,6 +513,149 @@ async def _gate_catalog(
 
 
 # ---------------------------------------------------------------------------
+# Template compile-on-install + resolver (RFC 03 v2 / Wave 3e)
+# ---------------------------------------------------------------------------
+#
+# A pocket created or updated with a ``template_slug`` is "instantiated"
+# from one of the bundled RFC 03 v2 templates: the OSS loader reads the
+# template off disk, the OSS compile pass translates it into a runtime-
+# shaped dict, and the EE service MERGES that dict into the pocket's
+# ``rippleSpec`` (option B — keep user-customized fields, replace the
+# compile-output keys). The merge strategy is intentional: a user can
+# tweak ``rippleSpec.ui`` after instantiation and a subsequent
+# template-recompile (template upgraded out-of-band) won't blow those
+# tweaks away — only the fields the compile pass produced get replaced.
+#
+# Tolerance posture: ``load_template(slug, strict=False)`` never raises;
+# a stale / missing / malformed template returns ``None``. The pocket
+# keeps its slug (so a later resolver attempt can retry) and its
+# rippleSpec is left unmodified — the create/update never fails just
+# because the template went away. A WARNING is logged so an operator can
+# see the drift.
+
+
+def _compile_template_to_runtime_dict(loaded: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Translate an OSS ``load_template`` result into the runtime rippleSpec dict.
+
+    Returns the compile output dict on success, or ``None`` if the
+    loader returned ``None`` (unknown / stale slug — see the section
+    docstring for the tolerance posture). Validation failures inside
+    the loader already became ``None`` under ``strict=False``; this
+    function only re-runs ``PocketTemplate.model_validate`` to obtain
+    the typed model the OSS ``compile_template`` consumes.
+    """
+    if loaded is None:
+        return None
+    meta = loaded.get("meta")
+    if not isinstance(meta, dict):
+        return None
+
+    # Lazy imports — OSS bundled_templates is the only place that owns the
+    # ``PocketTemplate`` schema + ``compile_template`` pure function.
+    from pocketpaw.bundled_templates import PocketTemplate, compile_template
+
+    try:
+        template = PocketTemplate.model_validate(meta)
+    except Exception as exc:  # noqa: BLE001 — the loader already deferred validation
+        logger.warning("template compile: schema validation failed: %s", exc)
+        return None
+    try:
+        return compile_template(template)
+    except Exception as exc:  # noqa: BLE001 — compile is pure; bug in OSS if it raises
+        logger.warning("template compile: compile_template raised: %s", exc)
+        return None
+
+
+def _merge_compile_into_ripple_spec(
+    existing: dict[str, Any] | None,
+    compiled: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge a ``compile_template`` result into an existing rippleSpec.
+
+    Merge strategy (option B in the Wave 3e brief): keys produced by
+    the compile pass (``sources``, ``state``, ``actions``, ``agents``,
+    ``triggers``, ``outcomes``, etc.) REPLACE matching keys in the
+    existing spec. Keys the compile pass does NOT produce
+    (e.g. ``ui`` — a user-authored render tree) survive unchanged.
+    The result is a NEW dict; neither input is mutated.
+
+    Rationale: a pocket created from a template carries the template's
+    sources / state / actions verbatim, but the user may have edited
+    ``rippleSpec.ui`` to rearrange the canvas. A subsequent template
+    re-apply (template upgraded out-of-band) should refresh the
+    machinery without nuking the user's layout.
+    """
+    out: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    for key, value in compiled.items():
+        out[key] = value
+    return out
+
+
+async def resolve_pocket_template(
+    workspace_id: str,
+    pocket_id: str,
+    *,
+    templates_dir: Path | None = None,
+) -> Any | None:
+    """Return the resolved :class:`PocketTemplate` for a pocket, or ``None``.
+
+    Tenant-filtered: a pocket in a different workspace, a missing
+    pocket, an unset ``template_slug``, or a template the loader can't
+    read all return ``None``. Callers (``bulk_dispatch``,
+    ``temporal_scheduler``) treat ``None`` as "no-op for this pocket"
+    — never an error.
+
+    Args:
+        workspace_id: Tenancy. Required.
+        pocket_id: The pocket to resolve. Required.
+        templates_dir: Optional override of the OSS loader's templates
+            root — used by tests to point at a tmp install. Defaults to
+            ``~/.pocketpaw/templates/`` via the OSS default.
+
+    Returns:
+        A validated ``PocketTemplate`` instance, or ``None`` for any
+        of the failure modes above.
+    """
+    if not workspace_id or not pocket_id:
+        return None
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001 — malformed id surfaces as "not found"
+        return None
+    # Rule 7 — tenant filter on every read.
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    slug = getattr(doc, "template_slug", None)
+    if not slug:
+        return None
+
+    # Lazy import — keep the OSS schema off the eager import path.
+    from pocketpaw.bundled_templates import PocketTemplate, load_template
+
+    loaded = load_template(slug, templates_dir=templates_dir, strict=False)
+    if loaded is None:
+        logger.warning(
+            "resolve_pocket_template: pocket=%s slug=%r could not be loaded — returning None",
+            pocket_id,
+            slug,
+        )
+        return None
+    meta = loaded.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    try:
+        return PocketTemplate.model_validate(meta)
+    except Exception as exc:  # noqa: BLE001 — strict=False already swallowed validation
+        logger.warning(
+            "resolve_pocket_template: pocket=%s slug=%r post-load validation failed: %s",
+            pocket_id,
+            slug,
+            exc,
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
 
@@ -516,6 +672,20 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     from pocketpaw_ee.cloud.sessions import service as sessions_service
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
+    # Wave 3e — compile-on-install. When ``template_slug`` is set, load
+    # the bundled template, compile it, and merge the runtime dict into
+    # the caller-supplied rippleSpec (option B merge — see the section
+    # docstring above ``_merge_compile_into_ripple_spec``). A stale /
+    # missing slug logs a warning and leaves the rippleSpec unchanged —
+    # the pocket still gets created and keeps the slug for retry.
+    if body.template_slug:
+        from pocketpaw.bundled_templates import load_template
+
+        loaded = load_template(body.template_slug, strict=False)
+        compiled = _compile_template_to_runtime_dict(loaded)
+        if compiled is not None:
+            normalized_spec = _merge_compile_into_ripple_spec(normalized_spec, compiled)
+
     if normalized_spec:
         validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
         # Human/import path — catalog drift is logged for triage, not blocked.
@@ -538,6 +708,7 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         agents=list(body.agents or []),
         widgets=widget_docs,
         rippleSpec=normalized_spec,
+        template_slug=body.template_slug,
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)
@@ -686,6 +857,21 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         _check_domain_owner(pocket, user_id)
 
     normalized_spec = normalize_ripple_spec(body.ripple_spec) if body.ripple_spec else None
+    # Wave 3e — recompile-on-update when ``template_slug`` is supplied in
+    # the body (different OR same slug — same body slug forces a
+    # refresh against the on-disk template). The compile output merges
+    # into either the caller-supplied rippleSpec or the existing one.
+    # Same tolerance posture as ``create``: a stale slug leaves the
+    # rippleSpec untouched and logs a warning.
+    if body.template_slug is not None:
+        from pocketpaw.bundled_templates import load_template
+
+        loaded = load_template(body.template_slug, strict=False)
+        compiled = _compile_template_to_runtime_dict(loaded)
+        if compiled is not None:
+            merge_base = normalized_spec if normalized_spec is not None else doc.rippleSpec
+            normalized_spec = _merge_compile_into_ripple_spec(merge_base, compiled)
+
     if normalized_spec:
         validate_ripple_spec_logged(
             normalized_spec, pocket_id=str(doc.id), workspace_id=doc.workspace
@@ -713,6 +899,8 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         doc.visibility = body.visibility
     if normalized_spec is not None:
         doc.rippleSpec = normalized_spec
+    if body.template_slug is not None:
+        doc.template_slug = body.template_slug
     if body.project_id is not None:
         # Empty string is the "unassign" signal; non-empty must point at a
         # real project in the same workspace.
@@ -3093,6 +3281,90 @@ async def rotate_webhook_secret(workspace_id: str, user_id: str, pocket_id: str)
     return doc.webhook_secret
 
 
+# ---------------------------------------------------------------------------
+# Bulk action dispatch (RFC 03 v2 / Wave 3b)
+# ---------------------------------------------------------------------------
+
+
+async def dispatch_bulk_action(
+    workspace_id: str,
+    user_id: str,
+    body: dict | Any,
+    *,
+    template: Any | None = None,
+    now: Any | None = None,
+) -> dict:
+    """Fan out a ``kind: bulk`` action across the rows in ``body.rows``.
+
+    Service-level entry point that:
+
+    1. Re-validates the body via ``DispatchBulkRequest.model_validate``
+       (rule 6 — internal callers re-parse the schema).
+    2. Delegates the orchestration to ``bulk_dispatch.dispatch_bulk``,
+       which calls the pure OSS planner, persists ONE batch approval
+       if any row escalated, and fires each ready-to-run row through
+       ``action_executor.run_action``.
+    3. Emits a ``BulkActionDispatched`` event with the dispatch
+       summary (counts + optional batch approval id) — rule 9.
+
+    ``template`` is threaded through for internal callers (the future
+    paw-enterprise UI fetches the template from its pocket and passes
+    it here). Library tests pass it explicitly. A missing template
+    raises ``ValidationError`` — we cannot fan out a bulk action
+    without the template-level rules to evaluate.
+
+    Returns a wire dict (rule 5) so the router can construct
+    ``BulkDispatchResponse`` directly.
+    """
+    from pocketpaw_ee.cloud._core.realtime.events import BulkActionDispatched
+    from pocketpaw_ee.cloud.pockets import bulk_dispatch
+    from pocketpaw_ee.cloud.pockets.dto import DispatchBulkRequest
+
+    body = DispatchBulkRequest.model_validate(body)
+
+    if template is None:
+        raise ValidationError(
+            "bulk_action.template_required",
+            "dispatch_bulk_action requires the resolved PocketTemplate",
+        )
+
+    result = await bulk_dispatch.dispatch_bulk(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=body.pocket_id,
+        template=template,
+        action_name=body.action_name,
+        selected_rows=body.rows,
+        now=now,
+    )
+
+    # Wire-friendly dict — frozen Pydantic models serialize cleanly.
+    wire = result.model_dump()
+    # Emit ONE event per dispatch call. Per EE rule 9, every state-
+    # mutating service function emits its event on the way out. The
+    # batch approval write inside ``dispatch_bulk`` already fired its
+    # own ``InstinctApprovalCreated``; this event summarises the bulk
+    # call so downstream audit / analytics listeners can key off a
+    # single event per dispatch.
+    approval_needed = len(result.approval_row_ids)
+    await emit(
+        BulkActionDispatched(
+            data={
+                "workspace_id": workspace_id,
+                "pocket_id": body.pocket_id,
+                "action_name": body.action_name,
+                "total_rows": result.total_rows,
+                "executed": len(result.executions),
+                "blocked": len(result.blocked),
+                "approval_needed": approval_needed,
+                "batch_approval_id": result.batch_approval_id,
+                "actor": user_id,
+            }
+        )
+    )
+    return wire
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -3123,6 +3395,7 @@ __all__ = [
     "create_from_ripple_spec",
     "create_pocket_and_session",
     "delete",
+    "dispatch_bulk_action",
     "generate_share_link",
     "get",
     "get_pocket_backend",
@@ -3141,6 +3414,7 @@ __all__ = [
     "remove_team_member",
     "remove_widget",
     "reorder_widgets",
+    "resolve_pocket_template",
     "resolve_webhook_pocket",
     "revoke_share_link",
     "rotate_webhook_secret",
