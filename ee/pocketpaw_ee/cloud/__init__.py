@@ -249,6 +249,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.decisions.router import router as decisions_router
     from pocketpaw_ee.cloud.instinct_approvals.router import router as instinct_approvals_router
     from pocketpaw_ee.cloud.kb.router import router as kb_router
+    from pocketpaw_ee.cloud.leads.router import router as leads_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
@@ -279,6 +280,12 @@ def mount_cloud(app: FastAPI) -> None:
     # ``resolve_instinct`` returns ``ESCALATE_APPROVAL``; this router
     # exposes the operator-facing read + decision surface.
     app.include_router(instinct_approvals_router, prefix="/api/v1")
+
+    # Paw Sites — RFC 12 capture surface. Public POST /sites/{id}/capture
+    # (origin-pinned + per-site signed key, no user auth — the edge Queue
+    # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
+    # workspace-scoped) for the Leads view.
+    app.include_router(leads_router, prefix="/api/v1")
 
     # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
     # for the persisted (trigger, row) state matrix; the actual sweep
