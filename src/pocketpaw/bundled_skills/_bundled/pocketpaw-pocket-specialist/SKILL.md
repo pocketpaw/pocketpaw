@@ -167,6 +167,13 @@ get shallow-merged; keys you don't mention stay.
 { "merge": { "state": { "filter": "overdue", "count": 7 } } }
 ```
 
+Reverse coherence: a state-only patch is correct only when a widget
+already reads the key (e.g. ``filter`` drives a list a ``{state.filter}``
+binding shows). When you're ADDING a widget, add the ui node AND its
+state together in one merge — a new state key with no binding widget
+renders nothing. The merge endpoint now returns a non-blocking warning
+naming any state key it added that no ui node reads; wire that key.
+
 ### Replace — only for >50% rewrites
 
 If the user said "redesign this completely" or you're inserting an
@@ -270,6 +277,9 @@ the spot the user asked are fine; silently dropping existing widgets,
   (selects + kanban column matching).
 - Don't invent new state keys without a reason — every new key is
   context the agent has to remember next session.
+- Don't add a state key without the ui that reads it. When adding a
+  widget, add the ui node AND its state together; a new state key with
+  no binding widget renders nothing.
 - Don't read source files, grep the repo, or run ``web_search`` to
   figure out a pocket operation. The merge endpoint + the rules above
   are the whole interface.

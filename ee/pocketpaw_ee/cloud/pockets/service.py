@@ -156,6 +156,7 @@ from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
     ActionWiringViolationError,
     CatalogViolationError,
+    find_unreferenced_state_keys,
     format_action_violations_for_agent,
     format_violations_for_agent,
     validate_action_wiring_logged,
@@ -1046,11 +1047,17 @@ async def merge_spec(
 
     # Compute the new spec.
     orphans: list[str] = []
+    base_spec = doc.rippleSpec or {}
+    # Top-level state keys present BEFORE this edit — so the orphan-state
+    # warning below names only keys this edit ADDED, not pre-existing
+    # orphans the agent didn't touch (avoids re-warning noise on replace).
+    base_state_keys: set[str] = set(
+        base_spec.get("state", {}) if isinstance(base_spec.get("state"), dict) else {}
+    )
     if parsed.replace is not None:
         new_spec_raw = parsed.replace
     else:
         assert parsed.merge is not None  # narrowing for type checkers
-        base_spec = doc.rippleSpec or {}
         new_spec_raw, orphans = merge_ripple_spec(base_spec, parsed.merge)
 
     # Normalize + validate (mirror the create_from_ripple_spec gate
@@ -1064,6 +1071,29 @@ async def merge_spec(
             f"dropped: {', '.join(orphans)}. To add a new node, re-state "
             "its parent with the new child appended to children."
         )
+
+    # Orphan-state warning (issue #1301) — NON-BLOCKING. A state-only
+    # merge patch (an add-widget intent that never carried a ui node)
+    # adds a state key no widget reads, so it renders nothing. Mirror the
+    # orphan-node warning above: name the newly-added unreferenced keys so
+    # the specialist self-correction loop can wire a widget. Limit to keys
+    # this edit ADDED — a pre-existing orphan or a legitimate ``sources``
+    # bind target must not re-warn (the collector already excludes the
+    # latter).
+    if normalized:
+        added_orphan_state = [
+            k
+            for k in find_unreferenced_state_keys(normalized)
+            if k not in base_state_keys
+        ]
+        if added_orphan_state:
+            warnings.append(
+                "Added state key(s) with no ui widget reading them — "
+                f"{', '.join(added_orphan_state)}. A new state key with no "
+                "binding widget renders nothing. Add the ui node that reads "
+                "it (a `{state.<key>}` expression or a `bind`), or declare a "
+                "`sources` entry that binds it."
+            )
 
     if normalized:
         # Expression-grammar — never blocks; collect for the caller.

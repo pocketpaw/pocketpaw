@@ -23,6 +23,12 @@ new token / method added to the resolver should be added here too — the
 two files together are the contract.
 
 Changes:
+  - 2026-05-30 (issue #1301): added ``find_unreferenced_state_keys`` —
+    a pure ui-walk collector (mirrors ``find_unwired_live_buttons``) that
+    returns top-level ``state`` keys no ui node references. Closes the
+    silent-orphan-state gap where an add-widget intent landing as a
+    state-only merge patch persisted with nothing rendering it. Used by
+    ``pockets/service.merge_spec`` to emit a NON-BLOCKING warning.
   - 2026-05-22 (Increment 5): added the catalog-as-allowlist gate —
     ``CatalogViolationError`` plus ``validate_against_catalog_strict``
     (agent-generation path, RAISES) and ``..._logged`` (human/import
@@ -661,11 +667,157 @@ def validate_action_wiring_strict(
         raise ActionWiringViolationError(violations)
 
 
+# ---------------------------------------------------------------------------
+# Orphan-state gate (issue #1301, 2026-05-30).
+#
+# An add-widget intent that lands as a STATE-ONLY merge patch is
+# structurally valid at every layer, and nothing cross-references state
+# against ui — so a new state key with no ui referent persists silently
+# and renders nothing. This pure collector closes that gap: it walks the
+# ui tree, gathers EVERY state reference (template expressions + node-level
+# ``bind`` values, dotted and bare), unions in the legitimate ``sources``
+# bind targets (write-targets no widget may read yet), and returns the
+# state keys with no referent.
+#
+# Mirrors the structure of ``find_unwired_live_buttons`` in OSS
+# ``pocketpaw.ripple.manifest`` (a pure ui-walk collector). The caller
+# (``pockets/service.merge_spec``) surfaces the result as a NON-BLOCKING
+# warning — a state-only seed of a ``sources`` bind target is legitimate.
+# ---------------------------------------------------------------------------
+
+
+# Top-level state key inside a ``{state.<key>...}`` expression body. The
+# resolver addresses state by dotted path; only the FIRST segment is the
+# top-level key the merge shallow-merges against.
+_STATE_REF_RE = re.compile(r"\bstate\.([A-Za-z_$][\w$]*)")
+
+# Built-in loop / event context vars the renderer injects inside ``each``
+# bodies. A bare ``bind`` to one of these is loop-scoped, NOT a top-level
+# state key, so it must not count as a state reference.
+_LOOP_CONTEXT_VARS: frozenset[str] = frozenset({"item", "card", "index", "event", "i"})
+
+
+def _state_keys_in_expression(value: str) -> Iterator[str]:
+    """Yield every top-level state key referenced inside any ``{…}``
+    template in ``value`` (e.g. ``{state.tickets}`` → ``tickets``,
+    ``{state.x + state.y}`` → ``x``, ``y``)."""
+    for body in _expressions_in(value):
+        for m in _STATE_REF_RE.finditer(body):
+            yield m.group(1)
+
+
+def _normalize_bind_target(bind: str) -> str:
+    """Strip a leading ``state.`` from a dotted bind path and return the
+    top-level key. ``"state.prs"`` → ``"prs"``; ``"draft_lane"`` →
+    ``"draft_lane"``; ``"state.form.x"`` → ``"form"`` (only the top-level
+    key the merge shallow-merges against matters)."""
+    stripped = bind[len("state.") :] if bind.startswith("state.") else bind
+    # Only the first dotted segment is the top-level state key.
+    return stripped.split(".", 1)[0].split("[", 1)[0]
+
+
+def _collect_referenced_state(
+    node: Any,
+    referenced: set[str],
+    loop_vars: frozenset[str],
+) -> None:
+    """Recursive ui walk that records every state key a node reads.
+
+    Two reference forms are collected:
+
+    * ``{state.<key>…}`` template expressions in ANY string value, and
+    * node-level ``bind`` values — dotted (``state.x``) or bare (``x``).
+      A bare ``bind`` that names a loop / event context var in scope is
+      loop-scoped, not a top-level state key, and is skipped.
+
+    Generous on purpose: over-collecting a reference only suppresses a
+    warning (safe); under-collecting would emit a false positive. The
+    ``state`` seed block is never walked here — initial values are plain
+    data, not references.
+    """
+    if isinstance(node, dict):
+        # Extend loop-var scope for ``each`` bodies — the conventional
+        # loop-context names plus any ``item_as`` / ``index_as`` aliases.
+        # Reserved ONLY inside ``each``; a top-level bare bind is real state.
+        child_loop_vars = loop_vars
+        if node.get("type") == "each":
+            extra = set(loop_vars)
+            for alias_key in ("item_as", "index_as"):
+                alias = node.get(alias_key)
+                if isinstance(alias, str) and alias:
+                    extra.add(alias)
+            child_loop_vars = frozenset(extra | _LOOP_CONTEXT_VARS)
+
+        for key, value in node.items():
+            if key == "bind" and isinstance(value, str) and value:
+                if value.startswith("state."):
+                    referenced.add(_normalize_bind_target(value))
+                else:
+                    head = _normalize_bind_target(value)
+                    if head not in child_loop_vars:
+                        referenced.add(head)
+                continue
+            if isinstance(value, str):
+                referenced.update(_state_keys_in_expression(value))
+            else:
+                _collect_referenced_state(value, referenced, child_loop_vars)
+    elif isinstance(node, list):
+        for child in node:
+            _collect_referenced_state(child, referenced, loop_vars)
+    elif isinstance(node, str):
+        referenced.update(_state_keys_in_expression(node))
+
+
+def find_unreferenced_state_keys(spec: dict[str, Any] | None) -> list[str]:
+    """Return top-level ``state`` keys that no ui node references.
+
+    Walks ``spec["ui"]`` collecting every state reference (template
+    expressions in all forms, node-level ``bind`` values dotted and bare,
+    excluding loop-scoped item vars), unions in every ``sources`` bind
+    target (legitimate write-targets a widget may not read yet), then
+    returns the ``state`` keys minus that referenced set, sorted.
+
+    Pure / side-effect-free — mirrors ``find_unwired_live_buttons``. The
+    caller decides what to do with the result; this never blocks.
+
+    Returns ``[]`` when ``spec`` is not a dict or has no ``state`` dict.
+    """
+    if not isinstance(spec, dict):
+        return []
+    state = spec.get("state")
+    if not isinstance(state, dict) or not state:
+        return []
+
+    referenced: set[str] = set()
+
+    # 1. References from the ui tree (templates + node-level binds).
+    ui = spec.get("ui")
+    if isinstance(ui, (dict, list)):
+        # Top-level scope reserves NO loop vars — a state key literally named
+        # ``item``/``index``/etc. read by a top-level bare bind must be rescued
+        # (loop-context names are reserved only inside ``each`` bodies).
+        _collect_referenced_state(ui, referenced, frozenset())
+
+    # 2. Legitimate ``sources`` write-targets — a source binding seeds a
+    #    state key that no widget may read yet (the unconditional seed
+    #    rule). Union them in so they're never flagged as orphans.
+    sources = spec.get("sources")
+    if isinstance(sources, dict):
+        for binding in sources.values():
+            if isinstance(binding, dict):
+                bind = binding.get("bind")
+                if isinstance(bind, str) and bind:
+                    referenced.add(_normalize_bind_target(bind))
+
+    return sorted(k for k in state if k not in referenced)
+
+
 __all__ = [
     "ActionWiringViolationError",
     "CatalogViolationError",
     "ExpressionWarning",
     "RippleSpecGrammarError",
+    "find_unreferenced_state_keys",
     "format_action_violations_for_agent",
     "format_violations_for_agent",
     "format_warnings_for_agent",
