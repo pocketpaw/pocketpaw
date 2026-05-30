@@ -15,7 +15,8 @@
 # always accepted, letting untrusted form input reach mapping + DB unchecked.
 # Now screens the stringified payload through the real InjectionScanner (the
 # command-injection / prompt-injection heuristic scanner) and drops any
-# submission with a MEDIUM-or-higher threat verdict.
+# submission at/above the drop threshold (see the follow-up item 5 note below for
+# the MEDIUM -> HIGH threshold change).
 #
 # Updated 2026-05-30 (follow-up item 1): the per-IP rate-limit bucket is keyed on
 # a SERVER-derived ``rate_key`` (the router hashes ``request.client.host``), not
@@ -43,6 +44,12 @@
 # a single atomic step. See ``_within_rate_limit`` for the one known residual gap
 # (increment-and-test over-counts a REJECTED request by one — strictly safer, not
 # looser).
+#
+# Updated 2026-05-30 (follow-up item 5): the injection-screen drop threshold
+# moved MEDIUM -> HIGH (``_INJECTION_DROP_THRESHOLD``). MEDIUM risked
+# false-dropping legitimate lead text (e.g. "act as a guarantor" scans MEDIUM
+# persona_hijack), and a lost lead is the worst failure here, so only HIGH-or-
+# above verdicts now drop.
 
 from __future__ import annotations
 
@@ -178,22 +185,25 @@ async def _within_rate_limit(
     return True, per_ip
 
 
-# Form input is untrusted, attacker-controlled text. A MEDIUM-or-higher verdict
+# Form input is untrusted, attacker-controlled text. A HIGH-or-higher verdict
 # from the injection scanner means a known instruction-override / persona-hijack
 # / delimiter / exfil / jailbreak / tool-abuse pattern was matched, so the
 # submission is dropped rather than persisted and surfaced into the workspace.
-_INJECTION_DROP_THRESHOLD = ThreatLevel.MEDIUM
+# Threshold is HIGH, not MEDIUM: MEDIUM risked false-dropping legitimate lead
+# text (e.g. "act as a guarantor" scans MEDIUM persona_hijack), and a lost lead
+# is the worst failure here.
+_INJECTION_DROP_THRESHOLD = ThreatLevel.HIGH
 _THREAT_RANK = {ThreatLevel.NONE: 0, ThreatLevel.LOW: 1, ThreatLevel.MEDIUM: 2, ThreatLevel.HIGH: 3}
 
 
 def _passes_injection_screen(payload: dict[str, Any]) -> bool:
     """Screen the stringified form payload through the real InjectionScanner.
 
-    Returns False (drop the submission) when the scanner reports a MEDIUM-or-
-    higher threat. The scanner's heuristic ``scan`` is synchronous and needs no
-    LLM/API key, so it always runs. Replaces the prior dead Guardian call, which
-    referenced a ``check_input`` method GuardianAgent never had and so always
-    accepted."""
+    Returns False (drop the submission) when the scanner reports a HIGH-or-higher
+    threat (see ``_INJECTION_DROP_THRESHOLD``). The scanner's heuristic ``scan``
+    is synchronous and needs no LLM/API key, so it always runs. Replaces the
+    prior dead Guardian call, which referenced a ``check_input`` method
+    GuardianAgent never had and so always accepted."""
     import json
 
     content = json.dumps(payload, default=str)

@@ -16,6 +16,10 @@
 # Updated 2026-05-30 (follow-up item 2): every dropped submission emits exactly
 # one low-severity audit event carrying the drop REASON + counts and NO payload
 # (the payload is PII); covered here via the audit logger's on_log hook.
+# Updated 2026-05-30 (follow-up item 5): the injection-screen drop threshold
+# moved MEDIUM -> HIGH. A HIGH-threat injection still drops; a MEDIUM phrase
+# (e.g. "act as a guarantor", a persona_hijack match on legitimate lead text)
+# now passes, because a lost lead is the worst failure here.
 from __future__ import annotations
 
 import json
@@ -93,9 +97,11 @@ async def test_list_for_site_is_tenant_scoped(mongo_db):
 
 @pytest.mark.asyncio
 async def test_capture_drops_injection_payload(mongo_db):
-    """H2: untrusted form input carrying a prompt-injection pattern is screened
-    and dropped (returns None, nothing persisted). Proves the injection screen
-    is a real control, not the previous always-accept no-op."""
+    """H2 / item 5: untrusted form input carrying a HIGH-threat prompt-injection
+    pattern is screened and dropped (returns None, nothing persisted). The drop
+    threshold is HIGH, and an instruction-override pattern scans HIGH, so it
+    still drops. Proves the injection screen is a real control, not the previous
+    always-accept no-op."""
     site = await _site()
     lead = await leads_service.capture(
         site=site,
@@ -106,6 +112,26 @@ async def test_capture_drops_injection_payload(mongo_db):
     )
     assert lead is None  # injection screen tripped → dropped
     assert await leads_service.count_for_site("ws1", "site_1") == 0
+
+
+@pytest.mark.asyncio
+async def test_capture_allows_medium_threat_phrase_after_threshold_raised(mongo_db):
+    """Item 5: with the drop threshold at HIGH, a MEDIUM-threat phrase is no
+    longer dropped. "act as a guarantor" scans MEDIUM (persona_hijack) but is
+    legitimate lead text — under the old MEDIUM threshold it was a false drop;
+    now it passes and the lead is written. A lost lead is the worst failure here,
+    so MEDIUM no longer drops."""
+    site = await _site()
+    lead = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        # Legitimate lead text that the scanner rates MEDIUM (persona_hijack).
+        payload={"full_name": "I can act as a guarantor for the loan, please call me"},
+        submitter_ref="ip_real_lead",
+        rate_key="rk_lead",
+    )
+    assert lead is not None  # MEDIUM no longer drops → the lead is captured
+    assert await leads_service.count_for_site("ws1", "site_1") == 1
 
 
 @pytest.mark.asyncio
