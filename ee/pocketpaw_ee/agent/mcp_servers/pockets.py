@@ -37,6 +37,15 @@ agent's retry loop sees a tight, focused corrective hint that names the
 exact bad verb without needing a cloud round-trip. The service-layer gate
 in ``pockets/service.py`` is still the authoritative ground truth — this
 is a cheap belt-and-suspenders that runs first.
+Changes: 2026-05-31 (feat/home-pocket-sources-authoring) — the ``add_widget``
+tool now documents an optional ``widget.sources`` field: a dict keyed by
+source name of RFC-04 GET bindings ({method, path, bind, refresh}) that the
+home grid runs to hydrate the tile's state. ``add_widget_for_agent`` pulls
+``sources`` off the widget dict and the service layer merges it (logged /
+drift-allowed) onto the pocket's top-level ``rippleSpec.sources`` in the same
+write — so the agent can create a live tile AND the source feeding it in one
+call. The handler itself is unchanged (it forwards the whole ``widget``); only
+the tool schema/description grew.
 """
 
 from __future__ import annotations
@@ -340,7 +349,15 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
             "real `data` series). Call `get_widget_spec` for the widget "
             "type FIRST so the spec uses valid props; a spec with invented "
             'props is rejected. Native widgets pass `type:"native"` and '
-            "no `spec`."
+            "no `spec`. To make the tile LIVE, also pass `widget.sources` — "
+            "a dict keyed by source name; each value is a read-only GET "
+            "binding `{method:'GET', path:'/...', bind:'state.<key>', "
+            "refresh:['pocket_open'|'manual']}`. The source hydrates the "
+            "state path the tile's `spec` binds to (e.g. tile "
+            "`value:'{state.revenue}'` + source `bind:'state.revenue'`). "
+            "Sources are authored onto the pocket's top-level "
+            "rippleSpec.sources and run by the source executor; an invalid "
+            "source is dropped without blocking the tile."
         ),
         {
             "type": "object",
@@ -352,8 +369,12 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
                 "widget": {
                     "type": "object",
                     "description": (
-                        "Widget entry: name, type, optional icon/color, and a "
-                        "rippleSpec `spec` subtree (omit for native widgets)."
+                        "Widget entry: name, type, optional icon/color, a "
+                        "rippleSpec `spec` subtree (omit for native widgets), "
+                        "and optional `sources` — a dict keyed by source name "
+                        "of RFC-04 GET bindings ({method, path, bind, refresh}) "
+                        "that feed the tile's state. Omit `sources` for a "
+                        "static tile."
                     ),
                 },
             },
