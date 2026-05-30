@@ -461,8 +461,7 @@ def _build_pocket_brief(
     sections = _parse_pocket_prd_sections(prd)
 
     widgets = [
-        {"type": left, "purpose": right}
-        for left, right in _parse_bullet_pairs(sections["WIDGETS"])
+        {"type": left, "purpose": right} for left, right in _parse_bullet_pairs(sections["WIDGETS"])
     ]
 
     state: dict[str, dict[str, str]] = {}
@@ -663,7 +662,8 @@ async def _run_pocket_planner_pipeline(
         # debugging captain can see exactly what the model emitted.
         logger.info("plan_pocket: retrying task breakdown with explicit JSON hint")
         warnings.append(
-            f"task-breakdown first attempt produced no todos; raw output (first 300 chars): {tasks_raw[:300]!r}"
+            "task-breakdown first attempt produced no todos; "
+            f"raw output (first 300 chars): {tasks_raw[:300]!r}"
         )
         tasks_raw = await planner._run_prompt(
             "Your previous response was not valid JSON. Return ONLY a "
@@ -680,7 +680,8 @@ async def _run_pocket_planner_pipeline(
         warnings.extend(retry_warnings)
         if not tasks:
             warnings.append(
-                f"task-breakdown retry also failed; raw output (first 300 chars): {tasks_raw[:300]!r}"
+                "task-breakdown retry also failed; "
+                f"raw output (first 300 chars): {tasks_raw[:300]!r}"
             )
 
     brief = _build_pocket_brief(
@@ -818,9 +819,7 @@ def build_pocket_planner_context_server() -> tuple[str, Any] | None:
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except ImportError:
-        logger.debug(
-            "claude_agent_sdk not installed; pocketpaw_pocket_planner MCP disabled"
-        )
+        logger.debug("claude_agent_sdk not installed; pocketpaw_pocket_planner MCP disabled")
         return None
 
     @tool(

@@ -177,12 +177,15 @@ class TestPlanKitGate:
             update={"spec": {"version": "1.0", "state": {}, "ui": {"id": "n_a", "type": "flex"}}}
         )
 
-        with patch(
-            "pocketpaw_ee.agent.pocket_specialist.adapters._input_with_template_spec",
-            return_value=templated_input,
-        ), patch(
-            "pocketpaw_ee.agent.pocket_specialist.adapters._validate_and_persist"
-        ) as mock_validate:
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.adapters._input_with_template_spec",
+                return_value=templated_input,
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.adapters._validate_and_persist"
+            ) as mock_validate,
+        ):
             mock_validate.return_value = type(
                 "FakeOutput",
                 (),

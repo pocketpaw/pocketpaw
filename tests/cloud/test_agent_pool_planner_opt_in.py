@@ -185,6 +185,4 @@ async def test_pocket_planner_ambient_does_not_need_opt_in_token():
     # OPT_IN_MCP_SERVERS get translated.
     doc_with_token = _make_agent_doc(tools=["pocketpaw_pocket_planner"])
     policy_with_token = await _build_with(doc_with_token, Settings(anthropic_api_key="k"))
-    assert (
-        policy_with_token.is_mcp_server_explicitly_allowed("pocketpaw_pocket_planner") is False
-    )
+    assert policy_with_token.is_mcp_server_explicitly_allowed("pocketpaw_pocket_planner") is False

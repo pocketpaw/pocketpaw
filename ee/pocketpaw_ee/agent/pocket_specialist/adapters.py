@@ -286,9 +286,11 @@ class AgentModeAdapter:
         # the user iterate, then walks the todos calling /spec/merge per
         # todo. Falls back to ``_draft_kit_response`` when USE_SKILL is
         # off so the existing one-shot path remains the default.
-        use_skill = os.environ.get(
-            "POCKETPAW_POCKET_SPECIALIST_USE_SKILL", ""
-        ).lower() in ("1", "true", "yes")
+        use_skill = os.environ.get("POCKETPAW_POCKET_SPECIALIST_USE_SKILL", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         if use_skill:
             return _plan_kit_response(
                 input,
@@ -544,7 +546,7 @@ def _plan_kit_response(
             "satisfies its success_criteria, then POST to "
             "``http://localhost:8888/api/v1/pockets/<id>/spec/merge`` "
             "with the auth_headers above and body "
-            "``{\"merge\": <partial>}``. The first /spec/merge against "
+            '``{"merge": <partial>}``. The first /spec/merge against '
             "a fresh pocket id creates the pocket; subsequent calls "
             "merge into it. Tick each todo as you go. Halt on the "
             "first failure unless the user says retry."
