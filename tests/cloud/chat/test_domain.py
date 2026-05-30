@@ -24,6 +24,7 @@ def test_message_is_frozen() -> None:
         group="g1",
         sender="u1",
         sender_type="user",
+        sender_name="Alice",
         agent=None,
         content="hi",
     )
@@ -39,6 +40,7 @@ def test_message_minimal_fields() -> None:
         group="g1",
         sender="u1",
         sender_type="user",
+        sender_name="Alice",
         agent=None,
         content="hi",
     )
@@ -58,6 +60,7 @@ def test_message_with_mentions_and_reactions() -> None:
         group="g1",
         sender="u1",
         sender_type="user",
+        sender_name="Alice",
         agent=None,
         content="hi @bob",
         mentions=(mention,),
@@ -75,6 +78,7 @@ def test_pocket_message_has_session_key_and_role() -> None:
         group=None,
         sender=None,
         sender_type="user",
+        sender_name=None,
         agent=None,
         content="hello",
         session_key="cloud:pocket:p1:agent1",
