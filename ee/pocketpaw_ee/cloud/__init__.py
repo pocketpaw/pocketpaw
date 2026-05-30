@@ -260,6 +260,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.fleet.router import router as fleet_router
     from pocketpaw_ee.instinct.router import router as instinct_router
     from pocketpaw_ee.paw_print.router import router as paw_print_router
+    from pocketpaw_ee.sites.router import router as sites_router
 
     app.include_router(kb_router, prefix="/api/v1")
     app.include_router(knowledge_router, prefix="/api/v1")
@@ -286,6 +287,10 @@ def mount_cloud(app: FastAPI) -> None:
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
     # workspace-scoped) for the Leads view.
     app.include_router(leads_router, prefix="/api/v1")
+    # Sites control plane — RFC 12 Task 3.5. POST /sites/publish (compile +
+    # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
+    # (Cloudflare for SaaS) the Domains panel drives.
+    app.include_router(sites_router, prefix="/api/v1")
 
     # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
     # for the persisted (trigger, row) state matrix; the actual sweep
