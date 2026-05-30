@@ -1082,9 +1082,7 @@ async def merge_spec(
     # latter).
     if normalized:
         added_orphan_state = [
-            k
-            for k in find_unreferenced_state_keys(normalized)
-            if k not in base_state_keys
+            k for k in find_unreferenced_state_keys(normalized) if k not in base_state_keys
         ]
         if added_orphan_state:
             warnings.append(
