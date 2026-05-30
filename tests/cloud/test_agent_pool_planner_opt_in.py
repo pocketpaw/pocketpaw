@@ -156,3 +156,33 @@ def test_claude_sdk_backend_is_the_real_class():
     branch in ``_build`` would silently skip the policy plumbing.
     """
     assert ClaudeSDKBackend.__name__ == "ClaudeSDKBackend"
+
+
+@pytest.mark.asyncio
+async def test_pocket_planner_ambient_does_not_need_opt_in_token():
+    """Sibling pin of ``test_no_tools_planner_off`` for the pocket-create
+    planner. ``pocketpaw_pocket_planner`` is NOT in ``OPT_IN_MCP_SERVERS``
+    — the bundled pocket-create skill calls it without the agent ever
+    naming it in ``config.tools``. The pool builder must therefore NOT
+    add it to ``mcp_servers_allow`` even if the agent does name it (an
+    unknown token is dropped silently — same as any other non-opt-in
+    server name).
+    """
+    # Agent with no tools — the ambient pocket planner must still be
+    # reachable (the allow-by-default path), so ``is_mcp_server_allowed``
+    # returns True. We assert by ABSENCE from ``mcp_servers_allow``: the
+    # ambient server is intentionally not in OPT_IN_MCP_SERVERS so the
+    # opt-in path doesn't even see it.
+    doc = _make_agent_doc(tools=[])
+    policy = await _build_with(doc, Settings(anthropic_api_key="k"))
+    # Not opted in (because not in OPT_IN_MCP_SERVERS), but still reachable
+    # via the allow-by-default channel.
+    assert policy.is_mcp_server_explicitly_allowed("pocketpaw_pocket_planner") is False
+    assert policy.is_mcp_server_allowed("pocketpaw_pocket_planner") is True
+
+    # Even an agent that explicitly names the ambient server in `tools`
+    # does not flip it into the opt-in set — only servers in
+    # OPT_IN_MCP_SERVERS get translated.
+    doc_with_token = _make_agent_doc(tools=["pocketpaw_pocket_planner"])
+    policy_with_token = await _build_with(doc_with_token, Settings(anthropic_api_key="k"))
+    assert policy_with_token.is_mcp_server_explicitly_allowed("pocketpaw_pocket_planner") is False

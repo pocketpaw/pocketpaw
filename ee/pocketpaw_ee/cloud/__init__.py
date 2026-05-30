@@ -121,7 +121,17 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud._core.csrf import CSRFMiddleware, csrf_router
     from pocketpaw_ee.cloud._core.ee_auth_bridge import EEAuthBridgeMiddleware
     from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
     from pocketpaw_ee.cloud._core.timing import TimingMiddleware
+
+    # Boot-time secret for the loopback internal bypass on the
+    # pocket-specialist spec-merge endpoint (PR #1222 R1 fix). Generated
+    # or loaded from ``~/.pocketpaw/internal-token`` (0600). Exported as
+    # ``POCKETPAW_INTERNAL_TOKEN`` so the pocket-specialist subprocess
+    # inherits it. Idempotent on restart; safe to call before any
+    # routers register because the merge endpoint reads the token
+    # lazily on each request.
+    ensure_internal_token()
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
@@ -538,14 +548,57 @@ def mount_cloud(app: FastAPI) -> None:
 
     _get_bus().subscribe("pocket.outcome", _outcomes_service.record_outcome)
 
-    # Decision graph projection (RFC 07 Slice 1). Lazy-init the
-    # singleton DecisionGraph + projection so `GET /api/v1/decisions/_ping`
-    # and the in-process Python API (`get_decision_graph()`) work from
-    # process start. Slice 1 ships the substrate only — Slice 2 wires
-    # the journal-to-projection subscription that keeps the store live.
+    # Decision graph projection (RFC 07 Slice 1 + RFC 09 Slice 1b).
+    # Lazy-init the singleton DecisionGraph + projection so
+    # `GET /api/v1/decisions/_ping` and the in-process Python API
+    # (`get_decision_graph()`) work from process start. Pass
+    # `rebuild_from_journal=True` so a cold process boot folds any
+    # pre-existing chain events the journal already holds (RFC 09
+    # Slice 1b § "Bootstrap replay verification"). Warm restarts skip
+    # the replay because the projection's cursor is persisted in
+    # decisions.db.
     from pocketpaw_ee.cloud.decisions.service import init_decisions_projection
 
-    init_decisions_projection()
+    init_decisions_projection(rebuild_from_journal=True)
+
+    # Decision-graph reconciler + abandon-path sweeper (RFC 09 Slice 4).
+    #
+    # The reconciler is a 60s background loop that drains the journal
+    # from the projection's cursor and replays any chain events the
+    # hot-path co-location missed. The sweeper is an hourly background
+    # loop that closes Decision chains for parked Instinct Actions older
+    # than the configurable TTL (default 30 days). Both are gated on
+    # the same scheduler env flag the daily-snapshot scheduler uses so
+    # test runs do not spawn background loops that outlive the test.
+    # Production deployments set ``POCKETPAW_CLOUD_SCHEDULER_ENABLED=
+    # true`` to flip them on.
+    import os as _os_slice4_decisions
+
+    if _os_slice4_decisions.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.decisions._action_sweeper import (
+            start_action_sweeper,
+            stop_action_sweeper,
+        )
+        from pocketpaw_ee.cloud.decisions.reconciler import (
+            start_reconciler,
+            stop_reconciler,
+        )
+
+        @app.on_event("startup")
+        async def _start_decisions_reconciler() -> None:
+            await start_reconciler(app)
+
+        @app.on_event("shutdown")
+        async def _stop_decisions_reconciler() -> None:
+            await stop_reconciler(app)
+
+        @app.on_event("startup")
+        async def _start_decisions_sweeper() -> None:
+            await start_action_sweeper(app)
+
+        @app.on_event("shutdown")
+        async def _stop_decisions_sweeper() -> None:
+            await stop_action_sweeper(app)
 
     # Tasks → notifications fan-out. When a Task is proposed to a human
     # assignee, drop an in-app notification so they see it even without

@@ -49,11 +49,40 @@ against real relative paths instead of hallucinating endpoints. Wired into
 ``_build_system_prompt`` for the create path and into
 ``_run_edit_subagent_pipeline`` for the edit path (the edit path already
 fetches ``backend_summary`` from ``get_pocket_backend``).
+Changes: 2026-05-25 (PR #1222 R1 Blocker 1) — the SKILL branch no
+longer writes per-request tenancy to ``os.environ``. The runtime now
+calls ``backend.attach_subprocess_env({...})`` with workspace_id,
+user_id, and the process-local internal token; the backend merges
+that dict into the subprocess env at spawn time. The prior code
+mutated the parent process's env on every request, racing across
+concurrent edits (one request's tenancy could leak into another's
+subprocess if their spawns interleaved). The new path is per-request
+isolated by the isolated-backend instance the runtime already created.
+Changes: 2026-05-24 (MVP skill+merge endpoint) — the edit subagent
+pipeline now branches on ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL``. When
+truthy, the pipeline:
+
+  1. Uses ``POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL`` (the prompt
+     variant that points at the new bundled ``pocketpaw-pocket-
+     specialist`` skill plus the ``POST /spec/merge`` endpoint), and
+  2. SKIPS ``backend.attach_specialist_tools(make_edit_pocket_tools)``
+     so the 17-tool granular-op surface is NOT attached, and
+  3. Calls ``backend.attach_subprocess_env`` with
+     ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+     ``POCKETPAW_INTERNAL_TOKEN`` so the Claude Code subprocess
+     inherits them for ``curl`` against the local API (with the
+     loopback internal bypass headers documented in the merge
+     endpoint).
+
+The flag defaults False so existing behavior is unchanged — both paths
+coexist until the captain greenlights deletion of the granular surface
+after the live-test cycle.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Literal
 
@@ -63,6 +92,7 @@ from pocketpaw.agents.router import AgentRouter
 from pocketpaw.config import Settings
 from pocketpaw.ripple._pockets import (
     POCKET_EDIT_SPECIALIST_PROMPT_MCP,
+    POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL,
     POCKET_ID_TOKEN,
     POCKET_SPECIALIST_PROMPT,
     fill_current_pocket,
@@ -181,7 +211,7 @@ class PocketSpecialistCreateInput(BaseModel):
 
 class PocketSpecialistCreateOutput(BaseModel):
     ok: bool
-    action: Literal["created", "extended", "failed", "draft_kit", "redraft"]
+    action: Literal["created", "extended", "failed", "draft_kit", "redraft", "plan_kit"]
     pocket: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
     error: str | None = None
@@ -193,7 +223,11 @@ class PocketSpecialistCreateOutput(BaseModel):
             "Agent-mode first-call payload: design rules digest, structural "
             "plan echo, available widget list, and instructions for the "
             "calling chat agent to draft a rippleSpec and call back with "
-            "``spec=<draft>``. None in subagent mode."
+            "``spec=<draft>``. None in subagent mode. When ``action="
+            "'plan_kit'`` this carries the plan-pointer kit instead of the "
+            "draft kit: the chat agent should invoke the "
+            "``pocketpaw-pocket-planner`` skill and the ``plan_pocket`` MCP "
+            "tool to draft a multi-widget brief before any spec is built."
         ),
     )
 
@@ -804,7 +838,7 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
-    action: Literal["applied", "failed", "draft_kit"] = Field(
+    action: Literal["applied", "failed", "draft_kit", "skill_kit"] = Field(
         default="applied",
         description=(
             "What the run did. ``applied`` — ops ran (subagent mode, or "
@@ -922,10 +956,65 @@ async def _run_edit_subagent_pipeline(
         settings_override=override or None,
     )
 
-    ops_capture: dict[str, Any] = {"ops": []}
-    backend.attach_specialist_tools(
-        make_edit_pocket_tools(pocket_id=input.pocket_id, capture=ops_capture)
+    # MVP A/B switch — when ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` is
+    # truthy, the edit subagent runs against the new skill + merge-endpoint
+    # path instead of the 17-tool LangChain surface. Flag defaults False
+    # so existing behavior is unchanged; the captain will green-light
+    # deletion of the granular surface after the live test confirms the
+    # skill path produces the same or better edits.
+    use_skill = os.environ.get("POCKETPAW_POCKET_SPECIALIST_USE_SKILL", "").lower() in (
+        "1",
+        "true",
+        "yes",
     )
+
+    ops_capture: dict[str, Any] = {"ops": []}
+    if use_skill:
+        # Don't attach the granular ops — the agent applies edits via
+        # curl to ``POST /spec/merge`` using Claude Code's native Bash.
+        # Ship the tenancy + bypass-token env values into the subprocess
+        # via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1) so the
+        # loopback internal-bypass auth on the endpoint accepts the
+        # agent's calls — WITHOUT mutating the parent process's
+        # ``os.environ``, which would race across concurrent requests.
+        # The backend merges this dict into the subprocess env at spawn
+        # time; backends that don't spawn a subprocess (deep_agents)
+        # silently no-op, which is correct because they don't run the
+        # SKILL path either.
+        from pocketpaw_ee.cloud._core.internal_token import get_internal_token
+
+        subprocess_env: dict[str, str] = {
+            "POCKETPAW_WORKSPACE_ID": workspace_id,
+            "POCKETPAW_USER_ID": user_id,
+        }
+        internal_token = get_internal_token()
+        if internal_token:
+            subprocess_env["POCKETPAW_INTERNAL_TOKEN"] = internal_token
+        try:
+            backend.attach_subprocess_env(subprocess_env)
+        except (AttributeError, NotImplementedError):
+            # Backend predates the protocol addition or opted out of
+            # subprocess env injection. The SKILL path then has no
+            # path to the API — log loudly so the operator sees the
+            # config drift; don't crash the request.
+            log.warning(
+                "[pocket-specialist:edit] backend %s does not support "
+                "attach_subprocess_env — the SKILL path's curl auth will "
+                "fail. Switch to claude_agent_sdk or revert the "
+                "POCKETPAW_POCKET_SPECIALIST_USE_SKILL flag.",
+                backend_name,
+            )
+        log.info(
+            "[pocket-specialist:edit] skill+merge path engaged "
+            "(workspace=%s user=%s token_present=%s)",
+            workspace_id,
+            user_id,
+            bool(internal_token),
+        )
+    else:
+        backend.attach_specialist_tools(
+            make_edit_pocket_tools(pocket_id=input.pocket_id, capture=ops_capture)
+        )
 
     # Surface the NON-SECRET backend summary so the specialist knows
     # whether a backend is already configured before it authors a
@@ -937,9 +1026,10 @@ async def _run_edit_subagent_pipeline(
         backend_summary = await _pockets_service.get_pocket_backend(workspace_id, input.pocket_id)
     except Exception:  # noqa: BLE001 — a missing backend summary must not block the edit
         log.debug("[pocket-specialist:edit] backend summary fetch failed", exc_info=True)
-    system_prompt = fill_current_pocket(
-        POCKET_EDIT_SPECIALIST_PROMPT_MCP, input.pocket_id, backend_summary
+    prompt_template = (
+        POCKET_EDIT_SPECIALIST_PROMPT_MCP_SKILL if use_skill else POCKET_EDIT_SPECIALIST_PROMPT_MCP
     )
+    system_prompt = fill_current_pocket(prompt_template, input.pocket_id, backend_summary)
     # When the pocket's backend has an installed API skill, splice its
     # endpoint reference in so the edit specialist authors set_source /
     # set_action ``path`` values against real endpoints (Increment 2b).

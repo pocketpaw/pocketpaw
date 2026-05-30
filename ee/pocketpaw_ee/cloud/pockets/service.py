@@ -74,6 +74,11 @@ Changes: 2026-05-22 (#1174) — widgets carry an optional ``spec`` field (a
 per-tile rippleSpec subtree the home grid renders). ``_build_widget_doc``,
 ``_widget_to_domain``, the REST ``add_widget``, and ``agent_update_widget``
 thread it through; the home agent's ``add_widget`` MCP tool populates it.
+Changes: 2026-05-24 (#1208) — ``agent_add_widget`` and ``agent_update_widget``
+now run the catalog + action-wiring gates on ``widgets[].spec`` the same way
+``agent_replace_node`` runs them on the pocket-level rippleSpec. Closes the
+verb-hallucination / unwired-Refresh-button class of regressions on the home
+pocket's widget-add surface (sibling to #1196 at the pocket level).
 Changes: 2026-05-28 (feat/wave-3e-template-slug) — wired the RFC 03 v2
 ``template_slug`` field end-to-end: ``create`` / ``update`` load + compile
 the bundled template (via OSS ``load_template`` + ``compile_template``)
@@ -84,6 +89,22 @@ dispatcher + temporal scheduler call to obtain a typed ``PocketTemplate``
 from a pocket. A stale / missing slug never breaks pocket creation: the
 loader's ``strict=False`` mode returns ``None`` and the rippleSpec is
 left unmodified so a later resolver run can retry.
+Changes: 2026-05-24 — added ``merge_spec`` (MVP entry point for the
+new ``POST /api/v1/pockets/{id}/spec/merge`` endpoint). Accepts either a
+``{"replace": <full spec>}`` or a ``{"merge": <partial spec>}`` body,
+runs the same strict catalog + action-wiring gates as the agent
+generation path, persists on success, returns a wire dict + warnings
+list. Lives alongside (not replacing) the 17-tool granular-op surface
+— the captain greenlights deletion in a follow-up PR after the new
+path is proven on real chat traffic.
+Changes: 2026-05-25 (PR #1222 R1) — ``merge_spec`` now accepts either
+the typed ``MergeSpecRequest`` Pydantic model or a legacy dict and
+``model_validate``s at entry. The exactly-one rule (``replace`` xor
+``merge``) is enforced by the model's ``model_validator``; the
+hand-rolled ``isinstance`` + presence checks the original MVP carried
+are gone. Behaviour is unchanged for the happy path; bad bodies now
+raise the same ``spec_merge.invalid_body`` ValidationError but via
+Pydantic instead of an ad-hoc branch.
 """
 
 from __future__ import annotations
@@ -120,11 +141,13 @@ from pocketpaw_ee.cloud.pockets import (
     spec_ops,
     state_ops,
 )
+from pocketpaw_ee.cloud.pockets._merge import merge_ripple_spec
 from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
+    MergeSpecRequest,
     UpdatePocketRequest,
     UpdateWidgetRequest,
     pocket_to_wire_dict,
@@ -133,6 +156,7 @@ from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
     ActionWiringViolationError,
     CatalogViolationError,
+    find_unreferenced_state_keys,
     format_action_violations_for_agent,
     format_violations_for_agent,
     validate_action_wiring_logged,
@@ -510,6 +534,57 @@ async def _gate_catalog(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
+
+
+# Widget ``type`` whose tiles carry no rippleSpec — the frontend renders them
+# as a built-in Svelte component keyed on ``name``. Mirrors the
+# ``_NATIVE_WIDGET_TYPE`` constant in the MCP server; duplicated here so the
+# service layer can short-circuit the gate without importing from the agent
+# package (which would invert the cloud → agent dependency direction).
+_NATIVE_WIDGET_TYPE = "native"
+
+
+async def _gate_widget_spec_for_agent(
+    spec: dict[str, Any] | None,
+    *,
+    widget_type: str | None,
+    actor: str,
+    workspace_id: str | None,
+    pocket_id: str | None,
+) -> str | None:
+    """Run the catalog + action-wiring gates over a single widget's ``spec``
+    subtree on the agent-generation path. Returns an agent-readable error
+    string on rejection, or ``None`` when the spec passes (or there's nothing
+    to gate).
+
+    Mirrors the strict half of :func:`_gate_catalog` — the same posture used
+    by the pocket-level granular ops (``agent_replace_node`` etc.) — but
+    scoped to a single ``widgets[].spec`` subtree rather than the
+    ``rippleSpec.ui`` tree. ``type="native"`` widgets and missing specs are
+    a no-op; the manifest-unavailable best-effort posture is inherited
+    from :func:`_gate_catalog`.
+
+    The catalog walker tolerates an unwrapped subtree (its first line is
+    ``root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec``)
+    so we hand the widget spec in directly, no synthetic ``ui`` wrapping.
+    """
+    if widget_type == _NATIVE_WIDGET_TYPE:
+        return None
+    if not isinstance(spec, dict):
+        return None
+    try:
+        await _gate_catalog(
+            spec,
+            strict=True,
+            actor=actor,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+        )
+    except CatalogViolationError as exc:
+        return format_violations_for_agent(exc.violations)
+    except ActionWiringViolationError as exc:
+        return format_action_violations_for_agent(exc.violations)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -912,6 +987,158 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def merge_spec(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    body: MergeSpecRequest | dict[str, Any],
+) -> dict:
+    """One-shot rippleSpec write — full replace OR partial merge.
+
+    MVP entry point for the new ``POST /spec/merge`` endpoint. Replaces
+    the 17-tool LangChain edit surface with a single server-side merge
+    that the agent invokes via ``curl`` after the ``pocketpaw-pocket-
+    specialist`` skill teaches it the rippleSpec shape + conventions.
+
+    Body must carry EXACTLY ONE of ``replace`` (whole new spec wholesale
+    replaces the existing one) or ``merge`` (partial spec — top-level
+    keys overwrite, ``state`` is shallow-merged, ``ui`` nodes are
+    replaced by id via ``merge_ripple_spec``).
+
+    Accepts either the typed ``MergeSpecRequest`` model the router
+    constructs from the HTTP body OR a plain dict (for internal
+    callers — CLI / bus handlers / tests). The first line below
+    re-validates via ``model_validate`` so the exactly-one rule is
+    enforced regardless of which path the caller came in through —
+    per cloud convention #6 (validate at entry).
+
+    Validation runs the STRICT catalog + action-wiring gates (mirrors
+    the agent-generation path in ``create_from_ripple_spec``). A
+    catalog or action-wiring violation BLOCKS the persist and returns
+    ``{ok: false, warnings: [...]}``. Expression-grammar warnings
+    (``validate_ripple_spec_logged``) are non-blocking — they are
+    surfaced in the warnings list but the merge persists anyway.
+
+    Edit-access is required; ``visibility`` changes via this endpoint
+    are NOT supported (use the existing PATCH ``/{pocket_id}``). The
+    response mirrors the existing wire shape so the desktop client can
+    re-render directly from the result.
+    """
+    # Validate at entry (cloud rule #6) — accept either the typed
+    # model or a raw dict and normalize to the model. ``model_validate``
+    # re-runs the exactly-one ``model_validator``, so a dict caller
+    # carrying both / neither raises here instead of later.
+    if isinstance(body, MergeSpecRequest):
+        parsed = body
+    else:
+        try:
+            parsed = MergeSpecRequest.model_validate(body)
+        except Exception as exc:  # noqa: BLE001 — pydantic validation
+            raise ValidationError(
+                "spec_merge.invalid_body",
+                str(exc),
+            ) from exc
+
+    doc = await _fetch_pocket(pocket_id)
+    pocket = _pocket_to_domain(doc)
+    _check_domain_edit_access(pocket, user_id)
+
+    # Compute the new spec.
+    orphans: list[str] = []
+    base_spec = doc.rippleSpec or {}
+    # Top-level state keys present BEFORE this edit — so the orphan-state
+    # warning below names only keys this edit ADDED, not pre-existing
+    # orphans the agent didn't touch (avoids re-warning noise on replace).
+    base_state_keys: set[str] = set(
+        base_spec.get("state", {}) if isinstance(base_spec.get("state"), dict) else {}
+    )
+    if parsed.replace is not None:
+        new_spec_raw = parsed.replace
+    else:
+        assert parsed.merge is not None  # narrowing for type checkers
+        new_spec_raw, orphans = merge_ripple_spec(base_spec, parsed.merge)
+
+    # Normalize + validate (mirror the create_from_ripple_spec gate
+    # sequence at line 794+ — strict on catalog + action-wiring, logged
+    # on expression grammar).
+    normalized = normalize_ripple_spec(new_spec_raw) if new_spec_raw else None
+    warnings: list[str] = []
+    if orphans:
+        warnings.append(
+            "Patch referenced node ids not present in the base tree — "
+            f"dropped: {', '.join(orphans)}. To add a new node, re-state "
+            "its parent with the new child appended to children."
+        )
+
+    # Orphan-state warning (issue #1301) — NON-BLOCKING. A state-only
+    # merge patch (an add-widget intent that never carried a ui node)
+    # adds a state key no widget reads, so it renders nothing. Mirror the
+    # orphan-node warning above: name the newly-added unreferenced keys so
+    # the specialist self-correction loop can wire a widget. Limit to keys
+    # this edit ADDED — a pre-existing orphan or a legitimate ``sources``
+    # bind target must not re-warn (the collector already excludes the
+    # latter).
+    if normalized:
+        added_orphan_state = [
+            k for k in find_unreferenced_state_keys(normalized) if k not in base_state_keys
+        ]
+        if added_orphan_state:
+            warnings.append(
+                "Added state key(s) with no ui widget reading them — "
+                f"{', '.join(added_orphan_state)}. A new state key with no "
+                "binding widget renders nothing. Add the ui node that reads "
+                "it (a `{state.<key>}` expression or a `bind`), or declare a "
+                "`sources` entry that binds it."
+            )
+
+    if normalized:
+        # Expression-grammar — never blocks; collect for the caller.
+        grammar_warnings = validate_ripple_spec_logged(
+            normalized, pocket_id=str(doc.id), workspace_id=doc.workspace
+        )
+        for w in grammar_warnings:
+            warnings.append(f"[expr] {w.path}: {w.detail} (expr: {w.expression})")
+
+        # Strict catalog + action-wiring — these BLOCK. Convert the
+        # raised error into an agent-readable warnings payload and bail
+        # without persisting.
+        try:
+            await _gate_catalog(
+                normalized,
+                strict=True,
+                actor=user_id,
+                workspace_id=doc.workspace,
+                pocket_id=str(doc.id),
+            )
+        except CatalogViolationError as exc:
+            return {
+                "ok": False,
+                "pocket_id": str(doc.id),
+                "rippleSpec": doc.rippleSpec,
+                "warnings": warnings + [format_violations_for_agent(exc.violations)],
+            }
+        except ActionWiringViolationError as exc:
+            return {
+                "ok": False,
+                "pocket_id": str(doc.id),
+                "rippleSpec": doc.rippleSpec,
+                "warnings": warnings + [format_action_violations_for_agent(exc.violations)],
+            }
+
+    # Persist + emit.
+    doc.rippleSpec = normalized
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    resolved = await _resolved_wire_dict(doc, user_id)
+    return {
+        "ok": True,
+        "pocket_id": str(doc.id),
+        "rippleSpec": resolved.get("rippleSpec"),
+        "pocket": resolved,
+        "warnings": warnings,
+    }
 
 
 async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
@@ -1632,6 +1859,21 @@ async def agent_add_widget(pocket_id: str, widget: dict) -> tuple[dict | None, s
     doc, err = await _agent_load_doc(pocket_id)
     if err:
         return None, err
+    # Agent-generation path — strict catalog + action-wiring gate on the
+    # widget's own ``spec`` subtree (#1208). Mirrors the pocket-level gate
+    # in ``agent_replace_node`` so the home-pocket widget-add surface gets
+    # the same protection against hallucinated dispatcher verbs and unwired
+    # "Refresh" buttons. Validate BEFORE constructing the doc so a violating
+    # spec never reaches the save path.
+    gate_error = await _gate_widget_spec_for_agent(
+        widget.get("spec") if isinstance(widget.get("spec"), dict) else None,
+        widget_type=widget.get("type") if isinstance(widget.get("type"), str) else None,
+        actor="agent",
+        workspace_id=doc.workspace,
+        pocket_id=str(doc.id),
+    )
+    if gate_error is not None:
+        return None, gate_error
     try:
         new_widget = _build_widget_doc(widget)
     except Exception as exc:  # noqa: BLE001
@@ -1656,6 +1898,27 @@ async def agent_update_widget(
     widget = next((w for w in doc.widgets if w.id == widget_id), None)
     if widget is None:
         return None, f"widget {widget_id} not found in pocket {pocket_id}"
+    # Agent-generation path — strict catalog + action-wiring gate when the
+    # update overwrites ``spec`` (#1208). Only fires when a new spec is
+    # supplied; a name-only / colour-only patch skips the gate the same way
+    # the MCP-layer manifest check does. ``type`` resolution mirrors the
+    # post-update widget state: take ``fields.type`` when provided, else
+    # fall back to the existing widget's type so a native widget that
+    # accidentally received a non-empty spec dict still short-circuits.
+    if "spec" in fields:
+        new_spec = fields["spec"] if isinstance(fields["spec"], dict) else None
+        effective_type = (
+            fields["type"] if "type" in fields and isinstance(fields["type"], str) else widget.type
+        )
+        gate_error = await _gate_widget_spec_for_agent(
+            new_spec,
+            widget_type=effective_type,
+            actor="agent",
+            workspace_id=doc.workspace,
+            pocket_id=str(doc.id),
+        )
+        if gate_error is not None:
+            return None, gate_error
     for k in ("name", "type", "icon", "color", "span", "data", "spec", "assignedAgent"):
         if k in fields:
             setattr(widget, k, fields[k])

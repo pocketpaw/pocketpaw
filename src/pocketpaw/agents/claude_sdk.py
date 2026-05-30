@@ -8,6 +8,18 @@ Updated: 2026-05-28 (#FU-F) — promote silent MCP provider build failures from
   startup summary log (``MCP servers registered: …``) after the
   ``pocketpaw.mcp_servers`` entry-point loop so the operator can confirm the
   full registered set at a glance.
+Updated: 2026-05-25 (PR #1222 R1 Blocker 1) — added
+  ``attach_subprocess_env``. The pocket-specialist runtime calls it to
+  thread per-request tenancy values (``POCKETPAW_WORKSPACE_ID`` /
+  ``POCKETPAW_USER_ID`` / ``POCKETPAW_INTERNAL_TOKEN``) into the
+  Claude Code subprocess at spawn time without mutating the parent
+  process's ``os.environ``. The original MVP path wrote those vars to
+  the parent env from a request handler — racy across concurrent
+  requests. ``run()`` merges the attached dict into
+  ``options_kwargs["env"]`` AFTER the LLM-auth env so an attached value
+  cannot accidentally clobber the auth key. Each isolated backend
+  instance carries its own stash, so one request's tenancy can never
+  leak into another's subprocess.
 Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
   collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
   server now carries a writable ``add_widget`` tool alongside the read tools;
@@ -155,6 +167,16 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client_options_key: str | None = None
         self._client_in_use = False
 
+        # Per-run subprocess env injected by the pocket-specialist
+        # runtime via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1).
+        # Merged into ``options_kwargs["env"]`` at spawn time so the
+        # Claude Code subprocess inherits per-request tenancy values
+        # (``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        # ``POCKETPAW_INTERNAL_TOKEN``) without the runtime mutating
+        # the parent's ``os.environ`` — which would race across
+        # concurrent requests.
+        self._extra_subprocess_env: dict[str, str] = {}
+
         # SDK imports (set during initialization)
         self._query = None
         self._ClaudeSDKClient = None
@@ -176,6 +198,27 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
     def set_tool_policy(self, policy: ToolPolicy) -> None:
         self._policy = policy
+
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:
+        """Merge ``env`` into the Claude Code subprocess env at next spawn.
+
+        The pocket-specialist runtime calls this once per isolated run
+        (PR #1222 R1 Blocker 1) to ship per-request tenancy values
+        (``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        ``POCKETPAW_INTERNAL_TOKEN``) into the subprocess without
+        mutating the parent process's ``os.environ`` — which would
+        race across concurrent requests sharing the same parent.
+
+        ``run()`` merges this dict into ``options_kwargs["env"]`` after
+        the LLM-provider env (``ANTHROPIC_API_KEY`` /
+        ``CLAUDE_CODE_OAUTH_TOKEN``) so an attached value cannot
+        accidentally clobber the auth key. Each call REPLACES the
+        previous dict — an isolated backend instance is per-run, so
+        the new run wants a fresh tenancy, not a merge with stale.
+        """
+        # Defensive copy so the caller can mutate their dict without
+        # corrupting the backend's stash.
+        self._extra_subprocess_env = dict(env)
 
     def _initialize(self) -> None:
         """Initialize the Claude Agent SDK with all imports."""
@@ -1045,6 +1088,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # too as a safety net.
             for _strip_key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
                 os.environ.pop(_strip_key, None)
+            # Merge per-run subprocess env (PR #1222 R1 Blocker 1) —
+            # e.g. the pocket-specialist runtime attaches
+            # ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+            # ``POCKETPAW_INTERNAL_TOKEN`` here instead of writing to
+            # the parent process's ``os.environ``. LLM-auth env wins:
+            # we lay extras DOWN FIRST so anything the caller attaches
+            # cannot accidentally clobber the auth key. An isolated
+            # backend has its own ``_extra_subprocess_env`` so the
+            # tenancy of one request cannot leak into another.
+            if self._extra_subprocess_env:
+                merged_env = dict(self._extra_subprocess_env)
+                if sdk_env:
+                    merged_env.update(sdk_env)
+                sdk_env = merged_env
             if sdk_env:
                 options_kwargs["env"] = sdk_env
             if is_non_anthropic:

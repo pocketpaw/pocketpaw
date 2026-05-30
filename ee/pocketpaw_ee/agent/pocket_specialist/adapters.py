@@ -5,6 +5,20 @@
 # new two-call protocol where the calling chat agent drafts the
 # rippleSpec inline using its own LLM and the specialist only runs
 # validate-and-persist on the returned draft.
+# Modified: 2026-05-25 (PR #1222 R1 Blocker 2) — the SKILL kit's
+# ``auth_headers`` now carries ``X-PocketPaw-Internal-Token`` when the
+# process-local internal token is loaded. The loopback bypass on the
+# spec-merge endpoint requires the token in addition to the prior
+# magic header + tenancy headers; without it the agent would hit a
+# clean 401 instead of the previous (forgeable) bypass.
+# Modified: 2026-05-25 (feat/pocket-planner-skill) — ``AgentModeAdapter
+# .create`` now branches to ``_plan_kit_response`` (a plan-pointer kit
+# pointing at the ``pocketpaw-pocket-planner`` skill + ``plan_pocket``
+# MCP tool) when ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` is truthy,
+# template-match failed, and ``input.spec is None``. Custom multi-
+# widget briefs go through plan-then-build instead of the one-shot
+# draft kit. Widens ``PocketSpecialistCreateOutput.action`` to include
+# ``"plan_kit"``.
 # Modified: 2026-05-23 (#1197) — ``_apply_ops`` now re-fetches the live
 # spec after a successful op batch and runs the strict action-wiring
 # gate against it. Without this, an end-of-batch spec with a hallucinated
@@ -54,6 +68,7 @@ bottom of this file.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Protocol
 
@@ -262,6 +277,28 @@ class AgentModeAdapter:
                 template_id,
             )
 
+        # Plan-pointer kit (feat/pocket-planner-skill, 2026-05-25). When
+        # USE_SKILL is on and template-match found nothing, custom multi-
+        # widget briefs go through plan-then-build instead of the one-
+        # shot draft kit. The chat agent invokes the
+        # ``pocketpaw-pocket-planner`` skill which calls the
+        # ``plan_pocket`` MCP tool, renders the brief in markdown, lets
+        # the user iterate, then walks the todos calling /spec/merge per
+        # todo. Falls back to ``_draft_kit_response`` when USE_SKILL is
+        # off so the existing one-shot path remains the default.
+        use_skill = os.environ.get("POCKETPAW_POCKET_SPECIALIST_USE_SKILL", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if use_skill:
+            return _plan_kit_response(
+                input,
+                started=started,
+                workspace_id=workspace_id,
+                user_id=user_id,
+            )
+
         return _draft_kit_response(input, started=started)
 
 
@@ -449,6 +486,98 @@ def _draft_kit_response(input: Any, *, started: float) -> Any:
         duration_ms=duration_ms,
         backend_used="agent_mode",
         draft_kit=kit,
+    )
+
+
+def _plan_kit_response(
+    input: Any,
+    *,
+    started: float,
+    workspace_id: str = "",
+    user_id: str = "",
+) -> Any:
+    """Build the plan-pointer kit (feat/pocket-planner-skill).
+
+    Mirrors the structure of the edit-side ``skill_kit`` branch in
+    ``_edit_kit_response`` but points at the planner skill + the
+    ``plan_pocket`` MCP tool instead of the merge endpoint. The chat
+    agent:
+
+      1. Loads the ``pocketpaw-pocket-planner`` skill body.
+      2. Calls ``mcp__pocketpaw_pocket_planner__plan_pocket(intent=...)`` and
+         renders the returned brief as markdown in the chat panel.
+      3. Iterates with the user (``plan_pocket`` again with
+         ``prior_plan`` + ``iteration_delta``).
+      4. On "build it" — walks the brief's ``todos`` in order, posting
+         each one's partial rippleSpec to
+         ``POST /api/v1/pockets/<id>/spec/merge`` with the auth headers
+         below. (The pocket itself is created on the first /spec/merge
+         call — there is no separate create step.)
+
+    No backend is spawned. Returns the same
+    ``PocketSpecialistCreateOutput`` shape as the draft kit so the MCP
+    tool handler treats both paths uniformly — just with
+    ``action="plan_kit"`` so the chat agent can switch on it.
+    """
+    from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistCreateOutput
+
+    hints_dict: dict[str, Any] = input.hints.model_dump(exclude_none=True) if input.hints else {}
+
+    plan_kit: dict[str, Any] = {
+        "brief": input.brief,
+        "structural_plan": hints_dict,
+        "skill_name": "pocketpaw-pocket-planner",
+        "mcp_tool": "mcp__pocketpaw_pocket_planner__plan_pocket",
+        "auth_headers": {
+            "X-PocketPaw-Internal": "true",
+            "X-PocketPaw-Workspace-Id": workspace_id,
+            "X-PocketPaw-User-Id": user_id,
+        },
+        "next_step": (
+            "Invoke the ``pocketpaw-pocket-planner`` skill and the "
+            "``mcp__pocketpaw_pocket_planner__plan_pocket`` tool to draft a "
+            "plan. Render the returned brief in chat as markdown "
+            "(narrative + widgets + state + sources + actions + todos "
+            "as a checkbox list). Iterate with the user — when they say "
+            "'drop X' / 'add Y' / 'rebuild', call plan_pocket again "
+            "with prior_plan + iteration_delta. When the user says "
+            "'build it' (or 'go' / 'ship it'), walk the todos in order: "
+            "for each todo compute the smallest partial rippleSpec that "
+            "satisfies its success_criteria, then POST to "
+            "``http://localhost:8888/api/v1/pockets/<id>/spec/merge`` "
+            "with the auth_headers above and body "
+            '``{"merge": <partial>}``. The first /spec/merge against '
+            "a fresh pocket id creates the pocket; subsequent calls "
+            "merge into it. Tick each todo as you go. Halt on the "
+            "first failure unless the user says retry."
+        ),
+        "lookup_tool": (
+            "Use ``mcp__pocketpaw_pocket__get_widget_spec`` to look up "
+            "allowed props for any widget kind referenced in the brief "
+            "before assembling the partial rippleSpec. Use "
+            "``mcp__pocketpaw_pocket__list_pockets`` to see existing "
+            "pockets in the workspace."
+        ),
+    }
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "[pocket-specialist] agent-mode plan-pointer kit returned "
+        "(USE_SKILL=true) (hints_keys=%s brief_len=%d duration=%dms)",
+        sorted(hints_dict.keys()),
+        len(input.brief or ""),
+        duration_ms,
+    )
+
+    return PocketSpecialistCreateOutput(
+        ok=False,
+        action="plan_kit",
+        pocket=None,
+        warnings=[],
+        error=None,
+        duration_ms=duration_ms,
+        backend_used="agent_mode_skill",
+        draft_kit=plan_kit,
     )
 
 
@@ -672,7 +801,12 @@ class EditAgentModeAdapter:
     ) -> Any:
         started = time.monotonic()
         if input.ops is None:
-            return _edit_kit_response(input, started=started)
+            return _edit_kit_response(
+                input,
+                started=started,
+                workspace_id=workspace_id,
+                user_id=user_id,
+            )
         return await _apply_ops(input, started=started)
 
 
@@ -697,7 +831,13 @@ _GRANULAR_EDIT_OPS: dict[str, str] = {
 }
 
 
-def _edit_kit_response(input: Any, *, started: float) -> Any:
+def _edit_kit_response(
+    input: Any,
+    *,
+    started: float,
+    workspace_id: str = "",
+    user_id: str = "",
+) -> Any:
     """Build the first-call response: enough scaffolding for the chat
     agent to compute granular ops inline, without spawning a backend.
 
@@ -705,8 +845,92 @@ def _edit_kit_response(input: Any, *, started: float) -> Any:
     ``pocketpaw-edit-pocket`` skill — the kit names the op vocabulary and
     tells it how to call back, it does not re-inline the specialist
     prompt.
+
+    MVP (2026-05-24): when ``POCKETPAW_POCKET_SPECIALIST_USE_SKILL`` is
+    truthy, return a SKILL POINTER KIT instead. The chat agent invokes
+    the ``pocketpaw-pocket-specialist`` skill directly (which lives in
+    ``~/.claude/skills/``) and follows its instructions to compute a
+    partial rippleSpec and ``curl POST /api/v1/pockets/<id>/spec/merge``.
+    No second MCP call, no granular ops, no per-op dispatch. The
+    chat agent uses Claude Code's native Bash + Skill tools — no
+    LangChain wrappers, no separate backend spawn.
     """
     from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistEditOutput
+
+    use_skill = os.environ.get("POCKETPAW_POCKET_SPECIALIST_USE_SKILL", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+    duration_ms_func = lambda: int((time.monotonic() - started) * 1000)  # noqa: E731
+
+    if use_skill:
+        # PR #1222 R1 Blocker 2 — the loopback bypass now requires a
+        # process-local token in addition to the magic header +
+        # tenancy headers. Pull it from the env (the dashboard's
+        # boot-time ``ensure_internal_token`` exports it); skip the
+        # header when absent so a misconfigured dev environment surfaces
+        # a clean 401 instead of a confusing JSON-shape error.
+        from pocketpaw_ee.cloud._core.internal_token import (
+            INTERNAL_TOKEN_HEADER,
+            get_internal_token,
+        )
+
+        auth_headers: dict[str, str] = {
+            "X-PocketPaw-Internal": "true",
+            "X-PocketPaw-Workspace-Id": workspace_id,
+            "X-PocketPaw-User-Id": user_id,
+        }
+        internal_token = get_internal_token()
+        if internal_token:
+            auth_headers[INTERNAL_TOKEN_HEADER] = internal_token
+
+        skill_kit: dict[str, Any] = {
+            "intent": input.intent,
+            "pocket": input.pocket,
+            "target_node_ids": input.target_node_ids,
+            "skill_name": "pocketpaw-pocket-specialist",
+            "endpoint": f"http://localhost:8888/api/v1/pockets/{input.pocket_id}/spec/merge",
+            "auth_headers": auth_headers,
+            "next_step": (
+                "Apply this edit yourself via the ``pocketpaw-pocket-specialist`` "
+                "skill — DO NOT call ``pocket_specialist__edit`` again. "
+                "Steps: (1) invoke ``Skill('pocketpaw-pocket-specialist')`` to "
+                "load the procedural guide; (2) compute the smallest partial "
+                "rippleSpec that achieves the intent above (re-emit only the "
+                "nodes you're changing, by their stable ids; new nodes get a "
+                "fresh ``n_xxxxxxxx`` id); (3) ``curl -X POST`` the partial "
+                "to the ``endpoint`` above with the ``auth_headers`` and a "
+                'JSON body of ``{"merge": <partial>}``; (4) report the '
+                "outcome (and any ``warnings`` from the response) back to the "
+                "user. The skill spells out the four interactivity conventions "
+                "(client-side push, value/label split, lowercase column ids, "
+                "validate-push-clear-increment) — follow them."
+            ),
+            "lookup_tool": (
+                "If you don't have the current spec, ``curl GET "
+                "http://localhost:8888/api/v1/pockets/<id>`` with the same "
+                "auth headers first."
+            ),
+        }
+        logger.info(
+            "[pocket-specialist:edit] skill-pointer kit returned (USE_SKILL=true) "
+            "(pocket_id=%s has_pocket=%s targets=%d duration=%dms)",
+            input.pocket_id,
+            input.pocket is not None,
+            len(input.target_node_ids or []),
+            duration_ms_func(),
+        )
+        return PocketSpecialistEditOutput(
+            ok=False,
+            action="skill_kit",
+            pocket_id=input.pocket_id,
+            ops=[],
+            duration_ms=duration_ms_func(),
+            backend_used="agent_mode_skill",
+            draft_kit=skill_kit,
+        )
 
     kit: dict[str, Any] = {
         "intent": input.intent,
@@ -743,14 +967,13 @@ def _edit_kit_response(input: Any, *, started: float) -> Any:
         ),
     }
 
-    duration_ms = int((time.monotonic() - started) * 1000)
     logger.info(
         "[pocket-specialist:edit] agent-mode edit kit returned "
         "(pocket_id=%s has_pocket=%s targets=%d duration=%dms)",
         input.pocket_id,
         input.pocket is not None,
         len(input.target_node_ids or []),
-        duration_ms,
+        duration_ms_func(),
     )
 
     return PocketSpecialistEditOutput(
@@ -758,7 +981,7 @@ def _edit_kit_response(input: Any, *, started: float) -> Any:
         action="draft_kit",
         pocket_id=input.pocket_id,
         ops=[],
-        duration_ms=duration_ms,
+        duration_ms=duration_ms_func(),
         backend_used="agent_mode",
         draft_kit=kit,
     )

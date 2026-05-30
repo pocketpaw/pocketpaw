@@ -42,6 +42,13 @@ RunActionResponse is now ``extra="forbid"`` so an executor-internal key
 (``_park``, ``outcome``) that the router fails to strip raises on
 construction instead of leaking the resolved write path/params onto the
 wire.
+Updated: 2026-05-24 (#1206 part a) — added RunToolRequest /
+RunToolResponse for the new ``POST /pockets/{id}/tools/run`` wire (the
+click-driven sibling of ``sources/run`` and ``actions/run``). The
+endpoint runs a named server-side tool with the resolved args from the
+``invoke_tool`` ripple action verb; the allowlist is intentionally empty
+in part (a) so the wire is locked down before any tool can fire (parts b
+and c add the home-grid plumbing + prompt guidance).
 Updated: 2026-05-28 (feat/wave-3b-action-pipeline) — added
 DispatchBulkRequest / BulkDispatchResponse / BulkExecutionResultDTO /
 BulkBlockedRowDTO for the new
@@ -63,7 +70,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CreatePocketRequest(BaseModel):
@@ -155,6 +162,38 @@ class ShareLinkRequest(BaseModel):
 class AddCollaboratorRequest(BaseModel):
     user_id: str
     access: str = Field(default="edit", pattern="^(view|comment|edit)$")
+
+
+class MergeSpecRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/spec/merge``.
+
+    Carries EXACTLY ONE of:
+
+    * ``replace`` — a full rippleSpec dict that wholesale-replaces the
+      pocket's current spec.
+    * ``merge`` — a partial rippleSpec dict that is applied via
+      ``_merge.merge_ripple_spec`` against the current spec.
+
+    The ``model_validator`` below enforces the exactly-one rule at
+    parse time so the router never has to hand-roll an ``isinstance``
+    check on a free-form ``dict`` body (the original MVP shape that
+    PR #1222 R1 flagged). A body with both keys or neither raises a
+    422 before the request reaches the service layer.
+
+    PR #1222 R1 follow-up: introduced to replace the prior
+    ``body: dict`` route signature.
+    """
+
+    replace: dict | None = None
+    merge: dict | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> MergeSpecRequest:
+        if (self.replace is None) == (self.merge is None):
+            raise ValueError(
+                "Body must carry exactly one of 'replace' or 'merge' (got both or neither).",
+            )
+        return self
 
 
 class PocketResponse(BaseModel):
@@ -364,6 +403,65 @@ class SetWritePolicyRequest(BaseModel):
     """
 
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Pocket tool invocations (#1206 part a — invoke_tool wire)
+# ---------------------------------------------------------------------------
+
+
+class RunToolRequest(BaseModel):
+    """Body for ``POST /pockets/{id}/tools/run`` (#1206 part a).
+
+    The client sends the tool's NAME (``tool``) plus the *resolved*
+    ``args`` — Ripple's ``{state.x}`` / ``{item.id}`` expression resolver
+    runs client-side at click time, so the server sees plain values, not
+    expressions. Sibling to ``RunSourcesRequest`` (read-only fetch) and
+    ``RunActionRequest`` (named write binding); ``invoke_tool`` runs a
+    named server-side tool (WebFetch, Composio, etc.) and re-hydrates the
+    UI from the result.
+
+    The allowlist enforcement lives in the executor: an empty allowlist
+    fails closed with ``code="not_allowed"``. The wire-level allowlist is
+    intentionally empty in part (a) so nothing fires until the captain
+    explicitly enables tools per pocket; the home-grid plumbing that
+    actually POSTs here lands in part (b).
+    """
+
+    tool: str = Field(min_length=1)
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class RunToolResponse(BaseModel):
+    """Result of an ``invoke_tool`` run.
+
+    Mirrors :class:`RunActionResponse` so a single client-side reconcile
+    handler shape services both write actions and tool invocations. On a
+    fired tool ``ok`` is true and ``status`` / ``response`` carry the
+    tool's HTTP-shaped result. On rejection ``ok`` is false and
+    ``error`` / ``code`` describe the reason — ``not_allowed`` when the
+    tool isn't on the pocket's allowlist, ``unknown_tool`` when no
+    registry entry matches.
+
+    ``on_success`` / ``on_error`` are the reconcile handler lists the
+    client runs after — the same shape ``call_binding`` returns, so the
+    home grid's ``onEvent`` plumbing handles both with one branch.
+
+    ``extra="forbid"`` matches :class:`RunActionResponse`: any
+    executor-internal key the route fails to strip raises on
+    construction instead of leaking onto the wire.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    ok: bool
+    tool: str
+    status: int | None = None
+    response: Any = None
+    error: str | None = None
+    code: str | None = None
+    on_success: list[dict] = Field(default_factory=list)
+    on_error: list[dict] = Field(default_factory=list)
 
 
 class SetApprovalRouteRequest(BaseModel):

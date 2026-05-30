@@ -132,7 +132,7 @@ class Decision(BaseModel):
 
     The fold of an N-event subgraph of the journal into one record.
     Construction happens inside ``DecisionProjection._close_chain`` when a
-    terminal event (per A2: only ``decision.graduated``) lands on a
+    terminal event (per A2: only ``decision.completed``) lands on a
     correlation_id that previously received ``agent.proposed``.
 
     Multi-tenancy: ``scope`` is required (min_length=1). The journal

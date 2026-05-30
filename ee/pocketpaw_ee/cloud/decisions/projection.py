@@ -4,9 +4,9 @@
 #   /tmp/team-rfc07 prototype (8 green tests there) but rewritten for:
 #     - SQLite store (DecisionStore) instead of in-memory dicts
 #     - A1 — `approvers: list[ApproverRef]` carrying approved_at + position
-#     - A2 — ONLY `decision.graduated` closes a chain. Fabric writes
-#       (`fabric.object.*`) CONTRIBUTE inputs but do NOT close. This
-#       decouples the projection from Fabric's namespace.
+#     - A2 — ONLY the terminal chain-close action closes a chain. Fabric
+#       writes (`fabric.object.*`) CONTRIBUTE inputs but do NOT close.
+#       This decouples the projection from Fabric's namespace.
 #     - A3 — Precedent supply order: (1) agent payload first, (2)
 #       projection fallback same-pocket / same-action / nearest-ts.
 #       Out-of-band reconciler deferred.
@@ -32,6 +32,16 @@
 #   return through `_emit(decision)` which fires hooks before returning.
 #   This keeps layering one-way (explain → decisions) — the projection
 #   never imports the cache.
+#
+#   2026-05-25 (RFC 09 Slice 1b) — `_TERMINAL_ACTIONS` swapped from
+#   `decision.graduated` to `decision.completed` per RFC 09 §
+#   "Vocabulary fix". The old name collided with soul-protocol's
+#   pattern-promotion concept (`DecisionGraduation` payload — meaning B);
+#   the chain-close semantic (meaning A) gets a precise name. The
+#   `DecisionGraduation` payload + the `decision.graduated` action stay
+#   in soul-protocol for the unshipped pattern-promotion subsystem.
+#   Producers route through `decisions.journal_writer.record_decision_event`
+#   which emits the renamed action.
 from __future__ import annotations
 
 import logging
@@ -60,10 +70,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Action namespace constants
 # ---------------------------------------------------------------------------
-# A2 (gap G2): ONLY `decision.graduated` closes a chain. Fabric writes
+# A2 (gap G2): ONLY `decision.completed` closes a chain. Fabric writes
 # CONTRIBUTE inputs but do NOT close. Rejection chains end on
-# `decision.graduated` too — the payload carries `passed=false`.
-_TERMINAL_ACTIONS = frozenset({"decision.graduated"})
+# `decision.completed` too — the payload carries `passed=false`.
+#
+# RFC 09 § "Vocabulary fix" — the chain-closing action used to be named
+# `decision.graduated` and collided with soul-protocol's pattern-
+# promotion concept (`DecisionGraduation` payload). The chain-close
+# semantic was renamed to `decision.completed` (RFC 09 Q2). The
+# `decision.graduated` action stays registered in soul-protocol's
+# ACTION_NAMESPACES for the unshipped pattern-promotion subsystem;
+# nothing in this projection consumes it any more.
+_TERMINAL_ACTIONS = frozenset({"decision.completed"})
 
 # Fabric write actions — they don't close a chain (A2) but they do
 # contribute the target object as an InputRef so the decision row carries
@@ -100,7 +118,7 @@ _TRACKED_ACTIONS = (
 @dataclass
 class _PendingChain:
     """In-flight decision chain — accumulates events under one
-    correlation_id until a `decision.graduated` event closes it."""
+    correlation_id until a `decision.completed` event closes it."""
 
     correlation_id: UUID
     intent: str = ""
@@ -118,7 +136,7 @@ class _PendingChain:
     payload_acc: dict[str, Any] = field(default_factory=dict)
     # A2: if the chain saw a `fabric.object.*` write the projection
     # records the target object as an additional input — but the chain
-    # stays open until `decision.graduated` lands.
+    # stays open until `decision.completed` lands.
     fabric_write_payload: dict[str, Any] | None = None
 
 
@@ -240,7 +258,7 @@ class DecisionProjection:
 
     def apply(self, entry: EventEntry) -> Decision | None:
         """Fold one event. Returns a Decision when a chain closes
-        (`decision.graduated`), or when a `decision.outcome_attached`
+        (`decision.completed`), or when a `decision.outcome_attached`
         mutates an already-emitted Decision, or for a degenerate
         single-write Decision (no correlation_id). Returns None while a
         chain is still accumulating.
@@ -384,7 +402,7 @@ class DecisionProjection:
     def _fold_fabric_write(self, chain: _PendingChain, entry: EventEntry) -> None:
         """A2: a fabric write contributes the target object as an input
         AND records the canonical write payload, but does NOT close the
-        chain. The chain stays open until `decision.graduated` lands."""
+        chain. The chain stays open until `decision.completed` lands."""
         payload = entry.payload or {}
         chain.fabric_write_payload = dict(payload)
         target = payload.get("object_id")
@@ -410,9 +428,9 @@ class DecisionProjection:
         scope_kind = _infer_scope_kind(chain.scope, chain.pocket_id)
 
         # Derive rejection from the freshest available signal:
-        #   1. terminal `decision.graduated` payload's `passed` flag (if set)
+        #   1. terminal `decision.completed` payload's `passed` flag (if set)
         #   2. fall back to the LAST observed `instinct_policy_passed`
-        # A chain that went policy(fail) → human → policy(pass) → graduated
+        # A chain that went policy(fail) → human → policy(pass) → completed
         # ends with `instinct_policy_passed=True` and is NOT rejected.
         terminal_payload = terminal.payload or {}
         terminal_passed = terminal_payload.get("passed")
@@ -439,7 +457,7 @@ class DecisionProjection:
             scope=chain.scope,
             scope_kind=scope_kind,
             intent=chain.intent or "(no intent recorded)",
-            action=chain.action or "graduated",
+            action=chain.action or "completed",
             inputs=chain.inputs,
             approvers=chain.approvers,
             instinct_policy=chain.instinct_policy,
