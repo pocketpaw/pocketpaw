@@ -34,6 +34,15 @@ closes the only remaining gap. ``kind`` is the simpler client-facing
 label; ``family`` is kept untouched on the granular-op frames for
 back-compat. See ``ee/docs/architecture/pocket-mutation-channel.md``
 for the full channel contract.
+Changes: 2026-05-31 (feat/home-pocket-sources-authoring) —
+``add_widget_for_agent`` now pulls an optional ``sources`` dict off the
+``widget`` argument and threads it to ``agent_add_widget`` as an explicit
+kwarg, so the home agent can author the RFC-04 source that feeds a live tile
+in the same call that adds the tile. The merge happens at the service layer
+in LOGGED (drift-allowed) mode; this wrapper only routes ``sources`` so it
+never lands as a widget field, and still emits the full-document ``replace``
+``pocket_mutation`` via ``_push_replace`` (the frontend already understands
+``replace`` — no paw-enterprise change needed).
 """
 
 from __future__ import annotations
@@ -377,8 +386,23 @@ async def update_pocket_for_agent(
 
 
 async def add_widget_for_agent(pocket_id: str, widget: dict[str, Any]) -> dict[str, Any]:
-    """Append a widget to the pocket's embedded widget list."""
-    view, err = await pockets_service.agent_add_widget(pocket_id, widget)
+    """Append a widget to the pocket's embedded widget list.
+
+    When the ``widget`` dict carries an optional ``sources`` key (a dict
+    keyed by source name, each value an RFC-04 ``SourceBinding`` —
+    ``method`` / ``path`` / ``bind`` / ``refresh`` / …), those entries are
+    authored onto the pocket's top-level ``rippleSpec.sources`` in the same
+    write so the home agent can create a live tile AND the source that feeds
+    it in one call. The sources merge is LOGGED (drift-allowed) at the
+    service layer: a single invalid binding is skipped, never blocking the
+    tile. ``sources`` rides ON the widget dict (not the widget doc) — it is
+    pulled off here and threaded as an explicit kwarg so it never lands as a
+    widget field."""
+    # Pull ``sources`` off the widget dict (a non-dict widget falls through
+    # to the service layer's "must be a JSON object" guard unchanged).
+    raw_sources = widget.get("sources") if isinstance(widget, dict) else None
+    sources = raw_sources if isinstance(raw_sources, dict) else None
+    view, err = await pockets_service.agent_add_widget(pocket_id, widget, sources=sources)
     if err is not None:
         return {"ok": False, "error": err}
     await _push_replace(view)

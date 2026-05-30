@@ -1853,7 +1853,76 @@ async def agent_update(
     return _agent_view_dict(doc), None
 
 
-async def agent_add_widget(pocket_id: str, widget: dict) -> tuple[dict | None, str | None]:
+def _merge_authored_sources_logged(doc: _PocketDoc, sources: dict[str, Any]) -> None:
+    """Merge agent-authored RFC-04 sources into ``doc.rippleSpec.sources``.
+
+    This is the LOGGED (drift-allowed) sibling of ``agent_set_source``'s
+    strict per-source validation — it mirrors how the create / human-import
+    paths treat catalog drift (``validate_against_catalog_logged``) and how
+    the source executor's own ``_parse_bindings`` treats a malformed entry:
+    a bad binding is logged and SKIPPED, never raised, so one hallucinated
+    source can't block the whole ``add_widget``. Each surviving entry is
+    normalized through the ``SourceBinding`` model (the same schema the
+    executor parses), so the binding the executor later runs is identical to
+    a binding authored via ``set_source``.
+
+    Mutates ``doc.rippleSpec`` in place via the pure ``sources_ops`` helper.
+    A non-dict ``sources`` arg, or one with no valid entry, is a no-op — the
+    ``sources`` key is only materialised when at least one binding validates.
+    """
+    from pocketpaw_ee.cloud.pockets.source_executor import SourceBinding
+
+    if not isinstance(sources, dict) or not sources:
+        return
+    spec = _sources_root(doc)
+    for key, entry in sources.items():
+        if not key or not isinstance(entry, dict):
+            logger.warning(
+                "add_widget: skipping authored source %r — entry must be a non-empty "
+                "keyed object (pocket %s)",
+                key,
+                str(doc.id),
+            )
+            continue
+        try:
+            normalized = SourceBinding.model_validate(entry).model_dump(mode="json")
+        except PydanticValidationError as exc:
+            logger.warning(
+                "add_widget: skipping invalid authored source %r on pocket %s: %s",
+                key,
+                str(doc.id),
+                exc.errors()[0].get("msg", exc) if exc.errors() else exc,
+            )
+            continue
+        try:
+            sources_ops.set_source(spec, key, normalized)
+        except ValueError as exc:
+            logger.warning(
+                "add_widget: could not merge authored source %r on pocket %s: %s",
+                key,
+                str(doc.id),
+                exc,
+            )
+
+
+async def agent_add_widget(
+    pocket_id: str,
+    widget: dict,
+    *,
+    sources: dict[str, Any] | None = None,
+) -> tuple[dict | None, str | None]:
+    """Append one widget tile to the pocket's embedded widget list, and —
+    when ``sources`` is supplied — author the RFC-04 data sources that feed
+    it onto the pocket's top-level ``rippleSpec.sources`` in the same write.
+
+    ``sources`` is a dict keyed by source name; each value is an RFC-04
+    ``SourceBinding`` (``method`` / ``path`` / ``bind`` / ``refresh`` / …).
+    It is merged in LOGGED (drift-allowed) mode — see
+    :func:`_merge_authored_sources_logged` — so a single bad binding is
+    skipped rather than blocking the tile. The tile's own spec carries the
+    ``{state.<path>}`` bind that references the source's ``bind`` target; no
+    special handling beyond persisting it.
+    """
     if not isinstance(widget, dict):
         return None, "widget must be a JSON object"
     doc, err = await _agent_load_doc(pocket_id)
@@ -1879,6 +1948,11 @@ async def agent_add_widget(pocket_id: str, widget: dict) -> tuple[dict | None, s
     except Exception as exc:  # noqa: BLE001
         return None, f"invalid widget spec: {exc}"
     doc.widgets.append(new_widget)
+    # Author the tile's data sources onto the pocket's top-level
+    # rippleSpec.sources in the SAME save (RFC-04). Logged/drift-allowed so
+    # a hallucinated binding never blocks the tile.
+    if sources is not None:
+        _merge_authored_sources_logged(doc, sources)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
