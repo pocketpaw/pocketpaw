@@ -23,9 +23,21 @@
 # randomizable to mint a fresh per-IP bucket on every request and so was never a
 # real limiter. It is retained only as an opaque, non-PII provenance LABEL on the
 # stored Lead; it is never the limiter key.
+#
+# Updated 2026-05-30 (follow-up item 2): every dropped submission (honeypot /
+# rate-limit / injection screen) emits ONE low-severity audit event carrying the
+# drop reason + counts via the canonical audit infra
+# (``get_audit_logger().log(AuditEvent.create(...))``). The event NEVER carries
+# the form payload — the payload is attacker-/user-supplied PII, and the whole
+# point of the drop is to keep it out of the workspace, so it must not be
+# resurfaced through the audit log either. "Low severity" maps to
+# ``AuditSeverity.INFO``: the audit enum defines INFO < WARNING < CRITICAL <
+# ALERT and has no dedicated LOW rung, and a routine ingest drop is informational
+# (not a workspace-mutating or security-violation event).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -40,6 +52,8 @@ from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 
+logger = logging.getLogger(__name__)
+
 
 def _to_domain(doc: _LeadDoc) -> Lead:
     return Lead(
@@ -53,9 +67,56 @@ def _to_domain(doc: _LeadDoc) -> Lead:
     )
 
 
-async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -> bool:
+def _emit_drop_audit(
+    *,
+    site: _SiteDoc,
+    form_type: str,
+    reason: str,
+    count: int | None = None,
+) -> None:
+    """Emit ONE low-severity audit event for a dropped submission.
+
+    Carries the drop ``reason`` + an optional numeric ``count`` (e.g. the
+    rate-limit window count) and NOTHING from the form payload — the payload is
+    untrusted PII the drop exists to keep out of the workspace, so it must not
+    leak into the audit log. Severity is INFO (the lowest rung the audit infra
+    defines; a routine ingest drop is informational, not a security violation).
+    Audit failures must never break ingest, so the whole call is wrapped."""
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        context: dict[str, Any] = {
+            "reason": reason,
+            "site_id": site.script_name,
+            "form_type": form_type,
+        }
+        if count is not None:
+            context["count"] = count
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.INFO,
+                actor="sites_capture",
+                action="sites.capture.drop",
+                target=site.script_name,
+                status="dropped",
+                category="sites_capture",
+                workspace_id=site.workspace,
+                **context,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break ingest
+        logger.warning("sites capture drop audit-log write failed", exc_info=True)
+
+
+async def _within_rate_limit(
+    workspace_id: str, site: _SiteDoc, rate_key: str
+) -> tuple[bool, int]:
     """Mongo sliding-window counter — generalization of paw-print's
     `within_rate_limit`. Counts leads in the last minute overall + per IP.
+
+    Returns ``(ok, count)`` where ``count`` is the window count that drove the
+    verdict (the per-IP count, or the overall count when the overall cap is the
+    one that tripped) — the drop audit carries it.
 
     The per-IP window is keyed on ``rate_key`` (the server-derived hash of the
     client host stored on ``source.rate_key``), NOT ``submitter_ref`` — see the
@@ -70,7 +131,7 @@ async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -
         }
     ).count()
     if overall >= site.rate_limit_per_min:
-        return False
+        return False, overall
     per_ip = await _LeadDoc.find(
         {
             "workspace": workspace_id,
@@ -79,7 +140,7 @@ async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -
             "createdAt": {"$gte": window_start},
         }
     ).count()
-    return per_ip < site.per_ip_limit_per_min
+    return per_ip < site.per_ip_limit_per_min, per_ip
 
 
 # Form input is untrusted, attacker-controlled text. A MEDIUM-or-higher verdict
@@ -124,14 +185,21 @@ async def capture(
     the caller a fresh bucket per request."""
     effective_rate_key = rate_key or "unknown"
     if is_honeypot_tripped(payload, honeypot_field=site.honeypot_field):
+        _emit_drop_audit(site=site, form_type=form_type, reason="honeypot")
         return None
-    if not await _within_rate_limit(site.workspace, site, effective_rate_key):
+    ok, window_count = await _within_rate_limit(site.workspace, site, effective_rate_key)
+    if not ok:
+        _emit_drop_audit(
+            site=site, form_type=form_type, reason="rate_limit", count=window_count
+        )
         return None
     if not _passes_injection_screen(payload):
+        _emit_drop_audit(site=site, form_type=form_type, reason="injection")
         return None
 
     raw_mapping = site.event_mapping.get(form_type)
     if raw_mapping is None:
+        _emit_drop_audit(site=site, form_type=form_type, reason="no_mapping")
         return None
     mapping = SiteEventMapping.model_validate(raw_mapping)
     properties = interpolate_mapping(mapping, {"payload": payload, "submitter_ref": submitter_ref})

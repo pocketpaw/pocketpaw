@@ -13,7 +13,12 @@
 # caller-controlled ``submitter_ref`` — two submissions with different
 # submitter_ref but the same rate_key share one bucket; randomizing submitter_ref
 # no longer buys a fresh bucket.
+# Updated 2026-05-30 (follow-up item 2): every dropped submission emits exactly
+# one low-severity audit event carrying the drop REASON + counts and NO payload
+# (the payload is PII); covered here via the audit logger's on_log hook.
 from __future__ import annotations
+
+import json
 
 import pytest
 from pocketpaw_ee.cloud.leads import service as leads_service
@@ -168,3 +173,97 @@ async def test_different_rate_key_gets_its_own_bucket(mongo_db):
     assert a is not None
     assert b is not None  # distinct host, not throttled
     assert await leads_service.count_for_site("ws1", "site_1") == 2
+
+
+# ---------------------------------------------------------------------------
+# Item 2 — audit-on-drop. A dropped submission emits exactly one low-severity
+# audit event carrying the REASON + counts, and NEVER the payload (PII).
+# Events are captured via the audit logger's on_log hook; ``_isolate_audit_log``
+# (autouse in tests/conftest.py) yields the per-test temp logger.
+# ---------------------------------------------------------------------------
+
+
+def _capture_audit(temp_logger) -> list[dict]:
+    sink: list[dict] = []
+    temp_logger.on_log(lambda event_dict: sink.append(event_dict))
+    return sink
+
+
+@pytest.mark.asyncio
+async def test_dropped_honeypot_submission_emits_audit_with_reason_and_no_payload(
+    mongo_db, _isolate_audit_log
+):
+    sink = _capture_audit(_isolate_audit_log)
+    site = await _site()
+    secret_name = "SecretLeadName1234"
+    honeypot_value = "spam-bot-marker-9182"
+    lead = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": secret_name, "company_website": honeypot_value},
+        submitter_ref="ip_bot",
+        rate_key="rk_bot",
+    )
+    assert lead is None  # honeypot tripped → dropped
+
+    # Exactly one audit event for the drop.
+    assert len(sink) == 1
+    event = sink[0]
+    # Carries the reason …
+    assert event["context"]["reason"] == "honeypot"
+    assert event["action"] == "sites.capture.drop"
+    assert event["status"] == "dropped"
+    # … and is low-severity (INFO is the lowest rung the audit infra defines).
+    assert event["severity"] == "info"
+    # … and NEVER the payload: no field value appears anywhere in the event.
+    blob = json.dumps(event, default=str)
+    assert secret_name not in blob
+    assert honeypot_value not in blob
+
+
+@pytest.mark.asyncio
+async def test_dropped_rate_limited_submission_emits_audit_with_counts(
+    mongo_db, _isolate_audit_log
+):
+    site = await _site(per_ip_limit_per_min=1, rate_limit_per_min=100)
+    # First submission is accepted (no drop → no audit yet).
+    await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "First"},
+        submitter_ref="ref1",
+        rate_key="host_rl",
+    )
+    sink = _capture_audit(_isolate_audit_log)  # start capturing at the drop
+    secret = "RateLimitedSecret777"
+    dropped = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": secret},
+        submitter_ref="ref2",
+        rate_key="host_rl",  # same host → over the per-IP cap
+    )
+    assert dropped is None
+    assert len(sink) == 1
+    event = sink[0]
+    assert event["context"]["reason"] == "rate_limit"
+    # Counts only — a numeric submission count, never the payload values.
+    assert isinstance(event["context"]["count"], int)
+    assert secret not in json.dumps(event, default=str)
+
+
+@pytest.mark.asyncio
+async def test_accepted_submission_emits_no_drop_audit(mongo_db, _isolate_audit_log):
+    """A clean, accepted submission is NOT a drop — it emits no drop audit."""
+    sink = _capture_audit(_isolate_audit_log)
+    site = await _site()
+    lead = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "Real Person", "company_website": ""},
+        submitter_ref="ip_ok",
+        rate_key="rk_ok",
+    )
+    assert lead is not None
+    drop_events = [e for e in sink if e.get("action") == "sites.capture.drop"]
+    assert drop_events == []
