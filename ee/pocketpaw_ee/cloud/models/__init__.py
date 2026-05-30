@@ -21,6 +21,10 @@ RFC 08 §9 calibration buffer's Mongo persistence is wired into ``init_beanie``.
 Updated: 2026-05-21 (PR #1177 security pass) — dropped PocketBackendCredential
 from ``__all__`` so it cannot be star-imported into routers/DTOs/domains; it
 remains registered in ``get_all_documents()`` for Beanie init.
+Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 follow-up item 3) — added
+``SiteRateCounter`` (the atomic per-minute capture rate-limit counter) to the
+imports, ``__all__``, and ``get_all_documents()`` so the counter collection is
+wired into ``init_beanie``.
 """
 
 from __future__ import annotations
@@ -69,6 +73,7 @@ from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
+from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
@@ -154,6 +159,7 @@ __all__ = [
     "Session",
     "Site",
     "SiteDomain",
+    "SiteRateCounter",
     "Task",
     "TaskAssignee",
     "TaskSource",
@@ -212,6 +218,7 @@ def get_all_documents():
         ChatRunDoc,
         Lead,
         Site,
+        SiteRateCounter,
         AuditEvent,
         AuditWebhook,
         AuthSession,

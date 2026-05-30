@@ -267,3 +267,94 @@ async def test_accepted_submission_emits_no_drop_audit(mongo_db, _isolate_audit_
     assert lead is not None
     drop_events = [e for e in sink if e.get("action") == "sites.capture.drop"]
     assert drop_events == []
+
+
+# ---------------------------------------------------------------------------
+# Item 3 — atomic rate limit. The old count-then-insert window was TOCTOU: a
+# burst of concurrent requests all read count < cap before any insert landed, so
+# they all slipped past. The fix increments a per-(scope, minute) counter doc and
+# tests the cap on the post-increment result, so the cap holds under contention.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inserts_past_the_per_ip_cap_are_rejected(mongo_db):
+    """Sequential: once the per-IP window count hits the cap, the next
+    submission from the same host is rejected."""
+    site = await _site(per_ip_limit_per_min=2, rate_limit_per_min=100)
+    accepted = 0
+    for _ in range(5):
+        lead = await leads_service.capture(
+            site=site,
+            form_type="AppointmentRequest",
+            payload={"full_name": "X"},
+            submitter_ref="ref",
+            rate_key="one_host",
+        )
+        if lead is not None:
+            accepted += 1
+    assert accepted == 2  # exactly the cap, no more
+    assert await leads_service.count_for_site("ws1", "site_1") == 2
+
+
+@pytest.mark.asyncio
+async def test_toctou_window_cannot_admit_past_the_cap(mongo_db, monkeypatch):
+    """TOCTOU reproduction (deterministic). The old window decided admission by
+    COUNTING persisted leads, so two requests racing in the gap between
+    count-and-insert both saw an under-cap lead count and both got in. We
+    simulate that gap by forcing the persisted-lead count to read 0 on every
+    check, then fire three captures against a cap of 1.
+
+    Old count-then-insert logic: every check sees 0 < 1 → all three admitted.
+    New atomic increment-and-test logic: it ignores the lead count entirely and
+    increments a counter doc, so only the first is admitted regardless of what
+    the lead count reports."""
+
+    class _ZeroCountCursor:
+        def __init__(self, *a, **k):
+            pass
+
+        async def count(self):
+            return 0  # the persisted-lead count always reads stale-empty
+
+    # Patch ONLY the lead-count query used by the rate window. The new atomic
+    # path doesn't consult it, so this patch is inert there; the old path
+    # depends on it entirely.
+    from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
+
+    monkeypatch.setattr(_LeadDoc, "find", lambda *a, **k: _ZeroCountCursor())
+
+    site = await _site(per_ip_limit_per_min=1, rate_limit_per_min=100)
+    accepted = 0
+    for i in range(3):
+        lead = await leads_service.capture(
+            site=site,
+            form_type="AppointmentRequest",
+            payload={"full_name": f"race-{i}"},
+            submitter_ref=f"ref-{i}",
+            rate_key="racing_host",
+        )
+        if lead is not None:
+            accepted += 1
+    # The cap of 1 must hold even though the lead count reads 0 every time.
+    assert accepted == 1
+
+
+@pytest.mark.asyncio
+async def test_overall_site_cap_is_enforced_atomically(mongo_db):
+    """The overall per-site cap (across all hosts) is also enforced on the
+    post-increment count."""
+    site = await _site(per_ip_limit_per_min=100, rate_limit_per_min=2)
+    accepted = 0
+    for i in range(5):
+        lead = await leads_service.capture(
+            site=site,
+            form_type="AppointmentRequest",
+            payload={"full_name": f"P{i}"},
+            submitter_ref=f"ref{i}",
+            rate_key=f"distinct_host_{i}",  # every request a different host …
+        )
+        if lead is not None:
+            accepted += 1
+    # … but the OVERALL site cap of 2 still bites regardless of per-host spread.
+    assert accepted == 2

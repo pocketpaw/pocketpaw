@@ -34,11 +34,20 @@
 # ``AuditSeverity.INFO``: the audit enum defines INFO < WARNING < CRITICAL <
 # ALERT and has no dedicated LOW rung, and a routine ingest drop is informational
 # (not a workspace-mutating or security-violation event).
+#
+# Updated 2026-05-30 (follow-up item 3): the rate limit is now ATOMIC. The old
+# window read a persisted-lead count and THEN inserted (TOCTOU — a burst all read
+# under-cap before any insert landed and all slipped past). It now ``$inc``-s a
+# per-(scope, minute) ``SiteRateCounter`` doc via one ``find_one_and_update`` and
+# tests the cap on the post-increment result, so the check and the increment are
+# a single atomic step. See ``_within_rate_limit`` for the one known residual gap
+# (increment-and-test over-counts a REJECTED request by one — strictly safer, not
+# looser).
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from pocketpaw.security.injection_scanner import (
@@ -51,6 +60,7 @@ from pocketpaw_ee.cloud.leads.domain import Lead
 from pocketpaw_ee.cloud.models.lead import Lead as _LeadDoc
 from pocketpaw_ee.cloud.models.lead import LeadSource as _LeadSourceDoc
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter as _RateCounterDoc
 
 logger = logging.getLogger(__name__)
 
@@ -108,39 +118,64 @@ def _emit_drop_audit(
         logger.warning("sites capture drop audit-log write failed", exc_info=True)
 
 
+def _bucket_minute(now: datetime) -> datetime:
+    """Truncate a UTC timestamp to the minute — the rate-limit window key."""
+    return now.replace(second=0, microsecond=0)
+
+
+async def _bump(scope: str, scope_id: str, bucket: datetime, now: datetime) -> int:
+    """Atomically increment the (scope, scope_id, bucket) counter and return the
+    POST-increment hit count. A single ``find_one_and_update`` with ``$inc`` +
+    upsert is the whole check-and-increment, so two racing requests can never
+    both read an under-cap value and both get in (the TOCTOU the old
+    count-then-insert window had). ``return_document=True`` == AFTER (mongomock +
+    pymongo accept the bool)."""
+    coll = _RateCounterDoc.get_pymongo_collection()
+    doc = await coll.find_one_and_update(
+        {"scope": scope, "scope_id": scope_id, "bucket": bucket},
+        {"$inc": {"hits": 1}, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+        return_document=True,
+    )
+    return int(doc["hits"])
+
+
 async def _within_rate_limit(
     workspace_id: str, site: _SiteDoc, rate_key: str
 ) -> tuple[bool, int]:
-    """Mongo sliding-window counter — generalization of paw-print's
-    `within_rate_limit`. Counts leads in the last minute overall + per IP.
+    """Atomic per-minute rate limit. Increments a counter doc per window and
+    tests the cap on the post-increment count, so a burst can't slip past the way
+    the old read-then-write window let it.
 
-    Returns ``(ok, count)`` where ``count`` is the window count that drove the
-    verdict (the per-IP count, or the overall count when the overall cap is the
-    one that tripped) — the drop audit carries it.
+    Returns ``(ok, count)`` where ``count`` is the post-increment hit count that
+    drove the verdict (per-IP if that cap tripped, else overall) — the drop audit
+    carries it.
 
-    The per-IP window is keyed on ``rate_key`` (the server-derived hash of the
-    client host stored on ``source.rate_key``), NOT ``submitter_ref`` — see the
-    module header. ``rate_key`` is server-controlled, so a caller cannot mint a
-    fresh per-IP bucket by varying a request body field."""
-    window_start = datetime.now(UTC) - timedelta(minutes=1)
-    overall = await _LeadDoc.find(
-        {
-            "workspace": workspace_id,
-            "site_id": site.script_name,
-            "createdAt": {"$gte": window_start},
-        }
-    ).count()
-    if overall >= site.rate_limit_per_min:
+    The per-IP window is keyed on ``rate_key`` (the server-derived host hash),
+    NOT ``submitter_ref`` — see the module header. The per-IP cap is checked and
+    incremented FIRST so a single flooding host that trips its own cap never eats
+    the site-wide budget on its rejected requests.
+
+    KNOWN GAP (noted in the PR): a request rejected at one cap has already
+    incremented the counter it reached (and a request rejected at the OVERALL cap
+    has already consumed a per-IP slot). Increment-and-test over-counts rejected
+    requests by one because there is no compensating decrement / multi-key
+    transaction. The effect is a slightly stricter limiter under sustained abuse,
+    never a looser one — acceptable, and the safe direction to err. The counter
+    is keyed and tenant-scoped per (site, minute); the window is the same minute
+    bucket the old logic used. A fully race-free multi-key check would need a
+    Mongo transaction across the two counter docs (deferred)."""
+    now = datetime.now(UTC)
+    bucket = _bucket_minute(now)
+    site_scope_id = f"{workspace_id}:{site.script_name}"
+
+    per_ip = await _bump("ip", f"{site_scope_id}:{rate_key}", bucket, now)
+    if per_ip > site.per_ip_limit_per_min:
+        return False, per_ip
+    overall = await _bump("site", site_scope_id, bucket, now)
+    if overall > site.rate_limit_per_min:
         return False, overall
-    per_ip = await _LeadDoc.find(
-        {
-            "workspace": workspace_id,
-            "site_id": site.script_name,
-            "source.rate_key": rate_key,
-            "createdAt": {"$gte": window_start},
-        }
-    ).count()
-    return per_ip < site.per_ip_limit_per_min, per_ip
+    return True, per_ip
 
 
 # Form input is untrusted, attacker-controlled text. A MEDIUM-or-higher verdict
