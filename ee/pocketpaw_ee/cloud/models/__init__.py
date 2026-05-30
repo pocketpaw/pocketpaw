@@ -1,5 +1,10 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2) — added the
+``Lead`` and ``Site`` tenant-scoped Paw Sites documents (plus their
+``LeadSource`` / ``SiteDomain`` subdocs) to the imports, ``__all__``, and the
+``get_all_documents()`` registry so the cloud capture sink is wired into
+``init_beanie``.
 Updated: 2026-05-26 (feat/foresight-v10-scenario-editor-backend) — added
 ``ForesightWorkspaceScenario`` (RFC 08 v1.0 wave 3) to the registered
 docs + ``__all__`` so workspace-scoped custom scenarios are wired into
@@ -48,6 +53,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
+from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
     MeetingProviderCredentials,
@@ -62,6 +68,7 @@ from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
@@ -127,6 +134,8 @@ __all__ = [
     "GroupAgent",
     "InstinctApproval",
     "Invite",
+    "Lead",
+    "LeadSource",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -143,6 +152,8 @@ __all__ = [
     "Reaction",
     "ReadState",
     "Session",
+    "Site",
+    "SiteDomain",
     "Task",
     "TaskAssignee",
     "TaskSource",
@@ -199,6 +210,8 @@ def get_all_documents():
         ForesightWorkspaceConfig,
         ForesightWorkspaceScenario,
         ChatRunDoc,
+        Lead,
+        Site,
         AuditEvent,
         AuditWebhook,
         AuthSession,
