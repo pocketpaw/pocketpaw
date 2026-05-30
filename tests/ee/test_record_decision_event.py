@@ -29,23 +29,20 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from soul_protocol.engine.journal import open_journal
-from soul_protocol.spec.journal import Actor
-
-import pocketpaw.journal_dep as journal_dep
-import pocketpaw_ee.cloud.decisions.service as decisions_service
 from pocketpaw_ee.cloud.decisions.journal_writer import (
     DECISION_CHAIN_ACTIONS,
     record_decision_event,
 )
-from pocketpaw_ee.cloud.decisions.projection import DecisionProjection
 from pocketpaw_ee.cloud.decisions.service import (
     DecisionGraph,
     get_decision_graph,
     reset_projection_for_tests,
 )
 from pocketpaw_ee.cloud.decisions.store import set_db_path
+from soul_protocol.engine.journal import open_journal
+from soul_protocol.spec.journal import Actor
 
+import pocketpaw.journal_dep as journal_dep
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -359,9 +356,7 @@ def test_decision_chain_actions_contains_renamed_completed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_helper_preserves_causation_id(
-    journal, graph: DecisionGraph, base_ts: datetime
-) -> None:
+def test_helper_preserves_causation_id(journal, graph: DecisionGraph, base_ts: datetime) -> None:
     """RFC 09 § Correlation propagation calls for `human.corrected` to
     cite the prior `policy.evaluated(passed=False)` via `causation_id`.
     The helper must round-trip that field through to the journal entry."""

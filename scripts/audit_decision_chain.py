@@ -186,10 +186,7 @@ def main() -> int:
         )
         return 1
 
-    print(
-        f"Decision-chain audit: clean — {files_scanned} files scanned, "
-        "no violations."
-    )
+    print(f"Decision-chain audit: clean — {files_scanned} files scanned, no violations.")
     return 0
 
 

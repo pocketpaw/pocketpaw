@@ -197,7 +197,6 @@ def record_decision_event(
     # picture in static analysis and avoids touching the
     # `init_decisions_projection` singleton at module-import time.
     from pocketpaw.journal_dep import get_journal
-
     from pocketpaw_ee.cloud.decisions.service import get_decision_graph
 
     entry = EventEntry(

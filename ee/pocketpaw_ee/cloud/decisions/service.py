@@ -488,9 +488,7 @@ def init_decisions_projection(*, rebuild_from_journal: bool = False) -> Decision
 
                 journal = get_journal()
                 cursor = _GRAPH.projection.cursor
-                applied = _GRAPH.projection.rebuild(
-                    journal.replay_from(cursor), since_seq=cursor
-                )
+                applied = _GRAPH.projection.rebuild(journal.replay_from(cursor), since_seq=cursor)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "decisions projection cold-start rebuild skipped — "
@@ -500,8 +498,7 @@ def init_decisions_projection(*, rebuild_from_journal: bool = False) -> Decision
                     exc_info=True,
                 )
         logger.info(
-            "decisions projection initialized — cursor=%d count=%d "
-            "events_replayed=%d",
+            "decisions projection initialized — cursor=%d count=%d events_replayed=%d",
             _GRAPH.projection.cursor,
             _GRAPH.store.count(),
             applied,
