@@ -16,6 +16,13 @@
 # Now screens the stringified payload through the real InjectionScanner (the
 # command-injection / prompt-injection heuristic scanner) and drops any
 # submission with a MEDIUM-or-higher threat verdict.
+#
+# Updated 2026-05-30 (follow-up item 1): the per-IP rate-limit bucket is keyed on
+# a SERVER-derived ``rate_key`` (the router hashes ``request.client.host``), not
+# the caller-controlled ``submitter_ref``. ``submitter_ref`` was trivially
+# randomizable to mint a fresh per-IP bucket on every request and so was never a
+# real limiter. It is retained only as an opaque, non-PII provenance LABEL on the
+# stored Lead; it is never the limiter key.
 
 from __future__ import annotations
 
@@ -46,12 +53,21 @@ def _to_domain(doc: _LeadDoc) -> Lead:
     )
 
 
-async def _within_rate_limit(workspace_id: str, site: _SiteDoc, submitter_ref: str) -> bool:
+async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -> bool:
     """Mongo sliding-window counter — generalization of paw-print's
-    `within_rate_limit`. Counts leads in the last minute overall + per IP."""
+    `within_rate_limit`. Counts leads in the last minute overall + per IP.
+
+    The per-IP window is keyed on ``rate_key`` (the server-derived hash of the
+    client host stored on ``source.rate_key``), NOT ``submitter_ref`` — see the
+    module header. ``rate_key`` is server-controlled, so a caller cannot mint a
+    fresh per-IP bucket by varying a request body field."""
     window_start = datetime.now(UTC) - timedelta(minutes=1)
     overall = await _LeadDoc.find(
-        {"workspace": workspace_id, "site_id": site.script_name, "createdAt": {"$gte": window_start}}
+        {
+            "workspace": workspace_id,
+            "site_id": site.script_name,
+            "createdAt": {"$gte": window_start},
+        }
     ).count()
     if overall >= site.rate_limit_per_min:
         return False
@@ -59,7 +75,7 @@ async def _within_rate_limit(workspace_id: str, site: _SiteDoc, submitter_ref: s
         {
             "workspace": workspace_id,
             "site_id": site.script_name,
-            "source.submitter_ref": submitter_ref,
+            "source.rate_key": rate_key,
             "createdAt": {"$gte": window_start},
         }
     ).count()
@@ -95,13 +111,21 @@ async def capture(
     form_type: str,
     payload: dict[str, Any],
     submitter_ref: str,
+    rate_key: str = "",
 ) -> Lead | None:
     """Harden + persist one submission as a tenant-scoped Lead. Returns None
     when the submission is dropped (honeypot / rate-limited / injection screen /
-    no mapping for this form_type)."""
+    no mapping for this form_type).
+
+    ``rate_key`` is the server-derived per-IP limiter identity (the router hashes
+    the client host). ``submitter_ref`` is only an opaque label. An empty
+    ``rate_key`` falls back to a fixed sentinel — never to ``submitter_ref`` —
+    so a missing client host collapses to one shared bucket rather than handing
+    the caller a fresh bucket per request."""
+    effective_rate_key = rate_key or "unknown"
     if is_honeypot_tripped(payload, honeypot_field=site.honeypot_field):
         return None
-    if not await _within_rate_limit(site.workspace, site, submitter_ref):
+    if not await _within_rate_limit(site.workspace, site, effective_rate_key):
         return None
     if not _passes_injection_screen(payload):
         return None
@@ -117,7 +141,12 @@ async def capture(
         site_id=site.script_name,
         form_type=form_type,
         properties=properties,
-        source=_LeadSourceDoc(form_type=form_type, site_id=site.script_name, submitter_ref=submitter_ref),
+        source=_LeadSourceDoc(
+            form_type=form_type,
+            site_id=site.script_name,
+            submitter_ref=submitter_ref,
+            rate_key=effective_rate_key,
+        ),
     )
     await doc.insert()
     # no-event: lead capture is a public ingest; the Leads view polls, no realtime subscriber yet

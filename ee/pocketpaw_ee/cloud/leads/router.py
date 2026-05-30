@@ -15,9 +15,17 @@
 # body for a Mongo-write amplification DoS — and (H1) compares the signed key
 # with secrets.compare_digest (constant time) instead of ``!=`` so the check is
 # not vulnerable to a timing side channel.
+#
+# Updated 2026-05-30 (follow-up item 1): the per-IP rate-limit identity is now
+# derived SERVER-SIDE from the connection — a sha256 hash of
+# ``request.client.host`` (see ``_rate_key``) — and passed to the service as
+# ``rate_key``. The caller-controlled ``body.submitter_ref`` is no longer the
+# limiter key (it was randomizable to dodge the cap); it rides through only as an
+# opaque, non-PII label on the stored Lead.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 
@@ -34,11 +42,23 @@ from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 router = APIRouter(tags=["Sites"])
 
 
+def _rate_key(request: Request) -> str:
+    """Server-derived per-IP rate-limit identity: a sha256 hex digest of the
+    client host. Derived from the CONNECTION, never from a request-body field,
+    so a caller cannot mint a fresh per-IP bucket by varying the payload. The
+    hash (not the raw IP) is stored, so the limiter never persists a bare IP.
+    Falls back to an empty string when the host is unknown (e.g. a test transport
+    with no client) — the service then collapses that to one shared bucket."""
+    host = request.client.host if request.client else ""
+    return hashlib.sha256(host.encode("utf-8")).hexdigest() if host else ""
+
+
 @router.post("/sites/{site_id}/capture", response_model=CaptureResponse)
 async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> CaptureResponse:
     """Public ingest. Order: site exists → origin pinned → signed key → payload
     size cap → delegate to the service (honeypot/rate/injection screen/mapping)."""
-    site = await _SiteDoc.find_one({"script_name": site_id})  # global-read: public ingest keyed by site
+    # global-read: public ingest is keyed by site, not by a workspace session.
+    site = await _SiteDoc.find_one({"script_name": site_id})
     if site is None:
         raise HTTPException(404, "Site not found")
 
@@ -60,6 +80,7 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
         form_type=body.form_type,
         payload=body.payload,
         submitter_ref=body.submitter_ref or "anon",
+        rate_key=_rate_key(request),  # server-derived; the real per-IP limiter key
     )
     if lead is None:
         return CaptureResponse(ok=False, reason="dropped")

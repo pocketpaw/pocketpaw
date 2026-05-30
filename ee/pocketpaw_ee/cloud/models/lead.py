@@ -9,6 +9,11 @@
 # ``created_at``, which names no field on the base doc and would index nothing.
 # This matches the canonical tenant/time-indexed docs (foresight_run, chat_run,
 # instinct_approval, message, task) so the per-site/time paging query is cheap.
+#
+# Updated 2026-05-30 (follow-up item 1): LeadSource gains ``rate_key`` — the
+# SERVER-derived hash of the client host the per-IP rate limiter buckets on.
+# ``submitter_ref`` stays as an opaque caller LABEL only (never the limiter key),
+# because a caller can randomize it to dodge the per-IP cap.
 
 from __future__ import annotations
 
@@ -25,7 +30,8 @@ class LeadSource(BaseModel):
 
     form_type: str            # e.g. "AppointmentRequest"
     site_id: str
-    submitter_ref: str = ""   # IP hash / client token (not PII-bearing)
+    submitter_ref: str = ""   # opaque, caller-supplied LABEL (not PII, not the limiter key)
+    rate_key: str = ""        # server-derived host hash; the per-IP limiter buckets on this
 
 
 class Lead(TimestampedDocument):

@@ -8,6 +8,11 @@
 # Updated 2026-05-30 (security hardening, H2): added coverage that an
 # injection-pattern payload is dropped by the real InjectionScanner screen and
 # that clean form input still passes through.
+# Updated 2026-05-30 (follow-up item 1): the per-IP rate-limit bucket is now
+# keyed on a SERVER-derived ``rate_key`` (hash of the client host), not the
+# caller-controlled ``submitter_ref`` — two submissions with different
+# submitter_ref but the same rate_key share one bucket; randomizing submitter_ref
+# no longer buys a fresh bucket.
 from __future__ import annotations
 
 import pytest
@@ -108,6 +113,58 @@ async def test_capture_allows_clean_payload_through_screen(mongo_db):
         form_type="AppointmentRequest",
         payload={"full_name": "Jordan Lee", "company_website": ""},
         submitter_ref="ip_ok",
+        rate_key="rk_clean",
     )
     assert lead is not None
     assert lead.properties == {"name": "Jordan Lee"}
+
+
+@pytest.mark.asyncio
+async def test_per_ip_bucket_keyed_on_rate_key_not_submitter_ref(mongo_db):
+    """Item 1: the per-IP limiter buckets on the SERVER-derived rate_key, not the
+    caller-controlled submitter_ref. Two submissions from the SAME client host
+    (same rate_key) but DIFFERENT submitter_ref share one bucket — randomizing
+    submitter_ref can no longer dodge the per-IP cap."""
+    site = await _site(per_ip_limit_per_min=1, rate_limit_per_min=100)
+    first = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "A"},
+        submitter_ref="ref-one",
+        rate_key="host_hash_shared",
+    )
+    assert first is not None  # under the per-IP cap
+    second = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "B"},
+        submitter_ref="ref-two-different",  # caller randomized this …
+        rate_key="host_hash_shared",  # … but the host (rate_key) is the same
+    )
+    assert second is None  # same bucket → rate-limited despite the new ref
+    assert await leads_service.count_for_site("ws1", "site_1") == 1
+
+
+@pytest.mark.asyncio
+async def test_different_rate_key_gets_its_own_bucket(mongo_db):
+    """Item 1 (complement): a genuinely different client host (different
+    rate_key) is NOT throttled by another host's submissions, even when both
+    reuse the same submitter_ref label."""
+    site = await _site(per_ip_limit_per_min=1, rate_limit_per_min=100)
+    a = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "A"},
+        submitter_ref="same-label",
+        rate_key="host_a",
+    )
+    b = await leads_service.capture(
+        site=site,
+        form_type="AppointmentRequest",
+        payload={"full_name": "B"},
+        submitter_ref="same-label",  # identical label …
+        rate_key="host_b",  # … but a different host → its own bucket
+    )
+    assert a is not None
+    assert b is not None  # distinct host, not throttled
+    assert await leads_service.count_for_site("ws1", "site_1") == 2
