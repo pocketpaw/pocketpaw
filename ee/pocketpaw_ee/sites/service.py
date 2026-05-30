@@ -22,6 +22,12 @@
 # escape as an unhandled 500. The cast is wrapped so a bad id surfaces as a 404
 # NotFound. add_domain / domain_status both route through _load, so this covers
 # every authed path that casts a caller-supplied site_id.
+#
+# Updated 2026-05-30 (follow-up item 4): added list_domains() — a tenant-scoped
+# read of the Site doc's domains list (hostname + status + cname_target), backing
+# GET /sites/{site_id}/domains so the Domains tab can rehydrate on reload. It
+# routes through _load, so it inherits the same tenant scoping + malformed-id
+# guard as the other authed domain paths (no Cloudflare call).
 
 from __future__ import annotations
 
@@ -186,9 +192,29 @@ async def domain_status(
     )
 
 
+async def list_domains(*, workspace_id: str, site_id: str) -> list[DomainStatusResponse]:
+    """Return the site's custom domains with their current statuses, read from
+    the Site doc's ``domains`` list. Tenant-scoped via ``_load`` (a missing /
+    cross-tenant site raises NotFound → 404). Backs the Domains tab's reload
+    rehydration: no Cloudflare call, just the persisted state."""
+    site = await _load(workspace_id, site_id)
+    return [
+        DomainStatusResponse(
+            hostname=d.hostname, cname_target=d.cname_target, status=d.status
+        )
+        for d in site.domains
+    ]
+
+
 async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     cursor = _SiteDoc.find({"workspace": workspace_id}).sort(-_SiteDoc.createdAt)  # type: ignore[operator]
     return [_to_response(doc) async for doc in cursor]
 
 
-__all__ = ["publish", "add_domain", "domain_status", "list_for_workspace"]
+__all__ = [
+    "publish",
+    "add_domain",
+    "domain_status",
+    "list_domains",
+    "list_for_workspace",
+]

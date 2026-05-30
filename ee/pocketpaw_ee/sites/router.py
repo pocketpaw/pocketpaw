@@ -9,6 +9,12 @@
 # None). theme is pulled from the rippleSpec subtree.
 #
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+#
+# Updated 2026-05-30 (follow-up item 4): added GET /sites/{site_id}/domains — an
+# authed, tenant-scoped read of the site's domains + statuses (same
+# require_plan_feature("fabric") router gate + require_action_any_workspace
+# scoping as the other authed sites reads) so the Domains tab can rehydrate on
+# reload. A site in another workspace surfaces as a 404 (via the service _load).
 
 from __future__ import annotations
 
@@ -73,6 +79,17 @@ async def add_domain(
     return await sites_service.add_domain(
         workspace_id=ctx.workspace_id, site_id=site_id, hostname=body.hostname
     )
+
+
+@router.get("/sites/{site_id}/domains", response_model=list[DomainStatusResponse])
+async def list_domains(
+    site_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> list[DomainStatusResponse]:
+    """Tenant-scoped read of the site's domains + statuses (Domains-tab
+    rehydration). A site in another workspace surfaces as a 404."""
+    return await sites_service.list_domains(workspace_id=ctx.workspace_id, site_id=site_id)
 
 
 @router.get("/sites/{site_id}/domains/{hostname}/status", response_model=DomainStatusResponse)

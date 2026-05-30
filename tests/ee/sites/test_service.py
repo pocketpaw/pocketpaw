@@ -6,6 +6,9 @@
 # Updated 2026-05-30 (security hardening, H3): added coverage that a malformed
 # site_id on the authed paths raises NotFound (404) instead of leaking a raw
 # bson InvalidId as an unhandled 500.
+# Updated 2026-05-30 (follow-up item 4): coverage for list_domains — the new
+# tenant-scoped read backing GET /sites/{site_id}/domains (returns the owning
+# workspace's domains; a different workspace gets NotFound, i.e. a 404).
 from __future__ import annotations
 
 import pytest
@@ -145,3 +148,76 @@ async def test_domain_status_malformed_site_id_raises_not_found(beanie_test_db):
             hostname="www.example.com",
             _cloudflare=cf,
         )
+
+
+@pytest.mark.asyncio
+async def test_list_domains_returns_owning_workspace_domains(beanie_test_db):
+    """Item 4: list_domains returns the site's domains (hostname, status,
+    cname_target) for the owning workspace."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    await sites_service.add_domain(
+        workspace_id="ws1",
+        site_id=site.id,
+        hostname="www.brightsmiledental.com",
+        _cloudflare=cf,
+    )
+    domains = await sites_service.list_domains(workspace_id="ws1", site_id=site.id)
+    assert len(domains) == 1
+    assert domains[0].hostname == "www.brightsmiledental.com"
+    assert domains[0].status == "pending"
+    assert domains[0].cname_target == "zone_1.cdn.cloudflare.net"
+
+
+@pytest.mark.asyncio
+async def test_list_domains_empty_when_no_domains_added(beanie_test_db):
+    """A freshly published site with no custom domains lists an empty list."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    assert await sites_service.list_domains(workspace_id="ws1", site_id=site.id) == []
+
+
+@pytest.mark.asyncio
+async def test_list_domains_cross_tenant_raises_not_found(beanie_test_db):
+    """Tenant scoping: a different workspace cannot read this site's domains —
+    _load raises NotFound (the router surfaces it as a 404)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws_owner",
+        user_id="u1",
+        pocket_id="pk1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    await sites_service.add_domain(
+        workspace_id="ws_owner",
+        site_id=site.id,
+        hostname="www.example.com",
+        _cloudflare=cf,
+    )
+    with pytest.raises(NotFound):
+        await sites_service.list_domains(workspace_id="ws_other", site_id=site.id)
