@@ -15,6 +15,13 @@
 # credentials use (_core/crypto.encrypt_json) — never logged, never plaintext.
 #
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+#
+# Updated 2026-05-30 (security hardening, H3): _load now guards the
+# ObjectId(site_id) cast — a malformed, attacker-supplied site_id raised
+# bson.errors.InvalidId, which the cloud error handler (CloudError-only) let
+# escape as an unhandled 500. The cast is wrapped so a bad id surfaces as a 404
+# NotFound. add_domain / domain_status both route through _load, so this covers
+# every authed path that casts a caller-supplied site_id.
 
 from __future__ import annotations
 
@@ -24,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from bson import ObjectId
+from bson.errors import InvalidId
 
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
@@ -119,7 +127,13 @@ async def publish(
 
 
 async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
-    doc = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+    # Guard the cast: a malformed site_id is not a 500. bson raises InvalidId
+    # (TypeError for non-str/bytes inputs); both mean "no such site".
+    try:
+        oid = ObjectId(site_id)
+    except (InvalidId, TypeError):
+        raise NotFound("site", site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         raise NotFound("site", site_id)
     return doc

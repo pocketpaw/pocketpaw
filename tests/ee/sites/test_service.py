@@ -3,9 +3,13 @@
 # is touched. Uses the shared ``beanie_test_db`` fixture (tests/ee/conftest.py)
 # to init Beanie against an in-memory Mongo so the service can persist Site docs.
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
+# Updated 2026-05-30 (security hardening, H3): added coverage that a malformed
+# site_id on the authed paths raises NotFound (404) instead of leaking a raw
+# bson InvalidId as an unhandled 500.
 from __future__ import annotations
 
 import pytest
+from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
@@ -113,3 +117,31 @@ async def test_domain_status_polls_cloudflare(beanie_test_db):
         _cloudflare=cf,
     )
     assert status.status == "live"
+
+
+@pytest.mark.asyncio
+async def test_add_domain_malformed_site_id_raises_not_found(beanie_test_db):
+    """H3: a malformed site_id is not a valid ObjectId. The cast must be guarded
+    so the caller gets a 404 NotFound, not an unhandled bson InvalidId → 500."""
+    cf = _FakeCF()
+    with pytest.raises(NotFound):
+        await sites_service.add_domain(
+            workspace_id="ws1",
+            site_id="not-a-valid-objectid",
+            hostname="www.example.com",
+            _cloudflare=cf,
+        )
+
+
+@pytest.mark.asyncio
+async def test_domain_status_malformed_site_id_raises_not_found(beanie_test_db):
+    """H3: the domain_status path also flows through _load — a malformed site_id
+    must surface as NotFound, never InvalidId."""
+    cf = _FakeCF()
+    with pytest.raises(NotFound):
+        await sites_service.domain_status(
+            workspace_id="ws1",
+            site_id="@@@not-an-objectid@@@",
+            hostname="www.example.com",
+            _cloudflare=cf,
+        )

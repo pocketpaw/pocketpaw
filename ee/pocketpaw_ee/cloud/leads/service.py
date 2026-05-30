@@ -1,19 +1,31 @@
 # ee/pocketpaw_ee/cloud/leads/service.py — sole owner of Lead writes. The
 # public capture endpoint calls capture(); the Leads view calls list_for_site().
-# Ingest hardening order mirrors paw-print: honeypot → rate limit → Guardian →
-# event-mapping → persist. Origin pinning is enforced at the router (it needs
-# the request's Origin header). Tenancy: every read filters on workspace.
+# Ingest hardening order: honeypot → rate limit → injection screen →
+# event-mapping → persist. Origin pinning + the payload size cap are enforced at
+# the router (they need the request). Tenancy: every read filters on workspace.
 #
 # Created 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.3): the cloud
 # capture pipeline composing the OSS sites_capture primitive (honeypot +
-# mapping interpolation) with a Mongo sliding-window rate limit, a best-effort
-# Guardian screen, and the tenant-scoped Lead doc write + reads.
+# mapping interpolation) with a Mongo sliding-window rate limit, an input
+# screen, and the tenant-scoped Lead doc write + reads.
+#
+# Updated 2026-05-30 (security hardening, H2): replaced the dead Guardian
+# `check_input` call — GuardianAgent only screens shell commands (check_command),
+# so `getattr(guardian, "check_input", None)` was always None and the screen
+# always accepted, letting untrusted form input reach mapping + DB unchecked.
+# Now screens the stringified payload through the real InjectionScanner (the
+# command-injection / prompt-injection heuristic scanner) and drops any
+# submission with a MEDIUM-or-higher threat verdict.
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pocketpaw.security.injection_scanner import (
+    ThreatLevel,
+    get_injection_scanner,
+)
 from pocketpaw.sites_capture.ingest import interpolate_mapping, is_honeypot_tripped
 from pocketpaw.sites_capture.models import SiteEventMapping
 from pocketpaw_ee.cloud.leads.domain import Lead
@@ -54,26 +66,27 @@ async def _within_rate_limit(workspace_id: str, site: _SiteDoc, submitter_ref: s
     return per_ip < site.per_ip_limit_per_min
 
 
-async def _pass_guardian(payload: dict[str, Any]) -> bool:
-    """Best-effort Guardian screen — tolerant when the security stack is absent
-    (verbatim posture from paw-print's `_pass_through_guardian`)."""
+# Form input is untrusted, attacker-controlled text. A MEDIUM-or-higher verdict
+# from the injection scanner means a known instruction-override / persona-hijack
+# / delimiter / exfil / jailbreak / tool-abuse pattern was matched, so the
+# submission is dropped rather than persisted and surfaced into the workspace.
+_INJECTION_DROP_THRESHOLD = ThreatLevel.MEDIUM
+_THREAT_RANK = {ThreatLevel.NONE: 0, ThreatLevel.LOW: 1, ThreatLevel.MEDIUM: 2, ThreatLevel.HIGH: 3}
+
+
+def _passes_injection_screen(payload: dict[str, Any]) -> bool:
+    """Screen the stringified form payload through the real InjectionScanner.
+
+    Returns False (drop the submission) when the scanner reports a MEDIUM-or-
+    higher threat. The scanner's heuristic ``scan`` is synchronous and needs no
+    LLM/API key, so it always runs. Replaces the prior dead Guardian call, which
+    referenced a ``check_input`` method GuardianAgent never had and so always
+    accepted."""
     import json
 
-    try:
-        from pocketpaw.security.guardian import get_guardian
-    except Exception:
-        return True
-    try:
-        guardian = get_guardian()
-        check = getattr(guardian, "check_input", None)
-        if check is None:
-            return True
-        verdict = await check(json.dumps(payload, default=str))
-    except Exception:
-        return True
-    if isinstance(verdict, bool):
-        return verdict
-    return not getattr(verdict, "blocked", False)
+    content = json.dumps(payload, default=str)
+    result = get_injection_scanner().scan(content, source="sites_capture")
+    return _THREAT_RANK[result.threat_level] < _THREAT_RANK[_INJECTION_DROP_THRESHOLD]
 
 
 async def capture(
@@ -84,13 +97,13 @@ async def capture(
     submitter_ref: str,
 ) -> Lead | None:
     """Harden + persist one submission as a tenant-scoped Lead. Returns None
-    when the submission is dropped (honeypot / rate-limited / Guardian / no
-    mapping for this form_type)."""
+    when the submission is dropped (honeypot / rate-limited / injection screen /
+    no mapping for this form_type)."""
     if is_honeypot_tripped(payload, honeypot_field=site.honeypot_field):
         return None
     if not await _within_rate_limit(site.workspace, site, submitter_ref):
         return None
-    if not await _pass_guardian(payload):
+    if not _passes_injection_screen(payload):
         return None
 
     raw_mapping = site.event_mapping.get(form_type)

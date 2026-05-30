@@ -8,12 +8,23 @@
 # capture surface. Public POST /sites/{site_id}/capture (site-exists → origin
 # pin → signed key → service hardening) and authed GET /sites/{site_id}/leads
 # (plan-gated + RBAC + workspace-scoped read).
+#
+# Updated 2026-05-30 (security hardening): the public capture path now (C1)
+# enforces MAX_PAYLOAD_BYTES on the JSON-encoded payload immediately after the
+# signed-key check — an unauthenticated caller can no longer POST an unbounded
+# body for a Mongo-write amplification DoS — and (H1) compares the signed key
+# with secrets.compare_digest (constant time) instead of ``!=`` so the check is
+# not vulnerable to a timing side channel.
 
 from __future__ import annotations
+
+import json
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from pocketpaw.sites_capture.ingest import origin_allowed
+from pocketpaw.sites_capture.models import MAX_PAYLOAD_BYTES
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.cloud.leads import service as leads_service
@@ -25,8 +36,8 @@ router = APIRouter(tags=["Sites"])
 
 @router.post("/sites/{site_id}/capture", response_model=CaptureResponse)
 async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> CaptureResponse:
-    """Public ingest. Order: site exists → origin pinned → signed key →
-    delegate to the service (honeypot/rate/Guardian/mapping)."""
+    """Public ingest. Order: site exists → origin pinned → signed key → payload
+    size cap → delegate to the service (honeypot/rate/injection screen/mapping)."""
     site = await _SiteDoc.find_one({"script_name": site_id})  # global-read: public ingest keyed by site
     if site is None:
         raise HTTPException(404, "Site not found")
@@ -34,8 +45,15 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
     if not origin_allowed(site.allowed_origins, request.headers.get("origin")):
         raise HTTPException(403, "Origin not allowed for this site")
 
-    if body.signed_key != site.signed_key:
+    # H1: constant-time compare so the key check can't be probed via timing.
+    if not secrets.compare_digest(body.signed_key, site.signed_key):
         raise HTTPException(401, "Invalid signed key")
+
+    # C1: reject oversized payloads before the service touches Mongo. This runs
+    # after auth so an unauthenticated caller can't even reach the size check,
+    # and caps the amplification a past-auth caller could otherwise drive.
+    if len(json.dumps(body.payload, default=str).encode("utf-8")) > MAX_PAYLOAD_BYTES:
+        raise HTTPException(413, "Payload exceeds size cap")
 
     lead = await leads_service.capture(
         site=site,
