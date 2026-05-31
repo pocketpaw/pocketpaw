@@ -527,6 +527,86 @@ def test_home_prompt_carries_source_authoring_guidance():
     assert "field path" in HOME_POCKET_PROMPT.lower() or "field-path" in HOME_POCKET_PROMPT.lower()
 
 
+def _session_ctx() -> ScopeContext:
+    return ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+    )
+
+
+def _force_settings(monkeypatch, **overrides):
+    """Make ``Settings.load()`` return a controlled instance for the
+    Composio gating checks inside ``build_behavior_instructions``.
+
+    Clears the Composio env vars first so the result depends only on the
+    explicit overrides, not on whatever the host machine has exported.
+    """
+    from pocketpaw.config import Settings
+
+    for var in (
+        "POCKETPAW_COMPOSIO_API_KEY",
+        "POCKETPAW_COMPOSIO_ENTERPRISE_ID",
+        "POCKETPAW_COMPOSIO_TOOLKITS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    s = Settings(_env_file=None, **overrides)
+    monkeypatch.setattr(Settings, "load", classmethod(lambda cls: s))
+    return s
+
+
+def test_composio_rules_injected_when_enabled_without_toolkits(monkeypatch):
+    """Credentials set but no toolkit allow-list. ``providers`` falls back
+    to the discovery meta-tools (COMPOSIO_SEARCH_TOOLS et al.), so the
+    agent DOES have Composio tools — the auth/search rules must be
+    injected (the search-fallback rule matters most in this mode)."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    _force_settings(
+        monkeypatch,
+        composio_api_key="ck_test",
+        composio_enterprise_id="ent_acme",
+        composio_toolkits=[],
+    )
+    block = build_behavior_instructions(_session_ctx(), backend_name="claude_agent_sdk")
+    assert "<composio-auth-flow>" in block
+    assert "<composio-search-fallback>" in block
+    assert "<runtime-identity>" in block
+
+
+def test_composio_rules_injected_when_toolkits_configured(monkeypatch):
+    """Credentials AND a non-empty toolkit allow-list → concrete tools +
+    meta-tools, so the auth/search guidance is injected."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    _force_settings(
+        monkeypatch,
+        composio_api_key="ck_test",
+        composio_enterprise_id="ent_acme",
+        composio_toolkits=["gmail", "slack"],
+    )
+    block = build_behavior_instructions(_session_ctx(), backend_name="claude_agent_sdk")
+    assert "<composio-auth-flow>" in block
+    assert "<composio-search-fallback>" in block
+
+
+def test_composio_rules_omitted_when_disabled(monkeypatch):
+    """No credentials → Composio is off, no tools at all. The auth/search
+    rules must NOT be injected, but the always-on identity rule (which
+    tells the agent to say so plainly) still is."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    _force_settings(monkeypatch)  # bare Settings: no api_key / enterprise_id
+    block = build_behavior_instructions(_session_ctx(), backend_name="claude_agent_sdk")
+    assert "<composio-auth-flow>" not in block
+    assert "<composio-search-fallback>" not in block
+    assert "<runtime-identity>" in block
+
+
 @pytest.mark.asyncio
 async def test_build_knowledge_context_includes_workspace_kb_hits_and_file_refs():
     ctx = ScopeContext(

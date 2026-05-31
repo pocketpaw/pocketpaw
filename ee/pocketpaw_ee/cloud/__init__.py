@@ -119,6 +119,7 @@ def mount_cloud(app: FastAPI) -> None:
     """Mount all cloud domain routers, the error handler, and the
     request-timing middleware."""
     from pocketpaw_ee.cloud._core.csrf import CSRFMiddleware, csrf_router
+    from pocketpaw_ee.cloud._core.ee_auth_bridge import EEAuthBridgeMiddleware
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
     from pocketpaw_ee.cloud._core.timing import TimingMiddleware
@@ -133,12 +134,17 @@ def mount_cloud(app: FastAPI) -> None:
     ensure_internal_token()
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
-    # on inbound. Effective order here: CSRF → Timing → route handler.
+    # on inbound. Effective order here:
+    #   CSRF → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    # The bridge marks admin/owner cloud users as ``full_access`` before
+    # the OSS AuthMiddleware reads it, so OSS routes (settings/channels/...)
+    # accept EE JWT auth without 403'ing on missing scopes.
     # A CSRF 403 short-circuits before Timing observes the request, so perf
     # data won't include rejected POSTs. That's a deliberate tradeoff: the
     # CSRF gate exists to be fast and predictable, not measured. Reorder
     # ONLY if you want Timing to wrap CSRF rejections (swap the two add_
     # middleware calls — TimingMiddleware would then run outermost).
+    app.add_middleware(EEAuthBridgeMiddleware)
     app.add_middleware(TimingMiddleware)
 
     # CSRF middleware — outermost on inbound, runs before any route.

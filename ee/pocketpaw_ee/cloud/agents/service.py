@@ -29,6 +29,13 @@ from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, NotFound
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    AgentCreated,
+    AgentDeleted,
+    AgentScopeUpdated,
+    AgentUpdated,
+)
 from pocketpaw_ee.cloud.agents.domain import Agent, AgentConfigSpec
 from pocketpaw_ee.cloud.agents.dto import (
     CreateAgentRequest,
@@ -228,6 +235,18 @@ async def create(ctx: RequestContext, workspace_id: str, body: CreateAgentReques
     if agent.config.soul_enabled:
         await _try_eager_soul(agent)
 
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": agent.id,
+                "workspace_id": workspace_id,
+                "owner_id": ctx.user_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
+    )
     return agent
 
 
@@ -280,6 +299,18 @@ async def update(ctx: RequestContext, agent_id: str, body: UpdateAgentRequest) -
     if new_config != _config_to_domain(doc.config):
         doc.config = _config_to_doc(new_config)
     await doc.save()
+
+    payload: dict[str, Any] = {
+        "agent_id": str(doc.id),
+        "workspace_id": doc.workspace,
+    }
+    if body.name is not None:
+        payload["name"] = doc.name
+    if body.avatar is not None:
+        payload["avatar"] = doc.avatar
+    if body.visibility is not None:
+        payload["visibility"] = doc.visibility
+    await emit(AgentUpdated(data=payload))
     return _to_domain(doc)
 
 
@@ -292,7 +323,16 @@ async def delete(ctx: RequestContext, agent_id: str) -> None:
         raise NotFound("agent", agent_id)
     if doc.owner != ctx.user_id:
         raise Forbidden("agent.not_owner", "Only the agent owner can delete it")
+    workspace_id = doc.workspace
     await doc.delete()
+    await emit(
+        AgentDeleted(
+            data={
+                "agent_id": agent_id,
+                "workspace_id": workspace_id,
+            }
+        )
+    )
 
 
 async def get_scopes(agent_id: str) -> list[str]:
@@ -311,6 +351,15 @@ async def set_scopes(agent_id: str, scopes: list[str]) -> list[str]:
     new_config = replace(_config_to_domain(doc.config), scopes=tuple(cleaned))
     doc.config = _config_to_doc(new_config)
     await doc.save()
+    await emit(
+        AgentScopeUpdated(
+            data={
+                "agent_id": str(doc.id),
+                "workspace_id": doc.workspace,
+                "scopes": list(new_config.scopes),
+            }
+        )
+    )
     return list(new_config.scopes)
 
 
@@ -470,6 +519,18 @@ async def seed_default_agent(
         "Default 'pocketpaw' agent seeded in workspace %s (id: %s)",
         workspace_id,
         agent.id,
+    )
+    await emit(
+        AgentCreated(
+            data={
+                "agent_id": str(agent.id),
+                "workspace_id": workspace_id,
+                "owner_id": owner_id,
+                "name": agent.name,
+                "slug": agent.slug,
+                "visibility": agent.visibility,
+            }
+        )
     )
     return agent, True
 

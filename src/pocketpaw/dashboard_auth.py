@@ -499,7 +499,13 @@ async def _auth_dispatch(request: Request) -> Response | None:
     is_valid = False
     # full_access means "bypass scope checks" (issue #888). Set by the
     # master/session/cookie/localhost paths — NOT by API key or OAuth auth.
-    request.state.full_access = False
+    # Defensive default: preserve any upstream-set value so the EE auth
+    # bridge middleware (mounted by ``mount_cloud()``) can mark admin/owner
+    # cloud users as full-access before we get here.
+    if getattr(request.state, "full_access", False):
+        is_valid = True
+    else:
+        request.state.full_access = False
 
     # 1. Check Query Param (master token or session token)
     if token:

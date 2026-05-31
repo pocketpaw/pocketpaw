@@ -46,7 +46,7 @@ input       button, input, textarea, select, combobox, multi-select,
             checkbox, switch, radio-group, slider, rating, date-picker,
             time-picker, number-input, segmented, color-picker,
             file-upload, form, filter-bar, search, mention, otp-input,
-            range-bar, code-editor
+            range-bar, code-editor, ask-user-questions
 data        chart, table, data-grid, kanban, gantt, calendar, timeline,
             tree, tree-table, virtual-list, sparkline, gauge, funnel,
             heatmap, sankey, treemap, workflow
@@ -95,6 +95,9 @@ of text rows" rebuild looks worse than the real widget.
   monitoring gauge / dial             → gauge
   signup / contact / multi-field form → form-layout
   multi-step setup / onboarding flow  → wizard-layout
+  ask user a multi-choice question
+    (single or multi-select, optional
+     "other" text, stepped)            → ask-user-questions
   launch checklist / runbook / pre-flight → checklist-layout
   quarterly / status report write-up  → report-layout
   invoice / quote / receipt           → invoice-layout

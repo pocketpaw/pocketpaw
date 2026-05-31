@@ -20,6 +20,13 @@ from pathlib import Path
 
 from pocketpaw.connectors.protocol import ExecutionMode
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import (
+    ConnectorConfigUpdated,
+    ConnectorDisabled,
+    ConnectorEnabled,
+    ConnectorSyncRecorded,
+)
 from pocketpaw_ee.cloud.connectors.domain import AvailableConnector, WorkspaceConnector
 from pocketpaw_ee.cloud.connectors.dto import (
     ConnectorDetailResponse,
@@ -212,6 +219,15 @@ async def enable_connector(
         "connector.enabled",
         {"workspace_id": workspace_id, "name": name, "scope": body.scope},
     )
+    await emit(
+        ConnectorEnabled(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+                "scope": body.scope,
+            }
+        )
+    )
     return _row_response(a, doc)
 
 
@@ -235,6 +251,14 @@ async def disable_connector(workspace_id: str, name: str) -> ConnectorResponse:
         "connector.disabled",
         {"workspace_id": workspace_id, "name": name},
     )
+    await emit(
+        ConnectorDisabled(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+            }
+        )
+    )
     return _row_response(available[name], doc)
 
 
@@ -256,6 +280,14 @@ async def update_config(
     await event_bus.emit(
         "connector.config_updated",
         {"workspace_id": workspace_id, "name": name},
+    )
+    await emit(
+        ConnectorConfigUpdated(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+            }
+        )
     )
     return _row_response(available[name], doc)
 
@@ -288,6 +320,15 @@ async def record_sync(
     await event_bus.emit(
         "connector.sync_recorded",
         {"workspace_id": workspace_id, "name": name, "status": status},
+    )
+    await emit(
+        ConnectorSyncRecorded(
+            data={
+                "workspace_id": workspace_id,
+                "name": name,
+                "status": status,
+            }
+        )
     )
     return _doc_to_domain(doc, display_name=a.display_name, type_=a.type, icon=a.icon)
 

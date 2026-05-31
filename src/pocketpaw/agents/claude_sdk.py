@@ -1127,10 +1127,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     prompt_path,
                 )
 
+            # ``setting_sources=[]`` keeps the agent on its OWN persona.
+            # PocketPaw is not Claude Code: we pass a custom ``system_prompt``
+            # string (never the ``claude_code`` preset), and an empty
+            # setting-source list stops the SDK from injecting CLAUDE.md,
+            # output styles, or filesystem settings as context. The repo
+            # CLAUDE.md literally opens with "guidance to Claude Code
+            # (claude.ai/code)" — loading it bled that identity into the
+            # agent. Hooks, MCP servers, allowed_tools and permissions are
+            # all passed explicitly below, so none of them depend on
+            # setting sources. See
+            # https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts
             options_kwargs = {
                 "system_prompt": system_prompt_arg,
                 "allowed_tools": allowed_tools,
-                "setting_sources": ["user", "project"],
+                "setting_sources": [],
                 "hooks": hooks,
                 "cwd": str(self._cwd),
                 "max_turns": self.settings.claude_sdk_max_turns or None,

@@ -49,7 +49,13 @@ from pocketpaw_ee.cloud.chat.schemas import (
 from pocketpaw_ee.cloud.chat.ws import PRESENCE_GRACE_SECONDS, manager
 from pocketpaw_ee.cloud.license import get_license, require_license
 from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import PresenceOffline, PresenceOnline
+from pocketpaw_ee.cloud.realtime.events import (
+    MessageRead,
+    PresenceOffline,
+    PresenceOnline,
+    TypingStart,
+    TypingStop,
+)
 from pocketpaw_ee.cloud.shared.deps import (
     current_user,
     current_user_id,
@@ -764,18 +770,24 @@ async def _ws_typing(user_id: str, msg: WsInbound, *, active: bool) -> None:
     else:
         manager.stop_typing(msg.group_id, user_id)
 
+    # Broadcast the registered typing.start / typing.stop event (matches
+    # EVENT_REGISTRY + the browser bus topics). A prior ad-hoc type="typing"
+    # with an `active` flag never matched the client's typing.start/.stop
+    # subscriptions, so the indicator never rendered.
     await manager.send_to_room(
         msg.group_id,
         WsOutbound(
-            type="typing",
+            type="typing.start" if active else "typing.stop",
             data={
                 "group_id": msg.group_id,
                 "user_id": user_id,
-                "active": active,
             },
         ),
         exclude_user=user_id,
     )
+
+    payload = {"group_id": msg.group_id, "user_id": user_id}
+    await emit(TypingStart(data=payload) if active else TypingStop(data=payload))
 
 
 async def _ws_read_ack(user_id: str, msg: WsInbound) -> None:
@@ -799,4 +811,14 @@ async def _ws_read_ack(user_id: str, msg: WsInbound) -> None:
             },
         ),
         exclude_user=user_id,
+    )
+
+    await emit(
+        MessageRead(
+            data={
+                "group_id": msg.group_id,
+                "user_id": user_id,
+                "message_id": msg.message_id,
+            }
+        )
     )

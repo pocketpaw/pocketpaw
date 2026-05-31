@@ -22,6 +22,9 @@ from livekit.protocol.room import (
     ListRoomsRequest,
 )
 
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallNotesPosted, CallStarted
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -587,8 +590,7 @@ async def create_room(group_id: str) -> dict[str, Any]:
 
         logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
 
-    # NOTE: call.started event is emitted by the router layer which has
-    # access to the current user context (caller_id, caller_name).
+    await emit(CallStarted(data={"group_id": group_id, "room_name": room_name}))
 
     return {
         "room_name": room_name,
@@ -688,8 +690,7 @@ async def end_room(group_id: str) -> dict[str, Any]:
                 logger.error("Failed to delete LiveKit room: %s", exc)
                 raise
 
-    # NOTE: call.ended event is emitted by the router layer which has
-    # access to the current user context.
+    await emit(CallEnded(data={"group_id": group_id, "room_name": room_name}))
 
     return {
         "room_name": room_name,
@@ -813,6 +814,16 @@ async def post_meeting_notes_to_group(
                 "mentions": [],
             },
         )
+        await emit(
+            CallNotesPosted(
+                data={
+                    "group_id": group_id,
+                    "message_id": domain_msg.id,
+                    "duration_seconds": duration_seconds,
+                    "participant_count": len(participants),
+                }
+            )
+        )
         logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
     except Exception as exc:
         logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
@@ -882,6 +893,6 @@ def _format_joined_at(joined_at: Any) -> str | None:
         return None
     if hasattr(joined_at, "ToDatetime"):
         return joined_at.ToDatetime().isoformat()
-    if isinstance(joined_at, (int, float)):
+    if isinstance(joined_at, int | float):
         return datetime.fromtimestamp(joined_at, tz=UTC).isoformat()
     return str(joined_at)

@@ -45,7 +45,8 @@ from pocketpaw_ee.cloud.realtime.events import (
     MessageReaction,
     MessageSent,
     MessageUiStateUpdated,
-    ThreadReply,
+    ThreadClosed,
+    ThreadCreated,
     UnreadUpdate,
 )
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound
@@ -456,11 +457,11 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
     # Only create notifications for non-self messages
     notif_recipients = [m for m in group.members if m != user_id]
     if notif_recipients:
-        try:
+        sender_name = "Someone"
+        if PydanticObjectId.is_valid(user_id):
             sender_doc = await _UserDoc.get(PydanticObjectId(user_id))
-            sender_name = sender_doc.full_name or sender_doc.email or "Someone"
-        except (ValueError, AttributeError):
-            sender_name = "Someone"
+            if sender_doc:
+                sender_name = sender_doc.full_name or sender_doc.email or "Someone"
 
         title = (
             f"New message from {sender_name}"
@@ -889,11 +890,11 @@ async def create_thread(group_id: str, user_id: str, message_id: str) -> dict:
     wire = message_to_wire_dict(domain_msg)
 
     await emit(
-        ThreadReply(
+        ThreadCreated(
             data={
-                "type": "thread.created",
                 "group_id": group_id,
                 "message_id": message_id,
+                "creator_id": user_id,
                 "message": wire,
             }
         )
@@ -1007,11 +1008,11 @@ async def close_thread(group_id: str, user_id: str, thread_id: str) -> None:
     await group.save()
 
     await emit(
-        ThreadReply(
+        ThreadClosed(
             data={
-                "type": "thread.closed",
                 "group_id": group_id,
                 "thread_id": thread_id,
+                "closed_by": user_id,
             }
         )
     )

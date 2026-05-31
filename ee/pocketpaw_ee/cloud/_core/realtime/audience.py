@@ -117,7 +117,7 @@ class AudienceResolver:
             return await self._group(d["group_id"])
         if t == "message.sent":
             return [d["sender_id"]]
-        if t == "thread.reply":
+        if t in {"thread.reply", "thread.created", "thread.closed"}:
             return await self._group(d.get("group_id", ""))
         if t == "message.ui_state.updated":
             # Group-context messages fan out to every group member so a peer
@@ -185,6 +185,16 @@ class AudienceResolver:
         }:
             return await self._group(d["group_id"])
 
+        # --- Agent CRUD (workspace-scoped configs) ------------------------------
+        # An Agent doc lives in a workspace; visibility is private/workspace/public
+        # but the sidebar is per-workspace, so fan out to every workspace member.
+        # Public agents would ideally cross workspaces, but the realtime fan-out
+        # is bounded by workspace anyway (cross-tenant sockets aren't joined).
+        if t in {"agent.created", "agent.updated", "agent.deleted", "agent.scope_updated"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Pockets ------------------------------------------------------------
         # Audience is computed by the service (it's the only layer that knows
         # the pocket's visibility + shared_with) and shipped on the event:
@@ -199,9 +209,86 @@ class AudienceResolver:
                 recipients.extend(await self._workspace(wid))
             return list(set(recipients))
 
+        # --- Calls (LiveKit group call lifecycle) -------------------------------
+        # The room is per-group, so audience is every group member: the call
+        # panel needs to light up for the receiver and clear for everyone on
+        # end. Notes posting also fans out so peer tabs can scroll to the
+        # newly-created meeting-notes message without a manual refetch.
+        if t in {"call.started", "call.ended", "call.notes_posted"}:
+            if gid := d.get("group_id"):
+                return await self._group(gid)
+            return []
+
+        # --- Connectors (workspace-scoped adapter rows) -------------------------
+        if t in {
+            "connector.enabled",
+            "connector.disabled",
+            "connector.config_updated",
+            "connector.sync_recorded",
+        }:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Notifications ------------------------------------------------------
         if t in {"notification.new", "notification.read", "notification.cleared"}:
             return [d["user_id"]]
+
+        # --- Unread (per-user counter delta) ------------------------------------
+        if t == "unread.update":
+            return [d["user_id"]]
+
+        # --- Tasks (Mission Control work items) ---------------------------------
+        # Payload carries explicit ``recipient_ids`` (creator + human assignee);
+        # fan out to those plus every workspace member so any operator with the
+        # Mission Control board open sees the row update live.
+        if t in {
+            "task.proposed",
+            "task.updated",
+            "task.claimed",
+            "task.resolved",
+            "task.blocked",
+        }:
+            recipients = list(d.get("recipient_ids") or [])
+            if wid := d.get("workspace_id"):
+                recipients.extend(await self._workspace(wid))
+            return list(set(recipients))
+
+        # --- Cycles (Mission Control time-boxed windows) ------------------------
+        if t in {"cycle.created", "cycle.updated", "cycle.closed", "cycle.snapshotted"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Projects (Linear-style scoping primitive) --------------------------
+        if t in {
+            "project.created",
+            "project.updated",
+            "project.archived",
+            "project.deleted",
+        }:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Planner (PRD materialization + gap resolution) ---------------------
+        if t in {"plan.generated", "plan.gap_resolved"}:
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Pocket outcomes (named business events from write actions) ---------
+        # Workspace-scoped: the outcomes ledger dashboard watches every write.
+        if t == "pocket.outcome":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Composio (per-user OAuth identity probes) --------------------------
+        if t in {"composio.connection.verified", "composio.connection.mismatch"}:
+            if uid := d.get("user_id"):
+                return [uid]
+            return []
 
         # --- Presence -----------------------------------------------------------
         if t in {"presence.online", "presence.offline"}:

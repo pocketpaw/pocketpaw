@@ -213,8 +213,18 @@ class MessageSent(Event):
 
 
 @dataclass
+class ThreadCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.created"
+
+
+@dataclass
 class ThreadReply(Event):
     EVENT_TYPE: ClassVar[str] = "thread.reply"
+
+
+@dataclass
+class ThreadClosed(Event):
+    EVENT_TYPE: ClassVar[str] = "thread.closed"
 
 
 @dataclass
@@ -351,6 +361,27 @@ class AgentStreamEnd(Event):
 @dataclass
 class AgentToolUse(Event):
     EVENT_TYPE: ClassVar[str] = "agent.tool_use"
+
+
+# Agents (entity CRUD — distinct from agent.* runtime stream events above)
+@dataclass
+class AgentCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.created"
+
+
+@dataclass
+class AgentUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.updated"
+
+
+@dataclass
+class AgentDeleted(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.deleted"
+
+
+@dataclass
+class AgentScopeUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "agent.scope_updated"
 
 
 # Pockets
@@ -672,6 +703,45 @@ class ComposioConnectionVerified(Event):
 @dataclass
 class ComposioConnectionMismatch(Event):
     EVENT_TYPE: ClassVar[str] = "composio.connection.mismatch"
+
+
+# Connectors — per-workspace adapter state (enable / disable / config / sync).
+# Distinct from ``ComposioConnectionVerified`` above: those events describe a
+# per-user OAuth identity probe; these describe workspace-scoped adapter rows
+# in the WorkspaceConnector collection. Audience fans out to every member of
+# ``workspace_id`` so the connectors UI updates live in every open tab.
+@dataclass
+class ConnectorEnabled(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.enabled"
+
+
+@dataclass
+class ConnectorDisabled(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.disabled"
+
+
+@dataclass
+class ConnectorConfigUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.config_updated"
+
+
+@dataclass
+class ConnectorSyncRecorded(Event):
+    EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
+
+
+# Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
+# are defined above with the rest of the LiveKit group-call types; this is the
+# post-call notes fan-out, audience = the group's members.
+@dataclass
+class CallNotesPosted(Event):
+    EVENT_TYPE: ClassVar[str] = "call.notes_posted"
+
+
+# Activity
+@dataclass
+class ActivityLogged(Event):
+    EVENT_TYPE: ClassVar[str] = "activity.logged"
 
 
 # Instinct approval queue (RFC 03 v2 / Wave 3a). Fires on every
