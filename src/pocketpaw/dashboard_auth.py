@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pocketpaw.config import Settings, get_access_token, regenerate_token
 from pocketpaw.dashboard_state import _LOCALHOST_ADDRS, _PROXY_HEADERS
 from pocketpaw.http_utils import is_request_secure
-from pocketpaw.security.rate_limiter import api_limiter, auth_limiter
+from pocketpaw.security.rate_limiter import api_limiter, auth_limiter, login_limiter
 from pocketpaw.security.session_tokens import create_session_token, verify_session_token
 from pocketpaw.tunnel import get_tunnel_manager
 from pocketpaw.uploads.signing import verify_grant
@@ -158,6 +158,20 @@ async def verify_token(
 # ---------------------------------------------------------------------------
 
 
+_WS_AUTH_OPTIONAL_PATHS: tuple[str, ...] = ("/ws/cloud",)
+"""WebSocket paths whose route handler does its own auth.
+
+The cloud EE router authenticates ``/ws/cloud`` via a short-lived
+``ws_ticket`` JWT (aud=ws, type=ws_ticket) consumed atomically from
+Redis, or via the ``paw_auth`` HttpOnly cookie, or via a long-lived
+session JWT in ``?token=``. None of those formats are known to the OSS
+scope gate below, so accepting them here would require duplicating the
+EE verifier — instead we let the route handler reject with a typed
+close code, matching the existing HTTP ``auth_optional_prefixes``
+pattern for ``/api/v1/*``.
+"""
+
+
 def _ws_scope_auth_ok(scope: dict) -> bool:
     """Return True if the raw ASGI WebSocket *scope* carries valid auth.
 
@@ -166,9 +180,15 @@ def _ws_scope_auth_ok(scope: dict) -> bool:
     ``Sec-WebSocket-Protocol`` header, and genuine-localhost bypass.
 
     This runs *before* the WebSocket upgrade completes so that
-    unauthenticated connections are rejected immediately.
+    unauthenticated connections are rejected immediately. Paths listed
+    in ``_WS_AUTH_OPTIONAL_PATHS`` bypass this gate and rely on their
+    route handler's own auth.
     """
     from urllib.parse import parse_qs
+
+    path = scope.get("path", "")
+    if path in _WS_AUTH_OPTIONAL_PATHS:
+        return True
 
     current_token = get_access_token()
 
@@ -288,6 +308,29 @@ class AuthMiddleware:
         if rejection is not None:
             await rejection(scope, receive, send)
             return
+        # If the dispatch consumed the body for the login/register rate-limit
+        # branch, replay it for the downstream auth handler. Without this,
+        # fastapi-users sees an empty body and 422s every login.
+        cached_body = getattr(request.state, "cached_body", None)
+        downstream_receive = receive
+        if cached_body is not None:
+            body_sent = False
+
+            async def replay_receive():
+                nonlocal body_sent
+                if not body_sent:
+                    body_sent = True
+                    return {
+                        "type": "http.request",
+                        "body": cached_body,
+                        "more_body": False,
+                    }
+                # After the cached body, defer to the original receive for any
+                # subsequent messages (e.g. disconnect).
+                return await receive()
+
+            downstream_receive = replay_receive
+
         # Allowed — inject rate-limit headers into the downstream response
         rl_headers = getattr(request.state, "rate_limit_headers", None)
         if rl_headers:
@@ -300,9 +343,16 @@ class AuthMiddleware:
                     message = {**message, "headers": headers}
                 await send(message)
 
-            await self.app(scope, receive, send_with_headers)
+            await self.app(scope, downstream_receive, send_with_headers)
         else:
-            await self.app(scope, receive, send)
+            await self.app(scope, downstream_receive, send)
+
+
+_LOGIN_RATE_LIMITED_PATHS = (
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
+    "/api/v1/auth/bearer/login",
+)
 
 
 async def _auth_dispatch(request: Request) -> Response | None:
@@ -313,6 +363,51 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     path = request.url.path
     client_ip = request.client.host if request.client else "unknown"
+
+    # Brute-force guard for login / register / bearer-login (OWASP A07).
+    # These paths used to be unconditionally exempt from rate limiting, which
+    # left an unbounded brute-force window. The per-(ip, email) bucket prevents
+    # an attacker from rotating the email field behind one IP to slip the
+    # per-IP api_limiter. fastapi-users reads the form body downstream, so we
+    # cache the body bytes on request.state and the ASGI wrapper in
+    # AuthMiddleware.__call__ replays them via a wrapped `receive`.
+    if request.method == "POST" and path in _LOGIN_RATE_LIMITED_PATHS:
+        try:
+            body_bytes = await request.body()
+            request.state.cached_body = body_bytes
+        except Exception:
+            body_bytes = b""
+            request.state.cached_body = body_bytes
+        email = ""
+        try:
+            form = await request.form()
+            # fastapi-users uses OAuth2PasswordRequestForm — field is "username".
+            # /register receives JSON with an "email" field instead.
+            email = str(form.get("username") or form.get("email") or "").strip().lower()
+        except Exception:
+            # JSON body on /register — best-effort parse for the email key.
+            try:
+                import json as _json
+
+                payload = _json.loads(body_bytes.decode("utf-8") or "{}")
+                if isinstance(payload, dict):
+                    email = (
+                        str(payload.get("email") or payload.get("username") or "").strip().lower()
+                    )
+            except Exception:
+                email = ""
+        key = f"login:{client_ip}:{email}"
+        rl_info = login_limiter.check(key)
+        if not rl_info.allowed:
+            _audit_auth_event("login_rate_limited", request, status="block")
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many login attempts"},
+                headers=rl_info.headers(),
+            )
+        # Allowed — fall through. The cached body is on request.state so the
+        # ASGI wrapper can hand a replayed `receive` to the downstream auth
+        # handler.
 
     # Rate-limit authentication endpoints BEFORE exempt-path processing.
     # Login and QR endpoints are intentionally exempt from token auth (the user
@@ -345,12 +440,12 @@ async def _auth_dispatch(request: Request) -> Response | None:
         # NOTE: /ws, /v1/ws, /api/v1/ws are no longer exempted here — WebSocket
         # scopes are now authenticated at the middleware level (issue #883).
         "/api/auth/login",
-        "/api/v1/auth/login",
         "/api/v1/docs",
         "/api/v1/redoc",
         "/api/v1/openapi.json",
         "/webhook/whatsapp",
         "/webhook/inbound",
+        "/api/v1/meetings/webhooks/",
         "/api/whatsapp/qr",
         "/api/v1/whatsapp/qr",
         "/oauth/callback",
@@ -358,28 +453,23 @@ async def _auth_dispatch(request: Request) -> Response | None:
         "/api/v1/mcp/oauth/callback",
         "/api/v1/oauth/authorize",
         "/api/v1/oauth/token",
-        "/api/v1/auth/login",
-        "/api/v1/auth/register",
-        "/api/v1/auth/bearer/login",
+        # NOTE: /api/v1/auth/login, /register, /bearer/login are NOT exempt.
+        # They have no token (the user is acquiring one) but must still pass
+        # through the login_limiter branch below — see the (ip, email) bucket
+        # near the top of _auth_dispatch.
         "/api/v1/auth/me",
         "/api/v1/license",
         "/ws/cloud",
     ]
 
-    # Shared-prefix routes — ee.cloud mounts JWT-authed routers at these paths,
-    # but the non-ee v1 routers (pocketpaw.api.v1.chat/pockets/sessions) also
-    # mount there and rely on require_scope() reading request.state.full_access.
+    # Shared-prefix routes — pocketpaw_ee.cloud mounts JWT-authed routers at
+    # these paths, but the non-ee v1 routers (pocketpaw.api.v1.chat/sessions)
+    # also mount there and rely on require_scope() reading
+    # request.state.full_access.
     # We must run the token-verification cascade so dashboard session cookies
     # populate state, but skip the final 401 — ee routes authenticate at the
     # route level via fastapi-users (#888 follow-up).
-    auth_optional_prefixes = (
-        "/api/v1/chat",
-        "/api/v1/workspaces",
-        "/api/v1/pockets",
-        "/api/v1/sessions",
-        "/api/v1/agents",
-        "/api/v1/users",
-    )
+    auth_optional_prefixes = ("/api/v1/",)
 
     for exempt in exempt_paths:
         if path.startswith(exempt):
@@ -409,7 +499,13 @@ async def _auth_dispatch(request: Request) -> Response | None:
     is_valid = False
     # full_access means "bypass scope checks" (issue #888). Set by the
     # master/session/cookie/localhost paths — NOT by API key or OAuth auth.
-    request.state.full_access = False
+    # Defensive default: preserve any upstream-set value so the EE auth
+    # bridge middleware (mounted by ``mount_cloud()``) can mark admin/owner
+    # cloud users as full-access before we get here.
+    if getattr(request.state, "full_access", False):
+        is_valid = True
+    else:
+        request.state.full_access = False
 
     # 1. Check Query Param (master token or session token)
     if token:

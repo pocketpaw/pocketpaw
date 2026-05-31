@@ -13,8 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-
-from ee.cloud.chat.domain import Group, Message
+from pocketpaw_ee.cloud.chat.domain import Group, Message
 
 # ---------------------------------------------------------------------------
 # Domain object builders (still used by a handful of pure-domain tests)
@@ -95,9 +94,8 @@ def make_domain_group(**overrides: Any) -> Group:
 async def beanie_memory_db():
     from beanie import init_beanie
     from mongomock_motor import AsyncMongoMockClient
-
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     db_name = f"test_chat_{uuid.uuid4().hex[:8]}"
     client = AsyncMongoMockClient()

@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ee.cloud.embeddings.cost_tracker import (
+from pocketpaw_ee.cloud.embeddings.cost_tracker import (
     CostTracker,
     get_cost_tracker,
     reset_cost_tracker_for_tests,
@@ -87,7 +87,7 @@ def test_get_cost_tracker_singleton(monkeypatch, tmp_path: Path) -> None:
     reset_cost_tracker_for_tests()
     # Redirect the default ledger to a temp file so production state isn't touched.
     monkeypatch.setattr(
-        "ee.cloud.embeddings.cost_tracker._DEFAULT_PATH",
+        "pocketpaw_ee.cloud.embeddings.cost_tracker._DEFAULT_PATH",
         _ledger(tmp_path),
     )
 
@@ -102,7 +102,7 @@ def test_get_cost_tracker_singleton(monkeypatch, tmp_path: Path) -> None:
 def test_get_cost_tracker_rebuilds_when_cap_changes(monkeypatch, tmp_path: Path) -> None:
     reset_cost_tracker_for_tests()
     monkeypatch.setattr(
-        "ee.cloud.embeddings.cost_tracker._DEFAULT_PATH",
+        "pocketpaw_ee.cloud.embeddings.cost_tracker._DEFAULT_PATH",
         _ledger(tmp_path),
     )
 

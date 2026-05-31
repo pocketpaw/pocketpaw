@@ -11,10 +11,10 @@ from datetime import datetime
 import pytest
 from beanie import init_beanie
 from mongomock_motor import AsyncMongoMockClient
+from pocketpaw_ee.cloud.files.service import UnifiedFile, UnifiedFilesService, _dedupe
+from pocketpaw_ee.cloud.uploads.models import FileUpload
+from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
-from ee.cloud.files.service import UnifiedFile, UnifiedFilesService, _dedupe
-from ee.cloud.uploads.models import FileUpload
-from ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw.uploads.file_store import FileRecord
 
 

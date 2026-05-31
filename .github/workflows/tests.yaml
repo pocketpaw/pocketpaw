@@ -1,13 +1,18 @@
-# Tests — runs the pytest suite on every PR and on pushes to ee/main/dev.
+# Tests — runs the pytest suite on every PR targeting dev/main or an
+# RFC integration branch (pattern: feat/*-integration), and on pushes to
+# the same branches.
 # Created: 2026-05-07 — Added pytest job to PR Quality Gate so broken tests
 # can no longer slip through CI on PRs targeting ee. Closes #1065.
+# Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
+# sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
+# Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
 name: Tests
 
 on:
   pull_request:
-    branches: [ee, main, dev]
+    branches: [dev, main, 'feat/*-integration']
   push:
-    branches: [ee, main, dev]
+    branches: [dev, main, 'feat/*-integration']
 
 concurrency:
   group: tests-${{ github.ref }}
@@ -28,12 +33,14 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        # --all-extras pulls every optional extra (enterprise, soul, vector, etc.)
-        # so ee/cloud tests can import beanie/motor/fastapi-users[beanie,oauth].
+        # --all-extras pulls every optional core extra (soul, vector, etc.).
+        # The enterprise layer is the separate `pocketpaw-ee` package since the
+        # OSS-EE split (Phase 4) — install it editable so tests/ee can import
+        # pocketpaw_ee (beanie / motor / fastapi-users ship as its deps).
         # Cold-start installs are heavier (~60 s on cache miss because chromadb
         # pulls onnxruntime, plus a few smaller wheels) but uv's cache keeps
         # subsequent runs fast.
-        run: uv sync --dev --all-extras
+        run: uv sync --dev --all-extras --group ee
 
       - name: Run pytest
         # No -x: this is a PR gate, surface ALL failures, not just the first.

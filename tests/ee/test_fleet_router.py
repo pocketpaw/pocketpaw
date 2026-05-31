@@ -39,12 +39,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.testclient import TestClient
+from pocketpaw_ee.cloud.auth import current_active_user
+from pocketpaw_ee.fleet import FleetTemplate
+from pocketpaw_ee.fleet.router import router
 from soul_protocol.engine.journal import open_journal
 
-from ee.cloud.auth import current_active_user
-from ee.fleet import FleetTemplate
-from ee.fleet.router import router
-from ee.journal_dep import get_journal, reset_journal_cache
+from pocketpaw.journal_dep import get_journal, reset_journal_cache
 
 # ---------------------------------------------------------------------------
 # Shared constants used across install tests — the default admin workspace
@@ -195,13 +195,13 @@ def patch_install_fleet(fake_soul_factory):
     on them) without requiring a real SoulFactory on the import path.
     """
 
-    from ee.fleet import install_fleet as real_install
+    from pocketpaw_ee.fleet import install_fleet as real_install
 
     async def _wrapped(fleet, **kwargs):
         kwargs.setdefault("soul_factory", fake_soul_factory)
         return await real_install(fleet, **kwargs)
 
-    with patch("ee.fleet.router.install_fleet", side_effect=_wrapped) as mock:
+    with patch("pocketpaw_ee.fleet.router.install_fleet", side_effect=_wrapped) as mock:
         yield mock
 
 
@@ -283,10 +283,10 @@ class TestGetTemplates:
             )
 
         monkeypatch.setattr(
-            "ee.fleet.router.list_bundled_fleets",
+            "pocketpaw_ee.fleet.router.list_bundled_fleets",
             lambda: ["broken", "ok"],
         )
-        monkeypatch.setattr("ee.fleet.router.load_fleet", _explode)
+        monkeypatch.setattr("pocketpaw_ee.fleet.router.load_fleet", _explode)
 
         resp = client.get("/fleet/templates")
         assert resp.status_code == 200

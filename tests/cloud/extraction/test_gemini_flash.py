@@ -18,9 +18,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pocketpaw_ee.cloud.extraction import ExtractionResult
 from pypdf import PdfWriter
-
-from ee.cloud.extraction import ExtractionResult
 
 
 @pytest.fixture
@@ -65,7 +64,7 @@ def tmp_blank_pdf(tmp_path: Path) -> Path:
 async def test_image_extract_calls_gemini_with_inline_bytes(
     mock_genai_client, tmp_image: Path
 ) -> None:
-    from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
+    from pocketpaw_ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     fake_client, fake_response = mock_genai_client
     fake_response.text = "Caption: a small PNG image."
@@ -94,7 +93,7 @@ async def test_image_extract_calls_gemini_with_inline_bytes(
 
 
 async def test_image_extract_uses_configured_model(mock_genai_client, tmp_image: Path) -> None:
-    from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
+    from pocketpaw_ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     fake_client, _ = mock_genai_client
     extractor = GeminiFlashExtractor(api_key="fake-key", model="custom-model")
@@ -105,7 +104,7 @@ async def test_image_extract_uses_configured_model(mock_genai_client, tmp_image:
 
 
 async def test_image_extract_handles_empty_response(mock_genai_client, tmp_image: Path) -> None:
-    from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
+    from pocketpaw_ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     _, fake_response = mock_genai_client
     fake_response.text = None
@@ -118,7 +117,7 @@ async def test_image_extract_handles_empty_response(mock_genai_client, tmp_image
 
 
 async def test_pdf_extract_blank_page_marked_sparse(mock_genai_client, tmp_blank_pdf: Path) -> None:
-    from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
+    from pocketpaw_ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     fake_client, _ = mock_genai_client
     extractor = GeminiFlashExtractor(api_key="fake-key")
@@ -136,7 +135,7 @@ async def test_pdf_extract_blank_page_marked_sparse(mock_genai_client, tmp_blank
 
 
 async def test_unsupported_mime_raises(mock_genai_client, tmp_path: Path) -> None:
-    from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
+    from pocketpaw_ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     p = tmp_path / "audio.wav"
     p.write_bytes(b"RIFF...")
@@ -147,7 +146,7 @@ async def test_unsupported_mime_raises(mock_genai_client, tmp_path: Path) -> Non
 
 
 async def test_supports_metadata(mock_genai_client) -> None:
-    from ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
+    from pocketpaw_ee.cloud.extraction.gemini_flash import GeminiFlashExtractor
 
     extractor = GeminiFlashExtractor(api_key="fake-key")
     assert extractor.name == "gemini-flash"

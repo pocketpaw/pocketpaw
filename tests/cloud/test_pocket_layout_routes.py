@@ -29,17 +29,16 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud.license import require_license
-from ee.cloud.pockets import service as pockets_service
-from ee.cloud.pockets.layouts import (
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.pockets import service as pockets_service
+from pocketpaw_ee.cloud.pockets.layouts import (
     UserTemplateStore,
     get_user_template_store,
     parse_layout_yaml,
     reset_user_template_store,
 )
-from ee.cloud.pockets.router import router
-from ee.cloud.shared.deps import (
+from pocketpaw_ee.cloud.pockets.router import router
+from pocketpaw_ee.cloud.shared.deps import (
     current_user_id,
     current_workspace_id,
     require_pocket_edit,
@@ -81,7 +80,7 @@ def _reset_store():
 
 @pytest.fixture
 def app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    from ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud._core.http import add_error_handler
 
     a = FastAPI()
     add_error_handler(a)
@@ -195,7 +194,7 @@ class TestWorkspaceScoping:
             else get_user_template_store()
         )
 
-        from ee.cloud.pockets.layouts import UserPocketTemplate
+        from pocketpaw_ee.cloud.pockets.layouts import UserPocketTemplate
 
         store.save(
             UserPocketTemplate(

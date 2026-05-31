@@ -9,6 +9,11 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
 # ---- Builder stage ----
 FROM python:3.12-slim AS builder
 
+# Edition selector. "oss" (default) builds the MIT core only; "enterprise"
+# also installs the FSL enterprise layer (pocketpaw-ee) from ee/. Override
+# with: docker build --build-arg POCKETPAW_EDITION=enterprise
+ARG POCKETPAW_EDITION=oss
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc python3-dev git \
     && rm -rf /var/lib/apt/lists/*
@@ -23,6 +28,15 @@ COPY src/ src/
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir '.[all]'
+
+# Enterprise edition: also install the FSL enterprise layer (pocketpaw-ee).
+# For an OSS build, ee/ lands only in this throwaway builder stage and is
+# never installed — the runtime image below copies just the venv, so it
+# stays genuinely EE-free.
+COPY ee/ ee/
+RUN if [ "$POCKETPAW_EDITION" = "enterprise" ]; then \
+        pip install --no-cache-dir ./ee ; \
+    fi
 
 # Install Playwright Chromium browser
 RUN playwright install chromium

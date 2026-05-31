@@ -11,7 +11,8 @@ import pytest
 
 class TestCreateMemoryStoreMongoBranch:
     def test_mongodb_backend_returns_mongo_store(self):
-        from ee.cloud.memory.mongo_store import MongoMemoryStore
+        from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+
         from pocketpaw.memory.manager import create_memory_store
 
         store = create_memory_store(backend="mongodb")
@@ -27,7 +28,7 @@ class TestCreateMemoryStoreMongoBranch:
 
 class TestEeDefaultFlip:
     def test_flip_when_env_unset(self):
-        from ee.cloud.memory.bootstrap import register_default_backend
+        from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
 
         env = dict(os.environ)
         env.pop("POCKETPAW_MEMORY_BACKEND", None)
@@ -36,7 +37,7 @@ class TestEeDefaultFlip:
             assert os.environ["POCKETPAW_MEMORY_BACKEND"] == "mongodb"
 
     def test_preserves_explicit_file_choice(self):
-        from ee.cloud.memory.bootstrap import register_default_backend
+        from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
 
         env = dict(os.environ)
         env["POCKETPAW_MEMORY_BACKEND"] = "file"
@@ -45,7 +46,7 @@ class TestEeDefaultFlip:
             assert os.environ["POCKETPAW_MEMORY_BACKEND"] == "file"
 
     def test_preserves_explicit_mem0_choice(self):
-        from ee.cloud.memory.bootstrap import register_default_backend
+        from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
 
         env = dict(os.environ)
         env["POCKETPAW_MEMORY_BACKEND"] = "mem0"
@@ -59,8 +60,9 @@ class TestEeDefaultFlip:
         Bypasses ``Settings.load()`` since that reads ``~/.pocketpaw/config.json``
         which may carry a stale ``memory_backend`` value from earlier sessions.
         """
-        from ee.cloud.memory.bootstrap import register_default_backend
-        from ee.cloud.memory.mongo_store import MongoMemoryStore
+        from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
+        from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+
         from pocketpaw.memory.manager import get_memory_manager
 
         env = dict(os.environ)
@@ -86,7 +88,8 @@ class TestOssIsolation:
                 stripped = line.lstrip()
                 indent = len(line) - len(stripped)
                 if indent == 0 and (
-                    stripped.startswith("from ee.") or stripped.startswith("import ee.")
+                    stripped.startswith("from pocketpaw_ee.")
+                    or stripped.startswith("import pocketpaw_ee.")
                 ):
                     raise AssertionError(f"top-level ee import in {py}: {stripped}")
 
@@ -105,7 +108,8 @@ class TestOssIsolation:
             stripped = line.lstrip()
             indent = len(line) - len(stripped)
             if indent == 0 and (
-                stripped.startswith("from ee.") or stripped.startswith("import ee.")
+                stripped.startswith("from pocketpaw_ee.")
+                or stripped.startswith("import pocketpaw_ee.")
             ):
                 raise AssertionError(f"manager.py has a top-level ee import: {stripped}")
 

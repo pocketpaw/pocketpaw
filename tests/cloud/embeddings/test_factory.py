@@ -12,8 +12,7 @@ import types as _types
 from unittest.mock import MagicMock
 
 import pytest
-
-from ee.cloud.embeddings import build_embedder
+from pocketpaw_ee.cloud.embeddings import build_embedder
 
 
 class _Stub:

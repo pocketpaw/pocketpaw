@@ -13,10 +13,11 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"body"
 
 @pytest.fixture()
 def folder_client(tmp_path: Path, beanie_upload_db, monkeypatch):
-    import ee.cloud.uploads.router as uploads_module
-    from ee.cloud.uploads.folder_store import FolderStore
-    from ee.cloud.uploads.mongo_store import MongoFileStore
-    from ee.cloud.uploads.service import EEUploadService
+    import pocketpaw_ee.cloud.uploads.router as uploads_module
+    from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
+    from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+    from pocketpaw_ee.cloud.uploads.service import EEUploadService
+
     from pocketpaw.uploads.config import UploadSettings
     from pocketpaw.uploads.local import LocalStorageAdapter
 
@@ -42,9 +43,8 @@ def folder_client(tmp_path: Path, beanie_upload_db, monkeypatch):
 
     app = FastAPI()
     from fastapi import Header
-
-    from ee.cloud.license import require_license
-    from ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
     app.dependency_overrides[require_license] = lambda: None
 
@@ -117,7 +117,7 @@ def test_rename_folder_rewrites_descendants(folder_client: TestClient):
     )
     # Find the /reports folder id.
     # Use list_children via provider path listing — hit internal store directly.
-    from ee.cloud.uploads.folder_store import FolderStore
+    from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 
     store = FolderStore()
 
@@ -156,7 +156,7 @@ def test_delete_folder_not_empty_409(folder_client: TestClient):
     )
     import asyncio
 
-    from ee.cloud.uploads.folder_store import FolderStore
+    from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 
     async def _fid():
         return (await FolderStore().get_by_path("w1", "/a")).folder_id
@@ -178,7 +178,7 @@ def test_delete_folder_cascade_softdeletes_files(folder_client: TestClient):
     fid_file = r_up.json()["uploaded"][0]["id"]
     import asyncio
 
-    from ee.cloud.uploads.folder_store import FolderStore
+    from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 
     async def _fid():
         return (await FolderStore().get_by_path("w1", "/a")).folder_id
@@ -195,7 +195,7 @@ def test_folder_rename_stranger_forbidden(folder_client: TestClient):
     folder_client.post("/api/v1/uploads/folders", json={"path": "/a"}, headers=_hdr(user="u1"))
     import asyncio
 
-    from ee.cloud.uploads.folder_store import FolderStore
+    from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 
     async def _fid():
         return (await FolderStore().get_by_path("w1", "/a")).folder_id
@@ -214,7 +214,7 @@ def test_folder_rename_admin_allowed(folder_client: TestClient):
     folder_client.admins.add(("admin", "w1"))  # type: ignore[attr-defined]
     import asyncio
 
-    from ee.cloud.uploads.folder_store import FolderStore
+    from pocketpaw_ee.cloud.uploads.folder_store import FolderStore
 
     async def _fid():
         return (await FolderStore().get_by_path("w1", "/a")).folder_id

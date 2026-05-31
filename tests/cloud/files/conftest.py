@@ -7,15 +7,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-
-from ee.cloud.files.dto import (
+from pocketpaw_ee.cloud.files.dto import (
     FileEntry,
     Page,
     Permission,
     RequestContext,
     ResolvedMount,
 )
-from ee.cloud.files.errors import ProviderUnsupported
+from pocketpaw_ee.cloud.files.errors import ProviderUnsupported
 
 
 class FakeProvider:

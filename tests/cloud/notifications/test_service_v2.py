@@ -9,13 +9,12 @@ tests request it explicitly to assert on ``bus.events``.
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.events import (
     NotificationCleared,
     NotificationNew,
     NotificationRead,
 )
-from ee.cloud.notifications import service as notifications_service
+from pocketpaw_ee.cloud.notifications import service as notifications_service
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 

@@ -1,10 +1,10 @@
 import pytest
+from pocketpaw_ee.cloud.files.abac_config import AbacRule, AbacRuleSet
+from pocketpaw_ee.cloud.files.browse import browse_mount
+from pocketpaw_ee.cloud.files.dto import MountConfig
+from pocketpaw_ee.cloud.files.errors import MountNotFound
+from pocketpaw_ee.cloud.files.registry import ProviderRegistry
 
-from ee.cloud.files.abac_config import AbacRule, AbacRuleSet
-from ee.cloud.files.browse import browse_mount
-from ee.cloud.files.dto import MountConfig
-from ee.cloud.files.errors import MountNotFound
-from ee.cloud.files.registry import ProviderRegistry
 from tests.cloud.files.conftest import FakeProvider
 
 

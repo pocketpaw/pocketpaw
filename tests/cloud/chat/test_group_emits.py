@@ -15,17 +15,17 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from ee.cloud.chat import group_service
-from ee.cloud.chat.schemas import (
+from pocketpaw_ee.cloud.chat import group_service
+from pocketpaw_ee.cloud.chat.schemas import (
     AddGroupAgentRequest,
     CreateGroupRequest,
     UpdateGroupAgentRequest,
     UpdateGroupRequest,
 )
-from ee.cloud.models.group import Group as _GroupDoc
-from ee.cloud.models.group import GroupAgent as _GroupAgentDoc
-from ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
+from pocketpaw_ee.cloud.realtime.events import (
     GroupAgentAdded,
     GroupAgentRemoved,
     GroupAgentUpdated,
@@ -48,7 +48,7 @@ async def _empty_lookups(_groups):
 def patched_lookups(monkeypatch):
     """Replace ``_populate_lookups_for_domain_groups`` with an empty stub."""
     monkeypatch.setattr(
-        "ee.cloud.chat.group_service._populate_lookups_for_domain_groups", _empty_lookups
+        "pocketpaw_ee.cloud.chat.group_service._populate_lookups_for_domain_groups", _empty_lookups
     )
 
 
@@ -56,7 +56,7 @@ def patched_lookups(monkeypatch):
 def resolver_mock(monkeypatch):
     """Replace ``get_resolver()`` so we can assert invalidate_group calls."""
     rmock = MagicMock()
-    monkeypatch.setattr("ee.cloud.chat.group_service.get_resolver", lambda: rmock)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.group_service.get_resolver", lambda: rmock)
     return rmock
 
 
@@ -87,6 +87,18 @@ async def _make_group(
         owner=owner,
         agents=agent_docs,
     )
+    await doc.insert()
+    return doc
+
+
+async def _make_agent(
+    *,
+    workspace: str = "w1",
+    owner: str = "u1",
+    name: str = "Agent",
+    slug: str = "agent",
+) -> _AgentDoc:
+    doc = _AgentDoc(workspace=workspace, name=name, slug=slug, owner=owner)
     await doc.insert()
     return doc
 
@@ -275,57 +287,150 @@ async def test_set_member_role_emits_member_role_no_invalidation(
 
 @pytest.mark.asyncio
 async def test_add_agent_emits_agent_added(mongo_db, recording_bus):
-    group = await _make_group(owner="u1", member_roles={"u1": "admin"})
+    agent = await _make_agent(workspace="w1")
+    group = await _make_group(workspace="w1", owner="u1", member_roles={"u1": "admin"})
 
     await group_service.add_agent(
         str(group.id),
         "u1",
-        AddGroupAgentRequest(agent_id="a1", respond_mode="auto"),
+        AddGroupAgentRequest(agent_id=str(agent.id), respond_mode="auto"),
     )
 
     events = [e for e in recording_bus.events if isinstance(e, GroupAgentAdded)]
     assert len(events) == 1
     assert events[0].data == {
         "group_id": str(group.id),
-        "agent_id": "a1",
+        "agent_id": str(agent.id),
         "respond_mode": "auto",
     }
 
 
 @pytest.mark.asyncio
 async def test_update_agent_emits_agent_updated(mongo_db, recording_bus):
+    agent = await _make_agent(workspace="w1")
     group = await _make_group(
+        workspace="w1",
         owner="u1",
         member_roles={"u1": "admin"},
-        agents=[("a1", "assistant", "auto")],
+        agents=[(str(agent.id), "assistant", "auto")],
     )
 
     await group_service.update_agent(
-        str(group.id), "u1", "a1", UpdateGroupAgentRequest(respond_mode="mention")
+        str(group.id), "u1", str(agent.id), UpdateGroupAgentRequest(respond_mode="mention")
     )
 
     events = [e for e in recording_bus.events if isinstance(e, GroupAgentUpdated)]
     assert len(events) == 1
     assert events[0].data == {
         "group_id": str(group.id),
-        "agent_id": "a1",
+        "agent_id": str(agent.id),
         "respond_mode": "mention",
     }
 
 
 @pytest.mark.asyncio
 async def test_remove_agent_emits_agent_removed(mongo_db, recording_bus):
+    agent = await _make_agent(workspace="w1")
     group = await _make_group(
+        workspace="w1",
         owner="u1",
         member_roles={"u1": "admin"},
-        agents=[("a1", "assistant", "auto")],
+        agents=[(str(agent.id), "assistant", "auto")],
     )
 
-    await group_service.remove_agent(str(group.id), "u1", "a1")
+    await group_service.remove_agent(str(group.id), "u1", str(agent.id))
 
     events = [e for e in recording_bus.events if isinstance(e, GroupAgentRemoved)]
     assert len(events) == 1
-    assert events[0].data == {"group_id": str(group.id), "agent_id": "a1"}
+    assert events[0].data == {"group_id": str(group.id), "agent_id": str(agent.id)}
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant agent-on-group IDOR guard (Wave 2 task 9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_agent_rejects_cross_workspace_agent(mongo_db, recording_bus):
+    """A workspace-A admin cannot wire a workspace-B agent into an A-side group.
+
+    The service must raise NotFound (not Forbidden) — 404 keeps the agent's
+    existence opaque to a probing attacker.
+    """
+    from pocketpaw_ee.cloud.shared.errors import NotFound
+
+    foreign_agent = await _make_agent(workspace="w2", owner="u2", slug="foreign")
+    group = await _make_group(workspace="w1", owner="u1", member_roles={"u1": "admin"})
+
+    with pytest.raises(NotFound):
+        await group_service.add_agent(
+            str(group.id),
+            "u1",
+            AddGroupAgentRequest(agent_id=str(foreign_agent.id), respond_mode="auto"),
+        )
+
+    assert not [e for e in recording_bus.events if isinstance(e, GroupAgentAdded)]
+
+
+@pytest.mark.asyncio
+async def test_add_agent_rejects_unknown_agent(mongo_db, recording_bus):
+    """A made-up agent_id must surface as NotFound, not Forbidden."""
+    from beanie import PydanticObjectId
+    from pocketpaw_ee.cloud.shared.errors import NotFound
+
+    group = await _make_group(workspace="w1", owner="u1", member_roles={"u1": "admin"})
+
+    with pytest.raises(NotFound):
+        await group_service.add_agent(
+            str(group.id),
+            "u1",
+            AddGroupAgentRequest(agent_id=str(PydanticObjectId()), respond_mode="auto"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_agent_rejects_cross_workspace_agent(mongo_db, recording_bus):
+    """update_agent must refuse a foreign-workspace agent even if the id
+    happens to already be on the group's agents list (corrupt-state guard)."""
+    from pocketpaw_ee.cloud.shared.errors import NotFound
+
+    foreign_agent = await _make_agent(workspace="w2", owner="u2", slug="foreign")
+    group = await _make_group(
+        workspace="w1",
+        owner="u1",
+        member_roles={"u1": "admin"},
+        agents=[(str(foreign_agent.id), "assistant", "auto")],
+    )
+
+    with pytest.raises(NotFound):
+        await group_service.update_agent(
+            str(group.id),
+            "u1",
+            str(foreign_agent.id),
+            UpdateGroupAgentRequest(respond_mode="mention"),
+        )
+
+    assert not [e for e in recording_bus.events if isinstance(e, GroupAgentUpdated)]
+
+
+@pytest.mark.asyncio
+async def test_remove_agent_rejects_cross_workspace_agent(mongo_db, recording_bus):
+    """remove_agent must refuse a foreign-workspace agent — guards against
+    using a leaked agent_id to fingerprint or de-wire foreign agents."""
+    from pocketpaw_ee.cloud.shared.errors import NotFound
+
+    foreign_agent = await _make_agent(workspace="w2", owner="u2", slug="foreign")
+    group = await _make_group(
+        workspace="w1",
+        owner="u1",
+        member_roles={"u1": "admin"},
+        agents=[(str(foreign_agent.id), "assistant", "auto")],
+    )
+
+    with pytest.raises(NotFound):
+        await group_service.remove_agent(str(group.id), "u1", str(foreign_agent.id))
+
+    assert not [e for e in recording_bus.events if isinstance(e, GroupAgentRemoved)]
 
 
 # ---------------------------------------------------------------------------
@@ -368,8 +473,8 @@ async def test_get_or_create_agent_dm_emits_when_created(
     )
     fake_agent_cls = MagicMock()
     fake_agent_cls.get = AsyncMock(return_value=fake_agent_doc)
-    monkeypatch.setattr("ee.cloud.models.agent.Agent", fake_agent_cls)
-    monkeypatch.setattr("ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
+    monkeypatch.setattr("pocketpaw_ee.cloud.models.agent.Agent", fake_agent_cls)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
 
     await group_service.get_or_create_agent_dm("w1", "u1", "a1")
 
@@ -398,8 +503,8 @@ async def test_get_or_create_agent_dm_no_emit_when_existing(
     )
     fake_agent_cls = MagicMock()
     fake_agent_cls.get = AsyncMock(return_value=fake_agent_doc)
-    monkeypatch.setattr("ee.cloud.models.agent.Agent", fake_agent_cls)
-    monkeypatch.setattr("ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
+    monkeypatch.setattr("pocketpaw_ee.cloud.models.agent.Agent", fake_agent_cls)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
 
     await group_service.get_or_create_agent_dm("w1", "u1", "a1")
 
@@ -425,7 +530,7 @@ async def test_join_group_allows_channel_type(
 @pytest.mark.asyncio
 async def test_join_group_still_rejects_private(mongo_db, recording_bus):
     """Private groups must remain invite-only."""
-    from ee.cloud.shared.errors import Forbidden
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
 
     group = await _make_group(owner="u1", type="private", members=["u1"])
 

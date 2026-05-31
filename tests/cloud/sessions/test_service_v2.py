@@ -10,15 +10,14 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.realtime.events import (
     SessionCreated,
     SessionDeleted,
     SessionUpdated,
 )
-from ee.cloud.sessions import service as sessions_service
-from ee.cloud.sessions.dto import CreateSessionRequest, UpdateSessionRequest
+from pocketpaw_ee.cloud.sessions import service as sessions_service
+from pocketpaw_ee.cloud.sessions.dto import CreateSessionRequest, UpdateSessionRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -41,7 +40,7 @@ def captured_legacy_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, d
         async def emit(self, name: str, payload: dict) -> None:
             events.append((name, payload))
 
-    monkeypatch.setattr("ee.cloud.sessions.service.event_bus", _FakeBus())
+    monkeypatch.setattr("pocketpaw_ee.cloud.sessions.service.event_bus", _FakeBus())
     return events
 
 
@@ -110,7 +109,7 @@ async def test_delete_emits_session_deleted(recording_bus) -> None:
 
 
 async def test_get_rejects_other_owner() -> None:
-    from ee.cloud.shared.errors import Forbidden
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
 
     s = await sessions_service.create(_ctx("u1"), "w1", CreateSessionRequest(title="t"))
     with pytest.raises(Forbidden):
@@ -164,7 +163,7 @@ async def test_touch_emits_session_updated(recording_bus) -> None:
     doc_stub = MagicMock()
     doc_stub.find_one = AsyncMock(return_value=session)
 
-    with patch("ee.cloud.sessions.service._SessionDoc", new=doc_stub):
+    with patch("pocketpaw_ee.cloud.sessions.service._SessionDoc", new=doc_stub):
         await sessions_service.touch("websocket_abc")
 
     events = [e for e in recording_bus.events if isinstance(e, SessionUpdated)]
@@ -181,7 +180,7 @@ async def test_touch_no_emit_when_session_missing(recording_bus) -> None:
     doc_stub = MagicMock()
     doc_stub.find_one = AsyncMock(return_value=None)
 
-    with patch("ee.cloud.sessions.service._SessionDoc", new=doc_stub):
+    with patch("pocketpaw_ee.cloud.sessions.service._SessionDoc", new=doc_stub):
         await sessions_service.touch("missing")
 
     assert not [e for e in recording_bus.events if isinstance(e, SessionUpdated)]

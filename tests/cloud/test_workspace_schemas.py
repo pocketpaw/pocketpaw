@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
-
-from ee.cloud.workspace.dto import (
+from pocketpaw_ee.cloud.workspace.dto import (
     CreateInviteRequest,
     CreateWorkspaceRequest,
     UpdateMemberRoleRequest,
     UpdateWorkspaceRequest,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 
 def test_create_workspace_required_fields():

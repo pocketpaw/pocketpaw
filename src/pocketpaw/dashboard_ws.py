@@ -461,6 +461,24 @@ async def websocket_handler(
                         settings.model_tier_moderate = data["model_tier_moderate"]
                     if data.get("model_tier_complex"):
                         settings.model_tier_complex = data["model_tier_complex"]
+                    if "budget_monthly_usd" in data:
+                        val = data["budget_monthly_usd"]
+                        if isinstance(val, int | float) and val >= 0:
+                            settings.budget_monthly_usd = float(val)
+                    if "budget_warning_threshold" in data:
+                        val = data["budget_warning_threshold"]
+                        if isinstance(val, int | float) and 0 < val <= 1:
+                            settings.budget_warning_threshold = float(val)
+                    if "budget_auto_pause" in data:
+                        settings.budget_auto_pause = bool(data["budget_auto_pause"])
+                    if "budget_reset_day" in data:
+                        val = data["budget_reset_day"]
+                        if isinstance(val, int | float) and 1 <= val <= 28:
+                            settings.budget_reset_day = int(val)
+                    if "trace_retention_days" in data:
+                        val = data["trace_retention_days"]
+                        if isinstance(val, int | float) and 1 <= val <= 365:
+                            settings.trace_retention_days = int(val)
                     if data.get("tts_provider"):
                         settings.tts_provider = data["tts_provider"]
                     if "tts_voice" in data:
@@ -781,6 +799,11 @@ async def websocket_handler(
                             "modelTierSimple": settings.model_tier_simple,
                             "modelTierModerate": settings.model_tier_moderate,
                             "modelTierComplex": settings.model_tier_complex,
+                            "budgetMonthlyUsd": settings.budget_monthly_usd,
+                            "budgetWarningThreshold": settings.budget_warning_threshold,
+                            "budgetAutoPause": settings.budget_auto_pause,
+                            "budgetResetDay": settings.budget_reset_day,
+                            "traceRetentionDays": settings.trace_retention_days,
                             "ttsProvider": settings.tts_provider,
                             "ttsVoice": settings.tts_voice,
                             "sttProvider": settings.stt_provider,

@@ -2335,6 +2335,87 @@
 
           <div class="border-t border-[var(--glass-border)]"></div>
 
+          <!-- Budget Controls -->
+          <div class="space-y-3">
+            <p class="text-[12px] font-medium text-[var(--text-secondary)] uppercase tracking-wide">Budget Controls</p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div class="flex flex-col gap-1.5">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Monthly Budget Cap (USD)</label>
+                <input
+                  type="number"
+                  x-model="settings.budgetMonthlyUsd"
+                  @change="saveSettings()"
+                  min="0"
+                  step="0.01"
+                  placeholder="0 (unlimited)"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                />
+                <span class="text-[11px] text-white/40">Set to 0 for no monthly cap.</span>
+              </div>
+
+              <div class="flex flex-col gap-1.5">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Warning Threshold</label>
+                <input
+                  type="number"
+                  x-model="settings.budgetWarningThreshold"
+                  @change="saveSettings()"
+                  min="0.05"
+                  max="1"
+                  step="0.05"
+                  placeholder="0.8"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                />
+                <span class="text-[11px] text-white/40">Fraction from 0 to 1 (0.8 means warn at 80%).</span>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div class="flex flex-col gap-1.5">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Budget Reset Day</label>
+                <input
+                  type="number"
+                  x-model="settings.budgetResetDay"
+                  @change="saveSettings()"
+                  min="1"
+                  max="28"
+                  placeholder="1"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                />
+                <span class="text-[11px] text-white/40">Use 1-28 to avoid month-length edge cases.</span>
+              </div>
+
+              <div class="flex flex-col gap-1.5">
+                <label class="text-[12px] font-medium text-[var(--text-secondary)]">Trace Retention (days)</label>
+                <input
+                  type="number"
+                  x-model="settings.traceRetentionDays"
+                  @change="saveSettings()"
+                  min="1"
+                  max="365"
+                  placeholder="30"
+                  class="w-full bg-black/30 border border-[var(--glass-border)] rounded-[10px] py-2.5 px-3 text-[13px] text-white placeholder-white/30 focus:outline-none focus:border-[var(--accent-color)] transition-all"
+                />
+                <span class="text-[11px] text-white/40">Controls how long trace history is kept.</span>
+              </div>
+            </div>
+
+            <label class="flex items-start gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                x-model="settings.budgetAutoPause"
+                @change="saveSettings()"
+                class="mt-0.5 accent-[var(--accent-color)] w-4 h-4"
+              />
+              <div class="flex flex-col">
+                <span class="text-[13px] font-medium group-hover:text-white transition-colors">Auto-Pause on Budget Limit</span>
+                <span class="text-[11px] text-white/50 mt-0.5">Pause agent processing automatically when spend reaches the active cap.</span>
+              </div>
+            </label>
+          </div>
+
+          <div class="border-t border-[var(--glass-border)]"></div>
+
           <!-- Self-Audit Daemon -->
           <div>
             <label class="flex items-start gap-2.5 cursor-pointer group">

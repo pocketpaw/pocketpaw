@@ -1,0 +1,110 @@
+---
+title: "LiveKit: Agentic Meetings"
+description: "PocketPaw's LiveKit integration powers voice, video, screen-sharing, and composite room recording for group calls. Agents can join calls; owners can record to S3."
+section: Core Concepts
+ogType: article
+keywords: ["livekit", "agentic meetings", "voice", "video", "composite recording", "S3"]
+tags: ["livekit", "calls", "meetings"]
+---
+
+# LiveKit: Agentic Meetings
+
+LiveKit is the real-time media layer behind PocketPaw's group calls — voice, video, screen sharing, and composite room recording. The integration ships as a cloud router (`pocketpaw_ee.cloud.livekit`) that brokers room creation, participant tokens, and recording lifecycle. Agents can join calls as participants alongside humans; recordings land in S3 with owner-gated playback.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED.
+
+**Implementation PRs:** #1112 (LiveKit call management API + soul memory recall), #1186 (composite room recording with S3 output + owner-only controls)
+
+**Workspace RFC:** none — direct implementation.
+
+**What's live:** voice + video calls, screen sharing, camera, composite room recording to S3 with owner-only access, soul memory recall during calls.
+
+**What's planned:** transcription + AI summaries + post-call auto-processing (issue #1184).
+</Callout>
+
+## What LiveKit Gives PocketPaw
+
+The integration enables three call patterns:
+
+| Pattern | Who joins | Why |
+|---------|-----------|-----|
+| **Human-only call** | Workspace members | Replace a Zoom for in-team discussions; record for absent members |
+| **Human + agent call** | Members plus a meeting agent | The agent listens, can contribute, recalls soul memory for context |
+| **Agent-only call** | Two or more agents | Multi-agent coordination on a shared topic, recorded for the human to review |
+
+The substrate is LiveKit Cloud — `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` environment variables wire to a LiveKit project. The Python SDK (`livekit-api`) handles room CRUD and token minting; the meeting agent lifecycle runs in a subprocess to keep WebRTC and Deepgram out of the FastAPI event loop.
+
+## Room Model
+
+Rooms map deterministically to chat groups:
+
+| Concept | Identifier | Scope |
+|---------|-----------|-------|
+| **Chat group** | `group_id` (workspace-scoped) | The conversation that owns the call |
+| **LiveKit room** | `room_name = "group-call-" + group_id` | The active media session |
+| **Egress (recording)** | `egress_id` (in-memory registry) | The composite recording job |
+| **Participant identity** | `user_id` | The user's display name comes from `user.full_name` |
+
+A `POST /api/v1/livekit/rooms` creates the room if it does not exist, or returns the existing one. Caller is checked for group membership; only group members may create a room, generate participant tokens, get room info, or end the call. Recording is **additionally** gated on workspace ownership.
+
+## Composite Recording
+
+PR #1186 added `RoomCompositeEgress` recording — LiveKit's server-side recording mode that composites the room into a single MP4 stream rather than recording per-participant tracks. The output:
+
+- **Codec / quality:** H.264, 720p, MP4 container.
+- **Destination:** S3, configured via the existing `S3_*` env vars (shared with the uploads module — same credentials, no separate bucket).
+- **Lifecycle:** Start via `POST /api/v1/livekit/rooms/{group_id}/recording/start`; stop via `/recording/stop`; status via `GET /recording`.
+- **Registry:** Active recordings live in an in-memory `_active_recordings: dict[str, str]` mapping `group_id → egress_id`.
+- **File row:** When the recording stops, the service creates a `FileUpload` doc in MongoDB so the recording surfaces in the workspace's `/files` page alongside other uploads.
+
+Recording controls are **workspace-owner only** (`_require_workspace_owner()`). The frontend shows a red `REC` indicator in the call top bar when active; the Record button itself only renders for owners.
+
+## Frontend Pairing
+
+The Svelte frontend lives in the paw-enterprise repo and consumes this router:
+
+- **Call UI** — `paw-enterprise#206` wires `CallPanel.svelte` (Record button, REC indicator, participant grid) plus `call/service.ts` (start / stop / status / token helpers) and `call/store.svelte.ts` (CallSession state: `isRecording`, `recordingStartedAt`, `canRecord`).
+- **Records UI** — `paw-enterprise#241` surfaces past recordings in the workspace records view; the `FileUpload` MongoDB row written on stop-recording is what the records page queries.
+- **Permissions wiring** — `ChatPanel.svelte` passes `isWorkspaceOwner` as a prop to `CallPanel.svelte` so the Record button hides for non-owners.
+
+## API Surface
+
+All routes under `/api/v1/livekit/*` require an active enterprise license, user authentication, and group membership. Recording routes additionally require workspace ownership.
+
+| Method + Path | Purpose |
+|---------------|---------|
+| `POST /livekit/rooms` | Create or fetch the room for a group; returns a short-lived admin token for the call bot |
+| `POST /livekit/token` | Mint a participant access token (default TTL 3600s); display name comes from `user.full_name` |
+| `GET /livekit/rooms/{group_id}` | Room state: participant count, list, active flag |
+| `DELETE /livekit/rooms/{group_id}` | End the call; all participants are disconnected; the bot's notes post shortly after |
+| `POST /livekit/rooms/{group_id}/recording/start` | Begin composite recording to S3 (owner only) |
+| `POST /livekit/rooms/{group_id}/recording/stop` | Stop recording; writes a `FileUpload` doc; returns the file id |
+| `GET /livekit/rooms/{group_id}/recording` | Current recording status (mapped from LiveKit `EgressStatus` protobuf) |
+
+Events fire on the realtime bus:
+
+- `CallStarted` — on room create
+- `CallEnded` — on room delete
+
+The frontend's realtime channel subscribes to both so participant lists update without polling.
+
+## Soul Memory Integration
+
+PR #1112 wired soul memory recall into the meeting agent path. When an agent joins a call (via the subprocess agent lifecycle managed in `service.py`'s `_SubprocessAgentRef`), the agent's bootstrap pulls relevant soul memories into context:
+
+- **Episodic** — past calls with the same participants, decisions made, action items
+- **Semantic** — facts about projects / people / topics mentioned in the call group
+- **Procedural** — call etiquette and any group-specific conventions
+
+The result: an agent joining a recurring meeting with the same humans already knows the prior decisions, not just the last few minutes of transcript. This is the foundation the transcription + summary work (#1184) builds on — once transcripts land, they feed back into soul as episodic memories the agent recalls in the next call.
+
+## What's Next
+
+Three things land in the next cut, tracked under issue #1184:
+
+1. **Transcription** — Deepgram (already in the subprocess deps) produces a live transcript that streams to the call UI and is persisted with the recording.
+2. **AI summaries** — Post-call, a summarizer produces structured notes (decisions, action items, open questions) and posts them to the chat group thread.
+3. **Auto-processing** — Action items detected in the summary route through the existing pocket actions pipeline so a meeting can produce concrete writes (a calendar event, a tracker entry) under the same Instinct + outcome model the rest of the system uses.
+
+The recording infrastructure is the precondition: once a composite MP4 is reliably in S3, the transcript + summary jobs can run async against it without burdening the live call path.

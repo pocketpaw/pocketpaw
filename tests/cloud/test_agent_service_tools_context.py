@@ -5,15 +5,15 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from ee.cloud.chat.agent_service import (
+from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
     assemble_toolset,
     build_context_block,
     build_knowledge_context,
 )
-from ee.ripple._design import RIPPLE_DESIGN_RULES
+
+from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
 
 
 def _pocket_ctx(specs: list[dict]) -> ScopeContext:
@@ -155,7 +155,7 @@ def test_build_context_block_has_stable_static_prefix():
 
 
 def test_inline_widget_help_returns_catalog_for_known_types():
-    from ee.ripple._inline_core import widget_help
+    from pocketpaw.ripple._inline_core import widget_help
 
     out = widget_help(["chart"])
     # Some chart specifics must appear when 'chart' is asked for.
@@ -178,7 +178,7 @@ def test_inline_widget_help_returns_catalog_for_known_types():
 
 
 def test_inline_widget_help_no_args_returns_full_catalog():
-    from ee.ripple._inline_core import widget_help
+    from pocketpaw.ripple._inline_core import widget_help
 
     assert widget_help() == RIPPLE_DESIGN_RULES
     assert widget_help([]) == RIPPLE_DESIGN_RULES
@@ -215,7 +215,7 @@ def test_pocket_delegation_rule_points_at_specialist_mcp_tool():
     """The delegation rule must teach the agent to call the
     ``pocket_specialist__create`` MCP tool. The legacy native-subagent
     Agent-tool path has been removed."""
-    from ee.ripple._pockets import POCKET_DELEGATION_RULE
+    from pocketpaw.ripple._pockets import POCKET_DELEGATION_RULE
 
     assert "pocket_specialist__create" in POCKET_DELEGATION_RULE
     # Legacy native-subagent kwarg shape must be gone.
@@ -324,10 +324,127 @@ def test_non_subagent_backend_pocket_id_inlines_interaction_prompt():
     block = build_context_block(ctx_edit, backend_name="codex_cli")
     # The pocket id was substituted into the interaction prompt.
     assert "pocket-abc" in block
-    # Heavy interaction guidance IS present.
-    assert "<pocket-workflow>" in block
-    # Delegation rule is NOT.
+    # The interaction prompt IS inlined — post-#1163 the calling-agent
+    # interaction prompt is the slim delegation flow (<pocket-interaction>),
+    # while the heavy <pocket-workflow> block lives on the edit specialist
+    # only (see test_subagent_backend... above, line ~275).
+    assert "<pocket-interaction>" in block
+    assert "<pocket-workflow>" not in block
+    # The subagent-style delegation rule is NOT (codex_cli has no
+    # native subagent concept).
     assert "<pocket-delegation>" not in block
+
+
+def test_home_pocket_scope_injects_home_prompt():
+    """When the resolved scope's pocket has ``type == "home"``, the
+    behavior instructions must carry HOME_POCKET_PROMPT so the agent
+    knows it is on the user's home surface."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="home-pocket-1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="home-pocket-1",
+        pocket_type="home",
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<home-pocket>" in block, (
+        "HOME_POCKET_PROMPT must be injected for a type='home' pocket scope"
+    )
+
+
+def test_non_home_pocket_scope_omits_home_prompt():
+    """A normal (non-home) pocket scope must NOT receive HOME_POCKET_PROMPT."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="pocket-abc",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="pocket-abc",
+        pocket_type="custom",
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<home-pocket>" not in block, "HOME_POCKET_PROMPT leaked into a non-home pocket scope"
+
+
+def test_home_pocket_prompt_injected_for_cli_backend_too():
+    """The home-pocket case is backend-agnostic — a CLI backend in a
+    type='home' scope also gets HOME_POCKET_PROMPT."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="home-pocket-1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="home-pocket-1",
+        pocket_type="home",
+    )
+    block = build_behavior_instructions(ctx, backend_name="codex_cli")
+    assert "<home-pocket>" in block
+
+
+def test_home_pocket_scope_omits_specialist_delegation_rule():
+    """The home agent mutates widgets directly via ``add_widget`` — it does
+    NOT delegate to the pocket specialist. ``POCKET_DELEGATION_RULE`` and
+    ``HOME_POCKET_PROMPT`` contradict each other (one says "never call
+    add_widget, delegate"; the other says "call add_widget"). For a
+    type='home' scope on an MCP backend the delegation rule must be dropped
+    so the agent gets exactly one consistent widget-creation instruction."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="home-pocket-1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="home-pocket-1",
+        pocket_type="home",
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    # The home prompt is present...
+    assert "<home-pocket>" in block
+    # ...and the contradicting delegation rule is NOT.
+    assert "<pocket-delegation>" not in block, (
+        "POCKET_DELEGATION_RULE contradicts HOME_POCKET_PROMPT — it must "
+        "not be emitted for a type='home' scope"
+    )
+
+
+def test_non_home_pocket_scope_keeps_specialist_delegation_rule():
+    """A normal (non-home) MCP pocket scope still gets the delegation rule —
+    the home-only drop must not regress ordinary pocket chats."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="pocket-abc",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="pocket-abc",
+        pocket_type="custom",
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<pocket-delegation>" in block
 
 
 @pytest.mark.asyncio
@@ -351,7 +468,7 @@ async def test_build_knowledge_context_includes_workspace_kb_hits_and_file_refs(
         return ""
 
     with patch(
-        "ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
         AsyncMock(side_effect=_fake_search),
     ):
         out = await build_knowledge_context(
@@ -386,7 +503,7 @@ async def test_build_knowledge_context_falls_back_to_scope_block_on_kb_failure()
     )
 
     with patch(
-        "ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
+        "pocketpaw_ee.cloud.agents.knowledge.KnowledgeService.search_context_for_scope",
         AsyncMock(side_effect=RuntimeError("kb down")),
     ):
         out = await build_knowledge_context(ctx, user_message="hello")

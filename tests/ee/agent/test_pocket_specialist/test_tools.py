@@ -3,8 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
-from ee.agent.pocket_specialist.tools import (
+from pocketpaw_ee.agent.pocket_specialist.tools import (
     make_list_pockets_tool,
     make_persist_pocket_tool,
     make_validate_spec_tool,
@@ -15,7 +14,7 @@ class TestListPocketsTool:
     @pytest.mark.asyncio
     async def test_closes_over_workspace_and_user(self):
         with patch(
-            "ee.agent.pocket_specialist.tools._agent_list_pockets",
+            "pocketpaw_ee.agent.pocket_specialist.tools._agent_list_pockets",
             new=AsyncMock(return_value=[{"id": "p1", "name": "X"}]),
         ) as mocked:
             tool = make_list_pockets_tool(workspace_id="ws-1", user_id="user-A")
@@ -38,7 +37,7 @@ class TestValidateSpecTool:
             ],
         }
         with patch(
-            "ee.agent.pocket_specialist.tools._get_manifest",
+            "pocketpaw_ee.agent.pocket_specialist.tools._get_manifest",
             new=AsyncMock(return_value=fake_manifest),
         ):
             tool = make_validate_spec_tool()
@@ -63,7 +62,7 @@ class TestValidateSpecTool:
             ],
         }
         with patch(
-            "ee.agent.pocket_specialist.tools._get_manifest",
+            "pocketpaw_ee.agent.pocket_specialist.tools._get_manifest",
             new=AsyncMock(return_value=fake_manifest),
         ):
             tool = make_validate_spec_tool()
@@ -81,7 +80,7 @@ class TestPersistPocketTool:
     @pytest.mark.asyncio
     async def test_create_path(self):
         with patch(
-            "ee.agent.pocket_specialist.tools._agent_create",
+            "pocketpaw_ee.agent.pocket_specialist.tools._agent_create",
             new=AsyncMock(return_value=({"id": "new-1", "name": "Created"}, "new-1", None)),
         ) as mocked:
             tool = make_persist_pocket_tool(workspace_id="ws-1", user_id="user-A")
@@ -101,7 +100,7 @@ class TestPersistPocketTool:
     @pytest.mark.asyncio
     async def test_update_path(self):
         with patch(
-            "ee.agent.pocket_specialist.tools._agent_update",
+            "pocketpaw_ee.agent.pocket_specialist.tools._agent_update",
             new=AsyncMock(return_value=({"id": "p1", "name": "Updated"}, None)),
         ) as mocked:
             tool = make_persist_pocket_tool(workspace_id="ws-1", user_id="user-A")

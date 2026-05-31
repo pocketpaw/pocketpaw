@@ -1,0 +1,1094 @@
+"""LangChain ``StructuredTool`` factories for the pocket specialist's
+internal use.
+
+Each factory closes over ``workspace_id`` and ``user_id``, so those are
+NEVER tool arguments visible to the LLM. The LLM cannot accidentally
+cross workspaces — multi-tenancy stays enforced even if the model
+hallucinates argument names.
+
+The thunk indirections (``_agent_list_pockets``, ``_agent_create``,
+``_agent_update``, ``_get_manifest``) are bound at module level so
+tests can patch ``pocketpaw_ee.agent.pocket_specialist.tools.<name>``
+without reaching into ``pocketpaw_ee.cloud`` internals.
+
+Changes: 2026-05-14 — added the Tier-2 prop-array item tool factories
+(set / append / remove ``_prop_array_item``), reworked onto the
+pocketpaw_ee layout from PR #1106.
+Changes: 2026-05-21 (#1163) — ``_capture_op`` now accepts the tool's
+result dict. A service-rejected op (``{ok: false}``) is NO LONGER
+appended to ``capture['ops']`` — a rejected op is not an applied op.
+Instead it is recorded in ``capture['rejected']`` with its error so the
+runtime can fold the reason into the response ``warnings``.
+Changes: 2026-05-22 (RFC 04 alpha follow-up) — added the ``set_source``
+/ ``remove_source`` edit-tool factories so the specialist can author the
+pocket's top-level ``rippleSpec.sources`` block (read-only GET data
+bindings). Registered in ``make_edit_pocket_tools``.
+Changes: 2026-05-22 (RFC 05 M2a) — added the ``set_action`` /
+``remove_action`` edit-tool factories so the specialist can author the
+pocket's top-level ``rippleSpec.actions`` block (write bindings —
+POST/PUT/PATCH/DELETE). Registered in ``make_edit_pocket_tools``.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel, Field
+
+from pocketpaw.ripple.manifest import get_manifest as _get_manifest
+from pocketpaw.ripple.manifest import validate_against_manifest
+from pocketpaw_ee.cloud.pockets.service import agent_create as _agent_create
+from pocketpaw_ee.cloud.pockets.service import agent_list as _agent_list_pockets
+from pocketpaw_ee.cloud.pockets.service import agent_update as _agent_update
+
+log = logging.getLogger(__name__)
+
+
+class _ListPocketsArgs(BaseModel):
+    """No arguments — workspace is closed over by the factory."""
+
+
+def make_list_pockets_tool(*, workspace_id: str, user_id: str) -> StructuredTool:
+    """Build a ``list_pockets`` tool bound to the given workspace/user.
+
+    Returns a compact list of ``{id, name, description, type, icon, color, owner}``.
+    """
+
+    async def _run() -> list[dict[str, Any]]:
+        return await _agent_list_pockets(workspace_id, user_id)
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="list_pockets",
+        description=(
+            "List existing pockets in the current workspace. Call this BEFORE "
+            "drafting a new spec to decide whether to extend an existing pocket "
+            "or create a new one. Returns a compact list of "
+            "{id, name, description, type, icon, color, owner}."
+        ),
+        args_schema=_ListPocketsArgs,
+    )
+
+
+class _ValidateSpecArgs(BaseModel):
+    spec: dict[str, Any] = Field(..., description="The rippleSpec to validate.")
+
+
+def _format_issue(issue: dict[str, Any]) -> str:
+    """Render a manifest validator issue as a single human-readable line."""
+    parts: list[str] = []
+    path = issue.get("path", "<root>")
+    type_ = issue.get("type", "?")
+    unknown = issue.get("unknown_props") or []
+    allowed = issue.get("allowed_props") or []
+    item_issues = issue.get("item_issues") or []
+    if unknown:
+        parts.append(
+            f"{path} ({type_}): unknown props {unknown}"
+            + (f"; allowed={allowed}" if allowed else "")
+        )
+    for item in item_issues:
+        parts.append(
+            f"{item.get('path', path)}: '{item.get('from')}' -> '{item.get('to')}'"
+            + (" (auto-fixed)" if item.get("applied") else "")
+        )
+    # validate_against_manifest only emits issues when unknown_props or
+    # item_issues is non-empty, so parts is guaranteed non-empty here.
+    return "; ".join(parts)
+
+
+def make_validate_spec_tool(*, capture: dict[str, Any] | None = None) -> StructuredTool:
+    """Build a ``validate_spec`` tool that checks a draft rippleSpec
+    against the live widget manifest.
+
+    Returns ``{"ok": bool, "warnings": [str, ...]}``. If the manifest is
+    unavailable (offline, fetch error), the tool returns ``ok=True`` with
+    an empty warnings list — best-effort, never block the user.
+
+    If ``capture`` is provided, ``capture["last_validation"]`` is set to
+    the most recent result dict. This is the runtime's side-channel for
+    reading validator output without parsing truncated tool_result content
+    (most agent backends don't surface tool return values verbatim).
+    """
+
+    # Lazy-import settings inside the thunk to avoid pulling pocketpaw
+    # config at module import time (keeps test isolation clean).
+    async def _run(spec: dict[str, Any]) -> dict[str, Any]:
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        manifest = await _get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            result: dict[str, Any] = {"ok": True, "warnings": []}
+        else:
+            issues = validate_against_manifest(spec, manifest, apply_aliases=True)
+            warnings = [_format_issue(issue) for issue in issues]
+            result = {"ok": len(warnings) == 0, "warnings": warnings}
+        if capture is not None:
+            capture["last_validation"] = result
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="validate_spec",
+        description=(
+            "Validate a draft rippleSpec against the renderer's widget "
+            "manifest. Returns {ok, warnings}. Re-draft and re-validate if "
+            "warnings is non-empty. After max retries (default 3), persist "
+            "anyway — never block the user."
+        ),
+        args_schema=_ValidateSpecArgs,
+    )
+
+
+class _PersistPocketArgs(BaseModel):
+    name: str | None = Field(
+        default=None,
+        description="Required when creating; ignored when target_pocket_id is set.",
+    )
+    description: str | None = None
+    icon: str | None = None
+    color: str | None = None
+    ripple_spec: dict[str, Any] = Field(..., description="The validated rippleSpec.")
+    target_pocket_id: str | None = Field(
+        default=None,
+        description=("When set, updates the existing pocket. When None, creates a new one."),
+    )
+
+
+def make_persist_pocket_tool(
+    *,
+    workspace_id: str,
+    user_id: str,
+    capture: dict[str, Any] | None = None,
+    max_validation_retries: int = 3,
+) -> StructuredTool:
+    """Build a ``persist_pocket`` tool bound to the given workspace/user.
+
+    Creates a new pocket when ``target_pocket_id`` is None; updates an
+    existing pocket otherwise. Returns the pocket view dict on success.
+    Raises ``RuntimeError`` on persist failure (the runtime catches and
+    surfaces the error to the agent).
+
+    **Validation retry loop:** when the manifest validator returns
+    warnings AND we haven't yet hit ``max_validation_retries``, the tool
+    REFUSES to persist and returns ``{ok: false, redraft_required: True,
+    warnings: [...]}``. The model sees the warnings, fixes the spec, and
+    calls again. On attempt ``max_validation_retries + 1`` we persist
+    regardless — never block the user with a perma-retry loop.
+
+    If ``capture`` is provided, ``capture["pocket"]`` is set to the
+    persisted pocket view when the tool runs successfully. This is the
+    runtime's side-channel for getting the actual return value out of the
+    LangGraph/MCP boundary, since most agent backends don't surface tool
+    return values verbatim in tool_result events.
+    """
+
+    async def _run(
+        ripple_spec: dict[str, Any],
+        name: str | None = None,
+        description: str | None = None,
+        icon: str | None = None,
+        color: str | None = None,
+        target_pocket_id: str | None = None,
+    ) -> dict[str, Any]:
+        # Inline manifest validation — replaces the separate validate_spec
+        # tool round-trip. apply_aliases=True normalizes known prop aliases
+        # in-place; remaining warnings are surfaced in the run output.
+        from pocketpaw.config import get_settings
+
+        settings = get_settings()
+        manifest = await _get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        warnings: list[str] = []
+        if manifest is not None:
+            issues = validate_against_manifest(ripple_spec, manifest, apply_aliases=True)
+            warnings = [_format_issue(issue) for issue in issues]
+        if capture is not None:
+            capture["warnings"] = warnings
+            attempt = int(capture.get("attempt", 0)) + 1
+            capture["attempt"] = attempt
+        else:
+            attempt = 1
+
+        if warnings and attempt <= max_validation_retries:
+            return {
+                "ok": False,
+                "redraft_required": True,
+                "attempt": attempt,
+                "max_attempts": max_validation_retries + 1,
+                "warnings": warnings,
+                "message": (
+                    "Your spec has invalid props that the renderer will ignore "
+                    "(widgets render `undefined`). Re-draft using ONLY the props "
+                    "listed in each widget's `allowed_props` and call "
+                    "persist_pocket again. Common issue: `chart` accepts "
+                    "{data, type, title, height, colors, tooltip} — NOT "
+                    "series/xAxis/dataKey/categoryKey. Each chart data point "
+                    "is {label, value} directly."
+                ),
+            }
+
+        if target_pocket_id is not None:
+            view, err = await _agent_update(
+                pocket_id=target_pocket_id,
+                name=name,
+                description=description,
+                icon=icon,
+                color=color,
+                ripple_spec=ripple_spec,
+            )
+            if err is not None or view is None:
+                raise RuntimeError(f"persist failed: {err or 'update returned no view'}")
+            if capture is not None:
+                capture["pocket"] = view
+            return view
+        view, new_pocket_id, err = await _agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name or "Untitled pocket",
+            description=description or "",
+            icon=icon or "",
+            color=color or "",
+            ripple_spec=ripple_spec,
+        )
+        if err is not None or view is None or new_pocket_id is None:
+            raise RuntimeError(f"persist failed: {err or 'create returned no view'}")
+
+        # Bind the active chat session to the newly-created pocket AND
+        # push the ``pocket_created`` SSE event so the frontend auto-
+        # opens it. Both happen atomically with creation; we no longer
+        # depend on the main agent's tool_result event being parsed by
+        # ``_maybe_handle_specialist_response`` (backend-dependent and
+        # was silently failing for some flows).
+        #
+        # The specialist runs as an inline ``await`` from the MCP tool
+        # handler so it shares the parent stream's contextvars — the
+        # session_mongo_id set in agent_router.attach_agent_identity
+        # AND the SSE event sink bound by attach_sse_event_sink are
+        # both reachable from here.
+        try:
+            from pocketpaw_ee.cloud.chat.agent_service import (
+                current_session_mongo_id,
+                push_sse_event,
+            )
+            from pocketpaw_ee.cloud.sessions import service as sessions_service
+
+            session_mongo_id = current_session_mongo_id()
+            if session_mongo_id:
+                linked = await sessions_service.attach_pocket_to_session_doc(
+                    session_mongo_id, user_id, new_pocket_id
+                )
+                if linked is None and capture is not None:
+                    # Owner mismatch / save failure / missing doc — already
+                    # logged at WARN by the service. Surface in capture so
+                    # the runtime can include it in warnings.
+                    existing = list(capture.get("warnings", []))
+                    existing.append(
+                        f"session->pocket bind skipped for session "
+                        f"{session_mongo_id} (owner mismatch or missing)"
+                    )
+                    capture["warnings"] = existing
+
+            # Frontend auto-open trigger. The desktop client listens for
+            # ``pocket_created`` and mounts the new pocket without waiting
+            # for a sidebar refresh. Pushing this from inside persist_pocket
+            # means the canvas opens the moment the row hits Mongo — no
+            # gap waiting for the parent agent's reply.
+            push_sse_event(
+                "pocket_created",
+                {
+                    "pocket_id": new_pocket_id,
+                    "pocket": view,
+                    "session_id": session_mongo_id,
+                },
+            )
+        except Exception:
+            # Never let bind or SSE-push failure break pocket creation —
+            # the pocket already exists in mongo and that's the primary
+            # contract of persist_pocket.
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "persist_pocket: post-create side effects failed (non-fatal)",
+                exc_info=True,
+            )
+
+        if capture is not None:
+            capture["pocket"] = view
+        return view
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="persist_pocket",
+        description=(
+            "Persist the rippleSpec as a new pocket OR update an existing one. "
+            "Pass target_pocket_id to update; omit to create. "
+            "Validates props against the live widget manifest BEFORE saving. "
+            "If your spec uses invented props (e.g. `chart.series`, "
+            "`chart.xAxis`, `chart.categoryKey` — all hallucinated, real chart "
+            "props are {data, type, title, height, colors, tooltip}), the tool "
+            "returns `{ok: false, redraft_required: true, warnings: [...]}` "
+            "WITHOUT persisting; re-draft the spec and call again. After "
+            "max_validation_retries (default 3) failed attempts the tool "
+            "persists anyway and you exit. On success returns the pocket view."
+        ),
+        args_schema=_PersistPocketArgs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Edit-specialist tools — granular ops keyed to a specific pocket_id.
+#
+# Each factory closes over ``pocket_id`` so the LLM never sees it as a
+# parameter — the edit specialist can't accidentally target the wrong
+# pocket, and the spec is one field smaller per tool. workspace_id +
+# user_id come from the per-stream ContextVars in agent_service; the
+# granular service ops read them directly when they push SSE events.
+# ---------------------------------------------------------------------------
+
+
+def _capture_op(
+    capture: dict[str, Any] | None,
+    op: str,
+    args: dict[str, Any],
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Record a granular op for the runtime to inspect.
+
+    An op the service ACCEPTED lands in ``capture['ops']`` — that list is
+    the runtime's source of truth for "what changed."
+
+    An op the service REJECTED (``result`` reports ``{ok: false}``) is NOT
+    an applied op, so it must NOT land in ``capture['ops']`` — counting it
+    there would let a run whose only op was rejected return
+    ``ok=true, ops=[<rejected op>]``, the same silent-failure class as
+    #1163. A rejected op is logged and recorded in ``capture['rejected']``
+    with its error so ``run_edit_specialist`` can surface the reason in
+    the response ``warnings``.
+    """
+    if isinstance(result, dict) and result.get("ok") is False:
+        error = result.get("error") or result
+        log.warning(
+            "[pocket-specialist:edit] granular op %s rejected by service: %s",
+            op,
+            error,
+        )
+        if capture is not None:
+            rejected = capture.get("rejected")
+            if not isinstance(rejected, list):
+                rejected = []
+                capture["rejected"] = rejected
+            rejected.append({"op": op, "args": args, "error": str(error)})
+        return
+    if capture is None:
+        return
+    ops = capture.get("ops")
+    if not isinstance(ops, list):
+        ops = []
+        capture["ops"] = ops
+    ops.append({"op": op, "args": args})
+
+
+class _GetPocketArgs(BaseModel):
+    """No arguments — pocket id is closed over."""
+
+
+def make_get_pocket_tool(*, pocket_id: str) -> StructuredTool:
+    """Read the current pocket document. Returns the full pocket view
+    including ``rippleSpec.ui`` and ``rippleSpec.state``."""
+
+    async def _run() -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import fetch_pocket_for_agent
+
+        return await fetch_pocket_for_agent(pocket_id)
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="get_pocket",
+        description=(
+            "Read the current pocket document. Call ONCE at the start of "
+            "your edit run to see the existing rippleSpec.ui (widget tree) "
+            "and rippleSpec.state (data). Returns the full pocket view."
+        ),
+        args_schema=_GetPocketArgs,
+    )
+
+
+class _SetStateArgs(BaseModel):
+    path: str = Field(..., description="Dotted path with optional bracket indices.")
+    value: Any = Field(..., description="New value — any JSON-serialisable type.")
+
+
+def make_set_state_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
+    """Update one value in ``state`` at ``path``. Widgets bound to
+    ``{state.<path>}`` re-render automatically — cheapest data edit."""
+
+    async def _run(path: str, value: Any) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_state_for_agent
+
+        result = await set_state_for_agent(pocket_id, path, value)
+        _capture_op(capture, "set_state", {"path": path, "value": value}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_state",
+        description=(
+            "Cheapest data edit. Write `value` into the pocket's state at "
+            "`path` (dotted, with optional bracket indices: "
+            "`tasks[0].status`). Every widget bound to {state.<path>} "
+            "re-renders automatically. Use for label tweaks, status toggles, "
+            "filter changes, anything DATA."
+        ),
+        args_schema=_SetStateArgs,
+    )
+
+
+class _AppendStateArgs(BaseModel):
+    path: str
+    item: Any = Field(..., description="Element to append.")
+
+
+def make_append_state_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Append an item to an array in state."""
+
+    async def _run(path: str, item: Any) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import append_state_for_agent
+
+        result = await append_state_for_agent(pocket_id, path, item)
+        _capture_op(capture, "append_state", {"path": path, "item": item}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="append_state",
+        description=(
+            "Append `item` to the array at `path` in state. Creates an "
+            "empty list if the path is absent. Use for adding tasks, "
+            "comments, log entries, kanban cards."
+        ),
+        args_schema=_AppendStateArgs,
+    )
+
+
+class _RemoveStateArgs(BaseModel):
+    path: str
+
+
+def make_remove_state_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a key or array element from state."""
+
+    async def _run(path: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_state_for_agent
+
+        result = await remove_state_for_agent(pocket_id, path)
+        _capture_op(capture, "remove_state", {"path": path}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_state",
+        description=(
+            "Delete a key or array element from state. For dict keys, "
+            "deletes the key. For list indices (`tasks[1]`), removes the "
+            "element and shifts subsequent indices down."
+        ),
+        args_schema=_RemoveStateArgs,
+    )
+
+
+class _PatchStateArgs(BaseModel):
+    partial: dict[str, Any]
+
+
+def make_patch_state_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Batched top-level merge into state."""
+
+    async def _run(partial: dict[str, Any]) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import patch_state_for_agent
+
+        result = await patch_state_for_agent(pocket_id, partial)
+        _capture_op(capture, "patch_state", {"partial": partial}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="patch_state",
+        description=(
+            "Shallow-merge `partial` into the top of state. Use for batched "
+            "independent-key writes (resetting a form, clearing several "
+            "flags at once). Nested dicts are REPLACED, not deep-merged."
+        ),
+        args_schema=_PatchStateArgs,
+    )
+
+
+class _SetNodePropArgs(BaseModel):
+    node_id: str
+    prop: str
+    value: Any
+
+
+def make_set_node_prop_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Update a single prop on a widget node."""
+
+    async def _run(node_id: str, prop: str, value: Any) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_node_prop_for_agent
+
+        result = await set_node_prop_for_agent(pocket_id, node_id, prop, value)
+        _capture_op(capture, "set_node_prop", {"node_id": node_id, "prop": prop}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_node_prop",
+        description=(
+            "Change ONE prop on a widget. `prop` writes into props by "
+            "default; top-level keys (show, bind, class, style, on_click, "
+            "etc.) are addressable by bare name. Dotted paths "
+            "(`data.rows`) walk inside props. Use for label, color, "
+            "show-conditions, on_click handlers."
+        ),
+        args_schema=_SetNodePropArgs,
+    )
+
+
+class _AddNodeArgs(BaseModel):
+    parent_id: str
+    spec: dict[str, Any] = Field(..., description="UINode to insert.")
+    after_id: str | None = Field(default=None, description="Insert after this sibling.")
+    index: int | None = Field(
+        default=None,
+        description=(
+            "Insert at this 0-based position among the parent's children. "
+            "Takes precedence over after_id; clamped to the child count."
+        ),
+    )
+
+
+def make_add_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
+    """Add a new widget under a parent."""
+
+    async def _run(
+        parent_id: str,
+        spec: dict[str, Any],
+        after_id: str | None = None,
+        index: int | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import add_node_for_agent
+
+        result = await add_node_for_agent(pocket_id, parent_id, spec, after_id, index)
+        _capture_op(
+            capture,
+            "add_node",
+            {"parent_id": parent_id, "after_id": after_id, "index": index},
+            result,
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="add_node",
+        description=(
+            "Insert a new widget as a child of `parent_id`. Pass `spec` as "
+            "a UINode object. Position it with `index` (0-based slot) or "
+            "`after_id` (after a specific sibling); omit both to append. "
+            "Returns the new node with id assigned."
+        ),
+        args_schema=_AddNodeArgs,
+    )
+
+
+class _ReplaceNodeArgs(BaseModel):
+    node_id: str
+    spec: dict[str, Any]
+
+
+def make_replace_node_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Replace a subtree."""
+
+    async def _run(node_id: str, spec: dict[str, Any]) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import replace_node_for_agent
+
+        result = await replace_node_for_agent(pocket_id, node_id, spec)
+        _capture_op(capture, "replace_node", {"node_id": node_id}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="replace_node",
+        description=(
+            "Replace the subtree at `node_id` with `spec`. Preserves the "
+            "target's id. Use for shape-changing edits (swap a stat for a "
+            "chart); for prop-only tweaks prefer `set_node_prop`."
+        ),
+        args_schema=_ReplaceNodeArgs,
+    )
+
+
+class _MoveNodeArgs(BaseModel):
+    node_id: str
+    # `parent_id` for consistency with add_node — was `new_parent_id`, an
+    # asymmetry the chat agent kept tripping on.
+    parent_id: str
+    after_id: str | None = None
+
+
+def make_move_node_tool(*, pocket_id: str, capture: dict[str, Any] | None = None) -> StructuredTool:
+    """Move a subtree to a new parent / position."""
+
+    async def _run(node_id: str, parent_id: str, after_id: str | None = None) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import move_node_for_agent
+
+        result = await move_node_for_agent(pocket_id, node_id, parent_id, after_id)
+        _capture_op(
+            capture,
+            "move_node",
+            {"node_id": node_id, "parent_id": parent_id, "after_id": after_id},
+            result,
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="move_node",
+        description=(
+            "Move a subtree under a new parent. Same op handles "
+            "reorder-within-parent and cross-parent moves. Refuses to "
+            "move a node into itself or a descendant."
+        ),
+        args_schema=_MoveNodeArgs,
+    )
+
+
+class _RemoveNodeArgs(BaseModel):
+    node_id: str
+
+
+def make_remove_node_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a subtree."""
+
+    async def _run(node_id: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_node_for_agent
+
+        result = await remove_node_for_agent(pocket_id, node_id)
+        _capture_op(capture, "remove_node", {"node_id": node_id}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_node",
+        description=("Remove the subtree at `node_id`. Errors on the root."),
+        args_schema=_RemoveNodeArgs,
+    )
+
+
+class _SetPropArrayItemArgs(BaseModel):
+    node_id: str
+    prop: str
+    match: dict[str, Any] = Field(
+        ...,
+        description=(
+            "How to locate the item. One of: {index:0}, {id:'...'},"
+            " {by_field:'label', equals:'X'}, {by_key:{k:v,...}}."
+        ),
+    )
+    partial: dict[str, Any] = Field(
+        ...,
+        description="Fields to merge into the matched item (shallow merge).",
+    )
+
+
+def make_set_prop_array_item_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Edit ONE item inside a widget's prop-array — surgical alternative
+    to set_node_prop for chart.data / table.rows / etc."""
+
+    async def _run(
+        node_id: str,
+        prop: str,
+        match: dict[str, Any],
+        partial: dict[str, Any],
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_prop_array_item_for_agent
+
+        result = await set_prop_array_item_for_agent(pocket_id, node_id, prop, match, partial)
+        _capture_op(
+            capture,
+            "set_prop_array_item",
+            {"node_id": node_id, "prop": prop, "match": match},
+            result,
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_prop_array_item",
+        description=(
+            "Surgically edit ONE item in a widget's prop-array (chart.data, "
+            "table.rows, calendar.events, kanban.columns, feed.items, "
+            "tabs.items, nav.items, select.options, form-layout.fields). "
+            "Cheaper and safer than set_node_prop when you only need to "
+            "change one row/slice — you never copy the unchanged items, "
+            "so they can't drift. `match` picks the item: "
+            "{index:N} | {id:'...'} | {by_field:'label', equals:'X'} | "
+            "{by_key:{k:v}}. `partial` is shallow-merged into that item."
+        ),
+        args_schema=_SetPropArrayItemArgs,
+    )
+
+
+class _AppendPropArrayItemArgs(BaseModel):
+    node_id: str
+    prop: str
+    value: Any
+    after: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional ItemMatch — insert after the matching item; omit to append.",
+    )
+
+
+def make_append_prop_array_item_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    async def _run(
+        node_id: str,
+        prop: str,
+        value: Any,
+        after: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import append_prop_array_item_for_agent
+
+        result = await append_prop_array_item_for_agent(pocket_id, node_id, prop, value, after)
+        _capture_op(
+            capture,
+            "append_prop_array_item",
+            {"node_id": node_id, "prop": prop, "after": after},
+            result,
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="append_prop_array_item",
+        description=(
+            "Append (or insert-after) ONE item into a widget's prop-array. "
+            "Same allowed widgets as set_prop_array_item. If `after` is "
+            "given it must be an ItemMatch — the new item is inserted right "
+            "after the matched item; otherwise appended. Creates the array "
+            "if it does not yet exist on the node."
+        ),
+        args_schema=_AppendPropArrayItemArgs,
+    )
+
+
+class _RemovePropArrayItemArgs(BaseModel):
+    node_id: str
+    prop: str
+    match: dict[str, Any]
+
+
+def make_remove_prop_array_item_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    async def _run(
+        node_id: str,
+        prop: str,
+        match: dict[str, Any],
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_prop_array_item_for_agent
+
+        result = await remove_prop_array_item_for_agent(pocket_id, node_id, prop, match)
+        _capture_op(
+            capture,
+            "remove_prop_array_item",
+            {"node_id": node_id, "prop": prop, "match": match},
+            result,
+        )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_prop_array_item",
+        description=(
+            "Remove ONE matched item from a widget's prop-array. Same "
+            "allowed widgets and match grammar as set_prop_array_item. "
+            "Refuses ambiguous matches — disambiguate with by_key or index."
+        ),
+        args_schema=_RemovePropArrayItemArgs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# rippleSpec.sources ops — read-only data bindings (RFC 04 alpha)
+# ---------------------------------------------------------------------------
+
+
+class _SetSourceArgs(BaseModel):
+    source_key: str = Field(
+        ..., description="Short name for the source — also the `sources` map key."
+    )
+    path: str = Field(
+        ...,
+        description=(
+            "RELATIVE path against the pocket's configured backend "
+            "(e.g. `/pulls?state=open`). Never an absolute URL."
+        ),
+    )
+    bind: str = Field(
+        ...,
+        description="Dotted `state.` path the fetched JSON is written to (e.g. `state.prs`).",
+    )
+    method: str = Field(default="GET", description='Always "GET" — alpha is read-only.')
+    refresh: list[str] | None = Field(
+        default=None,
+        description=(
+            "When to run the source: `pocket_open` (on open) and/or `manual` "
+            '(refresh button). Defaults to `["pocket_open"]` when omitted.'
+        ),
+    )
+
+
+def make_set_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Declare (or replace) a read-only data source on the pocket."""
+
+    async def _run(
+        source_key: str,
+        path: str,
+        bind: str,
+        method: str = "GET",
+        refresh: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_source_for_agent
+
+        binding: dict[str, Any] = {"method": method, "path": path, "bind": bind}
+        if refresh is not None:
+            binding["refresh"] = refresh
+        result = await set_source_for_agent(pocket_id, source_key, binding)
+        _capture_op(capture, "set_source", {"source_key": source_key, "path": path}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_source",
+        description=(
+            "Declare a READ-ONLY live data source in rippleSpec.sources — a "
+            "GET binding that fetches from the pocket's own configured "
+            "backend (a CRM, an internal API) and writes the JSON into "
+            "state at `bind`. Use this when the user wants live data from "
+            "THEIR backend. The pocket must have a backend configured "
+            "(base URL + auth, set in backend settings). Seed state at the "
+            "`bind` target with an empty value so the widget renders before "
+            "the first fetch. For a manual refresh, add a button with "
+            "on_click {action: 'run_source', source: '<source_key>'}."
+        ),
+        args_schema=_SetSourceArgs,
+    )
+
+
+class _RemoveSourceArgs(BaseModel):
+    source_key: str = Field(..., description="The `sources` map key to remove.")
+
+
+def make_remove_source_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a read-only data source declaration from the pocket."""
+
+    async def _run(source_key: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_source_for_agent
+
+        result = await remove_source_for_agent(pocket_id, source_key)
+        _capture_op(capture, "remove_source", {"source_key": source_key}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_source",
+        description=(
+            "Remove a read-only data source from rippleSpec.sources by its "
+            "key. Idempotent — removing a source that was never declared "
+            "still succeeds. The state the source bound to is left alone."
+        ),
+        args_schema=_RemoveSourceArgs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# rippleSpec.actions ops — write bindings (RFC 05 M2a)
+# ---------------------------------------------------------------------------
+
+
+class _SetActionArgs(BaseModel):
+    action_key: str = Field(
+        ..., description="Short name for the action — also the `actions` map key."
+    )
+    method: str = Field(
+        ...,
+        description="The write verb: POST, PUT, PATCH, or DELETE.",
+    )
+    path: str = Field(
+        ...,
+        description=(
+            "RELATIVE path against the pocket's configured backend "
+            "(e.g. `/leases/{item.id}/renew`). Never an absolute URL. "
+            "May carry `{...}` expressions Ripple resolves at click time."
+        ),
+    )
+    params: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Request body for the write — a map of fields, values may be "
+            '`{...}` expressions (e.g. {"rent": "{state.form.rent}"}).'
+        ),
+    )
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "When true the widget should gate the write behind a confirm "
+            "step. Author DELETE / full-PUT actions with confirm=true."
+        ),
+    )
+    on_success: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Handlers to run after the write succeeds (e.g. run_source to refetch).",
+    )
+    on_error: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Handlers to run if the write fails (e.g. a rollback mutate_state).",
+    )
+
+
+def make_set_action_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Declare (or replace) a write action on the pocket."""
+
+    async def _run(
+        action_key: str,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        confirm: bool = False,
+        on_success: list[dict[str, Any]] | None = None,
+        on_error: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import set_action_for_agent
+
+        binding: dict[str, Any] = {
+            "kind": "write_binding",
+            "method": method.upper() if isinstance(method, str) else method,
+            "path": path,
+            "params": params or {},
+            "confirm": confirm,
+        }
+        if on_success is not None:
+            binding["on_success"] = on_success
+        if on_error is not None:
+            binding["on_error"] = on_error
+        result = await set_action_for_agent(pocket_id, action_key, binding)
+        _capture_op(capture, "set_action", {"action_key": action_key, "method": method}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="set_action",
+        description=(
+            "Declare a WRITE action in rippleSpec.actions — a binding that "
+            "POST/PUT/PATCH/DELETEs against the pocket's own configured "
+            "backend. A widget triggers it with on_click "
+            "{action: 'call_binding', binding: '<action_key>'}. The write "
+            "fires ONLY if the human owner has allow-listed that method+path "
+            "in the pocket's backend settings — authoring the action does "
+            "not authorize it. Author DELETE / full-PUT actions with "
+            "confirm=true. Use `on_success` to reconcile (run_source to "
+            "refetch a list, or set state from the response)."
+        ),
+        args_schema=_SetActionArgs,
+    )
+
+
+class _RemoveActionArgs(BaseModel):
+    action_key: str = Field(..., description="The `actions` map key to remove.")
+
+
+def make_remove_action_tool(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> StructuredTool:
+    """Remove a write-action declaration from the pocket."""
+
+    async def _run(action_key: str) -> dict[str, Any]:
+        from pocketpaw_ee.cloud.pockets.agent_context import remove_action_for_agent
+
+        result = await remove_action_for_agent(pocket_id, action_key)
+        _capture_op(capture, "remove_action", {"action_key": action_key}, result)
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_run,
+        name="remove_action",
+        description=(
+            "Remove a write action from rippleSpec.actions by its key. "
+            "Idempotent — removing an action that was never declared still "
+            "succeeds. Any call_binding handler still pointing at it will "
+            "no-op after removal — drop those handlers too."
+        ),
+        args_schema=_RemoveActionArgs,
+    )
+
+
+def make_edit_pocket_tools(
+    *, pocket_id: str, capture: dict[str, Any] | None = None
+) -> list[StructuredTool]:
+    """Bundle the full edit-specialist tool set for one pocket.
+
+    Order is the order the LLM sees them; we lead with the read tool
+    so the agent is prompted toward "get then mutate" rather than
+    blind writes. The Tier-2 ``*_prop_array_item`` ops sit next to
+    ``set_node_prop`` — they are the surgical alternative to it. The
+    ``*_source`` and ``*_action`` ops sit last — they write the top-level
+    ``rippleSpec.sources`` / ``rippleSpec.actions`` blocks, not the ui
+    tree or state.
+    """
+    return [
+        make_get_pocket_tool(pocket_id=pocket_id),
+        make_set_state_tool(pocket_id=pocket_id, capture=capture),
+        make_append_state_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_state_tool(pocket_id=pocket_id, capture=capture),
+        make_patch_state_tool(pocket_id=pocket_id, capture=capture),
+        make_set_node_prop_tool(pocket_id=pocket_id, capture=capture),
+        make_set_prop_array_item_tool(pocket_id=pocket_id, capture=capture),
+        make_append_prop_array_item_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_prop_array_item_tool(pocket_id=pocket_id, capture=capture),
+        make_add_node_tool(pocket_id=pocket_id, capture=capture),
+        make_replace_node_tool(pocket_id=pocket_id, capture=capture),
+        make_move_node_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_node_tool(pocket_id=pocket_id, capture=capture),
+        make_set_source_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_source_tool(pocket_id=pocket_id, capture=capture),
+        make_set_action_tool(pocket_id=pocket_id, capture=capture),
+        make_remove_action_tool(pocket_id=pocket_id, capture=capture),
+    ]

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 
 def test_errors_shim_identity() -> None:
-    from ee.cloud._core import errors as core_errors
-    from ee.cloud.shared import errors as shared_errors
+    from pocketpaw_ee.cloud._core import errors as core_errors
+    from pocketpaw_ee.cloud.shared import errors as shared_errors
 
     assert core_errors.CloudError is shared_errors.CloudError
     assert core_errors.NotFound is shared_errors.NotFound
@@ -22,15 +22,15 @@ def test_errors_shim_identity() -> None:
 
 
 def test_time_shim_identity() -> None:
-    from ee.cloud._core.time import iso_utc as core_iso_utc
-    from ee.cloud.shared.time import iso_utc as shared_iso_utc
+    from pocketpaw_ee.cloud._core.time import iso_utc as core_iso_utc
+    from pocketpaw_ee.cloud.shared.time import iso_utc as shared_iso_utc
 
     assert core_iso_utc is shared_iso_utc
 
 
 def test_deps_shim_identity() -> None:
-    from ee.cloud._core import deps as core_deps
-    from ee.cloud.shared import deps as shared_deps
+    from pocketpaw_ee.cloud._core import deps as core_deps
+    from pocketpaw_ee.cloud.shared import deps as shared_deps
 
     assert core_deps.current_user is shared_deps.current_user
     assert core_deps.current_user_id is shared_deps.current_user_id
@@ -44,7 +44,7 @@ def test_deps_shim_identity() -> None:
 def test_shared_errors_does_not_re_export_phase0_additions() -> None:
     """RateLimited, Internal, and with_cause are intentionally only in
     _core.errors. Asserts they are NOT exposed via the shared shim."""
-    from ee.cloud.shared import errors as shared_errors
+    from pocketpaw_ee.cloud.shared import errors as shared_errors
 
     assert not hasattr(shared_errors, "RateLimited")
     assert not hasattr(shared_errors, "Internal")
@@ -54,7 +54,7 @@ def test_shared_errors_does_not_re_export_phase0_additions() -> None:
 def test_shared_deps_keeps_domain_guards() -> None:
     """The domain-specific guards remain in shared.deps until their
     domains migrate. Phase 1 must not move them."""
-    from ee.cloud.shared import deps as shared_deps
+    from pocketpaw_ee.cloud.shared import deps as shared_deps
 
     assert hasattr(shared_deps, "require_group_action")
     assert hasattr(shared_deps, "require_agent_owner_or_admin")

@@ -16,12 +16,12 @@ async def main() -> int:
     )
 
     print("1. init_cloud_db ...")
-    from ee.cloud.shared.db import init_cloud_db
+    from pocketpaw_ee.cloud.shared.db import init_cloud_db
 
     await init_cloud_db("mongodb://localhost:27017/paw-enterprise")
 
     print("\n2. _ensure_cloud_session('diag-chat-1') ...")
-    from ee.cloud.shared.chat_persistence import _ensure_cloud_session
+    from pocketpaw_ee.cloud.shared.chat_persistence import _ensure_cloud_session
 
     info = await _ensure_cloud_session("diag-chat-1")
     print(f"   returned: {info}")
@@ -30,7 +30,7 @@ async def main() -> int:
         return 2
 
     print("\n3. save_user_message('diag-chat-1', 'hello from diag') ...")
-    from ee.cloud.models.message import Message
+    from pocketpaw_ee.cloud.models.message import Message
 
     msg = Message(
         group=info["group_id"],

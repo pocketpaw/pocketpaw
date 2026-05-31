@@ -82,7 +82,7 @@ async def test_resolve_cloud_context_returns_ids_for_authenticated_user():
         # ee.cloud not mounted in this environment — the dep is zero-arg.
         # In that case the only contract is (None, None), which is what
         # the no-auth case covers. Skip this assertion cleanly.
-        pytest.skip("ee.cloud not mounted — nothing to auth against")
+        pytest.skip("pocketpaw_ee.cloud not mounted — nothing to auth against")
 
 
 @pytest.mark.asyncio

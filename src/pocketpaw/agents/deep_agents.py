@@ -16,6 +16,7 @@ from typing import Any
 from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,15 @@ _LANGCHAIN_PROVIDER_MAP: dict[str, str] = {
 
 _LITELLM_PATCHED = False
 _OPENAI_PATCHED = False
+_ANTHROPIC_PATCHED = False
+
+# Threshold above which we tag the system block with ``cache_control``.
+# Anthropic's prompt-cache minimum is ~1024 tokens on Sonnet/Opus and
+# ~2048 on Haiku; one English token ≈ 4 chars, so 4000 chars is well
+# clear of the Sonnet floor but still excludes the small lifestyle
+# prompts the chat agent uses for greetings / one-shot facts. Tuned
+# conservatively — false positives only cost the cache-write overhead.
+_ANTHROPIC_CACHE_MIN_CHARS = 4000
 
 
 def _patch_openai_message_serializer() -> None:
@@ -205,6 +215,83 @@ def _patch_litellm_message_serializer() -> None:
     )
 
 
+def _patch_anthropic_message_serializer() -> None:
+    """Enable Anthropic prompt caching on long system messages.
+
+    Anthropic's prompt cache is opt-in per content block: a block must
+    carry ``cache_control: {"type": "ephemeral"}`` for the API to cache
+    its tokenized prefix. LangChain's ``_format_messages`` passes a
+    string-typed ``SystemMessage.content`` straight through to the API's
+    ``system`` parameter — no markup, no caching. For the pocket
+    specialist's ~12k-token design-rules prompt that means we re-pay
+    the prefix tokenization on every spec generation.
+
+    This patch wraps ``langchain_anthropic.chat_models._format_messages``:
+    after the upstream conversion runs, we lift a long string-typed
+    system value into a single-block list with ``cache_control``
+    attached, and we annotate the last text block when the system is
+    already a list (typical: the message left the SystemMessage as a
+    structured content object). Short prompts (< ``_ANTHROPIC_CACHE_MIN_CHARS``)
+    are left alone — cache overhead outweighs savings on small prompts.
+
+    Idempotent: re-imports of this module reuse the same patched
+    function via the ``_ANTHROPIC_PATCHED`` sentinel.
+    """
+    global _ANTHROPIC_PATCHED
+    if _ANTHROPIC_PATCHED:
+        return
+
+    try:
+        from langchain_anthropic import chat_models as _ac
+    except ImportError:
+        return
+
+    if not hasattr(_ac, "_format_messages"):
+        logger.error(
+            "langchain_anthropic upgrade broke the prompt-cache patch: "
+            "missing _format_messages on langchain_anthropic.chat_models. "
+            "Anthropic prompt caching is disabled for this run. Update "
+            "src/pocketpaw/agents/deep_agents.py:_patch_anthropic_message_serializer."
+        )
+        return
+
+    original = _ac._format_messages
+
+    def patched(messages):  # type: ignore[no-untyped-def]
+        system, formatted = original(messages)
+        if isinstance(system, str) and len(system) >= _ANTHROPIC_CACHE_MIN_CHARS:
+            system = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        elif isinstance(system, list) and system:
+            # Already a block list. Tag the last text block whose total
+            # text size pushes the system payload over the threshold —
+            # short text-only systems and pure-image systems are skipped.
+            total_chars = sum(
+                len(b.get("text", ""))
+                for b in system
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+            already_cached = any(isinstance(b, dict) and b.get("cache_control") for b in system)
+            if total_chars >= _ANTHROPIC_CACHE_MIN_CHARS and not already_cached:
+                for block in reversed(system):
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        block["cache_control"] = {"type": "ephemeral"}
+                        break
+        return system, formatted
+
+    _ac._format_messages = patched
+    _ANTHROPIC_PATCHED = True
+    logger.info(
+        "Patched langchain_anthropic._format_messages for prompt caching (threshold=%d chars)",
+        _ANTHROPIC_CACHE_MIN_CHARS,
+    )
+
+
 def _unwrap(value: Any) -> Any:
     """Unwrap LangGraph Overwrite/Send wrapper objects to their inner value.
 
@@ -308,10 +395,23 @@ class DeepAgentsBackend:
         self._sdk_available = False
         self._custom_tools: list | None = None
         self._mcp_tools: list | None = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         self._mcp_client: Any = None
         self._cached_agent: Any = None
         self._cached_model_key: Any = None
         self._initialize()
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+        self._custom_tools = None
+        self._mcp_tools = None
 
     def _initialize(self) -> None:
         try:
@@ -338,7 +438,9 @@ class DeepAgentsBackend:
         try:
             from pocketpaw.agents.tool_bridge import build_deep_agents_tools
 
-            self._custom_tools = build_deep_agents_tools(self.settings, backend="deep_agents")
+            self._custom_tools = build_deep_agents_tools(
+                self.settings, backend="deep_agents", policy=self._policy
+            )
         except Exception as exc:
             logger.info("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -367,18 +469,12 @@ class DeepAgentsBackend:
             self._mcp_tools = []
             return self._mcp_tools
 
-        from pocketpaw.tools.policy import ToolPolicy
-
         configs = load_mcp_config()
         if not configs:
             self._mcp_tools = []
             return self._mcp_tools
 
-        policy = ToolPolicy(
-            profile=self.settings.tool_profile,
-            allow=self.settings.tools_allow,
-            deny=self.settings.tools_deny,
-        )
+        policy = self._policy
 
         # Build MultiServerMCPClient config from PocketPaw MCP configs
         client_config: dict[str, dict] = {}
@@ -607,6 +703,21 @@ class DeepAgentsBackend:
             return self._cached_agent
 
         all_tools = self._build_custom_tools() + (mcp_tools or [])
+
+        # Composio — per-stream integration tools (Gmail, Slack, …) via the
+        # langgraph provider, discovered through the ``pocketpaw.composio_tools``
+        # entry point. Skipped on pocket sessions: the pocket specialist runs
+        # on this backend and we keep its tool surface narrow + Composio-free
+        # (the parent agent fetches Composio data and passes it down in the
+        # brief).
+        if not is_pocket_session:
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("deep_agents", self.settings)
+            if composio_tools:
+                all_tools = all_tools + list(composio_tools)
+                logger.info("Composio: appended %d langgraph tools", len(composio_tools))
+
         if is_pocket_session:
             # Drop shell + filesystem tools — pocket flow has MCP tools
             # for everything it needs. Without this filter the agent has
@@ -658,6 +769,13 @@ class DeepAgentsBackend:
             # ChatOpenAI under the hood. Patch the langchain_openai
             # serializers — see _patch_openai_message_serializer docstring.
             _patch_openai_message_serializer()
+        elif provider == "anthropic":
+            # ChatAnthropic does not tag long system blocks with
+            # cache_control by default, so the pocket specialist's
+            # ~12k-token design-rules prompt re-tokenizes on every call.
+            # The patch wraps _format_messages to add cache_control on
+            # the longest system text block. See the patch docstring.
+            _patch_anthropic_message_serializer()
 
         agent = create_deep_agent(**kwargs)
         self._cached_agent = agent
@@ -705,6 +823,10 @@ class DeepAgentsBackend:
             return
 
         self._stop_flag = False
+        # Stream handle captured in the run-level scope so the ``finally``
+        # block can close it on every exit path (normal completion,
+        # except branch, generator-close from caller).
+        _stream: Any = None
 
         try:
             model = self._build_model()
@@ -738,13 +860,21 @@ class DeepAgentsBackend:
             # path emits the final args. Same tool_call_id → emit once.
             announced_tool_ids: set[str] = set()
 
-            # Stream using LangGraph's async streaming
-            async for chunk in agent.astream(
+            # Stream using LangGraph's async streaming. Hold the stream in
+            # a variable so the ``finally`` block below can call
+            # ``aclose()`` on it. LangGraph's astream is backed by
+            # ``asyncio.Queue`` readers spawned as background tasks;
+            # without an explicit aclose, those readers stay pending and
+            # get destroyed by GC on the next run, surfacing as
+            # ``Task was destroyed but it is pending! Queue.get()`` log
+            # noise around backend transitions.
+            _stream = agent.astream(
                 {"messages": messages},
                 stream_mode=["updates", "messages"],
                 version="v2",
                 config=config if config else None,
-            ):
+            )
+            async for chunk in _stream:
                 if self._stop_flag:
                     break
 
@@ -845,6 +975,18 @@ class DeepAgentsBackend:
             logger.error("Deep Agents streaming error: %s", e, exc_info=True)
             yield AgentEvent(type="error", content=f"Deep Agents error: {e}")
             yield AgentEvent(type="done", content="")
+        finally:
+            # Close the astream generator so LangGraph's background
+            # Queue readers are cancelled cleanly. Without this, those
+            # readers GC with a pending Queue.get() at the next backend
+            # transition. Idempotent on streams that already exited.
+            if _stream is not None:
+                close = getattr(_stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("astream aclose error (non-fatal): %s", exc)
 
     async def stop(self) -> None:
         self._stop_flag = True

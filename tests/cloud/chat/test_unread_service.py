@@ -11,22 +11,22 @@ import pytest
 @pytest.mark.asyncio
 async def test_list_unreads_zero_when_caught_up():
     """If last_read matches the group's latest message, unread is 0."""
-    from ee.cloud.chat import unread_service
+    from pocketpaw_ee.cloud.chat import unread_service
 
     group = SimpleNamespace(id="g1", workspace="w1", message_count=5)
     state = SimpleNamespace(user="u1", group="g1", last_read_message_id="m5", mention_unread=0)
 
     with (
         patch(
-            "ee.cloud.chat.unread_service._list_member_groups",
+            "pocketpaw_ee.cloud.chat.unread_service._list_member_groups",
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "ee.cloud.chat.unread_service._get_read_state",
+            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
             new=AsyncMock(return_value=state),
         ),
         patch(
-            "ee.cloud.chat.unread_service._count_messages_after",
+            "pocketpaw_ee.cloud.chat.unread_service._count_messages_after",
             new=AsyncMock(return_value=0),
         ),
     ):
@@ -37,22 +37,22 @@ async def test_list_unreads_zero_when_caught_up():
 
 @pytest.mark.asyncio
 async def test_list_unreads_counts_messages_after_last_read():
-    from ee.cloud.chat import unread_service
+    from pocketpaw_ee.cloud.chat import unread_service
 
     group = SimpleNamespace(id="g1", workspace="w1", message_count=10)
     state = SimpleNamespace(user="u1", group="g1", last_read_message_id="m5", mention_unread=2)
 
     with (
         patch(
-            "ee.cloud.chat.unread_service._list_member_groups",
+            "pocketpaw_ee.cloud.chat.unread_service._list_member_groups",
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "ee.cloud.chat.unread_service._get_read_state",
+            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
             new=AsyncMock(return_value=state),
         ),
         patch(
-            "ee.cloud.chat.unread_service._count_messages_after",
+            "pocketpaw_ee.cloud.chat.unread_service._count_messages_after",
             new=AsyncMock(return_value=5),
         ),
     ):
@@ -64,16 +64,16 @@ async def test_list_unreads_counts_messages_after_last_read():
 @pytest.mark.asyncio
 async def test_list_unreads_fresh_user_has_full_count():
     """A user who has never read a group has its whole message_count as unread."""
-    from ee.cloud.chat import unread_service
+    from pocketpaw_ee.cloud.chat import unread_service
 
     group = SimpleNamespace(id="g1", workspace="w1", message_count=10)
     with (
         patch(
-            "ee.cloud.chat.unread_service._list_member_groups",
+            "pocketpaw_ee.cloud.chat.unread_service._list_member_groups",
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "ee.cloud.chat.unread_service._get_read_state",
+            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
             new=AsyncMock(return_value=None),
         ),
     ):
@@ -88,18 +88,18 @@ async def test_list_unreads_empty_last_read_falls_through_to_message_count():
     bump_mention before any ack), fall through to message_count — never pass
     an empty string to _count_messages_after which would silently return 0
     and under-report unreads to 0 while mention_unread is non-zero."""
-    from ee.cloud.chat import unread_service
+    from pocketpaw_ee.cloud.chat import unread_service
 
     group = SimpleNamespace(id="g1", workspace="w1", message_count=10)
     state = SimpleNamespace(user="u1", group="g1", last_read_message_id="", mention_unread=3)
 
     with (
         patch(
-            "ee.cloud.chat.unread_service._list_member_groups",
+            "pocketpaw_ee.cloud.chat.unread_service._list_member_groups",
             new=AsyncMock(return_value=[group]),
         ),
         patch(
-            "ee.cloud.chat.unread_service._get_read_state",
+            "pocketpaw_ee.cloud.chat.unread_service._get_read_state",
             new=AsyncMock(return_value=state),
         ),
     ):

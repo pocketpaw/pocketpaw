@@ -1,0 +1,589 @@
+# PocketPaw Enterprise Edition — packaging.
+#
+# `pocketpaw-ee` is the enterprise layer (multi-tenant cloud, auth, rooms,
+# messaging, billing, knowledge base, file storage, fleet, instinct, pocket
+# specialist). It is a thin wheel that contains only `pocketpaw_ee/` and
+# depends on the OSS core package `pocketpaw`.
+#
+# Versioning: `pocketpaw-ee` tracks `pocketpaw` within the same minor series.
+# The `pocketpaw~=` pin below is a compatible-release constraint — it accepts
+# any `pocketpaw` patch (0.4.x) without a hand-edit, but blocks a minor bump
+# (0.5+) so an incompatible core can't be pulled in silently. Bump the floor
+# here when EE starts depending on a feature added in a newer core patch.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pocketpaw-ee"
+version = "0.4.16"
+description = "PocketPaw Enterprise — multi-tenant cloud, auth, rooms, billing, knowledge base, and file storage for PocketPaw."
+readme = "README.md"
+license = { file = "LICENSE" }  # FSL-1.1 (Apache-2.0 future license)
+requires-python = ">=3.11"
+keywords = ["ai", "agent", "enterprise", "multi-tenant", "cloud"]
+authors = [
+    { name = "PocketPaw Team", email = "hello@pocketpaw.ai" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    # OSS core — compatible-release pin within 0.4.x (see versioning note above).
+    "pocketpaw~=0.4.16",
+    # --- Persistence (MongoDB async ODM; beanie pulls motor + pymongo) ---
+    "motor>=3.3.0",
+    "beanie>=1.26.0",
+    # --- Auth (user management + OAuth2 + JWT with a Beanie backend) ---
+    "fastapi-users[beanie,oauth]>=13.0.0",
+    "pwdlib[argon2]>=0.2.0",
+    # --- MFA (TOTP) — secrets + code verification for /auth/mfa/* ---
+    "pyotp>=2.9.0",
+    # --- Real-time / rate limiting / cache ---
+    "python-socketio>=5.11.0",
+    "slowapi>=0.1.9",
+    "redis[hiredis]>=5.0.0",
+    # --- DNS (verified-domain TXT lookup, Wave 3 Task 12) ---
+    "dnspython>=2.6.0",
+    # --- Background worker (Tier 2 resumable chat runs) ---
+    # arq is only imported by `pocketpaw_ee.cloud.chat.runs.arq_executor`
+    # and `worker.py`; both are gated behind POCKETPAW_CLOUD_RUN_EXECUTOR=arq.
+    "arq>=0.26.0",
+    # --- File storage (S3 + GCS) ---
+    "boto3>=1.34.0",
+    "google-cloud-storage>=2.14.0",
+    # --- Voice / video (LiveKit rooms + Deepgram STT) ---
+    # Moved here from the core base deps in Phase 4: `livekit` is imported
+    # only under ee/pocketpaw_ee/cloud/livekit/, never by the OSS core.
+    "livekit-api>=0.6.0",
+    "livekit-agents[codecs]>=1.5.9",
+    "livekit-plugins-deepgram>=1.5.9",
+    # --- Google integrations (OAuth + Workspace APIs) ---
+    "google-api-python-client>=2.100.0",
+    "google-auth>=2.25.0",
+    "google-auth-oauthlib>=1.2.0",
+    # --- Composio — 200+ pre-built OAuth integrations (Gmail, Slack,
+    # GitHub, Calendar, Drive, Linear, …). Each agent backend gets its
+    # own Composio provider package; the wiring lives in
+    # ee/pocketpaw_ee/cloud/composio/providers.py and is reached from the
+    # OSS core via the ``pocketpaw.composio_tools`` entry point. The
+    # pocket specialist runs on deep_agents but is deliberately kept
+    # Composio-free, so Composio reaches only the parent agent.
+    "composio>=0.7.0",
+    "composio_claude_agent_sdk>=0.7.0",
+    "composio_openai_agents>=0.7.0",
+    "composio_google_adk>=0.7.0",
+    "composio_langgraph>=0.7.0",
+    # Foresight module (RFC 08) — promoted to hard dep in PR 3 (was the
+    # pocketpaw-ee[foresight] optional extra in PR 2). CAMEL provides the
+    # LLM-backend abstraction (ChatAgent, BaseModelBackend, MemoryRecord,
+    # ModelFactory, FunctionTool, TextPrompt, OpenAIEmbedding) consumed
+    # by the vendored OASIS fork at
+    # ee/pocketpaw_ee/foresight/substrate/oasis/.
+    #
+    # We pin a QBTRIX fork (relax-caps branch) because CAMEL 0.2.90 caps
+    # ``psutil<6`` which collides with livekit-agents (already an ee/ dep
+    # at psutil>=5.9.0 with no upper bound) and the root pocketpaw
+    # dependency group. The fork removes ONLY the psutil cap — the
+    # openai cap was already lifted upstream so no extra patches needed.
+    # See ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for
+    # vendoring rationale; the fork-pin is verified by ``uv lock``
+    # alongside langchain-openai + livekit-agents (the colliding deps).
+    "camel-ai",
+    # igraph is the default backend for ``oasis.AgentGraph`` (Foresight
+    # uses it for the in-memory follower / approver / reports-to
+    # relationship graph). The neo4j backend stays optional — we made
+    # it lazy-imported in
+    # ``substrate/oasis/social_agent/agent_graph.py`` so the neo4j
+    # driver doesn't have to be installed. ``torch`` (needed by the
+    # recsys tier we don't use) and ``sentence-transformers`` /
+    # ``cairocffi`` (also recsys-only) remain unlisted; see
+    # ``OASIS_RECSYS_AVAILABLE`` in
+    # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
+    "igraph>=0.11",
+]
+
+[project.optional-dependencies]
+# Document extraction pipeline (ee/pocketpaw_ee/cloud/extraction). The
+# adapters lazy-import these, so they stay optional.
+extraction = [
+    "pypdf",
+    "trafilatura",
+    "python-docx>=1.1.0",
+    "pytesseract>=0.3.10",
+]
+
+[project.urls]
+Homepage = "https://pocketpaw.xyz"
+Repository = "https://github.com/pocketpaw/pocketpaw"
+Issues = "https://github.com/pocketpaw/pocketpaw/issues"
+
+# --- Extension-point providers (OSS-EE split) ---
+# The OSS core (`pocketpaw`) discovers these via importlib entry-points — see
+# pocketpaw/extensions.py for the Protocols and pocketpaw/_registry.py for
+# discovery. Installing `pocketpaw-ee` alongside `pocketpaw` activates them;
+# an OSS-only install simply finds none and degrades to core behaviour.
+[project.entry-points."pocketpaw.event_bus"]
+cloud = "pocketpaw_ee.extensions:CloudEventBusProvider"
+
+[project.entry-points."pocketpaw.embeddings"]
+cloud = "pocketpaw_ee.extensions:CloudEmbeddingProvider"
+
+[project.entry-points."pocketpaw.memory_backends"]
+mongodb = "pocketpaw_ee.extensions:MongoMemoryBackendProvider"
+
+[project.entry-points."pocketpaw.capabilities"]
+cloud = "pocketpaw_ee.extensions:CloudCapabilityProvider"
+
+[project.entry-points."pocketpaw.auth"]
+cloud = "pocketpaw_ee.extensions:CloudAuthProvider"
+
+[project.entry-points."pocketpaw.routes"]
+cloud = "pocketpaw_ee.extensions:CloudRouteProvider"
+
+[project.entry-points."pocketpaw.lifecycle"]
+cloud = "pocketpaw_ee.extensions:CloudLifecycleHook"
+
+[project.entry-points."pocketpaw.storage_backends"]
+cloud = "pocketpaw_ee.extensions:CloudStorageBackend"
+
+[project.entry-points."pocketpaw.models"]
+cloud = "pocketpaw_ee.extensions:CloudModelProvider"
+
+[project.entry-points."pocketpaw.pockets"]
+cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
+
+[project.entry-points."pocketpaw.mcp_servers"]
+tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
+planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
+pocket_planner = "pocketpaw_ee.extensions:CloudPocketPlannerMcpProvider"
+pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"
+decisions = "pocketpaw_ee.extensions:CloudDecisionsMcpProvider"
+pocket_specialist = "pocketpaw_ee.extensions:CloudPocketSpecialistMcpProvider"
+foresight = "pocketpaw_ee.extensions:CloudForesightMcpProvider"
+composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
+meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
+
+[project.entry-points."pocketpaw.agent_extensions"]
+cloud = "pocketpaw_ee.extensions:CloudAgentExtension"
+
+[project.entry-points."pocketpaw.composio_tools"]
+cloud = "pocketpaw_ee.extensions:CloudComposioToolProvider"
+
+[tool.hatch.metadata]
+# Allow git+ direct references in dependencies (PEP 440 disallows them
+# in published metadata by default; hatchling honors this flag locally).
+# Needed for the qbtrix CAMEL fork pinned via [tool.uv.sources] below.
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["pocketpaw_ee"]
+
+# RFC 08 PR 3 — Foresight CAMEL hard-dep promotion. The QBTRIX fork's
+# only change vs upstream camel-ai==0.2.90 is removing the psutil<6 cap
+# (which collides with livekit-agents at psutil>=7). uv resolves the
+# CAMEL dep via this source override when `uv lock` runs against
+# ee/pyproject.toml (workspace-local source). See
+# ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for the
+# vendoring rationale and the openai/psutil cap audit.
+[tool.uv.sources]
+camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
+
+# ---------------------------------------------------------------------------
+# import-linter: chokepoint contracts for ee/pocketpaw_ee/cloud/
+# ---------------------------------------------------------------------------
+# Rules (see ee/pocketpaw_ee/cloud CLAUDE.md):
+#   1. Beanie document classes (pocketpaw_ee.cloud.models.*) may only be
+#      imported from <entity>/service.py.
+#   2. router.py / dto.py / domain.py within an entity must not import the
+#      matching Beanie doc.
+#   3. shared façades (agent_bridge, deps) orchestrate via entity services.
+#
+# The OSS-boundary contract ("OSS core may not import from EE") lives in the
+# root pyproject.toml — it is scoped to the `pocketpaw` package.
+#
+# Run from the repo root (where import-linter is installed):
+#   uv run lint-imports --config ee/pyproject.toml
+[tool.importlinter]
+root_packages = ["pocketpaw_ee"]
+
+[[tool.importlinter.contracts]]
+name = "Pockets — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.pockets.router",
+    "pocketpaw_ee.cloud.pockets.dto",
+    "pocketpaw_ee.cloud.pockets.domain",
+    "pocketpaw_ee.cloud.pockets.agent_context",
+    "pocketpaw_ee.cloud.pockets.source_executor",
+    "pocketpaw_ee.cloud.pockets.sources_ops",
+    "pocketpaw_ee.cloud.pockets._http_guard",
+    "pocketpaw_ee.cloud.pockets.action_executor",
+    "pocketpaw_ee.cloud.pockets.actions_ops",
+    # RFC 04 M3 — the interval-refresh scheduler + the auto-refresh budget
+    # helper. The scheduler scans pockets through `pockets.service` and
+    # refreshes through `source_executor`; neither touches Beanie directly.
+    "pocketpaw_ee.cloud.pockets.refresh_scheduler",
+    "pocketpaw_ee.cloud.pockets._refresh_budget",
+    # RFC 05 M2b.1 — the instinct bridge proposes/executes parked writes
+    # through `pockets.service` and the Instinct store; it never touches
+    # Beanie document classes directly.
+    "pocketpaw_ee.cloud.pockets.instinct_bridge",
+    # RFC 03 v2 Wave 3a — the template-level instinct dispatch wrapper.
+    # Calls the pure OSS composer and the `instinct_approvals.service`
+    # Beanie writer; never imports the pockets/session/backend docs.
+    "pocketpaw_ee.cloud.pockets.instinct_dispatch",
+    # RFC 03 v2 Wave 3b — the bulk fan-out dispatcher. Calls the pure
+    # OSS ``plan_bulk_execution`` planner and the
+    # ``instinct_approvals.service`` writer; orchestrates per-row
+    # ``action_executor.run_action`` calls. Never imports a Beanie
+    # document class directly.
+    "pocketpaw_ee.cloud.pockets.bulk_dispatch",
+    # RFC 03 v2 Wave 3d — the per-pocket temporal trigger dispatcher.
+    # Calls the pure OSS ``sweep_temporal_triggers`` planner, the
+    # ``temporal_sweeps.service`` writer, ``instinct_dispatch``, and
+    # ``action_executor.run_action``. Never imports a Beanie document
+    # class directly.
+    "pocketpaw_ee.cloud.pockets.temporal_dispatcher",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.pocket_backend",
+    "pocketpaw_ee.cloud.models.session",
+]
+
+[[tool.importlinter.contracts]]
+name = "TemporalSweeps — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.temporal_sweeps.router",
+    "pocketpaw_ee.cloud.temporal_sweeps.dto",
+    "pocketpaw_ee.cloud.temporal_sweeps.domain",
+    # The cron driver scans pockets through ``pockets.service`` and
+    # dispatches through ``temporal_dispatcher``; it never touches a
+    # Beanie document directly.
+    "pocketpaw_ee.cloud._core.temporal_scheduler",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.temporal_sweep_state"]
+
+[[tool.importlinter.contracts]]
+name = "InstinctApprovals — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.instinct_approvals.router",
+    "pocketpaw_ee.cloud.instinct_approvals.dto",
+    "pocketpaw_ee.cloud.instinct_approvals.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
+
+[[tool.importlinter.contracts]]
+name = "Notifications — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.notifications.router",
+    "pocketpaw_ee.cloud.notifications.dto",
+    "pocketpaw_ee.cloud.notifications.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+
+[[tool.importlinter.contracts]]
+name = "Sessions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.sessions.router",
+    "pocketpaw_ee.cloud.sessions.dto",
+    "pocketpaw_ee.cloud.sessions.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.session"]
+
+[[tool.importlinter.contracts]]
+name = "Agents — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.agents.router",
+    "pocketpaw_ee.cloud.agents.dto",
+    "pocketpaw_ee.cloud.agents.domain",
+    "pocketpaw_ee.cloud.kb.knowledge_router",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.agent"]
+
+[[tool.importlinter.contracts]]
+name = "Workspace — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.workspace.router",
+    "pocketpaw_ee.cloud.workspace.dto",
+    "pocketpaw_ee.cloud.workspace.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.workspace"]
+
+[[tool.importlinter.contracts]]
+name = "Auth — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.auth.router",
+    "pocketpaw_ee.cloud.auth.dto",
+    "pocketpaw_ee.cloud.auth.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.user"]
+
+[[tool.importlinter.contracts]]
+name = "Shared agent_bridge — orchestrate via entity services only"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["pocketpaw_ee.cloud.shared.agent_bridge"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.group",
+    "pocketpaw_ee.cloud.models.message",
+    "pocketpaw_ee.cloud.models.agent",
+]
+
+[[tool.importlinter.contracts]]
+name = "Shared deps — guard via entity services only"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["pocketpaw_ee.cloud.shared.deps"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.group",
+    "pocketpaw_ee.cloud.models.agent",
+    "pocketpaw_ee.cloud.models.pocket",
+]
+
+[[tool.importlinter.contracts]]
+name = "Chat — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.chat.router",
+    "pocketpaw_ee.cloud.chat.agent_router",
+    "pocketpaw_ee.cloud.chat.dto",
+    "pocketpaw_ee.cloud.chat.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.group",
+    "pocketpaw_ee.cloud.models.message",
+    "pocketpaw_ee.cloud.models.read_state",
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.agent",
+]
+
+[[tool.importlinter.contracts]]
+name = "Tasks — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.tasks.router",
+    "pocketpaw_ee.cloud.tasks.dto",
+    "pocketpaw_ee.cloud.tasks.domain",
+    "pocketpaw_ee.cloud.tasks.listeners",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.task"]
+
+[[tool.importlinter.contracts]]
+name = "Meetings — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.meetings.router",
+    "pocketpaw_ee.cloud.meetings.dto",
+    "pocketpaw_ee.cloud.meetings.domain",
+    "pocketpaw_ee.cloud.meetings.providers.recall.webhooks",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.meeting"]
+
+[[tool.importlinter.contracts]]
+name = "Mission Control — no Beanie touches from façade layer"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.mission_control.router",
+    "pocketpaw_ee.cloud.mission_control.dto",
+    "pocketpaw_ee.cloud.mission_control.domain",
+    "pocketpaw_ee.cloud.mission_control.service",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.agent",
+    "pocketpaw_ee.cloud.models.planner",
+    "pocketpaw_ee.cloud.models.cycle",
+]
+
+[[tool.importlinter.contracts]]
+name = "Cycles — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.cycles.router",
+    "pocketpaw_ee.cloud.cycles.dto",
+    "pocketpaw_ee.cloud.cycles.domain",
+    "pocketpaw_ee.cloud.cycles.snapshot_job",
+    "pocketpaw_ee.cloud.cycles.scheduler",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "Foresight — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.foresight.router",
+    "pocketpaw_ee.cloud.foresight.dto",
+    "pocketpaw_ee.cloud.foresight.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.foresight_run",
+    "pocketpaw_ee.cloud.models.foresight_backtest",
+    "pocketpaw_ee.cloud.models.foresight_projected_decision",
+    "pocketpaw_ee.cloud.models.foresight_prediction_record",
+    "pocketpaw_ee.cloud.models.foresight_workspace_config",
+    "pocketpaw_ee.cloud.models.foresight_workspace_scenario",
+]
+
+[[tool.importlinter.contracts]]
+name = "Foresight cloud — must not import the engine layer"
+# Cloud is API + persistence + service; the engine (persona, llm,
+# scenarios, substrate, aggregator, calibration) carries the OASIS +
+# CAMEL deps and is the optional ``pocketpaw-ee[foresight]`` extra.
+# Static imports from the cloud entity into the engine would couple the
+# cloud surface to the optional extra; the service uses lazy imports
+# inside the engine call path instead. router / dto / domain / models
+# stay clean. PR 4's backtest service likewise imports the aggregator
+# (``ee.foresight.aggregator``) and calibration loop
+# (``ee.foresight.calibration``) lazily inside ``_score_backtest``.
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.foresight.router",
+    "pocketpaw_ee.cloud.foresight.dto",
+    "pocketpaw_ee.cloud.foresight.domain",
+    "pocketpaw_ee.cloud.models.foresight_run",
+    "pocketpaw_ee.cloud.models.foresight_backtest",
+    "pocketpaw_ee.cloud.models.foresight_projected_decision",
+    "pocketpaw_ee.cloud.models.foresight_prediction_record",
+    "pocketpaw_ee.cloud.models.foresight_workspace_config",
+    "pocketpaw_ee.cloud.models.foresight_workspace_scenario",
+]
+forbidden_modules = [
+    "pocketpaw_ee.foresight.persona",
+    "pocketpaw_ee.foresight.llm",
+    "pocketpaw_ee.foresight.scenarios",
+    "pocketpaw_ee.foresight.substrate",
+    "pocketpaw_ee.foresight.world",
+    "pocketpaw_ee.foresight.aggregator",
+    "pocketpaw_ee.foresight.calibration",
+    "pocketpaw_ee.foresight.subtypes",
+]
+
+[[tool.importlinter.contracts]]
+name = "Projects — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.projects.router",
+    "pocketpaw_ee.cloud.projects.dto",
+    "pocketpaw_ee.cloud.projects.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.project"]
+
+[[tool.importlinter.contracts]]
+name = "Planner — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.planner.router",
+    "pocketpaw_ee.cloud.planner.dto",
+    "pocketpaw_ee.cloud.planner.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.planner"]
+
+[[tool.importlinter.contracts]]
+name = "Audit — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.audit.router",
+    "pocketpaw_ee.cloud.audit.dto",
+    "pocketpaw_ee.cloud.audit.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.audit"]
+
+# Decisions — Beanie writes only from service.py (RFC 07 Slice 1).
+# The decision-graph entity has no Beanie document of its own — it
+# materializes into SQLite (`~/.soul/decisions.db`) via DecisionStore,
+# not MongoDB. The contract is included for consistency with the other
+# entities and to forbid any future Beanie creep. `domain.py`, `dto.py`,
+# `router.py`, `projection.py`, and `store.py` must never import the
+# cloud models.* tree — only `service.py` may (it doesn't yet, but the
+# contract pins the rule for future maintenance).
+[[tool.importlinter.contracts]]
+name = "Decisions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.decisions.router",
+    "pocketpaw_ee.cloud.decisions.dto",
+    "pocketpaw_ee.cloud.decisions.domain",
+    "pocketpaw_ee.cloud.decisions.projection",
+    "pocketpaw_ee.cloud.decisions.store",
+    "pocketpaw_ee.cloud.decisions.explain.extractor",
+    "pocketpaw_ee.cloud.decisions.explain.narrator",
+    "pocketpaw_ee.cloud.decisions.explain.cache",
+    "pocketpaw_ee.cloud.decisions.explain.service",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.notification",
+    "pocketpaw_ee.cloud.models.session",
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.models.user",
+    "pocketpaw_ee.cloud.models.agent",
+    "pocketpaw_ee.cloud.models.workspace",
+]
+
+# Increment 3 — the pocket execution router. The classifier is PURE: a
+# rule-based ``classify(intent, ripple_spec)`` with no I/O. It must never
+# import Beanie documents, the cloud-side executors / services, or the LLM
+# specialist — those belong to the router layer (``router.py``), which is
+# the only module here allowed to invoke them.
+[[tool.importlinter.contracts]]
+name = "Pocket router — classifier stays pure"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = ["pocketpaw_ee.agent.pocket_router.classifier"]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.pocket",
+    "pocketpaw_ee.cloud.pockets.service",
+    "pocketpaw_ee.cloud.pockets.source_executor",
+    "pocketpaw_ee.cloud.pockets.action_executor",
+    "pocketpaw_ee.agent.pocket_specialist.runtime",
+    "pocketpaw_ee.agent.pocket_specialist.adapters",
+]
+
+# RFC 09 Slice 1b — see `scripts/audit_decision_chain.py` for the
+# enforcement of "Decision-Graph chain producers must route through
+# `pocketpaw_ee.cloud.decisions.journal_writer.record_decision_event`."
+# That rule isn't expressible as an import-linter contract because the
+# forbidden surface (`soul_protocol.spec.decisions`) is a sub-package of
+# an external package and import-linter forbidden contracts only accept
+# top-level external packages. The script is wired into the same CI
+# step as `lint-imports` — see `Makefile` / `.github/workflows/ci.yml`.

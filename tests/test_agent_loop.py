@@ -1208,6 +1208,180 @@ async def test_token_metrics_persist_failure_is_logged_at_debug(
 @patch("pocketpaw.agents.loop.AgentContextBuilder")
 @patch("pocketpaw.agents.loop.AgentRouter")
 @pytest.mark.asyncio
+async def test_budget_exhaustion_blocks_before_router_run(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """When budget is exhausted, the loop must block before invoking AgentRouter."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+    mock_router_cls.return_value = MagicMock()
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    tracker = MagicMock()
+    tracker.get_summary.return_value = {"total_cost_usd": 12.0}
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+        patch("pocketpaw.agents.loop.usage_tracker_module.get_usage_tracker", return_value=tracker),
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.injection_scan_enabled = False
+        settings.pii_scan_enabled = False
+        settings.pii_scan_memory = False
+        settings.welcome_hint_enabled = False
+        settings.budget_monthly_usd = 10.0
+        settings.budget_warning_threshold = 0.8
+        settings.budget_auto_pause = True
+        settings.budget_reset_day = 1
+        settings.budget_paused = False
+        settings.budget_override_usd = None
+        settings.budget_override_reason = ""
+        settings.budget_override_expires_at = None
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="Hello",
+        )
+
+        await loop._process_message(msg)
+
+    mock_router_cls.assert_not_called()
+    outbound_contents = [
+        outbound.content
+        for outbound in (call.args[0] for call in mock_bus.publish_outbound.call_args_list)
+        if hasattr(outbound, "content")
+    ]
+    assert any("Budget exhausted" in content for content in outbound_contents)
+    assert any(
+        call.args[0].is_stream_end is True for call in mock_bus.publish_outbound.call_args_list
+    )
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
+async def test_budget_warning_event_emitted_on_threshold_cross(
+    mock_router_cls,
+    mock_builder_cls,
+    mock_get_memory,
+    mock_get_bus,
+    mock_bus,
+    mock_memory,
+):
+    """Crossing warning threshold after token_usage should emit budget_warning once."""
+    mock_get_bus.return_value = mock_bus
+    mock_get_memory.return_value = mock_memory
+
+    warning_router = MagicMock()
+
+    async def mock_run_with_token_usage(
+        message, *, system_prompt=None, history=None, session_key=None
+    ):
+        yield AgentEvent(
+            type="token_usage",
+            content="",
+            metadata={
+                "backend": "claude_agent_sdk",
+                "model": "claude-3-haiku",
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cached_input_tokens": 0,
+                "total_cost_usd": 1.5,
+            },
+        )
+        yield AgentEvent(type="done", content="")
+
+    warning_router.run = mock_run_with_token_usage
+    warning_router.stop = AsyncMock()
+    mock_router_cls.return_value = warning_router
+
+    mock_builder_instance = mock_builder_cls.return_value
+    mock_builder_instance.build_system_prompt = AsyncMock(return_value="System Prompt")
+
+    class MutableTracker:
+        def __init__(self, initial_total: float) -> None:
+            self.total = initial_total
+
+        def get_summary(self, since: str | None = None) -> dict[str, float]:
+            _ = since
+            return {"total_cost_usd": self.total}
+
+        def record(self, *, total_cost_usd=None, **kwargs) -> None:
+            _ = kwargs
+            self.total += float(total_cost_usd or 0.0)
+
+    tracker = MutableTracker(initial_total=7.0)
+
+    with (
+        patch("pocketpaw.agents.loop.get_settings") as mock_settings,
+        patch("pocketpaw.agents.loop.Settings") as mock_settings_cls,
+        patch("pocketpaw.agents.loop.usage_tracker_module.get_usage_tracker", return_value=tracker),
+    ):
+        settings = MagicMock()
+        settings.agent_backend = "claude_agent_sdk"
+        settings.max_concurrent_conversations = 5
+        settings.injection_scan_enabled = False
+        settings.pii_scan_enabled = False
+        settings.pii_scan_memory = False
+        settings.welcome_hint_enabled = False
+        settings.file_jail_path = "."
+        settings.compaction_recent_window = 20
+        settings.compaction_char_budget = 30000
+        settings.compaction_summary_chars = 1000
+        settings.compaction_llm_summarize = False
+        settings.tool_profile = "full"
+        settings.budget_monthly_usd = 10.0
+        settings.budget_warning_threshold = 0.8
+        settings.budget_auto_pause = True
+        settings.budget_reset_day = 1
+        settings.budget_paused = False
+        settings.budget_override_usd = None
+        settings.budget_override_reason = ""
+        settings.budget_override_expires_at = None
+        mock_settings.return_value = settings
+        mock_settings_cls.load.return_value = settings
+
+        loop = AgentLoop()
+        msg = InboundMessage(
+            channel=Channel.CLI,
+            sender_id="user1",
+            chat_id="chat1",
+            content="hello",
+        )
+
+        await loop._process_message(msg)
+
+    budget_events = [
+        call.args[0]
+        for call in mock_bus.publish_system.call_args_list
+        if getattr(call.args[0], "event_type", "") == "budget_warning"
+    ]
+    assert len(budget_events) == 1
+    assert budget_events[0].data["session_key"] == "cli:chat1"
+
+
+@patch("pocketpaw.agents.loop.get_message_bus")
+@patch("pocketpaw.agents.loop.get_memory_manager")
+@patch("pocketpaw.agents.loop.AgentContextBuilder")
+@patch("pocketpaw.agents.loop.AgentRouter")
+@pytest.mark.asyncio
 async def test_health_engine_persist_failure_logged_as_warning(
     mock_router_cls,
     mock_builder_cls,

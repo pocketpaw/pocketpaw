@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ee.cloud.files.abac_config import AbacRule, AbacRuleSet, load_rules
+from pocketpaw_ee.cloud.files.abac_config import AbacRule, AbacRuleSet, load_rules
 
 
 def test_load_rules_empty(tmp_path: Path):

@@ -14,9 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
-chat_router = importlib.import_module("ee.cloud.chat.router")
-from ee.cloud.chat.ws import manager  # noqa: E402
-from ee.cloud.realtime.events import PresenceOffline  # noqa: E402
+chat_router = importlib.import_module("pocketpaw_ee.cloud.chat.router")
+from pocketpaw_ee.cloud.chat.ws import manager  # noqa: E402
+from pocketpaw_ee.cloud.realtime.events import PresenceOffline  # noqa: E402
 
 
 @pytest.mark.asyncio

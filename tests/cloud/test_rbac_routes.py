@@ -31,10 +31,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.auth import current_active_user
-from ee.cloud.license import require_license
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.auth import current_active_user
+from pocketpaw_ee.cloud.license import require_license
 
 # ---------------------------------------------------------------------------
 # Fake user builders
@@ -116,7 +115,7 @@ def _unauthenticated():
 
 def _make_agents_app(user: _FakeUser | None = None) -> FastAPI:
     """Thin app with only the agents router mounted."""
-    from ee.cloud.agents.router import router as agents_router
+    from pocketpaw_ee.cloud.agents.router import router as agents_router
 
     app = FastAPI()
     add_error_handler(app)
@@ -131,7 +130,7 @@ def _make_agents_app(user: _FakeUser | None = None) -> FastAPI:
 
 def _make_workspace_app(user: _FakeUser | None = None) -> FastAPI:
     """Thin app with only the workspace router mounted."""
-    from ee.cloud.workspace.router import router as workspace_router
+    from pocketpaw_ee.cloud.workspace.router import router as workspace_router
 
     app = FastAPI()
     add_error_handler(app)
@@ -146,7 +145,7 @@ def _make_workspace_app(user: _FakeUser | None = None) -> FastAPI:
 
 def _make_kb_app(user: _FakeUser | None = None) -> FastAPI:
     """Thin app with only the KB router mounted."""
-    from ee.cloud.kb.router import router as kb_router
+    from pocketpaw_ee.cloud.kb.router import router as kb_router
 
     app = FastAPI()
     add_error_handler(app)
@@ -231,7 +230,9 @@ class TestMemberAccess:
         mock_agent.scopes = []
         mock_agent.created_at = None
 
-        with patch("ee.cloud.agents.service.create", new=AsyncMock(return_value=mock_agent)):
+        with patch(
+            "pocketpaw_ee.cloud.agents.service.create", new=AsyncMock(return_value=mock_agent)
+        ):
             app = _make_agents_app(user=_member_of("ws1"))
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
@@ -265,7 +266,7 @@ class TestMemberAccess:
         The kb binary call is patched so the test runs without the kb Go
         binary installed.
         """
-        with patch("ee.cloud.kb.router._kb", return_value=[]):
+        with patch("pocketpaw_ee.cloud.kb.router._kb", return_value=[]):
             app = _make_kb_app(user=_member_of("ws1"))
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(
@@ -304,7 +305,7 @@ class TestAdminAccess:
         """
         from datetime import UTC, datetime
 
-        from ee.cloud.workspace.domain import Workspace
+        from pocketpaw_ee.cloud.workspace.domain import Workspace
 
         fake_ws = Workspace(
             id="ws1",
@@ -316,7 +317,9 @@ class TestAdminAccess:
             created_at=datetime.now(UTC),
         )
 
-        with patch("ee.cloud.workspace.service.update", new=AsyncMock(return_value=fake_ws)):
+        with patch(
+            "pocketpaw_ee.cloud.workspace.service.update", new=AsyncMock(return_value=fake_ws)
+        ):
             app = _make_workspace_app(user=_admin_of("ws1"))
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.patch("/api/v1/workspaces/ws1", json={"name": "Updated Name"})
@@ -329,7 +332,7 @@ class TestAdminAccess:
         """
         from datetime import UTC, datetime
 
-        from ee.cloud.workspace.domain import Invite
+        from pocketpaw_ee.cloud.workspace.domain import Invite
 
         fake_invite = Invite(
             id="inv-1",
@@ -346,11 +349,11 @@ class TestAdminAccess:
         )
 
         with patch(
-            "ee.cloud.workspace.service.create_invite",
+            "pocketpaw_ee.cloud.workspace.service.create_invite",
             new=AsyncMock(return_value=fake_invite),
         ):
             with patch(
-                "ee.cloud.workspace.service.get",
+                "pocketpaw_ee.cloud.workspace.service.get",
                 new=AsyncMock(),
             ):
                 app = _make_workspace_app(user=_admin_of("ws1"))
@@ -431,7 +434,7 @@ class TestRoleBoundary:
         """workspace.update requires ADMIN — an OWNER (level > ADMIN) must pass."""
         from datetime import UTC, datetime
 
-        from ee.cloud.workspace.domain import Workspace
+        from pocketpaw_ee.cloud.workspace.domain import Workspace
 
         fake_ws = Workspace(
             id="ws1",
@@ -448,7 +451,9 @@ class TestRoleBoundary:
             workspaces=[_FakeMembership(workspace="ws1", role="owner")],
         )
 
-        with patch("ee.cloud.workspace.service.update", new=AsyncMock(return_value=fake_ws)):
+        with patch(
+            "pocketpaw_ee.cloud.workspace.service.update", new=AsyncMock(return_value=fake_ws)
+        ):
             app = _make_workspace_app(user=owner_user)
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.patch("/api/v1/workspaces/ws1", json={"name": "Owner Update"})
@@ -461,7 +466,7 @@ class TestRoleBoundary:
         test that a MEMBER can pass the write guard too (no regression into
         accidentally requiring ADMIN for writes).
         """
-        with patch("ee.cloud.kb.router._kb", return_value={"ingested": 1}):
+        with patch("pocketpaw_ee.cloud.kb.router._kb", return_value={"ingested": 1}):
             app = _make_kb_app(user=_member_of("ws1"))
             client = TestClient(app, raise_server_exceptions=False)
             resp = client.post(

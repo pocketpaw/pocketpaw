@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
-from ee.cloud.workspace.dto import (
+from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.dto import (
     invite_to_dto,
     invite_to_validate_dto,
     member_to_dto,

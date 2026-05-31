@@ -55,16 +55,15 @@ async def main() -> int:
     )
     os.environ.pop("POCKETPAW_MEMORY_BACKEND", None)
 
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
-    from ee.cloud.memory.bootstrap import register_default_backend
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud import mount_cloud
+    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -150,7 +149,7 @@ async def main() -> int:
 
             # 4. verify in Mongo
             _banner("4. raw Mongo — sessions collection")
-            from ee.cloud.models.session import Session
+            from pocketpaw_ee.cloud.models.session import Session
 
             rows = await Session.find(Session.sessionId == session_id).to_list()
             print(f"   found {len(rows)} session rows with sessionId={session_id!r}")
@@ -176,11 +175,11 @@ async def main() -> int:
 
             # 5. send a message using that session_id
             _banner("5. chat via save_user_message(session_id, ...)")
-            from ee.cloud.shared.chat_persistence import save_user_message
+            from pocketpaw_ee.cloud.shared.chat_persistence import save_user_message
 
             await save_user_message(session_id, "hello pocket chat")
 
-            from ee.cloud.models.message import Message
+            from pocketpaw_ee.cloud.models.message import Message
 
             msgs = await Message.find({"session_key": session_id}).to_list()
             print(f"   found {len(msgs)} messages with session_key={session_id!r}")

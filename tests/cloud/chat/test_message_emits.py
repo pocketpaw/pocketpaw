@@ -9,20 +9,21 @@ no fake repositories or seam-patching needed.
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.chat import message_service
-from ee.cloud.chat.schemas import (
+from pocketpaw_ee.cloud.chat import message_service
+from pocketpaw_ee.cloud.chat.schemas import (
     EditMessageRequest,
     SendMessageRequest,
 )
-from ee.cloud.models.group import Group as _GroupDoc
-from ee.cloud.models.message import Message as _MessageDoc
-from ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.message import Message as _MessageDoc
+from pocketpaw_ee.cloud.realtime.events import (
     MessageDeleted,
     MessageEdited,
     MessageNew,
     MessageReaction,
     MessageSent,
+    ThreadClosed,
+    ThreadCreated,
     UnreadUpdate,
 )
 
@@ -134,7 +135,7 @@ def test_router_no_longer_broadcasts_message_events():
     """Regression guard: the four _ws_message_* handlers must not call manager.broadcast/send."""
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[3] / "ee/cloud/chat/router.py").read_text(
+    src = (Path(__file__).resolve().parents[3] / "ee/pocketpaw_ee/cloud/chat/router.py").read_text(
         encoding="utf-8"
     )
 
@@ -166,8 +167,12 @@ async def test_send_message_fans_out_everyone_mention_to_all_members(
     async def fake_bump(user_id, group_id):
         bumped.append((user_id, group_id))
 
-    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", fake_notif)
-    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.notifications_service.create", fake_notif
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
+    )
 
     body = SendMessageRequest(
         content="hello team",
@@ -195,8 +200,12 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     async def fake_bump(user_id, group_id):
         pass
 
-    monkeypatch.setattr("ee.cloud.chat.message_service.notifications_service.create", fake_notif)
-    monkeypatch.setattr("ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.notifications_service.create", fake_notif
+    )
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.chat.message_service.unread_service.bump_mention", fake_bump
+    )
 
     body = SendMessageRequest(
         content="hi u2",
@@ -207,8 +216,11 @@ async def test_send_message_user_and_broadcast_mention_dedupes(
     )
     await message_service.send_message(str(group.id), "sender", body)
 
-    recipients = sorted(n["recipient"] for n in created_notifs)
-    assert recipients == ["u2", "u3"]  # no duplicate u2
+    # @u2 and @everyone both target u2; the mention fan-out must dedupe to a
+    # single mention per recipient. (The general per-member "message" notif is
+    # a separate kind and isn't what this test guards.)
+    mention_recipients = sorted(n["recipient"] for n in created_notifs if n["kind"] == "mention")
+    assert mention_recipients == ["u2", "u3"]  # no duplicate u2
 
 
 @pytest.mark.asyncio
@@ -246,9 +258,44 @@ async def test_send_reply_does_not_bump_thread_count(mongo_db, recording_bus):
 
 
 @pytest.mark.asyncio
+async def test_create_thread_emits_thread_created(mongo_db, recording_bus):
+    """create_thread must fire a typed ThreadCreated event, not stuff
+    type="thread.created" into a ThreadReply data dict."""
+    group = await _make_group(owner="u1", members=["u1"])
+    parent = await _make_message(group_id=str(group.id), sender="u1", content="parent")
+
+    await message_service.create_thread(str(group.id), "u1", str(parent.id))
+
+    created = [e for e in recording_bus.events if isinstance(e, ThreadCreated)]
+    assert len(created) == 1
+    ev = created[0]
+    assert ev.type == "thread.created"
+    assert ev.data["group_id"] == str(group.id)
+    assert ev.data["message_id"] == str(parent.id)
+
+
+@pytest.mark.asyncio
+async def test_close_thread_emits_thread_closed(mongo_db, recording_bus):
+    """close_thread must fire a typed ThreadClosed event."""
+    group = await _make_group(owner="u1", members=["u1"])
+    parent = await _make_message(group_id=str(group.id), sender="u1", content="parent")
+    await message_service.create_thread(str(group.id), "u1", str(parent.id))
+    recording_bus.events.clear()
+
+    await message_service.close_thread(str(group.id), "u1", str(parent.id))
+
+    closed = [e for e in recording_bus.events if isinstance(e, ThreadClosed)]
+    assert len(closed) == 1
+    ev = closed[0]
+    assert ev.type == "thread.closed"
+    assert ev.data["group_id"] == str(group.id)
+    assert ev.data["thread_id"] == str(parent.id)
+
+
+@pytest.mark.asyncio
 async def test_send_reply_emits_message_new_not_thread_reply(mongo_db, recording_bus):
     """Inline replies fan out via MessageNew; no ThreadReply event fires."""
-    from ee.cloud.realtime.events import ThreadReply
+    from pocketpaw_ee.cloud.realtime.events import ThreadReply
 
     group = await _make_group(owner="sender", members=["sender"])
     parent = await _make_message(group_id=str(group.id), sender="u_other")

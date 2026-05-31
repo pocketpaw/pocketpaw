@@ -14,6 +14,9 @@ Backend-aware exclusion:
 
 Changes:
 - 2026-03-12: Added EditFileTool to _CLAUDE_SDK_EXCLUDED (has native Edit)
+- 2026-05-21 (#1160): _scan_tool_output now also caps oversized results via
+  cap_tool_output(), so tool blobs returned through the OpenAI / ADK /
+  LangChain wrappers can't flood agent context.
 """
 
 from __future__ import annotations
@@ -42,17 +45,86 @@ _CLAUDE_SDK_EXCLUDED = frozenset(
     }
 )
 
-# Backends that receive ``PocketSpecialistTool`` via this bridge as a native
-# function tool. Must stay in sync with ``ee.ripple._pockets._MCP_POCKET_BACKENDS``
-# minus ``claude_agent_sdk`` (which goes through its own in-process MCP server,
-# not the function-tool bridge).
-_SPECIALIST_FUNCTION_TOOL_BACKENDS: frozenset[str] = frozenset(
+# Tool names (NOT class names) that overlap with Composio's hosted
+# integrations. When Composio is enabled (cloud, with ``composio_api_key``
+# set), these YAML-/native-connector-backed tools are dropped from the
+# agent's surface so the LLM has exactly one path per integration. Without
+# this, the agent gets confused between Composio's ``GMAIL_SEND_EMAIL`` and
+# the legacy ``gmail_send``, and tends to fall back on the legacy tool's
+# "Settings → Google OAuth" auth flow (a paw-enterprise UI affordance, not
+# a chat one).
+_COMPOSIO_OVERLAPPING_TOOL_NAMES = frozenset(
     {
-        "deep_agents",
-        "google_adk",
-        "openai_agents",
+        # Gmail
+        "gmail_search",
+        "gmail_read",
+        "gmail_send",
+        "gmail_list_labels",
+        "gmail_create_label",
+        "gmail_modify",
+        "gmail_trash",
+        "gmail_batch_modify",
+        # Google Calendar
+        "calendar_list",
+        "calendar_create",
+        "calendar_prep",
+        # Google Docs
+        "docs_read",
+        "docs_create",
+        "docs_search",
+        # Google Drive
+        "drive_list",
+        "drive_download",
+        "drive_upload",
+        "drive_share",
+        # Reddit
+        "reddit_search",
+        "reddit_read",
+        "reddit_trending",
+        # Spotify
+        "spotify_search",
+        "spotify_now_playing",
+        "spotify_playback",
+        "spotify_playlist",
     }
 )
+
+
+def _is_composio_enabled() -> bool:
+    """True when Composio is configured. Read lazily so OSS-local runs
+    don't pay the ``Settings.load`` cost up front."""
+    try:
+        from pocketpaw.config import Settings
+
+        s = Settings.load()
+        return bool(s.composio_api_key and s.composio_enterprise_id)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def composio_tools_for(backend: str, settings: Any) -> list[Any]:
+    """Composio integration tools for *backend*, via the
+    ``pocketpaw.composio_tools`` entry point.
+
+    Returns ``[]`` on an OSS install (no provider registered), when
+    Composio is not configured, or when the per-stream fetch fails —
+    Composio is always additive to the agent's tool surface, never
+    load-bearing, so a failure degrades silently rather than aborting
+    the run. Keeps the OSS core free of any ``pocketpaw_ee`` import: the
+    cloud provider is discovered through the entry-point registry.
+    """
+    from pocketpaw._registry import first as _ext_first
+
+    provider = _ext_first("pocketpaw.composio_tools")
+    if provider is None:
+        return []
+    try:
+        return list(provider.build_tools(backend, settings))
+    except ImportError:
+        return []  # composio SDK / provider package not installed
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("composio_tools_for(%s) failed: %s", backend, exc)
+        return []
 
 
 def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
@@ -97,31 +169,39 @@ def _instantiate_all_tools(backend: str = "claude_agent_sdk") -> list[BaseTool]:
     except Exception:
         pass  # Soul not available
 
-    # Inject the ee/cloud pocket specialist tool for MCP-capable function-tool
-    # backends only (deep_agents, google_adk, openai_agents). Same opt-in
-    # try-import pattern as soul above.
-    #
-    # Shell-CLI bridge backends (codex_cli, opencode, copilot_sdk, gemini_cli)
-    # are excluded: their POCKET_CREATION_PROMPT_CLI tells the agent to use
-    # ``cloud_pocket_specialist_create`` (registered in _CLOUD_HANDLERS), so
-    # surfacing ``pocket_specialist__create`` in their compact tool list
-    # would advertise a name the CLI dispatcher can't resolve.
-    #
-    # claude_agent_sdk is also excluded because that backend uses its own
-    # in-process SDK MCP server (``mcp_tool.build_pocket_specialist_server``)
-    # and never consumes PocketPaw BaseTools through this bridge.
-    if backend in _SPECIALIST_FUNCTION_TOOL_BACKENDS:
-        try:
-            from ee.agent.pocket_specialist.tool import PocketSpecialistTool
+    # EE agent extensions contribute backend-specific function tools — the
+    # cloud pocket specialist for MCP-capable function-tool backends. The
+    # extension owns the backend gating (which backends get the tool); an
+    # OSS install registers no extension and this loop is a no-op.
+    from pocketpaw._registry import providers as _ext_providers
 
-            tools.append(PocketSpecialistTool())
+    for ext in _ext_providers("pocketpaw.agent_extensions"):
+        try:
+            tools.extend(ext.agent_tools(backend))
         except Exception as exc:  # noqa: BLE001
-            logger.debug("PocketSpecialistTool not available: %s", exc)
+            logger.debug("agent extension %r agent_tools failed: %s", ext, exc)
+
+    # When Composio is configured, drop the YAML-/native-connector tools
+    # whose integrations are now served by Composio's hosted ``*_*`` tools
+    # (GMAIL_SEND_EMAIL, etc.). Prevents the LLM from mixing two
+    # integration paths and surfacing paw-enterprise's
+    # "Settings → Google OAuth" affordance in chat.
+    if _is_composio_enabled():
+        before = len(tools)
+        tools = [t for t in tools if t.name not in _COMPOSIO_OVERLAPPING_TOOL_NAMES]
+        dropped = before - len(tools)
+        if dropped:
+            logger.info(
+                "tool_bridge: dropped %d YAML-connector tools (Composio is enabled)",
+                dropped,
+            )
 
     return tools
 
 
-def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -> list:
+def build_openai_function_tools(
+    settings: Any, backend: str = "openai_agents", policy: ToolPolicy | None = None
+) -> list:
     """Build a list of OpenAI Agents SDK ``FunctionTool`` wrappers for PocketPaw tools.
 
     Each tool is wrapped in a FunctionTool whose ``on_invoke_tool`` callback
@@ -141,11 +221,12 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
         logger.debug("OpenAI Agents SDK not installed — returning empty tools list")
         return []
 
-    policy = ToolPolicy(
-        profile=settings.tool_profile,
-        allow=settings.tools_allow,
-        deny=settings.tools_deny,
-    )
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
     registry = ToolRegistry(policy=policy)
     for tool in _instantiate_all_tools(backend=backend):
@@ -181,7 +262,20 @@ def build_openai_function_tools(settings: Any, backend: str = "openai_agents") -
 
 
 def _scan_tool_output(result: str, tool_name: str) -> str:
-    """Scan tool output for injection attacks, return sanitized content if needed."""
+    """Post-process a tool result before it reaches agent context.
+
+    Two steps, both best-effort (an error in either leaves the result
+    unchanged rather than breaking tool execution):
+
+    1. Injection scan — sanitise content that trips the prompt-injection
+       scanner (e.g. hostile web pages).
+    2. Output budget — cap an oversized blob (a long test run, a build log,
+       a big HTTP body) via ``cap_tool_output`` so it can't flood the
+       context window. Normal-sized output passes through untouched.
+
+    This runs inside the OpenAI / ADK / LangChain tool wrappers, which call
+    ``tool.execute`` directly rather than through ``ToolRegistry.execute``.
+    """
     try:
         from pocketpaw.config import get_settings
         from pocketpaw.security.injection_scanner import get_injection_scanner
@@ -191,9 +285,22 @@ def _scan_tool_output(result: str, tool_name: str) -> str:
             scanner = get_injection_scanner()
             scan = scanner.scan(result, source=f"tool:{tool_name}")
             if scan.threat_level.value != "none":
-                return scan.sanitized_content
+                result = scan.sanitized_content
     except Exception:
         pass  # Don't let scanner errors break tool execution
+
+    # Output budget — cap a noisy blob. Idempotent, so a result already
+    # capped inside BaseTool._success passes through unchanged.
+    if result:
+        try:
+            from pocketpaw.config import get_settings
+            from pocketpaw.tools.output_budget import cap_tool_output
+
+            cap = getattr(get_settings(), "tool_output_char_cap", None)
+            result = cap_tool_output(result, cap=cap, tool_name=tool_name)
+        except Exception:
+            logger.debug("Tool output cap failed for %s", tool_name, exc_info=True)
+
     return result
 
 
@@ -219,7 +326,9 @@ def _make_invoke_callback(tool: Any):
     return callback
 
 
-def build_adk_function_tools(settings: Any, backend: str = "google_adk") -> list:
+def build_adk_function_tools(
+    settings: Any, backend: str = "google_adk", policy: ToolPolicy | None = None
+) -> list:
     """Build a list of Google ADK ``FunctionTool`` wrappers for PocketPaw tools.
 
     ADK accepts plain Python callables as tools via ``FunctionTool(func=...)``.
@@ -240,11 +349,12 @@ def build_adk_function_tools(settings: Any, backend: str = "google_adk") -> list
         logger.debug("Google ADK not installed — returning empty tools list")
         return []
 
-    policy = ToolPolicy(
-        profile=settings.tool_profile,
-        allow=settings.tools_allow,
-        deny=settings.tools_deny,
-    )
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
     registry = ToolRegistry(policy=policy)
     for tool in _instantiate_all_tools(backend=backend):
@@ -308,7 +418,9 @@ def _make_adk_wrapper(tool: Any):
     return _adk_tool_wrapper
 
 
-def build_deep_agents_tools(settings: Any, backend: str = "deep_agents") -> list:
+def build_deep_agents_tools(
+    settings: Any, backend: str = "deep_agents", policy: ToolPolicy | None = None
+) -> list:
     """Build a list of LangChain ``StructuredTool`` wrappers for PocketPaw tools.
 
     Deep Agents accepts LangChain tools, plain callables, or dicts. We use
@@ -328,11 +440,12 @@ def build_deep_agents_tools(settings: Any, backend: str = "deep_agents") -> list
         logger.debug("langchain-core not installed — returning empty tools list")
         return []
 
-    policy = ToolPolicy(
-        profile=settings.tool_profile,
-        allow=settings.tools_allow,
-        deny=settings.tools_deny,
-    )
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
 
     registry = ToolRegistry(policy=policy)
     for tool in _instantiate_all_tools(backend=backend):

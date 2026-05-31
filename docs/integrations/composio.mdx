@@ -1,0 +1,184 @@
+---
+title: "Composio: 200+ Pre-Built OAuth-Managed Toolkits"
+description: "PocketPaw's first-party Composio integration. The chat agent discovers and calls any whitelisted Composio toolkit (Gmail, Slack, GitHub, Drive, Linear, …) at runtime via in-process MCP. Multi-tenant via namespaced user_id, per-backend providers for all four supported agent SDKs."
+section: Integrations
+ogType: article
+keywords: ["composio", "composio integration", "mcp tools", "third-party tools", "oauth toolkits"]
+tags: ["integrations", "composio", "tools", "ee"]
+---
+
+# Composio: 200+ Pre-Built OAuth-Managed Toolkits
+
+[Composio](https://docs.composio.dev) ships 200+ pre-built OAuth-managed integrations (Gmail, Slack, GitHub, Drive, Calendar, Linear, …) as a single MCP-shaped surface. PocketPaw wires the Composio MCP server into the cloud chat agent so it can discover and call any whitelisted toolkit at runtime, without us building per-toolkit Python glue or owning each service's OAuth dance.
+
+The v1 integration lives in `ee/pocketpaw_ee/cloud/composio/` on the 4-file shape. The chat agent gets Composio's meta-tools (`COMPOSIO_SEARCH_TOOLS`, `COMPOSIO_GET_TOOL_SCHEMAS`, `COMPOSIO_MULTI_EXECUTE_TOOL`, `COMPOSIO_MANAGE_CONNECTIONS`); the [pocket specialist](/api/post-pocket-spec-merge) does NOT. When a pocket needs Composio data, the parent agent fetches it first and passes it into the specialist brief.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED (v1).
+
+**Implementation PRs:** #1153 (Composio v1 tool-provider integration in OSS-EE split layout).
+
+**Plan doc:** [docs/plans/2026-05-12-composio-integration.md](https://github.com/pocketpaw/pocketpaw/blob/main/docs/plans/2026-05-12-composio-integration.md).
+
+**What's live:** first-party Composio tool-provider integration via in-process MCP; per-backend providers for `claude_agent_sdk`, `openai_agents`, `google_adk`, `deep_agents`; namespaced `user_id` (`f"{enterprise_id}:{user_id}"`) for multi-tenant isolation; env-var toolkit allow-list via `POCKETPAW_COMPOSIO_TOOLKITS`; Connect Link → inline Ripple spec for OAuth handoff; per-`(user_id, backend_kind)` tools cache (default 1h TTL); identity verification on session create (`ComposioConnectionVerified` / `ComposioConnectionMismatch` bus events).
+
+**What's planned:** per-provider auth UX (per-workspace admin UI for toolkit allow-list); tool catalog surfacing in the dashboard; `ComposioConnector` adapter implementing `ConnectorProtocol` (v2, gated on Ripple `$source` demand); self-hosted Composio runtime full validation; Composio Triggers / Webhooks.
+</Callout>
+
+## Why MCP-Direct, Not a Connector
+
+The plan doc evaluates two paths and locks the MCP-direct one for v1:
+
+| Concern | MCP-direct in parent agent (v1) | `ComposioConnector` adapter (deferred to v2) |
+|---|---|---|
+| Surface | The chat agent discovers / calls any whitelisted toolkit at runtime | Each toolkit needs a typed `ConnectorProtocol` implementation |
+| Tool count to add | 4 meta-tools (search, schema, execute, manage) | 200+ toolkit-specific tools, one per service |
+| Ripple `$source` access | No (agent must mediate) | Yes (deterministic Python callers) |
+| Per-service glue | None | One adapter per toolkit |
+| Time to ship | Days | Weeks per batch |
+
+The v2 adapter is deferred until **deterministic non-agent code** (Ripple `$source`, batch jobs) actually needs a Composio toolkit. As of v1 the chat agent is the only consumer.
+
+## Architecture
+
+```
+   Settings (api_key + enterprise_id)
+         │
+         ▼
+   composio.service.is_enabled() / composio_user_id(ctx)
+         │
+         ▼
+   composio.providers.get_tools_for(backend_kind, ctx)
+         │
+   ┌─────┴──────────────────────────────────────┐
+   │           per-(user_id, backend_kind)       │
+   │              tools cache (1h TTL)           │
+   └─────┬──────────────────────────────────────┘
+         │ (miss)
+         ▼
+   Composio(provider=<BackendProvider>()).create(user_id=…)
+         │
+         ▼
+   session.tools()  →  list[Tool]
+         │
+         ▼
+   each backend's _get_mcp_servers / tool-build path:
+     - claude_agent_sdk  →  ClaudeAgentOptions.mcp_servers
+     - openai_agents     →  Agent(tools=…)
+     - google_adk        →  …
+     - deep_agents       →  langgraph wrapper
+```
+
+## Per-Backend Providers
+
+Composio publishes a dedicated provider package per agent SDK. PocketPaw wires all four:
+
+| Backend | Provider class |
+|---|---|
+| `claude_agent_sdk` | `composio_claude_agent_sdk.ClaudeAgentSDKProvider` |
+| `openai_agents` | `composio_openai_agents.OpenAIAgentsProvider` |
+| `google_adk` | `composio_google_adk.GoogleAdkProvider` |
+| `deep_agents` | `composio_langgraph.LanggraphProvider` (deep_agents is langgraph under the hood) |
+
+The shape is identical across the four (see `ee/pocketpaw_ee/cloud/composio/providers.py`):
+
+```python
+composio = Composio(provider=XxxProvider())
+session = composio.create(user_id="enterprise_id:user_id")
+tools = session.tools()
+# → pass `tools` to whatever the backend's agent constructor expects
+```
+
+The per-stream tool-build resolves the active user from `pocketpaw_ee.cloud.chat.agent_service.current_user_id` so multi-tenancy is per-call, not per-instance.
+
+## Multi-Tenancy — Namespaced `user_id`
+
+Composio scopes everything (OAuth tokens, tool catalogs, execution context) by `user_id`. To prevent collisions when one Composio org serves multiple PocketPaw deployments (one prod tenant + one staging tenant on the same Composio account, for instance), PocketPaw namespaces every `user_id`:
+
+```
+user_id sent to Composio = f"{enterprise_id}:{user_id}"
+```
+
+The `ComposioUserId` value object in `domain.py` enforces this at construction:
+
+```python
+@dataclass(frozen=True, slots=True)
+class ComposioUserId:
+    enterprise_id: str   # required, cannot contain ":"
+    user_id: str         # required
+
+    def __str__(self) -> str:
+        return f"{self.enterprise_id}:{self.user_id}"
+```
+
+A `ComposioUserId` cannot exist without both segments — per ee/cloud Rule 3 (domain enforces multi-tenancy at construction). Service code calls `composio_user_id(ctx)` instead of stitching the string by hand.
+
+## Configuration
+
+| Setting | Env var | Purpose |
+|---|---|---|
+| `composio_api_key` | `POCKETPAW_COMPOSIO_API_KEY` | Composio API key (required to enable) |
+| `composio_enterprise_id` | `POCKETPAW_COMPOSIO_ENTERPRISE_ID` | The namespace prefix (required when `api_key` is set; Settings validator enforces) |
+| `composio_base_url` | `POCKETPAW_COMPOSIO_BASE_URL` | Override for self-hosted Composio runtime (defaults to Composio cloud) |
+| `composio_toolkits` | `POCKETPAW_COMPOSIO_TOOLKITS` | Comma-separated allow-list (`"gmail,slack,github,googlecalendar,googledrive"`) |
+| `composio_connect_link_inline` | (flag) | When true (default), render Connect Links as inline Ripple buttons; when false, fall back to text |
+| `composio_mcp_url_ttl_seconds` | (flag) | Per-user tools cache TTL — default 3600 (1h) |
+
+The toolkit allow-list is env-var driven for v1; a per-workspace admin UI is planned. Self-host parity is one env var (`COMPOSIO_BASE_URL`); full validation of self-hosted deployments is a follow-up.
+
+## Lazy Import Boundary
+
+The upstream `composio` SDK is imported **lazily** inside `_get_client` so `pocketpaw_ee.cloud.composio.service` is importable in environments that don't have `pocketpaw[enterprise]` installed (test collection in OSS-only checkouts, doc builds, etc.). Callers should gate on `composio.service.is_enabled(settings)` before invoking anything that touches the SDK.
+
+The process-global client cache holds the api_key and is safe to share across requests — it does not carry per-user state. An `asyncio.Lock` guards against the thundering-herd on first use.
+
+## Connect Link → Inline Ripple
+
+When a Composio tool call returns a "needs authorization" response, PocketPaw extracts the Connect Link URL and emits an inline Ripple spec to the active chat stream — a single button the user clicks to authorize the integration in a new browser tab. Once authorized, the user resends the same prompt and the Composio call succeeds.
+
+Why inline Ripple, not a markdown link: the cloud chat already supports interactive Ripple via the `chat.send` round-trip. A clickable button is the consistent surface for chat-side interactions; a raw URL would mix two formats in the transcript and degrade UX.
+
+Detection heuristic (refine as real Composio responses calibrate):
+
+- dict with a `connect_url` / `connect_link` / `auth_url` / `authorization_url` key
+- dict with `needs_connection: true` / `requires_auth: true` (or sibling flags) AND a URL key nested anywhere obvious
+
+Gated by `settings.composio_connect_link_inline`.
+
+## What Composio Means for Pockets
+
+The pocket specialist sub-agent does NOT receive Composio MCP. Data flows parent → specialist brief, not specialist → Composio. So when a pocket needs to render Composio-sourced data:
+
+1. The user asks for "a pocket showing my open Linear issues."
+2. The parent chat agent calls `COMPOSIO_MULTI_EXECUTE_TOOL` to fetch the issues.
+3. The fetched data goes into the specialist brief as a `state` seed.
+4. The specialist builds the pocket against the seeded state.
+
+The seeded data lives in pocket state at create time. Live refresh (post-create) goes through the pocket's own [sources](/concepts/pocket-sources) — a follow-up PR will let pocket sources reference Composio toolkits directly once the v2 `ComposioConnector` lands.
+
+## Bus Events
+
+Service-layer Composio operations emit two bus events (per ee/cloud Rule 9 — emit on every write):
+
+- `ComposioConnectionVerified` — successful identity check on session create
+- `ComposioConnectionMismatch` — caller's `user_id` didn't match the Composio session identity (defense in depth against misrouted sessions)
+
+Downstream listeners (audit log, dashboard notification) consume these.
+
+## Out of Scope (v1)
+
+Per the plan doc, deferred to follow-ups:
+
+- `ComposioConnector` implementing `ConnectorProtocol` (per-toolkit adapter layer for Ripple `$source` consumers).
+- Migration of existing custom connectors to Composio — both stacks coexist; case-by-case migration is a separate effort.
+- Toolkit allow-listing UX in paw-enterprise — v1 uses env-var allow-list.
+- Self-hosted Composio runtime full validation (single env var hook is the only support v1 ships).
+- Replacing the OSS-side tool registry (`src/pocketpaw/tools/`).
+- Composio Triggers / Webhooks — tool-call path only for v1.
+
+## Related
+
+- [Merge Pocket Spec](/api/post-pocket-spec-merge) — pocket specialist endpoint that consumes Composio-fetched data through the brief.
+- [Pocket Sources](/concepts/pocket-sources) — live source path; v2 will let sources reference Composio toolkits.
+- [OAuth Framework](/integrations/oauth) — sibling first-party OAuth path for the Google integrations.
+- [MCP Servers](/integrations/mcp-servers) — the agent-side MCP framework Composio's tools plug into.

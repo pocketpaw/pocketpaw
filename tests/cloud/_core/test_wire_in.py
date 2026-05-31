@@ -6,11 +6,10 @@ real cloud app, so it doubles as a regression guard for the wire-in.
 from __future__ import annotations
 
 from fastapi import FastAPI
-
-from ee.cloud import mount_cloud
-from ee.cloud._core.errors import CloudError
-from ee.cloud._core.http import cloud_error_handler
-from ee.cloud._core.timing import TimingMiddleware
+from pocketpaw_ee.cloud import mount_cloud
+from pocketpaw_ee.cloud._core.errors import CloudError
+from pocketpaw_ee.cloud._core.http import cloud_error_handler
+from pocketpaw_ee.cloud._core.timing import TimingMiddleware
 
 
 def test_mount_cloud_registers_cloud_error_handler() -> None:

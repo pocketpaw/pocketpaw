@@ -15,10 +15,10 @@ import pytest
 class TestCloudPocketSpecialistCreate:
     @pytest.mark.asyncio
     async def test_parses_brief_and_returns_dict(self):
-        from ee.agent.pocket_specialist.cli_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.cli_tool import (
             _cloud_pocket_specialist_create,
         )
-        from ee.agent.pocket_specialist.runtime import (
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistCreateOutput,
         )
 
@@ -32,15 +32,15 @@ class TestCloudPocketSpecialistCreate:
         )
         with (
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.run_specialist",
                 new=AsyncMock(return_value=fake_out),
             ),
         ):
@@ -54,10 +54,10 @@ class TestCloudPocketSpecialistCreate:
 
     @pytest.mark.asyncio
     async def test_parses_hints(self):
-        from ee.agent.pocket_specialist.cli_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.cli_tool import (
             _cloud_pocket_specialist_create,
         )
-        from ee.agent.pocket_specialist.runtime import (
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistCreateOutput,
         )
 
@@ -71,15 +71,15 @@ class TestCloudPocketSpecialistCreate:
         )
         with (
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.run_specialist",
                 new=AsyncMock(return_value=fake_out),
             ) as mock_run,
         ):
@@ -100,10 +100,10 @@ class TestCloudPocketSpecialistCreate:
         workspace_id / user_id provided in the args dict (matches the
         env-var fallback pattern used by other cloud_* handlers like
         _cloud_list_pockets)."""
-        from ee.agent.pocket_specialist.cli_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.cli_tool import (
             _cloud_pocket_specialist_create,
         )
-        from ee.agent.pocket_specialist.runtime import (
+        from pocketpaw_ee.agent.pocket_specialist.runtime import (
             PocketSpecialistCreateOutput,
         )
 
@@ -117,15 +117,15 @@ class TestCloudPocketSpecialistCreate:
         )
         with (
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_workspace_id",
                 return_value=None,
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_user_id",
                 return_value=None,
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.run_specialist",
                 new=AsyncMock(return_value=fake_out),
             ) as mock_run,
         ):
@@ -142,17 +142,17 @@ class TestCloudPocketSpecialistCreate:
 
     @pytest.mark.asyncio
     async def test_returns_error_when_no_workspace_context(self):
-        from ee.agent.pocket_specialist.cli_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.cli_tool import (
             _cloud_pocket_specialist_create,
         )
 
         with (
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_workspace_id",
                 return_value=None,
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_user_id",
                 return_value=None,
             ),
         ):
@@ -162,21 +162,21 @@ class TestCloudPocketSpecialistCreate:
 
     @pytest.mark.asyncio
     async def test_handles_run_specialist_exception(self):
-        from ee.agent.pocket_specialist.cli_tool import (
+        from pocketpaw_ee.agent.pocket_specialist.cli_tool import (
             _cloud_pocket_specialist_create,
         )
 
         with (
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_workspace_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_workspace_id",
                 return_value="ws-1",
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.current_user_id",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.current_user_id",
                 return_value="user-A",
             ),
             patch(
-                "ee.agent.pocket_specialist.cli_tool.run_specialist",
+                "pocketpaw_ee.agent.pocket_specialist.cli_tool.run_specialist",
                 new=AsyncMock(side_effect=RuntimeError("boom")),
             ),
         ):

@@ -23,10 +23,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pocketpaw_ee.cloud.extraction import ExtractionResult
+from pocketpaw_ee.cloud.extraction.local import LocalExtractor
 from pypdf import PdfWriter
-
-from ee.cloud.extraction import ExtractionResult
-from ee.cloud.extraction.local import LocalExtractor
 
 
 @pytest.fixture

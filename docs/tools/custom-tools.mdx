@@ -83,6 +83,20 @@ openai_schema = tool.definition.to_openai()
 5. **Be async** - The `execute` method must be async
 6. **Document inputs** - Provide clear descriptions in the schema so the LLM knows how to use the tool
 
+## Output Size
+
+You do not need to truncate large output yourself. Every tool result passes
+through an [output budget](/concepts/tool-system#output-budget) before it
+reaches the agent: oversized blobs are shortened to a head + tail slice, or a
+salient-lines extract for recognised test and lint formats. This runs at
+`BaseTool._success` / `_error` and again at `ToolRegistry.execute`, so it
+applies whether your tool returns through `_success` or returns a string
+directly. The cap defaults to 12,000 characters (`tool_output_char_cap`).
+
+Return the full, accurate result from `execute` and let the budget handle
+size. Avoid ad hoc per-tool slicing — it loses the salient-lines treatment
+and is harder to tune than one central cap.
+
 ## Related
 
 <CardGroup>

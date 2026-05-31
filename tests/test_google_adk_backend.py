@@ -132,6 +132,7 @@ def _make_mock_runner(events):
 def _make_backend():
     """Create a backend instance with mocked SDK availability."""
     from pocketpaw.agents.google_adk import GoogleADKBackend
+    from pocketpaw.tools.policy import ToolPolicy
 
     backend = GoogleADKBackend.__new__(GoogleADKBackend)
     backend.settings = Settings()
@@ -140,6 +141,11 @@ def _make_backend():
     backend._runner = None
     backend._sessions = {}
     backend._custom_tools = []
+    backend._policy = ToolPolicy(
+        profile=backend.settings.tool_profile,
+        allow=backend.settings.tools_allow,
+        deny=backend.settings.tools_deny,
+    )
     return backend
 
 
@@ -394,8 +400,10 @@ class TestGoogleADKMCP:
 
     def test_build_mcp_toolsets_policy_blocks_server(self):
         """MCP servers denied by tool policy should be excluded."""
+        from pocketpaw.tools.policy import ToolPolicy
+
         backend = _make_backend()
-        backend.settings.tools_deny = ["mcp:blocked_server:*"]
+        backend.set_tool_policy(ToolPolicy(profile="full", deny=["mcp:blocked_server:*"]))
 
         mock_cfg_blocked = MagicMock()
         mock_cfg_blocked.name = "blocked_server"
@@ -439,8 +447,10 @@ class TestGoogleADKMCP:
 
     def test_build_mcp_toolsets_policy_blocks_group_mcp(self):
         """Denying group:mcp should block all MCP servers."""
+        from pocketpaw.tools.policy import ToolPolicy
+
         backend = _make_backend()
-        backend.settings.tools_deny = ["group:mcp"]
+        backend.set_tool_policy(ToolPolicy(profile="full", deny=["group:mcp"]))
 
         mock_cfg = MagicMock()
         mock_cfg.name = "any_server"

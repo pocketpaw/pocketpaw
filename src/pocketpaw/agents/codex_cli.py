@@ -61,6 +61,7 @@ from pocketpaw.agents.backend import (
 )
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -186,24 +187,18 @@ def _build_subprocess_env(system_prompt: str) -> dict[str, str]:
     """
     env: dict[str, str] = dict(os.environ)
 
-    # Lazy import — keeps codex_cli importable in OSS-only builds.
-    try:
-        from ee.cloud.chat.agent_service import (
-            current_session_mongo_id,
-            current_user_id,
-            current_workspace_id,
-        )
+    # Cloud identity for the subprocess — the workspace/user/session ids the
+    # cloud_* CLI commands read — comes from EE agent extensions, which pull
+    # it from the per-stream ContextVars. Empty on an OSS install or when
+    # called outside a cloud chat stream, which is fine: the cloud_* CLI
+    # commands then surface a clear error rather than mis-tenanting.
+    from pocketpaw._registry import providers as _ext_providers
 
-        for var, fn in (
-            ("POCKETPAW_WORKSPACE_ID", current_workspace_id),
-            ("POCKETPAW_USER_ID", current_user_id),
-            ("POCKETPAW_SESSION_ID", current_session_mongo_id),
-        ):
-            value = fn()
-            if value:
-                env[var] = str(value)
-    except Exception:
-        logger.debug("ee.cloud.chat ContextVars unavailable", exc_info=True)
+    for ext in _ext_providers("pocketpaw.agent_extensions"):
+        try:
+            env.update(ext.subprocess_env())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("agent extension %r subprocess_env failed: %s", ext, exc)
 
     # Pocket id rides in on the system prompt (the cloud prompt builder
     # appends ``<current-pocket id="...">`` for in-pocket chats).
@@ -310,6 +305,11 @@ class CodexCLIBackend(BaseAgentBackend):
         # (e.g. CommandExecutionItem.status='declined' which the SDK schema
         # doesn't list). One-shot patch; safe to call repeatedly.
         _patch_codex_parser()
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         if self._cli_available:
             logger.info("Codex CLI binary: %s", self._codex_path)
         else:
@@ -317,6 +317,15 @@ class CodexCLIBackend(BaseAgentBackend):
                 "Codex CLI binary not found — install with: "
                 "npm install -g @openai/codex (or call Codex.install(version=...))"
             )
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        # Policy is stored but never enforced — Codex runs tools inside an
+        # external CLI process that has no awareness of this policy.
+        logger.debug("set_tool_policy on CodexCLIBackend: stored but not enforced (external CLI)")
+        self._policy = policy
 
     @staticmethod
     def _inject_history(instruction: str, history: list[dict]) -> str:

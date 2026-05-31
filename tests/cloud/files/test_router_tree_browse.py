@@ -1,12 +1,12 @@
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pocketpaw_ee.cloud.files.abac_config import AbacRuleSet
+from pocketpaw_ee.cloud.files.dto import MountConfig, RequestContext
+from pocketpaw_ee.cloud.files.registry import ProviderRegistry
+from pocketpaw_ee.cloud.files.router import build_router
+from pocketpaw_ee.cloud.files.tree import invalidate_tree_cache
 
-from ee.cloud.files.abac_config import AbacRuleSet
-from ee.cloud.files.dto import MountConfig, RequestContext
-from ee.cloud.files.registry import ProviderRegistry
-from ee.cloud.files.router import build_router
-from ee.cloud.files.tree import invalidate_tree_cache
 from tests.cloud.files.conftest import FakeProvider
 
 
@@ -18,7 +18,7 @@ def _clear_tree_cache():
 
 
 def _mount(provider_id, path, writable=False, order=100):
-    from ee.cloud.files.dto import ResolvedMount
+    from pocketpaw_ee.cloud.files.dto import ResolvedMount
 
     return ResolvedMount(
         provider_id=provider_id, path=path, writable=writable, order=order, variables={}

@@ -10,9 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_fabric_store():
-    """Lazy import to avoid circular deps and missing ee/ module."""
+    """Lazy import to avoid circular deps at module load."""
     try:
-        from ee.api import get_fabric_store
+        from pocketpaw.stores import get_fabric_store
 
         return get_fabric_store()
     except ImportError:
@@ -95,7 +95,7 @@ class FabricQueryTool(BaseTool):
             return "Fabric is not available (enterprise feature)."
 
         try:
-            from ee.fabric.models import FabricQuery
+            from pocketpaw.fabric.models import FabricQuery
 
             result = await store.query(
                 FabricQuery(
@@ -222,7 +222,7 @@ class FabricCreateTool(BaseTool):
             if action == "define_type":
                 if not type_name:
                     return "type_name is required for define_type"
-                from ee.fabric.models import PropertyDef
+                from pocketpaw.fabric.models import PropertyDef
 
                 prop_defs = []
                 if properties:

@@ -12,7 +12,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_dispatch_agent_responses_runs_agents_sequentially() -> None:
     """Eligible agents should run one-by-one, not concurrently."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     group = SimpleNamespace(
         members=["user-1", "user-2"],
@@ -60,12 +60,18 @@ async def test_dispatch_agent_responses_runs_agents_sequentially() -> None:
         assert response_label is None
 
     with (
-        patch("ee.cloud.chat.group_service.get_for_dispatch", new=AsyncMock(return_value=group)),
         patch(
-            "ee.cloud.shared.agent_bridge._should_agent_respond",
+            "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
+            new=AsyncMock(return_value=group),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._should_agent_respond",
             new=AsyncMock(return_value=True),
         ),
-        patch("ee.cloud.shared.agent_bridge._run_agent_response", new=fake_run_agent_response),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._run_agent_response",
+            new=fake_run_agent_response,
+        ),
     ):
         await agent_bridge._dispatch_agent_responses(payload)
 
@@ -83,7 +89,7 @@ async def test_dispatch_agent_responses_runs_agents_sequentially() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_agent_responses_skips_non_eligible_agents() -> None:
     """Only agents with should-respond=True are executed."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     group = SimpleNamespace(
         members=["user-1"],
@@ -97,9 +103,12 @@ async def test_dispatch_agent_responses_skips_non_eligible_agents() -> None:
     should_mock = AsyncMock(side_effect=[True, False, True])
 
     with (
-        patch("ee.cloud.chat.group_service.get_for_dispatch", new=AsyncMock(return_value=group)),
-        patch("ee.cloud.shared.agent_bridge._should_agent_respond", new=should_mock),
-        patch("ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
+        patch(
+            "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
+            new=AsyncMock(return_value=group),
+        ),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge._should_agent_respond", new=should_mock),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
     ):
         await agent_bridge._dispatch_agent_responses(
             {
@@ -118,7 +127,7 @@ async def test_dispatch_agent_responses_skips_non_eligible_agents() -> None:
 @pytest.mark.asyncio
 async def test_dispatch_agent_responses_adds_final_collaboration_reply() -> None:
     """When multiple agents respond, bridge should request one synthesized final answer."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     group = SimpleNamespace(
         members=["user-1"],
@@ -130,12 +139,15 @@ async def test_dispatch_agent_responses_adds_final_collaboration_reply() -> None
     run_mock = AsyncMock(side_effect=["draft from b", "draft from a", "final synthesis"])
 
     with (
-        patch("ee.cloud.chat.group_service.get_for_dispatch", new=AsyncMock(return_value=group)),
         patch(
-            "ee.cloud.shared.agent_bridge._should_agent_respond",
+            "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
+            new=AsyncMock(return_value=group),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._should_agent_respond",
             new=AsyncMock(return_value=True),
         ),
-        patch("ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
     ):
         await agent_bridge._dispatch_agent_responses(
             {
@@ -166,7 +178,7 @@ async def test_dispatch_agent_responses_continues_after_agent_failure() -> None:
 
     Three agents: A fails, B+C succeed. The synthesis pass runs because
     2 agents responded — the >=2-survivor condition is met."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     group = SimpleNamespace(
         members=["user-1"],
@@ -186,12 +198,15 @@ async def test_dispatch_agent_responses_continues_after_agent_failure() -> None:
     )
 
     with (
-        patch("ee.cloud.chat.group_service.get_for_dispatch", new=AsyncMock(return_value=group)),
         patch(
-            "ee.cloud.shared.agent_bridge._should_agent_respond",
+            "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
+            new=AsyncMock(return_value=group),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._should_agent_respond",
             new=AsyncMock(return_value=True),
         ),
-        patch("ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
     ):
         await agent_bridge._dispatch_agent_responses(
             {
@@ -224,7 +239,7 @@ async def test_dispatch_agent_responses_skips_synthesis_when_only_one_agent_resp
     Regression test for the synthesis-guard bug: previously the guard was
     `if len(agents_to_run) < 2 or not responses_by_agent` — passed when
     one agent survived, triggering self-synthesis."""
-    from ee.cloud.shared import agent_bridge
+    from pocketpaw_ee.cloud.shared import agent_bridge
 
     group = SimpleNamespace(
         members=["user-1"],
@@ -237,12 +252,15 @@ async def test_dispatch_agent_responses_skips_synthesis_when_only_one_agent_resp
     run_mock = AsyncMock(side_effect=[RuntimeError("boom"), "draft from b"])
 
     with (
-        patch("ee.cloud.chat.group_service.get_for_dispatch", new=AsyncMock(return_value=group)),
         patch(
-            "ee.cloud.shared.agent_bridge._should_agent_respond",
+            "pocketpaw_ee.cloud.chat.group_service.get_for_dispatch",
+            new=AsyncMock(return_value=group),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.shared.agent_bridge._should_agent_respond",
             new=AsyncMock(return_value=True),
         ),
-        patch("ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
+        patch("pocketpaw_ee.cloud.shared.agent_bridge._run_agent_response", new=run_mock),
     ):
         await agent_bridge._dispatch_agent_responses(
             {

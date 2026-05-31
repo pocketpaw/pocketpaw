@@ -10,7 +10,7 @@ is exercised at the integration layer in later tasks.
 
 from __future__ import annotations
 
-from ee.cloud.models.pocket import Pocket
+from pocketpaw_ee.cloud.models.pocket import Pocket
 
 
 def test_pocket_tool_specs_defaults_to_empty_list():

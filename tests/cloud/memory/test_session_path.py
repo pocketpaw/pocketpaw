@@ -129,7 +129,7 @@ class TestAdapterSpecificReads:
         assert await store.get_session_info(key) is None
 
     async def test_get_session_info_returns_session_when_api_created_it(self, store):
-        from ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.models.session import Session
 
         key = f"sess-{uuid.uuid4().hex[:8]}"
         await Session(
@@ -147,7 +147,7 @@ class TestAdapterSpecificReads:
         assert got.context_type == "pocket"
 
     async def test_get_session_with_messages_returns_both(self, store):
-        from ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.models.session import Session
 
         key = f"sess-{uuid.uuid4().hex[:8]}"
         await Session(
@@ -176,7 +176,7 @@ class TestAdapterSpecificReads:
         assert [m.content for m in messages] == ["m2", "m3", "m4"]
 
     async def test_combined_equals_separate_reads(self, store):
-        from ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.models.session import Session
 
         key = f"sess-{uuid.uuid4().hex[:8]}"
         await Session(
@@ -199,7 +199,7 @@ class TestAdapterSpecificReads:
 
 class TestGetByTypeSession:
     async def test_returns_pocket_messages_only(self, store):
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.models.message import Message
 
         # Seed: one pocket, one group. get_by_type(SESSION) should return only pocket.
         await store.save(_entry("sess1", "user", "pocket-row"))
