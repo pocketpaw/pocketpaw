@@ -770,14 +770,17 @@ async def _ws_typing(user_id: str, msg: WsInbound, *, active: bool) -> None:
     else:
         manager.stop_typing(msg.group_id, user_id)
 
+    # Broadcast the registered typing.start / typing.stop event (matches
+    # EVENT_REGISTRY + the browser bus topics). A prior ad-hoc type="typing"
+    # with an `active` flag never matched the client's typing.start/.stop
+    # subscriptions, so the indicator never rendered.
     await manager.send_to_room(
         msg.group_id,
         WsOutbound(
-            type="typing",
+            type="typing.start" if active else "typing.stop",
             data={
                 "group_id": msg.group_id,
                 "user_id": user_id,
-                "active": active,
             },
         ),
         exclude_user=user_id,
