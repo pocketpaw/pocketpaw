@@ -11,14 +11,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pocketpaw_ee.paw_print.router import router
 
-from ee.paw_print.models import (
+from pocketpaw.paw_print.models import (
     MAX_PAYLOAD_BYTES,
     PawPrintBlock,
     PawPrintSpec,
 )
-from ee.paw_print.router import router
-from ee.paw_print.store import PawPrintStore
+from pocketpaw.paw_print.store import PawPrintStore
 
 
 def _spec(widget_id: str = "pp_test", pocket_id: str = "pocket-1") -> PawPrintSpec:
@@ -54,7 +54,7 @@ def app_with_store(tmp_path: Path):
     app = FastAPI()
     app.include_router(router)
     store = PawPrintStore(tmp_path / "paw_print_router.db")
-    with patch("ee.paw_print.router._store", return_value=store):
+    with patch("pocketpaw_ee.paw_print.router._store", return_value=store):
         yield app, store
 
 
@@ -242,7 +242,7 @@ class TestEventIngest:
             return False
 
         monkeypatch.setattr(
-            "ee.paw_print.router._pass_through_guardian",
+            "pocketpaw_ee.paw_print.router._pass_through_guardian",
             AsyncMock(return_value=False),
         )
         created = client.post("/paw-print/widgets", json=_widget_payload()).json()
@@ -270,17 +270,17 @@ class TestEventIngest:
         import sys
         import types
 
-        fake_api = types.ModuleType("ee.api")
+        fake_api = types.ModuleType("pocketpaw_ee.api")
         fake_api.get_fabric_store = lambda: fabric  # type: ignore[attr-defined]
 
-        fake_fabric_models = types.ModuleType("ee.fabric.models")
+        fake_fabric_models = types.ModuleType("pocketpaw.fabric.models")
         fake_fabric_models.FabricObject = _FakeFabricObject  # type: ignore[attr-defined]
         fake_fabric_models._gen_id = lambda prefix="x": f"{prefix}_fake"  # type: ignore[attr-defined]
 
-        monkeypatch.setitem(sys.modules, "ee.api", fake_api)
+        monkeypatch.setitem(sys.modules, "pocketpaw_ee.api", fake_api)
         # ee.fabric.models is already a real module — only patch create_object
         # via monkeypatching the router's _apply_event_mapping import path.
-        from ee.paw_print import router as ppr
+        from pocketpaw_ee.paw_print import router as ppr
 
         async def fake_apply(widget, event):
             props = {
@@ -320,12 +320,12 @@ class TestEventIngest:
 
 class TestInterpolate:
     def test_full_placeholder_returns_raw_value(self) -> None:
-        from ee.paw_print.router import _interpolate
+        from pocketpaw_ee.paw_print.router import _interpolate
 
         assert _interpolate("{{ payload.count }}", {"payload": {"count": 42}}) == 42
 
     def test_mixed_string_stringifies(self) -> None:
-        from ee.paw_print.router import _interpolate
+        from pocketpaw_ee.paw_print.router import _interpolate
 
         out = _interpolate(
             "Order {{ payload.item }} for {{ customer_ref }}",
@@ -334,7 +334,7 @@ class TestInterpolate:
         assert out == "Order latte for cust_a"
 
     def test_missing_path_resolves_to_empty_string_in_mixed_mode(self) -> None:
-        from ee.paw_print.router import _interpolate
+        from pocketpaw_ee.paw_print.router import _interpolate
 
         out = _interpolate("Hi {{ payload.name }}!", {"payload": {}})
         assert out == "Hi !"

@@ -5,6 +5,18 @@ Extracted from dashboard.py — contains:
 - ``_broadcast_audit_entry()`` / ``_broadcast_health_update()`` — WS-only broadcasts
 - ``startup_event()`` — initializes bus, agent loop, channels, MCP, health, scheduler, daemon
 - ``shutdown_event()`` — tears down all services
+
+Changes:
+- 2026-05-22: ``startup_event`` also mirrors the built-in pocket
+  templates into ``~/.pocketpaw/templates/`` via the
+  ``bundled_templates`` installer — same best-effort, catch-and-log
+  pattern as the skills / kb installers, gated on
+  ``auto_install_bundled_templates`` (feat/bundled-templates, 2a).
+- 2026-05-21: ``startup_event`` mirrors bundled SKILL.md files and
+  pre-compiled kb-go scopes into the user's home dir at boot via the
+  ``bundled_skills`` / ``bundled_kb`` installers. Best-effort, gated on
+  the ``auto_install_bundled_*`` settings; reuses the already-loaded
+  ``settings`` object.
 """
 
 import asyncio
@@ -174,23 +186,28 @@ async def startup_event(
     except ImportError:
         pass
 
-    # Initialize enterprise cloud DB (Beanie/MongoDB) — best-effort
+    # Run enterprise lifecycle startup hooks — best-effort. The cloud hook
+    # initializes the Beanie/MongoDB database, seeds the default admin +
+    # workspace, back-fills agents and registers the chat-title listener.
+    # Discovered via the `pocketpaw.lifecycle` entry-point; an OSS install
+    # has no provider and skips this entirely.
+    from pocketpaw._registry import providers as _ext_providers
+
+    for _hook in _ext_providers("pocketpaw.lifecycle"):
+        try:
+            await _hook.on_startup()
+        except Exception as exc:
+            logger.warning("Lifecycle startup hook failed (cloud features disabled): %s", exc)
+
+    # Start the cloud agent pool GC task. Previously registered via
+    # ``@app.on_event("startup")`` inside ``mount_cloud()`` but that path is
+    # silenced when the app is built with a custom ``lifespan=``.
     try:
-        import os
+        from pocketpaw.agents.pool import get_agent_pool
 
-        from ee.cloud.db import init_cloud_db
-
-        mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
-        await init_cloud_db(mongo_uri)
-        # Seed default admin user and workspace
-        from ee.cloud.auth.core import seed_admin, seed_workspace
-
-        admin = await seed_admin()
-        await seed_workspace(admin)
-    except ImportError:
-        logger.debug("Enterprise cloud module not available — skipping MongoDB init")
+        await get_agent_pool().start()
     except Exception as exc:
-        logger.warning("Enterprise cloud DB init failed (cloud features disabled): %s", exc)
+        logger.warning("Agent pool start failed: %s", exc)
 
     # Start Agent Loop
     asyncio.create_task(agent_loop.start())
@@ -198,6 +215,92 @@ async def startup_event(
 
     # Auto-start configured channel adapters (respects per-channel autostart setting)
     settings = Settings.load()
+
+    # Mirror PocketPaw's bundled AgentSkills-format SKILL.md files into
+    # ``~/.claude/skills/<name>/`` so PocketPaw's own ``SkillLoader``
+    # (and Claude Code's native discovery, for claude_agent_sdk users)
+    # picks them up. Skills loaded from there work across every chat
+    # backend via PocketPaw's slash-command dispatcher; claude_agent_sdk
+    # additionally auto-discovers them on natural-language intent.
+    # Best-effort — a failure here just means the chat agent won't have
+    # the ``pocketpaw-create-pocket`` / ``pocketpaw-edit-pocket`` skills;
+    # the MCP tool surface still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false``.
+    if settings.auto_install_bundled_skills:
+        try:
+            from pocketpaw.bundled_skills import install_bundled_skills
+
+            results = install_bundled_skills()
+            installed = sum(1 for r in results if r.status == "installed")
+            updated = sum(1 for r in results if r.status == "updated")
+            skipped = sum(1 for r in results if r.status == "skipped")
+            failed = [r for r in results if r.status == "failed"]
+            logger.info(
+                "Bundled skills sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Skill %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled-skills install failed (non-fatal): %s", exc)
+
+    # Mirror PocketPaw's pre-compiled kb-go scopes into
+    # ``~/.knowledge-base/`` so the existing ``_get_kb_context``
+    # injection can retrieve recipes at pocket-creation time.
+    # Best-effort — a failure here just means the agent loses the
+    # recipe-retrieval boost; the MCP tool + skill flow still works.
+    # Opt-out: ``POCKETPAW_AUTO_INSTALL_BUNDLED_KB_SCOPES=false``.
+    if settings.auto_install_bundled_kb_scopes:
+        try:
+            from pocketpaw.bundled_kb import install_bundled_kb_scopes
+
+            kb_results = install_bundled_kb_scopes()
+            installed = sum(1 for r in kb_results if r.status == "installed")
+            updated = sum(1 for r in kb_results if r.status == "updated")
+            skipped = sum(1 for r in kb_results if r.status == "skipped")
+            failed = [r for r in kb_results if r.status == "failed"]
+            logger.info(
+                "Bundled kb-go scopes sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("KB scope %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled kb-go scopes install failed (non-fatal): %s", exc)
+
+    # Mirror PocketPaw's built-in pocket templates into
+    # ``~/.pocketpaw/templates/`` so the create specialist can
+    # instantiate-and-customize a matching template instead of
+    # cold-generating a pocket from scratch. Best-effort — a failure
+    # here just means the specialist falls back to cold generation;
+    # pocket creation still works. Opt-out:
+    # ``POCKETPAW_AUTO_INSTALL_BUNDLED_TEMPLATES=false``.
+    if settings.auto_install_bundled_templates:
+        try:
+            from pocketpaw.bundled_templates import install_bundled_templates
+
+            tpl_results = install_bundled_templates()
+            installed = sum(1 for r in tpl_results if r.status == "installed")
+            updated = sum(1 for r in tpl_results if r.status == "updated")
+            skipped = sum(1 for r in tpl_results if r.status == "skipped")
+            failed = [r for r in tpl_results if r.status == "failed"]
+            logger.info(
+                "Bundled pocket templates sync: %d installed / %d updated / %d skipped / %d failed",
+                installed,
+                updated,
+                skipped,
+                len(failed),
+            )
+            for r in failed:
+                logger.warning("Pocket template %s failed to install: %s", r.name, r.error)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Bundled pocket templates install failed (non-fatal): %s", exc)
 
     # Start StatusTracker (agent state for external integrations)
     from pocketpaw.dashboard_state import status_tracker
@@ -304,6 +407,45 @@ async def startup_event(
     except Exception as e:
         logger.warning("Failed to ensure built-in PawKits: %s", e)
 
+    # In-process MCP servers (entry-point `pocketpaw.mcp_servers`). These
+    # are the claude_agent_sdk SDK servers contributed by extension wheels
+    # — tasks, planner, pocket, pocket_specialist, composio, meetings, …
+    # An empty list almost always means `pocketpaw-ee` wasn't installed
+    # (so no entry points registered), which silently disables every cloud
+    # MCP tool on the agent. Loud-log it once at boot.
+    try:
+        from pocketpaw._registry import providers as _ext_providers
+
+        names: list[str] = []
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            try:
+                built = provider.build_server()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("In-process MCP provider %r failed to build: %s", provider, exc)
+                continue
+            if built is None:
+                # None means the provider chose to soft-disable itself —
+                # could be claude_agent_sdk missing, an unconfigured
+                # integration (composio with no toolkits), or no work to do.
+                # Distinguishing them is the provider's job; we just note it.
+                logger.info(
+                    "In-process MCP provider %s soft-disabled (build_server returned None)",
+                    type(provider).__name__,
+                )
+                continue
+            names.append(built[0])
+        if names:
+            logger.info("In-process MCP servers registered: %s", sorted(names))
+        else:
+            logger.warning(
+                "No in-process MCP servers registered — cloud tools (meetings, "
+                "tasks, pockets, composio, …) will be unavailable to the agent. "
+                "Install pocketpaw-ee (uv sync --dev --group ee) and the "
+                "claude_agent_sdk."
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to enumerate in-process MCP providers: %s", exc)
+
     # Wire MCP OAuth broadcast + auto-start enabled MCP servers (non-blocking)
     try:
         from pocketpaw.mcp.manager import get_mcp_manager, set_ws_broadcast
@@ -351,7 +493,23 @@ async def startup_event(
     scheduler = get_scheduler()
     scheduler.start(callback=broadcast_reminder)
 
-    # Start proactive daemon
+    # Start proactive daemon. Prune orphan ``[auto] *`` intentions first so
+    # bridged-from-EE entries whose Rule no longer exists don't keep
+    # firing crons forever (test fixtures, deleted rules, manual edits).
+    try:
+        from pocketpaw.automations.bridge import prune_orphan_auto_intentions
+        from pocketpaw.daemon.intentions import get_intention_store
+
+        prune_orphan_auto_intentions()
+        # Single line that tells the truth at startup-completion. The
+        # ``Loaded N intentions`` line from the IntentionStore singleton
+        # fires before pruning and can mislead readers when N includes
+        # orphans that get cleared a few lines later.
+        active = len(get_intention_store().get_enabled())
+        logger.info("Active intentions: %d", active)
+    except Exception:
+        logger.exception("Failed to prune orphan [auto] intentions; continuing")
+
     daemon = get_daemon()
     daemon.start(stream_callback=broadcast_intention)
 
@@ -427,39 +585,83 @@ async def startup_event(
 # ---------------------------------------------------------------------------
 
 
+async def _bounded(label: str, coro, *, timeout: float = 5.0) -> None:
+    """Await *coro* but never let a wedged subsystem hang process shutdown.
+
+    A cleanup step that exceeds *timeout* is abandoned (cancelled) with a
+    warning so the rest of shutdown — and the process exit — still proceeds.
+    Without this, a stuck ``await`` here blocks uvicorn's lifespan shutdown,
+    which has no timeout of its own: Ctrl+C appears to do nothing and the
+    port stays bound until the terminal is killed.
+    """
+    try:
+        await asyncio.wait_for(coro, timeout=timeout)
+    except TimeoutError:
+        logger.warning("Shutdown step '%s' timed out after %.0fs — skipping", label, timeout)
+    except Exception:
+        logger.warning("Shutdown step '%s' failed", label, exc_info=True)
+
+
 async def shutdown_event(*, _stop_channel_adapter_fn=None):
     """Stop services on app shutdown.
+
+    Every async cleanup step is time-bounded via ``_bounded`` — a single
+    subsystem that fails to stop cleanly must not wedge the whole process.
 
     Parameters
     ----------
     _stop_channel_adapter_fn:
         Callable for stopping a channel adapter. Injected from dashboard.py.
     """
-    # Stop Agent Loop
-    await agent_loop.stop()
-    await ws_adapter.stop()
+    # Stop Agent Loop + WebSocket adapter
+    await _bounded("agent_loop", agent_loop.stop())
+    await _bounded("ws_adapter", ws_adapter.stop())
+
+    # Stop the cloud agent pool (best-effort; may not have started if the
+    # enterprise cloud module is not installed).
+    try:
+        from pocketpaw.agents.pool import get_agent_pool
+
+        await _bounded("agent_pool", get_agent_pool().stop())
+    except Exception as exc:
+        logger.warning("Agent pool stop failed: %s", exc)
+
+    # Drain in-flight cloud chat runs. Under ``FastAPI(lifespan=...)`` this
+    # is the only shutdown hook that fires — ``@app.on_event("shutdown")``
+    # handlers in ``mount_cloud`` are silently dropped. ``drain()`` waits for
+    # tasks to finish naturally (no cancellation); ``_bounded`` caps the wait
+    # so a stuck run can't wedge exit.
+    try:
+        from pocketpaw_ee.cloud.chat.runs.executor import InProcessExecutor, get_executor
+
+        executor = get_executor()
+        if isinstance(executor, InProcessExecutor):
+            await _bounded("cloud_run_drain", executor.drain(), timeout=10.0)
+    except Exception as exc:
+        logger.debug("Cloud run drain skipped: %s", exc)
 
     # Stop all channel adapters
     if _stop_channel_adapter_fn:
         for channel in list(_channel_adapters):
-            try:
-                await _stop_channel_adapter_fn(channel)
-            except Exception as e:
-                logger.warning(f"Error stopping {channel} adapter: {e}")
+            await _bounded(f"channel:{channel}", _stop_channel_adapter_fn(channel))
 
-    # Stop proactive daemon
-    daemon = get_daemon()
-    daemon.stop()
+    # Stop proactive daemon (sync — scheduler.shutdown(wait=False), fast)
+    try:
+        get_daemon().stop()
+    except Exception:
+        logger.warning("Daemon stop failed", exc_info=True)
 
-    # Stop reminder scheduler
-    scheduler = get_scheduler()
-    scheduler.stop()
+    # Stop reminder scheduler (sync — scheduler.shutdown(wait=False), fast)
+    try:
+        get_scheduler().stop()
+    except Exception:
+        logger.warning("Scheduler stop failed", exc_info=True)
 
-    # Stop MCP servers
+    # Stop MCP servers — these own subprocesses, so give them a little longer
+    # but still bound it: an MCP child that ignores SIGTERM must not hang exit.
     try:
         from pocketpaw.mcp.manager import get_mcp_manager
 
-        mcp = get_mcp_manager()
-        await mcp.stop_all()
+        await _bounded("mcp_servers", get_mcp_manager().stop_all(), timeout=8.0)
     except Exception as e:
         logger.warning("Error stopping MCP servers: %s", e)

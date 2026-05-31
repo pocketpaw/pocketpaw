@@ -1,10 +1,14 @@
 # Tool protocol - simple, string-based tool interface.
 # Created: 2026-02-02
+# Updated: 2026-05-21 (#1160) — BaseTool._success / _error now pass results
+# through cap_tool_output() so a noisy tool blob can't flood agent context.
 
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Protocol
+
+from pocketpaw.tools.output_budget import cap_tool_output
 
 
 def normalize_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -101,6 +105,20 @@ class BaseTool(ABC):
         return {"type": "object", "properties": {}, "required": []}
 
     @property
+    def args_schema(self) -> type | None:
+        """Optional Pydantic model for richer arg schemas.
+
+        Wrappers that introspect Python type annotations (LangChain
+        ``StructuredTool``, ADK ``FunctionTool``) lose fidelity for tools
+        with nested object params because they default to flat str-typed
+        signatures. Override this with a Pydantic ``BaseModel`` subclass
+        to preserve nested structure end-to-end. Wrappers that read
+        ``defn.parameters`` directly (OpenAI Agents) ignore this and use
+        the JSON Schema instead.
+        """
+        return None
+
+    @property
     def definition(self) -> ToolDefinition:
         """Get the tool definition."""
         return ToolDefinition(
@@ -127,9 +145,18 @@ class BaseTool(ABC):
         return tag
 
     def _error(self, message: str) -> str:
-        """Format an error response."""
-        return f"Error: {message}"
+        """Format an error response.
+
+        Capped via ``cap_tool_output`` so an error carrying a large blob
+        (a full stack trace, a failed-build log) can't flood agent context.
+        """
+        return cap_tool_output(f"Error: {message}", tool_name=self.name)
 
     def _success(self, message: str) -> str:
-        """Format a success response."""
-        return message
+        """Format a success response.
+
+        Capped via ``cap_tool_output`` so a noisy success payload (a long
+        test run, a build log, a big HTTP body) can't flood agent context.
+        Normal-sized output passes through untouched.
+        """
+        return cap_tool_output(message, tool_name=self.name)

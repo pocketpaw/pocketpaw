@@ -1,0 +1,83 @@
+{
+  "_placeholder_note": "Built-in pocket template (metrics-dashboard). All numbers, labels, and segment names below carry [bracketed] placeholders — the create specialist replaces them with the user's real metrics and domain. Keep the hero+grid layout: KPI strip on top, full-width trend chart, then the breakdown table. Reshape chart data to {label, value} for the user's actual series.",
+  "state": {
+    "period_label": "[This quarter]",
+    "kpis": [
+      { "id": "k1", "label": "[Revenue]", "value": "[$1.24M]", "delta": "[+12%]", "direction": "up-good" },
+      { "id": "k2", "label": "[New customers]", "value": "[318]", "delta": "[+8%]", "direction": "up-good" },
+      { "id": "k3", "label": "[Churn]", "value": "[2.1%]", "delta": "[-0.4%]", "direction": "down-good" },
+      { "id": "k4", "label": "[NPS]", "value": "[54]", "delta": "[+6]", "direction": "up-good" }
+    ],
+    "trend": [
+      { "label": "[Jan]", "value": 312000 },
+      { "label": "[Feb]", "value": 348000 },
+      { "label": "[Mar]", "value": 401000 },
+      { "label": "[Apr]", "value": 386000 },
+      { "label": "[May]", "value": 442000 },
+      { "label": "[Jun]", "value": 471000 }
+    ],
+    "segments": [
+      { "id": "s1", "segment": "[Enterprise]", "value": 624000, "change_pct": 14 },
+      { "id": "s2", "segment": "[Mid-market]", "value": 382000, "change_pct": 9 },
+      { "id": "s3", "segment": "[Self-serve]", "value": 158000, "change_pct": 21 },
+      { "id": "s4", "segment": "[Partners]", "value": 76000, "change_pct": -3 }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "20px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Performance Dashboard]",
+          "subtitle": "[Headline metrics for this period]"
+        }
+      },
+      {
+        "type": "grid",
+        "props": { "columns": 4, "gap": "16px" },
+        "children": [
+          {
+            "type": "each",
+            "items": "{state.kpis}",
+            "item_as": "kpi",
+            "children": [
+              {
+                "type": "stat",
+                "props": {
+                  "label": "{kpi.label}",
+                  "value": "{kpi.value}",
+                  "delta": "{kpi.delta}",
+                  "direction": "{kpi.direction}"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "chart",
+        "props": {
+          "type": "area",
+          "title": "[Revenue trend]",
+          "data": "{state.trend}",
+          "height": 300
+        }
+      },
+      {
+        "type": "data-grid",
+        "props": {
+          "columns": [
+            { "key": "segment", "label": "Segment", "sortable": true, "align": "left" },
+            { "key": "value", "label": "Value", "sortable": true, "align": "right" },
+            { "key": "change_pct", "label": "Change %", "sortable": true, "align": "right" }
+          ],
+          "rows": "{state.segments}",
+          "defaultSort": "value:desc",
+          "dense": true
+        }
+      }
+    ]
+  }
+}

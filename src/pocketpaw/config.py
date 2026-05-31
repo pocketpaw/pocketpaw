@@ -1,6 +1,34 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
+    ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
+    still auto-installs; this flag toggles the chat-surface affordance
+    only. Read by the agent prompt assembler and the paw-enterprise
+    feature-flag echo. RFC 08 v1.0 wave 4.
+  - 2026-05-22: Added ``source_refresh_min_interval_seconds`` (interval
+    floor) and ``source_refresh_max_per_hour`` (per-pocket auto-refresh
+    budget) — cost controls for pocket data-source interval / webhook
+    refresh (RFC 04 M3).
+  - 2026-05-22: Added ``ripple_embed_allowed_hosts`` — host allow-list
+    for the Ripple ``embed`` widget's ``mode:"url"`` form (Increment 5,
+    escape-hatch node + embed URL policy).
+  - 2026-05-22: Added ``pocket_router_enabled`` (kill-switch) and
+    ``pocket_router_min_confidence`` (cheap-tier confidence floor) for
+    the pocket execution router (Increment 3).
+  - 2026-05-22: Added ``auto_install_bundled_templates`` — toggles the
+    boot-time mirror of built-in pocket templates into
+    ``~/.pocketpaw/templates/`` (feat/bundled-templates, Increment 2a).
+  - 2026-05-21: Added ``auto_install_bundled_skills`` and
+    ``auto_install_bundled_kb_scopes`` — toggle the boot-time mirror of
+    bundled SKILL.md files and pre-compiled kb-go scopes.
+  - 2026-04-30: Added pluggable embedding adapter settings — ``kb_vectors_enabled``,
+    ``embedding_adapter``, ``embedding_dim``, ``embedding_monthly_cap_usd``,
+    ``vertex_project_id``, ``vertex_location``. Stage 2.D of "Files as Knowledge".
+  - 2026-04-30: Added ``kb_scopes`` (list[str]) for multi-scope KB queries.
+    ``kb_scope`` (single string) is now a deprecation shim — when set and
+    ``kb_scopes`` is empty, it copies forward and emits DeprecationWarning.
+    Stage 1.B of "Files as Knowledge".
   - 2026-04-16: SSRF guard on URL config fields — opencode_base_url,
     litellm_api_base, openai_compatible_base_url, mem0_ollama_base_url,
     embedding_base_url, signal_api_url, mcp_client_metadata_url are now
@@ -20,13 +48,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, AliasChoices, Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AfterValidator, AliasChoices, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from pocketpaw.security.url_validators import validate_external_url
 
@@ -174,8 +204,9 @@ class Settings(BaseSettings):
         default="claude_agent_sdk",
         description=(
             "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', "
-            "'codex_cli', 'opencode', 'copilot_sdk', or 'deep_agents'. "
-            "All backends support 'litellm' as a provider for open-source model access."
+            "'codex_cli', 'opencode', 'copilot_sdk', 'deep_agents', or "
+            "'langchain_react'. All backends support 'litellm' as a provider "
+            "for open-source model access."
         ),
     )
     # backend fallback chain
@@ -239,6 +270,47 @@ class Settings(BaseSettings):
     codex_cli_max_turns: int = Field(
         default=100, description="Max turns per query in Codex CLI backend (0 = unlimited)"
     )
+    codex_cli_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Optional API key for the Codex CLI backend. Falls back to "
+            "openai_api_key when unset; useful when the user wants Codex "
+            "talking to a different account than the rest of OpenAI tooling."
+        ),
+    )
+    codex_cli_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional base URL for the Codex CLI backend (sets OPENAI_BASE_URL "
+            "for the codex subprocess). Lets you point Codex at an "
+            "OpenAI-compatible proxy (LiteLLM, Azure, etc.) without changing "
+            "the global OpenAI base URL."
+        ),
+    )
+    codex_cli_sandbox_mode: str = Field(
+        default="danger-full-access",
+        description=(
+            "Codex CLI sandbox_mode. Values: read-only, workspace-write, "
+            "danger-full-access. Default danger-full-access because Codex's "
+            "tighter sandboxes (workspace-write, read-only) rely on Linux "
+            "seccomp/landlock — on Windows the sandbox can't be created, so "
+            "every exec call is auto-declined with status='declined'. "
+            "PocketPaw runs Codex in an ephemeral temp dir as a trusted "
+            "agent that the operator already authorized; the tighter modes "
+            "are only useful on Linux operator deployments that want to "
+            "constrain a less-trusted agent."
+        ),
+    )
+    codex_cli_approval_policy: str = Field(
+        default="never",
+        description=(
+            "Codex CLI approval_policy. Values: never, on-request, "
+            "on-failure, untrusted. 'never' is required for headless cloud "
+            "use (no human to approve). Pair with codex_cli_sandbox_mode="
+            "'danger-full-access' on Windows or anywhere the agent can't "
+            "be interactively supervised."
+        ),
+    )
 
     # Copilot SDK Settings
     copilot_sdk_provider: str = Field(
@@ -257,11 +329,173 @@ class Settings(BaseSettings):
     # Deep Agents (LangChain/LangGraph) Settings
     deep_agents_model: str = Field(
         default="anthropic:claude-sonnet-4-6",
-        description="Model for Deep Agents backend (provider:model format, e.g. 'openai:gpt-4o')",
+        description="Model for Deep Agents backend in ``provider:model`` format.",
     )
     deep_agents_max_turns: int = Field(
         default=100,
         description="Max turns per query in Deep Agents backend (0 = unlimited)",
+    )
+    deep_agents_disable_thinking: bool = Field(
+        default=False,
+        description=(
+            "Ask the Deep Agents backend's chat model to skip extended "
+            "thinking. Sent as a provider-shaped kwarg; providers that "
+            "don't recognize the shape ignore it."
+        ),
+    )
+    # Pocket Specialist Settings — see docs/superpowers/specs/2026-05-09-pocket-specialist-design.md
+    pocket_specialist_backend: str = Field(
+        default="deep_agents",
+        description=(
+            "Which agent backend runs the pocket specialist's LLM work. Must be a "
+            "registered backend name (deep_agents, langchain_react, claude_agent_sdk, "
+            "openai_agents, google_adk, codex_cli, opencode, copilot_sdk). Default "
+            "deep_agents avoids subprocess cold-start."
+        ),
+    )
+    pocket_specialist_model: str = Field(
+        default="anthropic:claude-haiku-4-5-20251001",
+        description=(
+            "Model the specialist uses for spec generation. Defaults to Haiku — "
+            "the specialist's job is emitting structured rippleSpec JSON from a "
+            "stable ~12k-token design-rules prompt, which Haiku handles at ~2-4x "
+            "Sonnet speed with no measurable quality loss. Override with "
+            "provider:model when you need creative liberty (Sonnet) or cheap "
+            "self-hosted inference ('openai_compatible:deepseek-v4-pro'). Set to "
+            "an empty string to fall back to the chosen backend's default "
+            "*_model setting."
+        ),
+    )
+    pocket_specialist_max_validation_retries: int = Field(
+        default=3,
+        description=(
+            "Max draft -> validate -> revise iterations before persisting with "
+            "remaining warnings. Specialist always persists; this only bounds revision."
+        ),
+    )
+    pocket_specialist_mode: Literal["subagent", "agent"] = Field(
+        default="subagent",
+        description=(
+            "Which adapter handles ``pocket_specialist__create`` calls. "
+            "``subagent`` (default) spawns an isolated backend running the "
+            "specialist's own model — the historical flow. ``agent`` uses a "
+            "two-call protocol: the first call returns a draft kit (design "
+            "rules digest + structural plan + widget list); the chat agent "
+            "drafts the rippleSpec inline using its own model and calls back "
+            "with ``spec=<draft>`` for validate-and-persist. ``agent`` mode "
+            "ignores ``pocket_specialist_backend`` and ``pocket_specialist_model`` "
+            "entirely — the chat agent's runtime is the LLM."
+        ),
+    )
+    pocket_router_enabled: bool = Field(
+        default=True,
+        description=(
+            "Kill-switch for the pocket execution router (Increment 3). When "
+            "True (default) ``pocket_specialist__edit`` first runs a pure, "
+            "rule-based classifier that routes a request to the cheapest "
+            "capable tier — Tier 0 declarative (fire a declared source/action), "
+            "Tier 1 deterministic op (apply one granular op), or Tier 2 "
+            "specialist (the existing LLM flow). When False the router always "
+            "escalates to Tier 2, restoring pre-router behaviour exactly — "
+            "every edit invokes the specialist. Flip to False to disable the "
+            "router instantly without a deploy if a Tier-0/1 verdict ever "
+            "misfires."
+        ),
+    )
+    pocket_router_min_confidence: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor for a cheap-tier (Tier 0 / Tier 1) routing "
+            "verdict. The classifier escalates to the specialist (Tier 2) "
+            "whenever its confidence in the cheap tier falls below this "
+            "threshold. High by default — a wrong skip produces a broken "
+            "pocket, so the router is deliberately conservative."
+        ),
+    )
+    auto_install_bundled_skills: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror bundled AgentSkills-format "
+            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/`` "
+            "into ``~/.claude/skills/<name>/SKILL.md``. That destination "
+            "is covered by both Claude Code's native skill discovery AND "
+            "PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the skill works "
+            "for all chat backends (claude_agent_sdk via natural-language "
+            "invocation, codex_cli / openai_agents / deep_agents via the "
+            "``/<skill-name>`` slash command). Idempotent — SHA-256 hash "
+            "compare per file. Set ``false`` to freeze a manually-customized "
+            "copy or disable bundled skills entirely. Skill installation "
+            "is best-effort: pocket creation still works via the MCP tool "
+            "surface even when no skill is installed."
+        ),
+    )
+    auto_install_bundled_kb_scopes: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror PocketPaw's pre-compiled kb-go "
+            "scopes from ``pocketpaw/bundled_kb/_bundled/<scope>/`` into "
+            "``~/.knowledge-base/<scope>/``. The bundle ships "
+            "``ripple-recipes`` — pattern recipes (sales-pipeline, "
+            "customer-support-app, recipe/how-to viewer) that the chat "
+            "agent retrieves at pocket-creation time via the existing "
+            "``_get_kb_context`` injection in bootstrap.context_builder. "
+            "Idempotent — SHA-256 hash compare per file, no-op when the "
+            "destination already matches. Set ``false`` to freeze a "
+            "hand-customised scope or disable bundled KB entirely. KB "
+            "retrieval is a non-critical enhancement: pocket creation "
+            "still works via the MCP tool surface + the bundled skill."
+        ),
+    )
+    auto_install_bundled_templates: bool = Field(
+        default=True,
+        description=(
+            "On dashboard startup, mirror PocketPaw's built-in pocket "
+            "templates from ``pocketpaw/bundled_templates/_bundled/<slug>/`` "
+            "into ``~/.pocketpaw/templates/<slug>/``. Each template ships a "
+            "``template.pocket.yaml`` (RFC 03 schema metadata) and a "
+            "hand-authored ``ripple_spec.json`` skeleton. The create "
+            "specialist instantiates-and-customizes a matching template "
+            "instead of cold-generating a pocket — the fix for the 2-3 "
+            "iteration authoring pain. Idempotent — SHA-256 hash compare "
+            "per file. Set ``false`` to freeze a hand-customised template "
+            "or disable the template library entirely. Template install is "
+            "best-effort: pocket creation still works (the specialist "
+            "cold-generates) even when no template is installed."
+        ),
+    )
+    foresight_use_skill: bool = Field(
+        default=True,
+        description=(
+            "Activate the ``foresight-create-sim`` bundled skill in chat. "
+            "Default ON as of 2026-05-27 — the SKILL.md auto-installs to "
+            "``~/.claude/skills/`` (idempotent) and the chat agent's "
+            "prompt context builder + the cloud's foresight surface "
+            "handler include the skill-activation hint in the preamble. "
+            "Read by the agent prompt assembler "
+            "(``pocketpaw.bootstrap.context_builder``) and the cloud's "
+            "paw-enterprise feature-flag echo endpoint at "
+            "``/api/v1/config/features``); the foresight CRUD endpoints "
+            "themselves stay reachable regardless of this flag — the gate "
+            "is purely a chat-surface affordance toggle. The flag is dev-"
+            "grade today and tightens to a per-workspace database setting "
+            "in a follow-up RFC."
+        ),
+    )
+    deep_agents_skills: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths passed to deepagents `skills=` — directories or files loaded "
+            "progressively by SkillsMiddleware (AGENTS.md-style). Empty disables."
+        ),
+    )
+    deep_agents_memory: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths passed to deepagents `memory=` — files loaded by "
+            "MemoryMiddleware for cross-thread recall. Empty disables."
+        ),
     )
 
     # OpenCode Settings
@@ -454,6 +688,15 @@ class Settings(BaseSettings):
     tools_deny: list[str] = Field(
         default_factory=list, description="Explicit tool deny list (highest priority)"
     )
+    tool_output_char_cap: int = Field(
+        default=12000,
+        gt=0,
+        description=(
+            "Max characters a single tool result may add to agent context. "
+            "Oversized results are truncated (head+tail, or a salient-lines "
+            "extract for test/lint output) before reaching the LLM."
+        ),
+    )
 
     # Discord
     discord_bot_token: str | None = Field(default=None, description="Discord bot token")
@@ -599,6 +842,21 @@ class Settings(BaseSettings):
     )
     pii_scan_logs: bool = Field(
         default=True, description="Extend log scrubber with PII patterns (when pii_scan_enabled)"
+    )
+
+    # Chat Title Generation (Haiku-backed, first-message naming)
+    chat_title_generation_enabled: bool = Field(
+        default=True,
+        description=(
+            "Auto-generate a short title for a chat from its first user message."
+            " Uses a Haiku model when an Anthropic API key is configured, and"
+            " falls back to a trimmed excerpt of the first message otherwise."
+            " Fires a session_titled SystemEvent on completion."
+        ),
+    )
+    chat_title_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Model used by the chat title generator (Anthropic).",
     )
 
     # Smart Model Routing
@@ -927,9 +1185,20 @@ class Settings(BaseSettings):
     kb_scope: str = Field(
         default="",
         description=(
-            "Knowledge base scope to query via the `kb` CLI (github.com/qbtrix/kb-go). "
-            "When set and the kb binary is on PATH, relevant articles are injected "
-            "into the agent system prompt alongside soul memories. Empty = disabled."
+            "DEPRECATED: single-scope back-compat shim. Prefer ``kb_scopes`` "
+            "(list). When ``kb_scopes`` is empty and ``kb_scope`` is set, "
+            "the value is copied into ``kb_scopes`` and a DeprecationWarning "
+            "is emitted. Set via POCKETPAW_KB_SCOPE."
+        ),
+    )
+    kb_scopes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of kb-go scopes to query when building the agent "
+            "system prompt. Each scope receives a slice of the total limit; "
+            "results are concatenated under per-scope headers. Set via "
+            "POCKETPAW_KB_SCOPES as a JSON array (e.g. "
+            '["workspace:w1","agent:a1"]).'
         ),
     )
     kb_binary: str = Field(
@@ -939,6 +1208,160 @@ class Settings(BaseSettings):
     kb_limit: int = Field(
         default=3,
         description="Number of top articles to inject from kb search (default: 3)",
+    )
+    ripple_manifest_url: str = Field(
+        default="http://localhost:5174/manifest.json",
+        description=(
+            "URL to the Ripple UI manifest (widget specs). Defaults to the "
+            "local ripple dev server while @ripple-ui/svelte is unreleased; "
+            "swap to "
+            "https://cdn.jsdelivr.net/npm/@ripple-ui/svelte@latest/dist/manifest.json "
+            "(or any pinned version) once published."
+        ),
+    )
+    ripple_manifest_ttl_seconds: int = Field(
+        default=86400,
+        description="TTL in seconds for cached Ripple manifest (default: 24h)",
+    )
+    ripple_embed_allowed_hosts: list[str] = Field(
+        default_factory=lambda: [
+            "youtube-nocookie.com",
+            "player.vimeo.com",
+            "codepen.io",
+            "codesandbox.io",
+            "observablehq.com",
+            "www.figma.com",
+        ],
+        description=(
+            'Host allow-list for the Ripple `embed` widget\'s `mode:"url"` form. '
+            "An `embed` URL must be https and its host must match an entry here "
+            "(exact or sub-domain). Set via POCKETPAW_RIPPLE_EMBED_ALLOWED_HOSTS "
+            'as a JSON array. A literal `["*"]` widens it to every host; even '
+            "then loopback / private / link-local / cloud-metadata hosts stay "
+            "hard-blocked. Defaults to a curated set of sandbox-friendly "
+            "embed providers."
+        ),
+    )
+
+    # Pocket data-source refresh — cost controls (RFC 04 M3).
+    # A pocket source binding may declare an `interval` or `webhook` refresh
+    # trigger. Both are AUTO-refresh: they re-run a source without a human in
+    # the loop, so they cost real backend calls. These two settings cap that
+    # cost. The interval floor clamps a too-frequent (or hallucinated)
+    # `refresh_interval_seconds` up to a sane minimum; the per-hour cap is a
+    # separate budget — counted PER POCKET, distinct from the manual
+    # `run_source` per-(pocket, user) limiter — so an interval storm or a
+    # webhook flood cannot run up unbounded backend cost.
+    source_refresh_min_interval_seconds: int = Field(
+        default=60,
+        description=(
+            "Minimum seconds between automatic interval refreshes of a pocket "
+            "data source. A source binding's `refresh_interval_seconds` is "
+            "clamped UP to this floor — a hallucinated `refresh_interval_seconds: "
+            "1` is never honored. Set via POCKETPAW_SOURCE_REFRESH_MIN_INTERVAL_SECONDS."
+        ),
+    )
+    source_refresh_max_per_hour: int = Field(
+        default=60,
+        description=(
+            "Maximum automatic (interval + webhook) source refreshes per pocket "
+            "per rolling hour. Once the budget is spent, further auto-refreshes "
+            "are skipped (and logged) rather than queued. This counter is "
+            "SEPARATE from the manual run_source rate limiter. Set via "
+            "POCKETPAW_SOURCE_REFRESH_MAX_PER_HOUR."
+        ),
+    )
+
+    # File extraction chain (Phase 1, "Files as Knowledge")
+    extraction_chain: list[str] = Field(
+        default_factory=lambda: ["local"],
+        description=(
+            "Ordered list of extraction adapter names "
+            "(e.g. ['gemini-flash', 'local']). The chain runs first-match-wins "
+            "per MIME, with offline fallback to 'local'. Set via "
+            "POCKETPAW_EXTRACTION_CHAIN as a JSON array."
+        ),
+    )
+    extraction_per_mime: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-MIME adapter override map (e.g. {'image/png': 'gemini-flash'}). "
+            "Wins over the chain order. Set via POCKETPAW_EXTRACTION_PER_MIME "
+            "as a JSON object."
+        ),
+    )
+    extraction_offline_fallback: str = Field(
+        default="local",
+        description=(
+            "Adapter name used when the chosen adapter requires network and "
+            "the host is offline. Today the chain hardcodes LocalExtractor as "
+            "fallback; this setting reserves the env key for future overrides."
+        ),
+    )
+    gemini_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Google Gemini API key for the gemini-flash extraction adapter. "
+            "Read from POCKETPAW_GEMINI_API_KEY. When unset, the gemini-flash "
+            "adapter is silently skipped during chain construction."
+        ),
+    )
+
+    # Embedding adapter (Phase 2, "Files as Knowledge" Stage 2.D)
+    kb_vectors_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master switch for the vector-embedding pipeline. When False the "
+            "FileReady listener stops after text-ingest and the chat path "
+            "skips interleaved-image queries. Set via POCKETPAW_KB_VECTORS_ENABLED."
+        ),
+    )
+    embedding_adapter: str = Field(
+        default="",
+        description=(
+            "Embedding adapter name. Empty disables embeddings even when "
+            "kb_vectors_enabled is True. Supported: "
+            "'vertex-gemini-embedding-2' (preview, 3072-dim, multimodal), "
+            "'vertex-mm-001' (GA, 1408-dim, text+image). Set via "
+            "POCKETPAW_EMBEDDING_ADAPTER."
+        ),
+    )
+    embedding_dim: int = Field(
+        default=1024,
+        gt=0,
+        description=(
+            "Target output dim. vertex-gemini-embedding-2 uses Matryoshka "
+            "truncation; vertex-mm-001 snaps to the closest valid native "
+            "dim (128/256/512/1408). All vectors in a single kb-go scope "
+            "must agree on this value. Set via POCKETPAW_EMBEDDING_DIM."
+        ),
+    )
+    embedding_monthly_cap_usd: float = Field(
+        default=10.0,
+        ge=0,
+        description=(
+            "Soft monthly USD cap for embedding spend. When the running "
+            "total would exceed this, the listener falls back to "
+            "extraction-only (text still ingests, vector skipped). 0 "
+            "disables the cap. Persisted at ~/.pocketpaw/embedding_cost.json. "
+            "NOT a billing source — real billing comes from the provider's "
+            "dashboard. Set via POCKETPAW_EMBEDDING_MONTHLY_CAP_USD."
+        ),
+    )
+    vertex_project_id: str | None = Field(
+        default=None,
+        description=(
+            "GCP project id for vertex-mm-001 (the multimodalembedding@001 "
+            "adapter). When unset, the adapter is silently skipped during "
+            "factory construction. Set via POCKETPAW_VERTEX_PROJECT_ID."
+        ),
+    )
+    vertex_location: str | None = Field(
+        default=None,
+        description=(
+            "GCP region for vertex-mm-001 (default: us-central1 when "
+            "unset). Set via POCKETPAW_VERTEX_LOCATION."
+        ),
     )
 
     soul_cognitive_model: str = Field(
@@ -985,6 +1408,103 @@ class Settings(BaseSettings):
     max_concurrent_conversations: int = Field(
         default=5, gt=0, description="Max parallel conversations processed simultaneously"
     )
+
+    # Composio — MCP-direct tool provider for the parent cloud chat agent.
+    # Wired into src/pocketpaw/agents/claude_sdk.py::_get_mcp_servers; the
+    # pocket specialist does NOT receive Composio MCP. When api_key is set,
+    # composio_enterprise_id is required to namespace the per-user Composio
+    # user_id (avoids collisions across PocketPaw enterprise deployments
+    # that share one Composio org).
+    composio_api_key: str | None = Field(
+        default=None, description="Composio API key (enables Composio MCP for the parent agent)"
+    )
+    composio_base_url: str | None = Field(
+        default=None,
+        description="Composio base URL. None = Composio cloud; set for self-hosted runtime.",
+    )
+    # ``NoDecode`` keeps pydantic-settings from trying to JSON-parse the raw
+    # env string; the ``field_validator`` below handles CSV → list[str].
+    composio_toolkits: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Allow-list of Composio toolkit slugs (e.g. 'gmail,slack,github'). "
+            "Comma-separated when set via env. Empty = fail closed (no toolkits exposed)."
+        ),
+    )
+    composio_enterprise_id: str | None = Field(
+        default=None,
+        description=(
+            "Namespace prefix for Composio user_id (f'{enterprise_id}:{user_id}'). "
+            "Required when composio_api_key is set."
+        ),
+    )
+    composio_mcp_url_ttl_seconds: int = Field(
+        default=3600,
+        gt=0,
+        description=(
+            "How long per-user Composio tools are cached in-process before "
+            "re-fetching via the provider's ``composio.create(user_id=...)`` + "
+            "``session.tools()``. The Composio call is a network round-trip "
+            "and the per-user toolset rarely changes mid-session, so caching "
+            "covers the common case. Default: 1h."
+        ),
+    )
+    composio_connect_link_inline: bool = Field(
+        default=True,
+        description=(
+            "When True, Composio 'needs auth' responses render as an inline Ripple button "
+            "instead of a raw URL in the chat. Set False to disable if detection is brittle."
+        ),
+    )
+
+    @field_validator("composio_toolkits", mode="before")
+    @classmethod
+    def _parse_composio_toolkits_csv(cls, v: object) -> object:
+        """Accept comma-separated env values (e.g. 'gmail, slack ,github').
+
+        pydantic-settings normally requires JSON for list fields; this
+        before-validator lets ops set the allow-list as plain CSV in
+        ``POCKETPAW_COMPOSIO_TOOLKITS`` without quoting brackets.
+        """
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    @model_validator(mode="after")
+    def _validate_composio_invariants(self) -> Settings:
+        """Enforce composio_api_key → composio_enterprise_id required.
+
+        Without the enterprise_id namespace, two PocketPaw deployments
+        sharing one Composio org would collide on user_id space. Fail at
+        startup rather than at first tool call.
+        """
+        if self.composio_api_key and not self.composio_enterprise_id:
+            raise ValueError(
+                "composio_enterprise_id is required when composio_api_key is set "
+                "(POCKETPAW_COMPOSIO_ENTERPRISE_ID). Prevents user_id collisions "
+                "across enterprise deployments sharing one Composio org."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _migrate_kb_scope(self) -> Settings:
+        """Copy deprecated single ``kb_scope`` into ``kb_scopes`` once.
+
+        When a host has only the legacy ``POCKETPAW_KB_SCOPE`` set we keep
+        their KB injection working: the string is appended to ``kb_scopes``
+        and a :class:`DeprecationWarning` nudges them to switch. If both
+        keys are populated the new list wins and the legacy string is
+        ignored (no surprise merging).
+        """
+        if not self.kb_scopes and self.kb_scope:
+            warnings.warn(
+                "POCKETPAW_KB_SCOPE is deprecated; use POCKETPAW_KB_SCOPES "
+                "(list, e.g. POCKETPAW_KB_SCOPES='[\"workspace:w1\"]')",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.kb_scopes = [self.kb_scope]
+        return self
 
     def save(self) -> None:
         """Save settings to config file.
@@ -1034,27 +1554,42 @@ class Settings(BaseSettings):
 
     @classmethod
     def load(cls) -> Settings:
-        """Load settings from config file + encrypted credential store."""
+        """Load settings from config file + encrypted credential store.
+
+        Set ``POCKETPAW_IGNORE_CONFIG_JSON=true`` to skip config.json
+        entirely. Useful when ``.env`` is the source of truth and you
+        don't want unset fields to silently inherit stale dashboard
+        values. Secrets from the encrypted credential store still load.
+        """
         from pocketpaw.credentials import SECRET_FIELDS, get_credential_store
 
-        # Run one-time migration from plaintext config
         _migrate_plaintext_keys()
+
+        ignore_json = os.environ.get("POCKETPAW_IGNORE_CONFIG_JSON", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
         config_path = get_config_path()
         data: dict = {}
-        if config_path.exists():
+        if config_path.exists() and not ignore_json:
             try:
                 data = json.loads(config_path.read_text())
             except (json.JSONDecodeError, Exception):
                 pass
 
-        # Overlay secrets from encrypted store (falls back to config.json values)
         store = get_credential_store()
         secrets = store.get_all()
         for field in SECRET_FIELDS:
             if field in secrets and secrets[field]:
                 data[field] = secrets[field]
-            # data[field] may already be set from config.json — keep it as fallback
+
+        env_prefix = cls.model_config.get("env_prefix", "")
+        for field in list(data.keys()):
+            if os.environ.get(f"{env_prefix}{field.upper()}") is not None:
+                data.pop(field, None)
 
         if data:
             try:

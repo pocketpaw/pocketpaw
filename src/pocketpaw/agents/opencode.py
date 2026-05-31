@@ -17,7 +17,12 @@ from typing import Any
 
 import httpx
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
@@ -25,7 +30,7 @@ from pocketpaw.tools.policy import ToolPolicy
 logger = logging.getLogger(__name__)
 
 
-class OpenCodeBackend:
+class OpenCodeBackend(BaseAgentBackend):
     """OpenCode server backend — communicates via REST API."""
 
     @staticmethod
