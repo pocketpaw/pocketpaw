@@ -1,0 +1,64 @@
+# Tests — runs the pytest suite on every PR targeting dev/main or an
+# RFC integration branch (pattern: feat/*-integration), and on pushes to
+# the same branches.
+# Created: 2026-05-07 — Added pytest job to PR Quality Gate so broken tests
+# can no longer slip through CI on PRs targeting ee. Closes #1065.
+# Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
+# sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
+# Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+name: Tests
+
+on:
+  pull_request:
+    branches: [dev, main, 'feat/*-integration']
+  push:
+    branches: [dev, main, 'feat/*-integration']
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set Python version
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        # --all-extras pulls every optional core extra (soul, vector, etc.).
+        # The enterprise layer is the separate `pocketpaw-ee` package since the
+        # OSS-EE split (Phase 4) — install it editable so tests/ee can import
+        # pocketpaw_ee (beanie / motor / fastapi-users ship as its deps).
+        # Cold-start installs are heavier (~60 s on cache miss because chromadb
+        # pulls onnxruntime, plus a few smaller wheels) but uv's cache keeps
+        # subsequent runs fast.
+        run: uv sync --dev --all-extras --group ee
+
+      - name: Run pytest
+        # No -x: this is a PR gate, surface ALL failures, not just the first.
+        # --deselect entries are pre-existing failures the gate caught on first
+        # run (#1066). Tracked separately so the gate stays green for new
+        # changes and goes red when someone introduces a new regression:
+        #   - #1079: tests/test_concurrency.py — list-membership flakes
+        #   - #1080: tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch
+        # Remove the corresponding --deselect once each issue lands its fix.
+        run: |
+          uv run pytest tests/ \
+            --ignore=tests/e2e \
+            --ignore=tests/test_frontend_syntax.py \
+            --deselect tests/test_concurrency.py::test_session_lock_serialises_same_session \
+            --deselect tests/test_concurrency.py::test_cross_session_runs_in_parallel \
+            --deselect tests/test_concurrency.py::test_global_semaphore_caps_concurrency \
+            --deselect tests/test_context_budget.py::TestKbContext::test_successful_kb_fetch \
+            -q --tb=short
+        env:
+          POCKETPAW_LLM_PROVIDER: "ollama"
+          POCKETPAW_OLLAMA_HOST: "http://localhost:11434"

@@ -1,0 +1,10 @@
+# ABAC rules restrict visibility based on entry.tags and ctx.user.attributes.
+# Each rule: tag -> requires-all attribute matches.
+# Example:
+# - tag: confidential
+#   require:
+#     role: [admin, owner]
+# - tag: hr-only
+#   require:
+#     department: [hr]
+rules: []

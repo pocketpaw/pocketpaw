@@ -55,7 +55,24 @@ services:
       - qdrant-data:/qdrant/storage
     restart: unless-stopped
 
+  # MongoDB for the enterprise (pocketpaw-ee) cloud layer — auth, rooms,
+  # messaging, billing, knowledge base. Only needed for enterprise dev:
+  #   docker compose --profile mongo up -d
+  # The cloud layer defaults to mongodb://localhost:27017/paw-enterprise — which
+  # this service provides — so no config is needed; override with the
+  # CLOUD_MONGODB_URI env var to point elsewhere.
+  mongo:
+    image: mongo:7
+    container_name: pocketpaw-mongo
+    profiles: [mongo]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
 volumes:
   pocketpaw-data:
   ollama-data:
   qdrant-data:
+  mongo-data:

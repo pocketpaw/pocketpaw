@@ -1,0 +1,31 @@
+# Google Docs connector — REST over OAuth bearer.
+# Created: 2026-05-03 — Phase 1 PR-5. Mirrors gmail.yaml + gcalendar.yaml.
+
+name: gdocs
+display_name: Google Docs
+type: knowledge
+icon: file-text
+
+auth:
+  method: oauth2
+  credentials:
+    - name: GOOGLE_OAUTH_TOKEN
+      description: OAuth access token with documents + drive.readonly scopes
+      required: true
+
+actions:
+  - name: docs_read
+    description: Read the full text content of a Google Doc by ID.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: docs_create
+    description: Create a new Google Doc with optional initial content.
+    method: POST
+    trust_level: confirm
+    execution_mode: cloud
+  - name: docs_search
+    description: Search your Google Docs by name / title.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
