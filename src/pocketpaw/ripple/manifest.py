@@ -11,6 +11,13 @@ returns None — the caller is expected to fall back to a different
 source (today: kb scope search).
 
 Changes:
+  - 2026-05-31 (constraint-zone enforcer): added ``validate_required_props``
+    + ``required_props_from_manifest`` — a mechanical walker that flags any
+    node missing a prop the manifest marks ``required: true`` for its
+    ``type``. The rippleSpec analogue of the genesis "Constraint Zones" 🔒
+    HARD ``required_fields`` zone; sibling to ``validate_against_catalog`` /
+    ``validate_action_verbs``. Previously the ``required`` flag was surfaced
+    only in the system prompt and never enforced at gate time.
   - 2026-05-22 (Increment 5): added ``validate_against_catalog`` — a
     catalog-as-allowlist ingest gate that flags any node whose ``type``
     is not in the widget manifest (sibling to ``validate_against_manifest``,
@@ -809,6 +816,169 @@ def find_unwired_live_buttons(spec: dict[str, Any] | None) -> list[dict[str, Any
     root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
     issues: list[dict[str, Any]] = []
     _walk_live_buttons(root, "ui", raw_sources, issues)
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Required-prop "HARD constraint" gate (2026-05-31).
+#
+# The widget manifest declares ``required: true`` on the props a widget
+# cannot render without (a ``chart`` with no ``data``, a ``stat`` with no
+# ``value``, an ``each``-driven ``table`` with no ``columns``). Today that
+# flag is surfaced only in the system prompt — nothing mechanically enforces
+# it, so a node like ``{"type": "chart", "props": {}}`` sails through every
+# gate and renders an empty box.
+#
+# This is the rippleSpec analogue of the genesis "Constraint Zones" model's
+# 🔒 HARD ``required_fields`` zone: the agent is free to choose WHICH widgets
+# to use and HOW to fill the creative props, but the structural minimum — the
+# manifest-declared required props — is locked and checked, not merely asked
+# for. A prompt-side "include required props" rule rots at agent-write-rate;
+# this walker catches every omission for free, exactly like the catalog and
+# action-verb gates it sits beside.
+#
+# Runs as a sibling to ``validate_against_catalog`` — strict on the
+# agent-generation path (raises so the chat agent can retry with the missing
+# prop named), logged on the human / import path.
+# ---------------------------------------------------------------------------
+
+
+def required_props_from_manifest(manifest: dict[str, Any]) -> dict[str, list[str]]:
+    """Extract the per-widget required-prop map from a parsed manifest.
+
+    Returns ``{ widget_type: [required_prop, ...] }`` for every widget that
+    declares at least one ``required: true`` prop; widgets with no required
+    props are omitted entirely (so a membership test doubles as "does this
+    type have anything to enforce"). Prop order follows the manifest's
+    declaration order so corrective hints read naturally.
+
+    Mirrors :func:`allowed_types_from_manifest` — a pure manifest reader with
+    no spec involvement.
+    """
+    out: dict[str, list[str]] = {}
+    for w in manifest.get("widgets") or []:
+        if not isinstance(w, dict):
+            continue
+        wtype = w.get("type")
+        props = w.get("props")
+        if not isinstance(wtype, str) or not wtype or not isinstance(props, dict):
+            continue
+        required = [
+            name
+            for name, spec in props.items()
+            if isinstance(spec, dict) and spec.get("required") and isinstance(name, str)
+        ]
+        if required:
+            out[wtype] = required
+    return out
+
+
+def _prop_is_present(value: Any) -> bool:
+    """True when a prop value counts as "provided" for required-prop checks.
+
+    Present means the key exists with a non-``None`` value. An empty string,
+    empty list, empty dict, ``0``, or ``False`` all count as present — the
+    agent made a deliberate choice and the renderer can handle them; only a
+    missing key or an explicit ``null`` is a structural omission. A bound
+    expression string (``"{item.data}"``) is a non-empty string, so it counts
+    — key-presence, not value-resolution, is what this gate enforces.
+    """
+    return value is not None
+
+
+def _walk_required_props(
+    node: Any,
+    path: str,
+    required_by_type: dict[str, list[str]],
+    issues: list[dict[str, Any]],
+) -> None:
+    """Recursive walk that flags nodes missing a manifest-required prop.
+
+    Only nodes whose ``type`` is a key in ``required_by_type`` are checked —
+    an unknown ``type`` is the catalog gate's concern, not this one, so it is
+    never double-flagged here. A node that carries ``bind`` for a required
+    prop is treated as supplying it: the bound value populates the prop at
+    render time even though the literal key is absent from ``props``.
+    """
+    if not isinstance(node, dict):
+        return
+
+    wtype = node.get("type")
+    if isinstance(wtype, str) and wtype in required_by_type:
+        props = node.get("props")
+        props = props if isinstance(props, dict) else {}
+        # A node-level ``bind`` feeds exactly one prop (the widget's bind
+        # contract target). We can't know that prop's name here without the
+        # bind-contract map, so a present ``bind`` rescues the single most
+        # common bindable required prop families. Conservative: only suppress
+        # when bind is set AND there's exactly one required prop, the typical
+        # input-widget case (``value`` on input, ``checked`` on checkbox).
+        bound = isinstance(node.get("bind"), str) and bool(node.get("bind"))
+        required = required_by_type[wtype]
+        missing = [p for p in required if not _prop_is_present(props.get(p))]
+        if missing and bound and len(required) == 1:
+            missing = []
+        if missing:
+            issues.append(
+                {
+                    "path": path,
+                    "type": wtype,
+                    "missing": missing,
+                    "required": list(required),
+                }
+            )
+
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_required_props(child, f"{path}.{key}[{i}]", required_by_type, issues)
+
+
+def validate_required_props(
+    spec: dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every node missing a prop the widget
+    manifest marks ``required: true`` for that ``type``.
+
+    ``manifest_or_required`` accepts either a full parsed manifest (a dict
+    with a ``widgets`` array) or an already-extracted required-prop map
+    (``{type: [prop, ...]}`` from :func:`required_props_from_manifest`); the
+    latter lets a hot path extract the map once and reuse it across specs.
+
+    Returns one issue dict per offending node; ``[]`` when ``spec`` is not a
+    dict or every node supplies its required props. Issue shape::
+
+        {
+          "path": "ui.children[2]",
+          "type": "chart",
+          "missing": ["data"],            # required props this node omitted
+          "required": ["data"],           # all required props for the type
+        }
+
+    The renderer draws a node with a missing required prop as an empty / broken
+    widget rather than erroring, so the failure is invisible until a human
+    looks at the canvas. Catching it at spec ingest forces the agent to fill
+    the structural minimum — the rippleSpec analogue of the genesis HARD
+    ``required_fields`` constraint zone.
+    """
+    if not isinstance(spec, dict):
+        return []
+    if "widgets" in manifest_or_required:
+        required_by_type = required_props_from_manifest(manifest_or_required)
+    else:
+        required_by_type = {
+            t: list(p)
+            for t, p in manifest_or_required.items()
+            if isinstance(t, str) and isinstance(p, (list, tuple))
+        }
+    if not required_by_type:
+        return []
+
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_required_props(root, "ui", required_by_type, issues)
     return issues
 
 
