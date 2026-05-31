@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -293,3 +294,139 @@ async def test_invalid_source_is_skipped_logged_not_blocking(home_doc):
     assert "revenue" in home_doc.rippleSpec["sources"]
     assert "broken" not in home_doc.rippleSpec["sources"]
     assert home_doc.saves == 1
+
+
+# ---------------------------------------------------------------------------
+# REFINE path — update_widget can author sources (feat/home-agent-source-
+# authoring). Mirrors the add_widget tests above on the in-place refresh path.
+# ---------------------------------------------------------------------------
+
+
+def _seed_widget(doc: _FakeDoc, widget_id: str, name: str) -> None:
+    """Append a minimal widget the update path can target by id."""
+    doc.widgets.append(
+        SimpleNamespace(
+            id=widget_id,
+            name=name,
+            type="stat",
+            icon="",
+            color="",
+            span=None,
+            data=None,
+            spec={"type": "stat", "props": {"label": "Revenue", "value": "0"}},
+            assignedAgent=None,
+            config={},
+            props={},
+            dataSourceType=None,
+        )
+    )
+
+
+async def test_update_widget_for_agent_authors_source(home_doc):
+    """The refine fix: ``update_widget_for_agent`` with a ``sources`` block on
+    its fields merges the binding into the pocket's top-level
+    ``rippleSpec.sources`` AND patches the tile — so refining a static tile can
+    make it live."""
+    _seed_widget(home_doc, "w_rev", "Live revenue")
+    fields = {
+        "spec": {"type": "stat", "props": {"label": "Revenue", "value": "{state.revenue}"}},
+        "sources": {"revenue": dict(_REVENUE_SOURCE)},
+    }
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        result = await agent_context.update_widget_for_agent(home_doc.id, "w_rev", fields)
+
+    assert result["ok"] is True
+    assert home_doc.rippleSpec["sources"]["revenue"]["path"] == "/revenue/today"
+    assert home_doc.rippleSpec["sources"]["revenue"]["bind"] == "state.revenue"
+    # The tile spec was patched too.
+    assert home_doc.widgets[0].spec["props"]["value"] == "{state.revenue}"
+    assert home_doc.saves == 1
+
+
+async def test_agent_update_widget_service_authors_source(home_doc):
+    """Same merge on the service-layer entry point ``agent_update_widget`` with
+    an explicit ``sources`` kwarg."""
+    _seed_widget(home_doc, "w_rev", "Live revenue")
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        view, err = await pocket_service.agent_update_widget(
+            home_doc.id,
+            "w_rev",
+            {"name": "Live revenue"},
+            sources={"revenue": dict(_REVENUE_SOURCE)},
+        )
+    assert err is None
+    assert view is not None
+    assert home_doc.rippleSpec["sources"]["revenue"]["bind"] == "state.revenue"
+
+
+async def test_update_widget_without_sources_is_noop_on_sources(home_doc):
+    """Omitting ``sources`` on update_widget never materialises a sources key —
+    no regression for legacy refresh calls."""
+    _seed_widget(home_doc, "w_rev", "Live revenue")
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        result = await agent_context.update_widget_for_agent(
+            home_doc.id, "w_rev", {"name": "Renamed"}
+        )
+    assert result["ok"] is True
+    assert "sources" not in home_doc.rippleSpec
+    assert home_doc.widgets[0].name == "Renamed"
+
+
+# ---------------------------------------------------------------------------
+# Honest tool result — the result reflects what actually persisted re: sources
+# so the agent can't report "source authored" when nothing was written.
+# ---------------------------------------------------------------------------
+
+
+async def test_add_widget_result_reports_authored_source_keys(home_doc):
+    """``add_widget_for_agent`` returns the authored source keys so the agent
+    can honestly confirm the source landed."""
+    widget = {**_REVENUE_TILE, "sources": {"revenue": dict(_REVENUE_SOURCE)}}
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        result = await agent_context.add_widget_for_agent(home_doc.id, widget)
+    assert result["ok"] is True
+    assert result.get("authored_sources") == ["revenue"]
+    assert result.get("skipped_sources") == []
+
+
+async def test_add_widget_result_reports_skipped_invalid_source(home_doc):
+    """An invalid binding shows up in ``skipped_sources`` (and NOT in
+    ``authored_sources``) so the agent can't claim a source it didn't write."""
+    widget = {
+        **_REVENUE_TILE,
+        "sources": {
+            "revenue": dict(_REVENUE_SOURCE),
+            "broken": {"method": "GET"},  # no path / bind — invalid
+        },
+    }
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        result = await agent_context.add_widget_for_agent(home_doc.id, widget)
+    assert result["ok"] is True
+    assert result.get("authored_sources") == ["revenue"]
+    assert result.get("skipped_sources") == ["broken"]
+
+
+async def test_update_widget_result_reports_authored_source_keys(home_doc):
+    """The honest-result fields are present on the refine path too."""
+    _seed_widget(home_doc, "w_rev", "Live revenue")
+    fields = {"sources": {"revenue": dict(_REVENUE_SOURCE)}}
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        result = await agent_context.update_widget_for_agent(home_doc.id, "w_rev", fields)
+    assert result["ok"] is True
+    assert result.get("authored_sources") == ["revenue"]
+
+
+async def test_add_widget_without_sources_omits_honest_result_keys(home_doc):
+    """When no ``sources`` are supplied, the honest-result keys are absent (or
+    empty) — they only appear when sources were actually in play."""
+    ctx, _ = _patches(home_doc, allowed_types=None)
+    with ctx:
+        result = await agent_context.add_widget_for_agent(home_doc.id, dict(_REVENUE_TILE))
+    assert result["ok"] is True
+    assert "authored_sources" not in result

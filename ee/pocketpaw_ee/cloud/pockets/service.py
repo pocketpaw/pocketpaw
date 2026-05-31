@@ -105,6 +105,15 @@ hand-rolled ``isinstance`` + presence checks the original MVP carried
 are gone. Behaviour is unchanged for the happy path; bad bodies now
 raise the same ``spec_merge.invalid_body`` ValidationError but via
 Pydantic instead of an ad-hoc branch.
+Changes: 2026-05-31 (feat/home-agent-source-authoring) — the REFINE half
+of the home-pocket live-data fix. ``agent_update_widget`` gains an optional
+``sources`` kwarg and authors it onto ``rippleSpec.sources`` via the same
+``_merge_authored_sources_logged`` helper ``agent_add_widget`` (PR-4) uses,
+so refining a static tile into a live one is one call. That helper now
+RETURNS ``(authored_keys, skipped_keys)``; both widget paths stash the
+result on the returned view under ``_source_merge`` so the agent_context
+wrappers can build an HONEST tool result — the agent can confirm only the
+sources that actually persisted and can't claim a binding that was dropped.
 """
 
 from __future__ import annotations
@@ -1853,7 +1862,9 @@ async def agent_update(
     return _agent_view_dict(doc), None
 
 
-def _merge_authored_sources_logged(doc: _PocketDoc, sources: dict[str, Any]) -> None:
+def _merge_authored_sources_logged(
+    doc: _PocketDoc, sources: dict[str, Any]
+) -> tuple[list[str], list[str]]:
     """Merge agent-authored RFC-04 sources into ``doc.rippleSpec.sources``.
 
     This is the LOGGED (drift-allowed) sibling of ``agent_set_source``'s
@@ -1869,11 +1880,19 @@ def _merge_authored_sources_logged(doc: _PocketDoc, sources: dict[str, Any]) -> 
     Mutates ``doc.rippleSpec`` in place via the pure ``sources_ops`` helper.
     A non-dict ``sources`` arg, or one with no valid entry, is a no-op — the
     ``sources`` key is only materialised when at least one binding validates.
+
+    Returns ``(authored_keys, skipped_keys)`` so the caller can build an
+    HONEST tool result: the agent can confirm only the sources that actually
+    persisted and learn which it must NOT report as written. This closes the
+    smoke-test gap where the agent claimed "source authored" for a binding
+    that was silently dropped.
     """
     from pocketpaw_ee.cloud.pockets.source_executor import SourceBinding
 
+    authored: list[str] = []
+    skipped: list[str] = []
     if not isinstance(sources, dict) or not sources:
-        return
+        return authored, skipped
     spec = _sources_root(doc)
     for key, entry in sources.items():
         if not key or not isinstance(entry, dict):
@@ -1883,6 +1902,7 @@ def _merge_authored_sources_logged(doc: _PocketDoc, sources: dict[str, Any]) -> 
                 key,
                 str(doc.id),
             )
+            skipped.append(key)
             continue
         try:
             normalized = SourceBinding.model_validate(entry).model_dump(mode="json")
@@ -1893,9 +1913,11 @@ def _merge_authored_sources_logged(doc: _PocketDoc, sources: dict[str, Any]) -> 
                 str(doc.id),
                 exc.errors()[0].get("msg", exc) if exc.errors() else exc,
             )
+            skipped.append(key)
             continue
         try:
             sources_ops.set_source(spec, key, normalized)
+            authored.append(key)
         except ValueError as exc:
             logger.warning(
                 "add_widget: could not merge authored source %r on pocket %s: %s",
@@ -1903,6 +1925,8 @@ def _merge_authored_sources_logged(doc: _PocketDoc, sources: dict[str, Any]) -> 
                 str(doc.id),
                 exc,
             )
+            skipped.append(key)
+    return authored, skipped
 
 
 async def agent_add_widget(
@@ -1950,20 +1974,39 @@ async def agent_add_widget(
     doc.widgets.append(new_widget)
     # Author the tile's data sources onto the pocket's top-level
     # rippleSpec.sources in the SAME save (RFC-04). Logged/drift-allowed so
-    # a hallucinated binding never blocks the tile.
+    # a hallucinated binding never blocks the tile. The authored/skipped keys
+    # ride back on the view dict (under ``_source_merge``) so the agent_context
+    # wrapper can build an HONEST tool result without us widening the 2-tuple
+    # signature that the widget-gate callers depend on.
+    authored: list[str] = []
+    skipped: list[str] = []
     if sources is not None:
-        _merge_authored_sources_logged(doc, sources)
+        authored, skipped = _merge_authored_sources_logged(doc, sources)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
-    return _agent_view_dict(doc), None
+    view = _agent_view_dict(doc)
+    if sources is not None:
+        view["_source_merge"] = {"authored": authored, "skipped": skipped}
+    return view, None
 
 
 async def agent_update_widget(
-    pocket_id: str, widget_id: str, fields: dict
+    pocket_id: str,
+    widget_id: str,
+    fields: dict,
+    *,
+    sources: dict[str, Any] | None = None,
 ) -> tuple[dict | None, str | None]:
+    """Patch fields on one embedded widget, and — when ``sources`` is supplied
+    — author the RFC-04 data sources that feed it onto the pocket's top-level
+    ``rippleSpec.sources`` in the same write. Mirrors ``agent_add_widget``:
+    refining a static tile into a live one is one call (patch the bind + author
+    the source). The sources merge is LOGGED (drift-allowed); the authored /
+    skipped keys ride back on the view under ``_source_merge`` for an honest
+    tool result."""
     if not isinstance(fields, dict):
         return None, "fields must be a JSON object"
     doc, err = await _agent_load_doc(pocket_id)
@@ -2002,12 +2045,20 @@ async def agent_update_widget(
         widget.props = fields["props"]
     if "dataSourceType" in fields:
         widget.dataSourceType = fields["dataSourceType"]
+    # Author/refine the tile's data sources in the SAME save (RFC-04), logged.
+    authored: list[str] = []
+    skipped: list[str] = []
+    if sources is not None:
+        authored, skipped = _merge_authored_sources_logged(doc, sources)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
         return None, f"save failed: {exc}"
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
-    return _agent_view_dict(doc), None
+    view = _agent_view_dict(doc)
+    if sources is not None:
+        view["_source_merge"] = {"authored": authored, "skipped": skipped}
+    return view, None
 
 
 async def agent_remove_widget(pocket_id: str, widget_id: str) -> tuple[dict | None, str | None]:

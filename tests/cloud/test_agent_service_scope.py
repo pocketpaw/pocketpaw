@@ -115,6 +115,66 @@ async def test_resolve_pocket_uses_first_agent_when_no_hint():
 
 
 @pytest.mark.asyncio
+async def test_resolve_home_pocket_populates_backend_summary():
+    """A type='home' pocket scope must carry the non-secret backend summary
+    on the resolved ScopeContext so the (sync) prompt builder can render the
+    configured base_url into HOME_POCKET_PROMPT. Mirrors how the
+    pocket_specialist fetches `get_pocket_backend`."""
+    pocket = SimpleNamespace(
+        id="home-1",
+        type="home",
+        workspace="w1",
+        owner="u_caller",
+        team=["u_caller"],
+        agents=["agent_primary"],
+        tool_specs=[],
+        visibility="workspace",
+        shared_with=[],
+    )
+    summary = {"configured": True, "base_url": "https://api.acme.test", "auth_type": "bearer"}
+    with (
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.get_pocket_backend",
+            AsyncMock(return_value=summary),
+        ),
+    ):
+        ctx = await resolve_scope_context(
+            scope="pocket", scope_id="home-1", user_id="u_caller", agent_id_hint=None
+        )
+    assert ctx.pocket_type == "home"
+    assert ctx.backend_summary == summary
+
+
+@pytest.mark.asyncio
+async def test_resolve_non_home_pocket_skips_backend_summary():
+    """A normal (non-home) pocket scope does NOT pay the backend-summary read —
+    only the home agent inlines it into a static prompt; ordinary pockets get
+    the summary lazily via get_pocket when the specialist needs it."""
+    pocket = SimpleNamespace(
+        id="p1",
+        type="custom",
+        workspace="w1",
+        owner="u_caller",
+        team=["u_caller"],
+        agents=["agent_primary"],
+        tool_specs=[],
+        visibility="workspace",
+        shared_with=[],
+    )
+    backend_mock = AsyncMock(return_value={"configured": True})
+    with (
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
+        patch("pocketpaw_ee.cloud.pockets.service.get_pocket_backend", backend_mock),
+    ):
+        ctx = await resolve_scope_context(
+            scope="pocket", scope_id="p1", user_id="u_caller", agent_id_hint=None
+        )
+    assert ctx.backend_summary is None
+    backend_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_resolve_unknown_scope_raises():
     with pytest.raises(InvalidScope):
         await resolve_scope_context(scope="nope", scope_id="x", user_id="u", agent_id_hint=None)
