@@ -80,6 +80,37 @@ class TestCookieLogin:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
         assert "pocketpaw_session" in resp.cookies
+        assert "Secure" not in resp.headers["set-cookie"]
+
+    @patch("pocketpaw.config.get_access_token", return_value=MASTER_TOKEN)
+    @patch("pocketpaw.config.Settings.load")
+    @patch("pocketpaw.security.session_tokens.create_session_token", return_value="sess:xyz")
+    def test_login_sets_secure_cookie_for_forwarded_https(
+        self, mock_create, mock_load, mock_get, client
+    ):
+        mock_load.return_value = MagicMock(session_token_ttl_hours=24)
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"token": MASTER_TOKEN},
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert resp.status_code == 200
+        assert "Secure" in resp.headers["set-cookie"]
+
+    @patch("pocketpaw.config.get_access_token", return_value=MASTER_TOKEN)
+    @patch("pocketpaw.config.Settings.load")
+    @patch("pocketpaw.security.session_tokens.create_session_token", return_value="sess:xyz")
+    def test_login_sets_secure_cookie_for_multihop_forwarded_proto(
+        self, mock_create, mock_load, mock_get, client
+    ):
+        mock_load.return_value = MagicMock(session_token_ttl_hours=24)
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"token": MASTER_TOKEN},
+            headers={"X-Forwarded-Proto": "HTTPS, http"},
+        )
+        assert resp.status_code == 200
+        assert "Secure" in resp.headers["set-cookie"]
 
     @patch("pocketpaw.config.get_access_token", return_value=MASTER_TOKEN)
     def test_login_wrong_token(self, mock_get, client):

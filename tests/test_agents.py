@@ -192,11 +192,12 @@ class TestAgentRouter:
 
         assert AgentRouter is not None
 
-    def test_router_defaults_to_claude_agent_sdk(self):
+    def test_router_defaults_to_claude_agent_sdk(self, monkeypatch):
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
         from pocketpaw.agents.router import AgentRouter
 
-        settings = Settings()
+        monkeypatch.delenv("POCKETPAW_AGENT_BACKEND", raising=False)
+        settings = Settings(_env_file=None)
         router = AgentRouter(settings)
         assert router._backend is not None
         assert isinstance(router._backend, ClaudeSDKBackend)
@@ -235,10 +236,11 @@ class TestAgentRouter:
         router = AgentRouter(settings)
         assert isinstance(router._backend, ClaudeSDKBackend)
 
-    def test_router_get_backend_info(self):
+    def test_router_get_backend_info(self, monkeypatch):
         from pocketpaw.agents.router import AgentRouter
 
-        router = AgentRouter(Settings())
+        monkeypatch.delenv("POCKETPAW_AGENT_BACKEND", raising=False)
+        router = AgentRouter(Settings(_env_file=None))
         info = router.get_backend_info()
         assert info is not None
         assert info.name == "claude_agent_sdk"
@@ -276,17 +278,19 @@ class TestAgentRouter:
 class TestClaudeSDKCliAuth:
     """Bug reproduction: PocketPaw requires API key even when Claude CLI is authenticated."""
 
-    def test_auto_resolve_no_key_gives_ollama(self):
+    def test_auto_resolve_no_key_gives_ollama(self, monkeypatch):
         from pocketpaw.llm.client import resolve_llm_client
 
-        settings = Settings()
+        monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
+        settings = Settings(_env_file=None)
         llm = resolve_llm_client(settings)
         assert llm.provider == "ollama"
 
-    def test_force_anthropic_no_key_returns_anthropic(self):
+    def test_force_anthropic_no_key_returns_anthropic(self, monkeypatch):
         from pocketpaw.llm.client import resolve_llm_client
 
-        settings = Settings()
+        monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
+        settings = Settings(_env_file=None)
         llm = resolve_llm_client(settings, force_provider="anthropic")
         assert llm.provider == "anthropic"
         assert llm.api_key is None
@@ -303,14 +307,17 @@ class TestClaudeSDKCliAuth:
         assert llm.to_sdk_env() == {}
 
     @pytest.mark.asyncio
-    async def test_claude_sdk_run_resolves_anthropic_not_ollama(self):
+    async def test_claude_sdk_run_resolves_anthropic_not_ollama(self, monkeypatch):
         """run() should resolve to anthropic, not fall to ollama."""
         from unittest.mock import patch
 
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
         from pocketpaw.llm.client import resolve_llm_client as real_resolve
 
-        settings = Settings(agent_backend="claude_agent_sdk", smart_routing_enabled=False)
+        monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
+        settings = Settings(
+            _env_file=None, agent_backend="claude_agent_sdk", smart_routing_enabled=False
+        )
         with patch("shutil.which", return_value="/usr/bin/claude"):
             sdk = ClaudeSDKBackend(settings)
 

@@ -7,13 +7,13 @@ Pydantic's model_validate (construct=True).
 
 from __future__ import annotations
 
-from ee.cloud.models.group import Group
-from ee.cloud.models.invite import Invite
-from ee.cloud.models.message import Message
-from ee.cloud.models.notification import Notification
-from ee.cloud.models.pocket import Pocket
-from ee.cloud.models.session import Session
-from ee.cloud.models.workspace import Workspace
+from pocketpaw_ee.cloud.models.group import Group
+from pocketpaw_ee.cloud.models.invite import Invite
+from pocketpaw_ee.cloud.models.message import Message
+from pocketpaw_ee.cloud.models.notification import Notification
+from pocketpaw_ee.cloud.models.pocket import Pocket
+from pocketpaw_ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.workspace import Workspace
 
 # ---------------------------------------------------------------------------
 # Group
@@ -56,7 +56,7 @@ def test_pocket_sharing_fields():
     p = Pocket.model_construct(workspace="w1", name="test", owner="u1")
     assert p.share_link_token is None
     assert p.share_link_access == "view"
-    assert p.visibility == "private"
+    assert p.visibility == "workspace"
     assert p.shared_with == []
 
 

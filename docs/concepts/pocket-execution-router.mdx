@@ -1,0 +1,187 @@
+---
+title: "Pocket Execution Router: Cheapest-Tier Edit Dispatch + Structure/Data Split"
+description: "A pure rule-based classifier that front-runs pocket_specialist__edit, routing every edit intent to the cheapest tier that can satisfy it — declarative source/action, deterministic op, or LLM specialist. Pairs with the SSE structure/data discriminant so clients can patch only the layer that changed."
+section: Core Concepts
+ogType: article
+keywords: ["pocket execution router", "pocket router", "tier classifier", "structure data split", "updateComponents", "updateDataModel"]
+tags: ["pockets", "router", "ee"]
+---
+
+# Pocket Execution Router: Cheapest-Tier Edit Dispatch
+
+The pocket execution router is a pure rule-based classifier that front-runs `pocket_specialist__edit`. It looks at the natural-language edit intent plus the pocket's current rippleSpec and routes the request to the **cheapest tier capable of producing the exact change**. A data-only refresh fires a declared source in a few milliseconds with zero tokens. A single-prop edit fires one granular op. Anything ambiguous — anything structural — escalates to the LLM specialist unchanged.
+
+PR #1181 shipped the router and one related-but-distinct change: a **structure/data discriminant** on the `pocket_mutation` SSE frame so a client can patch only the layer that changed instead of rebuilding the whole pocket.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED.
+
+**Implementation PRs:** #1181 (execution router + structure/data split for pocket edits).
+
+**Workspace RFC:** RFC 06 (Ripple — structure/data discriminant); router has no dedicated RFC.
+
+**What's live:** the `classify_and_route` chokepoint in `ee/pocketpaw_ee/agent/pocket_router/router.py`; the pure `classifier.py`; per-stage `ExecutionStage` timeline; the single `pocket_execution` SSE frame; `pocket_router` audit entries (WARNING severity on cheap-tier bypass); kill-switch (`settings.pocket_router_enabled`) and confidence floor (`settings.pocket_router_min_confidence`); structure/data family discriminant on every `pocket_mutation` frame (`updateComponents` for node/structure ops, `updateDataModel` for state/data ops).
+
+**What's planned:** surface routing decisions in the audit trail UI; thread the specialist's own token spend back into the `pocket_execution` frame (today it stays `{0, 0}` on Tier-2 escalation until the specialist surfaces a usage report).
+</Callout>
+
+## The Two Changes, One PR
+
+PR #1181 ships two changes that arrive together but solve different problems:
+
+1. **Execution router** — picks the cheapest tier for each edit intent. Saves latency and tokens on data-only refreshes and single-op edits.
+2. **Structure/data split** — every `pocket_mutation` SSE frame now carries a `family` discriminant (`updateComponents` or `updateDataModel`). A client can patch only the layer that changed instead of rebuilding the whole pocket.
+
+They're related — both encode the same insight that a state-only change doesn't need a full rebuild — but they live in different layers. The router decides the cheap path; the SSE discriminant tells the client what just changed so it can apply the corresponding cheap patch.
+
+## The Three Tiers
+
+```
+   intent + rippleSpec
+        │
+        ▼
+   classify (pure, no I/O)
+        │
+   ┌────┴──────────────────────────────────────┐
+   ▼                ▼                          ▼
+ Tier 0          Tier 1                     Tier 2
+ declarative     deterministic op           specialist
+   │                │                          │
+   ▼                ▼                          ▼
+ source_executor   op-apply path             run_edit_specialist
+ .run_sources()    (EditAgentModeAdapter)    (LLM round-trip)
+   │                │                          │
+ action_executor    ▼                          ▼
+ .run_action()    one granular op            full edit
+   │              applied                    pipeline
+   ▼
+ fire declared
+ source / action
+```
+
+| Tier | What it does | Latency | Tokens | When it fires |
+|---|---|---|---|---|
+| **Tier 0 — declarative** | Fire a declared `sources.X` or `actions.X` through the existing executors (the guards — allowlist, SSRF, rate limit, fail-closed instinct-reject — all still run) | ~10 ms | 0 | "Refresh the deals" → resolves to exactly one declared source |
+| **Tier 1 — deterministic** | Apply exactly one granular op through the existing `EditAgentModeAdapter` op-apply path | ~30 ms | 0 | "Set the title to 'Open PRs'" → resolves to one `set_node_prop` |
+| **Tier 2 — specialist** | Escalate to `run_edit_specialist` UNCHANGED (the legacy LLM flow) | ~5-30 s | hundreds-thousands | Anything ambiguous, anything structural, anything with `requires_instinct` |
+
+The router only **invokes** the executors — it bypasses no guard. The Tier-0 path goes through `source_executor.run_sources` and `action_executor.run_action` which keep their allowlist + SSRF + rate-limit + fail-closed instinct-reject checks. The router cannot widen the executor's surface; it can only decide whether to call them at all.
+
+## Why Fail-Safe Is the Governing Rule
+
+The classifier returns a cheap-tier verdict ONLY when it is HIGH-confidence the cheap tier produces the EXACT change the user asked for. Any doubt — a partial keyword match, a structural verb anywhere in the intent, a target that resolves to ≠ 1 entity, an unresolved `{state.x}` / `{item.id}` action param, a `requires_instinct` action, or a confidence below `settings.pocket_router_min_confidence` — escalates to Tier 2.
+
+> A wrong skip produces a broken pocket; a wrong escalate only costs an LLM call. The asymmetry drives every default.
+
+Concretely:
+
+- The structural-verbs frozenset (`add`, `create`, `insert`, `build`, `redesign`, `rebuild`, `restructure`, `reorganize`, `layout`, `move`, `rearrange`, ...) forces Tier 2 the moment any of them appears. The specialist owns structure.
+- Verbs only count when they appear as whole words (`\b`-anchored). "remarketing" won't match "remove".
+- Tier 2 escalation always carries `confidence = 1.0` ("escalation is never wrong").
+
+The kill-switch (`settings.pocket_router_enabled`) and the confidence floor make the router fail-safe: with the switch off, or on any sub-threshold verdict, the router escalates and behaves exactly like today.
+
+## The Pure Classifier
+
+`pocketpaw_ee.agent.pocket_router.classifier` is **pure**: no I/O, no Beanie, no LLM, no logging side effects. It only inspects the two arguments (intent + rippleSpec) and returns a `Classification`. Purity is an import-linter contract — the router (`router.py`) is the layer allowed to touch executors and the specialist.
+
+```python
+@dataclass(frozen=True)
+class Classification:
+    tier: Tier                 # 0, 1, or 2
+    target: str | None         # source/action key | state path | None
+    confidence: float          # [0.0, 1.0]
+    reasoning: str             # short human-readable explanation
+    op: str | None = None      # "run_source" / "run_action" / "set_state" / ...
+    op_args: dict[str, Any] = field(default_factory=dict)
+```
+
+The router calls `classify(intent, ripple_spec)` and dispatches on `result.tier`.
+
+## Per-Stage Timeline
+
+Every routed request accumulates an `ExecutionStage` timeline. The four fixed stages:
+
+| Stage | Tier 0 | Tier 1 | Tier 2 |
+|---|---|---|---|
+| `classify` | runs | runs | runs |
+| `apply` | runs | runs | runs (specialist) |
+| `layout_build` | skipped — "data-only change" | skipped — "data-only change" | runs |
+| `widget_render` | skipped — "data-only change" | skipped — "data-only change" | runs |
+
+The cheap-tier wins land in the two skipped stages. A declarative refresh and a single-op data edit both leave the component tree untouched, so the renderer never re-runs layout.
+
+## The pocket_execution SSE Frame
+
+Once per routed request the router emits one `pocket_execution` SSE frame — the Thesys-style "what ran / what was skipped" readout:
+
+```json
+{
+  "type": "pocket_execution",
+  "request_id": "req_abc123",
+  "intent": "refresh the open PRs",
+  "tier_chosen": 0,
+  "stages": [
+    {"stage": "classify",       "ran": true,  "ms": 2, "detail": "Tier 0: run_source 'open_prs' (conf=0.92)"},
+    {"stage": "apply",          "ran": true,  "ms": 84, "detail": "source 'open_prs' refreshed"},
+    {"stage": "layout_build",   "ran": false, "ms": 0, "skipped_reason": "data-only change"},
+    {"stage": "widget_render",  "ran": false, "ms": 0, "skipped_reason": "data-only change"}
+  ],
+  "total_ms": 91,
+  "tokens": {"prompt": 0, "completion": 0}
+}
+```
+
+A client can render this as a "this edit took Tier 1, 14 ms, 0 tokens, skipped layout + render" readout.
+
+## The Audit Entry
+
+Every routed request writes a `pocket_router` audit entry — **WARNING severity on a Tier-0/1 bypass** because that is a write/mutation with no agent reasoning behind it and deserves a durable trail. Tier-2 escalations log at the normal level (the specialist's own audit is already in the trail).
+
+## Structure/Data Split — the SSE Discriminant
+
+Independent of the router but shipped in the same PR: every granular `agent_*` edit op already pushed a `pocket_mutation` SSE frame. That frame now carries a `family` discriminant:
+
+| Family | When | What changed |
+|---|---|---|
+| `updateComponents` | Node / structure op (`add_node`, `remove_node`, `move_node`, `replace_node`, `set_node_prop`) | The component tree |
+| `updateDataModel` | State / data op (`set_state`, `set_state_key`, `set_state_path`) | The reactive state, not the tree |
+
+A client can patch only the layer that changed. Still one frame per op, and the coarse `PocketUpdated` realtime event is untouched, so older clients keep their refetch signal — the change is purely additive.
+
+## Mental Model
+
+```
+                    edit intent
+                         │
+                         ▼
+              ┌────────────────────┐
+              │ classify_and_route │
+              └─────────┬──────────┘
+                        │
+        ┌───────────────┼──────────────┐
+        │               │              │
+        ▼               ▼              ▼
+   Tier 0          Tier 1         Tier 2
+  (declarative)   (one op)      (specialist)
+        │               │              │
+        ▼               ▼              ▼
+  source/action    op-apply      LLM round-trip
+  fired              │                  │
+        │            ▼                  ▼
+        └──────► pocket_mutation ◄──────┘
+                 SSE frame
+                 (family: updateComponents | updateDataModel)
+                         │
+                         ▼
+                pocket_execution
+                 SSE frame
+                 (tier_chosen, stages, total_ms, tokens)
+```
+
+## Related
+
+- [Merge Pocket Spec](/api/post-pocket-spec-merge) — the merge endpoint the Tier-2 specialist's `pocketpaw-pocket-specialist` skill drives.
+- [Pocket Planner](/concepts/pocket-planner) — the create-side sibling that plans-before-build for complex pockets.
+- [Pocket Sources](/concepts/pocket-sources) — Tier 0 fires through the same source executor described here.
+- [Pocket Write Actions](/concepts/pocket-write-actions) — Tier 0 also dispatches declared actions through the action executor.

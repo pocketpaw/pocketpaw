@@ -446,6 +446,9 @@
               }"
           ></span>
         </button>
+        <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openAnalytics(); sidebarOpen = false">
+          <i data-lucide="pie-chart" class="w-3.5 h-3.5"></i> Analytics
+        </button>
         <button class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/5 transition-colors" @click="openChannels(); sidebarOpen = false">
           <i data-lucide="radio-tower" class="w-3.5 h-3.5"></i> Channels
           <span x-show="runningChannelCount() > 0" class="ml-auto text-[10px] bg-success/20 text-success px-1.5 rounded-full" x-text="runningChannelCount()"></span>

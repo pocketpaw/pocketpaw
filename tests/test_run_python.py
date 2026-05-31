@@ -211,7 +211,7 @@ def test_run_python_definition():
     defn = tool.definition
 
     assert defn.name == "run_python"
-    assert defn.trust_level == "elevated"
+    assert defn.trust_level == "critical"
 
     props = defn.parameters["properties"]
     assert "code" in props

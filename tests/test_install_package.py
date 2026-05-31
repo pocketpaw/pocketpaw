@@ -257,7 +257,7 @@ def test_install_package_definition():
     defn = tool.definition
 
     assert defn.name == "install_package"
-    assert defn.trust_level == "elevated"
+    assert defn.trust_level == "high"
 
     props = defn.parameters["properties"]
     assert "package" in props

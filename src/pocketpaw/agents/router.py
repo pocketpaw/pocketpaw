@@ -5,8 +5,10 @@ configured agent backend. Supports optional user-configured fallback
 backends if the primary backend fails.
 """
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from pocketpaw.agents.backend import BackendInfo
@@ -32,6 +34,7 @@ class AgentRouter:
 
         # Optional fallback backends
         self._fallback_backends: list[str] = settings.fallback_backends
+        self._policy_lock = asyncio.Lock()  # serializes per-pocket policy
 
         self._initialize_backend()
 
@@ -86,6 +89,56 @@ class AgentRouter:
                 exc,
             )
             return None
+
+    @classmethod
+    def create_isolated_backend(
+        cls,
+        backend_name: str,
+        settings: Settings,
+        *,
+        settings_override: dict[str, Any] | None = None,
+    ) -> Any:
+        """Build a fresh, non-cached AgentBackend with optional settings overrides.
+
+        Used for short-lived specialist runs that should not share state with
+        the main chat backend. Each call returns a new instance; nothing is
+        cached on the router.
+        """
+        backend_cls = get_backend_class(backend_name)
+        if backend_cls is None:
+            raise ValueError(
+                f"Backend '{backend_name}' is not registered or its dependencies are not installed."
+            )
+
+        if settings_override:
+            effective = settings.model_copy(update=settings_override)
+        else:
+            effective = settings
+
+        return backend_cls(effective)
+
+    @asynccontextmanager
+    async def scoped_tool_policy(self, policy: "ToolPolicy"):  # noqa: F821
+        """Scope a ToolPolicy for one request across primary + all fallback backends.
+
+        Acquires a lock so concurrent pocket requests cannot clobber each other's
+        policy mid-request. Restores the original policy in the finally block.
+        """
+        async with self._policy_lock:
+            backends = [self._backend] + list(self._fallback_instances.values())
+            active = [
+                b
+                for b in backends
+                if b is not None and hasattr(b, "get_tool_policy") and hasattr(b, "set_tool_policy")
+            ]
+            saved = [b.get_tool_policy() for b in active]
+            try:
+                for b in active:
+                    b.set_tool_policy(policy)
+                yield
+            finally:
+                for b, original in zip(active, saved):
+                    b.set_tool_policy(original)
 
     async def run(
         self,

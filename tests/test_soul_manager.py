@@ -19,7 +19,7 @@ pytestmark = pytest.mark.skipif(not _has_soul_protocol(), reason="soul-protocol 
 
 @pytest.fixture(autouse=True)
 def _reset_soul():
-    from pocketpaw.soul.manager import _reset_manager
+    from pocketpaw.soul._manager import _reset_manager
 
     _reset_manager()
     yield
@@ -41,7 +41,7 @@ def soul_settings(tmp_path):
 
 class TestSoulManager:
     async def test_initialize_births_new_soul(self, soul_settings):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -51,7 +51,8 @@ class TestSoulManager:
         assert mgr.bootstrap_provider is not None
 
     async def test_save_and_reawaken(self, soul_settings, tmp_path):
-        from pocketpaw.soul.manager import SoulManager, _reset_manager
+        from pocketpaw.soul import SoulManager
+        from pocketpaw.soul._manager import _reset_manager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -64,21 +65,27 @@ class TestSoulManager:
         assert mgr2.soul.name == "TestSoul"
 
     async def test_observe_does_not_raise(self, soul_settings):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
         await mgr.observe("Hello", "Hi there!")
 
-    async def test_get_tools_returns_six(self, soul_settings):
-        from pocketpaw.soul.manager import SoulManager
+    async def test_get_tools_exposes_core_soul_tools(self, soul_settings):
+        """SoulManager exposes at least the six core tools pocketpaw depends on.
+
+        Subset-check (renamed from the old exact-6 variant) so soul-protocol
+        can add new tools without breaking this contract. v0.3.1 ships three
+        extras (soul_forget, soul_core_memory, soul_context) on top of the
+        original six; the test now proves the core six are always present.
+        """
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
         tools = mgr.get_tools()
-        assert len(tools) == 6
         names = {t.name for t in tools}
-        assert names == {
+        required = {
             "soul_remember",
             "soul_recall",
             "soul_edit_core",
@@ -86,9 +93,11 @@ class TestSoulManager:
             "soul_evaluate",
             "soul_reload",
         }
+        missing = required - names
+        assert not missing, f"SoulManager missing core tools: {missing}"
 
     async def test_corrupt_soul_file_falls_back_to_birth(self, soul_settings, tmp_path):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         soul_file = tmp_path / "test.soul"
         soul_file.write_text("this is not a valid soul file")
@@ -101,7 +110,7 @@ class TestSoulManager:
         assert backup.exists()
 
     async def test_concurrent_observe_is_serialized(self, soul_settings):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -111,7 +120,7 @@ class TestSoulManager:
 
     async def test_shutdown_saves_and_stops_autosave(self, tmp_path):
         from pocketpaw.config import Settings
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         settings = Settings(
             soul_enabled=True,
@@ -134,7 +143,7 @@ class TestSoulManager:
         # Birth and export a soul to a separate file
         from soul_protocol import Soul
 
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         donor = await Soul.birth(name="Donor", persona="I am the donor soul.")
         donor_path = tmp_path / "donor.soul"
@@ -154,7 +163,7 @@ class TestSoulManager:
 
     async def test_import_from_yaml_config(self, soul_settings, tmp_path):
         """Import a YAML config births a new soul from it."""
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         yaml_path = tmp_path / "config.yaml"
         yaml_path.write_text(
@@ -175,7 +184,7 @@ class TestSoulManager:
         """Import a JSON config births a new soul from it."""
         import json
 
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         json_path = tmp_path / "config.json"
         json_path.write_text(
@@ -202,7 +211,7 @@ class TestSoulManager:
         """
         from soul_protocol import Soul
 
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -226,7 +235,7 @@ class TestSoulManager:
         assert ctx.name == "NewIdentity"
 
     async def test_import_unsupported_format_raises(self, soul_settings, tmp_path):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -238,7 +247,7 @@ class TestSoulManager:
             await mgr.import_from_file(bad_file)
 
     async def test_import_missing_file_raises(self, soul_settings, tmp_path):
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -248,7 +257,7 @@ class TestSoulManager:
 
     async def test_reload_from_disk(self, soul_settings, tmp_path):
         """Reload picks up changes from disk."""
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -261,7 +270,7 @@ class TestSoulManager:
 
     async def test_reload_returns_false_when_no_file(self, soul_settings, tmp_path):
         """Reload returns False when .soul file doesn't exist."""
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -274,7 +283,7 @@ class TestSoulManager:
 
     async def test_evaluate_returns_none_when_unsupported(self, soul_settings):
         """Evaluate returns None when soul doesn't have evaluate method."""
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -285,7 +294,7 @@ class TestSoulManager:
 
     async def test_dirty_tracking(self, soul_settings):
         """Dirty flag is set after observe and cleared after save."""
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -299,7 +308,7 @@ class TestSoulManager:
 
     async def test_tools_are_cached(self, soul_settings):
         """get_tools() returns the same list on repeated calls."""
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -311,7 +320,7 @@ class TestSoulManager:
         """Importing a soul invalidates the tools cache."""
         from soul_protocol import Soul
 
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()
@@ -330,7 +339,7 @@ class TestSoulManager:
         import os
         import time
 
-        from pocketpaw.soul.manager import SoulManager
+        from pocketpaw.soul import SoulManager
 
         mgr = SoulManager(soul_settings)
         await mgr.initialize()

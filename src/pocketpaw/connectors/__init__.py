@@ -7,6 +7,8 @@ from pocketpaw.connectors.protocol import (
     ActionSchema,
     ConnectionResult,
     ConnectorProtocol,
+    IngestACL,
+    IngestAdapter,
     SyncResult,
 )
 from pocketpaw.connectors.registry import ConnectorRegistry
@@ -16,6 +18,8 @@ __all__ = [
     "ConnectionResult",
     "ActionSchema",
     "ActionResult",
+    "IngestACL",
+    "IngestAdapter",
     "SyncResult",
     "ConnectorRegistry",
 ]

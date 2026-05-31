@@ -19,6 +19,7 @@ from pocketpaw.api.v1.schemas.auth import (
     SessionTokenResponse,
     TokenRegenerateResponse,
 )
+from pocketpaw.http_utils import is_request_secure
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +112,7 @@ async def cookie_login(request: Request):
         samesite="lax",
         path="/",
         max_age=max_age,
+        secure=is_request_secure(request),
     )
     return response
 

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
-
-from ee.cloud.pockets.schemas import (
+from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
     AddWidgetRequest,
     CreatePocketRequest,
@@ -14,11 +12,12 @@ from ee.cloud.pockets.schemas import (
     UpdatePocketRequest,
     UpdateWidgetRequest,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 
 def test_create_pocket_defaults():
     req = CreatePocketRequest(name="My Pocket")
-    assert req.visibility == "private" and req.session_id is None
+    assert req.visibility == "workspace" and req.session_id is None
 
 
 def test_create_pocket_with_session():
@@ -175,7 +174,7 @@ def test_pocket_response_model():
     from datetime import UTC, datetime
 
     now = datetime.now(UTC)
-    from ee.cloud.pockets.schemas import PocketResponse
+    from pocketpaw_ee.cloud.pockets.dto import PocketResponse
 
     resp = PocketResponse(
         id="p1",

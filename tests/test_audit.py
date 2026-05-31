@@ -70,7 +70,7 @@ def populated_store(audit_db, sample_entry_data):
         for e in entries:
             await audit_db.log_entry(**e)
 
-    asyncio.get_event_loop().run_until_complete(_populate())
+    asyncio.new_event_loop().run_until_complete(_populate())
     return audit_db
 
 

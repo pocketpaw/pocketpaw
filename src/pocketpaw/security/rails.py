@@ -26,7 +26,10 @@ DANGEROUS_PATTERNS: list[str] = [
     r"rm\s+[/~]\s+(-[rf]+\s*)+",  # rm / -rf, rm ~ -fr
     r"rm\s+(-[rf]+\s+)*\*",  # rm -rf *
     r"sudo\s+rm\b",  # Any sudo rm
-    r">\s*/dev/",  # Write to devices
+    # Write to devices — negative lookbehind on digit and `&` so the
+    # standard `2>/dev/null` / `&>/dev/null` / `1>/dev/null` idioms for
+    # discarding stderr/stdout pass through. Bare `> /dev/sda` still trips.
+    r"(?<![&\d])>\s*/dev/",
     r">\s*/etc/",  # Overwrite system config
     r"mkfs\.",  # Format filesystem
     r"dd\s+if=",  # Disk operations
@@ -64,8 +67,12 @@ DANGEROUS_PATTERNS: list[str] = [
     # -- Reverse shells --
     r"\bnc\b.*-e\s+/bin/(ba)?sh",  # nc -e /bin/sh
     r"bash\s+-i\s+>&\s+/dev/tcp/",  # bash -i >& /dev/tcp/
-    r"python[23]?\s+-c\s+.*socket.*connect",  # Python reverse shell
-    r"perl\s+-e\s+.*socket.*INET",  # Perl reverse shell
+    # Python / Perl reverse shell — bounded to avoid ReDoS (#895). The
+    # previous `.*socket.*connect` chain had two unbounded `.*` quantifiers
+    # which backtrack pathologically on long inputs. Bounded `.{0,500}`
+    # matches the typical one-liner without exponential cost.
+    r"python[23]?\s+-c\s+.{0,500}?socket.{0,200}?connect",
+    r"perl\s+-e\s+.{0,500}?socket.{0,200}?INET",
     r"ruby\s+-rsocket\s+-e",  # Ruby reverse shell
     # -- Crontab / scheduled task injection --
     r"crontab\s+-[elr]",  # crontab edit/list/remove
@@ -106,7 +113,9 @@ DANGEROUS_SUBSTRINGS: list[str] = [
     "rm ~ -rf",
     "rm -rf *",
     "sudo rm",
-    "> /dev/",
+    # NB: "> /dev/" substring intentionally absent — it falsely matches
+    # benign `2>/dev/null` / `&>/dev/null`. The regex above uses a
+    # lookbehind to exclude those; substring matching cannot express it.
     "format ",
     "mkfs",
     "chmod 777 /",

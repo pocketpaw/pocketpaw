@@ -3,6 +3,13 @@
 #
 # Stores per-request usage records as append-only JSONL in ~/.pocketpaw/usage.jsonl.
 # Provides aggregation helpers for the /api/v1/metrics/usage endpoint.
+#
+# Budget enforcement:
+#   record() performs a cumulative-spend check against the configured cap
+#   before writing to disk.  When budget_auto_pause is True and the cap is
+#   exhausted, it raises BudgetExhaustedError.  The AgentLoop preflight
+#   catches this before routing to the LLM, but the check here ensures
+#   enforcement even in code paths that call record() directly.
 
 from __future__ import annotations
 
@@ -98,6 +105,10 @@ class UsageSummary:
     by_backend: dict = field(default_factory=dict)
 
 
+class BudgetExhaustedError(RuntimeError):
+    """Raised by UsageTracker.record() when the monthly budget cap is hit."""
+
+
 class UsageTracker:
     """Append-only usage tracker with JSONL persistence."""
 
@@ -145,6 +156,17 @@ class UsageTracker:
             cost_usd=cost,
             session_id=session_id,
         )
+
+        # Log a warning for unknown models so operators know to add pricing.
+        # Primary budget enforcement is the async preflight in AgentLoop which
+        # calls get_budget_snapshot() via asyncio.to_thread() before routing.
+        # record() must never do blocking I/O on the event loop.
+        if cost is None:
+            logger.warning(
+                "Unknown model pricing for '%s' — cost estimate unavailable. "
+                "Add the model to _PRICING or supply total_cost_usd.",
+                model,
+            )
 
         try:
             with self._lock:

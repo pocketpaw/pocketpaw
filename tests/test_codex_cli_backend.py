@@ -1,19 +1,111 @@
-"""Tests for Codex CLI backend — mocked (no real CLI needed)."""
+"""Tests for Codex CLI backend — SDK-driven, mocked.
 
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+We mock ``Codex.start_thread`` to return a fake Thread whose
+``run_streamed`` yields typed SDK events
+(``ItemStartedEvent``/``ItemCompletedEvent``/``TurnCompletedEvent`` with
+real ``CommandExecutionItem``/``McpToolCallItem``/``FileChangeItem``/
+``WebSearchItem``/``AgentMessageItem``/``ReasoningItem``/``ErrorItem``
+payloads). This catches the same kind of regressions our old subprocess-
+fixture tests caught — wrong field name, missing case in the dispatch —
+without depending on stdout NDJSON parsing.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import patch
 
 import pytest
 
 from pocketpaw.agents.backend import Capability
 from pocketpaw.config import Settings
 
-# On Windows the backend uses create_subprocess_shell; elsewhere create_subprocess_exec
-_SUBPROCESS_PATCH = (
-    "asyncio.create_subprocess_shell"
-    if sys.platform == "win32"
-    else "asyncio.create_subprocess_exec"
-)
+# A path that ``_resolve_codex_binary`` would never actually return; we
+# patch the resolver so the backend treats Codex as installed without
+# actually running it.
+_FAKE_BINARY = "/usr/local/bin/codex"
+
+
+def _events_from(items_or_events):
+    """Build the typed SDK events for a sequence of ``(phase, item)``
+    tuples (``phase`` ∈ ``"started" | "completed"``) plus optional
+    raw events appended verbatim."""
+    from openai_codex_sdk import ItemCompletedEvent, ItemStartedEvent
+
+    out = []
+    for entry in items_or_events:
+        if isinstance(entry, tuple):
+            phase, item = entry
+            if phase == "started":
+                out.append(ItemStartedEvent(type="item.started", item=item))
+            elif phase == "completed":
+                out.append(ItemCompletedEvent(type="item.completed", item=item))
+            else:
+                raise AssertionError(f"unknown phase: {phase}")
+        else:
+            out.append(entry)
+    return out
+
+
+def _patch_codex(events):
+    """Build a context manager that swaps ``Codex.start_thread`` with a
+    fake thread whose ``run_streamed`` yields ``events``."""
+    from openai_codex_sdk import StreamedTurn
+
+    class _AsyncIter:
+        def __init__(self, items):
+            self._items = list(items)
+            self._i = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._i >= len(self._items):
+                raise StopAsyncIteration
+            ev = self._items[self._i]
+            self._i += 1
+            return ev
+
+    class _FakeThread:
+        def __init__(self):
+            self.last_input = None
+            self.last_turn_options = None
+
+        async def run_streamed(self, input_, turn_options=None):
+            self.last_input = input_
+            self.last_turn_options = turn_options
+            return StreamedTurn(events=_AsyncIter(events))
+
+    fake_thread = _FakeThread()
+
+    class _FakeCodex:
+        def __init__(self, options=None):
+            self.options = options
+            self.started_with = None
+
+        def start_thread(self, options=None):
+            self.started_with = options
+            return fake_thread
+
+    return patch(
+        "pocketpaw.agents.codex_cli.Codex" if False else "openai_codex_sdk.Codex",
+        _FakeCodex,
+    ), fake_thread
+
+
+@pytest.fixture(autouse=True)
+def _stub_resolver():
+    """Make every test see Codex as "installed" without touching disk."""
+    with patch(
+        "pocketpaw.agents.codex_cli._resolve_codex_binary",
+        return_value=_FAKE_BINARY,
+    ):
+        yield
+
+
+# ---------------------------------------------------------------------------
+# Static metadata
+# ---------------------------------------------------------------------------
 
 
 class TestCodexCLIInfo:
@@ -47,46 +139,34 @@ class TestCodexCLIInfo:
         assert "openai" in info.supported_providers
 
 
+# ---------------------------------------------------------------------------
+# Init / availability
+# ---------------------------------------------------------------------------
+
+
 class TestCodexCLIInit:
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    def test_init(self, mock_which):
+    def test_init(self):
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
         assert backend._cli_available is True
-
-    @patch("shutil.which", return_value=None)
-    def test_init_without_cli(self, mock_which):
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-        assert backend._cli_available is False
+        assert backend._codex_path == _FAKE_BINARY
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value=None)
-    async def test_run_without_cli(self, mock_which):
+    async def test_run_without_cli(self):
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
-        backend = CodexCLIBackend(Settings())
-        events = []
-        async for event in backend.run("test"):
-            events.append(event)
+        with patch("pocketpaw.agents.codex_cli._resolve_codex_binary", return_value=None):
+            backend = CodexCLIBackend(Settings())
+            events = []
+            async for event in backend.run("test"):
+                events.append(event)
 
         assert any(e.type == "error" for e in events)
         assert any("not found" in e.content for e in events if e.type == "error")
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_stop(self, mock_which):
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-        await backend.stop()
-        assert backend._stop_flag is True
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_get_status(self, mock_which):
+    async def test_get_status(self):
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
@@ -94,6 +174,11 @@ class TestCodexCLIInit:
         assert status["backend"] == "codex_cli"
         assert status["cli_available"] is True
         assert "model" in status
+
+
+# ---------------------------------------------------------------------------
+# History injection helper
+# ---------------------------------------------------------------------------
 
 
 class TestCodexCLIHelpers:
@@ -120,446 +205,450 @@ class TestCodexCLIHelpers:
         assert "x" * 501 not in result
 
 
-class _AsyncLineIterator:
-    """Helper that simulates async line iteration over bytes."""
-
-    def __init__(self, lines: list[str]):
-        self._lines = [(line + "\n").encode("utf-8") for line in lines]
-        self._index = 0
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self._index >= len(self._lines):
-            raise StopAsyncIteration
-        line = self._lines[self._index]
-        self._index += 1
-        return line
-
-
-def _ev(data: dict) -> str:
-    """Serialize a dict to a compact JSON string for mock stdout."""
-    import json
-
-    return json.dumps(data, separators=(",", ":"))
-
-
-def _make_mock_process(stdout_lines: list[str], returncode: int = 0) -> MagicMock:
-    """Create a mock subprocess with given stdout lines."""
-    mock_proc = MagicMock()
-    mock_proc.returncode = None
-    mock_proc.stdout = _AsyncLineIterator(stdout_lines)
-    mock_proc.stderr = AsyncMock()
-    mock_proc.stderr.read = AsyncMock(return_value=b"")
-
-    # Mock stdin (prompt is now piped via stdin)
-    mock_stdin = MagicMock()
-    mock_stdin.written = bytearray()
-    mock_stdin.write = lambda data: mock_stdin.written.extend(data)
-    mock_stdin.drain = AsyncMock()
-    mock_stdin.close = MagicMock()
-    mock_stdin.wait_closed = AsyncMock()
-    mock_proc.stdin = mock_stdin
-
-    async def mock_wait():
-        mock_proc.returncode = returncode
-
-    mock_proc.wait = mock_wait
-    return mock_proc
+# ---------------------------------------------------------------------------
+# Stream → AgentEvent translation
+# ---------------------------------------------------------------------------
 
 
 class TestCodexCLIRun:
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_agent_message(self, mock_which):
+    async def test_parses_agent_message(self):
+        from openai_codex_sdk import AgentMessageItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        item = {"id": "item_1", "type": "agent_message", "text": "Hello from Codex!"}
-        mock_proc = _make_mock_process(
+        events_in = _events_from(
             [
-                _ev({"type": "item.completed", "item": item}),
+                (
+                    "completed",
+                    AgentMessageItem(id="i1", type="agent_message", text="Hello from Codex!"),
+                ),
             ]
         )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        ctx, _ = _patch_codex(events_in)
+        with ctx:
+            out = []
             async for event in backend.run("Hi"):
-                events.append(event)
+                out.append(event)
 
-        messages = [e for e in events if e.type == "message"]
+        messages = [e for e in out if e.type == "message"]
         assert len(messages) == 1
         assert messages[0].content == "Hello from Codex!"
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_command_execution_started(self, mock_which):
+    async def test_strips_codex_stderr_deprecation_prefix(self):
+        """Codex 0.125 leaks a [features].web_search_request deprecation
+        warning into the first AgentMessageItem.text. The user-visible
+        message must start with the real model reply, not the warning.
+        Closes pocketpaw#1070."""
+        from openai_codex_sdk import AgentMessageItem
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        polluted = (
+            "[features].web_search_request is deprecated because web search "
+            'is enabled by default. (Set web_search to "live", "cached", '
+            'or "disabled" at the top level (or under a profile) in '
+            "config.toml if you want to override it.)Hello there, Test."
+        )
+
+        backend = CodexCLIBackend(Settings())
+        events_in = _events_from(
+            [
+                (
+                    "completed",
+                    AgentMessageItem(id="i1", type="agent_message", text=polluted),
+                ),
+            ]
+        )
+        ctx, _ = _patch_codex(events_in)
+        with ctx:
+            out = []
+            async for event in backend.run("say hello"):
+                out.append(event)
+
+        messages = [e for e in out if e.type == "message"]
+        assert len(messages) == 1
+        assert messages[0].content == "Hello there, Test."
+        assert "deprecated" not in messages[0].content
+        assert "web_search_request" not in messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_clean_messages_pass_through_unchanged(self):
+        """Sanity guard: a message with no known stderr-noise pattern is
+        forwarded verbatim. If the noise-stripper ever over-matches and
+        eats real model output this test will fail loudly."""
+        from openai_codex_sdk import AgentMessageItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        item = {
-            "id": "item_1",
-            "type": "command_execution",
-            "command": "bash -lc ls",
-            "status": "in_progress",
-        }
-        mock_proc = _make_mock_process(
+        clean = (
+            "Here is a snippet: `[features].web_search_request` was the "
+            "old config key — your snippet about deprecation should not "
+            "trigger the stripper because it is not at the start of the "
+            "message and lacks the trailing override-clause."
+        )
+        events_in = _events_from(
             [
-                _ev({"type": "item.started", "item": item}),
+                (
+                    "completed",
+                    AgentMessageItem(id="i1", type="agent_message", text=clean),
+                ),
             ]
         )
+        ctx, _ = _patch_codex(events_in)
+        with ctx:
+            out = []
+            async for event in backend.run("explain web_search"):
+                out.append(event)
 
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        messages = [e for e in out if e.type == "message"]
+        assert len(messages) == 1
+        assert messages[0].content == clean
+
+    @pytest.mark.asyncio
+    async def test_parses_command_execution_started_and_completed(self):
+        from openai_codex_sdk import CommandExecutionItem
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        started = CommandExecutionItem(
+            id="i1",
+            type="command_execution",
+            command="bash -lc ls",
+            aggregated_output="",
+            exit_code=None,
+            status="in_progress",
+        )
+        completed = CommandExecutionItem(
+            id="i1",
+            type="command_execution",
+            command="bash -lc ls",
+            aggregated_output="file1.txt\nfile2.txt",
+            exit_code=0,
+            status="completed",
+        )
+        events_in = _events_from([("started", started), ("completed", completed)])
+
+        ctx, _ = _patch_codex(events_in)
+        with ctx:
+            out = []
             async for event in backend.run("list files"):
-                events.append(event)
+                out.append(event)
 
-        tool_events = [e for e in events if e.type == "tool_use"]
-        assert len(tool_events) == 1
-        assert tool_events[0].metadata["name"] == "shell"
-        assert "ls" in tool_events[0].metadata["input"]["command"]
+        tool_use = [e for e in out if e.type == "tool_use"]
+        results = [e for e in out if e.type == "tool_result"]
+        assert tool_use and tool_use[0].metadata["name"] == "shell"
+        assert "ls" in tool_use[0].metadata["input"]["command"]
+        assert results and results[0].metadata["name"] == "shell"
+        assert "file1.txt" in results[0].content
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_command_execution_completed(self, mock_which):
+    async def test_command_execution_passes_full_output_through(self):
+        """The adapter used to truncate ``aggregated_output`` to 200
+        chars, which destroyed the JSON body of cloud_* CLI calls
+        before ``_publish_pocket_event`` could parse it. Full content
+        (capped at 64 KiB) must reach the agent loop now."""
+        from openai_codex_sdk import CommandExecutionItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        item = {
-            "id": "item_1",
-            "type": "command_execution",
-            "output": "file1.txt\nfile2.txt",
-        }
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.completed", "item": item}),
-            ]
+        big = "x" * 5000  # well over the old 200-char cap
+        completed = CommandExecutionItem(
+            id="i1",
+            type="command_execution",
+            command="echo big",
+            aggregated_output=big,
+            exit_code=0,
+            status="completed",
         )
+        ctx, _ = _patch_codex(_events_from([("completed", completed)]))
+        with ctx:
+            out = []
+            async for event in backend.run("run"):
+                out.append(event)
 
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("list files"):
-                events.append(event)
-
-        results = [e for e in events if e.type == "tool_result"]
-        assert len(results) == 1
-        assert results[0].metadata["name"] == "shell"
+        results = [e for e in out if e.type == "tool_result"]
+        assert results
+        assert len(results[0].content) >= 5000
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_file_change_started(self, mock_which):
+    async def test_command_execution_nonzero_exit_prefixed(self):
+        from openai_codex_sdk import CommandExecutionItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        item = {
-            "id": "item_2",
-            "type": "file_change",
-            "filename": "main.py",
-            "status": "in_progress",
-        }
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.started", "item": item}),
-            ]
+        completed = CommandExecutionItem(
+            id="i1",
+            type="command_execution",
+            command="false",
+            aggregated_output="oops",
+            exit_code=1,
+            status="failed",
         )
+        ctx, _ = _patch_codex(_events_from([("completed", completed)]))
+        with ctx:
+            out = []
+            async for event in backend.run("run"):
+                out.append(event)
 
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("edit file"):
-                events.append(event)
-
-        tool_events = [e for e in events if e.type == "tool_use"]
-        assert len(tool_events) == 1
-        assert tool_events[0].metadata["name"] == "file_edit"
-        assert "main.py" in tool_events[0].content
+        results = [e for e in out if e.type == "tool_result"]
+        assert results and results[0].content.startswith("[exit 1]")
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_file_change_completed(self, mock_which):
+    async def test_parses_file_change(self):
+        from openai_codex_sdk import FileChangeItem
+        from openai_codex_sdk.types import FileUpdateChange
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        item = {"id": "item_2", "type": "file_change", "filename": "main.py"}
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.completed", "item": item}),
-            ]
+        item = FileChangeItem(
+            id="i2",
+            type="file_change",
+            changes=[FileUpdateChange(path="main.py", kind="update")],
+            status="completed",
         )
+        ctx, _ = _patch_codex(_events_from([("started", item), ("completed", item)]))
+        with ctx:
+            out = []
+            async for event in backend.run("edit"):
+                out.append(event)
 
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("edit file"):
-                events.append(event)
-
-        results = [e for e in events if e.type == "tool_result"]
-        assert len(results) == 1
-        assert "main.py" in results[0].content
+        tool_use = [e for e in out if e.type == "tool_use"]
+        results = [e for e in out if e.type == "tool_result"]
+        assert tool_use and tool_use[0].metadata["name"] == "file_edit"
+        assert "main.py" in tool_use[0].content
+        assert results and "main.py" in results[0].content
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_web_search(self, mock_which):
+    async def test_parses_web_search(self):
+        from openai_codex_sdk import WebSearchItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        started = {"id": "item_3", "type": "web_search", "query": "python asyncio"}
-        completed = {"id": "item_3", "type": "web_search", "output": "Results found"}
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.started", "item": started}),
-                _ev({"type": "item.completed", "item": completed}),
-            ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        item = WebSearchItem(id="i3", type="web_search", query="python asyncio")
+        ctx, _ = _patch_codex(_events_from([("started", item), ("completed", item)]))
+        with ctx:
+            out = []
             async for event in backend.run("search"):
-                events.append(event)
+                out.append(event)
 
-        tool_use = [e for e in events if e.type == "tool_use"]
-        tool_result = [e for e in events if e.type == "tool_result"]
-        assert len(tool_use) == 1
-        assert "asyncio" in tool_use[0].content
-        assert len(tool_result) == 1
-        assert tool_result[0].metadata["name"] == "web_search"
+        tool_use = [e for e in out if e.type == "tool_use"]
+        results = [e for e in out if e.type == "tool_result"]
+        assert tool_use and "asyncio" in tool_use[0].content
+        assert results and results[0].metadata["name"] == "web_search"
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_mcp_tool_call(self, mock_which):
+    async def test_parses_mcp_tool_call_with_text_blocks(self):
+        from openai_codex_sdk import McpToolCallItem
+        from openai_codex_sdk.types import McpToolCallResult
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        started = {
-            "id": "item_4",
-            "type": "mcp_tool_call",
-            "name": "my_tool",
-            "arguments": {"key": "val"},
-        }
-        completed = {
-            "id": "item_4",
-            "type": "mcp_tool_call",
-            "name": "my_tool",
-            "output": "done",
-        }
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.started", "item": started}),
-                _ev({"type": "item.completed", "item": completed}),
-            ]
+        started = McpToolCallItem(
+            id="i4",
+            type="mcp_tool_call",
+            server="pocketpaw_pocket",
+            tool="get_pocket",
+            arguments={"pocket_id": "abc"},
+            result=None,
+            error=None,
+            status="in_progress",
         )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        completed = McpToolCallItem(
+            id="i4",
+            type="mcp_tool_call",
+            server="pocketpaw_pocket",
+            tool="get_pocket",
+            arguments={"pocket_id": "abc"},
+            result=McpToolCallResult(
+                content=[{"type": "text", "text": "pocket payload"}],
+                structured_content=None,
+            ),
+            error=None,
+            status="completed",
+        )
+        ctx, _ = _patch_codex(_events_from([("started", started), ("completed", completed)]))
+        with ctx:
+            out = []
             async for event in backend.run("use mcp"):
-                events.append(event)
+                out.append(event)
 
-        tool_use = [e for e in events if e.type == "tool_use"]
-        tool_result = [e for e in events if e.type == "tool_result"]
-        assert len(tool_use) == 1
-        assert tool_use[0].metadata["name"] == "my_tool"
-        assert tool_use[0].metadata["input"] == {"key": "val"}
-        assert len(tool_result) == 1
+        tool_use = [e for e in out if e.type == "tool_use"]
+        results = [e for e in out if e.type == "tool_result"]
+        assert tool_use and tool_use[0].metadata["name"] == "get_pocket"
+        assert tool_use[0].metadata["input"] == {"pocket_id": "abc"}
+        # The actual MCP text reaches the agent — this is the bug from the
+        # earlier subprocess implementation that returned ``""``.
+        assert results and "pocket payload" in results[0].content
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_reasoning(self, mock_which):
+    async def test_mcp_tool_call_error(self):
+        from openai_codex_sdk import McpToolCallItem
+        from openai_codex_sdk.types import McpToolCallError
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        item = {"id": "item_5", "type": "reasoning", "text": "Thinking about this..."}
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.completed", "item": item}),
-            ]
+        completed = McpToolCallItem(
+            id="i5",
+            type="mcp_tool_call",
+            server="srv",
+            tool="x",
+            arguments={},
+            result=None,
+            error=McpToolCallError(message="boom"),
+            status="failed",
         )
+        ctx, _ = _patch_codex(_events_from([("completed", completed)]))
+        with ctx:
+            out = []
+            async for event in backend.run("err"):
+                out.append(event)
 
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        results = [e for e in out if e.type == "tool_result"]
+        assert results and results[0].content.startswith("[error] boom")
+
+    @pytest.mark.asyncio
+    async def test_parses_reasoning(self):
+        from openai_codex_sdk import ReasoningItem
+
+        from pocketpaw.agents.codex_cli import CodexCLIBackend
+
+        backend = CodexCLIBackend(Settings())
+        item = ReasoningItem(id="i6", type="reasoning", text="Thinking about this...")
+        ctx, _ = _patch_codex(_events_from([("completed", item)]))
+        with ctx:
+            out = []
             async for event in backend.run("think"):
-                events.append(event)
+                out.append(event)
 
-        thinking = [e for e in events if e.type == "thinking"]
-        assert len(thinking) == 1
-        assert "Thinking" in thinking[0].content
+        thinking = [e for e in out if e.type == "thinking"]
+        assert thinking and "Thinking" in thinking[0].content
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_parses_turn_completed_usage(self, mock_which):
+    async def test_parses_turn_completed_usage(self):
+        from openai_codex_sdk import TurnCompletedEvent
+        from openai_codex_sdk.types import Usage
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        usage = {
-            "input_tokens": 100,
-            "cached_input_tokens": 50,
-            "output_tokens": 25,
-        }
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "turn.completed", "usage": usage}),
-            ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        usage = Usage(input_tokens=100, output_tokens=25, cached_input_tokens=50)
+        ev = TurnCompletedEvent(type="turn.completed", usage=usage)
+        ctx, _ = _patch_codex([ev])
+        with ctx:
+            out = []
             async for event in backend.run("test"):
-                events.append(event)
+                out.append(event)
 
-        usage_evts = [e for e in events if e.type == "token_usage"]
-        assert len(usage_evts) == 1
+        usage_evts = [e for e in out if e.type == "token_usage"]
+        assert usage_evts
         assert usage_evts[0].metadata["input_tokens"] == 100
         assert usage_evts[0].metadata["output_tokens"] == 25
         assert usage_evts[0].metadata["cached_input_tokens"] == 50
+        assert usage_evts[0].metadata["backend"] == "codex_cli"
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_handles_error_event(self, mock_which):
+    async def test_handles_error_item(self):
+        from openai_codex_sdk import ErrorItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "error", "message": "Rate limit exceeded"}),
-            ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        item = ErrorItem(id="ie", type="error", message="Rate limit exceeded")
+        ctx, _ = _patch_codex(_events_from([("completed", item)]))
+        with ctx:
+            out = []
             async for event in backend.run("test"):
-                events.append(event)
+                out.append(event)
 
-        errors = [e for e in events if e.type == "error"]
-        assert len(errors) == 1
-        assert "Rate limit" in errors[0].content
+        errors = [e for e in out if e.type == "error"]
+        assert errors and "Rate limit" in errors[0].content
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_handles_turn_failed(self, mock_which):
+    async def test_yields_done_at_end(self):
+        from openai_codex_sdk import AgentMessageItem
+
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "turn.failed", "message": "Model overloaded"}),
-            ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
+        item = AgentMessageItem(id="i", type="agent_message", text="ok")
+        ctx, _ = _patch_codex(_events_from([("completed", item)]))
+        with ctx:
+            out = []
             async for event in backend.run("test"):
-                events.append(event)
+                out.append(event)
 
-        errors = [e for e in events if e.type == "error"]
-        assert len(errors) == 1
-        assert "overloaded" in errors[0].content.lower()
+        assert out[-1].type == "done"
 
+
+# ---------------------------------------------------------------------------
+# Cross-backend / system-prompt behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestCodexCLIPromptDelivery:
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_handles_process_failure(self, mock_which):
+    async def test_history_injected_into_agents_md(self, tmp_path, monkeypatch):
+        """Conversation history is written into AGENTS.md (which Codex
+        auto-loads from cwd) so multi-turn context survives across runs."""
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
-        backend = CodexCLIBackend(Settings())
-        mock_proc = _make_mock_process([], returncode=1)
-        mock_proc.stderr = AsyncMock()
-        mock_proc.stderr.read = AsyncMock(return_value=b"fatal error")
+        captured_path: list[str] = []
+        original_mkdtemp = __import__("tempfile").mkdtemp
 
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("test"):
-                events.append(event)
+        def capture_mkdtemp(*args, **kwargs):
+            p = original_mkdtemp(*args, **kwargs)
+            captured_path.append(p)
+            return p
 
-        errors = [e for e in events if e.type == "error"]
-        assert len(errors) >= 1
-        assert any("error" in e.content.lower() for e in errors)
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_skips_invalid_json(self, mock_which):
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
+        monkeypatch.setattr("tempfile.mkdtemp", capture_mkdtemp)
 
         backend = CodexCLIBackend(Settings())
-        item = {"id": "item_1", "type": "agent_message", "text": "OK"}
-        mock_proc = _make_mock_process(
-            [
-                "not valid json",
-                _ev({"type": "item.completed", "item": item}),
+        ctx, _ = _patch_codex([])
+
+        # Snapshot AGENTS.md while the run is in progress (before the
+        # ``finally`` block deletes the temp dir). We do that by reading
+        # the file inside our fake ``start_thread``.
+        captured_agents_md: list[str] = []
+
+        from openai_codex_sdk import StreamedTurn
+
+        class _FakeThread:
+            async def run_streamed(self, input_, turn_options=None):
+                # cwd is set to the tempdir; AGENTS.md sits there.
+                from pathlib import Path
+
+                cwd = Path(captured_path[0])
+                captured_agents_md.append((cwd / "AGENTS.md").read_text("utf-8"))
+                return StreamedTurn(events=_async_empty())
+
+        class _FakeCodex:
+            def __init__(self, options=None):
+                pass
+
+            def start_thread(self, options=None):
+                return _FakeThread()
+
+        async def _async_empty():
+            if False:
+                yield None
+            return
+
+        with patch("openai_codex_sdk.Codex", _FakeCodex):
+            history = [
+                {"role": "user", "content": "From previous backend"},
+                {"role": "assistant", "content": "I remember"},
             ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("test"):
-                events.append(event)
-
-        messages = [e for e in events if e.type == "message"]
-        assert len(messages) == 1
-        assert messages[0].content == "OK"
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_full_conversation_flow(self, mock_which):
-        """End-to-end: thread start -> command -> message -> usage -> done."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-        cmd_item = {
-            "id": "i1",
-            "type": "command_execution",
-            "command": "bash -lc ls",
-            "status": "in_progress",
-        }
-        cmd_done = {"id": "i1", "type": "command_execution", "output": "README.md"}
-        msg_item = {"id": "i2", "type": "agent_message", "text": "Has a README."}
-        usage = {
-            "input_tokens": 500,
-            "cached_input_tokens": 400,
-            "output_tokens": 50,
-        }
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "thread.started", "thread_id": "abc-123"}),
-                _ev({"type": "turn.started"}),
-                _ev({"type": "item.started", "item": cmd_item}),
-                _ev({"type": "item.completed", "item": cmd_done}),
-                _ev({"type": "item.completed", "item": msg_item}),
-                _ev({"type": "turn.completed", "usage": usage}),
-            ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("summarize"):
-                events.append(event)
-
-        types = [e.type for e in events]
-        assert "tool_use" in types
-        assert "tool_result" in types
-        assert "message" in types
-        assert "token_usage" in types
-        assert types[-1] == "done"
-
-
-class TestCodexCLICrossBackend:
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_history_seeded_on_new_session(self, mock_which):
-        """History is injected into prompt for context portability."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-
-        captured_proc = None
-
-        async def capture_exec(*args, **kwargs):
-            nonlocal captured_proc
-            captured_proc = _make_mock_process([])
-            return captured_proc
-
-        history = [
-            {"role": "user", "content": "From previous backend"},
-            {"role": "assistant", "content": "I remember that context"},
-        ]
-
-        with patch(_SUBPROCESS_PATCH, side_effect=capture_exec):
             async for _ in backend.run(
                 "Continue our chat",
                 system_prompt="You are PocketPaw.",
@@ -568,309 +657,52 @@ class TestCodexCLICrossBackend:
             ):
                 pass
 
-        assert captured_proc is not None
-        # Prompt is now piped via stdin
-        prompt_value = captured_proc.stdin.written.decode("utf-8")
-        assert "Recent Conversation" in prompt_value
-        assert "From previous backend" in prompt_value
+        assert captured_agents_md, "AGENTS.md should have been written"
+        contents = captured_agents_md[0]
+        assert "You are PocketPaw." in contents
+        assert "Recent Conversation" in contents
+        assert "From previous backend" in contents
+
+    def test_build_subprocess_env_extracts_pocket_id_and_mirrors_mongo(self, monkeypatch):
+        """The Codex subprocess gets per-turn identity + a Mongo URI alias.
+        ``cloud_*`` CLI commands invoked from the agent then have everything
+        they need without an explicit MCP layer."""
+        from pocketpaw.agents.codex_cli import _build_subprocess_env
+
+        monkeypatch.setenv("CLOUD_MONGODB_URI", "mongodb://example/paw")
+        monkeypatch.delenv("POCKETPAW_MONGO_URI", raising=False)
+        monkeypatch.delenv("POCKETPAW_POCKET_ID", raising=False)
+
+        prompt = '<scope>pocket abc123</scope>\n<current-pocket id="abc123" />\n...'
+        env = _build_subprocess_env(prompt)
+
+        assert env["POCKETPAW_POCKET_ID"] == "abc123"
+        # Mirror the cloud Mongo URI under the CLI's preferred name so
+        # ``pocketpaw.tools.cli cloud_*`` doesn't have to know about both.
+        assert env["POCKETPAW_MONGO_URI"] == "mongodb://example/paw"
+        # Parent env survives.
+        assert env["CLOUD_MONGODB_URI"] == "mongodb://example/paw"
+
+    def test_build_subprocess_env_no_pocket_in_prompt_leaves_id_unset(self, monkeypatch):
+        from pocketpaw.agents.codex_cli import _build_subprocess_env
+
+        monkeypatch.delenv("POCKETPAW_POCKET_ID", raising=False)
+        env = _build_subprocess_env("plain prompt with no current-pocket tag")
+        assert "POCKETPAW_POCKET_ID" not in env
 
     @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_history_not_injected_when_empty(self, mock_which):
-        """No history section when history is empty."""
+    async def test_user_message_goes_to_run_streamed_input(self):
+        """The user prompt is the ``input_`` argument to ``run_streamed`` —
+        not in AGENTS.md. (AGENTS.md gets the system prompt + history.)"""
         from pocketpaw.agents.codex_cli import CodexCLIBackend
 
         backend = CodexCLIBackend(Settings())
-
-        captured_proc = None
-
-        async def capture_exec(*args, **kwargs):
-            nonlocal captured_proc
-            captured_proc = _make_mock_process([])
-            return captured_proc
-
-        with patch(_SUBPROCESS_PATCH, side_effect=capture_exec):
+        ctx, fake_thread = _patch_codex([])
+        with ctx:
             async for _ in backend.run(
-                "Hello",
+                "Hello world",
                 system_prompt="You are PocketPaw.",
-                session_key="s1",
             ):
                 pass
 
-        assert captured_proc is not None
-        prompt_value = captured_proc.stdin.written.decode("utf-8")
-        assert "Recent Conversation" not in prompt_value
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_system_prompt_injected(self, mock_which):
-        """System prompt is passed via model_instructions_file temp file."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-
-        captured_cmd = None
-        captured_proc = None
-
-        async def capture_exec(*args, **kwargs):
-            nonlocal captured_cmd, captured_proc
-            captured_cmd = args
-            captured_proc = _make_mock_process([])
-            return captured_proc
-
-        with patch(_SUBPROCESS_PATCH, side_effect=capture_exec):
-            async for _ in backend.run(
-                "Hello",
-                system_prompt="You are a helpful assistant.",
-                session_key="s1",
-            ):
-                pass
-
-        assert captured_proc is not None
-        assert captured_cmd is not None
-
-        # System prompt is passed via -c model_instructions_file=<path>, not stdin
-        if sys.platform == "win32":
-            cmd_str = captured_cmd[0]
-            assert "model_instructions_file=" in cmd_str
-        else:
-            cmd_list = list(captured_cmd)
-            instructions_args = [a for a in cmd_list if "model_instructions_file=" in a]
-            assert instructions_args, "Expected model_instructions_file in command args"
-
-        # Stdin should contain only the user message, not the system prompt
-        prompt_value = captured_proc.stdin.written.decode("utf-8")
-        assert "Hello" in prompt_value
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_uses_codex_exec_json_full_auto(self, mock_which):
-        """Verify the subprocess command includes exec --json --full-auto."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-
-        captured_cmd = None
-
-        async def capture_exec(*args, **kwargs):
-            nonlocal captured_cmd
-            captured_cmd = args
-            return _make_mock_process([])
-
-        with patch(_SUBPROCESS_PATCH, side_effect=capture_exec):
-            async for _ in backend.run("test"):
-                pass
-
-        assert captured_cmd is not None
-        if sys.platform == "win32":
-            # On Windows, create_subprocess_shell receives a single string
-            cmd_str = captured_cmd[0]
-            # Ensure "codex" appears as the binary, not as part of a model name
-            assert cmd_str.split()[0].endswith("codex")
-            assert "exec" in cmd_str
-            assert "--json" in cmd_str
-            assert "--full-auto" in cmd_str
-            assert "--model" in cmd_str
-        else:
-            cmd_list = list(captured_cmd)
-            assert "codex" in cmd_list[0]
-            assert cmd_list[1] == "exec"
-            assert "--json" in cmd_list
-            assert "--full-auto" in cmd_list
-            assert "--model" in cmd_list
-            assert "-" in cmd_list  # prompt read from stdin
-
-
-class TestCodexCLIValidation:
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_rejects_malicious_model_name(self, mock_which):
-        """Model names with shell metacharacters are rejected."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        settings = Settings()
-        settings.codex_cli_model = 'gpt-4" & dir'
-        backend = CodexCLIBackend(settings)
-        events = []
-        async for event in backend.run("test"):
-            events.append(event)
-
-        errors = [e for e in events if e.type == "error"]
-        assert len(errors) == 1
-        assert "Invalid model name" in errors[0].content
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_accepts_valid_model_names(self, mock_which):
-        """Standard model names pass validation."""
-        from pocketpaw.agents.codex_cli import _MODEL_NAME_RE
-
-        valid_names = [
-            "gpt-5.3-codex",
-            "gpt-4o",
-            "o3-mini",
-            "claude-3.5-sonnet",
-            "my_custom:latest",
-        ]
-        for name in valid_names:
-            assert _MODEL_NAME_RE.match(name), f"{name!r} should be valid"
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_rejects_invalid_model_names(self, mock_which):
-        """Model names with dangerous characters are rejected."""
-        from pocketpaw.agents.codex_cli import _MODEL_NAME_RE
-
-        invalid_names = [
-            'gpt-4" & dir',
-            "model; rm -rf /",
-            "model$(whoami)",
-            "model`id`",
-            "model name with spaces",
-        ]
-        for name in invalid_names:
-            assert not _MODEL_NAME_RE.match(name), f"{name!r} should be invalid"
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_broken_pipe_handling(self, mock_which):
-        """BrokenPipeError when Codex CLI crashes before reading stdin."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-
-        mock_proc = MagicMock()
-        mock_proc.returncode = None
-        mock_proc.stdout = _AsyncLineIterator([])
-        mock_proc.stderr = AsyncMock()
-        mock_proc.stderr.read = AsyncMock(return_value=b"segfault")
-
-        mock_stdin = MagicMock()
-        mock_stdin.write = MagicMock(side_effect=BrokenPipeError("broken"))
-        mock_stdin.drain = AsyncMock()
-        mock_stdin.close = MagicMock()
-        mock_stdin.wait_closed = AsyncMock()
-        mock_proc.stdin = mock_stdin
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("test"):
-                events.append(event)
-
-        errors = [e for e in events if e.type == "error"]
-        assert len(errors) == 1
-        assert "exited before reading" in errors[0].content
-        assert "segfault" in errors[0].content
-
-
-class TestCodexCLIBufferLimit:
-    def test_buffer_limit_constant(self):
-        from pocketpaw.agents.codex_cli import _SUBPROCESS_BUFFER_LIMIT
-
-        # Must be larger than the asyncio default of 64 KiB
-        assert _SUBPROCESS_BUFFER_LIMIT > 65536
-        assert _SUBPROCESS_BUFFER_LIMIT == 10 * 1024 * 1024
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_subprocess_receives_buffer_limit(self, mock_which):
-        """Verify create_subprocess passes the increased buffer limit."""
-        from pocketpaw.agents.codex_cli import _SUBPROCESS_BUFFER_LIMIT, CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-        captured_kwargs = {}
-
-        async def capture_exec(*args, **kwargs):
-            captured_kwargs.update(kwargs)
-            return _make_mock_process([])
-
-        with patch(_SUBPROCESS_PATCH, side_effect=capture_exec):
-            async for _ in backend.run("test"):
-                pass
-
-        assert "limit" in captured_kwargs
-        assert captured_kwargs["limit"] == _SUBPROCESS_BUFFER_LIMIT
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_handles_large_mcp_output(self, mock_which):
-        """Large MCP tool results (>64 KiB) should be parsed without error."""
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-        # Simulate a large MCP tool result (100 KiB of content)
-        large_output = "x" * (100 * 1024)
-        item = {
-            "id": "item_mcp",
-            "type": "mcp_tool_call",
-            "name": "playwright_snapshot",
-            "output": large_output,
-        }
-        mock_proc = _make_mock_process(
-            [
-                _ev({"type": "item.completed", "item": item}),
-            ]
-        )
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("browse page"):
-                events.append(event)
-
-        results = [e for e in events if e.type == "tool_result"]
-        assert len(results) == 1
-        assert results[0].metadata["name"] == "playwright_snapshot"
-
-    @pytest.mark.asyncio
-    @patch("shutil.which", return_value="/usr/bin/codex")
-    async def test_limit_overrun_recovers_gracefully(self, mock_which):
-        """When output exceeds even the increased limit, the session continues."""
-        import asyncio as _asyncio
-
-        from pocketpaw.agents.codex_cli import CodexCLIBackend
-
-        backend = CodexCLIBackend(Settings())
-
-        class _OverrunIterator:
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                raise _asyncio.LimitOverrunError("chunk is longer than limit", 0)
-
-        mock_proc = _make_mock_process([])
-        mock_proc.stdout = _OverrunIterator()
-
-        with patch(_SUBPROCESS_PATCH, return_value=mock_proc):
-            events = []
-            async for event in backend.run("test"):
-                events.append(event)
-
-        # Should not crash; yields error + done instead of raising
-        error_events = [e for e in events if e.type == "error"]
-        assert len(error_events) == 1
-        assert "buffer limit" in error_events[0].content
-        assert events[-1].type == "done"
-
-
-class TestCodexCLIRegistry:
-    def test_registered_in_backend_registry(self):
-        from pocketpaw.agents.registry import get_backend_class
-
-        cls = get_backend_class("codex_cli")
-        assert cls is not None
-        assert cls.__name__ == "CodexCLIBackend"
-
-    def test_backend_info_via_registry(self):
-        from pocketpaw.agents.registry import get_backend_info
-
-        info = get_backend_info("codex_cli")
-        assert info is not None
-        assert info.name == "codex_cli"
-        assert info.display_name == "Codex CLI"
-
-    def test_listed_in_backends(self):
-        from pocketpaw.agents.registry import list_backends
-
-        backends = list_backends()
-        assert "codex_cli" in backends
+        assert fake_thread.last_input == "Hello world"

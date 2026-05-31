@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class _IdentityCache:
     content: str
     mtime: float
+    size: int = 0
 
 
 _identity_file_cache: dict[str, _IdentityCache] = {}
@@ -25,12 +26,14 @@ _identity_file_cache: dict[str, _IdentityCache] = {}
 def _read_identity_file(path: Path, strip: bool = False) -> str:
     """Read an identity file; return cached content when mtime is unchanged."""
     try:
-        mtime = path.stat().st_mtime
+        stat = path.stat()
+        mtime = stat.st_mtime
+        size = stat.st_size
     except FileNotFoundError:
         return ""
     key = str(path)
     cached = _identity_file_cache.get(key)
-    if cached and cached.mtime == mtime:
+    if cached and cached.mtime == mtime and cached.size == size:
         return cached.content
     raw = path.read_bytes()
     content = raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
@@ -38,7 +41,7 @@ def _read_identity_file(path: Path, strip: bool = False) -> str:
         logger.warning("File %s contains non-UTF-8 bytes (replaced with placeholders)", path)
     if strip:
         content = content.strip()
-    _identity_file_cache[key] = _IdentityCache(content=content, mtime=mtime)
+    _identity_file_cache[key] = _IdentityCache(content=content, mtime=mtime, size=size)
     return content
 
 

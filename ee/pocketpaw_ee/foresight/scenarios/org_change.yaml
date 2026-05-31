@@ -1,0 +1,124 @@
+# ee/pocketpaw_ee/foresight/scenarios/org_change.yaml
+# Updated: 2026-05-25 (feat/foresight-v14-decision-graph-stub) — RFC 08
+# §14.4 wiring. Optional scenario-root fields:
+#   - ``precedent_seed`` (string | null): scenario-wide seed the engine's
+#     DecisionGraphRef hashes into synthetic forward-precedent ids on
+#     every emitted ProjectedDecision.
+#   - ``precedent_seeds`` (map | null): per-anchor overrides keyed by
+#     anchor_id (``rollout:<event>``). Anchor-level wins.
+# Absent by default — synthetic ids only surface when a scenario opts in.
+# Created: 2026-05-25 (feat/foresight-v05-subtypes-projected-decision) —
+# RFC 08 PR 5. Org Change Rehearsal sub-type smoke scenario — RFC §4.3.
+#
+# Eight personas across four internal roles (manager / ic / ops /
+# customer-success) ticked against the four-step rollout sequence
+# (announce / training / deadline / escalation). The deterministic-fake
+# backend will fan accept / resist / exit / escalate actions; the adapter
+# buckets them into per-event adoption rates.
+#
+# v0.5 keeps the persona count small (eight) so the smoke runs in
+# milliseconds; v1.0 will load the workspace's actual team-soul roster
+# per RFC §4.3 and apply the Instinct policy overlay so the throughput
+# / queue-depth metrics emerge from the simulation.
+#
+# Fields the v0.5 loader ignores but v1.0 will read live as comments
+# below the active block so this YAML can absorb the full RFC §18
+# grammar without changing shape.
+
+name: smoke-org-change
+sub_type: org_change_rehearsal
+n_ticks: 4  # one tick per rollout event (announce / training / deadline / escalation)
+
+# PR 8 (RFC 08 §8) — when true, every ProjectedDecision this scenario
+# emits is also fanned into the Instinct approval queue so The Tray
+# surfaces the rollout forecast as evidence next to the real-world
+# adoption decision. Defaults to false here (and in the request DTO)
+# so smoke runs don't pollute the Tray. The v0.8 cloud loader only
+# reads this flag from the POST body; the YAML carries it as
+# documentation / v1.0 loader hook.
+#
+# route_to_instinct: false
+
+# Captain-locked 5/15/80 default per RFC §10.
+tier_mix:
+  premium: 0.05  # Claude Sonnet 4.7 — manager personas
+  mid:     0.15  # Claude Haiku 4.7 — IC personas
+  tail:    0.80  # Llama-3.1-8B via vLLM — ops + customer-success
+
+personas:
+  - name: eng-manager-anne
+    role: manager
+    ocean:
+      conscientiousness: 0.8
+      agreeableness: 0.4
+  - name: eng-manager-priya
+    role: manager
+    ocean:
+      conscientiousness: 0.6
+      openness: 0.3
+  - name: ic-alex
+    role: ic
+    ocean:
+      openness: 0.7
+      neuroticism: -0.3
+  - name: ic-blake
+    role: ic
+    ocean:
+      conscientiousness: 0.5
+      agreeableness: 0.6
+  - name: ic-carmen
+    role: ic
+    ocean:
+      neuroticism: 0.4   # higher resistance tilt
+      openness: -0.2
+  - name: ops-david
+    role: ops
+    ocean:
+      conscientiousness: 0.7
+      agreeableness: 0.5
+  - name: cs-elena
+    role: customer_success
+    ocean:
+      extraversion: 0.6
+      openness: 0.4
+  - name: cs-frank
+    role: customer_success
+    ocean:
+      agreeableness: 0.7
+      conscientiousness: 0.3
+
+# v1.0 will read these blocks — parked here as documentation. The v0.5
+# loader skips unknown top-level keys.
+#
+# rollout_events:
+#   - id: announce
+#     at_tick: 0
+#     payload:
+#       channel: all-hands
+#   - id: training
+#     at_tick: 1
+#     payload:
+#       attendance_required: true
+#   - id: deadline
+#     at_tick: 2
+#     payload:
+#       deadline_days: 30
+#   - id: escalation
+#     at_tick: 3
+#     payload:
+#       trigger: missed_deadline
+#
+# instinct_policy_overlay:
+#   approve_per_row:
+#     mode: two_approver_concur
+#     min_amount_usd: 5000
+#
+# aggregator:
+#   per_event:
+#     - adoption_rate
+#     - resistance_rate
+#     - exit_rate
+#   totals:
+#     - throughput
+#     - queue_depth
+#     - escalation_count

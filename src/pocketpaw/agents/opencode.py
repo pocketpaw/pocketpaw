@@ -17,14 +17,20 @@ from typing import Any
 
 import httpx
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
 
-class OpenCodeBackend:
+class OpenCodeBackend(BaseAgentBackend):
     """OpenCode server backend — communicates via REST API."""
 
     @staticmethod
@@ -55,7 +61,23 @@ class OpenCodeBackend:
         self._stop_flag = False
         self._session_map: dict[str, str] = {}  # pocketpaw key → opencode session ID
         self._client: httpx.AsyncClient | None = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         logger.info("OpenCode backend targeting %s", self._base_url)
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        # Policy is stored but never enforced — OpenCode runs tools inside an
+        # external server process that has no awareness of this policy.
+        logger.debug(
+            "set_tool_policy on OpenCodeBackend: stored but not enforced (external server)"
+        )
+        self._policy = policy
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:

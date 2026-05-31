@@ -1,0 +1,178 @@
+---
+title: "Calendar Module: Native Events, RRULE, Free/Busy"
+description: "PocketPaw's first-party calendar primitive. Events with RFC 5545 recurrence, conflict detection, free/busy queries, and a Fabric pointer for cross-domain joins. Mounted under /api/v1/calendar on the cloud app."
+section: Core Concepts
+ogType: article
+keywords: ["calendar module", "calendar primitive", "rrule", "recurrence", "free busy", "calendar conflicts"]
+tags: ["calendar", "ee", "modules"]
+---
+
+# Calendar Module: Native Events, RRULE, Free/Busy
+
+The calendar module is a native PocketPaw primitive — events, recurring rules, free/busy queries, conflict detection — not a wrapper over Google Calendar or any external system. It lives in `ee/pocketpaw_ee/calendar/`, mounts under `/api/v1/calendar`, and pairs with the [Google Calendar integration](/integrations/calendar) which uses its own tools and remote sync. Use this module when you want PocketPaw to own the events (workspace-scoped, joined to Fabric objects); use the integration when you want PocketPaw to read/write the user's existing Google Calendar.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED.
+
+**Implementation PRs:** #1130 (RFC), #1132 (module land — domain, service, router, RRULE, freebusy), #1139 (mount into the cloud app), #1143 (security follow-ups from the #1132 review).
+
+**What's live:** `pocketpaw_ee.calendar` module with `domain.py`, `service.py`, `router.py`, RRULE expansion (`recurrence.py`), free/busy union queries (`freebusy.py`), conflict detection (`conflicts.py`), sync stub (`sync.py`); the canonical `pocketpaw_ee.cloud.calendar` sibling for the agent's per-turn surface preamble (#1218); router mounted at `/api/v1/calendar` from `pocketpaw_ee.cloud.__init__`; security hardening from PR #1143 (EmailStr on Attendee, RRULE length cap 2048, exception cap 500, datetime-typed query params, accessible-calendar gate on free/busy, creator-equality on modify).
+
+**What's planned:** remaining security follow-ups from the PR #1132 review (issue #1142); recurrence expansion plugged into `freebusy.compute_freebusy` (today masters only — recurring instances inside the window appear as a single busy block from the master row).
+</Callout>
+
+## The Two Calendar Modules
+
+PocketPaw has two `calendar` modules. They share a name but solve different problems.
+
+| Module | Path | Role |
+|---|---|---|
+| **`pocketpaw_ee.calendar`** | `ee/pocketpaw_ee/calendar/` | The full primitive — CRUD, RRULE, free/busy, conflicts. The subject of this page. |
+| **`pocketpaw_ee.cloud.calendar`** | `ee/pocketpaw_ee/cloud/calendar/` | A surface-preamble read adapter that proxies upcoming events into the chat agent's per-turn context (#1218). Domain + dto + service only, no router. |
+
+The `pocketpaw_ee.calendar.__init__` carries a pointer to the sibling so future contributors find both modules.
+
+## Module Layout — The 4-File Shape Plus Helpers
+
+The module follows the ee/cloud canonical 4-file shape (domain / dto / service / router) with a few extra pure-Python helpers:
+
+```
+ee/pocketpaw_ee/calendar/
+├── domain.py        # Frozen Pydantic value objects (Event, Calendar, Recurrence, Attendee, FreeBusy)
+├── dto.py           # Request / response DTOs (CreateEventRequest, EventResponse, ConflictReport, ...)
+├── service.py       # Module-level async functions — the business logic
+├── router.py        # FastAPI router (thin wrappers, no logic)
+├── models.py        # Beanie documents (_EventDoc, _CalendarDoc) — private
+├── recurrence.py    # Pure RRULE expansion (dateutil.rrule wrapper)
+├── freebusy.py      # Union-of-busy-periods query
+├── conflicts.py     # Overlap detection across attendees
+├── policy.py        # check_calendar_read, check_event_modify (creator-equality, visibility)
+├── events.py        # CalendarEventCreated / Updated / Deleted bus events
+├── sync.py          # External-system sync hook (Google Calendar bridge target)
+└── _context.py      # RequestContext for the calendar entity
+```
+
+## Domain — Multi-Tenancy at Construction
+
+The value objects in `domain.py` are frozen Pydantic models with `workspace_id` required and no default. Construction without tenancy info is a type error, per ee/cloud Rule 3.
+
+```python
+class Event(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    workspace_id: str          # required — no default
+    calendar_id: str
+    title: str
+    starts_at: datetime
+    ends_at: datetime
+    timezone: str              # IANA, e.g. "America/Los_Angeles"
+    created_by_user_id: str    # H-NEW-1: required, gates creator-equality modify
+    description: str = ""
+    location: str | None = None
+    attendees: list[Attendee] = Field(default_factory=list)
+    recurrence: Recurrence | None = None
+    fabric_object_id: str | None = None       # join target into ee/fabric
+    source_connector: str | None = None       # e.g. "gcalendar"
+    source_external_id: str | None = None     # e.g. the Google event id
+    created_at: datetime
+    updated_at: datetime
+```
+
+Notable invariants on the related models:
+
+- **`Attendee.email: EmailStr`** — Pydantic's email-validator integration rejects malformed emails at the boundary (PR #1143 M3) instead of letting them propagate into the DB.
+- **`Recurrence.rrule: str = Field(min_length=1, max_length=2048)`** — caps pathological RRULE strings that could choke expansion (PR #1143 M1).
+- **`Recurrence.exceptions: list[datetime] = Field(default_factory=list, max_length=500)`** — caps unbounded growth that would slow conflict detection (PR #1143 M2).
+- **`Calendar.visibility`** — `PUBLIC_TO_WORKSPACE` / `PRIVATE` / `SHARED_WITH_USERS`. Read access is also gated by `policy.check_calendar_read`.
+
+The `fabric_object_id` field lets a Customer Fabric object have a related Meeting event without a join table — a key cross-domain primitive.
+
+## RRULE Handling
+
+`recurrence.py` is **pure** — no DB, no bus, no I/O. It takes a master `Event` with a `Recurrence` and expands to concrete instances within a window.
+
+```python
+def expand_recurrence(
+    master: Event,
+    range_start: datetime,
+    range_end: datetime,
+) -> list[Event]: ...
+```
+
+Rules:
+
+- If the master has no `recurrence`, returns `[master]` when its window overlaps the range, else `[]`.
+- `range_start` inclusive, `range_end` exclusive.
+- `recurrence.exceptions` removes matching occurrences (compared to generated start datetime, not the human-visible local date).
+- `recurrence.until` and `recurrence.count` are honoured if the underlying RRULE didn't already encode them.
+- Each expanded instance keeps the master's id; callers disambiguate via `starts_at`.
+- Hard cap: `_MAX_INSTANCES = 5000` (~13 years of daily recurrence — well beyond any legitimate use).
+- The parser wraps `dateutil.rrule.rrulestr`; it synthesizes a DTSTART from `master.starts_at` if the RRULE omits one.
+
+## Free/Busy
+
+`freebusy.py` computes the union of busy periods for a list of attendees within a window using a single Mongo `$in` query on `attendees.email` (cheaper than N queries).
+
+```python
+async def compute_freebusy(
+    workspace_id: str,
+    attendee_emails: list[str],
+    starts_at: datetime,
+    ends_at: datetime,
+    accessible_calendar_ids: set[str] | None = None,
+) -> list[FreeBusy]: ...
+```
+
+The `accessible_calendar_ids` argument (PR #1143 H2 — closes the availability-oracle gap) restricts which calendars contribute to the returned busy periods. The service layer is the chokepoint for "is this email known on a calendar I can see?" pre-validation; events on calendars outside the set are silently dropped from the result so a requester only sees busy blocks for calendars they could read directly. `None` preserves legacy behaviour for trusted internal callers.
+
+Recurrence today: this implementation queries the **master rows only**, so recurring instances inside the window appear as a single busy block (the master's window). A planned follow-up plugs `expand_recurrence` in here — documented in the module docstring so the gap is explicit, not silent.
+
+Per-attendee emails are lowercased for case-insensitive matching against stored data; the response preserves the caller's casing so it matches what they sent.
+
+## REST Routes
+
+Mounted from `ee/pocketpaw_ee/cloud/__init__.py` via:
+
+```python
+from pocketpaw_ee.calendar import router as calendar_router
+app.include_router(calendar_router)  # router declares its own /api/v1/calendar prefix
+```
+
+| Route | Returns |
+|---|---|
+| `POST /api/v1/calendar/events` | `EventResponse` (201) |
+| `GET /api/v1/calendar/events?starts_after=&starts_before=&calendar_id=&limit=` | `EventListResponse` |
+| `GET /api/v1/calendar/events/:id` | `EventResponse` |
+| `PATCH /api/v1/calendar/events/:id` | `EventResponse` |
+| `DELETE /api/v1/calendar/events/:id` | 204 |
+| `POST /api/v1/calendar/freebusy` | `FreeBusyResponse` |
+| `GET /api/v1/calendar/events/:id/conflicts` | `ConflictReport` |
+
+The router is intentionally thin — every handler delegates to `service.py`, never raises `HTTPException`, and lets `_core.http` map `CloudError` subclasses to JSON. The list endpoint declares `starts_after` and `starts_before` as `datetime` query parameters directly (PR #1143 H3) so FastAPI returns 422 on malformed input instead of bubbling a `ValueError` into the global 500 handler.
+
+## Security Hardening (PR #1143)
+
+The #1132 review surfaced a stack of gaps. PR #1143 closed the high-severity ones:
+
+| Tag | Gap | Fix |
+|---|---|---|
+| H2 | Availability oracle on `/freebusy` | `accessible_calendar_ids` set restricts which calendars contribute |
+| H3 | Unvalidated datetime query params returned 500 | Declare as `datetime` parameters; FastAPI returns 422 |
+| H-NEW-1 | A synthetic-default Calendar granted cross-user modify | `Event.created_by_user_id` required; `policy.check_event_modify` gates on creator-equality |
+| M1 | Pathological RRULE strings | `rrule` capped at 2048 chars |
+| M2 | Unbounded exceptions list | `exceptions` capped at 500 entries |
+| M3 | Malformed email addresses propagating into DB | `Attendee.email: EmailStr` |
+
+The remaining items from the review are tracked in issue #1142.
+
+## Frontend Pairing
+
+paw-enterprise wires the routes into a calendar widget that pairs with the [Pocket Templates](/concepts/pocket-templates) `calendar-planner` bundled template. The widget calls `GET /api/v1/calendar/events` for the visible window and `POST /api/v1/calendar/events` from the composer. Live-source state seeding (see `feat/pockets` work in the live recovery cascade) keeps the widget reactive after every mutation without a full pocket rebuild.
+
+## Related
+
+- [Google Calendar Integration](/integrations/calendar) — the tool-level adapter that reads/writes a user's Google Calendar (uses `calendar_list`, `calendar_create`, `calendar_search` tools and OAuth).
+- [Pocket Templates](/concepts/pocket-templates) — the `calendar-planner` bundled template instantiates a pocket against this module's routes.
+- [OSS-EE Split](/concepts/oss-ee-split) — the calendar module lives under `pocketpaw_ee` and ships only in the enterprise wheel.
+- [API Reference](/api) — full REST endpoint documentation (calendar routes coming in a follow-up sweep).

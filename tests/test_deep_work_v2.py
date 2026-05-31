@@ -1352,7 +1352,7 @@ class TestCancelProjectAPI:
             await dw_manager.update_project(project)
             return project
 
-        project = asyncio.get_event_loop().run_until_complete(_setup())
+        project = asyncio.new_event_loop().run_until_complete(_setup())
 
         # Patch cancel_project to simulate session cancel without full stack
         async def fake_cancel(pid):
@@ -1403,7 +1403,7 @@ class TestRetryTaskAPI:
             await dw_manager.save_task(task)
             return project, task
 
-        project, task = asyncio.get_event_loop().run_until_complete(_setup())
+        project, task = asyncio.new_event_loop().run_until_complete(_setup())
 
         mock_session = MagicMock()
         mock_session.scheduler = MagicMock()
@@ -1435,7 +1435,7 @@ class TestRetryTaskAPI:
             await dw_manager.save_task(task)
             return project, task
 
-        project, task = asyncio.get_event_loop().run_until_complete(_setup())
+        project, task = asyncio.new_event_loop().run_until_complete(_setup())
 
         response = dw_client.post(f"/api/deep-work/projects/{project.id}/tasks/{task.id}/retry")
 
@@ -1448,7 +1448,7 @@ class TestRetryTaskAPI:
         async def _setup():
             return await dw_manager.create_project(title="404 Retry")
 
-        project = asyncio.get_event_loop().run_until_complete(_setup())
+        project = asyncio.new_event_loop().run_until_complete(_setup())
 
         response = dw_client.post(
             f"/api/deep-work/projects/{project.id}/tasks/does-not-exist/retry"
@@ -1469,7 +1469,7 @@ class TestRetryTaskAPI:
             await dw_manager.save_task(task)
             return p1, p2, task
 
-        p1, p2, task = asyncio.get_event_loop().run_until_complete(_setup())
+        p1, p2, task = asyncio.new_event_loop().run_until_complete(_setup())
 
         response = dw_client.post(f"/api/deep-work/projects/{p2.id}/tasks/{task.id}/retry")
 

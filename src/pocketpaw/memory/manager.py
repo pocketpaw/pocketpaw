@@ -53,6 +53,20 @@ def create_memory_store(
     Returns:
         MemoryStoreProtocol implementation
     """
+    if backend == "mongodb":
+        # MongoDB is an enterprise memory backend, supplied via the
+        # `pocketpaw.memory_backends` entry-point. OSS builds have no
+        # provider and never reach this branch with backend="mongodb".
+        from pocketpaw._registry import providers
+
+        for provider in providers("pocketpaw.memory_backends"):
+            if getattr(provider, "name", None) == "mongodb":
+                logger.info("Using MongoDB memory backend (ee)")
+                return provider.build(None)
+        raise RuntimeError(
+            "memory backend 'mongodb' requested but no provider is registered "
+            "(install pocketpaw_ee for the cloud memory backend)"
+        )
     if backend == "mem0":
         try:
             # Check if mem0 is actually available before creating store
@@ -237,6 +251,7 @@ class MemoryManager:
         self,
         content: str,
         tags: list[str] | None = None,
+        sender_id: str | None = None,
     ) -> str:
         """
         Add a daily note.
@@ -244,16 +259,23 @@ class MemoryManager:
         Args:
             content: The note content.
             tags: Optional tags.
+            sender_id: Which user is writing the note. Scoped so that user A
+                doesn't see user B's daily notes when the agent builds
+                ``get_context_for_agent`` (issue #887).
 
         Returns:
             The note entry ID.
         """
+        user_id = self._resolve_user_id(sender_id)
         entry = MemoryEntry(
             id="",
             type=MemoryType.DAILY,
             content=content,
             tags=tags or [],
-            metadata={"header": datetime.now(tz=UTC).strftime("%H:%M")},
+            metadata={
+                "header": datetime.now(tz=UTC).strftime("%H:%M"),
+                "user_id": user_id,
+            },
         )
         return await self._store.save(entry)
 
@@ -330,10 +352,12 @@ class MemoryManager:
         parts = []
         user_id = self._resolve_user_id(sender_id)
 
-        # Fetch long-term + daily concurrently (independent stores/files)
+        # Fetch long-term + daily concurrently (independent stores/files).
+        # Daily notes are now user-scoped too (#887) — legacy notes without
+        # a user_id in metadata still show up for every user.
         long_term, daily = await asyncio.gather(
             self._store.get_by_type(MemoryType.LONG_TERM, limit=long_term_limit, user_id=user_id),
-            self._store.get_by_type(MemoryType.DAILY, limit=daily_limit),
+            self._store.get_by_type(MemoryType.DAILY, limit=daily_limit, user_id=user_id),
         )
 
         if long_term:

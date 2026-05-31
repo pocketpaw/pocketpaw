@@ -1,6 +1,30 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-05-28: Wave 4b — `template lint` now also enforces Fabric
+                `tier: registered` policy via
+                `validate_template_with_registry`. Defaults to
+                `NullFabricRegistry` (synthetic-tier templates lint
+                clean; registered-tier surfaces errors). New top-level
+                `--registry <path>` flag loads a JSONFileFabricRegistry
+                mock so developers can lint against a synthetic Fabric
+                without standing up the EE backend.
+  - 2026-05-28: Added `template publish / install / upgrade` subactions
+                for RFC 03 v2 Wave 4a — content-addressed, optionally
+                signed (Ed25519) template bundles. Local-file only —
+                no Registry transport in v0. New top-level flags:
+                `--output`, `--key`, `--unsigned`, `--dest`,
+                `--verify-key`, `--no-prompt`.
+  - 2026-05-25: Added `template compile <file>` subaction next to lint /
+                migrate / diff (RFC 03 v2 PR 2b). Compile prints the
+                runtime-shaped rippleSpec dict the template produces —
+                JSON by default, YAML under the new top-level `--yaml`
+                flag. Author-facing inspection only; never persists.
+  - 2026-05-25: Added `template` subcommand (lint / migrate / diff) for
+                RFC 03 v2 templates. Wired into _EARLY_COMMANDS so the
+                lint / migrate / diff path never pays the agent or
+                settings boot cost. Adds --yes and --no-backup flags for
+                template migrate.
   - 2026-04-07: Auto-detect free port in range 8000-9000 if requested port is busy.
   - 2026-03-18: Added CLI subcommands: doctor, health, channels, skills,
                 sessions, memory, config, errors, logs.
@@ -96,6 +120,7 @@ _EARLY_COMMANDS = {
     "config",
     "errors",
     "logs",
+    "template",
 }
 
 
@@ -177,6 +202,26 @@ def _handle_early_command(args) -> int | None:
             as_json=getattr(args, "json", False),
         )
 
+    if cmd == "template":
+        from pocketpaw.cli.template import run_template_cmd
+
+        return run_template_cmd(
+            subaction=getattr(args, "subaction", None),
+            file1=getattr(args, "file1", None),
+            file2=getattr(args, "file2", None),
+            as_json=getattr(args, "json", False),
+            yes=getattr(args, "yes", False),
+            no_backup=getattr(args, "no_backup", False),
+            as_yaml=getattr(args, "yaml", False),
+            output_path=getattr(args, "output", None),
+            key_path=getattr(args, "key", None),
+            unsigned=getattr(args, "unsigned", False),
+            destination=getattr(args, "dest", None),
+            verify_key_path=getattr(args, "verify_key", None),
+            no_prompt=getattr(args, "no_prompt", False),
+            registry_path=getattr(args, "registry", None),
+        )
+
     return None
 
 
@@ -223,7 +268,6 @@ Examples:
 """,
     )
 
-    # ── Global flags ────────────────────────────────────────────────────
     parser.add_argument(
         "--web",
         "-w",
@@ -231,30 +275,22 @@ Examples:
         help="Run web dashboard (same as default, kept for compatibility)",
     )
     parser.add_argument(
-        "--telegram",
-        action="store_true",
-        help="Run Telegram-only mode (legacy pairing flow)",
+        "--telegram", action="store_true", help="Run Telegram-only mode (legacy pairing flow)"
     )
     parser.add_argument("--discord", action="store_true", help="Run headless Discord bot")
     parser.add_argument("--slack", action="store_true", help="Run headless Slack bot (Socket Mode)")
     parser.add_argument(
-        "--whatsapp",
-        action="store_true",
-        help="Run headless WhatsApp webhook server",
+        "--whatsapp", action="store_true", help="Run headless WhatsApp webhook server"
     )
     parser.add_argument("--signal", action="store_true", help="Run headless Signal bot")
     parser.add_argument("--matrix", action="store_true", help="Run headless Matrix bot")
     parser.add_argument("--teams", action="store_true", help="Run headless Teams bot")
     parser.add_argument("--gchat", action="store_true", help="Run headless Google Chat bot")
     parser.add_argument(
-        "--security-audit",
-        action="store_true",
-        help="Run security audit and print report",
+        "--security-audit", action="store_true", help="Run security audit and print report"
     )
     parser.add_argument(
-        "--fix",
-        action="store_true",
-        help="Auto-fix fixable issues found by --security-audit",
+        "--fix", action="store_true", help="Auto-fix fixable issues found by --security-audit"
     )
     parser.add_argument(
         "--pii-scan",
@@ -266,13 +302,6 @@ Examples:
         type=str,
         default=None,
         help="Host to bind web server (default: auto-detect; 0.0.0.0 on headless servers)",
-    )
-    parser.add_argument(
-        "--port",
-        "-p",
-        type=int,
-        default=8888,
-        help="Port for web server (default: 8888; auto-falls back if busy)",
     )
     parser.add_argument("--dev", action="store_true", help="Development mode with auto-reload")
     parser.add_argument(
@@ -286,20 +315,13 @@ Examples:
         help="Check OpenAI-compatible endpoint connectivity and tool calling support",
     )
     parser.add_argument(
-        "--doctor",
-        action="store_true",
-        help="(deprecated: use 'pocketpaw doctor') Run diagnostics",
+        "--doctor", action="store_true", help="(deprecated: use 'pocketpaw doctor') Run diagnostics"
     )
     parser.add_argument(
-        "--version",
-        "-v",
-        action="version",
-        version=f"%(prog)s {get_version('pocketpaw')}",
+        "--version", "-v", action="version", version=f"%(prog)s {get_version('pocketpaw')}"
     )
     parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output as JSON (works with most subcommands)",
+        "--json", action="store_true", help="Output as JSON (works with most subcommands)"
     )
     parser.add_argument(
         "--watch",
@@ -309,8 +331,14 @@ Examples:
         default=0,
         help="Watch mode: refresh status every N seconds (default: 2)",
     )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=8888,
+        help="Port for web server (default: 8888; auto-falls back if busy)",
+    )
 
-    # ── Subcommand (positional) ─────────────────────────────────────────
     parser.add_argument(
         "command",
         nargs="?",
@@ -328,17 +356,11 @@ Examples:
             "config",
             "errors",
             "logs",
+            "template",
         ],
         help="Subcommand to run",
     )
-    parser.add_argument(
-        "subargs",
-        nargs="*",
-        default=[],
-        help=argparse.SUPPRESS,
-    )
-
-    # ── Flags for subcommands (shared namespace) ────────────────────────
+    parser.add_argument("subargs", nargs="*", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--search", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--limit",
@@ -347,6 +369,75 @@ Examples:
         help="Limit number of results (for errors, logs, sessions, memory)",
     )
     parser.add_argument("--follow", action="store_true", help="Tail mode (for logs)")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompts (for template migrate)",
+    )
+    parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip backup creation (for template migrate)",
+    )
+    parser.add_argument(
+        "--yaml",
+        action="store_true",
+        help="Emit YAML instead of JSON (for template compile)",
+    )
+    # ── Wave 4a registry flags (template publish / install / upgrade) ──
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Output directory for template publish (default: ./)",
+    )
+    parser.add_argument(
+        "--key",
+        type=str,
+        default=None,
+        help=("Ed25519 signing key file (raw 32 bytes or 64-char hex) for template publish"),
+    )
+    parser.add_argument(
+        "--unsigned",
+        action="store_true",
+        help="Explicitly publish an unsigned bundle (mutually exclusive with --key)",
+    )
+    parser.add_argument(
+        "--dest",
+        "-d",
+        type=str,
+        default=None,
+        help="Destination directory for template install / upgrade",
+    )
+    parser.add_argument(
+        "--verify-key",
+        type=str,
+        default=None,
+        dest="verify_key",
+        help="Ed25519 public key file for template install signature verification",
+    )
+    parser.add_argument(
+        "--no-prompt",
+        action="store_true",
+        dest="no_prompt",
+        help=(
+            "Refuse to apply a destructive template upgrade rather than "
+            "prompting interactively (exit code 2)"
+        ),
+    )
+    # ── Wave 4b lint flag ──
+    parser.add_argument(
+        "--registry",
+        type=str,
+        default=None,
+        dest="registry",
+        help=(
+            "JSON Fabric-registry file for `template lint`. Defaults to "
+            "NullFabricRegistry (synthetic-tier templates lint clean; "
+            "registered-tier surfaces errors)."
+        ),
+    )
 
     return parser
 
@@ -360,8 +451,15 @@ def _resolve_subargs(args) -> None:
     subargs = args.subargs or []
     args.subaction = None
     args.query = None
-    args.key = None
+    # NB: do NOT reset args.key here. ``--key`` is an argparse flag used by
+    # ``template publish`` to point at an Ed25519 signing key file; argparse
+    # already populates it (default=None). The ``config`` branch below
+    # overwrites it from positional subargs[1] when that command is used.
+    # Unconditionally resetting here silently dropped the signing key —
+    # see the smoke-test finding for pocketpaw#1283.
     args.value = None
+    args.file1 = None
+    args.file2 = None
 
     cmd = args.command
 
@@ -383,6 +481,13 @@ def _resolve_subargs(args) -> None:
             args.key = subargs[1]
         if len(subargs) > 2:
             args.value = subargs[2]
+    elif cmd == "template" and subargs:
+        # pocketpaw template <lint|migrate|diff> <file1> [<file2>]
+        args.subaction = subargs[0]
+        if len(subargs) > 1:
+            args.file1 = subargs[1]
+        if len(subargs) > 2:
+            args.file2 = subargs[2]
 
     if args.limit is None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
@@ -390,24 +495,38 @@ def _resolve_subargs(args) -> None:
 
 
 def _serve(
-    fn, *args, port: int = 8888, max_attempts: int = 10, host: str = "127.0.0.1", **kwargs
+    fn,
+    *args,
+    port: int = 8888,
+    max_attempts: int = 10,
+    host: str = "127.0.0.1",
+    **kwargs,
 ) -> None:
     """Start server, retrying with port+1 on EADDRINUSE.
 
-    Uses SO_REUSEADDR socket probe as best-effort pre-check (fast feedback),
+    Uses a plain socket probe as best-effort pre-check (fast feedback),
     then passes the port directly to the server. The probe window is tiny so
     the race is acceptable; the real guard is the server bind itself.
     The probe binds to the same host the server will use, fixing the
     0.0.0.0 vs 127.0.0.1 mismatch. Scanning starts from the requested port,
     not from 8000, so fallback is always requested+N.
+    SO_REUSEADDR is set on the probe socket so it mirrors uvicorn's
+    behaviour — uvicorn sets SO_REUSEADDR on its own socket, so the probe
+    must do the same to correctly detect ports briefly held in TIME_WAIT
+    after a clean shutdown as available rather than skipping them.
     """
+
     import errno as _errno
     import socket as _socket
 
     current_port = port
     for attempt in range(max_attempts):
-        # Best-effort probe using same host the server will bind to
+        # Best-effort probe using same host the server will bind to.
+        # SO_REUSEADDR mirrors uvicorn's default so that TIME_WAIT ports
+        # (briefly held after a clean Ctrl+C shutdown) are correctly
+        # detected as available and not skipped to port+1.
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+            s.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, current_port))
             except OSError:
@@ -420,7 +539,7 @@ def _serve(
             fn(*args, port=current_port, host=host, **kwargs)
             return
         except OSError as e:
-            if e.errno in (_errno.EADDRINUSE, 10048):
+            if e.errno in (_errno.EADDRINUSE, 10048):  # 10048 = WSAEADDRINUSE (Windows)
                 next_port = current_port + 1
                 print(f"\n  [WARN] Port {current_port} taken at bind — trying {next_port}\n")
                 current_port = next_port
@@ -435,8 +554,31 @@ def main() -> None:
     """Main entry point."""
     _check_python_version()
     parser = _build_parser()
-    args = parser.parse_args()
+    # parse_known_args lets the template subcommand accept flags
+    # interspersed with positional file paths (e.g.
+    # ``pocketpaw template migrate --yes /path/to/file``). argparse's
+    # default `parse_args` aborts on the trailing positional because
+    # the nargs="*" subargs collector stops at the first optional. The
+    # unknown leftovers are folded into ``args.subargs`` below so the
+    # existing dispatch logic keeps working.
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        # Reject truly unknown flags (anything starting with `-`) so we
+        # don't silently swallow typos like `--frobnicate`. Bare
+        # positionals are appended to subargs for the active command.
+        bad_flags = [a for a in unknown if a.startswith("-")]
+        if bad_flags:
+            parser.error(f"unrecognized arguments: {' '.join(bad_flags)}")
+        args.subargs = list(args.subargs or []) + [a for a in unknown if not a.startswith("-")]
     _resolve_subargs(args)
+
+    # Reject combining --telegram with other channel flags. Telegram is the
+    # legacy pairing-only path; other channels require the dashboard.
+    _other_channel_flags = ("discord", "slack", "whatsapp", "signal", "matrix", "teams", "gchat")
+    if getattr(args, "telegram", False) and any(
+        getattr(args, f, False) for f in _other_channel_flags
+    ):
+        parser.error("--telegram cannot be combined with other channel flags")
 
     # ── Early-exit commands (no settings, health, or env setup needed) ──
     if args.command in _EARLY_COMMANDS:

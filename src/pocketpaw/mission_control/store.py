@@ -469,6 +469,12 @@ class FileMissionControlStore:
         notifications.sort(key=lambda n: n.created_at, reverse=True)
         return notifications[:limit]
 
+    async def get_all_notifications(self, limit: int = 50) -> list[Notification]:
+        """Get all notifications regardless of agent."""
+        notifications = list(self._notifications.values())
+        notifications.sort(key=lambda n: n.created_at, reverse=True)
+        return notifications[:limit]
+
     async def mark_notification_delivered(self, notification_id: str) -> bool:
         """Mark a notification as delivered."""
         notification = self._notifications.get(notification_id)

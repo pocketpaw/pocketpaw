@@ -23,6 +23,8 @@ class PIIType(StrEnum):
     CREDIT_CARD = "credit_card"
     IP_ADDRESS = "ip_address"
     DATE_OF_BIRTH = "date_of_birth"
+    PASSPORT = "passport"
+    BANK_ACCOUNT = "bank_account"
 
 
 class PIIAction(StrEnum):
@@ -70,6 +72,10 @@ class PIIScanResult:
 _PII_PATTERNS: list[tuple[str, PIIType, int]] = [
     # SSN: 123-45-6789 (dashed format only — bare 9-digit has too many false positives)
     (r"\b\d{3}-\d{2}-\d{4}\b", PIIType.SSN, 0),
+    # SSN: 123 45 6789 (space-separated)
+    (r"\b\d{3}\s\d{2}\s\d{4}\b", PIIType.SSN, 0),
+    # SSN: contextual bare 9-digit (requires keyword nearby)
+    (r"(?:ssn|social security)\s*(?:number|num|no|#)?[\s:]*\b\d{9}\b", PIIType.SSN, re.IGNORECASE),
     # Email addresses
     (r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b", PIIType.EMAIL, 0),
     # US phone: (555) 123-4567, 555-123-4567, 555.123.4567, +1 555-123-4567
@@ -94,6 +100,20 @@ _PII_PATTERNS: list[tuple[str, PIIType, int]] = [
     (
         r"\b(?:born|dob|birthday|date of birth)\b.{0,20}\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
         PIIType.DATE_OF_BIRTH,
+        re.IGNORECASE,
+    ),
+    # Passport number (contextual — requires "passport" keyword)
+    (
+        r"(?:passport)\s*(?:number|num|no|#)?[\s:]*\b[A-Z0-9]{6,9}\b",
+        PIIType.PASSPORT,
+        re.IGNORECASE,
+    ),
+    # IBAN — contextual: requires "iban" keyword nearby to avoid false positives
+    # on arbitrary uppercase strings (e.g. AWS resource ARNs, UUIDs).
+    # Real IBANs are 15-34 chars: CC (country) + 2 check digits + 11-30 alphanumeric.
+    (
+        r"\biban\b[\s:]*[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
+        PIIType.BANK_ACCOUNT,
         re.IGNORECASE,
     ),
 ]

@@ -14,9 +14,15 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
+from pocketpaw.tools.policy import ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +32,7 @@ def _get_session_db_path() -> Path:
     return Path.home() / ".pocketpaw" / "openai_agents_sessions.db"
 
 
-class OpenAIAgentsBackend:
+class OpenAIAgentsBackend(BaseAgentBackend):
     """OpenAI Agents SDK backend — supports GPT models and Ollama/local via OpenAI-compat."""
 
     @staticmethod
@@ -63,7 +69,19 @@ class OpenAIAgentsBackend:
         self._sqlite_session_available = False
         self._sessions: dict[str, Any] = {}  # session_key -> SQLiteSession
         self._custom_tools: list | None = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         self._initialize()
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+        self._custom_tools = None
 
     def _initialize(self) -> None:
         try:
@@ -150,14 +168,21 @@ class OpenAIAgentsBackend:
         return "Tool"
 
     def _build_custom_tools(self) -> list:
-        """Lazily build and cache PocketPaw custom tools as FunctionTool wrappers."""
+        """Lazily build and cache PocketPaw custom tools as FunctionTool wrappers.
+
+        The pocket specialist tool is injected automatically by
+        ``tool_bridge._instantiate_all_tools`` so it shows up in this list
+        without per-backend wiring.
+        """
         if self._custom_tools is not None:
             return self._custom_tools
         try:
             from pocketpaw.agents.tool_bridge import build_openai_function_tools
 
             # Cache tools at init; the tool set doesn't change at runtime.
-            self._custom_tools = build_openai_function_tools(self.settings, backend="openai_agents")
+            self._custom_tools = build_openai_function_tools(
+                self.settings, backend="openai_agents", policy=self._policy
+            )
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -238,6 +263,17 @@ class OpenAIAgentsBackend:
                 instructions = self._inject_history(instructions, history)
 
             custom_tools = self._build_custom_tools()
+
+            # Composio — per-stream integration tools via the documented
+            # ``composio_openai_agents`` provider, discovered through the
+            # ``pocketpaw.composio_tools`` entry point.
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("openai_agents", self.settings)
+            if composio_tools:
+                custom_tools = list(custom_tools) + list(composio_tools)
+                logger.info("Composio: appended %d openai-agents tools", len(composio_tools))
+
             agent = Agent(
                 name="PocketPaw",
                 instructions=instructions,

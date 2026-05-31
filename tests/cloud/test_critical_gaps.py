@@ -10,7 +10,7 @@ import pytest
 
 from pocketpaw.connectors.yaml_engine import DirectRESTAdapter, parse_connector_yaml
 
-CONNECTORS_DIR = Path(__file__).parent.parent / "connectors"
+CONNECTORS_DIR = Path(__file__).parent.parent.parent / "connectors"
 
 
 # --- Gap 1: Real HTTP in DirectRESTAdapter ---
@@ -126,7 +126,7 @@ class TestFabricTools:
 
     @pytest.mark.asyncio
     async def test_fabric_query_with_results(self):
-        from ee.fabric.models import FabricObject, FabricQueryResult
+        from pocketpaw.fabric.models import FabricObject, FabricQueryResult
         from pocketpaw.tools.builtin.fabric_tools import FabricQueryTool
 
         mock_store = MagicMock()
@@ -160,7 +160,7 @@ class TestFabricTools:
 
     @pytest.mark.asyncio
     async def test_fabric_create_object(self):
-        from ee.fabric.models import FabricObject, ObjectType
+        from pocketpaw.fabric.models import FabricObject, ObjectType
         from pocketpaw.tools.builtin.fabric_tools import FabricCreateTool
 
         mock_store = MagicMock()
@@ -190,7 +190,7 @@ class TestFabricTools:
 class TestInstinctTools:
     @pytest.mark.asyncio
     async def test_propose_action(self):
-        from ee.instinct.models import Action, ActionTrigger
+        from pocketpaw.instinct.models import Action, ActionTrigger
         from pocketpaw.tools.builtin.instinct_tools import InstinctProposeTool
 
         mock_store = MagicMock()
@@ -236,7 +236,7 @@ class TestInstinctTools:
 
     @pytest.mark.asyncio
     async def test_audit_query(self):
-        from ee.instinct.models import AuditEntry
+        from pocketpaw.instinct.models import AuditEntry
         from pocketpaw.tools.builtin.instinct_tools import InstinctAuditTool
 
         mock_store = MagicMock()

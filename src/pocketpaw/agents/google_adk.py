@@ -15,7 +15,12 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
@@ -26,7 +31,7 @@ logger = logging.getLogger(__name__)
 _APP_NAME = "pocketpaw"
 
 
-class GoogleADKBackend:
+class GoogleADKBackend(BaseAgentBackend):
     """Google ADK backend — native Python SDK for Gemini-powered agents."""
 
     @staticmethod
@@ -63,7 +68,19 @@ class GoogleADKBackend:
         self._runner: Any = None
         self._sessions: dict[str, str] = {}  # session_key -> session_id
         self._custom_tools: list | None = None
+        self._policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
         self._initialize()
+
+    def get_tool_policy(self) -> ToolPolicy:
+        return self._policy
+
+    def set_tool_policy(self, policy: ToolPolicy) -> None:
+        self._policy = policy
+        self._custom_tools = None
 
     def _initialize(self) -> None:
         try:
@@ -103,14 +120,21 @@ class GoogleADKBackend:
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
 
     def _build_custom_tools(self) -> list:
-        """Lazily build and cache PocketPaw custom tools as ADK FunctionTool wrappers."""
+        """Lazily build and cache PocketPaw custom tools as ADK FunctionTool wrappers.
+
+        The pocket specialist tool is injected automatically by
+        ``tool_bridge._instantiate_all_tools`` so it shows up in this list
+        without per-backend wiring.
+        """
         if self._custom_tools is not None:
             return self._custom_tools
         try:
             from pocketpaw.agents.tool_bridge import build_adk_function_tools
 
             # Cache tools at init; the tool set doesn't change at runtime.
-            self._custom_tools = build_adk_function_tools(self.settings, backend="google_adk")
+            self._custom_tools = build_adk_function_tools(
+                self.settings, backend="google_adk", policy=self._policy
+            )
         except Exception as exc:
             logger.debug("Could not build custom tools: %s", exc)
             self._custom_tools = []
@@ -138,11 +162,7 @@ class GoogleADKBackend:
         if not configs:
             return []
 
-        policy = ToolPolicy(
-            profile=self.settings.tool_profile,
-            allow=self.settings.tools_allow,
-            deny=self.settings.tools_deny,
-        )
+        policy = self._policy
 
         toolsets: list = []
         for cfg in configs:
@@ -242,8 +262,16 @@ class GoogleADKBackend:
 
             instruction = system_prompt or _DEFAULT_IDENTITY
 
-            # Build tools: custom PocketPaw tools + MCP toolsets
+            # Build tools: custom PocketPaw tools + MCP toolsets + Composio
+            # (per-stream via the documented composio_google_adk provider,
+            # discovered through the ``pocketpaw.composio_tools`` entry point).
             tools = self._build_custom_tools() + self._build_mcp_toolsets()
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("google_adk", self.settings)
+            if composio_tools:
+                tools = tools + list(composio_tools)
+                logger.info("Composio: appended %d ADK tools", len(composio_tools))
 
             # Session management: reuse sessions for multi-turn, seed history on first call
             user_id = "pocketpaw_user"

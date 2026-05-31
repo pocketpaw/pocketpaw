@@ -71,12 +71,11 @@ async def beanie_db():
     Uses a unique database name per test run to avoid collisions.
     Drops the database after tests complete.
     """
+    # Reset license cache so env vars take effect
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    # Reset license cache so env vars take effect
-    import ee.cloud.license as lic_mod
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -95,8 +94,8 @@ async def beanie_db():
 async def app(license_env, beanie_db) -> FastAPI:
     """Build a FastAPI app with cloud routes mounted, agent pool mocked."""
     # Reset license module cache before mounting
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
+    import pocketpaw_ee.cloud.license as lic_mod
+    from pocketpaw_ee.cloud import mount_cloud
 
     lic_mod._cached_license = None
 
@@ -443,7 +442,7 @@ class TestWorkspaceFlow:
         """Workspace routes require a valid license."""
         auth = await _register_and_login(http)
         with patch.dict(os.environ, {"POCKETPAW_LICENSE_KEY": ""}):
-            import ee.cloud.license as lic_mod
+            import pocketpaw_ee.cloud.license as lic_mod
 
             lic_mod._cached_license = None
             lic_mod._license_error = None
@@ -1225,3 +1224,274 @@ class TestCrossDomainFlows:
         assert r.status_code == 200
         results = r.json()
         assert isinstance(results, list)
+
+
+# ===========================================================================
+# AGENT DM FLOW
+# ===========================================================================
+
+
+async def _setup_ws(http: AsyncClient) -> dict:
+    """Register user, create workspace, set active. Return auth context."""
+    auth = await _register_and_login(http)
+    ws = await _make_workspace(http, auth["headers"])
+    await http.post(
+        "/api/v1/auth/set-active-workspace",
+        json={"workspace_id": ws["_id"]},
+        headers=auth["headers"],
+    )
+    return {**auth, "workspace_id": ws["_id"]}
+
+
+async def _create_agent(
+    http: AsyncClient, headers: dict, *, slug: str | None = None, visibility: str = "workspace"
+) -> dict:
+    """Create an agent in the caller's active workspace and return the response."""
+    slug = slug or f"agent-{uuid.uuid4().hex[:8]}"
+    r = await http.post(
+        "/api/v1/agents",
+        json={
+            "name": f"Agent {slug}",
+            "slug": slug,
+            "visibility": visibility,
+            "backend": "claude_agent_sdk",
+        },
+        headers=headers,
+    )
+    assert r.status_code == 200, f"Create agent failed: {r.text}"
+    return r.json()
+
+
+class TestAgentDMFlow:
+    """Tests for POST /chat/dm-agent/{agent_id} — 1:1 DM with an agent."""
+
+    async def test_create_agent_dm_returns_dm_group(self, http: AsyncClient):
+        ctx = await _setup_ws(http)
+        agent = await _create_agent(http, ctx["headers"])
+        r = await http.post(f"/api/v1/chat/dm-agent/{agent['_id']}", headers=ctx["headers"])
+        assert r.status_code == 200, r.text
+        dm = r.json()
+        assert dm["type"] == "dm"
+        assert dm["members"] and dm["members"][0]["_id"] == ctx["user_id"]
+        assert any(a["agent"] == agent["_id"] for a in dm["agents"])
+        assert dm["owner"] == ctx["user_id"]
+
+    async def test_agent_dm_is_idempotent(self, http: AsyncClient):
+        ctx = await _setup_ws(http)
+        agent = await _create_agent(http, ctx["headers"])
+        r1 = await http.post(f"/api/v1/chat/dm-agent/{agent['_id']}", headers=ctx["headers"])
+        r2 = await http.post(f"/api/v1/chat/dm-agent/{agent['_id']}", headers=ctx["headers"])
+        assert r1.json()["_id"] == r2.json()["_id"]
+
+    async def test_agent_dm_respond_mode_is_auto(self, http: AsyncClient):
+        ctx = await _setup_ws(http)
+        agent = await _create_agent(http, ctx["headers"])
+        r = await http.post(f"/api/v1/chat/dm-agent/{agent['_id']}", headers=ctx["headers"])
+        dm = r.json()
+        ga = next(a for a in dm["agents"] if a["agent"] == agent["_id"])
+        assert ga["respond_mode"] == "auto"
+
+    async def test_agent_dm_nonexistent_agent_returns_404(self, http: AsyncClient):
+        ctx = await _setup_ws(http)
+        # Use a valid-looking but nonexistent ObjectId
+        r = await http.post(
+            "/api/v1/chat/dm-agent/507f1f77bcf86cd799439011", headers=ctx["headers"]
+        )
+        assert r.status_code == 404
+
+    async def test_agent_dm_invalid_agent_id_returns_404(self, http: AsyncClient):
+        ctx = await _setup_ws(http)
+        r = await http.post("/api/v1/chat/dm-agent/not-an-object-id", headers=ctx["headers"])
+        assert r.status_code == 404
+
+    async def test_agent_dm_hidden_private_agent_from_other_user_returns_404(
+        self, http: AsyncClient
+    ):
+        # Owner creates a private agent; another user in the same workspace cannot DM it.
+        owner = await _setup_ws(http)
+        private_agent = await _create_agent(http, owner["headers"], visibility="private")
+
+        invitee_email = _unique_email()
+        r_inv = await http.post(
+            f"/api/v1/workspaces/{owner['workspace_id']}/invites",
+            json={"email": invitee_email},
+            headers=owner["headers"],
+        )
+        token = r_inv.json()["token"]
+        invitee = await _register_and_login(http, email=invitee_email)
+        await http.post(f"/api/v1/workspaces/invites/{token}/accept", headers=invitee["headers"])
+        await http.post(
+            "/api/v1/auth/set-active-workspace",
+            json={"workspace_id": owner["workspace_id"]},
+            headers=invitee["headers"],
+        )
+
+        r = await http.post(
+            f"/api/v1/chat/dm-agent/{private_agent['_id']}", headers=invitee["headers"]
+        )
+        assert r.status_code == 404
+
+
+# ===========================================================================
+# MEMBER ROLES FLOW
+# ===========================================================================
+
+
+async def _invite_user_to_ws(
+    http: AsyncClient, owner_ctx: dict, invitee_email: str | None = None
+) -> dict:
+    """Invite a fresh user to the owner's workspace, return invitee's auth ctx."""
+    email = invitee_email or _unique_email()
+    r_inv = await http.post(
+        f"/api/v1/workspaces/{owner_ctx['workspace_id']}/invites",
+        json={"email": email},
+        headers=owner_ctx["headers"],
+    )
+    token = r_inv.json()["token"]
+    invitee = await _register_and_login(http, email=email)
+    await http.post(f"/api/v1/workspaces/invites/{token}/accept", headers=invitee["headers"])
+    await http.post(
+        "/api/v1/auth/set-active-workspace",
+        json={"workspace_id": owner_ctx["workspace_id"]},
+        headers=invitee["headers"],
+    )
+    return invitee
+
+
+class TestMemberRolesFlow:
+    """Tests for per-member edit/view roles in chat groups."""
+
+    async def _make_group_with_member(
+        self, http: AsyncClient, role: str = "edit"
+    ) -> tuple[dict, dict, str]:
+        """Create a group, invite a second user, add them with the given role.
+
+        Returns (owner_ctx, member_ctx, group_id).
+        """
+        owner = await _setup_ws(http)
+        r = await http.post(
+            "/api/v1/chat/groups",
+            json={"name": "roles-test"},
+            headers=owner["headers"],
+        )
+        group_id = r.json()["_id"]
+        member = await _invite_user_to_ws(http, owner)
+        add = await http.post(
+            f"/api/v1/chat/groups/{group_id}/members",
+            json={"user_ids": [member["user_id"]], "role": role},
+            headers=owner["headers"],
+        )
+        assert add.status_code == 200, add.text
+        return owner, member, group_id
+
+    async def test_add_view_member_persists_role(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="view")
+        r = await http.get(f"/api/v1/chat/groups/{group_id}", headers=owner["headers"])
+        data = r.json()
+        assert data["memberRoles"].get(member["user_id"]) == "view"
+
+    async def test_add_edit_member_has_no_role_entry(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="edit")
+        r = await http.get(f"/api/v1/chat/groups/{group_id}", headers=owner["headers"])
+        data = r.json()
+        # edit = default; no entry stored
+        assert member["user_id"] not in data["memberRoles"]
+
+    async def test_view_member_cannot_send_message(self, http: AsyncClient):
+        _owner, member, group_id = await self._make_group_with_member(http, role="view")
+        r = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "try me"},
+            headers=member["headers"],
+        )
+        assert r.status_code == 403
+        assert "view_only" in r.text.lower() or "read-only" in r.text.lower()
+
+    async def test_view_member_cannot_react(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="view")
+        # Owner sends a message
+        r_msg = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "hi"},
+            headers=owner["headers"],
+        )
+        msg_id = r_msg.json()["_id"]
+        # Viewer tries to react
+        r = await http.post(
+            f"/api/v1/chat/messages/{msg_id}/react",
+            json={"emoji": "👍"},
+            headers=member["headers"],
+        )
+        assert r.status_code == 403
+
+    async def test_owner_can_promote_view_to_edit(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="view")
+        r = await http.patch(
+            f"/api/v1/chat/groups/{group_id}/members/{member['user_id']}/role",
+            json={"role": "edit"},
+            headers=owner["headers"],
+        )
+        assert r.status_code == 200
+        assert r.json()["role"] == "edit"
+        # Now the member can post
+        r_post = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "now i can"},
+            headers=member["headers"],
+        )
+        assert r_post.status_code == 200
+
+    async def test_owner_can_demote_edit_to_view(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="edit")
+        r = await http.patch(
+            f"/api/v1/chat/groups/{group_id}/members/{member['user_id']}/role",
+            json={"role": "view"},
+            headers=owner["headers"],
+        )
+        assert r.status_code == 200
+        # Member now blocked
+        r_post = await http.post(
+            f"/api/v1/chat/groups/{group_id}/messages",
+            json={"content": "blocked"},
+            headers=member["headers"],
+        )
+        assert r_post.status_code == 403
+
+    async def test_non_owner_cannot_change_role(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="edit")
+        # Member tries to downgrade themselves (or anyone) → 403
+        r = await http.patch(
+            f"/api/v1/chat/groups/{group_id}/members/{member['user_id']}/role",
+            json={"role": "view"},
+            headers=member["headers"],
+        )
+        assert r.status_code == 403
+
+    async def test_cannot_change_owner_role(self, http: AsyncClient):
+        owner, _member, group_id = await self._make_group_with_member(http, role="edit")
+        r = await http.patch(
+            f"/api/v1/chat/groups/{group_id}/members/{owner['user_id']}/role",
+            json={"role": "view"},
+            headers=owner["headers"],
+        )
+        assert r.status_code == 403
+
+    async def test_invalid_role_returns_422(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="edit")
+        r = await http.patch(
+            f"/api/v1/chat/groups/{group_id}/members/{member['user_id']}/role",
+            json={"role": "admin"},
+            headers=owner["headers"],
+        )
+        # Pydantic Literal validation rejects it at schema level
+        assert r.status_code == 422
+
+    async def test_remove_member_clears_role_entry(self, http: AsyncClient):
+        owner, member, group_id = await self._make_group_with_member(http, role="view")
+        r = await http.delete(
+            f"/api/v1/chat/groups/{group_id}/members/{member['user_id']}",
+            headers=owner["headers"],
+        )
+        assert r.status_code == 204
+        r_get = await http.get(f"/api/v1/chat/groups/{group_id}", headers=owner["headers"])
+        assert member["user_id"] not in r_get.json()["memberRoles"]

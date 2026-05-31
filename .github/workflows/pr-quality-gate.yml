@@ -367,7 +367,7 @@ jobs:
 
       - name: Check for secrets in diff
         run: |
-          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!uv.lock' ':!*.lock' ':!src/pocketpaw/security/redact.py' ':!tests/test_redact.py' ':!tests/test_pii.py' 2>/dev/null || true)
+          DIFF=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -- . ':!uv.lock' ':!*.lock' ':!src/pocketpaw/security/redact.py' ':!tests/test_redact.py' ':!tests/test_pii.py' ':!tests/test_logging_scrub.py' 2>/dev/null || true)
           if [ -z "$DIFF" ]; then
             echo "No diff to scan."
             exit 0

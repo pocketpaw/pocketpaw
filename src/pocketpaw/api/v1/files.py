@@ -1,5 +1,7 @@
 # File browser router — directory listing + file content serving.
 # Created: 2026-02-20
+# 2026-04-16: Router-level files:read scope guard + symlink filter in
+# /files/download-zip. Closes #884 and #886.
 
 from __future__ import annotations
 
@@ -25,7 +27,10 @@ from pocketpaw.api.v1.schemas.files import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["Files"])
+# All read endpoints require files:read. The write endpoint tightens this
+# further to files:write on its own decorator. This guards against scopeless
+# API keys reading arbitrary paths (issues #884, #886).
+router = APIRouter(tags=["Files"], dependencies=[Depends(require_scope("files:read"))])
 
 
 @router.get("/files/browse", response_model=BrowseResponse)
@@ -243,6 +248,24 @@ async def download_dir_as_zip(path: str):
     cumulative_size = 0
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for file_path in sorted(resolved.rglob("*")):
+            # Symlink traversal guard (#886): skip any symlink, and belt-and-braces
+            # verify the resolved path is still inside the jail before adding it.
+            if file_path.is_symlink():
+                logger.warning(
+                    "Skipping symlink during zip to avoid jail escape: %s",
+                    file_path,
+                )
+                continue
+            try:
+                real_path = file_path.resolve()
+            except OSError:
+                continue
+            if not is_safe_path(real_path, jail):
+                logger.warning(
+                    "Skipping file that resolves outside jail: %s",
+                    file_path,
+                )
+                continue
             if file_path.is_file() and not file_path.name.startswith("."):
                 try:
                     fsize = file_path.stat().st_size

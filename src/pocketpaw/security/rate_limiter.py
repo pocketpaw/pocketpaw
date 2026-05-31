@@ -3,6 +3,7 @@
 Pre-configured tiers:
   - api:      10 req/s, burst 30  (general API endpoints)
   - auth:      1 req/s, burst  5  (token/QR endpoints)
+  - login:    5 per 15 min, burst 5  (login/register/bearer-login, keyed by (ip, email))
   - ws:        2 conn/s, burst  5  (WebSocket connections)
   - api_key:   configurable per-key limiter (default 60 req/min)
 
@@ -12,6 +13,7 @@ No external dependencies — pure stdlib.
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 __all__ = [
@@ -19,6 +21,8 @@ __all__ = [
     "RateLimitInfo",
     "api_limiter",
     "auth_limiter",
+    "login_limiter",
+    "mfa_challenge_limiter",
     "ws_limiter",
     "get_api_key_limiter",
     "cleanup_all",
@@ -73,6 +77,10 @@ class RateLimiter:
         self.rate = rate
         self.capacity = capacity
         self._buckets: dict[str, _Bucket] = {}
+        # Guards the whole check-and-decrement so that concurrent requests
+        # can't both see `tokens >= 1.0` and both decrement (issue #891).
+        # The operation is O(1), so the lock is near-zero cost in practice.
+        self._lock = threading.Lock()
 
     def allow(self, key: str) -> bool:
         """Return True if the request is allowed, consuming one token."""
@@ -82,38 +90,72 @@ class RateLimiter:
         """Check rate limit and return detailed info with header values."""
         now = time.monotonic()
 
-        if key not in self._buckets:
-            self._buckets[key] = _Bucket(self.capacity, now)
+        with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = _Bucket(self.capacity, now)
+            bucket = self._buckets[key]
 
-        bucket = self._buckets[key]
+            # Refill tokens since last check
+            elapsed = now - bucket.last_refill
+            bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
+            bucket.last_refill = now
 
-        # Refill tokens since last check
-        elapsed = now - bucket.last_refill
-        bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
-        bucket.last_refill = now
+            if bucket.tokens >= 1.0:
+                bucket.tokens -= 1.0
+                remaining = int(bucket.tokens)
+                reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
+                return RateLimitInfo(True, self.capacity, remaining, reset_after)
 
-        if bucket.tokens >= 1.0:
-            bucket.tokens -= 1.0
-            remaining = int(bucket.tokens)
-            reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
-            return RateLimitInfo(True, self.capacity, remaining, reset_after)
+            # Denied — compute time until next token
+            reset_after = (1.0 - bucket.tokens) / self.rate if self.rate > 0 else 1.0
+            return RateLimitInfo(False, self.capacity, 0, reset_after)
 
-        # Denied — compute time until next token
-        reset_after = (1.0 - bucket.tokens) / self.rate if self.rate > 0 else 1.0
-        return RateLimitInfo(False, self.capacity, 0, reset_after)
+    def try_consume(self, key: str, n: int) -> RateLimitInfo:
+        """Atomically consume ``n`` tokens if available — no partial consumption.
+
+        Why: callers that need N tokens (e.g. bulk-create endpoints) can't
+        use ``check()`` in a loop without burning the budget when the Nth
+        call fails. ``try_consume`` checks once and decrements all-or-nothing.
+        """
+        if n <= 0:
+            return self.check(key)
+        now = time.monotonic()
+        with self._lock:
+            if key not in self._buckets:
+                self._buckets[key] = _Bucket(self.capacity, now)
+            bucket = self._buckets[key]
+            elapsed = now - bucket.last_refill
+            bucket.tokens = min(self.capacity, bucket.tokens + elapsed * self.rate)
+            bucket.last_refill = now
+
+            if bucket.tokens >= float(n):
+                bucket.tokens -= float(n)
+                remaining = int(bucket.tokens)
+                reset_after = (self.capacity - bucket.tokens) / self.rate if self.rate > 0 else 0
+                return RateLimitInfo(True, self.capacity, remaining, reset_after)
+
+            deficit = float(n) - bucket.tokens
+            reset_after = deficit / self.rate if self.rate > 0 else 1.0
+            return RateLimitInfo(False, self.capacity, int(bucket.tokens), reset_after)
 
     def cleanup(self, max_age: float = 3600.0) -> int:
         """Remove stale entries older than *max_age* seconds. Returns count removed."""
         now = time.monotonic()
-        stale = [k for k, b in self._buckets.items() if now - b.last_refill > max_age]
-        for k in stale:
-            del self._buckets[k]
-        return len(stale)
+        with self._lock:
+            stale = [k for k, b in self._buckets.items() if now - b.last_refill > max_age]
+            for k in stale:
+                del self._buckets[k]
+            return len(stale)
 
 
 # Pre-configured limiter instances
 api_limiter = RateLimiter(rate=10.0, capacity=30)
 auth_limiter = RateLimiter(rate=1.0, capacity=5)
+# Login / register / bearer-login: 5 attempts per 15 min, keyed by (ip, email)
+# so attackers can't bypass the bucket by rotating the email field behind one IP.
+login_limiter = RateLimiter(rate=5.0 / 900.0, capacity=5)
+# MFA challenge: 5 wrong codes per 5 min, keyed by (ip, mfa_token_jti).
+mfa_challenge_limiter = RateLimiter(rate=5.0 / 300.0, capacity=5)
 ws_limiter = RateLimiter(rate=2.0, capacity=5)
 _api_key_limiter: RateLimiter | None = None
 
@@ -134,7 +176,13 @@ def get_api_key_limiter() -> RateLimiter:
 
 def cleanup_all() -> int:
     """Run cleanup on all global limiters. Returns total entries removed."""
-    total = api_limiter.cleanup() + auth_limiter.cleanup() + ws_limiter.cleanup()
+    total = (
+        api_limiter.cleanup()
+        + auth_limiter.cleanup()
+        + login_limiter.cleanup()
+        + mfa_challenge_limiter.cleanup()
+        + ws_limiter.cleanup()
+    )
     if _api_key_limiter is not None:
         total += _api_key_limiter.cleanup()
     return total

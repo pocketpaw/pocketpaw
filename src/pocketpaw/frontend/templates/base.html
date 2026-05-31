@@ -38,7 +38,7 @@
     <link rel="stylesheet" href="/static/css/styles.css?v={{ v }}" />
 
     <!-- UnoCSS Runtime (utilities alongside custom CSS) -->
-    <script>
+    <script nonce="{{ request.state.csp_nonce }}">
       window.__unocss = {
         theme: {
           colors: {
@@ -65,8 +65,8 @@
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 
     <!-- Syntax highlighting (file viewer) -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/atom-one-dark.min.css" />
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
 
     <!-- QR code generation (WhatsApp pairing) -->
     <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
@@ -308,11 +308,12 @@
     <script src="/static/js/features/hash-router.js?v={{ v }}"></script>
     <script src="/static/js/features/project-browser.js?v={{ v }}"></script>
     <script src="/static/js/features/health.js?v={{ v }}"></script>
+    <script src="/static/js/features/analytics.js?v={{ v }}"></script>
     <!-- Main app (assembles features) -->
     <script src="/static/js/app.js?v={{ v }}"></script>
 
     <!-- Initialize Lucide icons + dismiss preloader -->
-    <script>
+    <script nonce="{{ request.state.csp_nonce }}">
       // Initial render
       document.addEventListener('DOMContentLoaded', () => {
         lucide.createIcons();

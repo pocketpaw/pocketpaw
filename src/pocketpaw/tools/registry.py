@@ -2,6 +2,13 @@
 # Created: 2026-02-02
 # Updated: 2026-02-25 — Strengthen param validation: also reject None for required params.
 # Updated: 2026-03-29 — Also reject empty/whitespace-only strings for required params (#793).
+# Updated: 2026-04-16 — Debug log scrubs params so that credentials in tool
+# inputs don't leak to stdout if DEBUG logging is on (#890 belt-and-braces;
+# the audit write is already scrubbed centrally in AuditLogger.log).
+# Updated: 2026-05-21 (#1160) — execute() caps oversized tool results via
+# cap_tool_output() so a noisy blob can't flood agent context. This is the
+# universal chokepoint: it also covers tools (shell, run_python) that return
+# strings directly without going through BaseTool._success.
 
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ import logging
 from typing import Any
 
 from pocketpaw.security import AuditSeverity, get_audit_logger
+from pocketpaw.security.scrub import scrub_params
 from pocketpaw.tools.policy import ToolPolicy
 from pocketpaw.tools.protocol import ToolProtocol
 
@@ -136,7 +144,7 @@ class ToolRegistry:
 
         timeout = getattr(tool, "timeout", DEFAULT_TOOL_TIMEOUT)
         try:
-            logger.debug(f"🔧 Executing {name} with {params}")
+            logger.debug("🔧 Executing %s with %s", name, scrub_params(params))
             result = await asyncio.wait_for(tool.execute(**params), timeout=timeout)
 
             # Audit Log: Success
@@ -157,6 +165,21 @@ class ToolRegistry:
                         result = scan.sanitized_content
             except Exception:
                 pass  # Don't let scanner errors break tool execution
+
+            # Output budget — cap a noisy blob before it reaches agent context.
+            # This is the universal chokepoint: it catches tools that return
+            # strings directly (shell, run_python) and not just BaseTool
+            # subclasses that route through _success. Capping is idempotent,
+            # so a result already capped by _success passes through untouched.
+            if result:
+                try:
+                    from pocketpaw.config import get_settings
+                    from pocketpaw.tools.output_budget import cap_tool_output
+
+                    cap = getattr(get_settings(), "tool_output_char_cap", None)
+                    result = cap_tool_output(result, cap=cap, tool_name=name)
+                except Exception:
+                    logger.debug("Tool output cap failed for %s", name, exc_info=True)
 
             # Log truncation to avoid massive log files
             log_result = result[:200] + "..." if len(result) > 200 else result
