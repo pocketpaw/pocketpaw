@@ -156,12 +156,15 @@ class IntentionStore:
 
         return None
 
-    def delete(self, intention_id: str) -> bool:
+    def delete(self, intention_id: str, quiet: bool = False) -> bool:
         """
         Delete an intention.
 
         Args:
             intention_id: ID of the intention to delete
+            quiet: When True, skip the per-deletion INFO log. Bulk callers
+                (e.g. the startup orphan pruner) emit a single summary line
+                instead of one log per item.
 
         Returns:
             True if deleted, False if not found
@@ -171,7 +174,8 @@ class IntentionStore:
                 deleted = self.intentions.pop(i)
                 self._save()
 
-                logger.info(f"Deleted intention: {deleted['name']} ({intention_id})")
+                if not quiet:
+                    logger.info(f"Deleted intention: {deleted['name']} ({intention_id})")
                 return True
 
         return False

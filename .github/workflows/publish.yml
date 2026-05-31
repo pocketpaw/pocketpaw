@@ -1,6 +1,13 @@
 # Publish to PyPI when a release is created
 # Changes: Initial creation for PyPI publishing
 # Updated: skip client-v* release tags (desktop releases), only run on v* backend tags
+#
+# OSS-EE split (Phase 4): this workflow publishes the OSS core `pocketpaw`
+# wheel only, and that is intentional. The enterprise `pocketpaw-ee` wheel
+# (ee/pyproject.toml) is deliberately NOT published to PyPI — for the next few
+# releases it is built in-house and deployed privately (the CI `build` job in
+# ci.yml produces it as a downloadable artifact). Revisit only if EE later
+# moves to a public or private package index.
 
 name: Publish to PyPI
 

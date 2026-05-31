@@ -1,0 +1,24 @@
+# Mount config is intentionally reshapeable: entries here may reference
+# providers whose implementations aren't yet registered in the ProviderRegistry.
+# Unregistered providers resolve to `files.mount_not_found` (404) at request
+# time instead of failing at startup.
+- provider_id: uploads
+  mount_template: "/My Files"
+  writable: true
+  order: 10
+- provider_id: kb
+  mount_template: "/Workspaces/{workspace_id}/Knowledge Base"
+  writable: true
+  order: 20
+- provider_id: chat
+  mount_template: "/Shared with me/Chat uploads"
+  writable: false
+  order: 50
+- provider_id: drive
+  mount_template: "/Connected/Google Drive"
+  writable: false
+  order: 80
+- provider_id: local
+  mount_template: "/Local"
+  writable: true
+  order: 90

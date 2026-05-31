@@ -62,6 +62,45 @@ result = await registry.execute("my_tool", param1="value")
 
 The registry automatically filters tools based on the active [tool policy](/tools/tool-policy).
 
+## Output Budget
+
+A tool that returns a large blob — a long test run, a build log, a big HTTP
+response body, verbose command stdout — used to drop that blob straight into
+the agent's context window. That burns tokens and buries the signal the
+agent actually needs.
+
+Every tool result now passes through an output budget before it reaches the
+model. Small results are untouched. A result over the cap is shortened in one
+of two ways:
+
+- **Structured formats** (pytest runs, ruff/flake8 lint output) get a
+  salient-lines extract: the failures, errors, assertion details, and the
+  summary line are kept; the thousands of `PASSED` lines are dropped.
+- **Everything else** gets a deterministic head + tail slice with an elision
+  marker stating how many characters were removed.
+
+The transform runs at two boundaries, so it applies whether a tool returns
+through `BaseTool._success` / `_error` or returns a string directly (the way
+`shell` and `run_python` do):
+
+- `BaseTool._success` and `BaseTool._error`
+- `ToolRegistry.execute` — the universal chokepoint
+
+The transform is deterministic (no LLM call) and idempotent — running it
+twice changes nothing — so applying it at both boundaries never
+double-truncates. The cap defaults to 12,000 characters and is configurable
+through the `tool_output_char_cap` setting.
+
+```python
+from pocketpaw.tools.output_budget import cap_tool_output
+
+# Normal-sized output passes through unchanged.
+cap_tool_output("Wrote 3 files.")            # -> "Wrote 3 files."
+
+# An oversized blob is shortened to <= tool_output_char_cap chars.
+cap_tool_output(huge_test_log)               # -> salient-lines extract
+```
+
 ## Built-in Tools
 
 PocketPaw ships with these built-in tools:

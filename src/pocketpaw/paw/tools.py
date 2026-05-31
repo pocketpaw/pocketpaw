@@ -13,7 +13,7 @@ from pocketpaw.tools.protocol import BaseTool
 if TYPE_CHECKING:
     from soul_protocol import Soul
 
-    from pocketpaw.soul.manager import SoulManager
+    from pocketpaw.soul import SoulManager
 
 
 class SoulRememberTool(BaseTool):

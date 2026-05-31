@@ -75,3 +75,60 @@ class AgentBackend(Protocol):
     def get_tool_policy(self) -> ToolPolicy: ...
 
     def set_tool_policy(self, policy: ToolPolicy) -> None: ...
+
+    def attach_specialist_tools(self, tools: list[Any]) -> None:
+        """Attach pocket-specialist-internal tools to this backend instance.
+
+        Called by the specialist runtime to wire list_pockets / validate_spec /
+        persist_pocket into the LLM's tool surface for the duration of an
+        isolated specialist run.
+
+        Backends that cannot accept dynamic tools at runtime should raise
+        NotImplementedError and will be excluded from the valid
+        ``pocket_specialist_backend`` set.
+        """
+        ...
+
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:
+        """Inject extra env vars into any subprocess this backend spawns.
+
+        Used by the pocket-specialist runtime to thread per-request
+        tenancy (``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        ``POCKETPAW_INTERNAL_TOKEN``) into the Claude Code subprocess
+        WITHOUT mutating the parent process's ``os.environ`` (which
+        would race across concurrent requests — see PR #1222 R1
+        Blocker 1).
+
+        Backends that don't spawn subprocesses can no-op safely.
+        Backends that DO spawn one (claude_sdk, codex_cli) merge the
+        dict into the env passed to that subprocess at spawn time.
+        """
+        ...
+
+
+class BaseAgentBackend:
+    """Default no-op implementations of optional ``AgentBackend`` methods.
+
+    Backends that don't support a particular optional capability inherit
+    from this mixin to get an informative ``NotImplementedError`` instead
+    of an unhelpful ``AttributeError`` when callers try to use that
+    capability.
+    """
+
+    def attach_specialist_tools(self, tools: list[Any]) -> None:  # noqa: ARG002
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support dynamic tool attachment. "
+            "Set POCKETPAW_POCKET_SPECIALIST_BACKEND=deep_agents (the default) "
+            "to use a backend that supports specialist tool injection."
+        )
+
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:  # noqa: ARG002
+        """No-op default — backends that don't spawn subprocesses ignore.
+
+        ``ClaudeSDKBackend`` overrides this to merge ``env`` into the
+        Claude Code subprocess's ``options_kwargs["env"]``. The runtime
+        calls this once per isolated specialist run to ship per-request
+        tenancy values that the subprocess needs in its environment
+        without polluting the parent's ``os.environ``.
+        """
+        return None

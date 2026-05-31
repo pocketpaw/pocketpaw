@@ -1,16 +1,22 @@
-"""Tests for agents domain schemas."""
+"""Tests for agents domain schemas.
+
+Updated 2026-04-19 (feat/cluster-d-agent-scope-picker): added scope-field
+coverage on CreateAgentRequest + UpdateAgentRequest, plus tests for the
+new ScopeAssignmentRequest / ScopeAssignmentResponse envelopes.
+"""
 
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
-
-from ee.cloud.agents.schemas import (
+from pocketpaw_ee.cloud.agents.dto import (
     AgentResponse,
     CreateAgentRequest,
     DiscoverRequest,
+    ScopeAssignmentRequest,
+    ScopeAssignmentResponse,
     UpdateAgentRequest,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 
 def test_create_agent_required_fields():
@@ -153,3 +159,63 @@ def test_agent_response_model():
     )
     assert resp.id == "abc123"
     assert resp.config["backend"] == "claude_agent_sdk"
+
+
+# ---------------------------------------------------------------------------
+# Scope field coverage (cluster-d-agent-scope-picker)
+# ---------------------------------------------------------------------------
+
+
+def test_create_agent_with_scopes_normalises():
+    req = CreateAgentRequest(
+        name="Sales Bot",
+        slug="sales-bot",
+        scopes=["  Org:Sales:*  ", "org:sales:*"],  # whitespace + dedupe
+    )
+    assert req.scopes == ["org:sales:*"]
+
+
+def test_create_agent_with_invalid_scope_rejected():
+    with pytest.raises(PydanticValidationError):
+        CreateAgentRequest(name="Bad", slug="bad", scopes=["org:*:leads"])  # mid-segment wildcard
+
+
+def test_create_agent_universal_wildcard_rejected():
+    with pytest.raises(PydanticValidationError):
+        CreateAgentRequest(name="Bad", slug="bad", scopes=["*"])
+
+
+def test_update_agent_scopes_can_clear_to_empty_list():
+    req = UpdateAgentRequest(scopes=[])
+    assert req.scopes == []
+
+
+def test_update_agent_scopes_normalises():
+    req = UpdateAgentRequest(scopes=["ORG:SALES:LEADS"])
+    assert req.scopes == ["org:sales:leads"]
+
+
+def test_scope_assignment_request_requires_scopes_field():
+    with pytest.raises(PydanticValidationError):
+        ScopeAssignmentRequest()  # type: ignore[call-arg]
+
+
+def test_scope_assignment_request_empty_list_ok():
+    req = ScopeAssignmentRequest(scopes=[])
+    assert req.scopes == []
+
+
+def test_scope_assignment_request_normalises():
+    req = ScopeAssignmentRequest(scopes=["org:sales", "ORG:SALES"])
+    assert req.scopes == ["org:sales"]
+
+
+def test_scope_assignment_request_rejects_bad_grammar():
+    with pytest.raises(PydanticValidationError):
+        ScopeAssignmentRequest(scopes=["org::broken"])
+
+
+def test_scope_assignment_response_envelope():
+    resp = ScopeAssignmentResponse(agent_id="abc", scopes=["org:sales:*"])
+    assert resp.agent_id == "abc"
+    assert resp.scopes == ["org:sales:*"]

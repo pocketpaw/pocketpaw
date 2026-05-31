@@ -105,7 +105,15 @@ class DirectRESTAdapter:
         return True
 
     async def actions(self) -> list[ActionSchema]:
-        """Convert YAML action definitions to ActionSchema list."""
+        """Convert YAML action definitions to ActionSchema list.
+
+        Phase 1 PR-2 reads optional ``execution_mode`` (default ``cloud``)
+        and ``requires_binary`` keys from the YAML so CLI connectors
+        rewritten as YAML can declare local-mode actions without a
+        Python adapter rewrite.
+        """
+        from pocketpaw.connectors.protocol import ExecutionMode
+
         schemas = []
         for act in self._def.actions:
             params = {}
@@ -114,6 +122,12 @@ class DirectRESTAdapter:
             for key, val in act.get("body", {}).items():
                 params[key] = val
 
+            mode_raw = act.get("execution_mode", "cloud")
+            try:
+                mode = ExecutionMode(mode_raw)
+            except ValueError:
+                mode = ExecutionMode.CLOUD
+
             schemas.append(
                 ActionSchema(
                     name=act["name"],
@@ -121,6 +135,8 @@ class DirectRESTAdapter:
                     method=act.get("method", "GET"),
                     parameters=params,
                     trust_level=TrustLevel(act.get("trust_level", "confirm")),
+                    execution_mode=mode,
+                    requires_binary=act.get("requires_binary"),
                 )
             )
         return schemas
@@ -307,3 +323,31 @@ class DirectRESTAdapter:
             "mapping": self._def.sync.get("mapping", {}),
             "schedule": self._def.sync.get("schedule", "manual"),
         }
+
+    # --- Phase 1 PR-2 protocol additions -------------------------------------
+
+    async def widgets(self) -> list[Any]:
+        """YAML connectors don't ship default home widgets in Phase 1.
+
+        Native connectors (Gmail, Calendar, …) override this in PR-3 onwards.
+        Returning ``Any`` instead of ``list[WidgetRecipe]`` here avoids a
+        forward-import — the protocol module declares the type, this
+        method just satisfies the protocol with an empty list.
+        """
+        return []
+
+    async def health(self, scope: Any | None = None) -> Any:
+        """Lightweight health snapshot.
+
+        Phase 1 default: returns ``ConnectorHealth(ok=connected,
+        status=CONNECTED|DISCONNECTED)`` based on whether ``connect()``
+        has been called. Avoids an HTTP probe so this stays cheap; an
+        adapter that wants real probing overrides this method.
+        """
+        from pocketpaw.connectors.protocol import ConnectorHealth, ConnectorStatus
+
+        return ConnectorHealth(
+            ok=self._connected,
+            status=ConnectorStatus.CONNECTED if self._connected else ConnectorStatus.DISCONNECTED,
+            message="connected" if self._connected else "not connected",
+        )
