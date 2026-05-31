@@ -1,0 +1,102 @@
+---
+title: "Flow Authoring: Scaffold Multi-Step Flows from a Descriptor"
+description: "The start_flow tool scaffolds a complete multi-step Chain Flow — an onboarding wizard, an intake, a survey — from a tiny descriptor. A deterministic builder owns the nested step tree, so the agent never hand-writes fragile chain structures."
+section: Tools
+ogType: article
+keywords: ["start_flow", "chain flow", "multi-step flow", "wizard", "intake", "ui-spec"]
+tags: ["tools", "ripple", "flow"]
+---
+
+# Flow Authoring: Scaffold Multi-Step Flows from a Descriptor
+
+The `start_flow` tool scaffolds a complete multi-step flow — an onboarding wizard, a due-diligence intake, a survey — from a tiny descriptor. The agent picks a template and the tool returns the **entire** nested flow tree as a renderable `{version, ui}` spec.
+
+## Why a Builder Owns the Tree
+
+A multi-step flow is one recursively-nested spec: each step carries the next step under `chain` (linear) or `chain_map` (branch on the user's selection). Hand-authoring that tree is error-prone — models stringify the nesting or wrap it in the wrong shape. So the model never writes the steps. It emits three fields; a deterministic Python builder materializes the whole decision tree up front.
+
+Once rendered, the flow advances **entirely client-side** — every step transition is local, with no model call between steps. The agent pays for one tool call to author the flow, then the user taps through it for free.
+
+## The Descriptor
+
+The agent emits up to three fields:
+
+- **`flow_type`** (required) — which template to scaffold.
+- **`domain`** (optional) — a hint like `fintech` or `saas`. Reserved for a future data-fresh path; it does not change the tree today.
+- **`config`** (optional) — per-template copy overrides. These tweak labels and text without changing the flow's structure.
+
+## Templates
+
+| `flow_type` | Steps | Branches on |
+|-------------|-------|-------------|
+| `onboarding_wizard` | pick a goal → workspace details → confirm | the chosen goal |
+| `due_diligence_intake` | pick a deal stage → stage financials → risk flags → review | the deal stage |
+
+Each template's terminal step pre-fills a confirmation from the user's earlier answers and emits the assembled payload back to the host on submit.
+
+### Config Overrides
+
+```json
+{
+  "flow_type": "onboarding_wizard",
+  "config": { "product_name": "Atlas" }
+}
+```
+
+- `onboarding_wizard` accepts `product_name` and `goals` (a list of `{id, label}` options; each id becomes a branch).
+- `due_diligence_intake` accepts `company_name` and `submit_event` (the terminal event name).
+
+## What It Returns
+
+A `{version, ui}` JSON document. The `ui` is the root step; the rest of the tree hangs off it via `chain` / `chain_map`. Drop the document verbatim into a ` ```ui-spec ` fenced block in the reply — do not edit the structure.
+
+```
+User: help me onboard a new teammate
+Agent: [calls start_flow with flow_type="onboarding_wizard"]
+  → returns the full goal → details → confirm tree
+Agent: emits the doc in a ```ui-spec fence; the client renders step 1
+  → user picks a goal      (branches, no model call)
+  → user names a workspace (no model call)
+  → user confirms          → onboarding.complete fires back to the host
+```
+
+The flow tree the builder emits stays inside the widget catalog and uses only known action verbs, so it renders without correction.
+
+## Tool Schema
+
+```json
+{
+  "name": "start_flow",
+  "description": "Scaffold a complete multi-step flow from a tiny descriptor.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "flow_type": {
+        "type": "string",
+        "enum": ["onboarding_wizard", "due_diligence_intake"],
+        "description": "Which flow template to scaffold."
+      },
+      "domain": {
+        "type": "string",
+        "description": "Optional domain hint. Does not change the tree today."
+      },
+      "config": {
+        "type": "object",
+        "description": "Optional per-template copy overrides (shape-stable)."
+      }
+    },
+    "required": ["flow_type"]
+  }
+}
+```
+
+## Related
+
+<CardGroup>
+  <Card title="Custom Tools" icon="lucide:puzzle" href="/tools/custom-tools">
+    Build your own tools with the ToolProtocol interface.
+  </Card>
+  <Card title="Tools Overview" icon="lucide:wrench" href="/tools">
+    Browse all 50+ built-in tools available in PocketPaw.
+  </Card>
+</CardGroup>
