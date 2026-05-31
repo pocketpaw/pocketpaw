@@ -1,5 +1,18 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
+# Changes: 2026-05-31 (feat/home-agent-source-authoring) — `HOME_POCKET_PROMPT`
+# now (1) carries the `__BACKEND_SUMMARY__` token in its intro (filled via
+# `fill_current_pocket` from the resolved scope) so the home agent SEES
+# whether a backend is configured and stops claiming "no integration wired
+# up", and (2) gains a `## Live data` section porting the pocket_specialist's
+# source-authoring guidance: when a backend is configured and the user wants
+# live data, author a read-only GET `widget.sources` binding
+# ({method:"GET", path, bind:"state.<key>", refresh:["pocket_open"]}) on
+# `add_widget`/`update_widget` and bind the tile spec to it. Adds the
+# data-shape rule the smoke test surfaced (bind a FIELD PATH / scalar, never a
+# whole object) and the honest-result rule (only confirm `authored_sources`,
+# never claim a `skipped_sources` key).
+#
 # Changes: 2026-05-24 (surface-context PR) — extended `HOME_POCKET_PROMPT`
 # with a `## Surface-context blocks` section that teaches the agent to
 # read the new `<pinned-widgets>` / `<live-snapshot>` /
@@ -2437,6 +2450,15 @@ the user keeps an eye on (a revenue stat, a task list, a sales chart). It
 is the user's own dashboard, assembled one widget at a time. The pocket
 id is in the `<current-pocket>` block — pass it as `pocket_id`.
 
+Backend: __BACKEND_SUMMARY__
+
+That line is the home pocket's data backend. "configured" = a real HTTP
+backend is wired at that base URL and you CAN bind tiles to live data
+(see "Live data" below) — never say "no integration is wired up" then.
+"not configured" = none; use believable static data and say so.
+"configured state unknown" = call `get_pocket` (its `backend` summary
+carries the same truth) before deciding.
+
 ## Surface-context blocks (you may already have these)
 
 The system context above may include three surface-aware tags built
@@ -2492,31 +2514,13 @@ points. If you don't have live numbers, populate a believable series and
 say so; an empty chart is a bug, and a `stat` tile is NOT a substitute
 for a chart the user asked for.
 
-Worked example — "add a 7-day sales chart":
+Worked example — "add a 7-day sales chart" (seven points; abbreviated):
 
-  add_widget({
-    "pocket_id": "<from current-pocket>",
-    "widget": {
-      "name": "7-day sales",
-      "type": "chart",
-      "icon": "trending-up",
-      "spec": {
-        "type": "chart",
-        "props": {
-          "variant": "bar",
-          "data": [
-            {"label": "Mon", "value": 1200},
-            {"label": "Tue", "value": 1850},
-            {"label": "Wed", "value": 1400},
-            {"label": "Thu", "value": 2100},
-            {"label": "Fri", "value": 2600},
-            {"label": "Sat", "value": 900},
-            {"label": "Sun", "value": 700}
-          ]
-        }
-      }
-    }
-  })
+  add_widget({"pocket_id": "<from current-pocket>", "widget": {
+    "name": "7-day sales", "type": "chart", "icon": "trending-up",
+    "spec": {"type": "chart", "props": {"variant": "bar", "data": [
+      {"label": "Mon", "value": 1200}, {"label": "Tue", "value": 1850},
+      ... {"label": "Sun", "value": 700}]}}}})
 
 A native widget (a built-in component the user picks by name) passes
 `type:"native"` and no `spec`.
@@ -2528,6 +2532,39 @@ To see what is already on the home grid, call `get_pocket` once with the
 pocket id and read the returned widgets. Add one widget per explicit
 request — don't pre-populate the grid.
 
+## Live data — bind a tile to the backend
+
+When the user wants a tile to show LIVE data AND `Backend:` reads
+"configured", make the tile live by authoring a data SOURCE in the SAME
+`add_widget` call. A source is a read-only GET binding the home grid runs
+on open to hydrate a state path the tile reads. Bind the tile's spec to a
+state key (a `stat` reads `props.value: "{state.revenue}"`, NOT a
+hardcoded number), then pass `widget.sources`:
+
+  "sources": {"revenue": {"method": "GET", "path": "/revenue/today",
+              "bind": "state.revenue", "refresh": ["pocket_open"]}}
+
+  - `method` is always `"GET"` (sources are read-only).
+  - `path` is RELATIVE (e.g. `/revenue/today`), never an absolute URL —
+    the runtime joins it to the backend base URL.
+  - `bind` is the `state.<key>` the source writes; it MUST match the
+    `{state.<key>}` the tile's spec reads.
+  - `refresh`: `["pocket_open"]` (on load) and/or `["manual"]`.
+
+DATA-SHAPE RULE: a GET often returns an OBJECT
+(e.g. `{"total": 4200, "currency": "USD"}`), not a bare number. A scalar
+tile (`stat`) shows ONE value — bind to a FIELD PATH, not the whole
+object: `bind: "state.revenue.total"`, tile reads
+`"{state.revenue.total}"`. Binding a whole object into a scalar renders
+`[object Object]` — never do that. Unsure of the shape? Pick the most
+likely scalar field and say which one you bound.
+
+After the call, read `authored_sources` / `skipped_sources` on the
+result. Confirm "live data wired up" ONLY for `authored_sources` keys; a
+`skipped_sources` key was dropped (invalid) — fix and retry, never claim
+it landed. If `Backend:` is "not configured", do NOT author a source —
+use static data and say no backend is wired up yet.
+
 ## How to refresh a widget
 
 When the user asks to "refresh", "reload", "update", or "show the latest"
@@ -2538,16 +2575,20 @@ again — that would create a duplicate tile. Instead:
   the entry whose `name` matches the widget the user means (or the most
   recent one if ambiguous). Grab its `_id`.
 
-  STEP 2. Fetch fresh data. You have `WebSearch`, `WebFetch`, and the
-  in-process MCP tools (Composio's gmail / calendar / drive when
-  configured) available. Use whichever fits the widget — a sales chart
-  may need a Composio CRM call, a competitor-news tile a WebSearch.
+  STEP 2. Fetch fresh data with whichever tool fits — `WebSearch`,
+  `WebFetch`, or the configured MCP data tools (Composio CRM/gmail/etc.).
 
   STEP 3. Call `update_widget` with the same `pocket_id`, the widget's
   `_id` as `widget_id`, and `fields: {spec: <new rippleSpec>}` carrying
-  the fresh data. The spec shape stays the same as the original; only
-  the `data` series (or rows, or text) changes. The renderer re-renders
-  the tile in place.
+  the fresh data. The spec shape stays the same; only the `data` (rows /
+  text) changes. The renderer re-renders the tile in place.
+
+To turn a STATIC tile LIVE ("wire this to live data"), `update_widget`
+also accepts a `sources` block on `fields` — same shape as `add_widget`'s
+`widget.sources`. Patch the spec to read the `{state.<key>}` bind AND
+author the source in one call. The same `authored_sources` /
+`skipped_sources` honesty fields come back — confirm only what landed.
+Configured backend only; the data-shape rule above applies.
 
 A native widget (Mission · Tray etc.) refreshes itself from its own
 endpoint — you do not need to touch it.

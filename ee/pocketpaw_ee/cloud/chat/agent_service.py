@@ -34,6 +34,17 @@ prepends its preamble before the legacy scope/participants/current-pocket
 tags so the chat agent sees the surface snapshot first. Clients that
 don't stamp a surface hint keep the old three-line shape unchanged —
 ``surface_context is None`` is the legacy path.
+Changes: 2026-05-31 (feat/home-agent-source-authoring) — ``ScopeContext``
+carries an optional ``backend_summary`` (the non-secret {base_url,
+auth_type, configured} dict from ``pockets.service.get_pocket_backend``,
+never the token). The resolvers populate it ONLY for a ``type="home"``
+pocket (via the new ``_home_backend_summary`` helper);
+``build_behavior_instructions`` fills it into ``HOME_POCKET_PROMPT``'s
+``__BACKEND_SUMMARY__`` token via ``fill_current_pocket`` so the home agent
+SEES whether a backend is configured (and its base_url) before authoring a
+``sources`` block — fixing the smoke-test finding where the agent claimed
+"no integration wired up" despite a configured backend. Non-home scopes
+keep ``backend_summary=None`` and pay no extra read.
 """
 
 from __future__ import annotations
@@ -214,6 +225,15 @@ class ScopeContext:
     # ``build_dynamic_context`` falls back to the legacy three-line
     # shape in that case.
     surface_context: SurfaceContext | None = None
+    # The anchored pocket's NON-SECRET backend summary ({base_url,
+    # auth_type, configured}) — the same shape ``get_pocket_backend``
+    # returns, never the token. Populated by the resolvers ONLY for a
+    # ``type="home"`` pocket (the home agent inlines it into the static
+    # HOME_POCKET_PROMPT so it can SEE a configured backend and author a
+    # ``sources`` block — mirroring how the pocket_specialist gets the
+    # summary via ``get_pocket_backend``). ``None`` for non-home scopes,
+    # which read the summary lazily through ``get_pocket`` when needed.
+    backend_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +272,30 @@ async def _get_session(session_id: str) -> Any:
         return await Session.get(PydanticObjectId(session_id))
     except Exception:
         return None
+
+
+async def _home_backend_summary(
+    pocket_type: str | None, workspace_id: str, pocket_id: str
+) -> dict[str, Any] | None:
+    """Fetch the NON-SECRET backend summary for a HOME pocket, or ``None``.
+
+    Only the home agent inlines the summary into its static prompt (so it can
+    SEE a configured backend before authoring a ``sources`` block — the same
+    summary the pocket_specialist gets via ``get_pocket_backend``). Non-home
+    scopes return ``None`` and never pay the read — they fetch the summary
+    lazily via ``get_pocket`` when the specialist needs it. The token is
+    NEVER returned; a fetch failure degrades to ``None`` so a transient
+    backend-collection hiccup never blocks scope resolution."""
+    if pocket_type != "home" or not workspace_id or not pocket_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.pockets import service as _pockets_service
+
+        summary = await _pockets_service.get_pocket_backend(workspace_id, pocket_id)
+    except Exception:  # noqa: BLE001 — a backend-read failure must not block resolution
+        logger.debug("home backend summary fetch failed for pocket %s", pocket_id, exc_info=True)
+        return None
+    return summary
 
 
 async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
@@ -317,12 +361,20 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
     # those chats would silently lose pocket tools.
     pocket_tool_specs: list[dict[str, Any]] = []
     pocket_type: str | None = None
+    backend_summary: dict[str, Any] | None = None
     pocket_id = getattr(session, "pocket", None)
     if pocket_id:
         pocket = await _get_pocket(str(pocket_id))
         if pocket is not None:
             pocket_tool_specs = list(getattr(pocket, "tool_specs", []) or [])
             pocket_type = getattr(pocket, "type", None)
+            # The home page commonly chats through session scope (so the
+            # active session id is honored). Surface the home pocket's
+            # backend summary here too so the home agent inlines it whether
+            # the chat routed through pocket or session scope.
+            backend_summary = await _home_backend_summary(
+                pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
+            )
 
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
@@ -347,6 +399,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         pocket_tool_specs=pocket_tool_specs,
         pocket_id=str(pocket_id) if pocket_id else None,
         pocket_type=pocket_type,
+        backend_summary=backend_summary,
     )
 
 
@@ -439,6 +492,9 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         seen.add(m)
         members.append(m)
 
+    pocket_type = getattr(pocket, "type", None)
+    backend_summary = await _home_backend_summary(pocket_type, workspace_id, scope_id)
+
     return ScopeContext(
         kind=ScopeKind.POCKET,
         scope_id=scope_id,
@@ -449,7 +505,8 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         agent_ids_in_scope=agent_ids,
         pocket_tool_specs=list(getattr(pocket, "tool_specs", []) or []),
         pocket_id=scope_id,
-        pocket_type=getattr(pocket, "type", None),
+        pocket_type=pocket_type,
+        backend_summary=backend_summary,
     )
 
 
@@ -579,8 +636,17 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     # Home surface: append the home-surface prompt so the agent calls
     # add_widget for an explicit widget request and answers directly
     # otherwise. Backend-agnostic — the discriminator is the pocket type.
+    # HOME_POCKET_PROMPT carries the __BACKEND_SUMMARY__ token: fill it with
+    # the resolved non-secret summary so the home agent can SEE whether a
+    # backend is configured (and its base_url) before it authors a sources
+    # block — fixing the smoke-test finding where the agent claimed "no
+    # integration wired up" despite a configured backend. ``None`` renders as
+    # "configured state unknown — call get_pocket to check". The literal
+    # token never leaks because ``fill_current_pocket`` always replaces it.
     if is_home:
-        parts.append(HOME_POCKET_PROMPT)
+        parts.append(
+            fill_current_pocket(HOME_POCKET_PROMPT, ctx.pocket_id or "", ctx.backend_summary)
+        )
     return "\n".join(parts)
 
 
