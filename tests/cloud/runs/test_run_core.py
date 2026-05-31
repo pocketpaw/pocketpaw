@@ -599,3 +599,31 @@ async def test_execute_run_no_ripple_event_for_truncated_block(monkeypatch):
 
     assert ripple is None
     assert [e.event for e in events][-1] == "stream_end"
+
+
+# ---------------------------------------------------------------------------
+# RFC 13 M3 — the `start_flow` authoring tool emits a doc that rides this M0
+# contract. A flow scaffolded by the builder, dropped into a ``ui-spec`` fence,
+# must extract through the same canonical path (the whole point of unifying the
+# envelope at M0 before layering flows at M3).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flow_type", ["onboarding_wizard", "due_diligence_intake"])
+async def test_start_flow_doc_extracts_through_canonical_path(flow_type):
+    from pocketpaw.tools.builtin.flow_tool import StartFlowTool
+
+    doc_str = await StartFlowTool().execute(flow_type=flow_type)
+    message = f"Here's your flow:\n\n```ui-spec\n{doc_str}\n```"
+
+    stripped, attachment = run_core._extract_ripple_attachment(message)
+
+    # The flow doc is pulled out as the ripple attachment...
+    assert attachment is not None
+    assert attachment["version"] == "1.0"
+    assert isinstance(attachment["ui"], dict)
+    # ...the nested Chain Flow survives intact (root branches via chain_map)...
+    assert isinstance(attachment["ui"].get("chain_map"), dict)
+    assert attachment["ui"].get("flowId")
+    # ...and the fence is stripped from the persisted message body.
+    assert "ui-spec" not in stripped

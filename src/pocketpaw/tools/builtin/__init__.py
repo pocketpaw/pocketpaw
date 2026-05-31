@@ -10,6 +10,7 @@
 #   - 2026-03-12: Added EditFileTool, RunPythonTool, InstallPackageTool (issue #581)
 #   - 2026-03-27: Added AddWidgetTool, RemoveWidgetTool for pocket mutations
 #   - 2026-03-28: Added Fabric + Instinct enterprise tools (guarded by ee/ availability)
+#   - 2026-05-31: Added StartFlowTool — the RFC 13 M3 Chain Flow authoring tool
 
 import importlib as _importlib
 
@@ -78,6 +79,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "CreatePocketTool": (".pocket", "CreatePocketTool"),
     "AddWidgetTool": (".pocket", "AddWidgetTool"),
     "RemoveWidgetTool": (".pocket", "RemoveWidgetTool"),
+    "StartFlowTool": (".flow_tool", "StartFlowTool"),
     "DiscordCLITool": (".discord", "DiscordCLITool"),
     "ConnectorListTool": (".connector_tools", "ConnectorListTool"),
     "ConnectorConnectTool": (".connector_tools", "ConnectorConnectTool"),
