@@ -285,6 +285,56 @@
             "icon": "lucide:layout-dashboard"
           },
           {
+            "label": "Foresight",
+            "href": "/concepts/foresight",
+            "icon": "lucide:eye"
+          },
+          {
+            "label": "Pocket Sources",
+            "href": "/concepts/pocket-sources",
+            "icon": "lucide:database"
+          },
+          {
+            "label": "Pocket Write Actions",
+            "href": "/concepts/pocket-write-actions",
+            "icon": "lucide:zap"
+          },
+          {
+            "label": "LiveKit (Calls)",
+            "href": "/concepts/livekit",
+            "icon": "lucide:video"
+          },
+          {
+            "label": "Decision Graph",
+            "href": "/concepts/decision-graph",
+            "icon": "lucide:git-branch"
+          },
+          {
+            "label": "Pocket Planner",
+            "href": "/concepts/pocket-planner",
+            "icon": "lucide:clipboard-list"
+          },
+          {
+            "label": "Pocket Execution Router",
+            "href": "/concepts/pocket-execution-router",
+            "icon": "lucide:route"
+          },
+          {
+            "label": "Pocket Templates",
+            "href": "/concepts/pocket-templates",
+            "icon": "lucide:layout-template"
+          },
+          {
+            "label": "Calendar",
+            "href": "/concepts/calendar",
+            "icon": "lucide:calendar"
+          },
+          {
+            "label": "OSS-EE Split",
+            "href": "/concepts/oss-ee-split",
+            "icon": "lucide:split"
+          },
+          {
             "label": "PocketPaw vs OpenClaw",
             "href": "/concepts/vs-openclaw",
             "icon": "lucide:scale"
@@ -525,6 +575,11 @@
             "icon": "lucide:server"
           },
           {
+            "label": "Composio",
+            "href": "/integrations/composio",
+            "icon": "lucide:puzzle"
+          },
+          {
             "label": "A2A Protocol",
             "href": "/integrations/a2a-protocol",
             "icon": "lucide:network"
@@ -650,6 +705,11 @@
             "icon": "lucide:radar"
           },
           {
+            "label": "Mission Control (Cloud)",
+            "href": "/advanced/mission-control-cloud",
+            "icon": "lucide:cloud"
+          },
+          {
             "label": "Autonomous Messaging",
             "href": "/advanced/autonomous-messaging",
             "icon": "lucide:bell"
@@ -751,7 +811,9 @@
           {
             "label": "Deep Work",
             "items": [
+              { "label": "Clarify Goal", "href": "/api/post-deep-work-intake-clarify", "method": "POST" },
               { "label": "Start Project", "href": "/api/post-deep-work-start", "method": "POST" },
+              { "label": "Start with Intake", "href": "/api/post-deep-work-start-with-intake", "method": "POST" },
               { "label": "Get Plan", "href": "/api/get-deep-work-plan", "method": "GET" },
               { "label": "Approve Plan", "href": "/api/post-deep-work-approve", "method": "POST" },
               { "label": "Pause Project", "href": "/api/post-deep-work-pause", "method": "POST" },
@@ -759,6 +821,12 @@
               { "label": "Cancel Project", "href": "/api/post-deep-work-cancel", "method": "POST" },
               { "label": "Skip Task", "href": "/api/post-deep-work-skip-task", "method": "POST" },
               { "label": "Retry Task", "href": "/api/post-deep-work-retry-task", "method": "POST" }
+            ]
+          },
+          {
+            "label": "Pockets",
+            "items": [
+              { "label": "Merge Pocket Spec", "href": "/api/post-pocket-spec-merge", "method": "POST" }
             ]
           },
           {

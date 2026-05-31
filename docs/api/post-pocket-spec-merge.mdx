@@ -1,0 +1,257 @@
+---
+title: Merge Pocket Spec
+description: "One-shot server-side rippleSpec write. Accepts a full replace or a partial merge, runs the strict catalog + action-wiring gates, and persists. Replaces the legacy 17-tool LangChain edit path."
+api: POST /api/v1/pockets/{pocket_id}/spec/merge
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["pocket spec merge", "rippleSpec patch", "pocket specialist", "merge endpoint"]
+tags: ["api", "pockets", "ripple"]
+---
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED.
+
+**Implementation PRs:** #1222 (MVP merge endpoint + specialist skill), #1223 (pocket-planner gate)
+
+**Workspace RFC:** ties to RFC 03 v2 work indirectly; no dedicated RFC.
+
+**What's live:** `POST /api/v1/pockets/{id}/spec/merge` accepts a rippleSpec patch and applies it server-side. The `pocketpaw-pocket-specialist` bundled skill drives this endpoint instead of the legacy 17-tool LangChain edit path.
+
+**What's planned:** deprecate the legacy 17-tool LangChain edit path once parity is verified on live traffic.
+</Callout>
+
+## Overview
+
+A single server-side write entry point for editing a pocket's rippleSpec. The endpoint accepts **exactly one of**:
+
+- `{"replace": <full rippleSpec>}` — overwrite the spec wholesale
+- `{"merge": <partial rippleSpec>}` — patch by name into the existing spec
+
+A body that carries both, or neither, returns `400`.
+
+This endpoint replaces the legacy 17-tool LangChain edit path. Where the legacy path required 17 separate `add_node` / `replace_node` / `set_node_prop` / `move_node` / `remove_node` tool calls (one per granular operation), the merge endpoint applies the whole patch in a single round trip. Lower latency, simpler traces, and the agent can author a coherent diff instead of stitching 17 micro-mutations.
+
+## Why This Replaces the 17-Tool Path
+
+| Concern | Legacy 17-tool path | `POST /spec/merge` |
+|---------|---------------------|---------------------|
+| Round trips | 17 LangChain tool calls + 17 LLM turns | 1 endpoint call |
+| Latency | ~30s on a 10-widget rebuild (tail-of-list) | <1s server-side |
+| Atomicity | Partial-apply on tool failure mid-batch | All-or-nothing |
+| Trace clarity | 17 nested tool spans per edit | One request/response pair |
+| Validation | Per-op (some ops pass, downstream ops fail on a broken tree) | One catalog + wiring gate over the resolved spec |
+
+The catalog and action-wiring gates are the **same gates** the agent-generation path runs in `create_from_ripple_spec`. A blocking violation returns `{ok: false, warnings: [...]}` and **does not persist** — the agent can fix and retry. Non-blocking expression-grammar warnings persist with `ok: true` and the warnings folded into the list.
+
+## How the Specialist Skill Calls It
+
+The bundled `pocketpaw-pocket-specialist` workspace skill drives this endpoint. The skill auto-installs on dashboard boot to `~/.claude/skills/` alongside `pocketpaw-create-pocket` and `pocketpaw-edit-pocket`. It teaches the chat agent:
+
+1. The rippleSpec shape (`{state, ui:{children, id}}` nested, not the flat-model spike).
+2. The four interactivity conventions the live recovery cascade kept regressing on: client-side push, value/label split, lowercase column ids, validate-push-clear-increment hygiene.
+3. The exact `curl` invocation for the merge endpoint (loopback bypass + tenancy headers).
+
+Behind the scenes, runtime flag `POCKETPAW_POCKET_SPECIALIST_USE_SKILL` toggles between the skill+merge path and the legacy 17-tool LangChain path. When the flag is truthy the edit-subagent pipeline swaps in the skill-pointer prompt variant, skips `make_edit_pocket_tools`, and sets `POCKETPAW_WORKSPACE_ID` / `POCKETPAW_USER_ID` env vars on the parent process so the Claude Code subprocess can `curl` the local API with the loopback bypass headers. Flag defaults `false` until the captain greenlights deletion of the legacy path.
+
+## Pocket-Planner Gate
+
+PR #1223 added the pocket-planner gate: complex multi-widget pockets get **planned first** via `deep_work` before the merge endpoint is called. The chat agent asks the planner to break the request into a structured kit (named widgets, state shape, action bindings, source bindings), then walks the todos applying the merge endpoint once per cohesive change. Simple pockets (single template match, no novel widgets) skip the planner and go straight to merge.
+
+## Validation
+
+The endpoint rejects:
+
+- **Unknown widget types** — every `ui` node's `type` must be in the widget catalog (`pocketpaw.ripple.catalog`). PR #1187's catalog-as-allowlist promotion applies here too.
+- **Unwired bindings** — an `events.click` handler referencing `binding: "close_pr"` when `actions.close_pr` does not exist; a `@state.prs` reference when `state.prs` is absent; a `run_source` verb naming an undeclared source.
+- **Invalid action verbs** — only the allowlist of ripple verbs is permitted (`call_binding`, `run_source`, `update_state`, etc.).
+- **Malformed structure** — non-dict where a dict is required, sibling id collisions (auto-reassigned with a warning rather than rejected), missing `id` on a node referenced by a handler.
+
+A blocking violation returns:
+
+```json
+{
+  "ok": false,
+  "warnings": [
+    "ui.children[2]: unknown widget type 'fancy_chart'",
+    "events.click[0]: unwired binding 'close_pr'"
+  ]
+}
+```
+
+The pocket is **not persisted** — the agent reads the warnings, fixes the spec, and retries.
+
+## Request Body
+
+<ResponseField name="replace" type="object">
+  A full rippleSpec — `{ version, state, ui, sources?, actions? }`. Overwrites the persisted spec wholesale. Mutually exclusive with `merge`.
+</ResponseField>
+
+<ResponseField name="merge" type="object">
+  A partial rippleSpec patch. Merge semantics are by-name: an `ui` node patch keyed by `id` updates that node in place; new top-level keys (`sources.foo`, `actions.bar`, `state.baz`) are added; existing ones are overwritten. Mutually exclusive with `replace`. Orphan node ids surface in the response `warnings` list (auto-orphan + warn, no block).
+</ResponseField>
+
+## Response
+
+<ResponseField name="ok" type="boolean">
+  `true` if the spec was persisted (possibly with non-blocking warnings); `false` if a blocking violation was found and nothing was persisted.
+</ResponseField>
+
+<ResponseField name="pocket" type="object">
+  The updated pocket wire dict on success. Includes the resolved `rippleSpec` and any auto-assigned node ids.
+</ResponseField>
+
+<ResponseField name="warnings" type="array">
+  Array of strings. Blocking violations on a failed request; non-blocking warnings (orphan ids, expression-grammar nits) on a successful one.
+</ResponseField>
+
+## Error Model
+
+| HTTP | Code | When |
+|------|------|------|
+| 400 | `merge.body_mutually_exclusive` | Body carries both `replace` and `merge`, or neither |
+| 400 | `merge.invalid_shape` | Top-level body is not a dict, or the patch is not a dict |
+| 401 | `auth.required` | No valid session / token and no loopback bypass headers |
+| 403 | `pocket.forbidden` | User lacks edit access on the pocket |
+| 404 | `pocket.not_found` | Pocket id is unknown or belongs to another workspace |
+| 422 | `ripple.catalog_violation` | One or more widgets reference unknown types (also surfaces in `warnings`) |
+
+## Auth
+
+Standard cookie / Bearer JWT (same as every other pocket route), **or** a loopback-only internal bypass:
+
+- Request originates from `127.0.0.1` / `::1` (`starlette` reads `request.client.host`, which is the actual peer — not the `X-Forwarded-For` header, so a reverse-proxy cannot spoof it).
+- Header `X-PocketPaw-Internal: true`.
+- Headers `X-PocketPaw-Workspace-Id` and `X-PocketPaw-User-Id` set.
+
+Service-level edit-access checks inside `merge_spec` still run on the resolved `user_id`, so a mistyped header cannot escalate privileges. The loopback bypass is the MVP path the specialist skill's Claude Code subprocess uses to `curl` the local API without an interactive session. It is flagged as MVP in the handler docstring; a follow-up PR will tighten the bypass (named local credential, short-lived token).
+
+<RequestExample>
+<Tabs items={["cURL (replace)", "cURL (merge)", "Python", "Loopback bypass"]}>
+  <Tab title="cURL (replace)">
+```bash
+curl -X POST "http://localhost:8000/api/v1/pockets/p_abc123/spec/merge" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "replace": {
+      "version": "1.0",
+      "state": { "prs": [] },
+      "ui": {
+        "id": "n_root1234",
+        "type": "table",
+        "props": { "rows": "@state.prs" },
+        "events": { "mount": [{ "verb": "run_source", "source": "prs" }] }
+      },
+      "sources": {
+        "prs": {
+          "type": "http_get",
+          "method": "GET",
+          "path": "/repos/owner/repo/pulls",
+          "refresh": ["manual"]
+        }
+      }
+    }
+  }'
+```
+  </Tab>
+  <Tab title="cURL (merge)">
+```bash
+curl -X POST "http://localhost:8000/api/v1/pockets/p_abc123/spec/merge" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "merge": {
+      "ui": {
+        "id": "n_root1234",
+        "props": { "title": "Open Pull Requests" }
+      },
+      "state": { "filter": "open" }
+    }
+  }'
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+patch = {
+    "merge": {
+        "ui": {"id": "n_root1234", "props": {"title": "Open PRs"}},
+        "state": {"filter": "open"},
+    }
+}
+
+res = httpx.post(
+    "http://localhost:8000/api/v1/pockets/p_abc123/spec/merge",
+    headers={"Authorization": f"Bearer {token}"},
+    json=patch,
+    timeout=30,
+)
+result = res.json()
+if not result["ok"]:
+    for w in result["warnings"]:
+        print(f"BLOCKED: {w}")
+```
+  </Tab>
+  <Tab title="Loopback bypass">
+```bash
+# Used by the pocket-specialist skill's Claude Code subprocess
+curl -X POST "http://localhost:8000/api/v1/pockets/p_abc123/spec/merge" \
+  -H "X-PocketPaw-Internal: true" \
+  -H "X-PocketPaw-Workspace-Id: ${POCKETPAW_WORKSPACE_ID}" \
+  -H "X-PocketPaw-User-Id: ${POCKETPAW_USER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"merge": {"state": {"refreshing": false}}}'
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200 OK", "200 Blocked", "400"]}>
+  <Tab title="200 OK">
+```json
+{
+  "ok": true,
+  "pocket": {
+    "_id": "p_abc123",
+    "rippleSpec": {
+      "version": "1.0",
+      "state": { "prs": [], "filter": "open" },
+      "ui": {
+        "id": "n_root1234",
+        "type": "table",
+        "props": { "rows": "@state.prs", "title": "Open PRs" }
+      }
+    }
+  },
+  "warnings": []
+}
+```
+  </Tab>
+  <Tab title="200 Blocked">
+```json
+{
+  "ok": false,
+  "warnings": [
+    "ui.children[2]: unknown widget type 'fancy_chart'",
+    "events.click[0]: unwired binding 'close_pr'"
+  ]
+}
+```
+  </Tab>
+  <Tab title="400">
+```json
+{
+  "detail": {
+    "code": "merge.body_mutually_exclusive",
+    "message": "Body must carry exactly one of 'replace' or 'merge'."
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

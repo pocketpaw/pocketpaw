@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class FileContext(BaseModel):
@@ -29,21 +29,30 @@ class PocketContext(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    """Send a message for processing."""
+    """Send a message for processing.
+
+    Accepts both snake_case and camelCase keys on the wire so the FE can
+    post ``sessionId``/``agentId`` without silently losing the value —
+    Pydantic defaults to dropping unknown fields, which previously caused
+    every ``sessionId: "websocket_xxx"`` payload to be treated as a brand
+    new chat with a freshly generated id.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
 
     content: str = Field(..., min_length=1, max_length=100000)
-    session_id: str | None = None
+    session_id: str | None = Field(default=None, alias="sessionId")
     media: list[str] = []
-    file_context: FileContext | None = None
-    pocket_context: PocketContext | None = None
+    file_context: FileContext | None = Field(default=None, alias="fileContext")
+    pocket_context: PocketContext | None = Field(default=None, alias="pocketContext")
 
     # Enterprise overrides (all optional, ignored in community mode)
-    agent_id: str | None = None
-    workspace_id: str | None = None
-    system_prompt: str | None = None
+    agent_id: str | None = Field(default=None, alias="agentId")
+    workspace_id: str | None = Field(default=None, alias="workspaceId")
+    system_prompt: str | None = Field(default=None, alias="systemPrompt")
     model: str | None = None
     tools: list[str] | None = None
-    soul_path: str | None = None
+    soul_path: str | None = Field(default=None, alias="soulPath")
     channel: str | None = None  # "enterprise" for NestJS requests
 
 

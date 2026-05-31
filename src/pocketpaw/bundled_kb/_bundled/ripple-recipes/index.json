@@ -1,0 +1,295 @@
+{
+  "scope": "ripple-recipes",
+  "articles": {
+    "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta": {
+      "summary": "Canonical recipe for triage-style internal apps (support tickets, CRM contacts, lead inbox, moderation queue). Root is app-shell with grouped sidebar nav by status, master-detail content area with comment-thread inside the detail pane, and notification-center + command-palette in the topbar. Use this whenever the user asks for an app that queues work items.",
+      "title": "Customer Support App — full-fledged app pattern with app-shell + sidebar + master-detail"
+    },
+    "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard": {
+      "summary": "Canonical recipe for the viewer pattern: page-header + lead text + kv-table of stable facts + body paragraph. Use whenever the user wants a read-only reference page (cocktail recipe, glossary entry, runbook step, API reference, character profile, wine notes). This is the explicit non-dashboard alternative for brief that look like 'how to do X' or 'reference for Y'.",
+      "title": "Recipe / How-To Viewer — canonical viewer pattern alternative to dashboard"
+    },
+    "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe": {
+      "summary": "Single pipeline-dashboard widget at the root with all data passed as props (quota / funnel / conversion / leaderboard / deals / ticker). Use whenever the user asks for a sales pipeline, quota tracker, or revenue dashboard. The widget composes the funnel + leaderboard + deals table + activity ticker internally — do NOT rebuild from primitives.",
+      "title": "Sales Pipeline Dashboard — pipeline-dashboard composed widget recipe"
+    }
+  },
+  "concepts": {
+    "agent-tool": {
+      "name": "agent-tool",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "app-shell": {
+      "name": "app-shell",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "command-palette": {
+      "name": "command-palette",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "comment-thread": {
+      "name": "comment-thread",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "composed-widget": {
+      "name": "composed-widget",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "conversion-rate": {
+      "name": "conversion-rate",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "crm-contacts": {
+      "name": "crm-contacts",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "crm-dashboard": {
+      "name": "crm-dashboard",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "customer-success-pipeline": {
+      "name": "customer-success-pipeline",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "customer-support": {
+      "name": "customer-support",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "deal-funnel": {
+      "name": "deal-funnel",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "deals-table": {
+      "name": "deals-table",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "entity-detail": {
+      "name": "entity-detail",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "espresso": {
+      "name": "espresso",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "funnel-prop": {
+      "name": "funnel-prop",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "glossary": {
+      "name": "glossary",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "helpdesk": {
+      "name": "helpdesk",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "how-to": {
+      "name": "how-to",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "kv-table": {
+      "name": "kv-table",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "lead-inbox": {
+      "name": "lead-inbox",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "lead-text": {
+      "name": "lead-text",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "master-detail": {
+      "name": "master-detail",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "moderation-queue": {
+      "name": "moderation-queue",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "non-dashboard": {
+      "name": "non-dashboard",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "notification-center": {
+      "name": "notification-center",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "page-header": {
+      "name": "page-header",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "pipeline-dashboard": {
+      "name": "pipeline-dashboard",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "queue-of-work": {
+      "name": "queue-of-work",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "quota-tracker": {
+      "name": "quota-tracker",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "recipe": {
+      "name": "recipe",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "recruiting-pipeline": {
+      "name": "recruiting-pipeline",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "reference-page": {
+      "name": "reference-page",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "renewals-pipeline": {
+      "name": "renewals-pipeline",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "rep-leaderboard": {
+      "name": "rep-leaderboard",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "revenue-dashboard": {
+      "name": "revenue-dashboard",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "runbook": {
+      "name": "runbook",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "sales-pipeline": {
+      "name": "sales-pipeline",
+      "articles": [
+        "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "sheet-drawer": {
+      "name": "sheet-drawer",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "sidebar-nav": {
+      "name": "sidebar-nav",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "stable-facts": {
+      "name": "stable-facts",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "supporting-pane": {
+      "name": "supporting-pane",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "ticket-inbox": {
+      "name": "ticket-inbox",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "triage-pattern": {
+      "name": "triage-pattern",
+      "articles": [
+        "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "viewer-pattern": {
+      "name": "viewer-pattern",
+      "articles": [
+        "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    }
+  },
+  "categories": [
+    "app-pattern",
+    "composed-widgets",
+    "dashboard-pattern",
+    "internal-apps",
+    "read-only-pages",
+    "recipe",
+    "reference-content",
+    "sales-revenue",
+    "support-tools",
+    "viewer-pattern"
+  ]
+}

@@ -1,0 +1,97 @@
+{
+  "_placeholder_note": "Built-in pocket template (todo-task-tracker). The seed rows below carry [bracketed] placeholder values — the create specialist replaces them with the user's real domain, renames labels, and preserves the widget structure. Keep the state/bind/on_click triangle intact; never strip the composer row.",
+  "state": {
+    "draft": "",
+    "draft_priority": "Medium",
+    "next_id": 6,
+    "status_filter": "All",
+    "priority_options": [
+      { "value": "High", "label": "High" },
+      { "value": "Medium", "label": "Medium" },
+      { "value": "Low", "label": "Low" }
+    ],
+    "status_filter_options": [
+      { "value": "All", "label": "All tasks" },
+      { "value": "Todo", "label": "To do" },
+      { "value": "In progress", "label": "In progress" },
+      { "value": "Done", "label": "Done" }
+    ],
+    "tasks": [
+      { "id": "t1", "title": "[Draft the Q3 launch brief]", "status": "In progress", "priority": "High", "due_date": "2026-06-02" },
+      { "id": "t2", "title": "[Review pull request #482]", "status": "Todo", "priority": "Medium", "due_date": "2026-05-28" },
+      { "id": "t3", "title": "[Reply to the Acme renewal email]", "status": "Todo", "priority": "High", "due_date": "2026-05-26" },
+      { "id": "t4", "title": "[Book the team offsite venue]", "status": "Done", "priority": "Low", "due_date": "2026-05-20" },
+      { "id": "t5", "title": "[Update the onboarding checklist]", "status": "In progress", "priority": "Medium", "due_date": "2026-06-09" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Task Tracker]",
+          "subtitle": "[Everything on your plate, in one sortable list]"
+        }
+      },
+      {
+        "type": "flex",
+        "props": { "direction": "row", "gap": "8px", "align": "end" },
+        "children": [
+          {
+            "type": "input",
+            "bind": "draft",
+            "props": { "label": "New task", "placeholder": "[What needs doing?]" }
+          },
+          {
+            "type": "select",
+            "bind": "draft_priority",
+            "props": { "label": "Priority", "options": "{state.priority_options}" }
+          },
+          {
+            "type": "button",
+            "props": { "label": "Add task", "variant": "primary" },
+            "on_click": [
+              { "action": "validate", "condition": "{state.draft.length > 0}", "message": "Type a task first" },
+              {
+                "action": "push",
+                "target": "tasks",
+                "value": {
+                  "id": "t-{state.next_id}",
+                  "title": "{state.draft}",
+                  "status": "Todo",
+                  "priority": "{state.draft_priority}",
+                  "due_date": ""
+                }
+              },
+              { "action": "set", "target": "next_id", "value": "{state.next_id + 1}" },
+              { "action": "set", "target": "draft", "value": "" }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "select",
+        "bind": "status_filter",
+        "props": { "label": "Filter by status", "options": "{state.status_filter_options}" }
+      },
+      {
+        "type": "data-grid",
+        "props": {
+          "columns": [
+            { "key": "title", "label": "Task", "sortable": true, "align": "left" },
+            { "key": "status", "label": "Status", "sortable": true, "align": "left", "width": "140px" },
+            { "key": "priority", "label": "Priority", "sortable": true, "align": "left", "width": "110px" },
+            { "key": "due_date", "label": "Due", "sortable": true, "align": "left", "width": "130px" }
+          ],
+          "rows": "{state.tasks.where('status', state.status_filter)}",
+          "searchable": true,
+          "defaultSort": "due_date",
+          "pageSize": 25,
+          "dense": true
+        }
+      }
+    ]
+  }
+}

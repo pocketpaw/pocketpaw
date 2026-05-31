@@ -15,7 +15,12 @@ import shutil
 from collections.abc import AsyncIterator
 from typing import Any
 
-from pocketpaw.agents.backend import _DEFAULT_IDENTITY, BackendInfo, Capability
+from pocketpaw.agents.backend import (
+    _DEFAULT_IDENTITY,
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.tools.policy import ToolPolicy
@@ -23,7 +28,7 @@ from pocketpaw.tools.policy import ToolPolicy
 logger = logging.getLogger(__name__)
 
 
-class CopilotSDKBackend:
+class CopilotSDKBackend(BaseAgentBackend):
     """Copilot SDK backend — Python SDK wrapper for GitHub Copilot CLI agent."""
 
     @staticmethod

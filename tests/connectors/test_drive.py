@@ -485,7 +485,7 @@ class TestResolveBearerToken:
         # "no source left" branch deterministically.
         monkeypatch.setitem(
             __import__("sys").modules,
-            "pocketpaw.integrations.oauth",
+            "pocketpaw.clients.oauth",
             None,
         )
         with pytest.raises(DriveAuthError):

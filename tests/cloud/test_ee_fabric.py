@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from ee.fabric.models import FabricQuery, PropertyDef
-from ee.fabric.store import FabricStore
+from pocketpaw.fabric.models import FabricQuery, PropertyDef
+from pocketpaw.fabric.store import FabricStore
 
 
 @pytest.fixture

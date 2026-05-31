@@ -6,9 +6,8 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
-
-from ee.cloud.chat.schemas import WsOutbound
-from ee.cloud.chat.ws import ConnectionManager
+from pocketpaw_ee.cloud.chat.schemas import WsOutbound
+from pocketpaw_ee.cloud.chat.ws import ConnectionManager
 
 
 @pytest.fixture

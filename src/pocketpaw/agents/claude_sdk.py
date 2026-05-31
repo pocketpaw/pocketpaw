@@ -1,5 +1,48 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-28 (#FU-F) — promote silent MCP provider build failures from
+  DEBUG to WARNING. A stale editable install (CloudForesightMcpProvider with a
+  missing SDK dependency) failed silently; the diagnostic took 30+ minutes.
+  Now logs provider class name, exception type, and message at WARNING with
+  exc_info so operators see it immediately on dashboard restart. Added an INFO
+  startup summary log (``MCP servers registered: …``) after the
+  ``pocketpaw.mcp_servers`` entry-point loop so the operator can confirm the
+  full registered set at a glance.
+Updated: 2026-05-25 (PR #1222 R1 Blocker 1) — added
+  ``attach_subprocess_env``. The pocket-specialist runtime calls it to
+  thread per-request tenancy values (``POCKETPAW_WORKSPACE_ID`` /
+  ``POCKETPAW_USER_ID`` / ``POCKETPAW_INTERNAL_TOKEN``) into the
+  Claude Code subprocess at spawn time without mutating the parent
+  process's ``os.environ``. The original MVP path wrote those vars to
+  the parent env from a request handler — racy across concurrent
+  requests. ``run()`` merges the attached dict into
+  ``options_kwargs["env"]`` AFTER the LLM-auth env so an attached value
+  cannot accidentally clobber the auth key. Each isolated backend
+  instance carries its own stash, so one request's tenancy can never
+  leak into another's subprocess.
+Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
+  collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
+  server now carries a writable ``add_widget`` tool alongside the read tools;
+  its id flows through the same provider loop, so the home-pocket agent can
+  call ``add_widget`` on the ``claude_agent_sdk`` backend.
+Updated: 2026-05-21 — Gate the ``pocketpaw_planner`` in-process MCP server
+  behind an explicit policy opt-in (``is_mcp_server_explicitly_allowed``).
+  It was the only in-process MCP server with no gate, so the
+  ``plan_project`` tool schema loaded into every agent run. It now
+  registers only when the agent opts in. ``__init__`` accepts an optional
+  ``policy`` so AgentPool can inject a per-agent ToolPolicy carrying that
+  opt-in; when omitted the policy is built from settings as before.
+Updated: 2026-05-20 — Fix concurrency lease race in run(). On every exit path
+  (the finally block AND the outer except handler) run() cleared the shared
+  self._client_in_use flag and nulled self._client unconditionally, so a
+  non-owning run — a stateless-fallback run, or one that failed before
+  acquiring the lease — would steal a still-streaming sibling persistent run's
+  lease and destroy its subprocess. run() now tracks ownership with a local
+  acquired_lease flag (declared above the try so it is in scope for the except
+  handler) and gates the flag clear and the persistent-client teardown on it
+  on both exit paths — only the run that actually acquired the lease may
+  release it or disconnect the shared subprocess. The event_stream.aclose()
+  in the finally is unaffected: a run always owns its own stream.
 Updated: 2026-03-11 — Always bypass permissions in headless mode. Without this,
   tool calls (like memory save via Bash) hang on messaging channels (Telegram,
   Discord, Slack) because there's no terminal to approve permission prompts.
@@ -19,11 +62,11 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from pocketpaw.agents.backend import BackendInfo, Capability
+from pocketpaw.agents.backend import BackendInfo, BaseAgentBackend, Capability
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.security.rails import is_substring_blocked
-from pocketpaw.tools.policy import ToolPolicy
+from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +78,7 @@ _DEFAULT_IDENTITY = (
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
 
-class ClaudeSDKBackend:
+class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
 
     Provides all built-in tools (Bash, Read, Write, Edit, Glob, Grep,
@@ -46,6 +89,17 @@ class ClaudeSDKBackend:
     """
 
     _TOOL_POLICY_MAP: dict[str, str] = {
+        # NOTE: is_tool_allowed() returns True for any key not explicitly
+        # denied when the profile is 'full' (empty _allowed_set). For
+        # restrictive profiles ('minimal', 'coding') it returns False for
+        # any key absent from the resolved allow set. 'Agent' therefore
+        # MUST have an explicit entry here; without it, any registered
+        # subagent (general-purpose claude_agent_sdk capability) would
+        # be silently blocked for every non-full profile. Mapped to
+        # 'shell' because invoking a subagent has comparable privilege
+        # scope to running a shell command — the gating is deliberately
+        # conservative.
+        "Agent": "shell",
         "Bash": "shell",
         "Read": "read_file",
         "Write": "write_file",
@@ -90,13 +144,17 @@ class ClaudeSDKBackend:
             ],
         )
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, policy: ToolPolicy | None = None):
         self.settings = settings
         self._stop_flag = False
         self._sdk_available = False
         self._cli_available = False  # Whether the `claude` CLI binary is installed
         self._cwd = settings.file_jail_path  # Default working directory
-        self._policy = ToolPolicy(
+        # ``policy`` lets a caller (AgentPool) inject a per-agent
+        # ToolPolicy — e.g. one that opts the agent into the planner MCP
+        # server. When omitted, build the process-wide policy from
+        # settings, which is the behaviour every other caller relies on.
+        self._policy = policy or ToolPolicy(
             profile=settings.tool_profile,
             allow=settings.tools_allow,
             deny=settings.tools_deny,
@@ -108,6 +166,16 @@ class ClaudeSDKBackend:
         self._client = None
         self._client_options_key: str | None = None
         self._client_in_use = False
+
+        # Per-run subprocess env injected by the pocket-specialist
+        # runtime via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1).
+        # Merged into ``options_kwargs["env"]`` at spawn time so the
+        # Claude Code subprocess inherits per-request tenancy values
+        # (``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        # ``POCKETPAW_INTERNAL_TOKEN``) without the runtime mutating
+        # the parent's ``os.environ`` — which would race across
+        # concurrent requests.
+        self._extra_subprocess_env: dict[str, str] = {}
 
         # SDK imports (set during initialization)
         self._query = None
@@ -130,6 +198,27 @@ class ClaudeSDKBackend:
 
     def set_tool_policy(self, policy: ToolPolicy) -> None:
         self._policy = policy
+
+    def attach_subprocess_env(self, env: dict[str, str]) -> None:
+        """Merge ``env`` into the Claude Code subprocess env at next spawn.
+
+        The pocket-specialist runtime calls this once per isolated run
+        (PR #1222 R1 Blocker 1) to ship per-request tenancy values
+        (``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        ``POCKETPAW_INTERNAL_TOKEN``) into the subprocess without
+        mutating the parent process's ``os.environ`` — which would
+        race across concurrent requests sharing the same parent.
+
+        ``run()`` merges this dict into ``options_kwargs["env"]`` after
+        the LLM-provider env (``ANTHROPIC_API_KEY`` /
+        ``CLAUDE_CODE_OAUTH_TOKEN``) so an attached value cannot
+        accidentally clobber the auth key. Each call REPLACES the
+        previous dict — an isolated backend instance is per-run, so
+        the new run wants a fresh tenancy, not a merge with stale.
+        """
+        # Defensive copy so the caller can mutate their dict without
+        # corrupting the backend's stash.
+        self._extra_subprocess_env = dict(env)
 
     def _initialize(self) -> None:
         """Initialize the Claude Agent SDK with all imports."""
@@ -498,7 +587,121 @@ class ClaudeSDKBackend:
                 continue
 
             servers[cfg.name] = entry
+
+        # In-process MCP server: ripple widget-spec lookups (get_widget_spec,
+        # get_inline_widget_help). Pure core — the ripple manifest / inline
+        # catalog have no cloud dependency, so this server is always built
+        # locally. Why in-process MCP at all: the rippleSpec.ui tree can be
+        # tens of KB, which would blow the Windows CLI command-line limit if
+        # embedded in the system prompt.
+        try:
+            from pocketpaw.agents.sdk_mcp_widgets import build_widgets_context_server
+
+            widgets_server = build_widgets_context_server()
+            if widgets_server is not None:
+                name, cfg_entry = widgets_server
+                if self._policy.is_mcp_server_allowed(name):
+                    servers[name] = cfg_entry
+                else:
+                    logger.info("MCP server '%s' blocked by tool policy", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_widgets MCP server not registered: %s", exc)
+
+        # EE-provided in-process MCP servers — cloud pocket context, Mission
+        # Control tasks, the planner, and the pocket specialist. Discovered
+        # via the ``pocketpaw.mcp_servers`` entry-point (see
+        # pocketpaw_ee.extensions); an OSS install registers none and this
+        # loop is a no-op.
+        #
+        # Most of these servers are ambient: allow-by-default policy lets
+        # them register on every agent run. The planner is the exception —
+        # it is *opt-in, not ambient*. Most agent runs never plan a
+        # project, and carrying the ``plan_project`` schema in every
+        # context is dead weight. For a server in ``OPT_IN_MCP_SERVERS``
+        # the loop uses ``is_mcp_server_explicitly_allowed``, which
+        # registers it only when the policy's ``mcp_servers_allow`` set
+        # names it. AgentPool builds that set from the cloud agent's
+        # ``tools`` field — an agent enables the planner by listing the
+        # bare token ``pocketpaw_planner`` there. Deny still wins.
+        from pocketpaw._registry import providers as _ext_providers
+
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            provider_name = type(provider).__name__
+            try:
+                built = provider.build_server()
+            except Exception as exc:  # noqa: BLE001
+                # 2026-05-28 (#FU-F): a stale editable install + dashboard
+                # restart left CloudForesightMcpProvider unable to import its
+                # SDK server, which silently swallowed the failure at DEBUG.
+                # The diagnostic took 30+ minutes because the failure mode was
+                # invisible. Promote to WARNING + include exception type +
+                # module path so the operator sees it on startup.
+                logger.warning(
+                    "MCP server provider %s failed to build: %s: %s",
+                    provider_name,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            if built is None:
+                continue
+            name, cfg_entry = built
+            if name in OPT_IN_MCP_SERVERS:
+                if not self._policy.is_mcp_server_explicitly_allowed(name):
+                    logger.debug(
+                        "MCP server '%s' not registered — agent has not opted "
+                        "in (add '%s' to the agent's tools)",
+                        name,
+                        name,
+                    )
+                    continue
+            elif not self._policy.is_mcp_server_allowed(name):
+                logger.info("MCP server '%s' blocked by tool policy", name)
+                continue
+            servers[name] = cfg_entry
+
+        # Startup summary — operators check this on dashboard restart to confirm
+        # their install picked up the expected entry-point set.
+        if servers:
+            logger.info("MCP servers registered: %s", ", ".join(sorted(servers)))
+        else:
+            logger.info("No MCP servers registered.")
+
         return servers
+
+    def _collect_mcp_tool_ids(self) -> list[str]:
+        """Collect the in-process MCP tool ids to add to the SDK allowlist.
+
+        An MCP tool is only callable if its id is on the allowlist. This
+        gathers the core ripple widget-spec ids plus every cloud
+        ``pocketpaw.mcp_servers`` provider's ``tool_ids()`` (which includes
+        the ``pocketpaw_pocket`` server's writable ``add_widget`` tool).
+
+        Opt-in servers (the planner) are skipped unless the policy opts
+        them in, mirroring the registration gate in ``_get_mcp_servers``.
+        Tool ids follow the ``mcp__<server>__<tool>`` convention, so the
+        server name is the segment between the first and second ``__``.
+        """
+        from pocketpaw._registry import providers as _ext_providers
+        from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+
+        ids: list[str] = list(WIDGET_TOOL_IDS)
+        for provider in _ext_providers("pocketpaw.mcp_servers"):
+            try:
+                tool_ids = list(provider.tool_ids())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("MCP provider tool ids not added to allowlist: %s", exc)
+                continue
+            for tool_id in tool_ids:
+                parts = tool_id.split("__")
+                server = parts[1] if len(parts) >= 3 and parts[0] == "mcp" else ""
+                if server in OPT_IN_MCP_SERVERS and not (
+                    self._policy.is_mcp_server_explicitly_allowed(server)
+                ):
+                    continue
+                ids.append(tool_id)
+        return ids
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
         """Get or create a persistent ClaudeSDKClient.
@@ -656,6 +859,15 @@ class ClaudeSDKBackend:
         )
 
         _stderr_lines: list[str] = []
+
+        # Ownership flag — True only if THIS run acquired the shared
+        # _client_in_use lease. Declared above the try/except so it is always
+        # in scope in the except handler (an exception can fire before the
+        # dispatch block runs). Both the finally block and the except handler
+        # gate the lease clear and the persistent-client teardown on this so a
+        # non-owning run (stateless fallback, or a failure before acquisition)
+        # can never release a sibling's lease or destroy its subprocess.
+        acquired_lease = False
         try:
             # Resolve LLM provider early -- needed for routing + env.
             # Use per-backend provider setting (defaults to "anthropic").
@@ -747,12 +959,14 @@ class ClaudeSDKBackend:
             except Exception:
                 pass  # Don't break agent if connector registry fails
 
-            # The persistent ClaudeSDKClient maintains conversation history
-            # natively across query() calls, so we do NOT inject history into
-            # the system prompt for that path. History is only appended for
-            # the stateless fallback path (which starts fresh each call).
+            # Inject prior turns into the system prompt at connect time. The
+            # persistent ClaudeSDKClient accumulates new turns natively after
+            # connect, but a fresh subprocess (after eviction, restart, or
+            # session switch) has empty native history — without this, those
+            # cold-start runs lose all conversation context. Reused clients
+            # keep the prompt set at first connect and ignore later option
+            # changes, so there's no duplication on the warm path.
             final_prompt = identity
-            final_prompt_with_history = identity
             if history:
                 lines = ["# Recent Conversation"]
                 for msg in history:
@@ -761,20 +975,40 @@ class ClaudeSDKBackend:
                     if len(content) > 2000:
                         content = content[:2000] + "..."
                     lines.append(f"**{role}**: {content}")
-                final_prompt_with_history += "\n\n" + "\n".join(lines)
+                final_prompt += "\n\n" + "\n".join(lines)
 
-            # Build allowed tools list, filtered by tool policy
-            all_sdk_tools = [
-                "Bash",
-                "Read",
-                "Write",
-                "Edit",
-                "Glob",
-                "Grep",
-                "WebSearch",
-                "WebFetch",
-                "Skill",
-            ]
+            # Pocket sessions don't need shell or filesystem access — the
+            # MCP pocket tools (get_pocket / list_pockets / set_state /
+            # set_node_prop / add_node / etc.) are the complete interface.
+            # Detect via the <pocket-scope> marker every pocket prompt
+            # carries; lock tools down to delegation + web + pocket MCP.
+            #
+            # Without this gate, the agent has been observed reaching for
+            # shell introspection (e.g. `env | grep pocket; curl localhost`)
+            # to "figure out" pocket state, which trips the security rails
+            # AND is the wrong path — the MCP tools already expose
+            # everything the agent needs.
+            is_pocket_session = "<pocket-scope>" in (final_prompt or "")
+
+            if is_pocket_session:
+                all_sdk_tools = ["Agent", "WebSearch", "WebFetch"]
+                logger.info(
+                    "Pocket session detected — tool surface locked to %s",
+                    all_sdk_tools,
+                )
+            else:
+                all_sdk_tools = [
+                    "Agent",
+                    "Bash",
+                    "Read",
+                    "Write",
+                    "Edit",
+                    "Glob",
+                    "Grep",
+                    "WebSearch",
+                    "WebFetch",
+                    "Skill",
+                ]
             allowed_tools = [
                 t
                 for t in all_sdk_tools
@@ -783,6 +1017,15 @@ class ClaudeSDKBackend:
             if len(allowed_tools) < len(all_sdk_tools):
                 blocked = set(all_sdk_tools) - set(allowed_tools)
                 logger.info("Tool policy blocked SDK tools: %s", blocked)
+
+            # In-process MCP tool ids must be on the allowlist to be
+            # callable. The ripple widget-spec tools are core; the cloud
+            # pocket / Mission Control tasks / planner / pocket-specialist
+            # ids come from the ``pocketpaw.mcp_servers`` providers (none on
+            # an OSS install). The cloud ``pocketpaw_pocket`` server carries
+            # both read tools (get_pocket / list_pockets) and the writable
+            # ``add_widget`` tool — they all flow through the loop below.
+            allowed_tools.extend(self._collect_mcp_tool_ids())
 
             # Build hooks for security
             hooks = {
@@ -795,8 +1038,29 @@ class ClaudeSDKBackend:
             }
 
             # Build options
+            #
+            # Windows note: CreateProcess caps the entire command line at
+            # ~32,767 chars. The SDK passes string ``system_prompt`` inline
+            # via ``--system-prompt``; long KB/identity blobs blow that limit
+            # and surface as a misleading ``CLINotFoundError``. Since SDK
+            # 0.1.72 we can pass a ``SystemPromptFile`` dict instead, which
+            # the CLI reads via ``--system-prompt-file <path>``.
+            system_prompt_arg: Any = final_prompt
+            if os.name == "nt" and len(final_prompt) > 24_000:
+                runtime_dir = Path.home() / ".pocketpaw" / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                prompt_path = runtime_dir / "system_prompt.md"
+                prompt_path.write_text(final_prompt, encoding="utf-8")
+                system_prompt_arg = {"type": "file", "path": str(prompt_path)}
+                logger.info(
+                    "System prompt %d chars exceeds Windows CLI safe limit; "
+                    "passing via --system-prompt-file %s",
+                    len(final_prompt),
+                    prompt_path,
+                )
+
             options_kwargs = {
-                "system_prompt": final_prompt,
+                "system_prompt": system_prompt_arg,
                 "allowed_tools": allowed_tools,
                 "setting_sources": ["user", "project"],
                 "hooks": hooks,
@@ -824,6 +1088,20 @@ class ClaudeSDKBackend:
             # too as a safety net.
             for _strip_key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
                 os.environ.pop(_strip_key, None)
+            # Merge per-run subprocess env (PR #1222 R1 Blocker 1) —
+            # e.g. the pocket-specialist runtime attaches
+            # ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+            # ``POCKETPAW_INTERNAL_TOKEN`` here instead of writing to
+            # the parent process's ``os.environ``. LLM-auth env wins:
+            # we lay extras DOWN FIRST so anything the caller attaches
+            # cannot accidentally clobber the auth key. An isolated
+            # backend has its own ``_extra_subprocess_env`` so the
+            # tenancy of one request cannot leak into another.
+            if self._extra_subprocess_env:
+                merged_env = dict(self._extra_subprocess_env)
+                if sdk_env:
+                    merged_env.update(sdk_env)
+                sdk_env = merged_env
             if sdk_env:
                 options_kwargs["env"] = sdk_env
             if is_non_anthropic:
@@ -904,6 +1182,7 @@ class ClaudeSDKBackend:
             if not self._client_in_use:
                 try:
                     self._client_in_use = True
+                    acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
                         options, session_key=session_key
                     )
@@ -926,23 +1205,23 @@ class ClaudeSDKBackend:
                             "CLI stderr during persistent client failure:\n%s",
                             "\n".join(_stderr_lines),
                         )
-                    # Clear broken client so next call creates a fresh one
+                    # Clear broken client so next call creates a fresh one.
+                    # This run is falling back to stateless: it no longer owns
+                    # the persistent client, so drop the lease and the
+                    # ownership flag so the finally/except teardown below
+                    # cannot misfire on a client this run no longer holds.
                     self._client = None
                     self._client_options_key = None
                     self._client_in_use = False
+                    acquired_lease = False
                     _persistent_client = None
 
             if event_stream is None:
                 logger.info("Starting stateless query (fallback — _client_in_use was True)")
-                # Stateless query starts fresh with no conversation memory,
-                # so inject compacted history into the system prompt.
-                if final_prompt_with_history != final_prompt:
-                    stateless_kwargs = dict(options_kwargs)
-                    stateless_kwargs["system_prompt"] = final_prompt_with_history
-                    stateless_options = self._ClaudeAgentOptions(**stateless_kwargs)
-                else:
-                    stateless_options = options
-                event_stream = self._resilient_query(prompt=message, options=stateless_options)
+                # final_prompt already carries Mongo history (injected above),
+                # so the stateless path uses the same options as the persistent
+                # path — no separate system prompt swap is needed.
+                event_stream = self._resilient_query(prompt=message, options=options)
 
             # State tracking for StreamEvent deduplication
             _streamed_via_events = False
@@ -1098,7 +1377,15 @@ class ClaudeSDKBackend:
                 # client, _resilient_receive handles this.  For the
                 # stateless path or early-break scenarios (stop flag),
                 # we still need to ensure the pipe is clean. ──
-                if _persistent_client is not None and not _saw_result and self._client is not None:
+                # Only a run that actually acquired the lease may tear down
+                # the shared persistent client — a stateless-fallback run does
+                # not own it and must leave a sibling's subprocess alone.
+                if (
+                    acquired_lease
+                    and _persistent_client is not None
+                    and not _saw_result
+                    and self._client is not None
+                ):
                     logger.warning(
                         "Main loop exited without ResultMessage — "
                         "destroying persistent client to avoid stale data"
@@ -1110,11 +1397,35 @@ class ClaudeSDKBackend:
                     self._client = None
                     self._client_options_key = None
 
-                self._client_in_use = False
+                # Only release the lease if this run acquired it. Clearing it
+                # unconditionally would steal a sibling persistent run's lease.
+                if acquired_lease:
+                    self._client_in_use = False
                 logger.info(
-                    "SDK stream finished: %d events, _client_in_use=False",
+                    "SDK stream finished: %d events, _client_in_use=%s",
                     _event_count,
+                    self._client_in_use,
                 )
+
+                # ── Close the inner async generator LAST. ──
+                # ``_resilient_receive`` / ``_resilient_query`` spawn
+                # background ``asend`` tasks under the hood; without
+                # ``aclose()`` those tasks linger in the loop's pending
+                # set until GC, surfacing as
+                # ``Task exception was never retrieved`` +
+                # ``StopAsyncIteration`` log noise on every turn (most
+                # visible right after the soul-mutation hook fires).
+                #
+                # Order matters: aclose runs AFTER the drain decision
+                # has read ``_saw_result`` so closing the generator
+                # cannot influence that branch. Idempotent + safe on a
+                # generator that already exited cleanly.
+                close = getattr(event_stream, "aclose", None)
+                if close is not None:
+                    try:
+                        await close()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("event_stream aclose error (non-fatal): %s", exc)
 
             yield AgentEvent(type="done", content="")
 
@@ -1130,10 +1441,14 @@ class ClaudeSDKBackend:
                 for hint in ["bun has crashed", "panic", "switch on corrupt value"]
             )
 
-            # Clear client on any error
-            self._client = None
-            self._client_options_key = None
-            self._client_in_use = False
+            # Clear client on any error — but only if THIS run owned it.
+            # A non-owning run (stateless fallback, or a failure before
+            # lease acquisition) must not destroy a sibling persistent run's
+            # subprocess or release its lease on the error path.
+            if acquired_lease:
+                self._client = None
+                self._client_options_key = None
+                self._client_in_use = False
 
             if _is_bun_crash and not getattr(self, "_bun_retry_done", False):
                 self._bun_retry_done = True
@@ -1146,6 +1461,19 @@ class ClaudeSDKBackend:
                     content="Runtime crashed, retrying with a fresh process...",
                 )
                 await asyncio.sleep(1)
+                # Lease state is consistent before the recursive retry, on
+                # both branches of the ownership gate above:
+                #  - acquired_lease True  → this run owned the persistent
+                #    client; the gate already cleared _client and set
+                #    _client_in_use=False, so the retry starts on a clean
+                #    lease and may take the persistent path itself.
+                #  - acquired_lease False → this run never owned the lease
+                #    (stateless fallback, or a failure before acquisition);
+                #    the gate left _client_in_use untouched, so a sibling
+                #    persistent run still holds it. The recursive run() will
+                #    correctly see _client_in_use=True and fall back to
+                #    stateless again — it cannot steal or double-release the
+                #    sibling's lease.
                 try:
                     async for retry_event in self.run(
                         message,

@@ -123,6 +123,39 @@ class TestIntentionStore:
         found = store.get_by_id(created["id"])
         assert found is None
 
+    def test_delete_logs_at_info_by_default(self, store, caplog):
+        """Default delete emits the per-item INFO log."""
+        import logging
+
+        created = store.create(
+            name="Loud Delete",
+            prompt="test",
+            trigger={"type": "cron", "schedule": "* * * * *"},
+        )
+
+        with caplog.at_level(logging.INFO, logger="pocketpaw.daemon.intentions"):
+            store.delete(created["id"])
+
+        assert any("Deleted intention" in r.message for r in caplog.records)
+
+    def test_delete_quiet_suppresses_per_item_log(self, store, caplog):
+        """quiet=True silences the per-deletion log so bulk callers stay clean."""
+        import logging
+
+        created = store.create(
+            name="Quiet Delete",
+            prompt="test",
+            trigger={"type": "cron", "schedule": "* * * * *"},
+        )
+
+        with caplog.at_level(logging.INFO, logger="pocketpaw.daemon.intentions"):
+            result = store.delete(created["id"], quiet=True)
+
+        assert result is True
+        assert not any("Deleted intention" in r.message for r in caplog.records)
+        # The intention is still gone — quiet only affects logging.
+        assert store.get_by_id(created["id"]) is None
+
     def test_toggle_intention(self, store):
         """Test toggling intention enabled state."""
         created = store.create(
