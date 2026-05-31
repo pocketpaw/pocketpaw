@@ -94,6 +94,42 @@ async def _authenticate_or_400(
     return user
 
 
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+async def _enforce_sso_or_raise(user: Any, request: Request) -> None:
+    """Reject non-SSO login when the user belongs to a workspace whose
+    ``SsoConfig.enforced`` is True. Workspace owners are exempt as a
+    break-glass. Emits an audit row for the rejection."""
+    from pocketpaw_ee.cloud.auth.sso import service as sso_service
+
+    blocked = await sso_service.find_enforced_sso_block(user)
+    if blocked is None:
+        return
+    await audit_service.record(
+        str(blocked.id),
+        str(user.id),
+        "sso.enforced_password_rejected",
+        target_type="user",
+        target_id=str(user.id),
+        metadata={
+            "email": user.email,
+            "workspace_slug": blocked.slug,
+        },
+        ip=_client_ip(request),
+    )
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "sso.enforced",
+            "message": ("Password login is disabled for this workspace. Sign in with SSO."),
+            "workspace_slug": blocked.slug,
+            "sso_login_url": f"/api/v1/auth/sso/{blocked.slug}/login",
+        },
+    )
+
+
 def _current_jti(request: Request) -> str | None:
     token = request.cookies.get("paw_auth")
     if not token:
@@ -117,6 +153,7 @@ async def login_cookie(
     manager: UserManager = Depends(get_user_manager),
 ):
     user = await _authenticate_or_400(credentials, manager)
+    await _enforce_sso_or_raise(user, request)
     if user.mfa_enabled:
         token, _ = mint_mfa_pending(str(user.id))
         return JSONResponse({"mfa_required": True, "mfa_token": token})
@@ -133,6 +170,7 @@ async def login_bearer(
     manager: UserManager = Depends(get_user_manager),
 ):
     user = await _authenticate_or_400(credentials, manager)
+    await _enforce_sso_or_raise(user, request)
     if user.mfa_enabled:
         token, _ = mint_mfa_pending(str(user.id))
         return JSONResponse({"mfa_required": True, "mfa_token": token})
@@ -145,10 +183,6 @@ async def login_bearer(
 class _MfaChallengeRequest(BaseModel):
     mfa_token: str
     code: str
-
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
 
 
 @router.post("/auth/mfa/challenge")
@@ -182,6 +216,8 @@ async def mfa_challenge(
 
     if not ok:
         raise HTTPException(status_code=401, detail="mfa_invalid_code")
+
+    await _enforce_sso_or_raise(user, request)
 
     response = await _mint_and_record(cookie_backend, user, request)
     await manager.on_after_login(user, request, response)

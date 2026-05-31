@@ -142,6 +142,31 @@ async def delete_sso_config(workspace_id: str) -> None:
     )
 
 
+async def find_enforced_sso_block(user: _UserDoc) -> _WorkspaceDoc | None:
+    """Return the first workspace blocking ``user`` from non-SSO login.
+
+    Walks the user's memberships and returns the first workspace whose
+    ``sso_config.enforced`` is True and where ``user`` is not the owner.
+    Workspace owners are exempt as a documented break-glass so a
+    misconfigured SSO connection cannot lock the org out. Returns
+    ``None`` when password login is permitted.
+    """
+    for membership in user.workspaces or []:
+        try:
+            ws = await _WorkspaceDoc.get(PydanticObjectId(membership.workspace))
+        except Exception:
+            continue
+        if ws is None or ws.deleted_at is not None:
+            continue
+        cfg = ws.sso_config
+        if cfg is None or not cfg.enforced:
+            continue
+        if ws.owner == str(user.id):
+            continue
+        return ws
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Login flow
 # ---------------------------------------------------------------------------
