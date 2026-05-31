@@ -1,5 +1,16 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-05-31 (fix/home-backend-summary-per-turn) — the persistent-client
+  cache key now folds in a digest of the system prompt's STABLE behavioral
+  prefix (``_client_cache_key`` / ``_behavior_prefix``), not just
+  session+model+tools. The home agent bakes its non-secret backend summary
+  ({base_url, auth_type, configured}) into the static system prompt; that
+  prompt is applied to the subprocess only at connect() time and ignored on
+  warm reuse, so configuring a pocket's backend mid-session stayed frozen
+  until a cold restart. Keying on the behavioral prefix makes a config flip
+  change the key, which rebuilds the client on the very next turn. The volatile
+  per-turn tail (KB block, soul memories, conversation history) is stripped
+  before hashing so ordinary turns still reuse the warm subprocess.
 Updated: 2026-05-28 (#FU-F) — promote silent MCP provider build failures from
   DEBUG to WARNING. A stale editable install (CloudForesightMcpProvider with a
   missing SDK dependency) failed silently; the diagnostic took 30+ minutes.
@@ -56,6 +67,7 @@ Uses the official Claude Agent SDK (pip install claude-agent-sdk) which provides
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -703,19 +715,75 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 ids.append(tool_id)
         return ids
 
+    # Section markers that ``AgentPool.run`` appends to the system prompt
+    # AFTER the authoritative behavioral instructions. Everything from the
+    # first marker onward is per-turn and volatile (query-specific KB hits,
+    # soul-memory recall, injected conversation history on a cold subprocess),
+    # so it MUST NOT participate in the persistent-client cache key — otherwise
+    # every turn would needlessly tear down and rebuild the subprocess. The
+    # behavioral prefix BEFORE these markers carries the home-pocket backend
+    # summary, which is exactly the mutable state we want the key to track.
+    _VOLATILE_PROMPT_MARKERS = (
+        "\n\n## Your Knowledge Base",
+        "\n\n## Relevant Past Memories",
+        "\n\n# Recent Conversation",
+    )
+
+    @classmethod
+    def _behavior_prefix(cls, system_prompt: Any) -> str:
+        """Return the stable behavioral prefix of ``system_prompt``.
+
+        Strips the volatile per-turn tail (KB block, soul memories, injected
+        history) so two turns that differ only in retrieved context hash to the
+        same value. On Windows the SDK may pass ``system_prompt`` as a
+        ``{type: "file", path: ...}`` dict — there is no inline text to key on,
+        so fall back to the path (stable per connect) repr.
+        """
+        if isinstance(system_prompt, dict):
+            return f"file:{system_prompt.get('path', '')}"
+        if not isinstance(system_prompt, str):
+            return ""
+        cut = len(system_prompt)
+        for marker in cls._VOLATILE_PROMPT_MARKERS:
+            idx = system_prompt.find(marker)
+            if idx != -1:
+                cut = min(cut, idx)
+        return system_prompt[:cut]
+
+    @classmethod
+    def _client_cache_key(cls, options: Any, *, session_key: str | None = None) -> str:
+        """Persistent-client cache key: session + model + tools + a digest of
+        the system prompt's stable behavioral prefix.
+
+        The prefix digest is what makes a mid-session backend config change
+        (configured:false -> configured:true, baked into the static home
+        prompt) evict and rebuild the warm subprocess on the next turn, instead
+        of staying frozen until a cold restart. Hashing keeps the key bounded
+        regardless of prompt length.
+        """
+        prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
+        prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
+        return (
+            f"{session_key or ''}:"
+            f"{getattr(options, 'model', '')}:"
+            f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
+            f"{prefix_digest}"
+        )
+
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
-        Reuses the existing subprocess if model, tools, **and session** haven't
-        changed.  Different sessions get a fresh subprocess so the CLI's
-        internal conversation context doesn't leak between chats.
+        Reuses the existing subprocess if model, tools, session, **and the
+        system prompt's behavioral prefix** haven't changed. Different sessions
+        get a fresh subprocess so the CLI's internal conversation context
+        doesn't leak between chats; a changed behavioral prefix (e.g. the home
+        pocket's backend summary flipping to "configured" mid-session) also
+        forces a fresh subprocess so the new prompt actually takes effect — the
+        SDK applies the system prompt only at connect() time.
         """
         import time
 
-        key = (
-            f"{session_key or ''}:"
-            f"{getattr(options, 'model', '')}:{sorted(getattr(options, 'allowed_tools', []) or [])}"
-        )
+        key = self._client_cache_key(options, session_key=session_key)
 
         if self._client is not None and self._client_options_key == key:
             logger.debug("Reusing persistent client (key=%s)", key)
