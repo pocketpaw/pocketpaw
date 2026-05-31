@@ -225,40 +225,49 @@ def _build_session_and_tools(
     # surface all 200+ integrations and blow context budgets. Failing
     # loud here is friendlier than silently sending 0 tools.
     toolkits = list(settings.composio_toolkits)
-    if not toolkits:
-        logger.warning(
-            "Composio: no toolkits configured. Set POCKETPAW_COMPOSIO_TOOLKITS=gmail,"
-            "slack,... to expose concrete tools to the agent. Agent will run with no "
-            "Composio tools this turn."
-        )
-        return []
-
-    # ``composio.tools.get`` paginates alphabetically across the
-    # combined toolkit set, so a single call with ``toolkits=[a,b,c]``
-    # can return ~200 entries from the first letter alone. Fetch
-    # per-toolkit so every requested integration is represented.
-    # 50 tools/toolkit keeps multi-toolkit setups under the typical
-    # LLM tool-schema budget (Claude historically caps ~128). Users
-    # who need the full surface of a single toolkit should narrow
-    # ``composio_toolkits`` to that one toolkit.
-    per_toolkit_limit = 50
     combined: list[Any] = []
     seen_names: set[str] = set()
-    for toolkit in toolkits:
-        try:
-            tk_tools = composio_client.tools.get(
-                user_id=namespaced_user_id, toolkits=[toolkit], limit=per_toolkit_limit
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("Composio: failed to fetch toolkit %r — skipping", toolkit)
-            continue
-        for t in tk_tools or []:
-            name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
-            if name and name in seen_names:
+
+    # An empty allow-list is NOT an error — we fall through to the
+    # discovery meta-tools (+ connection tools) below, so the agent can
+    # reach any of Composio's 200+ toolkits on demand via SEARCH ->
+    # GET_SCHEMAS -> EXECUTE. We deliberately do NOT pre-load every
+    # toolkit's concrete tools: ``tools.get`` with no filter paginates
+    # alphabetically (returning ~200 entries all from the first letter)
+    # and thousands of schemas would blow the LLM tool-schema budget.
+    # Concrete tools load ONLY for integrations explicitly allow-listed
+    # in ``composio_toolkits``.
+    if not toolkits:
+        logger.info(
+            "Composio: no toolkits allow-listed — exposing discovery meta-tools "
+            "only. Set POCKETPAW_COMPOSIO_TOOLKITS=gmail,slack,… to also load "
+            "concrete tools for specific integrations."
+        )
+    else:
+        # ``composio.tools.get`` paginates alphabetically across the
+        # combined toolkit set, so a single call with ``toolkits=[a,b,c]``
+        # can return ~200 entries from the first letter alone. Fetch
+        # per-toolkit so every requested integration is represented.
+        # 50 tools/toolkit keeps multi-toolkit setups under the typical
+        # LLM tool-schema budget (Claude historically caps ~128). Users
+        # who need the full surface of a single toolkit should narrow
+        # ``composio_toolkits`` to that one toolkit.
+        per_toolkit_limit = 50
+        for toolkit in toolkits:
+            try:
+                tk_tools = composio_client.tools.get(
+                    user_id=namespaced_user_id, toolkits=[toolkit], limit=per_toolkit_limit
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning("Composio: failed to fetch toolkit %r — skipping", toolkit)
                 continue
-            if name:
-                seen_names.add(name)
-            combined.append(t)
+            for t in tk_tools or []:
+                name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+                if name and name in seen_names:
+                    continue
+                if name:
+                    seen_names.add(name)
+                combined.append(t)
 
     # Append Composio's search-flow meta-tools as a discovery fallback.
     # The direct-tools surface above caps at ``per_toolkit_limit`` per

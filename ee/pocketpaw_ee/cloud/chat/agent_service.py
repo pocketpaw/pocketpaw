@@ -532,9 +532,13 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     """
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
-    # Composio search-fallback guidance is conditional: only useful if
-    # Composio is actually wired up for this deployment. Gating avoids
-    # telling the agent about tools it doesn't have.
+    # Composio auth/search guidance is injected whenever Composio is
+    # enabled. An enabled deployment ALWAYS surfaces at least the
+    # discovery meta-tools — ``providers.py`` falls back to them when no
+    # toolkit is allow-listed — and the search-fallback rule matters MOST
+    # in that meta-tools-only mode. So gate on credentials (is_enabled),
+    # not on the toolkit allow-list: the prompt and the real tool list
+    # agree because enabled ⇒ tools present.
     from pocketpaw_ee.cloud.composio import service as _composio_service
 
     if _composio_service.is_enabled():

@@ -223,6 +223,63 @@ def test_returns_empty_when_session_build_raises(
     assert composio_providers.build_tools_for_backend("claude_agent_sdk") == []
 
 
+def test_empty_allow_list_exposes_meta_tools_only(
+    stub_provider_modules: dict[str, MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    force_settings,  # type: ignore[no-untyped-def]
+) -> None:
+    """No toolkit allow-list is NOT an error: the agent still gets the
+    discovery meta-tools so it can reach any toolkit on demand. No
+    concrete per-toolkit tools are pre-loaded."""
+    force_settings(_enabled_settings(composio_toolkits=[]))
+    monkeypatch.setattr(composio_providers, "_resolve_ctx", lambda: _fake_ctx())
+
+    tools = composio_providers.build_tools_for_backend("claude_agent_sdk")
+    names = {_tool_name(t) for t in tools}
+    assert "COMPOSIO_SEARCH_TOOLS" in names
+    assert "COMPOSIO_GET_TOOL_SCHEMAS" in names
+    assert "COMPOSIO_MULTI_EXECUTE_TOOL" in names
+    # The concrete per-toolkit path (stub emits ``tool(<slug>)`` names)
+    # never ran.
+    assert not any((n or "").startswith("tool(") for n in names)
+
+
+# ---------------------------------------------------------------------------
+# MCP-server registration (claude_agent_sdk path)
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_provider_registers_server_when_tools_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CloudComposioMcpProvider.build_server`` must yield a
+    ``("composio", server)`` tuple whenever ``build_tools_for_backend``
+    returns tools — including the meta-tools-only (empty allow-list)
+    case — and ``None`` only when there are genuinely zero tools
+    (Composio disabled / no stream context). Guards against anyone
+    reintroducing an early ``return []`` that silently un-registers the
+    server."""
+    from pocketpaw_ee.extensions import CloudComposioMcpProvider
+
+    # Stub the SDK so the test doesn't depend on the real
+    # ``create_sdk_mcp_server`` validating tool objects.
+    sentinel = object()
+    fake_sdk = types.ModuleType("claude_agent_sdk")
+    fake_sdk.create_sdk_mcp_server = lambda **kw: sentinel  # type: ignore[attr-defined]
+    fake_sdk.tool = lambda *a, **k: lambda f: f  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    provider = CloudComposioMcpProvider()
+
+    # Tools present (e.g. meta-tools from an empty allow-list) → registered.
+    monkeypatch.setattr(composio_providers, "build_tools_for_backend", lambda *a, **k: ["meta"])
+    assert provider.build_server() == ("composio", sentinel)
+
+    # No tools (disabled / no context) → not registered.
+    monkeypatch.setattr(composio_providers, "build_tools_for_backend", lambda *a, **k: [])
+    assert provider.build_server() is None
+
+
 # ---------------------------------------------------------------------------
 # Per-backend dispatch
 # ---------------------------------------------------------------------------
