@@ -112,91 +112,98 @@ def _extract_pocket_json(content: str) -> dict | None:
     return None
 
 
-async def _create_pocket_and_session(spec: dict, session_key: str) -> str | None:
-    """Create pocket + session in MongoDB. Returns pocket _id or None on failure."""
-    try:
-        from ee.cloud.models.session import Session
-        from ee.cloud.models.user import User
-        from ee.cloud.models.workspace import Workspace
+async def _create_pocket_and_session(
+    spec: dict,
+    session_key: str,
+    user_id: str | None = None,
+    workspace_id: str | None = None,
+) -> str | None:
+    """Persist an agent-created pocket + session via the cloud PocketWriter.
 
-        # Find user + workspace from existing cloud data
-        # Try to find user from any existing session, or get the first active user
-        user = await User.find_one()
-        if not user:
-            logger.warning("Cannot create pocket — no user in DB")
-            return None
-        user_id = str(user.id)
+    Pocket persistence is a cloud feature. An OSS install registers no
+    ``pocketpaw.pockets`` provider, so this returns ``None`` — the pocket
+    spec still fans out as an SSE event for local-mode rendering. The
+    cloud implementation (workspace/user resolution + Mongo writes) lives
+    in ``pocketpaw_ee.cloud.pockets.service``.
+    """
+    from pocketpaw._registry import first
 
-        workspace = await Workspace.find_one(Workspace.owner == user_id)
-        if not workspace:
-            # Try any workspace the user belongs to
-            workspace = await Workspace.find_one()
-        if not workspace:
-            logger.warning("Cannot create pocket — no workspace in DB")
-            return None
-        workspace_id = str(workspace.id)
-
-        # Create pocket
-        from ee.cloud.pockets.schemas import CreatePocketRequest
-        from ee.cloud.pockets.service import PocketService
-
-        meta = spec.get("metadata", {})
-        pocket = await PocketService.create(
-            workspace_id,
-            user_id,
-            CreatePocketRequest(
-                name=spec.get("title") or spec.get("name") or "Untitled",
-                description=spec.get("description", ""),
-                type=meta.get("category", "custom"),
-                icon="sparkles",
-                color=meta.get("color", "#0A84FF"),
-                rippleSpec=spec,
-            ),
-        )
-        pocket_id = str(pocket["_id"])
-
-        # Create session linked to this pocket
-        safe_key = session_key.replace(":", "_") if session_key else ""
-        if safe_key:
-            existing = await Session.find_one(Session.sessionId == safe_key)
-            if existing:
-                existing.pocket = pocket_id
-                await existing.save()
-            else:
-                from datetime import UTC, datetime
-
-                session = Session(
-                    sessionId=safe_key,
-                    workspace=workspace_id,
-                    owner=user_id,
-                    title=spec.get("title") or "New Chat",
-                    pocket=pocket_id,
-                    lastActivity=datetime.now(UTC),
-                )
-                await session.insert()
-
-        logger.info("Created pocket %s + session %s in MongoDB", pocket_id, safe_key)
-        return pocket_id
-    except Exception:
-        logger.warning("Failed to create pocket/session in MongoDB", exc_info=True)
+    writer = first("pocketpaw.pockets")
+    if writer is None:
         return None
+    return await writer.create_pocket_and_session(spec, session_key, user_id, workspace_id)
 
 
 async def _publish_pocket_event(
-    bus: "MessageBus", content: str, session_key: str, trace_id: str | None = None
+    bus: "MessageBus",
+    content: str,
+    session_key: str,
+    metadata: dict | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Detect pocket event JSON in tool output and publish a dedicated SystemEvent.
 
-    Pocket tools return output as: ``{json}\\n\\nhuman message``.
-    The JSON block has a ``pocket_event`` key (``"created"`` or ``"mutation"``).
+    Two shapes are recognised:
+
+    1. **Legacy local-mode tools** (``CreatePocketTool`` / ``AddWidgetTool``
+       / ``RemoveWidgetTool`` in ``pocketpaw.tools.builtin.pocket``) return
+       ``{json}\\n\\nhuman message`` where the JSON has a
+       ``pocket_event: "created"|"mutation"`` key. These emit a
+       *mutation instruction* the desktop frontend applies locally — no
+       Mongo writes happen here.
+
+    2. **Cloud CLI commands** (``pocketpaw.tools.cli cloud_*``, used by
+       subprocess agents like Codex) return
+       ``{"ok": true, "pocket": {...full document...}, "pocket_id": "..."}``
+       after a successful Mongo write. The mutation has *already*
+       persisted in the CLI subprocess; we just need to fan a
+       ``pocket_mutation`` SSE event out to the active chat session so
+       paw-enterprise's existing handler refreshes the canvas without a
+       manual reload. (The Mongo-side ``PocketUpdated`` realtime event
+       fired in the subprocess can't reach the parent process's
+       WebSocket connection manager — this is the bridge.)
+
+    ``metadata`` is the originating ``InboundMessage.metadata`` — for
+    shape 1 we read ``cloud_user_id`` / ``cloud_workspace_id`` so the
+    created pocket is attributed to the caller rather than the first
+    user in the DB.
     """
-    # Fast path: skip content that can't contain a pocket event.
-    if '"pocket_event"' not in content:
+    # Cheap rejection — neither shape can be in the content otherwise.
+    if '"pocket_event"' not in content and '"pocket"' not in content:
         return
     data = _extract_pocket_json(content)
-    if not data or "pocket_event" not in data:
+    if not data:
         return
 
+    # ── Shape 2: cloud CLI response ──
+    if data.get("ok") is True and isinstance(data.get("pocket"), dict):
+        pocket = data["pocket"]
+        pocket_id = data.get("pocket_id") or pocket.get("_id") or pocket.get("id")
+        if not pocket_id:
+            return
+        logger.info(
+            "Cloud pocket write detected: pocket_id=%s, name=%r",
+            pocket_id,
+            pocket.get("name"),
+        )
+        await bus.publish_system(
+            SystemEvent(
+                event_type="pocket_mutation",
+                data={
+                    "mutation": {
+                        "action": "replace",
+                        "pocket_id": pocket_id,
+                        "pocket": pocket,
+                    },
+                    "session_key": session_key,
+                },
+            )
+        )
+        return
+
+    # ── Shape 1: legacy local-mode tool ──
+    if "pocket_event" not in data:
+        return
     evt_type = data["pocket_event"]
     spec = data.get("spec", {})
     logger.info(
@@ -208,8 +215,18 @@ async def _publish_pocket_event(
         "panes" in spec,
     )
     if evt_type == "created":
-        # Create pocket + session in MongoDB right here
-        pocket_cloud_id = await _create_pocket_and_session(spec, session_key)
+        # Create pocket + session in MongoDB right here. Pull the caller's
+        # identity out of the inbound metadata so multi-user / multi-
+        # workspace deployments route the pocket to the right tenant.
+        meta = metadata or {}
+        cloud_user_id = meta.get("cloud_user_id")
+        cloud_workspace_id = meta.get("cloud_workspace_id")
+        pocket_cloud_id = await _create_pocket_and_session(
+            spec,
+            session_key,
+            user_id=cloud_user_id,
+            workspace_id=cloud_workspace_id,
+        )
         payload = {
             "spec": spec,
             "session_key": session_key,
@@ -276,6 +293,17 @@ def _strip_tts_links(text: str) -> str:
     return text.strip()
 
 
+def _format_bytes(n: int) -> str:
+    """Human-readable byte size (e.g. ``414.7 KB``) for prompt injection."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    if n < 1024 * 1024 * 1024:
+        return f"{n / (1024 * 1024):.1f} MB"
+    return f"{n / (1024 * 1024 * 1024):.1f} GB"
+
+
 class AgentLoop:
     """
     Main agent execution loop.
@@ -285,11 +313,57 @@ class AgentLoop:
     openai_agents, google_adk, codex_cli, opencode, or copilot_sdk).
     """
 
-    def __init__(self):
-        self.settings = get_settings()
+    def __init__(
+        self,
+        agent_id: str | None = None,
+        agent_config: dict | None = None,
+        agent_name: str | None = None,
+    ):
+        """Build a loop, optionally scoped to a cloud Agent.
+
+        When ``agent_id`` is set, the loop uses a
+        :class:`CloudAgentBootstrapProvider` keyed by the agent's config so
+        the identity block in the system prompt matches the selected agent.
+        Per-agent backend overrides (``config.backend``, ``config.model``)
+        are applied when present. Per-agent loops are *not* bus consumers —
+        they're invoked directly via :meth:`process_message` so multiple
+        loops can coexist without racing each other for InboundMessages.
+        """
+        self.agent_id = agent_id
+        self.agent_config = agent_config or {}
+        self.agent_name = agent_name
+
+        base_settings = get_settings()
+        # Per-agent overrides: backend + model come from the agent doc.
+        if agent_id and self.agent_config:
+            overrides: dict = {}
+            be = (self.agent_config.get("backend") or "").strip()
+            mdl = (self.agent_config.get("model") or "").strip()
+            if be:
+                overrides["agent_backend"] = be
+            if mdl:
+                # Applies to the Anthropic provider — other providers read
+                # their own model fields from settings, so this is a
+                # best-effort override aligned with today's default backend.
+                overrides["anthropic_model"] = mdl
+            self.settings = (
+                base_settings.model_copy(update=overrides) if overrides else base_settings
+            )
+        else:
+            self.settings = base_settings
+
         self.bus = get_message_bus()
         self.memory = get_memory_manager()
         self.context_builder = AgentContextBuilder(memory_manager=self.memory)
+
+        # Point the context builder at a per-agent bootstrap when scoped.
+        if agent_id:
+            from pocketpaw.bootstrap.cloud_agent_provider import CloudAgentBootstrapProvider
+
+            self.context_builder.bootstrap = CloudAgentBootstrapProvider(
+                agent_name=agent_name or "Agent",
+                agent_config=self.agent_config,
+            )
 
         # Agent Router handles backend selection
         self._router: AgentRouter | None = None
@@ -310,15 +384,122 @@ class AgentLoop:
         # Soul Protocol (optional)
         self._soul_manager: Any = None  # SoulManager | None
 
+        # Strong refs to fire-and-forget background tasks (chat titling, etc.)
+        # so the event loop doesn't GC them mid-flight.
+        self._bg_tasks: set[asyncio.Task] = set()
+
         self._running = False
 
     def _get_router(self) -> AgentRouter:
-        """Get or create the agent router (lazy initialization)."""
+        """Get or create the agent router.
+
+        Per-agent loops honour their captured ``self.settings`` (which
+        already carries the agent's backend/model overrides) so we don't
+        reload from disk and clobber them on first router access.
+
+        Default loops reload settings on every call and rebuild the
+        router when ``agent_backend`` changes. Without this the user can
+        flip ``agent_backend`` from claude_agent_sdk to codex_cli (or
+        vice-versa) in the dashboard and the running loop keeps using
+        the previously-cached backend until the process restarts.
+        """
         if self._router is None:
-            # Reload settings to pick up any changes
-            settings = Settings.load()
-            self._router = AgentRouter(settings)
+            if self.agent_id:
+                self._router = AgentRouter(self.settings)
+            else:
+                self._router = AgentRouter(Settings.load())
+            return self._router
+
+        # Per-agent loop: don't second-guess agent-specific overrides.
+        if self.agent_id:
+            return self._router
+
+        # Default loop: detect backend changes since last call.
+        fresh_settings = Settings.load()
+        active = getattr(self._router, "_active_backend_name", None)
+        if active != fresh_settings.agent_backend:
+            old = self._router
+            logger.info(
+                "Backend changed: %s -> %s; rebuilding router",
+                active,
+                fresh_settings.agent_backend,
+            )
+            self.settings = fresh_settings
+            self._router = AgentRouter(fresh_settings)
+            # Best-effort cleanup of the previous backend (may own a
+            # subprocess like Codex). Fire-and-forget so we don't block
+            # the next ``run()``. The ``inspect.iscoroutine`` guard is
+            # there for two reasons: (a) some test backends mock
+            # ``stop()`` with a plain ``MagicMock`` whose call returns a
+            # ``MagicMock`` (not awaitable), and (b) defensive — a
+            # backend whose stop is sync would TypeError otherwise.
+            import inspect
+
+            try:
+                maybe_coro = old.stop()
+                if inspect.iscoroutine(maybe_coro):
+                    task = asyncio.create_task(maybe_coro)
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
+            except RuntimeError:
+                # No running loop (sync caller during shutdown).
+                pass
+
         return self._router
+
+    async def _generate_and_emit_title(self, session_key: str, first_message: str) -> None:
+        """Generate a chat title from ``first_message`` and publish a
+        ``session_titled`` SystemEvent. Best-effort; never raises."""
+        try:
+            from pocketpaw.memory.titler import generate_title
+
+            title = await generate_title(
+                first_message,
+                model=self.settings.chat_title_model,
+                api_key=self.settings.anthropic_api_key or None,
+            )
+            if not title:
+                logger.info("session titling skipped for %s (empty title)", session_key)
+                return
+            # session_key is "channel:chat_id" — expose the safe_key form
+            # ("channel_chat_id") so web clients can correlate with their
+            # session_id directly.
+            safe_key = session_key.replace(":", "_")
+            logger.info("session titled: %s -> %r", safe_key, title)
+            await self.bus.publish_system(
+                SystemEvent(
+                    event_type="session_titled",
+                    data={
+                        "session_key": session_key,
+                        "session_id": safe_key,
+                        "title": title,
+                    },
+                )
+            )
+        except Exception:
+            logger.warning("session titling failed for %s", session_key, exc_info=True)
+
+    async def process_message(self, message: InboundMessage) -> None:
+        """Public entry point — run the full processing pipeline on one
+        message without going through the bus consumer.
+
+        The default loop consumes InboundMessages from the bus in
+        ``_loop()``; per-agent loops skip that and are invoked directly
+        from the HTTP handler so multiple loops never race for messages.
+        Outbound events still go through the bus so SSE bridges and
+        other subscribers keep working unchanged.
+        """
+        session_key = message.session_key
+        task = asyncio.create_task(self._process_message(message))
+        self._background_tasks.add(task)
+        self._active_tasks[session_key] = task
+
+        def _on_done(t: asyncio.Task, key: str = session_key) -> None:
+            self._background_tasks.discard(t)
+            if self._active_tasks.get(key) is t:
+                self._active_tasks.pop(key, None)
+
+        task.add_done_callback(_on_done)
 
     def _set_budget_level(self, window_key: str, level: str) -> bool:
         """Update in-memory budget level and return True when it changed."""
@@ -399,8 +580,11 @@ class AgentLoop:
         # Initialize Soul if enabled
         if settings.soul_enabled:
             try:
-                from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
-                from pocketpaw.soul.manager import SoulManager
+                from pocketpaw.soul import (
+                    PocketPawCognitiveEngine,
+                    SoulManager,
+                    set_soul_manager,
+                )
 
                 # Build a lazy engine: the backend_provider lambda captures `self`
                 # so it resolves the router (and therefore the backend) on every
@@ -421,10 +605,10 @@ class AgentLoop:
                     self.context_builder.bootstrap = self._soul_manager.bootstrap_provider
                 self._soul_manager.start_auto_save()
 
-                # Register as global singleton so API endpoints can access it
-                import pocketpaw.soul.manager as _sm
-
-                _sm._manager = self._soul_manager
+                # Register as global singleton so API endpoints can access it.
+                # Belt-and-suspenders: initialize() already does this on success,
+                # but we re-register to keep behavior identical to pre-#1073.
+                set_soul_manager(self._soul_manager)
             except Exception:
                 logger.exception("Soul initialization failed, continuing without soul")
                 self._soul_manager = None
@@ -865,6 +1049,14 @@ class AgentLoop:
             store_meta = {
                 k: v for k, v in (message.metadata or {}).items() if k != "pocket_system_context"
             }
+            # Detect first-message state *before* persisting so titler can fire once.
+            is_first_message = False
+            try:
+                prior = await self.memory._store.get_session(session_key)
+                is_first_message = len(prior) == 0
+            except (AttributeError, TypeError):
+                is_first_message = False
+
             await self.memory.add_to_session(
                 session_key=session_key,
                 role="user",
@@ -872,14 +1064,43 @@ class AgentLoop:
                 metadata=store_meta,
             )
 
+            # 1a. Fire-and-forget chat title generation on the first user message.
+            # Publishes a ``session_titled`` SystemEvent; persistence is the
+            # caller's responsibility (cloud: Mongo; OSS: in-memory/SSE only).
+            if is_first_message:
+                from pocketpaw.features import chat_titles_enabled
+
+                if chat_titles_enabled(self.settings):
+                    task = asyncio.create_task(self._generate_and_emit_title(session_key, content))
+                    self._bg_tasks.add(task)
+                    task.add_done_callback(self._bg_tasks.discard)
+
             # 1b. Inject inbound media file paths so the agent can use them
             # Also detect whether this is a voice message so we can auto-TTS the reply.
             is_voice_message = any(
                 Path(p).suffix.lower() in _AUDIO_EXTS for p in (message.media or [])
             )
             if message.media:
-                paths_info = ", ".join(message.media)
-                content += f"\n[Media files on disk: {paths_info}]"
+                # Prefer the richer form when the chat bridge populated metadata
+                # (filename + mime + size per path). The plain path list is still
+                # a correct fallback — e.g. Telegram / Discord / WhatsApp adapters
+                # that don't produce upload records will drop in here.
+                media_info = (message.metadata or {}).get("media_info") or []
+                if media_info:
+                    lines = []
+                    for info in media_info:
+                        filename = info.get("filename") or Path(info.get("path", "")).name or "file"
+                        mime = info.get("mime") or "application/octet-stream"
+                        size = info.get("size")
+                        size_str = _format_bytes(size) if isinstance(size, int) else ""
+                        meta_suffix = f", {size_str}" if size_str else ""
+                        lines.append(
+                            f"- {filename} ({mime}{meta_suffix}) at {info.get('path', '')}"
+                        )
+                    content += "\n\nAttached files:\n" + "\n".join(lines)
+                else:
+                    paths_info = ", ".join(message.media)
+                    content += f"\n[Media files on disk: {paths_info}]"
 
             # 2. Build system prompt + session history concurrently (independent I/O)
             sender_id = message.sender_id
@@ -1251,11 +1472,15 @@ class AgentLoop:
                             )
                         )
                         # Detect pocket events in tool output and publish
-                        # dedicated SystemEvents for the SSE handler.
+                        # dedicated SystemEvents for the SSE handler. Pass
+                        # the inbound metadata so cloud_user_id /
+                        # cloud_workspace_id (threaded in from the chat
+                        # endpoint) reach the pocket creator.
                         await _publish_pocket_event(
                             self.bus,
                             econtent,
                             session_key,
+                            metadata=message.metadata,
                             trace_id=trace_id,
                         )
                         media_paths.extend(_extract_media_paths(econtent))
@@ -1373,9 +1598,14 @@ class AgentLoop:
                 # Skip auto-learn on cancelled responses — partial data is unreliable.
                 # Also skip when soul is active — soul.observe() + reflect() handles
                 # fact extraction and memory consolidation, so auto_learn would duplicate.
+                # Per-agent loops share the global memory store with every other
+                # agent, so extracted facts would contaminate the default agent's
+                # identity context. Skip auto-learn for per-agent loops until we
+                # have per-agent namespaced fact storage.
                 should_auto_learn = (
                     not cancelled
                     and self._soul_manager is None
+                    and self.agent_id is None
                     and (
                         (self.settings.memory_backend == "mem0" and self.settings.mem0_auto_learn)
                         or (
@@ -1395,13 +1625,13 @@ class AgentLoop:
                     self._background_tasks.add(t)
                     t.add_done_callback(self._background_tasks.discard)
 
-                # Soul observation: feed turn for personality/memory evolution
-                if self._soul_manager is not None and not cancelled:
-                    t = asyncio.create_task(
-                        self._soul_observe_and_emit(message.content, full_response, session_key)
-                    )
-                    self._background_tasks.add(t)
-                    t.add_done_callback(self._background_tasks.discard)
+                # Soul observation: feed turn for personality/memory evolution.
+                # Cloud runs pass ``suppress_global_soul_observe`` in metadata so
+                # the default PocketPaw soul does not evolve from interactions
+                # that were actually directed at a specific workspace agent.
+                await self._maybe_observe_soul(
+                    message, full_response, session_key, cancelled=cancelled
+                )
 
             # Signal agent processing complete
             if agent_started:
@@ -1523,6 +1753,26 @@ class AgentLoop:
         except Exception:
             logger.debug("Auto-learn background task failed", exc_info=True)
 
+    async def _maybe_observe_soul(
+        self, message: Any, full_response: str, session_key: str, *, cancelled: bool
+    ) -> None:
+        """Spawn global-soul observation unless the turn explicitly suppresses it.
+
+        The suppression flag lives on ``InboundMessage.metadata`` so cloud
+        runs -- which route observation to a per-agent soul via
+        ``AgentPool.observe`` -- don't double-feed the default PocketPaw soul.
+        """
+        if self._soul_manager is None or cancelled:
+            return
+        meta = getattr(message, "metadata", None) or {}
+        if meta.get("suppress_global_soul_observe"):
+            return
+        task = asyncio.create_task(
+            self._soul_observe_and_emit(message.content, full_response, session_key)
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def _soul_observe_and_emit(
         self, user_input: str, agent_output: str, session_key: str
     ) -> None:
@@ -1575,7 +1825,7 @@ class AgentLoop:
         settings = Settings.load()
         if settings.soul_enabled and self._soul_manager is None:
             try:
-                from pocketpaw.soul.manager import SoulManager
+                from pocketpaw.soul import SoulManager
 
                 self._soul_manager = SoulManager(settings)
                 asyncio.create_task(self._initialize_soul_runtime())
@@ -1591,7 +1841,7 @@ class AgentLoop:
     def _build_cognitive_engine(self) -> Any:
         """Build a CognitiveEngine for soul, backed by the active agent backend."""
         try:
-            from pocketpaw.soul.cognitive import PocketPawCognitiveEngine
+            from pocketpaw.soul import PocketPawCognitiveEngine
 
             return PocketPawCognitiveEngine(
                 backend_provider=lambda: (

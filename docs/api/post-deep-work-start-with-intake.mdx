@@ -1,0 +1,131 @@
+---
+title: Start with Intake
+description: "Start a Deep Work project through the interactive intake mode — submit the goal plus clarification answers, and the goal is enriched before planning. An empty answers list behaves like a plain Start Project call."
+api: POST /api/deep-work/start-with-intake
+baseUrl: http://localhost:8000
+layout: '@/layouts/APIEndpointLayout.astro'
+auth: bearer
+section: API Reference
+ogType: article
+keywords: ["goal intake", "clarification", "deep work", "ai planning", "project creation"]
+tags: ["api", "deep-work"]
+---
+
+## Overview
+
+Starts a Deep Work project through [interactive intake mode](/advanced/deep-work#interactive-goal-intake). Submit the original goal plus the clarification answers you collected — Deep Work folds the answers into the goal and plans against the enriched version.
+
+The usual flow is two calls: [Clarify Goal](/api/post-deep-work-intake-clarify) to get the questions, then this endpoint with the answers.
+
+The project is returned immediately in `PLANNING` status. Planning runs in the background — track progress via WebSocket events (`dw_planning_phase`, `dw_planning_complete`), the same as [Start Project](/api/post-deep-work-start).
+
+An empty `answers` list means the goal was well-formed; this endpoint then behaves identically to [Start Project](/api/post-deep-work-start).
+
+## Request Body
+
+<ResponseField name="description" type="string" required>
+  The original natural-language goal. Min 10, max 5000 characters.
+</ResponseField>
+
+<ResponseField name="answers" type="object[]" default="[]">
+  Clarification answers collected from the intake conversation. Each entry has a `question` and an `answer`. Entries with a blank `answer` are treated as skipped and dropped.
+  <ResponseField name="question" type="string">The clarification question that was asked.</ResponseField>
+  <ResponseField name="answer" type="string">The user's answer. Blank means skipped.</ResponseField>
+</ResponseField>
+
+<ResponseField name="research_depth" type="string" default="auto">
+  How deeply to research before planning. One of: `auto`, `none`, `quick`, `standard`, `deep`. `auto` uses the goal parser's suggestion.
+</ResponseField>
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Whether the project was created successfully.
+</ResponseField>
+
+<ResponseField name="project" type="object">
+  The created project object. `description` is the enriched goal; `metadata.intake` holds the Q&A transcript.
+  <ResponseField name="id" type="string">Unique project ID.</ResponseField>
+  <ResponseField name="status" type="string">Current status — `planning` initially.</ResponseField>
+  <ResponseField name="created_at" type="string">ISO 8601 timestamp.</ResponseField>
+</ResponseField>
+
+<RequestExample>
+<Tabs items={["cURL", "JavaScript", "Python"]}>
+  <Tab title="cURL">
+```bash
+curl -X POST http://localhost:8000/api/deep-work/start-with-intake \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "Chase down overdue invoices",
+    "answers": [
+      {"question": "How many days overdue before an invoice counts?", "answer": "30 days"},
+      {"question": "Which channel should reminders go out on?", "answer": "email"}
+    ]
+  }'
+```
+  </Tab>
+  <Tab title="JavaScript">
+```javascript
+const res = await fetch('http://localhost:8000/api/deep-work/start-with-intake', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_TOKEN',
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    description: 'Chase down overdue invoices',
+    answers: [
+      { question: 'How many days overdue before an invoice counts?', answer: '30 days' },
+      { question: 'Which channel should reminders go out on?', answer: 'email' },
+    ],
+  }),
+});
+const data = await res.json();
+```
+  </Tab>
+  <Tab title="Python">
+```python
+import httpx
+
+res = httpx.post(
+    "http://localhost:8000/api/deep-work/start-with-intake",
+    headers={"Authorization": "Bearer YOUR_TOKEN"},
+    json={
+        "description": "Chase down overdue invoices",
+        "answers": [
+            {"question": "How many days overdue before an invoice counts?", "answer": "30 days"},
+            {"question": "Which channel should reminders go out on?", "answer": "email"},
+        ],
+    },
+)
+data = res.json()
+```
+  </Tab>
+</Tabs>
+</RequestExample>
+
+<ResponseExample>
+<Tabs items={["200"]}>
+  <Tab title="200">
+```json
+{
+  "success": true,
+  "project": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "title": "Chase down overdue invoices",
+    "description": "Chase down overdue invoices\n\nClarifications gathered during intake:\n- How many days overdue before an invoice counts? → 30 days\n- Which channel should reminders go out on? → email",
+    "status": "planning",
+    "creator_id": "human",
+    "task_ids": [],
+    "team_agent_ids": [],
+    "tags": [],
+    "created_at": "2024-01-15T14:30:00Z",
+    "updated_at": "2024-01-15T14:30:00Z"
+  }
+}
+```
+  </Tab>
+</Tabs>
+</ResponseExample>

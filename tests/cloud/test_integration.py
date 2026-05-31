@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
-
-from ee.cloud import mount_cloud
+from pocketpaw_ee.cloud import mount_cloud
 
 
 def _get_route_paths(app: FastAPI) -> list[str]:
@@ -81,7 +80,7 @@ def test_license_endpoint_mounted():
 
 def test_cloud_error_handler_registered():
     """CloudError exception handler should be registered."""
-    from ee.cloud.shared.errors import CloudError
+    from pocketpaw_ee.cloud.shared.errors import CloudError
 
     app = FastAPI()
     mount_cloud(app)

@@ -88,6 +88,11 @@ class TestAuthDispatchApiKeyExceptionLogging:
             with patch("pocketpaw.dashboard_auth.api_limiter") as mock_rl:
                 mock_rl.check.return_value = rl_result
                 req.state = MagicMock()
+                # Real Starlette State has no ``full_access`` attr (defaults to
+                # False via getattr). A bare MagicMock would return a truthy
+                # mock for it, short-circuiting _auth_dispatch before the
+                # API-key/OAuth2 validation path under test (#888 full_access).
+                req.state.full_access = False
                 await auth_mod._auth_dispatch(req)
 
         mock_logger.warning.assert_called_once()
@@ -142,6 +147,11 @@ class TestAuthDispatchOAuth2ExceptionLogging:
             with patch("pocketpaw.dashboard_auth.api_limiter") as mock_rl:
                 mock_rl.check.return_value = rl_result
                 req.state = MagicMock()
+                # Real Starlette State has no ``full_access`` attr (defaults to
+                # False via getattr). A bare MagicMock would return a truthy
+                # mock for it, short-circuiting _auth_dispatch before the
+                # API-key/OAuth2 validation path under test (#888 full_access).
+                req.state.full_access = False
                 await auth_mod._auth_dispatch(req)
 
         mock_logger.warning.assert_called_once()

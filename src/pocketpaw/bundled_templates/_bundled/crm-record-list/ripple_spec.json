@@ -1,0 +1,66 @@
+{
+  "_placeholder_note": "Built-in pocket template (crm-record-list). The contact rows below carry [bracketed] placeholders — the create specialist rewrites them to the user's real records and domain. The `sources` block is a PLACEHOLDER live-data binding: if the user has a backend configured, keep it so /contacts hydrates state.records; if there is NO backend, REMOVE the `sources` block entirely and keep the seeded records as the working data. The master-detail widget binds selection to state.selected_id; the entity-detail in its children reads the selected record via the .where(...).first() expression.",
+  "sources": {
+    "records": {
+      "method": "GET",
+      "path": "/contacts",
+      "bind": "state.records",
+      "refresh": ["pocket_open", "manual"]
+    }
+  },
+  "state": {
+    "selected_id": "r1",
+    "records": [
+      { "id": "r1", "name": "[Amara Okafor]", "company": "[Northwind Labs]", "stage": "Negotiation", "email": "[amara@northwind.example]", "phone": "[+1 555 0142]", "notes": "[Wants the annual plan; waiting on procurement sign-off.]" },
+      { "id": "r2", "name": "[Liam Petrov]", "company": "[Brightline Co]", "stage": "Qualified", "email": "[liam@brightline.example]", "phone": "[+1 555 0188]", "notes": "[Evaluating against two competitors; demo booked for next week.]" },
+      { "id": "r3", "name": "[Sofia Marchetti]", "company": "[Harbor Freight Group]", "stage": "Closed won", "email": "[sofia@harborfg.example]", "phone": "[+1 555 0207]", "notes": "[Signed the 2-year contract; kickoff scheduled.]" },
+      { "id": "r4", "name": "[Daniel Cho]", "company": "[Vertex Analytics]", "stage": "New lead", "email": "[daniel@vertex.example]", "phone": "[+1 555 0231]", "notes": "[Inbound from the pricing page; not yet contacted.]" },
+      { "id": "r5", "name": "[Priya Nair]", "company": "[Cobalt Studio]", "stage": "Qualified", "email": "[priya@cobalt.example]", "phone": "[+1 555 0264]", "notes": "[Champion identified; needs a security review before moving forward.]" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "[Contacts]",
+          "subtitle": "[Your pipeline, one record at a time]"
+        }
+      },
+      {
+        "type": "master-detail",
+        "bind": "selected_id",
+        "props": {
+          "items": "{state.records}",
+          "valueKey": "id",
+          "labelKey": "name",
+          "descriptionKey": "company",
+          "badgeKey": "stage"
+        },
+        "children": [
+          {
+            "type": "entity-detail",
+            "props": {
+              "title": "{state.records.where('id', state.selected_id).first().name}",
+              "subtitle": "{state.records.where('id', state.selected_id).first().company}",
+              "eyebrow": "Contact",
+              "status": { "label": "{state.records.where('id', state.selected_id).first().stage}", "variant": "info" },
+              "meta": [
+                { "label": "Email", "value": "{state.records.where('id', state.selected_id).first().email}", "icon": "mail" },
+                { "label": "Phone", "value": "{state.records.where('id', state.selected_id).first().phone}", "icon": "phone" }
+              ]
+            },
+            "children": [
+              {
+                "type": "text",
+                "props": { "text": "{state.records.where('id', state.selected_id).first().notes}" }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -171,6 +171,23 @@ When `llm_provider` is `auto`, PocketPaw uses Anthropic if an API key is set, ot
 | `spotify_client_id` | `POCKETPAW_SPOTIFY_CLIENT_ID` | string | — | Spotify client ID |
 | `spotify_client_secret` | `POCKETPAW_SPOTIFY_CLIENT_SECRET` | string | — | Spotify secret |
 
+## Composio
+
+Wires Composio into every supported chat backend (`claude_agent_sdk`, `openai_agents`, `google_adk`, `deep_agents`) so any agent can call 200+ pre-built OAuth integrations (Gmail, Slack, GitHub, Calendar, Drive, Linear, …). Each backend uses its official Composio provider package (`composio_claude_agent_sdk`, `composio_openai_agents`, `composio_google_adk`, `composio_langgraph`). Tools are fetched per-stream via `composio.create(user_id=…)` + `session.tools()` so every user gets their own tool surface bound to their own connected accounts.
+
+Setup: set `composio_api_key` + `composio_enterprise_id` and you're done. No admin provisioning step.
+
+The pocket specialist does NOT receive Composio — its tool surface stays narrow. When pocket UI needs Composio data, the parent agent fetches it first and passes it into the specialist brief.
+
+| Setting | Env Variable | Type | Default | Description |
+|---------|-------------|------|---------|-------------|
+| `composio_api_key` | `POCKETPAW_COMPOSIO_API_KEY` | string | — | Composio API key (enables Composio for all supported backends) |
+| `composio_enterprise_id` | `POCKETPAW_COMPOSIO_ENTERPRISE_ID` | string | — | Namespace prefix for per-user `user_id` (format: `f"{enterprise_id}:{user_id}"`). Required when `composio_api_key` is set; prevents collisions across deployments sharing one Composio org. |
+| `composio_toolkits` | `POCKETPAW_COMPOSIO_TOOLKITS` | list (CSV) | `[]` | Informational. Used by the Connectors panel + admin helpers; not a runtime allow-list. |
+| `composio_base_url` | `POCKETPAW_COMPOSIO_BASE_URL` | string | — | Composio base URL. Unset = Composio cloud; set for self-hosted Composio runtime. |
+| `composio_mcp_url_ttl_seconds` | `POCKETPAW_COMPOSIO_MCP_URL_TTL_SECONDS` | int | `3600` | In-process cache TTL for per-user Composio tool sets before re-fetching via `composio.create`. |
+| `composio_connect_link_inline` | `POCKETPAW_COMPOSIO_CONNECT_LINK_INLINE` | boolean | `true` | When true, "needs auth" responses render as an inline Ripple button. Set false to fall back to raw URL text. |
+
 ## MCP
 
 | Setting | Env Variable | Type | Default | Description |

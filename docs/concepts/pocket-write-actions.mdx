@@ -1,0 +1,190 @@
+---
+title: "Pocket Write Actions"
+description: "Pocket write actions are bound, agent-callable verbs that mutate live external data through a pocket's backend. Instinct routes which writes require human approval; outcomes feed the Decision Graph."
+section: Core Concepts
+ogType: article
+keywords: ["pocket write actions", "rippleSpec actions", "Instinct routing", "call_binding", "outcome events"]
+tags: ["pockets", "ripple", "rfc-05"]
+---
+
+# Pocket Write Actions
+
+A pocket write action is a **declared, agent-callable verb** that mutates external data through the pocket's single configured backend. Read sources fetch (`GET`); write actions push (`POST` / `PUT` / `PATCH` / `DELETE`). Both share the same SSRF / size / timeout guards, but writes carry blast radius and so go through three extra gates: a human-authored write allowlist, an optional Instinct approval, and an outcome event that lands in the Decision Graph.
+
+<Callout type="info">
+**Status (2026-05-25):** IMPLEMENTED through M2b.
+
+**Implementation PRs:** #1179 (M2a), #1183 (M2b), #1181 (execution router structure/data split)
+
+**Workspace RFC:** [docs/rfc/05-pocket-write-actions-rfc.md](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/05-pocket-write-actions-rfc.md)
+
+**What's live:** write actions wired via the `call_binding` ripple verb; Instinct routing for approval-gated bindings; outcome emission; execution router splits structure edits from data writes.
+
+**What's planned:** multi-step action chains; richer outcome schemas tied to RFC 07 Decisions.
+</Callout>
+
+## What It Is
+
+A **read source** is `rippleSpec.sources["prs"] = { method: "GET", path: "/repos/.../pulls" }`. A **write action** is `rippleSpec.actions["close_pr"] = { method: "POST", path: "/repos/.../pulls/:id/close", requires_instinct: true, outcome: "pr_closed" }`. The agent that authors a pocket writes both; the human owner authorizes the *class* of writes via a separate, spec-external `allowed_writes` allowlist on the backend credential.
+
+Authorship and authorization are split on purpose: the agent cannot widen its own write blast radius, because the allowlist lives outside the spec it owns.
+
+## The Lifecycle
+
+A write action runs through six steps from agent intent to durable side-effect:
+
+<Steps>
+  <Step title="Agent proposes via call_binding">
+    Inside a widget event handler the agent emits the ripple verb `call_binding`, naming the action key (`close_pr`) and the resolved request bits (`path`, `params`, optional `idempotency_key`). The verb queues a `POST /api/v1/pockets/{id}/actions/run` on the client.
+  </Step>
+  <Step title="Server validates the binding">
+    `pockets/router.py:run_pocket_action` looks the action up in the persisted `rippleSpec.actions` dict. The HTTP `method` is read server-side from the binding — the client only sends the resolved `path` / `params`. An unknown action returns `{ok:false, code:"action_not_found"}`.
+  </Step>
+  <Step title="Allowlist + SSRF + rate-limit gates fire">
+    `action_executor.run_action` percent-decodes the request path, globs it against `allowed_writes`, re-validates the base URL, checks SSRF / DNS rebinding, and applies a per-`(pocket, user)` rate limit (20 writes / 60s). A rejected write returns `{ok:false}` and makes NO HTTP call.
+  </Step>
+  <Step title="Instinct routes approval-gated writes">
+    A binding marked `requires_instinct: true` runs every cheap validation gate, then returns the `instinct_pending` sentinel — the executor parks the resolved write under `_park` and does NOT call the backend. The router hands the parked write to `instinct_bridge.propose_pocket_write`, which spawns an Instinct Action keyed by the pocket's `approval_route` (owner by default, or a named workspace member). The response is `{ok:true, code:"instinct_pending", proposed_action_id}`.
+  </Step>
+  <Step title="Handler executes after approval (or directly)">
+    A non-gated write fires inline; the executor returns the backend response. A gated write fires later from `instinct_bridge.execute_approved_write` when the human approves the Instinct row. The backend's response body lands in this REST response — there is no SSE emit because the run endpoint is a standalone REST call outside any SSE stream.
+  </Step>
+  <Step title="Outcome event emits">
+    On a fired (non-pending) success the route emits a `pocket.outcome` event when the binding declared an `outcome` string. The outcomes service writes the row, and the Decision Graph (RFC 07) consumes it as evidence for `DecisionProjection`. A binding without `outcome` is a silent no-op.
+  </Step>
+</Steps>
+
+## Defining a Write Action
+
+A write binding lives inside `rippleSpec.actions` on the pocket. The minimum shape:
+
+```json
+{
+  "actions": {
+    "close_pr": {
+      "method": "POST",
+      "path": "/repos/:owner/:repo/pulls/:id/close",
+      "requires_instinct": false,
+      "outcome": "pr_closed"
+    }
+  }
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `method` | One of `POST` / `PUT` / `PATCH` / `DELETE`. Validated server-side; the client cannot override. |
+| `path` | Resolved path appended to the backend `base_url`. `:placeholder` segments are filled at call time. |
+| `requires_instinct` | When `true`, runs validation gates but parks the write for human approval via the Instinct surface. |
+| `instinct_policy` | Optional reference to a named Instinct policy. Rejected by the model validator if set without `requires_instinct`. |
+| `outcome` | Optional outcome name emitted on success. Feeds RFC 07's DecisionProjection. |
+
+The matching write rule on `allowed_writes` lives on the backend credential, set via:
+
+```bash
+PUT /api/v1/pockets/{pocket_id}/backend/write-policy
+```
+
+The body is `{ "allowed_writes": [ { "method": "POST", "path_pattern": "/repos/*/pulls/*/close" } ] }`. An empty list **revokes every write** (fail-closed); the agent cannot opt the pocket back in by editing the spec.
+
+## Instinct Routing
+
+Three things decide whether a write fires inline or routes to a human:
+
+1. **The binding** — `requires_instinct` is the explicit opt-in on the spec.
+2. **The pocket's approval route** — set via `PUT /pockets/{id}/backend/approval-route`. A `mode="user"` route names a workspace member; an unset route defaults to the pocket owner.
+3. **The Instinct policy** (optional) — when `instinct_policy` is set on the binding, the Instinct service can compose policy rules on top (allow-list of approvers, expiry, batch approval, etc.).
+
+The executor's contribution is the **fail-closed default**: a binding with `requires_instinct: true` and a misconfigured approval route still parks the write; it never silently falls through to direct execution.
+
+## Outcome Emission
+
+A successful, fired (non-pending) write that declares an `outcome` calls `outcomes_service.emit_pocket_outcome` with:
+
+```python
+emit_pocket_outcome(
+    outcome="pr_closed",
+    pocket_id=...,
+    workspace_id=...,
+    action="close_pr",
+    actor=user_id,
+    via_instinct=False,           # True when the write came through approval
+    instinct_action_id=None,      # The Instinct row id when via_instinct=True
+)
+```
+
+The outcomes service persists the row and emits a bus event. Downstream:
+
+- The pocket's UI reconciles via the `on_success` handler the agent wired into the widget event.
+- The Decision Graph (RFC 07) consumes the outcome as evidence on the relevant `DecisionProjection`.
+- The audit log keeps a tenant-filterable record (`workspace_id` is on every entry).
+
+## Execution Router and the Structure/Data Split (PR #1181)
+
+PR #1181 separated two kinds of mutations that previously shared one execution path:
+
+| Mutation kind | Where it lands | Endpoint |
+|---------------|----------------|----------|
+| **Structure edit** | Changes the pocket's rippleSpec (add a widget, rename a column, re-bind a source) | `POST /api/v1/pockets/{id}/spec/merge` — the specialist surface (see [POST /pockets/{id}/spec/merge](/api/post-pocket-spec-merge)) |
+| **Data write** | Calls the pocket's external backend through a declared action | `POST /api/v1/pockets/{id}/actions/run` — the write executor |
+
+The discriminant lives on the `pocket_mutation` SSE event so the frontend reconciler can route structure edits through the spec patch path and data writes through the optimistic-with-rollback path. Without the split, every data write triggered a spec round-trip, and the canvas flickered.
+
+## Examples
+
+### A read-only source bound to a refresh button
+
+```json
+{
+  "sources": {
+    "prs": { "method": "GET", "path": "/repos/owner/repo/pulls?state=open" }
+  },
+  "ui": {
+    "type": "button",
+    "props": { "label": "Refresh" },
+    "events": {
+      "click": [
+        { "verb": "run_source", "source": "prs" }
+      ]
+    }
+  }
+}
+```
+
+Read sources are open to any pocket reader. No allowlist, no Instinct.
+
+### A write action bound to a form submit
+
+```json
+{
+  "actions": {
+    "close_pr": {
+      "method": "POST",
+      "path": "/repos/:owner/:repo/pulls/:id/close",
+      "requires_instinct": true,
+      "outcome": "pr_closed"
+    }
+  },
+  "ui": {
+    "type": "form",
+    "children": [
+      { "type": "input", "id": "n_pr_id", "props": { "name": "id" } },
+      {
+        "type": "button",
+        "props": { "label": "Close PR" },
+        "events": {
+          "click": [
+            {
+              "verb": "call_binding",
+              "binding": "close_pr",
+              "params": { "owner": "octocat", "repo": "hello", "id": "@state.pr_id" }
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+`requires_instinct: true` parks the write — the user sees an "approval pending" affordance until the approver acts on the Instinct row.

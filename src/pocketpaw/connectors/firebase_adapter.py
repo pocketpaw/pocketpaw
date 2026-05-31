@@ -15,9 +15,13 @@ from pocketpaw.connectors.protocol import (
     ActionResult,
     ActionSchema,
     ConnectionResult,
+    ConnectorHealth,
+    ConnectorScope,
     ConnectorStatus,
+    ExecutionMode,
     SyncResult,
     TrustLevel,
+    WidgetRecipe,
 )
 
 # Default path to the firebase CLI binary. Overridden via FIREBASE_CLI_PATH if needed.
@@ -168,7 +172,16 @@ class FirebaseAdapter:
         return True
 
     async def actions(self) -> list[ActionSchema]:
-        """Return the action schemas for all supported Firebase operations."""
+        """Return the action schemas for all supported Firebase operations.
+
+        Phase 1 PR-8: every action is ``execution_mode=LOCAL`` (Firebase
+        CLI must run on the user's host where ``firebase login`` config
+        lives) and declares ``requires_binary="firebase"`` so the local
+        agent fails fast with a clear error if the binary isn't installed.
+        """
+        return [_local_action(s, "firebase") for s in self._raw_actions()]
+
+    def _raw_actions(self) -> list[ActionSchema]:
         return [
             # Project Management
             ActionSchema(
@@ -545,3 +558,72 @@ class FirebaseAdapter:
 
     async def schema(self) -> dict[str, Any]:
         return {"table": None, "mapping": {}, "schedule": "manual"}
+
+    # -- Phase 1 PR-8 protocol additions ------------------------------------------
+
+    async def widgets(self) -> list[WidgetRecipe]:
+        """No default home widgets for Firebase — admin-only operations.
+
+        Custom widgets (e.g. "Hosting deploys this week") can be added
+        via chat once the local-agent bus is fully wired; CLI output
+        formatting is per-customer.
+        """
+        return []
+
+    async def health(self, scope: ConnectorScope | None = None) -> ConnectorHealth:
+        """Check whether the firebase CLI is reachable on this host.
+
+        Runs ``firebase --version`` with a short timeout. Cheap, no
+        Firebase project state required.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self._firebase_bin,
+                "--version",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except TimeoutError:
+                proc.kill()
+                return ConnectorHealth(
+                    ok=False,
+                    status=ConnectorStatus.ERROR,
+                    message="firebase --version timed out",
+                )
+            ok = proc.returncode == 0
+            return ConnectorHealth(
+                ok=ok,
+                status=ConnectorStatus.CONNECTED if ok else ConnectorStatus.ERROR,
+                message="firebase CLI reachable" if ok else "firebase CLI not on PATH",
+            )
+        except FileNotFoundError:
+            return ConnectorHealth(
+                ok=False,
+                status=ConnectorStatus.ERROR,
+                message=f"firebase binary missing ({self._firebase_bin})",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ConnectorHealth(
+                ok=False,
+                status=ConnectorStatus.ERROR,
+                message=str(exc),
+            )
+
+
+def _local_action(schema: ActionSchema, binary: str) -> ActionSchema:
+    """Decorator: stamp execution_mode=LOCAL and requires_binary onto a schema.
+
+    Used by CLI adapters (firebase, gcp) to declare local-mode uniformly
+    without touching every ActionSchema construction site.
+    """
+    return ActionSchema(
+        name=schema.name,
+        description=schema.description,
+        method=schema.method,
+        parameters=schema.parameters,
+        trust_level=schema.trust_level,
+        execution_mode=ExecutionMode.LOCAL,
+        requires_binary=binary,
+    )

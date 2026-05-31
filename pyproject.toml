@@ -40,11 +40,13 @@ dependencies = [
     "pydantic-settings>=2.1.0",
     # HTTP client (used everywhere)
     "httpx>=0.26.0",
+    # Async file I/O
+    "aiofiles>=23.2.0",
     # LLM Clients
     "openai>=1.60.0",
     "anthropic>=0.45.0",
     # Agent Backend (recommended default)
-    "claude-agent-sdk>=0.1.56",
+    "claude-agent-sdk>=0.1.72",
     # Dashboard (default mode — must be in core so `pip install pocketpaw` just works)
     "uvicorn[standard]>=0.31.1",
     "jinja2>=3.1.0",
@@ -66,6 +68,9 @@ dependencies = [
     # Promoted from optional extra to base dep in v0.3.1 integration work;
     # the runtime now takes a hard dependency on the journal primitives.
     "soul-protocol[engine]>=0.3.1",
+    # NOTE: livekit-agents / livekit-plugins-deepgram moved to ee/pyproject.toml
+    # in the OSS-EE split (Phase 4) — only ee/pocketpaw_ee/cloud/livekit imports them.
+    "cel-python>=0.5.0",
 ]
 
 [project.optional-dependencies]
@@ -81,6 +86,9 @@ databases = [
 postgresql = ["sqlalchemy[asyncio]>=2.0.0", "asyncpg>=0.29.0"]
 mysql = ["sqlalchemy[asyncio]>=2.0.0", "aiomysql>=0.2.0"]
 mongodb = ["motor>=3.3.0", "beanie>=1.26.0"]
+# S3-compatible object storage for the uploads module (src/pocketpaw/uploads/s3.py).
+# Previously only reachable via the (removed) `enterprise` extra.
+s3 = ["boto3>=1.34.0"]
 graph = ["networkx>=3.0"]
 dashboard = [
     # Kept for backward compat — dashboard deps are now in core.
@@ -99,6 +107,13 @@ desktop = [
 openai-agents = [
     "openai-agents>=0.2.0",
 ]
+codex-sdk = [
+    # Official OpenAI Codex Python SDK — typed events + abort signal,
+    # replaces our subprocess + NDJSON parsing wrapper. The wheel does
+    # not bundle the codex binary; users supply it via ``npm install -g
+    # @openai/codex`` (auto-discovered) or ``Codex.install(version=...)``.
+    "openai-codex-sdk>=0.1.11",
+]
 google-adk = [
     "google-adk>=1.0.0",
 ]
@@ -106,8 +121,19 @@ copilot-sdk = [
     "github-copilot-sdk>=0.1.0",
 ]
 deep-agents = [
-    "deepagents>=0.1.0",
-    "langchain-mcp-adapters>=0.1.0",
+    "deepagents>=0.5.8,<0.6.0",
+    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    # Required for openai/openai_compatible/openrouter/litellm provider paths
+    # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
+    # langchain-google-genai, so this fills the gap.
+    "langchain-openai>=1.2.0,<2.0.0",
+    # Native LiteLLM integration — handles provider-specific quirks
+    # (DeepSeek reasoning_content, Anthropic thinking blocks, etc.) that the
+    # generic ChatOpenAI masquerade silently dropped on the floor.
+    # Pinned to 0.6.4 (excluding 0.6.5+) because 0.6.5 requires
+    # litellm>=1.83.14 which pins openai==2.24.0 and conflicts with
+    # langchain-openai>=1.2.0 (which needs openai>=2.26.0).
+    "langchain-litellm>=0.6.4,<0.6.5",
 ]
 litellm = [
     "litellm>=1.40.0",
@@ -237,30 +263,9 @@ all-tools = [
 all-backends = [
     "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
 ]
-enterprise = [
-    # MongoDB (async ODM)
-    "motor>=3.3.0",
-    "beanie>=1.26.0",
-    # Auth (user management + OAuth2 + JWT with Beanie backend)
-    "fastapi-users[beanie,oauth]>=13.0.0",
-    "pwdlib[argon2]>=0.2.0",
-    # Real-time (Socket.IO compat for enterprise multi-user)
-    "python-socketio>=5.11.0",
-    # Rate limiting
-    "slowapi>=0.1.9",
-    # File storage (S3 + GCS)
-    "boto3>=1.34.0",
-    "google-cloud-storage>=2.14.0",
-    # Voice/video tokens
-    "livekit-api>=0.6.0",
-    # Redis (session cache, pub/sub)
-    "redis[hiredis]>=5.0.0",
-    # OAuth integrations (Google APIs)
-    "google-api-python-client>=2.100.0",
-    "google-auth>=2.25.0",
-    "google-auth-oauthlib>=1.2.0",
-    "pocketpaw[soul]"
-]
+# NOTE: the `enterprise` extra was removed in the OSS-EE split (Phase 4).
+# Enterprise features now ship as the separate `pocketpaw-ee` package
+# (see ee/pyproject.toml). Install it with: pip install pocketpaw pocketpaw-ee
 all = [
     # browser
     "playwright>=1.50.0",
@@ -294,8 +299,13 @@ all = [
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
-    "deepagents>=0.1.0",
-    "langchain-mcp-adapters>=0.1.0",
+    "deepagents>=0.5.8,<0.6.0",
+    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    # Required for openai/openai_compatible/openrouter/litellm provider paths
+    # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
+    # langchain-google-genai, so this fills the gap.
+    "langchain-openai>=1.2.0,<2.0.0",
+    "langchain-litellm>=0.6.4,<0.6.5",
 ]
 dev = [
     # all deps (flattened from [all])
@@ -322,18 +332,32 @@ dev = [
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
-    "deepagents>=0.1.0",
-    "langchain-mcp-adapters>=0.1.0",
+    "deepagents>=0.5.8,<0.6.0",
+    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    # Required for openai/openai_compatible/openrouter/litellm provider paths
+    # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
+    # langchain-google-genai, so this fills the gap.
+    "langchain-openai>=1.2.0,<2.0.0",
+    "langchain-litellm>=0.6.4,<0.6.5",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "pytest-playwright>=0.4.0",
     "ruff>=0.4.0",
     "mypy>=1.8.0",
+    "import-linter>=2.0",
 ]
 
 [project.scripts]
 pocketpaw = "pocketpaw.__main__:main"
+
+# --- Extension-point providers (OSS-EE split) ---
+# Core (`pocketpaw`) discovers optional providers via importlib entry-points
+# in the `pocketpaw.*` groups — see pocketpaw/extensions.py for the Protocols
+# and pocketpaw/_registry.py for discovery. The enterprise providers are
+# declared by the `pocketpaw-ee` package (ee/pyproject.toml), not here: the
+# OSS core ships no entry-points of its own and degrades gracefully when none
+# are found.
 
 [project.urls]
 Homepage = "https://pocketpaw.xyz"
@@ -351,7 +375,9 @@ build-backend = "hatchling.build"
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-only-include = ["src/pocketpaw", "ee"]
+# OSS core only. The enterprise layer (ee/pocketpaw_ee) is built as the
+# separate `pocketpaw-ee` wheel from ee/pyproject.toml.
+only-include = ["src/pocketpaw"]
 
 [tool.hatch.build.targets.wheel.sources]
 "src" = ""
@@ -359,9 +385,36 @@ only-include = ["src/pocketpaw", "ee"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Skip vendored third-party code. The OASIS fork at
+# ee/pocketpaw_ee/foresight/substrate/oasis/ is upstream code under
+# Apache-2.0; we treat it as a frozen snapshot and don't reformat it
+# (see substrate/oasis/README-FORK.md for the drift policy). Any
+# behavioural edits we make in future PRs carry a per-file
+# "Modified by PocketPaw" notice and can be linted then.
+extend-exclude = [
+    "ee/pocketpaw_ee/foresight/substrate/oasis",
+]
+
+[tool.mypy]
+# Same rationale as the ruff extend-exclude above. The vendored OASIS
+# fork at substrate/oasis/ carries upstream type-checking debt we
+# inherited (implicit Optionals, unannotated variables, narrow
+# subclass-vs-base mismatches). We don't fix upstream — see the drift
+# policy in substrate/oasis/README-FORK.md.
+exclude = [
+    "ee/pocketpaw_ee/foresight/substrate/oasis/.*",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Prompt-text modules — long lines inside multi-line example/docs
+# strings can't be wrapped without changing the rendered prompt.
+"src/pocketpaw/ripple/_pockets.py" = ["E501"]
+"src/pocketpaw/ripple/_design.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/decisions/explain/extractor.py" = ["E501"]
+"ee/pocketpaw_ee/cloud/decisions/explain/narrator.py" = ["E501"]
 
 [dependency-groups]
 dev = [
@@ -389,15 +442,48 @@ dev = [
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
     "github-copilot-sdk>=0.1.0",
-    "deepagents>=0.1.0",
-    "langchain-mcp-adapters>=0.1.0",
+    "deepagents>=0.5.8,<0.6.0",
+    "langchain-mcp-adapters>=0.2.2,<0.3.0",
+    # Required for openai/openai_compatible/openrouter/litellm provider paths
+    # in agents/deep_agents.py — deepagents only pulls langchain-anthropic and
+    # langchain-google-genai, so this fills the gap.
+    "langchain-openai>=1.2.0,<2.0.0",
+    "langchain-litellm>=0.6.4,<0.6.5",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
     "ruff>=0.4.0",
     "mypy>=1.8.0",
     "pytest-playwright>=0.7.2",
+    "mongomock-motor>=0.0.36",
+    "moto[s3]>=5.0.0",
+    "types-aiofiles>=25.1.0.20260409",
+    "import-linter>=2.11",
+    "fakeredis>=2.21.0",
 ]
+
+# Enterprise layer — opt-in. `uv sync --dev --group ee` installs the
+# `pocketpaw-ee` package (ee/) editable on top of the OSS core, giving a full
+# development environment. Plain `uv sync --dev` stays OSS-only (that is what
+# the Test (OSS-only) CI job relies on).
+ee = ["pocketpaw-ee"]
+
+[tool.uv.sources]
+pocketpaw-ee = { path = "ee", editable = true }
+# RFC 08 PR 3 — Foresight CAMEL hard-dep promotion.
+#
+# camel-ai is required by pocketpaw-ee (the vendored OASIS fork at
+# ee/pocketpaw_ee/foresight/substrate/oasis/ imports from camel.agents,
+# camel.messages, camel.models, etc.). The QBTRIX fork at
+# pocketpaw/v01-relax-caps removes the psutil<6 cap that collides with
+# livekit-agents (an ee/ dep at psutil>=7). The source override is
+# duplicated in ee/pyproject.toml (which is the one uv reads when
+# resolving pocketpaw-ee's deps); keeping this entry here too means a
+# root-level `uv sync` honors the same pin if anyone ever depends on
+# camel-ai directly from the OSS side. See
+# ee/pocketpaw_ee/foresight/substrate/oasis/README-FORK.md for full
+# vendoring rationale and the psutil/openai cap audit.
+camel-ai = { git = "https://github.com/qbtrix/camel-ai.git", rev = "76ff78e8c78d0a38277e421ea9aca34904b4dc37" }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -405,4 +491,39 @@ testpaths = ["tests"]
 addopts = "--ignore=tests/cloud --ignore=tests/e2e"
 markers = [
     "enforce_scope: opt a test out of the global _TESTING_FULL_ACCESS bypass so require_scope fails closed as in production",
+]
+
+# ---------------------------------------------------------------------------
+# import-linter: OSS-EE boundary
+# ---------------------------------------------------------------------------
+# This root config holds the open-core boundary contract only. The OSS core
+# package `pocketpaw` must never statically import the enterprise package
+# `pocketpaw_ee`. Optional EE features are reached at runtime via entry-point
+# Protocols — see pocketpaw/extensions.py + pocketpaw/_registry.py — which
+# import-linter's static analysis correctly does not flag. The single
+# exception is the admin CLI: `pocketpaw <cloud subcommands>` administers an
+# EE install directly.
+#
+# The cloud Beanie-chokepoint contracts moved to ee/pyproject.toml in the
+# OSS-EE split (Phase 4); run them with `cd ee && uv run lint-imports`.
+#
+# `pocketpaw_ee` must be importable for this contract to resolve, so
+# `lint-imports` here runs only in the full (core + EE) CI job.
+[tool.importlinter]
+root_packages = ["pocketpaw_ee", "pocketpaw"]
+
+[[tool.importlinter.contracts]]
+name = "OSS core may not import from EE"
+type = "forbidden"
+source_modules = ["pocketpaw"]
+forbidden_modules = ["pocketpaw_ee"]
+ignore_imports = [
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud",
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud.shared.db",
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.service",
+    "pocketpaw.tools.cli -> pocketpaw_ee.cloud.pockets.agent_context",
+    "pocketpaw.tools.cli -> pocketpaw_ee.agent.pocket_specialist.cli_tool",
+    # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
+    # try/except runtime import; the OSS core never imports EE statically.
+    "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
 ]
