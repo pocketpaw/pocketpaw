@@ -56,13 +56,43 @@ def create_api_app():
         openapi_url="/api/v1/openapi.json",
     )
 
-    # --- Middleware (order matters: last added = outermost = runs first) --
-    # Auth must be added BEFORE CORS so that CORS is outermost and handles
-    # OPTIONS preflight requests before auth can reject them.
+    # --- Auth middleware (innermost) ------------------------------------
+    # CORS is registered AFTER router mounting below so it's outermost in
+    # the final stack — any rejection (CSRF 403, exception, etc.) added by
+    # `mount_cloud()` still ships Access-Control-Allow-Origin on its way
+    # back out.
     from pocketpaw.dashboard_auth import AuthMiddleware
 
     app.add_middleware(AuthMiddleware)
 
+    # --- Mount Mission Control + Deep Work routers ----------------------
+    from pocketpaw.deep_work.api import router as deep_work_router
+    from pocketpaw.mission_control.api import router as mission_control_router
+
+    app.include_router(mission_control_router, prefix="/api/mission-control")
+    app.include_router(deep_work_router, prefix="/api/deep-work")
+
+    # --- Mount enterprise route providers FIRST (priority over core) -----
+    from pocketpaw._registry import first as _first_provider
+
+    _route_provider = _first_provider("pocketpaw.routes")
+    if _route_provider is not None:
+        try:
+            _route_provider.mount(app)
+            logger.info("Enterprise route provider mounted successfully")
+        except Exception:
+            logger.warning("Route provider mount failed", exc_info=True)
+    else:
+        logger.debug("No enterprise route provider registered")
+
+    # --- Mount all /api/v1/ routers -------------------------------------
+    mount_v1_routers(app)
+
+    # --- CORS (outermost) -----------------------------------------------
+    # Registered LAST so it wraps every other middleware — including the
+    # CSRFMiddleware added inside `mount_cloud()`. Without this, a CSRF
+    # 403 short-circuits before CORS can attach Access-Control-Allow-
+    # Origin and the browser reports a misleading CORS error.
     _BUILTIN_ORIGINS = [
         "tauri://localhost",
         "https://tauri.localhost",
@@ -82,27 +112,6 @@ def create_api_app():
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # --- Mount Mission Control + Deep Work routers ----------------------
-    from pocketpaw.deep_work.api import router as deep_work_router
-    from pocketpaw.mission_control.api import router as mission_control_router
-
-    app.include_router(mission_control_router, prefix="/api/mission-control")
-    app.include_router(deep_work_router, prefix="/api/deep-work")
-
-    # --- Mount enterprise cloud module FIRST (takes priority over core) --
-    try:
-        from ee.cloud import mount_cloud
-
-        mount_cloud(app)
-        logger.info("Enterprise cloud module mounted successfully")
-    except ImportError as exc:
-        logger.debug("Enterprise cloud module not available: %s", exc)
-    except Exception:
-        logger.warning("Cloud module mount failed", exc_info=True)
-
-    # --- Mount all /api/v1/ routers -------------------------------------
-    mount_v1_routers(app)
 
     # --- WebSocket handler helper ----------------------------------------
     async def _handle_ws(
@@ -192,7 +201,12 @@ def run_api_server(
             reload_dirs=[src_dir],
             reload_includes=["*.py"],
             log_level="debug",
+            # Bound graceful shutdown — uvicorn's default is None (wait
+            # forever). This server exposes WebSocket endpoints (/ws,
+            # /api/v1/ws, /v1/ws); without a bound, Ctrl+C hangs waiting for
+            # an open client socket to close. 5s, then force-close.
+            timeout_graceful_shutdown=5,
         )
     else:
         app = create_api_app()
-        uvicorn.run(app, host=host, port=port)
+        uvicorn.run(app, host=host, port=port, timeout_graceful_shutdown=5)

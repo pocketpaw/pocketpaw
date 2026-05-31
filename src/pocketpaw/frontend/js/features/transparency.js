@@ -666,6 +666,20 @@ window.PocketPaw.Transparency = {
                     return;
                 }
 
+                // session_titled — Haiku-generated chat title; update sidebar entry
+                if (eventType === 'session_titled') {
+                    const d = data.data || {};
+                    const sid = d.session_id;
+                    const title = d.title;
+                    if (sid && title && this.sessions) {
+                        const session = this.sessions.find(s => s.id === sid);
+                        if (session) {
+                            session.title = title;
+                        }
+                    }
+                    return;
+                }
+
                 // AskUserQuestion — show interactive question in chat
                 if (eventType === 'ask_user_question') {
                     const d = data.data || {};

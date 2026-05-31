@@ -379,10 +379,18 @@ class TestPlaintextMigration:
     """Tests for the one-time migration from plaintext config.json to encrypted store."""
 
     @pytest.fixture
-    def env(self, tmp_path):
-        """Set up a temp config dir with NO migration flag (simulates upgrade)."""
+    def env(self, tmp_path, monkeypatch):
+        """Set up a temp config dir with NO migration flag (simulates upgrade).
+
+        Strips POCKETPAW_LLM_PROVIDER (set by CI to "ollama") so the test's
+        ``llm_provider == "anthropic"`` assertion in
+        ``test_loaded_settings_have_migrated_values`` measures what the
+        migrated config.json says, not what the CI workflow exports.
+        """
         import pocketpaw.config as cfg
         import pocketpaw.credentials as creds
+
+        monkeypatch.delenv("POCKETPAW_LLM_PROVIDER", raising=False)
 
         test_store = CredentialStore(config_dir=tmp_path)
 

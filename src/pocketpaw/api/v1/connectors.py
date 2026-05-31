@@ -1,9 +1,13 @@
 # Connectors router — list, connect, disconnect, execute connector actions.
 # Created: 2026-03-29 — REST API for the ConnectorRegistry.
+# Updated: 2026-04-19 (Cluster C / PR2) — Added GET /connectors/{kind}/status
+#   returning a structured {connected, last_sync, cred_state, scope} payload
+#   for the ConnectorCard UI. Gap C5 in docs/plans/FEATURE-HARDENING-PLAN.md.
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +92,108 @@ class ExecuteResponse(BaseModel):
     records_affected: int = 0
 
 
+class ConnectorStatusResponse(BaseModel):
+    """Structured status for one connector in one pocket.
+
+    Consumed by paw-enterprise's ``ConnectorCard`` component which renders
+    the Connect/Disconnect UI in PocketDataPanel. Fields:
+
+    - ``connected``: boolean — adapter is instantiated and credentials have
+      not been revoked.
+    - ``last_sync``: ISO timestamp of the last successful action, or null
+      if the connector has never been used.
+    - ``cred_state``: ``"valid" | "expired" | "missing" | "revoked"`` — the
+      UI uses this to choose the badge colour.
+    - ``scope``: the OAuth/permission scope string granted at connect time.
+      Never includes secret material — just the grant descriptor. Empty
+      string if the connector doesn't use scoped creds.
+    """
+
+    name: str
+    pocket_id: str
+    connected: bool
+    last_sync: str | None = None
+    cred_state: str = "missing"
+    scope: str = ""
+
+
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+
+# Per-pocket connector status side-table. Kept in memory because the
+# status is an ephemeral snapshot — the adapter instance map in the
+# registry is the source of truth for "connected" and this layer just
+# decorates it with the last-sync timestamp and cred state observed at
+# connect time.
+_STATUS_EXTRAS: dict[str, dict[str, Any]] = {}
+
+
+def _extras_key(pocket_id: str, connector_name: str) -> str:
+    return f"{pocket_id}:{connector_name}"
+
+
+def record_connector_event(
+    *,
+    pocket_id: str,
+    connector_name: str,
+    cred_state: str | None = None,
+    last_sync: str | None = None,
+    scope: str | None = None,
+) -> None:
+    """Persist the fields the status endpoint surfaces.
+
+    Called by the connect/disconnect/execute paths below. Kept as a small
+    helper so the registry stays unaware of the API layer.
+    """
+    key = _extras_key(pocket_id, connector_name)
+    entry = _STATUS_EXTRAS.setdefault(key, {})
+    if cred_state is not None:
+        entry["cred_state"] = cred_state
+    if last_sync is not None:
+        entry["last_sync"] = last_sync
+    if scope is not None:
+        entry["scope"] = scope
+
+
+@router.get(
+    "/connectors/{connector_name}/status",
+    response_model=ConnectorStatusResponse,
+)
+async def get_connector_status(
+    connector_name: str,
+    pocket_id: str = "default",
+) -> ConnectorStatusResponse:
+    """Status payload for one connector in one pocket.
+
+    The pocket_id filter is essential — per the Cluster C security review,
+    connector credentials are scoped by pocket, so status queries are too.
+    A pocket_id the caller doesn't have access to will simply return
+    ``connected=false`` without leaking whether the connector exists for
+    another pocket.
+    """
+    reg = _get_registry()
+    defn = reg.get_definition(connector_name)
+    if not defn:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
+
+    adapter = reg.get_adapter(pocket_id, connector_name)
+    connected = adapter is not None
+
+    extras = _STATUS_EXTRAS.get(_extras_key(pocket_id, connector_name), {})
+    cred_state = extras.get("cred_state") or ("valid" if connected else "missing")
+    last_sync = extras.get("last_sync")
+    scope = extras.get("scope", "")
+
+    return ConnectorStatusResponse(
+        name=connector_name,
+        pocket_id=pocket_id,
+        connected=connected,
+        last_sync=last_sync,
+        cred_state=cred_state,
+        scope=scope,
+    )
 
 
 @router.get("/connectors", response_model=list[ConnectorInfo])
@@ -155,10 +260,26 @@ async def get_connector_detail(connector_name: str, pocket_id: str = "default"):
 @router.post("/connectors/connect", response_model=ConnectResponse)
 async def connect_connector(req: ConnectRequest):
     """Connect to a data source with credentials."""
+    from datetime import datetime
+
     reg = _get_registry()
     result = await reg.connect(req.pocket_id, req.connector_name, req.config)
     if result is None:
         return ConnectResponse(success=False, message=f"Unknown connector: {req.connector_name}")
+    if result.success:
+        # Track status without retaining the config payload itself. We
+        # deliberately do NOT record anything from req.config here — only
+        # the grant descriptor if present. The registry layer has already
+        # handed the secret material to the adapter; the status side-table
+        # stays secret-free.
+        scope = str(req.config.get("scope") or req.config.get("scopes") or "")
+        record_connector_event(
+            pocket_id=req.pocket_id,
+            connector_name=req.connector_name,
+            cred_state="valid",
+            last_sync=datetime.now(UTC).isoformat(),
+            scope=scope,
+        )
     return ConnectResponse(
         success=result.success,
         message=result.message or "",
@@ -171,6 +292,13 @@ async def disconnect_connector(req: DisconnectRequest):
     """Disconnect a data source."""
     reg = _get_registry()
     ok = await reg.disconnect(req.pocket_id, req.connector_name)
+    if ok:
+        record_connector_event(
+            pocket_id=req.pocket_id,
+            connector_name=req.connector_name,
+            cred_state="missing",
+            scope="",
+        )
     return ConnectResponse(
         success=ok,
         message="Disconnected" if ok else "Not connected",
@@ -180,6 +308,8 @@ async def disconnect_connector(req: DisconnectRequest):
 @router.post("/connectors/execute", response_model=ExecuteResponse)
 async def execute_connector_action(req: ExecuteRequest):
     """Execute an action on a connected data source."""
+    from datetime import datetime
+
     reg = _get_registry()
     adapter = reg.get_adapter(req.pocket_id, req.connector_name)
     if not adapter:
@@ -189,6 +319,12 @@ async def execute_connector_action(req: ExecuteRequest):
         )
 
     result = await adapter.execute(req.action, req.params)
+    if result.success:
+        record_connector_event(
+            pocket_id=req.pocket_id,
+            connector_name=req.connector_name,
+            last_sync=datetime.now(UTC).isoformat(),
+        )
     return ExecuteResponse(
         success=result.success,
         data=result.data,

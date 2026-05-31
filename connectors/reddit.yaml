@@ -1,0 +1,31 @@
+# Reddit connector — REST over OAuth (or anonymous app-only).
+# Created: 2026-05-03 — Phase 1 PR-7.
+
+name: reddit
+display_name: Reddit
+type: knowledge
+icon: rss
+
+auth:
+  method: oauth2
+  credentials:
+    - name: REDDIT_OAUTH_TOKEN
+      description: OAuth token (or anonymous bearer for app-only mode)
+      required: false
+
+actions:
+  - name: reddit_search
+    description: Search Reddit posts.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: reddit_read
+    description: Read a Reddit post + top comments.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud
+  - name: reddit_trending
+    description: Top posts in a subreddit.
+    method: GET
+    trust_level: auto
+    execution_mode: cloud

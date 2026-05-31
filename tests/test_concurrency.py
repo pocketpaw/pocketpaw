@@ -40,6 +40,7 @@ def _make_slow_router(delay: float = 0.1):
 # ---------------------------------------------------------------------------
 
 
+@patch("pocketpaw.agents.loop.Settings.load")
 @patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
@@ -51,6 +52,7 @@ async def test_session_lock_serialises_same_session(
     mock_get_mem,
     mock_get_bus,
     mock_get_scanner,
+    mock_settings_load,
 ):
     """Two messages with the same session_key must not overlap."""
     settings = MagicMock()
@@ -63,7 +65,9 @@ async def test_session_lock_serialises_same_session(
     settings.compaction_summary_chars = 150
     settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 5
+    settings.agent_backend = "claude_agent_sdk"
     mock_get_settings.return_value = settings
+    mock_settings_load.return_value = settings
 
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
@@ -99,6 +103,8 @@ async def test_session_lock_serialises_same_session(
 
     router = MagicMock()
     router.run = slow_run
+    router._active_backend_name = "claude_agent_sdk"
+    router.stop = AsyncMock()
     loop._router = router
 
     msg1 = _make_inbound("user1", "first")
@@ -120,6 +126,7 @@ async def test_session_lock_serialises_same_session(
 # ---------------------------------------------------------------------------
 
 
+@patch("pocketpaw.agents.loop.Settings.load")
 @patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
@@ -131,6 +138,7 @@ async def test_cross_session_runs_in_parallel(
     mock_get_mem,
     mock_get_bus,
     mock_get_scanner,
+    mock_settings_load,
 ):
     """Messages for different sessions should overlap in time."""
     settings = MagicMock()
@@ -143,7 +151,9 @@ async def test_cross_session_runs_in_parallel(
     settings.compaction_summary_chars = 150
     settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 5
+    settings.agent_backend = "claude_agent_sdk"
     mock_get_settings.return_value = settings
+    mock_settings_load.return_value = settings
 
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
@@ -178,6 +188,8 @@ async def test_cross_session_runs_in_parallel(
 
     router = MagicMock()
     router.run = slow_run
+    router._active_backend_name = "claude_agent_sdk"
+    router.stop = AsyncMock()
     loop._router = router
 
     # Different session keys → should run in parallel
@@ -203,6 +215,7 @@ async def test_cross_session_runs_in_parallel(
 # ---------------------------------------------------------------------------
 
 
+@patch("pocketpaw.agents.loop.Settings.load")
 @patch("pocketpaw.agents.loop.get_injection_scanner")
 @patch("pocketpaw.agents.loop.get_message_bus")
 @patch("pocketpaw.agents.loop.get_memory_manager")
@@ -214,6 +227,7 @@ async def test_global_semaphore_caps_concurrency(
     mock_get_mem,
     mock_get_bus,
     mock_get_scanner,
+    mock_settings_load,
 ):
     """With max_concurrent_conversations=1, even cross-session must serialise."""
     settings = MagicMock()
@@ -226,7 +240,9 @@ async def test_global_semaphore_caps_concurrency(
     settings.compaction_summary_chars = 150
     settings.compaction_llm_summarize = False
     settings.max_concurrent_conversations = 1  # Force serial
+    settings.agent_backend = "claude_agent_sdk"
     mock_get_settings.return_value = settings
+    mock_settings_load.return_value = settings
 
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
@@ -261,6 +277,8 @@ async def test_global_semaphore_caps_concurrency(
 
     router = MagicMock()
     router.run = slow_run
+    router._active_backend_name = "claude_agent_sdk"
+    router.stop = AsyncMock()
     loop._router = router
 
     msg_a = _make_inbound("userA", "alpha")

@@ -2,7 +2,7 @@
 # Created: 2026-04-16 (Workstream C2 of the Org Architecture RFC).
 #
 # This is the connector-layer client. It is deliberately separate from
-# ``pocketpaw.integrations.gdrive.DriveClient``, which is coupled to the
+# ``pocketpaw.clients.gdrive.DriveClient``, which is coupled to the
 # global OAuth token store used by the ``drive_*`` built-in tools. The
 # retrieval router hands us a short-lived ``Credential`` at dispatch time
 # (via the credential broker) so we never reach for a global token.

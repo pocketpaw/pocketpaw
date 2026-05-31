@@ -1,0 +1,30 @@
+# src/pocketpaw/bundled_templates/_bundled/metrics-dashboard/template.pocket.yaml
+# Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — RFC 03
+# Pocket Template Schema metadata for the built-in metrics dashboard.
+# ``shape`` is ``data-grid`` because RFC 03's shape enum does not carry a
+# ``dashboard`` value; the dashboard *pattern* is recorded in index.json.
+# Modified 2026-05-25 (feat/rfc-03-v2-schema-chokepoint): migrated v1 ->
+# v2. Added schema_version, display_name, pattern. Renamed skills ->
+# skill_refs. ``pattern: dashboard`` per the sibling index.json row.
+schema_version: "2"
+name: metrics-dashboard
+version: 1.0.0
+vertical: analytics
+pattern: dashboard
+display_name: Metrics Dashboard
+shape: data-grid
+description: |
+  An at-a-glance metrics dashboard. A strip of headline KPI tiles over a
+  trend chart, with a per-segment breakdown table underneath. Built for
+  the "how are we doing this period" question — KPIs, a trend line, and
+  a roll-up roster. Pick this only when the brief explicitly asks for
+  metrics, KPIs, or an overview.
+state:
+  entity_type: Metric
+  columns:
+    - { field: segment, widget: text }
+    - { field: value, widget: number }
+    - { field: change_pct, widget: number }
+actions: []
+connectors: []
+skill_refs: []

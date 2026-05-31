@@ -1,8 +1,9 @@
 """Encrypted credential storage for PocketPaw.
 
 Changes:
-  - 2026-02-06: Initial implementation — Fernet encryption with machine-derived PBKDF2 key.
+  - 2026-04-10: v1 migration failure no longer crashes — logs warning, starts with empty store.
   - 2026-04-03: Hardened: Argon2id + AES-256-GCM, backup-safe migration, AEAD.
+  - 2026-02-06: Initial implementation — Fernet encryption with machine-derived PBKDF2 key.
 
 Stores API keys and tokens in ~/.pocketpaw/secrets.enc instead of plaintext config.json.
 Encryption key derived from machine identity (hostname + MAC + username) so the encrypted
@@ -292,28 +293,32 @@ class CredentialStore:
                 return self._cache
 
             except InvalidToken:
-                # v1 decryption failed — restore backup, raise immediately
+                # v1 decryption failed — restore backup, continue with empty store
                 if backup_path.exists():
                     shutil.copy2(backup_path, self._secrets_path)
-                    logger.error(
-                        "v1 secret decryption failed (wrong key?). Backup restored to secrets.enc."
-                    )
-                raise CredentialMigrationError(
-                    "Failed to decrypt v1 secrets.enc — key derivation mismatch. "
-                    "The backup has been restored."
-                ) from None
+                logger.warning(
+                    "v1 secret decryption failed (key derivation mismatch). "
+                    "Backup preserved at secrets.enc.v1.bak. "
+                    "Starting with empty credential store — keys from env vars "
+                    "and config.json will still work. "
+                    "Run: rm ~/.pocketpaw/secrets.enc secrets.enc.v1.bak "
+                    "to clear the stale files."
+                )
+                self._cache = {}
+                return self._cache
 
             except Exception as exc:
-                # Migration or v2 test-decrypt failed — restore backup
+                # Migration or v2 test-decrypt failed — restore backup, continue
                 if backup_path.exists():
                     shutil.copy2(backup_path, self._secrets_path)
-                    logger.error(
-                        "v1→v2 migration failed (%s). Backup restored to secrets.enc.",
-                        exc,
-                    )
-                raise CredentialMigrationError(
-                    f"v1→v2 migration failed: {exc}. The backup has been restored."
-                ) from exc
+                logger.warning(
+                    "v1→v2 migration failed (%s). "
+                    "Backup preserved at secrets.enc.v1.bak. "
+                    "Starting with empty credential store.",
+                    exc,
+                )
+                self._cache = {}
+                return self._cache
 
         # ---- Unknown format ----
         logger.warning(

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "files": {
+    "customer-support-app.md": {
+      "hash": "572335a659574ad35227ab388b5b1d788805f0a730cc26a7b409e4ebbcd6d6eb",
+      "article_id": "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta",
+      "compiled_at": "2026-05-14T08:42:35Z"
+    },
+    "espresso-recipe-viewer.md": {
+      "hash": "86deac00e8a48c5e9db74e65558f3d47d6f1f7c9e3f0586ea911f05f81f2a08e",
+      "article_id": "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard",
+      "compiled_at": "2026-05-14T08:42:35Z"
+    },
+    "sales-pipeline-dashboard.md": {
+      "hash": "e1b0e99c21d4c03051fbe9a1ff9fb26286d7fa28aae694c422dc1b5dd1390524",
+      "article_id": "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe",
+      "compiled_at": "2026-05-14T08:42:35Z"
+    }
+  }
+}

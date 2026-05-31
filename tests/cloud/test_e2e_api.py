@@ -71,12 +71,11 @@ async def beanie_db():
     Uses a unique database name per test run to avoid collisions.
     Drops the database after tests complete.
     """
+    # Reset license cache so env vars take effect
+    import pocketpaw_ee.cloud.license as lic_mod
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    # Reset license cache so env vars take effect
-    import ee.cloud.license as lic_mod
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     lic_mod._cached_license = None
     lic_mod._license_error = None
@@ -95,8 +94,8 @@ async def beanie_db():
 async def app(license_env, beanie_db) -> FastAPI:
     """Build a FastAPI app with cloud routes mounted, agent pool mocked."""
     # Reset license module cache before mounting
-    import ee.cloud.license as lic_mod
-    from ee.cloud import mount_cloud
+    import pocketpaw_ee.cloud.license as lic_mod
+    from pocketpaw_ee.cloud import mount_cloud
 
     lic_mod._cached_license = None
 
@@ -443,7 +442,7 @@ class TestWorkspaceFlow:
         """Workspace routes require a valid license."""
         auth = await _register_and_login(http)
         with patch.dict(os.environ, {"POCKETPAW_LICENSE_KEY": ""}):
-            import ee.cloud.license as lic_mod
+            import pocketpaw_ee.cloud.license as lic_mod
 
             lic_mod._cached_license = None
             lic_mod._license_error = None

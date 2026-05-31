@@ -230,6 +230,9 @@ async def run_multi_channel_mode(settings: Settings, args: argparse.Namespace) -
             host=settings.web_host,
             port=settings.web_port,
             log_level="info",
+            # Bound graceful shutdown — uvicorn's default (None) waits
+            # forever for open connections, hanging Ctrl+C / the port.
+            timeout_graceful_shutdown=5,
         )
         whatsapp_server = uvicorn.Server(config)
         asyncio.create_task(whatsapp_server.serve())

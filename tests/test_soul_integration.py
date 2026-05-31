@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(not _has_soul_protocol(), reason="soul-protocol 
 
 @pytest.fixture(autouse=True)
 def _reset_soul():
-    from pocketpaw.soul.manager import _reset_manager
+    from pocketpaw.soul._manager import _reset_manager
 
     _reset_manager()
     yield
@@ -28,7 +28,7 @@ class TestSoulIntegration:
     async def test_bootstrap_provider_generates_prompt(self):
         from soul_protocol import Soul
 
-        from pocketpaw.paw.soul_bridge import SoulBootstrapProvider
+        from pocketpaw.soul import SoulBootstrapProvider
 
         soul = await Soul.birth(
             name="IntegTest",
@@ -44,7 +44,7 @@ class TestSoulIntegration:
     async def test_bridge_observe_and_recall(self):
         from soul_protocol import Soul
 
-        from pocketpaw.paw.soul_bridge import SoulBridge
+        from pocketpaw.soul import SoulBridge
 
         soul = await Soul.birth(name="BridgeTest", persona="Test.")
         bridge = SoulBridge(soul)
@@ -55,7 +55,8 @@ class TestSoulIntegration:
 
     async def test_manager_full_lifecycle(self, tmp_path):
         from pocketpaw.config import Settings
-        from pocketpaw.soul.manager import SoulManager, _reset_manager
+        from pocketpaw.soul import SoulManager
+        from pocketpaw.soul._manager import _reset_manager
 
         _reset_manager()
         settings = Settings(
@@ -84,7 +85,8 @@ class TestSoulIntegration:
     async def test_soul_tools_injected_into_tool_bridge(self, tmp_path):
         """When soul is active, tool_bridge discovers all soul tools."""
         from pocketpaw.config import Settings
-        from pocketpaw.soul.manager import SoulManager, _reset_manager
+        from pocketpaw.soul import SoulManager
+        from pocketpaw.soul._manager import _reset_manager
 
         _reset_manager()
         settings = Settings(
@@ -112,7 +114,8 @@ class TestSoulIntegration:
     async def test_corrupt_file_recovery_end_to_end(self, tmp_path):
         """Corrupt .soul file triggers backup + fresh birth."""
         from pocketpaw.config import Settings
-        from pocketpaw.soul.manager import SoulManager, _reset_manager
+        from pocketpaw.soul import SoulManager
+        from pocketpaw.soul._manager import _reset_manager
 
         _reset_manager()
         soul_file = tmp_path / "corrupt.soul"
