@@ -43,6 +43,17 @@ in LOGGED (drift-allowed) mode; this wrapper only routes ``sources`` so it
 never lands as a widget field, and still emits the full-document ``replace``
 ``pocket_mutation`` via ``_push_replace`` (the frontend already understands
 ``replace`` — no paw-enterprise change needed).
+Changes: 2026-05-31 (feat/home-agent-source-authoring) — the REFINE half.
+``update_widget_for_agent`` now pulls an optional ``sources`` dict off the
+``fields`` argument (stripping it from the widget patch) and threads it to
+``agent_update_widget``, mirroring ``add_widget_for_agent`` — so refining a
+static tile into a live one is one call. Both widget wrappers now route
+their ``{ok, pocket}`` return through ``_widget_result_with_source_honesty``,
+which surfaces the service layer's authored / skipped source keys (stashed
+on the view under ``_source_merge``) as ``authored_sources`` /
+``skipped_sources`` so the agent can't report a source that was silently
+dropped. No honesty keys appear when no ``sources`` were supplied — the
+legacy result shape is unchanged.
 """
 
 from __future__ import annotations
@@ -406,18 +417,56 @@ async def add_widget_for_agent(pocket_id: str, widget: dict[str, Any]) -> dict[s
     if err is not None:
         return {"ok": False, "error": err}
     await _push_replace(view)
-    return {"ok": True, "pocket": view}
+    return _widget_result_with_source_honesty(view)
 
 
 async def update_widget_for_agent(
     pocket_id: str, widget_id: str, fields: dict[str, Any]
 ) -> dict[str, Any]:
-    """Patch fields on a single embedded widget."""
-    view, err = await pockets_service.agent_update_widget(pocket_id, widget_id, fields)
+    """Patch fields on a single embedded widget.
+
+    When the ``fields`` dict carries an optional ``sources`` key (a dict
+    keyed by source name, each value an RFC-04 ``SourceBinding``), those
+    entries are authored onto the pocket's top-level ``rippleSpec.sources``
+    in the same write — mirroring ``add_widget_for_agent``. This is the
+    REFINE path: the home agent can turn a static tile live by patching its
+    bind AND authoring the source in one call. ``sources`` rides ON the
+    ``fields`` dict (not the widget doc) — it is pulled off here and threaded
+    as an explicit kwarg so it never lands as a widget field."""
+    raw_sources = fields.get("sources") if isinstance(fields, dict) else None
+    sources = raw_sources if isinstance(raw_sources, dict) else None
+    # Strip ``sources`` from the widget-field patch so it is never persisted
+    # as a widget attribute (it belongs at the pocket's top-level sources).
+    patch_fields = (
+        {k: v for k, v in fields.items() if k != "sources"}
+        if isinstance(fields, dict) and "sources" in fields
+        else fields
+    )
+    view, err = await pockets_service.agent_update_widget(
+        pocket_id, widget_id, patch_fields, sources=sources
+    )
     if err is not None:
         return {"ok": False, "error": err}
     await _push_replace(view)
-    return {"ok": True, "pocket": view}
+    return _widget_result_with_source_honesty(view)
+
+
+def _widget_result_with_source_honesty(view: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``{ok, pocket}`` result and, when sources were in play, add
+    an HONEST readout of which authored sources actually persisted.
+
+    The service layer stashes ``{"authored": [...], "skipped": [...]}`` on
+    the view under the private ``_source_merge`` key whenever a ``sources``
+    block was supplied. We surface those keys (and drop the private marker
+    from the pocket the agent sees) so the agent confirms only what landed
+    and can't report a source it never wrote. When no sources were supplied,
+    no honesty keys appear — the legacy result shape is unchanged."""
+    merge = view.pop("_source_merge", None) if isinstance(view, dict) else None
+    result: dict[str, Any] = {"ok": True, "pocket": view}
+    if isinstance(merge, dict):
+        result["authored_sources"] = list(merge.get("authored", []))
+        result["skipped_sources"] = list(merge.get("skipped", []))
+    return result
 
 
 async def remove_widget_for_agent(pocket_id: str, widget_id: str) -> dict[str, Any]:
