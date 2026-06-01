@@ -55,6 +55,8 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "group:media": ["image_generate", "ocr", "deliver_artifact"],
     "group:translate": ["translate"],
     "group:reddit": ["reddit_search", "reddit_read", "reddit_trending"],
+    # Zero-config capability tools — no API key required.
+    "group:knowledge": ["weather", "wiki", "currency"],
     "group:sessions": [
         "new_session",
         "list_sessions",

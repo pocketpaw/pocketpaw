@@ -10,6 +10,7 @@
 #   - 2026-03-12: Added EditFileTool, RunPythonTool, InstallPackageTool (issue #581)
 #   - 2026-03-27: Added AddWidgetTool, RemoveWidgetTool for pocket mutations
 #   - 2026-03-28: Added Fabric + Instinct enterprise tools (guarded by ee/ availability)
+#   - 2026-05-31: Added zero-config WeatherTool, WikiTool, CurrencyTool (no API key)
 
 import importlib as _importlib
 
@@ -83,6 +84,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "ConnectorConnectTool": (".connector_tools", "ConnectorConnectTool"),
     "ConnectorExecuteTool": (".connector_tools", "ConnectorExecuteTool"),
     "ConnectorActionsTool": (".connector_tools", "ConnectorActionsTool"),
+    # Zero-config capability tools — no API key required.
+    "WeatherTool": (".weather", "WeatherTool"),
+    "WikiTool": (".wiki", "WikiTool"),
+    "CurrencyTool": (".currency", "CurrencyTool"),
 }
 
 # Enterprise tools (require ee/ module) — guarded so community installs don't break.
