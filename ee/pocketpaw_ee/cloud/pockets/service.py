@@ -165,13 +165,17 @@ from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
 from pocketpaw_ee.cloud.ripple_validator import (
     ActionWiringViolationError,
     CatalogViolationError,
+    MissingRequiredPropError,
     find_unreferenced_state_keys,
     format_action_violations_for_agent,
+    format_required_prop_violations_for_agent,
     format_violations_for_agent,
     validate_action_wiring_logged,
     validate_action_wiring_strict,
     validate_against_catalog_logged,
     validate_against_catalog_strict,
+    validate_required_props_logged,
+    validate_required_props_strict,
     validate_ripple_spec_logged,
 )
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
@@ -427,6 +431,35 @@ async def _catalog_allowed_types() -> list[str] | None:
         return None
 
 
+async def _catalog_required_props() -> dict[str, list[str]] | None:
+    """Resolve the per-widget required-prop map from the Ripple manifest.
+
+    Returns ``{type: [required_prop, ...]}`` for the constraint-zone HARD
+    required-prop gate, or ``None`` when the manifest is unavailable or no
+    widget declares a required prop — the caller skips the gate in that case,
+    best-effort like :func:`_catalog_allowed_types`.
+
+    ``get_manifest`` is in-process TTL-cached, so this resolves from the same
+    cache entry the allow-list lookup populated — no extra network fetch.
+    """
+    try:
+        from pocketpaw.config import get_settings
+        from pocketpaw.ripple.manifest import get_manifest, required_props_from_manifest
+
+        settings = get_settings()
+        manifest = await get_manifest(
+            settings.ripple_manifest_url,
+            ttl_seconds=settings.ripple_manifest_ttl_seconds,
+        )
+        if manifest is None:
+            return None
+        required = required_props_from_manifest(manifest)
+        return required or None
+    except Exception:
+        logger.debug("ripple required-prop map lookup skipped (non-fatal)", exc_info=True)
+        return None
+
+
 def _embed_allowed_hosts() -> list[str]:
     """Return the configured ``embed`` host allow-list."""
     try:
@@ -530,6 +563,20 @@ async def _gate_catalog(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
+        # Required-prop "HARD constraint" gate — same strict posture. Runs
+        # after the catalog walk so an unknown ``type`` surfaces as the
+        # fundamental "no such widget" error first; this catches the
+        # known-widget-but-missing-required-prop case (a ``chart`` with no
+        # ``data``) the catalog can't see. Best-effort: skipped when the
+        # required-prop map can't be resolved.
+        required_props = await _catalog_required_props()
+        if required_props:
+            validate_required_props_strict(
+                spec,
+                required_props,
+                pocket_id=pocket_id,
+                workspace_id=workspace_id,
+            )
     else:
         validate_against_catalog_logged(
             spec,
@@ -543,6 +590,14 @@ async def _gate_catalog(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
         )
+        required_props = await _catalog_required_props()
+        if required_props:
+            validate_required_props_logged(
+                spec,
+                required_props,
+                pocket_id=pocket_id,
+                workspace_id=workspace_id,
+            )
 
 
 # Widget ``type`` whose tiles carry no rippleSpec — the frontend renders them
@@ -593,6 +648,8 @@ async def _gate_widget_spec_for_agent(
         return format_violations_for_agent(exc.violations)
     except ActionWiringViolationError as exc:
         return format_action_violations_for_agent(exc.violations)
+    except MissingRequiredPropError as exc:
+        return format_required_prop_violations_for_agent(exc.violations)
     return None
 
 
@@ -1135,6 +1192,13 @@ async def merge_spec(
                 "rippleSpec": doc.rippleSpec,
                 "warnings": warnings + [format_action_violations_for_agent(exc.violations)],
             }
+        except MissingRequiredPropError as exc:
+            return {
+                "ok": False,
+                "pocket_id": str(doc.id),
+                "rippleSpec": doc.rippleSpec,
+                "warnings": warnings + [format_required_prop_violations_for_agent(exc.violations)],
+            }
 
     # Persist + emit.
     doc.rippleSpec = normalized
@@ -1277,6 +1341,14 @@ async def create_from_ripple_spec(
         # Strict action-wiring gate blocked the auto-create (PR #1196).
         logger.warning(
             "Auto-create blocked by action-wiring gate: %d violation(s); paths=%s",
+            len(exc.violations),
+            [v.get("path") for v in exc.violations],
+        )
+        return None
+    except MissingRequiredPropError as exc:
+        # Strict required-prop gate blocked the auto-create (constraint-zone).
+        logger.warning(
+            "Auto-create blocked by required-prop gate: %d violation(s); paths=%s",
             len(exc.violations),
             [v.get("path") for v in exc.violations],
         )
@@ -1854,6 +1926,8 @@ async def agent_update(
                 return None, format_violations_for_agent(exc.violations)
             except ActionWiringViolationError as exc:
                 return None, format_action_violations_for_agent(exc.violations)
+            except MissingRequiredPropError as exc:
+                return None, format_required_prop_violations_for_agent(exc.violations)
     try:
         await doc.save()
     except Exception as exc:  # noqa: BLE001
@@ -3021,6 +3095,8 @@ async def agent_create(
             return None, None, format_violations_for_agent(exc.violations)
         except ActionWiringViolationError as exc:
             return None, None, format_action_violations_for_agent(exc.violations)
+        except MissingRequiredPropError as exc:
+            return None, None, format_required_prop_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,

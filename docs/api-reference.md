@@ -314,6 +314,31 @@ Each flagged node reports `{path, type, suggestion}`, where `suggestion`
 is the nearest catalog widget by edit distance. The gate is best-effort:
 when the widget manifest can't be fetched it is skipped.
 
+### Required-prop gate
+
+The widget manifest marks the props a widget cannot render without as
+`required: true` (a `chart` with no `data`, a `stat` with no `value`, a
+`table` with no `columns`/`rows`). That flag used to live only in the
+system prompt — a node like `{"type": "chart", "props": {}}` passed the
+catalog gate (its `type` is known) and rendered an empty box. The
+required-prop gate runs as a sibling to the catalog walk and closes that
+hole: it flags any node missing a manifest-required prop for its `type`.
+
+It is the rippleSpec expression of the constraint-zone model's 🔒 **HARD**
+`required_fields` zone — the agent is free to choose which widgets to use
+and how to fill the creative props, but the manifest-declared structural
+minimum is locked and checked, not merely asked for. Same **strict**
+(agent path, blocks + returns a corrective message naming the missing
+prop) / **logged** (human / import path, structured warning, never blocks)
+posture as the catalog gate, and the same best-effort skip when the
+manifest can't be fetched. A prop counts as present when its key exists
+with a non-null value — a literal, an empty list / `0` / `false`, or a
+bound `{...}` expression all satisfy it; only a missing key or explicit
+`null` is a violation. A node-level `bind` satisfies a single-required-prop
+input widget (the bound value populates the prop at render time).
+
+Each flagged node reports `{path, type, missing, required}`.
+
 ### Escape-hatch widgets
 
 Two catalog widgets cover content the rest of the catalog can't express:
