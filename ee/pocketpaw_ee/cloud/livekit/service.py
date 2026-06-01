@@ -23,7 +23,12 @@ from livekit.protocol.room import (
 )
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallNotesPosted, CallStarted
+from pocketpaw_ee.cloud._core.realtime.events import (
+    CallEnded,
+    CallNotesPosted,
+    CallStarted,
+    MessageNew,
+)
 from pocketpaw_ee.cloud.models.meeting import Meeting as MeetingDoc
 from pocketpaw_ee.cloud.models.meeting import MeetingTranscript
 
@@ -899,6 +904,22 @@ async def post_meeting_notes_to_group(
                 }
             )
         )
+        await emit(
+            MessageNew(
+                data={
+                    "group": group_id,
+                    "group_id": group_id,
+                    "sender": CALL_BOT_USER_ID,
+                    "senderName": "Meeting Notes",
+                    "senderType": "user",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "message_id": domain_msg.id,
+                    "_id": domain_msg.id,
+                    "content": content,
+                    "mentions": [],
+                }
+            )
+        )
         logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
     except Exception as exc:
         logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
@@ -907,8 +928,6 @@ async def post_meeting_notes_to_group(
     # Store transcript as a file and create MeetingTranscript doc.
     if workspace_id and transcript:
         try:
-            from datetime import UTC
-
             from pocketpaw_ee.cloud.meetings.events import MeetingTranscriptReady
             from pocketpaw_ee.cloud.uploads.service import write_text_file
 
