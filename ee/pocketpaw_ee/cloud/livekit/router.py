@@ -175,7 +175,7 @@ async def create_room(
     group = await _get_group_domain_or_404(body.group_id)
     _require_domain_group_member(group, str(user.id))
 
-    result = await livekit_service.create_room(body.group_id)
+    result = await livekit_service.create_room(body.group_id, workspace_id, str(user.id))
 
     # Only emit call.started when the room was actually created (not when
     # someone joins an existing room). The is_new flag is set atomically
@@ -284,7 +284,7 @@ async def end_call(
     group = await _get_group_domain_or_404(group_id)
     _require_domain_group_member(group, str(user.id))
 
-    result = await livekit_service.end_room(group_id)
+    result = await livekit_service.end_room(group_id, workspace_id)
 
     # Emit realtime event so group members know the call ended
     try:
