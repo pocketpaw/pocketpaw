@@ -719,6 +719,7 @@ def _plan_session_to_dto(summary: Any) -> PlanSessionDTO:
     wire_status = _WIRE_STATUS_BY_DOC.get(summary.status, "draft")
     return PlanSessionDTO(
         id=summary.id,
+        project_id=summary.project_id,
         name=summary.name,
         status=wire_status,  # type: ignore[arg-type]
         task_count=summary.task_count,

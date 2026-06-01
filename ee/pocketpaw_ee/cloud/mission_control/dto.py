@@ -327,6 +327,8 @@ class PlanSessionDTO(BaseModel):
       - ``id`` — opaque PlanSession doc id; the frontend round-trips it
         when the operator opens a draft for full detail (separate
         endpoint, not in scope here).
+      - ``project_id`` — the project this session belongs to; the frontend
+        uses it to load the full plan detail via ``/planner/by-project/``.
       - ``name`` — display label from the linked Project. Empty string
         when the project was deleted underneath the session.
       - ``status`` — wire vocabulary (``draft``/``active``/``archived``).
@@ -343,6 +345,7 @@ class PlanSessionDTO(BaseModel):
     """
 
     id: str
+    project_id: str
     name: str
     status: PlanSessionStatus
     task_count: int
