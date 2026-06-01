@@ -157,12 +157,15 @@ async def emit_pocket_outcome(
     decision_id: str | None = None,
     outcome_value: float | None = None,
     outcome_unit: str | None = None,
+    compensated: bool = False,
 ) -> None:
     """Emit a ``pocket.outcome`` event for a successful write action.
 
-    Called by the pockets router (a direct, non-gated write) and by
+    Called by the pockets router (a direct, non-gated write), by
     ``instinct_bridge.execute_approved_write`` (a write fired after
-    Instinct approval) AFTER ``run_action`` returns ``ok:true``.
+    Instinct approval), and by ``saga.run_action_sequence`` (a
+    compensating write fired on rollback) AFTER ``run_action`` returns
+    ``ok:true``.
 
     A binding that declared no ``outcome`` passes ``outcome=None`` — this
     is a NO-OP, no event is emitted. Only a named outcome produces an
@@ -183,6 +186,12 @@ async def emit_pocket_outcome(
     when the caller has one in hand. ``None`` is fine for writers that
     don't yet know their Decision (legacy producers); the listener
     only fires the back-reference path when the id is present.
+
+    ``compensated`` (RFC 05 Saga Compensate) is ``True`` when this outcome
+    is a rollback — a compensating write fired because a later step in a
+    multi-step write sequence failed. The ledger records it so the meter
+    can net a refunded "renewal_completed" against the forward one instead
+    of over-counting. Defaults ``False`` (an ordinary forward outcome).
     """
     if not outcome:
         # No declared outcome — nothing to meter. The write still
@@ -206,6 +215,8 @@ async def emit_pocket_outcome(
                 "outcome_unit": outcome_unit,
                 # RFC 07 Slice 2 — back-reference to the decision graph.
                 "decision_id": decision_id,
+                # RFC 05 Saga Compensate — True for a rollback outcome.
+                "compensated": compensated,
             }
         )
     )
@@ -265,6 +276,8 @@ async def record_outcome(event) -> None:  # type: ignore[no-untyped-def]
         outcome_unit=outcome_unit,
         # RFC 07 Slice 2 — back-reference into the decision graph.
         decision_id=decision_id,
+        # RFC 05 Saga Compensate — True for a rollback outcome.
+        compensated=bool(data.get("compensated")),
     )
     path = _ledger_path(record.workspace_id)
     try:

@@ -18,9 +18,9 @@ A pocket write action is a **declared, agent-callable verb** that mutates extern
 
 **Workspace RFC:** [docs/rfc/05-pocket-write-actions-rfc.md](https://github.com/qbtrix/paw-workspace/blob/main/docs/rfc/05-pocket-write-actions-rfc.md)
 
-**What's live:** write actions wired via the `call_binding` ripple verb; Instinct routing for approval-gated bindings; outcome emission; execution router splits structure edits from data writes.
+**What's live:** write actions wired via the `call_binding` ripple verb; Instinct routing for approval-gated bindings; outcome emission; execution router splits structure edits from data writes; **Saga compensation** — a per-action `compensate` spec plus a server-side rollback runtime for multi-step write sequences (first pass).
 
-**What's planned:** multi-step action chains; richer outcome schemas tied to RFC 07 Decisions.
+**What's planned:** the call sites that drive a write SEQUENCE (Chain Flow / RFC 13); saga over Instinct-gated forward writes; richer outcome schemas tied to RFC 07 Decisions.
 </Callout>
 
 ## What It Is
@@ -78,6 +78,7 @@ A write binding lives inside `rippleSpec.actions` on the pocket. The minimum sha
 | `requires_instinct` | When `true`, runs validation gates but parks the write for human approval via the Instinct surface. |
 | `instinct_policy` | Optional reference to a named Instinct policy. Rejected by the model validator if set without `requires_instinct`. |
 | `outcome` | Optional outcome name emitted on success. Feeds RFC 07's DecisionProjection. |
+| `compensate` | Optional inverse-write spec (`{method, path, params, outcome?}`) — the action that undoes this one if a later step in a write sequence fails. Fired by the Saga runtime on rollback; ignored on a single `run_action` call. See [Saga Compensation](#saga-compensation-multi-step-rollback). |
 
 The matching write rule on `allowed_writes` lives on the backend credential, set via:
 
@@ -118,6 +119,70 @@ The outcomes service persists the row and emits a bus event. Downstream:
 - The pocket's UI reconciles via the `on_success` handler the agent wired into the widget event.
 - The Decision Graph (RFC 07) consumes the outcome as evidence on the relevant `DecisionProjection`.
 - The audit log keeps a tenant-filterable record (`workspace_id` is on every entry).
+
+## Saga Compensation (Multi-Step Rollback)
+
+A single write action either fires or it doesn't. But an agent-authored flow often performs **several writes in a row** — reserve inventory, charge the card, confirm the order. If the third write fails, the first two are already committed on the backend: inventory is held, the card is charged. Left alone, the backend is in an inconsistent state.
+
+Saga compensation closes that gap. Each forward action declares a `compensate` spec — the **inverse write** that undoes it (`charge` → `refund`, `reserve` → `release`). When a write **sequence** fails partway, the runtime fires the completed steps' compensations in **reverse order**, leaving the backend consistent.
+
+### The `compensate` spec
+
+```json
+{
+  "actions": {
+    "charge_card": {
+      "method": "POST",
+      "path": "/payments/charge",
+      "outcome": "payment_captured",
+      "compensate": {
+        "method": "POST",
+        "path": "/payments/refund",
+        "outcome": "payment_refunded"
+      }
+    }
+  }
+}
+```
+
+A compensation **is** a write binding — it shares the executor and is subject to the **same gates** (allowlist, SSRF, rate limit). The owner must allow-list the inverse write's `method` + `path` too, or the rollback is rejected at the allowlist gate. Two fields are deliberately absent from a `compensate` spec versus a full action:
+
+- **No `requires_instinct`.** A compensation fires **automatically**. Pausing a rollback for human approval would leave the backend in the inconsistent state the rollback exists to repair. The forward write's gate is the human checkpoint; the compensation is the automatic cleanup once a committed write must be undone.
+- **No nested `compensate`.** A compensation that itself fails is logged and surfaced for manual reconciliation — it is not auto-compensated recursively.
+
+### The rollback algorithm
+
+`pockets/saga.py:run_action_sequence` runs a list of steps through the existing single-write executor:
+
+1. Run each step in order via `action_executor.run_action`. Push every step that **fires** (`ok:true`, not parked) onto a completed stack, and emit its forward outcome.
+2. On the **first** failure — an `ok:false` result, **or** a step that parks for Instinct (`instinct_pending`) — stop advancing.
+3. Fire the completed steps' compensations in **reverse** order (newest-committed first), each as its own `run_action` call against the inverse binding.
+4. A successful compensation that declares an `outcome` emits a `pocket.outcome` event with `compensated: true`, so the audit trail closes and the meter can net the rollback against the forward outcome.
+
+```text
+reserve  ✓   charge  ✓   confirm  ✗   ← step 3 fails
+                              │
+                              ▼  roll back, newest-first
+                  refund (charge⁻¹)  →  release (reserve⁻¹)
+```
+
+The executor is **not** modified — it stays a pure single-write primitive, so the three existing single-write callers (the direct route, bulk fan-out, the Instinct re-entry) are byte-stable. The saga is a wrapper that orchestrates it.
+
+### Failure handling
+
+- **A compensation that itself fails** does *not* abort the rollback — the remaining compensations still fire (a half-rolled-back saga is worse than a fully-attempted one). Failed legs land in `SagaResult.compensation_failures` with `status: "failed"` for an operator to reconcile by hand.
+- **A completed step with no `compensate` spec** is recorded as a `no_compensator` gap rather than silently dropped — the operator sees exactly what was left committed. `rolled_back` is then `false`.
+- **`SagaResult.rolled_back`** is `true` only when every completed step was cleanly compensated. `false` means the backend may be partially inconsistent and needs attention.
+
+### Idempotency
+
+A compensation carries an `Idempotency-Key` derived from the forward step's key (suffixed `:compensate`) so a retried rollback dedupes on the backend without colliding with the forward write's key. A compensation is **required to be idempotent on the backend side** — re-firing `refund` for an already-refunded charge must be a no-op.
+
+### Open questions (first pass)
+
+- **Saga over Instinct-gated forward writes.** A `requires_instinct` forward write parks instead of firing, so it can't be part of an *automatic* saga. Today the saga treats a parked step as a sequence failure and rolls back the steps before it. A real "approve the whole sequence, then fire" (or per-step approval mid-saga) flow is a larger design, deferred.
+- **Who drives the sequence?** This pass ships the field + the runtime. The call sites that *assemble* a multi-step write sequence — Chain Flow (RFC 13), an agent-authored flow tool — are wired separately.
+- **Compensation retry policy.** A failed compensation is surfaced, not retried. A bounded-retry / dead-letter policy for stuck compensations is future work.
 
 ## Execution Router and the Structure/Data Split (PR #1181)
 
