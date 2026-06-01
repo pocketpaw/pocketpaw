@@ -208,7 +208,7 @@ class TestKbContext:
         import pocketpaw.bootstrap.context_builder as ctx_mod
 
         settings = MagicMock()
-        settings.kb_scope = "test-scope"
+        settings.kb_scopes = ["test-scope"]
         settings.kb_binary = "kb"
         settings.kb_limit = 3
         monkeypatch.setattr("pocketpaw.config.get_settings", lambda: settings)
