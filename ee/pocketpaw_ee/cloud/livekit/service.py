@@ -25,6 +25,7 @@ from livekit.protocol.room import (
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallNotesPosted, CallStarted
 from pocketpaw_ee.cloud.models.meeting import Meeting as MeetingDoc
+from pocketpaw_ee.cloud.models.meeting import MeetingTranscript
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +236,7 @@ async def _collect_agent_notes(
 async def _reap_agent_process(
     group_id: str,
     proc: asyncio.subprocess.Process,
+    workspace_id: str = "",
 ) -> None:
     """Wait for an agent subprocess to finish, then clean up the registry.
 
@@ -280,6 +282,7 @@ async def _reap_agent_process(
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
                 duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
             )
             logger.info("Posted meeting notes for group %s from agent payload", group_id)
         except Exception:
@@ -634,7 +637,7 @@ async def create_room(
 
         # Background task: wait for the subprocess to finish, then clean
         # up the registry so we don't leak agent references.
-        asyncio.create_task(_reap_agent_process(group_id, proc))
+        asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
 
         logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
 
@@ -722,6 +725,7 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
                 duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
             )
             logger.info("Posted meeting notes for group %s (end_room)", group_id)
         except Exception as exc:
@@ -822,12 +826,15 @@ async def post_meeting_notes_to_group(
     action_items: list[str],
     participants: list[str],
     duration_seconds: int,
+    workspace_id: str = "",
 ) -> None:
     """Post meeting notes to a group after a call ends.
 
     Creates a system message directly (bypassing membership check since the
     call-bot is not a group member) and emits a real-time event so all
-    group members see it.
+    group members see it. Also stores the transcript as a file and creates
+    a MeetingTranscript record so the meeting detail in /meetings can
+    display the transcript.
     """
     lines = [
         "📋 **Meeting Notes**",
@@ -896,6 +903,71 @@ async def post_meeting_notes_to_group(
     except Exception as exc:
         logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
         raise
+
+    # Store transcript as a file and create MeetingTranscript doc.
+    if workspace_id and transcript:
+        try:
+            from datetime import UTC
+
+            from pocketpaw_ee.cloud.meetings.events import MeetingTranscriptReady
+            from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+            room_name = room_name_for_group(group_id)
+            meeting = await MeetingDoc.find_one(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+            )
+            if meeting is None:
+                return
+
+            safe_title = (meeting.title or "call").replace("/", "-")[:80]
+            file_rec = await write_text_file(
+                workspace_id=workspace_id,
+                owner_id=meeting.created_by_user_id or "system",
+                folder_path="/transcripts",
+                filename=f"{safe_title}-transcript.vtt",
+                content=transcript,
+                mime="text/vtt",
+            )
+
+            import re as _re
+
+            cue_count = transcript.count("\n--> ") + transcript.count(" --> ")
+            # For plain-text transcripts (no VTT cues), fall back to line count
+            entry_count = max(cue_count, 1) if transcript.strip() else 0
+            speaker_count = len({m.group(1) for m in _re.finditer(r"<v\s+([^>]+)>", transcript)})
+
+            transcript_doc = MeetingTranscript(
+                workspace=workspace_id,
+                meeting_id=str(meeting.id),
+                provider_transcript_id=room_name,
+                file_id=file_rec.id,
+                entry_count=entry_count,
+                speaker_count=speaker_count,
+                language=None,
+                fetched_at=datetime.now(UTC),
+                indexed_in_kb=False,
+                kb_indexed_version=1,
+            )
+            await transcript_doc.insert()
+
+            await emit(
+                MeetingTranscriptReady(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "file_id": file_rec.id,
+                        "entry_count": entry_count,
+                        "speaker_count": speaker_count,
+                        "language": None,
+                    }
+                )
+            )
+            logger.info("Stored transcript for meeting %s (%d cues)", meeting.id, cue_count)
+        except Exception as exc:
+            logger.warning("Failed to store transcript: %s", exc)
 
 
 # ---------------------------------------------------------------------------
