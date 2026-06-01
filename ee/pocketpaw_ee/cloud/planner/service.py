@@ -62,6 +62,7 @@ Implementation notes:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -167,6 +168,19 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
             }
         )
     )
+
+    # Kick off execution of unblocked agent tasks asynchronously.
+    # Cascade dispatch on task.resolved is handled by the subscriber
+    # in cloud/tasks/listeners.py.
+    try:
+        asyncio.ensure_future(
+            _execute_ready_plan_tasks(
+                workspace_id=ctx.workspace_id,
+                project_id=project.id,
+            )
+        )
+    except Exception:
+        logger.exception("failed to kick off plan task execution")
 
     return _session_to_dto(session)
 
@@ -1078,4 +1092,280 @@ __all__ = [
     "agent_resolve_gap",
     "get_plan_for_project",
     "list_plan_sessions",
+    "on_plan_task_resolved",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Plan task execution — claims unblocked agent tasks and runs via AgentPool
+# ---------------------------------------------------------------------------
+
+
+async def _execute_ready_plan_tasks(
+    *,
+    workspace_id: str,
+    project_id: str,
+) -> None:
+    """Find and execute unblocked agent tasks for a plan project.
+
+    If tasks were assigned to a human fallback (the planner recommended
+    an agent missing from the workspace), auto-creates the missing agent,
+    reassigns the task, then executes it via AgentPool.
+    """
+    from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
+
+    docs = await _TaskDoc.find(
+        {
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+        }
+    ).to_list()
+    if not docs:
+        logger.info("_execute_ready_plan_tasks: no tasks for project %s", project_id)
+        return
+
+    resolved_ids = {str(d.id) for d in docs if d.status in ("done", "failed", "reverted")}
+
+    # Log every task
+    for d in docs:
+        meta = d.source.metadata or {}
+        wanted = meta.get("wanted_agent_spec_name", "")
+        logger.info(
+            "task_check: id=%s status=%s title=%s assignee=(%s,%s) wanted=%s blocked_by=%s",
+            str(d.id),
+            d.status,
+            d.title[:60],
+            d.assignee.kind,
+            d.assignee.id[:12] if d.assignee.id else "none",
+            wanted,
+            list(d.blocked_by or []),
+        )
+    logger.info("dep_check: total=%d resolved=%s", len(docs), sorted(resolved_ids))
+
+    # Find proposed agent-assigned tasks with no unresolved blockers
+    ready = []
+    for d in docs:
+        if d.status != "proposed":
+            continue
+        blocked = list(d.blocked_by or [])
+        if blocked and not all(bid in resolved_ids for bid in blocked):
+            continue
+        # Auto-create missing agent if needed
+        if d.assignee.kind != "agent":
+            meta = d.source.metadata or {}
+            wanted = meta.get("wanted_agent_spec_name", "")
+            if not wanted:
+                continue
+            aid = await _ensure_agent(workspace_id, wanted)
+            if not aid:
+                continue
+            await _reassign_task(workspace_id, str(d.id), aid, wanted)
+            refreshed = await _TaskDoc.get(str(d.id))
+            if refreshed:
+                ready.append(refreshed)
+        else:
+            ready.append(d)
+
+    if not ready:
+        logger.info(
+            "_execute_ready_plan_tasks: no ready tasks (total=%d, resolved=%d)",
+            len(docs),
+            len(resolved_ids),
+        )
+        return
+    logger.info("_execute_ready_plan_tasks: %d ready task(s)", len(ready))
+
+    from types import SimpleNamespace
+
+    from pocketpaw.agents.pool import get_agent_pool
+    from pocketpaw_ee.cloud.tasks.dto import ClaimTaskRequest
+    from pocketpaw_ee.cloud.tasks.service import agent_claim_task as cloud_claim_task
+
+    ctx = SimpleNamespace(workspace_id=workspace_id)
+    pool = get_agent_pool()
+
+    # Claim all concurrently
+    async def _try_claim(d):
+        tid = str(d.id)
+        aid = d.assignee.id
+        if not aid:
+            return None
+        try:
+            r = await cloud_claim_task(ctx, tid, ClaimTaskRequest(agent_id=aid))
+            if r.get("ok"):
+                return (tid, aid, d)
+            logger.warning("claim_task failed %s reason=%s", tid, r.get("reason"))
+        except Exception as e:
+            logger.warning("claim_task threw for %s: %s", tid, e)
+        return None
+
+    batch = []
+    for res in await asyncio.gather(*[_try_claim(d) for d in ready]):
+        if res:
+            batch.append(res)
+
+    if not batch:
+        logger.info("no tasks could be claimed")
+        return
+    logger.info("claimed %d task(s), spawning parallel execution", len(batch))
+
+    # Run all concurrently
+    async def _run_one(tid, aid, d):
+        instr = "You are executing a task from a project plan.\\n\\n"
+        instr += "## Task: " + d.title + "\\n\\n"
+        instr += d.summary + "\\n\\n"
+        if d.success_criteria:
+            instr += "## Success Criteria\\n"
+            for i, sc in enumerate(d.success_criteria, 1):
+                instr += str(i) + ". " + sc + "\\n"
+        instr += "\\n## Workflow\\n"
+        instr += "1. Review the task and create the required output.\\n"
+        instr += "2. When done, call the MCP tool complete_task\\n"
+        try:
+            async for _ in pool.run(
+                agent_id=aid,
+                message=instr,
+                session_key="planner:task:" + project_id + ":" + tid,
+                instructions="Execute the task and call complete_task when done.",
+            ):
+                pass
+            logger.info("agent done task=%s — auto-completing", tid)
+            await _auto_complete_task(workspace_id, tid, project_id)
+        except Exception as e:
+            logger.exception("agent exec failed for task %s: %s", tid, e)
+
+    await asyncio.gather(*[_run_one(tid, aid, d) for tid, aid, d in batch])
+
+
+# ---------------------------------------------------------------------------
+# Helpers for auto-creating missing agents and reassigning tasks
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_agent(workspace_id: str, spec_name: str) -> str | None:
+    """Find or create a cloud agent for the given planner spec name."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.agents import service as agents_service
+    from pocketpaw_ee.cloud.agents.dto import CreateAgentRequest
+
+    # Check if already exists by listing agents and matching name
+    try:
+        existing_list = await agents_service.list_agents(workspace_id)
+        for a in existing_list:
+            if a.name.lower() == spec_name.lower():
+                logger.info("_ensure_agent: found existing agent %s for %s", str(a.id), spec_name)
+                return str(a.id)
+    except Exception:
+        pass
+
+    # Create agent — slugify the name
+    import re
+
+    slug = re.sub(r"[^a-z0-9-]", "-", spec_name.lower()).strip("-") or "planner-agent"
+    ctx = SimpleNamespace(workspace_id=workspace_id, user_id="")
+
+    try:
+        created = await agents_service.create(
+            ctx,
+            workspace_id,
+            CreateAgentRequest(
+                name=spec_name,
+                slug=slug,
+                description=f"Auto-created for planner spec: {spec_name}",
+                backend="claude_agent_sdk",
+            ),
+        )
+        logger.info("_ensure_agent: created agent %s for %s", str(created.id), spec_name)
+        return str(created.id)
+    except Exception as e:
+        logger.warning("_ensure_agent: failed to create agent %s: %s", spec_name, e)
+        return None
+
+
+async def _reassign_task(workspace_id: str, task_id: str, agent_id: str, agent_name: str) -> bool:
+    """Reassign a human-fallback task to the specified agent."""
+    from types import SimpleNamespace
+
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import ReassignTaskRequest
+
+    ctx = SimpleNamespace(workspace_id=workspace_id)
+    try:
+        await tasks_service.agent_reassign_task(
+            ctx,
+            task_id,
+            ReassignTaskRequest(
+                assignee_kind="agent",
+                assignee_id=agent_id,
+                assignee_name=agent_name,
+            ),
+        )
+        logger.info("_reassign_task: reassigned %s to agent %s", task_id, agent_name)
+        return True
+    except Exception as e:
+        logger.warning("_reassign_task: failed for %s: %s", task_id, e)
+        return False
+
+
+async def _auto_complete_task(workspace_id: str, task_id: str, project_id: str) -> None:
+    """Mark a plan task as done in the cloud DB and emit TaskResolved.
+
+    Called automatically after AgentPool.run() finishes so the cascade
+    fires and blocked dependents get dispatched.
+    """
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import TaskResolved
+    from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
+
+    doc = await _TaskDoc.get(task_id)
+    if not doc:
+        logger.warning("auto-complete: task %s not found", task_id)
+        return
+    if doc.status in ("done", "failed", "reverted"):
+        logger.debug("auto-complete: task %s already %s", task_id, doc.status)
+        return
+
+    old_status = doc.status
+    doc.status = "done"
+    await doc.save()
+    logger.info("auto-completed task %s (%s) — %s -> done", task_id, doc.title, old_status)
+
+    # Build event payload and emit so cascade fires.
+    payload = {
+        "task_id": task_id,
+        "workspace_id": workspace_id,
+        "project_id": project_id,
+        "task": {
+            "id": task_id,
+            "workspace_id": workspace_id,
+            "project_id": project_id,
+            "title": doc.title,
+            "summary": doc.summary,
+            "status": "done",
+            "assignee": {
+                "kind": doc.assignee.kind,
+                "id": doc.assignee.id,
+                "name": doc.assignee.name,
+            },
+        },
+    }
+    try:
+        await emit(TaskResolved(data=payload))
+        logger.info("emitted TaskResolved for task %s", task_id)
+    except Exception as e:
+        logger.warning("auto-complete: emit failed for %s: %s", task_id, e)
+
+
+async def on_plan_task_resolved(workspace_id: str, project_id: str | None) -> None:
+    """Cascade hook — called when a plan task completes.
+
+    Dispatches any newly unblocked dependents.
+    """
+    if not project_id:
+        return
+    logger.info("on_plan_task_resolved: cascading for project %s", project_id)
+    await _execute_ready_plan_tasks(
+        workspace_id=workspace_id,
+        project_id=project_id,
+    )

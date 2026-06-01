@@ -386,28 +386,68 @@ async def agent_list_work_items(
 async def agent_bulk_approve(
     ctx: RequestContext, body: BulkActionRequest | dict[str, Any]
 ) -> dict[str, Any]:
-    """Approve N pending Nudges in one call.
+    """Approve N pending items in one call.
 
-    Tenancy: each id is checked against the caller's visible-pocket set
-    before fanning out to Instinct. Ids that fail that check come back
-    in ``missing`` rather than approving across tenants. The shared
-    ``bulk_id`` lives in every audit row's ``context.bulk_id`` so the
-    operator can recover the bulk transaction.
+    Works for both Nudges (Instinct store) and Tasks (Tasks service).
+    Items prefixed with ``task:`` are routed to the Tasks service's
+    ``agent_complete_task``; everything else goes through the Instinct
+    store's ``bulk_approve``. The shared ``bulk_id`` lives in every
+    audit row's ``context.bulk_id`` so the operator can recover the
+    bulk transaction.
     """
+    from uuid import uuid4
+
     body = BulkActionRequest.model_validate(body)
     _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
-    eligible, blocked = await _split_ids_by_tenancy(store, list(body.ids), visible)
-    approved, missing, bulk_id = await store.bulk_approve(
-        eligible, approver=ctx.user_id, note=body.note
-    )
-    # no-event: per-item approve/reject inside the loop already emits the events
-    return {
-        "bulk_id": bulk_id,
-        "approved": [a.model_dump(mode="json") for a in approved],
-        "missing": [*missing, *blocked],
-    }
+
+    bulk_id = uuid4().hex
+    approved: list[dict] = []
+    missing: list[str] = []
+
+    # Split IDs into nudges and tasks
+    nudge_ids: list[str] = []
+    task_ids: list[str] = []
+    for raw_id in body.ids:
+        tid = _classify_task_id(raw_id)
+        if tid is not None:
+            task_ids.append(raw_id)
+        else:
+            nudge_ids.append(raw_id)
+
+    # Handle tasks: call agent_complete_task for each
+    if task_ids:
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+        from pocketpaw_ee.cloud.tasks.dto import CompleteTaskRequest
+
+        for raw_id in task_ids:
+            task_id = _classify_task_id(raw_id)
+            if task_id is None:
+                missing.append(raw_id)
+                continue
+            try:
+                result = await tasks_service.agent_complete_task(
+                    ctx,
+                    task_id,
+                    CompleteTaskRequest(next_action="archive"),
+                )
+                approved.append(result.model_dump(mode="json"))
+            except Exception as e:
+                logger.info("bulk_approve: task %s failed: %s", raw_id, e)
+                missing.append(raw_id)
+
+    # Handle nudges via Instinct store
+    if nudge_ids:
+        visible = await _visible_pocket_ids(ctx)
+        store = get_instinct_store()
+        eligible, blocked = await _split_ids_by_tenancy(store, nudge_ids, visible)
+        nudge_approved, nudge_missing, _ = await store.bulk_approve(
+            eligible, approver=ctx.user_id, note=body.note
+        )
+        approved.extend(a.model_dump(mode="json") for a in nudge_approved)
+        missing.extend(nudge_missing)
+        missing.extend(blocked)
+
+    return {"bulk_id": bulk_id, "approved": approved, "missing": missing}
 
 
 async def agent_bulk_reject(
