@@ -1,5 +1,11 @@
 # Tests for the Google Drive SourceAdapter (Workstream C2).
 # Created: 2026-04-16.
+# Updated: 2026-06-02 (feat/retrieval-rehome, #1327) — dropped the ImportError
+# guard + skip marker that fenced off the RetrievalRouter/InMemoryCredentialBroker
+# integration tests. Those classes are now re-homed in pocketpaw.retrieval, so
+# the end-to-end router/broker tests run for real. Also fixed the integration
+# assertion to read candidate.content.kind as an attribute: 0.4.0 promotes the
+# adapter's dataref dict to a typed DataRef, which isn't subscriptable.
 #
 # Covers:
 #   * DriveClient request plumbing (auth header, params, rate-limit retry,
@@ -39,29 +45,10 @@ from pocketpaw.connectors.drive.auth import resolve_bearer_token
 
 # Retrieval orchestration (RetrievalRouter, InMemoryCredentialBroker) was removed
 # from soul-protocol in 0.4.0 (#179) — the spec now ships only the vocabulary in
-# soul_protocol.spec.retrieval; the concrete orchestration is meant to live in
-# the consuming runtime at pocketpaw.retrieval (per the 0.4.0 CHANGELOG, "as of
-# pocketpaw v0.4.17"). That re-home has NOT landed in pocketpaw yet, so these
-# classes have no home. Guard the import so the rest of this module still
-# collects + runs; the router/broker integration tests below skip until the
-# re-home ships. Tracked in the gap issue referenced on the skip marker.
-try:  # pragma: no cover - exercised once the re-home lands
-    from pocketpaw.retrieval import InMemoryCredentialBroker, RetrievalRouter
-
-    _RETRIEVAL_ORCHESTRATION = True
-except ImportError:  # pragma: no cover
-    InMemoryCredentialBroker = RetrievalRouter = None  # type: ignore[assignment,misc]
-    _RETRIEVAL_ORCHESTRATION = False
-
-_needs_orchestration = pytest.mark.skipif(
-    not _RETRIEVAL_ORCHESTRATION,
-    reason=(
-        "RetrievalRouter/InMemoryCredentialBroker not yet re-homed in "
-        "pocketpaw.retrieval (soul-protocol #179 removed them from "
-        "soul_protocol.engine.retrieval in 0.4.0)"
-    ),
-)
-
+# soul_protocol.spec.retrieval. The concrete orchestration was re-homed into the
+# consuming runtime at pocketpaw.retrieval in #1327, so these classes import
+# directly now and the router/broker end-to-end tests below run for real.
+from pocketpaw.retrieval import InMemoryCredentialBroker, RetrievalRouter
 
 # ---------------------------------------------------------------------------
 # HTTP scripting helpers — a tiny replacement for httpx_mock so we don't pull
@@ -449,7 +436,6 @@ class TestDriveSourceAdapter:
         assert candidates[0].as_of == _ts(2026, 4, 1, 0)
         assert fake.revision_calls == [("file_1", _ts(2026, 4, 1, 0))]
 
-    @_needs_orchestration
     def test_query_uses_credential_token_when_provided(self) -> None:
         broker = InMemoryCredentialBroker()
         credential = broker.acquire("drive", ["org:sales:*"])
@@ -492,7 +478,6 @@ class TestDriveSourceAdapter:
 
 
 class TestResolveBearerToken:
-    @_needs_orchestration
     def test_credential_wins_over_env(self) -> None:
         broker = InMemoryCredentialBroker()
         cred = broker.acquire("drive", ["org:sales:*"])
@@ -522,7 +507,6 @@ class TestResolveBearerToken:
 # ---------------------------------------------------------------------------
 
 
-@_needs_orchestration
 class TestRouterIntegration:
     @pytest.fixture
     def journal(self, tmp_path: Path):
@@ -551,9 +535,12 @@ class TestRouterIntegration:
 
         result = router.dispatch(_make_request("Q3 forecast"))
 
-        # Router produced candidates with the DataRef shape.
+        # Router produced candidates with the DataRef shape. As of soul-protocol
+        # 0.4.0 the adapter's dataref dict is auto-promoted to a typed DataRef on
+        # RetrievalCandidate validation, so read the discriminator as an attribute
+        # (subscript would raise — pydantic models aren't subscriptable).
         assert len(result.candidates) == 2
-        assert result.candidates[0].content["kind"] == "dataref"
+        assert result.candidates[0].content.kind == "dataref"
         assert result.sources_queried == ["drive"]
         assert result.sources_failed == []
 
