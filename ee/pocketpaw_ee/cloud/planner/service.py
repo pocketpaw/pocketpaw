@@ -1221,16 +1221,41 @@ async def _execute_ready_plan_tasks(
         instr += "\\n## Workflow\\n"
         instr += "1. Review the task and create the required output.\\n"
         instr += "2. When done, call the MCP tool complete_task\\n"
+        instr += "3. Prefix created files with FILE: /path/to/file.\n"
+        output_chunks: list[str] = []
+        from pocketpaw.agents.protocol import AgentEvent
+
         try:
-            async for _ in pool.run(
+            async for ev in pool.run(
                 agent_id=aid,
                 message=instr,
                 session_key="planner:task:" + project_id + ":" + tid,
                 instructions="Execute the task and call complete_task when done.",
             ):
-                pass
-            logger.info("agent done task=%s — auto-completing", tid)
-            await _auto_complete_task(workspace_id, tid, project_id)
+                try:
+                    if isinstance(ev, AgentEvent) and ev.type == "message":
+                        output_chunks.append(str(ev.content or ""))
+                except Exception:
+                    pass
+            full_output = "".join(output_chunks)[:50000] if output_chunks else ""
+            logger.info("agent done task=%s output_len=%d", tid, len(full_output))
+            if full_output:
+                await _save_task_output_file(workspace_id, tid, d.title, full_output, project_id)
+                uf = await _scan_and_upload_agent_files(
+                    workspace_id=workspace_id,
+                    project_id=project_id,
+                    task_id=tid,
+                    task_title=d.title,
+                    agent_output=full_output,
+                )
+                if uf:
+                    logger.info("uploaded %d file(s) from task %s", len(uf), tid)
+            await _auto_complete_task(
+                workspace_id,
+                tid,
+                project_id,
+                result_summary=full_output[:2000],
+            )
         except Exception as e:
             logger.exception("agent exec failed for task %s: %s", tid, e)
 
@@ -1308,12 +1333,14 @@ async def _reassign_task(workspace_id: str, task_id: str, agent_id: str, agent_n
         return False
 
 
-async def _auto_complete_task(workspace_id: str, task_id: str, project_id: str) -> None:
-    """Mark a plan task as done in the cloud DB and emit TaskResolved.
+async def _auto_complete_task(
+    workspace_id: str,
+    task_id: str,
+    project_id: str,
+    result_summary: str = "",
+) -> None:
+    """Mark a plan task as done in the cloud DB and emit TaskResolved."""
 
-    Called automatically after AgentPool.run() finishes so the cascade
-    fires and blocked dependents get dispatched.
-    """
     from pocketpaw_ee.cloud._core.realtime.emit import emit
     from pocketpaw_ee.cloud._core.realtime.events import TaskResolved
     from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
@@ -1325,6 +1352,12 @@ async def _auto_complete_task(workspace_id: str, task_id: str, project_id: str) 
     if doc.status in ("done", "failed", "reverted"):
         logger.debug("auto-complete: task %s already %s", task_id, doc.status)
         return
+
+    if result_summary:
+        if doc.summary:
+            doc.summary = (doc.summary + "\n\n---\n\n" + result_summary).strip()
+        else:
+            doc.summary = result_summary
 
     old_status = doc.status
     doc.status = "done"
@@ -1355,6 +1388,82 @@ async def _auto_complete_task(workspace_id: str, task_id: str, project_id: str) 
         logger.info("emitted TaskResolved for task %s", task_id)
     except Exception as e:
         logger.warning("auto-complete: emit failed for %s: %s", task_id, e)
+
+
+async def _save_task_output_file(
+    workspace_id: str,
+    task_id: str,
+    task_title: str,
+    output: str,
+    project_id: str,
+) -> None:
+    """Save agent task output as .md file in project folder."""
+    import re as _r
+
+    from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+    slug = _r.sub(r"[^a-z0-9-]", "-", task_title.lower())[:40] or "task-output"
+    filename = f"task-{task_id[-8:]}-{slug}.md"
+    try:
+        rec = await write_text_file(
+            workspace_id=workspace_id,
+            owner_id="",
+            folder_path=f"/projects/{project_id}",
+            filename=filename,
+            content=output[:100000],
+            mime="text/markdown",
+        )
+        logger.info("saved task output: %s (id=%s, len=%d)", filename, rec.id, len(output))
+    except Exception as e:
+        logger.warning("failed to save task output: %s", e)
+
+
+async def _scan_and_upload_agent_files(
+    *,
+    workspace_id: str,
+    project_id: str,
+    task_id: str,
+    task_title: str,
+    agent_output: str,
+) -> list[str]:
+    """Scan agent output for FILE: /path references and upload files to S3."""
+    import os
+
+    from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+    uploaded: list[str] = []
+    seen: set[str] = set()
+    for _line in agent_output.split("\n"):
+        idx = _line.find("FILE:")
+        if idx == -1:
+            continue
+        path = _line[idx + 5 :].strip().split()[0] if _line[idx + 5 :].strip() else ""
+        if not path or not path.startswith("/") or path in seen:
+            continue
+        seen.add(path)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                fc = fh.read()
+        except Exception:
+            continue
+        basename = os.path.basename(path)
+        if not basename:
+            continue
+        try:
+            rec = await write_text_file(
+                workspace_id=workspace_id,
+                owner_id="",
+                folder_path=f"/projects/{project_id}",
+                filename=basename,
+                content=fc[:500000],
+            )
+            uploaded.append(rec.id)
+            logger.info("uploaded agent file: %s (id=%s)", basename, rec.id)
+        except Exception as e:
+            logger.warning("upload failed %s: %s", basename, e)
+    return uploaded
 
 
 async def on_plan_task_resolved(workspace_id: str, project_id: str | None) -> None:
