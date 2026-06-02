@@ -6689,7 +6689,7 @@ wheels = [
 
 [[package]]
 name = "soul-protocol"
-version = "0.3.1"
+version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -6698,7 +6698,10 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b6/e7/1799cfc9c83c0a12b7e3d403190d01794c2c685917ec63bb3c4741183ca7/soul_protocol-0.3.1.tar.gz", hash = "sha256:1885b4878b09f3ff766080d13edb698581d564353cdb04ed8f186a5ade0d786d", size = 1506135, upload-time = "2026-04-14T18:32:03.919Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/b4/95da7a0390760ffabaf283f6466208078196743bdfa1eddae500ea301c9d/soul_protocol-0.4.0.tar.gz", hash = "sha256:8fce98358b87a19a1a1ac09263e2ed72d3c2c8063820660a43072b912227e699", size = 2387198, upload-time = "2026-04-29T18:18:10.917Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/9f/55f611207116979e11edef6eb9726626e25b825b57e2c3cf7c84b67479f7/soul_protocol-0.4.0-py3-none-any.whl", hash = "sha256:36afcc38f96cf2269e08e8e3c2dc699b03b5e2dacecaa01360f1e6e14bbf6e13", size = 385175, upload-time = "2026-04-29T18:18:09.622Z" },
+]
 
 [[package]]
 name = "sounddevice"

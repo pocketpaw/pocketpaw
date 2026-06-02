@@ -107,6 +107,11 @@ def test_real_home_behavior_instructions_flip_changes_key():
     until a cold restart. If someone moves the backend summary VALUE into the
     per-turn volatile tail this guard still passes only because the behavioral
     instructions themselves carry it — keep it in the static prefix."""
+    # build_behavior_instructions lives in the enterprise layer; skip when the
+    # OSS-only test job runs without pocketpaw_ee installed.
+    import pytest
+
+    pytest.importorskip("pocketpaw_ee")
     from pocketpaw_ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,

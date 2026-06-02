@@ -21,10 +21,6 @@ from typing import Any
 
 import pytest
 from soul_protocol.engine.journal import open_journal
-from soul_protocol.engine.retrieval import (
-    InMemoryCredentialBroker,
-    RetrievalRouter,
-)
 from soul_protocol.spec.journal import Actor
 from soul_protocol.spec.retrieval import (
     CandidateSource,
@@ -40,6 +36,32 @@ from pocketpaw.connectors.drive import (
     DriveSourceAdapter,
 )
 from pocketpaw.connectors.drive.auth import resolve_bearer_token
+
+# Retrieval orchestration (RetrievalRouter, InMemoryCredentialBroker) was removed
+# from soul-protocol in 0.4.0 (#179) — the spec now ships only the vocabulary in
+# soul_protocol.spec.retrieval; the concrete orchestration is meant to live in
+# the consuming runtime at pocketpaw.retrieval (per the 0.4.0 CHANGELOG, "as of
+# pocketpaw v0.4.17"). That re-home has NOT landed in pocketpaw yet, so these
+# classes have no home. Guard the import so the rest of this module still
+# collects + runs; the router/broker integration tests below skip until the
+# re-home ships. Tracked in the gap issue referenced on the skip marker.
+try:  # pragma: no cover - exercised once the re-home lands
+    from pocketpaw.retrieval import InMemoryCredentialBroker, RetrievalRouter
+
+    _RETRIEVAL_ORCHESTRATION = True
+except ImportError:  # pragma: no cover
+    InMemoryCredentialBroker = RetrievalRouter = None  # type: ignore[assignment,misc]
+    _RETRIEVAL_ORCHESTRATION = False
+
+_needs_orchestration = pytest.mark.skipif(
+    not _RETRIEVAL_ORCHESTRATION,
+    reason=(
+        "RetrievalRouter/InMemoryCredentialBroker not yet re-homed in "
+        "pocketpaw.retrieval (soul-protocol #179 removed them from "
+        "soul_protocol.engine.retrieval in 0.4.0)"
+    ),
+)
+
 
 # ---------------------------------------------------------------------------
 # HTTP scripting helpers — a tiny replacement for httpx_mock so we don't pull
@@ -356,11 +378,15 @@ class TestDriveSourceAdapter:
         candidates = adapter.query(request, credential=None)
 
         assert len(candidates) == 2
+        # 0.4.0: content with kind="dataref" is auto-promoted to a typed DataRef,
+        # so read fixed fields as attributes and Drive metadata via .extra.
         payload = candidates[0].content
-        assert payload["kind"] == "dataref"
-        assert payload["source"] == "drive"
-        assert payload["id"] == "file_1"
-        assert payload["scopes"] == ["org:sales:*"]
+        assert payload.kind == "dataref"
+        assert payload.source == "drive"
+        assert payload.id == "file_1"
+        assert payload.scopes == ["org:sales:*"]
+        assert payload.extra["name"] == "Q3 forecast"
+        assert payload.extra["web_view_link"] == "https://drive.google.com/file_1"
         # First candidate must rank higher than the second under position scoring.
         assert candidates[0].score is not None
         assert candidates[1].score is not None
@@ -417,14 +443,14 @@ class TestDriveSourceAdapter:
         candidates = adapter.query(request, credential=None)
 
         assert len(candidates) == 1
+        # revision_id is a top-level DataRef field (the point-in-time pin).
         payload = candidates[0].content
-        assert payload["revision_id"] == "rev-mid"
+        assert payload.revision_id == "rev-mid"
         assert candidates[0].as_of == _ts(2026, 4, 1, 0)
         assert fake.revision_calls == [("file_1", _ts(2026, 4, 1, 0))]
 
+    @_needs_orchestration
     def test_query_uses_credential_token_when_provided(self) -> None:
-        from soul_protocol.engine.retrieval import InMemoryCredentialBroker
-
         broker = InMemoryCredentialBroker()
         credential = broker.acquire("drive", ["org:sales:*"])
 
@@ -466,9 +492,8 @@ class TestDriveSourceAdapter:
 
 
 class TestResolveBearerToken:
+    @_needs_orchestration
     def test_credential_wins_over_env(self) -> None:
-        from soul_protocol.engine.retrieval import InMemoryCredentialBroker
-
         broker = InMemoryCredentialBroker()
         cred = broker.acquire("drive", ["org:sales:*"])
         token = resolve_bearer_token(cred, env={"GOOGLE_OAUTH_TOKEN": "env-value"})
@@ -497,6 +522,7 @@ class TestResolveBearerToken:
 # ---------------------------------------------------------------------------
 
 
+@_needs_orchestration
 class TestRouterIntegration:
     @pytest.fixture
     def journal(self, tmp_path: Path):
