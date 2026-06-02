@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
 
@@ -107,6 +109,8 @@ def test_real_home_behavior_instructions_flip_changes_key():
     until a cold restart. If someone moves the backend summary VALUE into the
     per-turn volatile tail this guard still passes only because the behavioral
     instructions themselves carry it — keep it in the static prefix."""
+    pytest.importorskip("pocketpaw_ee")
+
     from pocketpaw_ee.cloud.chat.agent_service import (
         ScopeContext,
         ScopeKind,
