@@ -43,6 +43,7 @@ class SurfaceKind(StrEnum):
     SETTINGS = "settings"
     SIDEPANEL = "sidepanel"
     FORESIGHT = "foresight"  # /foresight + /foresight/scenarios/* routes
+    SITES = "sites"  # /sites — describe-to-create + manage published Paw Sites
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
