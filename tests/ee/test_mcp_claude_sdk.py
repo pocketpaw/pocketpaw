@@ -1,5 +1,9 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-01 (Phase 4 — chat→create-site) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_sites_manager`` (the new always-on Paw Sites
+  publish server), so the external-config assertions stay focused after the
+  sites MCP server became ambient.
 Updated: 2026-05-28 (#FU-F) — added ``TestMcpProviderLoadFailures``: a provider
   that raises on ``build_server()`` must log at WARNING (not DEBUG), including
   the provider class name and exception type. Also covers the startup INFO
@@ -30,6 +34,7 @@ from pocketpaw_ee.agent.mcp_servers.planner import (
 )
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
     SERVER_NAME as _POCKET_SPECIALIST_MCP_SERVER_NAME,
@@ -62,6 +67,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     out.pop(_MEETINGS_MCP_SERVER_NAME, None)
     out.pop(_FORESIGHT_MCP_SERVER_NAME, None)
     out.pop(_POCKET_PLANNER_MCP_SERVER_NAME, None)
+    # ``pocketpaw_sites_manager`` is always-on too — the bundled
+    # pocketpaw-create-site skill calls it without an explicit opt-in.
+    out.pop(_SITES_MCP_SERVER_NAME, None)
     return out
 
 
