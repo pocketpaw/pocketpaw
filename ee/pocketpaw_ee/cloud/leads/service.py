@@ -147,9 +147,7 @@ async def _bump(scope: str, scope_id: str, bucket: datetime, now: datetime) -> i
     return int(doc["hits"])
 
 
-async def _within_rate_limit(
-    workspace_id: str, site: _SiteDoc, rate_key: str
-) -> tuple[bool, int]:
+async def _within_rate_limit(workspace_id: str, site: _SiteDoc, rate_key: str) -> tuple[bool, int]:
     """Atomic per-minute rate limit. Increments a counter doc per window and
     tests the cap on the post-increment count, so a burst can't slip past the way
     the old read-then-write window let it.
@@ -234,9 +232,7 @@ async def capture(
         return None
     ok, window_count = await _within_rate_limit(site.workspace, site, effective_rate_key)
     if not ok:
-        _emit_drop_audit(
-            site=site, form_type=form_type, reason="rate_limit", count=window_count
-        )
+        _emit_drop_audit(site=site, form_type=form_type, reason="rate_limit", count=window_count)
         return None
     if not _passes_injection_screen(payload):
         _emit_drop_audit(site=site, form_type=form_type, reason="injection")

@@ -28,10 +28,10 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 class LeadSource(BaseModel):
     """Provenance of a captured lead."""
 
-    form_type: str            # e.g. "AppointmentRequest"
+    form_type: str  # e.g. "AppointmentRequest"
     site_id: str
-    submitter_ref: str = ""   # opaque, caller-supplied LABEL (not PII, not the limiter key)
-    rate_key: str = ""        # server-derived host hash; the per-IP limiter buckets on this
+    submitter_ref: str = ""  # opaque, caller-supplied LABEL (not PII, not the limiter key)
+    rate_key: str = ""  # server-derived host hash; the per-IP limiter buckets on this
 
 
 class Lead(TimestampedDocument):

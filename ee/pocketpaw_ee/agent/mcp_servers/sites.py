@@ -93,8 +93,7 @@ async def _publish_handler(args: dict) -> dict:
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
         return _error_response(
-            "publish requires workspace and user context (call from a cloud "
-            "chat session)."
+            "publish requires workspace and user context (call from a cloud chat session)."
         )
 
     pocket_id = args.get("pocket_id")
@@ -186,8 +185,7 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
                 "name": {
                     "type": "string",
                     "description": (
-                        "Optional site name. Defaults to the pocket's own name "
-                        "when omitted."
+                        "Optional site name. Defaults to the pocket's own name when omitted."
                     ),
                 },
             },
