@@ -535,6 +535,30 @@ class CloudForesightMcpProvider:
         return list(FORESIGHT_TOOL_IDS)
 
 
+class CloudSitesMcpProvider:
+    """`pocketpaw.mcp_servers` — the Paw Sites publish in-process server
+    (``pocketpaw_sites_manager``). Hosts ``publish`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled
+    ``pocketpaw-create-site`` skill can call it on any cloud chat agent that
+    hits a "publish this pocket as a site" request without an explicit opt-in —
+    the same regime the pocket specialist + pocket planner use.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.sites import build_sites_manager_server
+
+            return build_sites_manager_server()
+        except ImportError:
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
+
+        return list(SITES_TOOL_IDS)
+
+
 class CloudAgentExtension:
     """`pocketpaw.agent_extensions` — EE additions to the core agent runtime.
 

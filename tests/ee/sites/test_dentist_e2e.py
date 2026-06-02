@@ -148,3 +148,64 @@ async def test_dentist_thin_slice_end_to_end(beanie_test_db, capture_app):
 
     # 5. Cross-tenant isolation: a different workspace sees nothing.
     assert await leads_service.list_for_site("ws_other", site.script_name) == []
+
+
+@pytest.mark.asyncio
+async def test_published_site_captures_lead_with_no_manual_mongo_edit(beanie_test_db, capture_app):
+    """Phase 2 proof: a site published through the REAL publish() flow — with NO
+    hand-edit of allowed_origins or event_mapping — captures a basic
+    {full_name, phone} lead. This is the exact shape the generated /api/submit
+    endpoint forwards: form_type "lead", JSON body, Origin set to the site's own
+    host (localhost here), signed_key == the key publish() minted. The earlier
+    dentist test had to set site.allowed_origins + site.event_mapping by hand;
+    this one asserts publish()'s seeded defaults make that unnecessary."""
+    site = await sites_service.publish(
+        workspace_id="ws_dentist",
+        user_id="freelancer_1",
+        pocket_id="pk_dentist",
+        ripple_spec={"type": "container"},
+        theme={"primary": "#0A84FF"},
+        name="Bright Smile Dental",
+        _generator=_FakeGenerator(),
+        _cloudflare=_FakeCF(),
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    assert site.deployed
+    # NO manual edits here — straight to a capture POST.
+
+    # The generated endpoint forwards JSON with Origin = the site's own origin.
+    # Locally that origin is http://localhost:5173 (host "localhost"), which is in
+    # the default allowed_origins publish() seeded.
+    async with AsyncClient(transport=ASGITransport(app=capture_app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/v1/sites/{site.script_name}/capture",
+            json={
+                "form_type": "lead",
+                "payload": {
+                    "full_name": "Dana Lee",
+                    "phone": "775-555-0199",
+                    "company_website": "",  # empty honeypot
+                },
+                "submitter_ref": "",
+                "signed_key": site.signed_key,  # == the key publish() minted
+            },
+            headers={"origin": "http://localhost:5173"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    assert resp.json()["lead_id"]
+
+    # The lead landed, tenant-scoped, with the default mapping applied.
+    from pocketpaw_ee.cloud.leads import service as leads_service
+
+    leads = await leads_service.list_for_site("ws_dentist", site.script_name)
+    assert len(leads) == 1
+    assert leads[0].form_type == "lead"
+    # full_name + phone mapped through. email + message were absent from the
+    # payload: a FULL-match placeholder ("{{ payload.email }}") that resolves to a
+    # missing key returns None (only partial-substitution templates coerce to ""),
+    # so those keys are present-but-None. The lead still lands — that is the proof.
+    assert leads[0].properties["full_name"] == "Dana Lee"
+    assert leads[0].properties["phone"] == "775-555-0199"
+    assert leads[0].properties["email"] is None
+    assert leads[0].properties["message"] is None

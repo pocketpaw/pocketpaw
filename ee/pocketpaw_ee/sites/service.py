@@ -1,5 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
-# owner of Site writes. publish() runs: mint site id + signed key → generate +
+# owner of Site writes.
+#
+# Updated 2026-06-01 (Phase 4 — chat→create-site): added publish_pocket(), the
+# shared "publish a pocket by id" path. It reads the pocket's rippleSpec + theme
+# via pockets_service (logic lifted verbatim from the router) and delegates to
+# publish(). Both the REST endpoint (POST /sites/publish) and the new in-process
+# MCP tool (mcp__pocketpaw_sites_manager__publish) call it, so the chat and HTTP
+# surfaces share ONE code path that reads the pocket, derives the theme, and
+# names the site.
+#
+# publish() runs: mint site id + signed key → generate +
 # smoke-gate the SvelteKit app (generator_client) → PUT the Worker into the WfP
 # dispatch namespace → persist the Site. add_domain()/domain_status() drive
 # Cloudflare for SaaS. The generator + Cloudflare client + bundle reader are
@@ -28,6 +38,29 @@
 # GET /sites/{site_id}/domains so the Domains tab can rehydrate on reload. It
 # routes through _load, so it inherits the same tenant scoping + malformed-id
 # guard as the other authed domain paths (no Cloudflare call).
+#
+# Updated 2026-06-01 (Phase 2 — lead capture lands without manual Mongo edits):
+# publish() now seeds the Site with a DEFAULT event_mapping and default
+# allowed_origins so a freshly published site can receive a basic
+# {full_name, phone, email, message} lead out of the box. Before this, publish()
+# left event_mapping={} (every capture dropped "no_mapping") and
+# allowed_origins=[] (origin_allowed fails closed → every POST 403'd), so a lead
+# could only land after hand-editing the Site doc (the dentist e2e did exactly
+# that). The default mapping is keyed on form_type "lead" — the same constant the
+# generated /api/submit endpoint sends. add_domain() now also appends the custom
+# hostname to allowed_origins, so connecting a domain authorizes the site's own
+# origin with no extra step.
+#
+# Updated 2026-06-01 (Phase 3 — LOCAL fake-deploy so publish works with zero
+# Cloudflare creds): publish() now has an additive LOCAL deploy branch. When CF
+# creds are absent (no PAW_CF_ACCOUNT_ID) OR PAW_SITES_LOCAL=1, and no CF client
+# was injected, publish() SKIPS the Cloudflare upload and instead persists the
+# built static site under ~/.pocketpaw/sites/<site_id>/ and serves it over HTTP
+# via a per-process static server (local_server.py). The Site's ``url`` is set to
+# that localhost URL so the SiteResponse carries a real openable address for the
+# cmux smoke. The REAL Cloudflare path is unchanged and stays the default when
+# creds ARE present (or a CF client is injected, e.g. by tests). PROD TODO: local
+# mode is a dev shim — production always takes the CF path.
 
 from __future__ import annotations
 
@@ -60,6 +93,42 @@ def _capture_base() -> str:
     return os.environ.get("PAW_CAPTURE_API_BASE", "http://localhost:8888/api/v1")
 
 
+# The default logical form type. The generated /api/submit endpoint sends this
+# constant as ``form_type`` (the static page wraps the whole spec in one form, so
+# there is no per-form id at submit time), so the seeded mapping must key on it.
+_DEFAULT_FORM_TYPE = "lead"
+
+# Default event mapping seeded at publish so a basic contact lead lands with NO
+# manual Mongo edit. Maps the common lead fields a marketing form collects; the
+# interpolator drops any ``{{ payload.X }}`` whose key is absent from the
+# submission (resolves to None), so a form that only sends {full_name, phone}
+# still produces a Lead — the extra fields simply come back empty.
+_DEFAULT_EVENT_MAPPING: dict[str, Any] = {
+    _DEFAULT_FORM_TYPE: {
+        "creates": "Lead",
+        "fields": {
+            "full_name": "{{ payload.full_name }}",
+            "phone": "{{ payload.phone }}",
+            "email": "{{ payload.email }}",
+            "message": "{{ payload.message }}",
+        },
+    }
+}
+
+
+def _default_allowed_origins() -> list[str]:
+    """Origins a freshly published site may capture from before any custom domain
+    is connected. ``origin_allowed`` does a host-only match and fails closed on an
+    empty list, so we seed the local dev hosts here so the LOCAL smoke (the
+    generated site served on localhost) lands a lead with no manual edit. Custom
+    production domains are appended by ``add_domain`` when the freelancer connects
+    one. Overridable via PAW_SITES_DEFAULT_ORIGINS (comma-separated hosts)."""
+    import os
+
+    raw = os.environ.get("PAW_SITES_DEFAULT_ORIGINS", "localhost,127.0.0.1")
+    return [h.strip() for h in raw.split(",") if h.strip()]
+
+
 def _cf_client():
     """Build the real Cloudflare client from settings (env). Injected in tests."""
     import os
@@ -74,6 +143,19 @@ def _cf_client():
     )
 
 
+def _local_mode() -> bool:
+    """Whether publish() takes the LOCAL deploy branch (skip Cloudflare, serve the
+    static site from localhost). True when PAW_SITES_LOCAL=1 is set explicitly, or
+    when no Cloudflare account id is configured (a fresh dev box). The real CF path
+    runs whenever creds are present — local mode is the fallback, not the default in
+    a configured environment."""
+    import os
+
+    if os.environ.get("PAW_SITES_LOCAL") == "1":
+        return True
+    return not os.environ.get("PAW_CF_ACCOUNT_ID")
+
+
 def _to_response(doc: _SiteDoc) -> SiteResponse:
     return SiteResponse(
         id=str(doc.id),
@@ -82,6 +164,7 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         script_name=doc.script_name,
         deployed=doc.deployed,
         signed_key=doc.signed_key,
+        url=doc.url,
     )
 
 
@@ -96,12 +179,20 @@ async def publish(
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    _local_deploy: Callable[[str, str], str] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and persist a site. Raises SmokeGateFailed
     (from generator_client) if the workerd smoke render fails — the site is not
-    deployed and not persisted as deployed."""
+    deployed and not persisted as deployed.
+
+    Deploy has two branches:
+      * REAL Cloudflare (default when creds are present, or when a CF client is
+        injected): PUT the Worker bundle into the dispatch namespace.
+      * LOCAL fake-deploy (no CF creds / PAW_SITES_LOCAL=1, and no injected CF
+        client): persist the built static site and serve it from localhost,
+        storing that URL on the Site so the response is openable. Cloudflare is
+        not contacted at all."""
     generator = _generator or GeneratorClient()
-    cf = _cloudflare or _cf_client()
 
     site_id = str(ObjectId())
     signed_key = f"site_key_{secrets.token_urlsafe(24)}"
@@ -115,8 +206,19 @@ async def publish(
         capture_signed_key=signed_key,
     )
 
-    bundle = _bundle_reader(build.project_dir)
-    await cf.put_worker(script_name=site_id, bundle=bundle)
+    # Local mode only when the caller did NOT inject a CF client (tests inject a
+    # fake CF and expect the real branch) AND the environment selects it.
+    use_local = _cloudflare is None and _local_mode()
+    url = ""
+    if use_local:
+        from pocketpaw_ee.sites import local_server
+
+        deploy = _local_deploy or local_server.deploy_local
+        url = deploy(site_id, build.project_dir)
+    else:
+        cf = _cloudflare or _cf_client()
+        bundle = _bundle_reader(build.project_dir)
+        await cf.put_worker(script_name=site_id, bundle=bundle)
 
     doc = _SiteDoc(
         id=ObjectId(site_id),
@@ -127,6 +229,13 @@ async def publish(
         script_name=site_id,
         deployed=True,
         signed_key=signed_key,
+        url=url,
+        # Seed capture config so a lead lands with no manual Mongo edit: a default
+        # mapping keyed on the form_type the generated endpoint sends, and the
+        # local dev origins so the local smoke works. add_domain() appends the
+        # production hostname when a custom domain is connected.
+        allowed_origins=_default_allowed_origins(),
+        event_mapping=_DEFAULT_EVENT_MAPPING,
     )
     await doc.insert()
     return doc
@@ -165,6 +274,11 @@ async def add_domain(
             status=ch.status.value,
         )
     )
+    # Authorize the site's own origin for capture: the deployed form posts from
+    # this host, and origin_allowed host-matches it against allowed_origins. Done
+    # here so connecting a domain needs no separate "allow this origin" step.
+    if ch.hostname not in site.allowed_origins:
+        site.allowed_origins.append(ch.hostname)
     await site.save()
     return DomainStatusResponse(
         hostname=ch.hostname, cname_target=ch.cname_target, status=ch.status.value
@@ -199,11 +313,55 @@ async def list_domains(*, workspace_id: str, site_id: str) -> list[DomainStatusR
     rehydration: no Cloudflare call, just the persisted state."""
     site = await _load(workspace_id, site_id)
     return [
-        DomainStatusResponse(
-            hostname=d.hostname, cname_target=d.cname_target, status=d.status
-        )
+        DomainStatusResponse(hostname=d.hostname, cname_target=d.cname_target, status=d.status)
         for d in site.domains
     ]
+
+
+async def publish_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    name: str = "",
+    _generator: GeneratorClient | None = None,
+    _cloudflare: Any | None = None,
+    _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    _local_deploy: Callable[[str, str], str] | None = None,
+) -> _SiteDoc:
+    """Publish a pocket as a site by id — the shared path for the REST router
+    and the in-process MCP tool.
+
+    Reads the pocket's rippleSpec + theme via the pockets service (the source of
+    truth, which returns the resolved wire dict and raises NotFound / Forbidden
+    itself — it never returns None), then delegates to ``publish``. Both the
+    ``POST /sites/publish`` endpoint and the ``sites_manager__publish`` MCP tool
+    call this so the two surfaces share one code path: a single place reads the
+    pocket, derives the theme, and names the site. ``name`` falls back to the
+    pocket's own name when the caller does not override it.
+
+    The generator / Cloudflare / bundle-reader / local-deploy seams are forwarded
+    straight through to ``publish`` so the shared path is unit-testable without
+    Bun / workerd / Cloudflare (the same injection contract ``publish`` exposes).
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    ripple_spec = pocket.get("rippleSpec") or {}
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+
+    return await publish(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        name=name or pocket.get("name", ""),
+        _generator=_generator,
+        _cloudflare=_cloudflare,
+        _bundle_reader=_bundle_reader,
+        _local_deploy=_local_deploy,
+    )
 
 
 async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
@@ -213,6 +371,7 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
 
 __all__ = [
     "publish",
+    "publish_pocket",
     "add_domain",
     "domain_status",
     "list_domains",

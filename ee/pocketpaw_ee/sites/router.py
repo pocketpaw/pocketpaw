@@ -8,6 +8,12 @@
 # name) and RAISES NotFound when missing / access-denied (it does not return
 # None). theme is pulled from the rippleSpec subtree.
 #
+# Updated 2026-06-01 (Phase 4 — chat→create-site): publish_site now delegates to
+# sites_service.publish_pocket(), the shared pocket-read + publish path the new
+# in-process MCP tool also calls. The pocket-read/theme-derive logic that used to
+# be inline here lives in the service now so the chat and REST surfaces share one
+# code path.
+#
 # Created: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.5).
 #
 # Updated 2026-05-30 (follow-up item 4): added GET /sites/{site_id}/domains — an
@@ -43,23 +49,14 @@ async def publish_site(
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> SiteResponse:
     """Compile the pocket's rippleSpec, smoke-gate, deploy, and persist."""
-    # Read the pocket's rippleSpec + theme via the pockets service (the source
-    # of truth). ``get`` returns the resolved wire dict and raises NotFound /
-    # Forbidden itself (it never returns None), so no extra existence check is
-    # needed here — the standard error envelope maps those to 404 / 403.
-    from pocketpaw_ee.cloud.pockets import service as pockets_service
-
-    pocket = await pockets_service.get(body.pocket_id, ctx.user_id)
-    ripple_spec = pocket.get("rippleSpec") or {}
-    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
-
-    doc = await sites_service.publish(
+    # The pocket-read + theme-derive + publish is shared with the in-process MCP
+    # tool via ``publish_pocket``. ``pockets_service.get`` (called inside) raises
+    # NotFound / Forbidden itself, which the standard error envelope maps to
+    # 404 / 403 — no extra existence check is needed here.
+    doc = await sites_service.publish_pocket(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
-        ripple_spec=ripple_spec,
-        theme=theme,
-        name=pocket.get("name", ""),
     )
     return sites_service._to_response(doc)
 
