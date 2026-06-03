@@ -5,6 +5,10 @@
       "summary": "Canonical recipe for triage-style internal apps (support tickets, CRM contacts, lead inbox, moderation queue). Root is app-shell with grouped sidebar nav by status, master-detail content area with comment-thread inside the detail pane, and notification-center + command-palette in the topbar. Use this whenever the user asks for an app that queues work items.",
       "title": "Customer Support App — full-fledged app pattern with app-shell + sidebar + master-detail"
     },
+    "marketing-landing-page-conversion-ordered-paw-site-recipe": {
+      "summary": "Canonical recipe for a brand-new marketing/landing site published as a static Paw Site. Composes by conversion role (navbar, hero, feature-grid, testimonial, pricing-table, cta, flat lead form, footer) and stamps the pocket type=site + pattern=landing. Use whenever the user describes a landing page or marketing site for a business (dentist, salon, bakery, agency, SaaS, gym). This is the marketing alternative to the dashboard pattern.",
+      "title": "Marketing Landing Page — conversion-ordered Paw Site recipe"
+    },
     "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard": {
       "summary": "Canonical recipe for the viewer pattern: page-header + lead text + kv-table of stable facts + body paragraph. Use whenever the user wants a read-only reference page (cocktail recipe, glossary entry, runbook step, API reference, character profile, wine notes). This is the explicit non-dashboard alternative for brief that look like 'how to do X' or 'reference for Y'.",
       "title": "Recipe / How-To Viewer — canonical viewer pattern alternative to dashboard"
@@ -45,6 +49,12 @@
         "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
       ]
     },
+    "conversion-funnel": {
+      "name": "conversion-funnel",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "conversion-rate": {
       "name": "conversion-rate",
       "articles": [
@@ -61,6 +71,12 @@
       "name": "crm-dashboard",
       "articles": [
         "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "cta": {
+      "name": "cta",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
       ]
     },
     "customer-success-pipeline": {
@@ -99,6 +115,18 @@
         "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
       ]
     },
+    "feature-grid": {
+      "name": "feature-grid",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
+    "footer": {
+      "name": "footer",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "funnel-prop": {
       "name": "funnel-prop",
       "articles": [
@@ -117,6 +145,12 @@
         "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
       ]
     },
+    "hero": {
+      "name": "hero",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "how-to": {
       "name": "how-to",
       "articles": [
@@ -127,6 +161,18 @@
       "name": "kv-table",
       "articles": [
         "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
+      ]
+    },
+    "landing": {
+      "name": "landing",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
+    "lead-capture": {
+      "name": "lead-capture",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
       ]
     },
     "lead-inbox": {
@@ -141,6 +187,12 @@
         "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
       ]
     },
+    "marketing-site": {
+      "name": "marketing-site",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "master-detail": {
       "name": "master-detail",
       "articles": [
@@ -151,6 +203,12 @@
       "name": "moderation-queue",
       "articles": [
         "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "navbar": {
+      "name": "navbar",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
       ]
     },
     "non-dashboard": {
@@ -171,10 +229,22 @@
         "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
       ]
     },
+    "paw-site": {
+      "name": "paw-site",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "pipeline-dashboard": {
       "name": "pipeline-dashboard",
       "articles": [
         "sales-pipeline-dashboard-pipeline-dashboard-composed-widget-recipe"
+      ]
+    },
+    "pricing-table": {
+      "name": "pricing-table",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
       ]
     },
     "queue-of-work": {
@@ -255,16 +325,34 @@
         "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
       ]
     },
+    "static-render": {
+      "name": "static-render",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "supporting-pane": {
       "name": "supporting-pane",
       "articles": [
         "recipe-how-to-viewer-canonical-viewer-pattern-alternative-to-dashboard"
       ]
     },
+    "testimonial": {
+      "name": "testimonial",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
+      ]
+    },
     "ticket-inbox": {
       "name": "ticket-inbox",
       "articles": [
         "customer-support-app-full-fledged-app-pattern-with-app-shell-sidebar-master-deta"
+      ]
+    },
+    "tiers": {
+      "name": "tiers",
+      "articles": [
+        "marketing-landing-page-conversion-ordered-paw-site-recipe"
       ]
     },
     "triage-pattern": {
@@ -285,6 +373,10 @@
     "composed-widgets",
     "dashboard-pattern",
     "internal-apps",
+    "landing-page",
+    "lead-capture",
+    "marketing",
+    "paw-sites",
     "read-only-pages",
     "recipe",
     "reference-content",
