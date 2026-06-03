@@ -10,6 +10,10 @@
 # missing-dir test now patches _SKILLS_DIR; added coverage for
 # bundled_skills_plugin_dir() (the path the claude_agent_sdk backend passes
 # via plugins=) and for create-site landing in the mirror.
+# Updated: 2026-06-03 (feat/sites-landing-brain, Task P2) — added coverage
+# for the new pocketpaw-create-paw-site marketing brain: it ships in the
+# mirror AND the local plugin, and carries its load-bearing SSR guardrails
+# (flat lead form, tiers pricing, no accordion, anchor CTAs, marketing hero).
 """Tests for ``pocketpaw.bundled_skills.installer.install_bundled_skills``.
 
 Each test installs into a tmp_path destination (no touching the user's
@@ -165,6 +169,48 @@ def test_install_includes_create_site(tmp_path: Path) -> None:
     assert "name: pocketpaw-create-site" in site_file.read_text()
 
 
+def test_install_includes_create_paw_site(tmp_path: Path) -> None:
+    """The marketing landing brain ships in the mirror. A dropped
+    create-paw-site skill would route every new-site request back to the
+    dashboard create-pocket flow → the broken-dashboard render."""
+    results = install_bundled_skills(destination_root=tmp_path)
+    assert any(r.name == "pocketpaw-create-paw-site" for r in results)
+
+    skill_file = tmp_path / "pocketpaw-create-paw-site" / "SKILL.md"
+    assert skill_file.is_file()
+    assert "name: pocketpaw-create-paw-site" in skill_file.read_text()
+
+
+def test_create_paw_site_carries_ssr_guardrails(tmp_path: Path) -> None:
+    """The brain's body must keep its five load-bearing SSR guardrails.
+    Each maps to a real static-render failure; a silent edit that drops
+    one would let the broken-dashboard output come back. We pin the
+    discriminating tokens, not prose, so wording can evolve."""
+    install_bundled_skills(destination_root=tmp_path)
+    body = (tmp_path / "pocketpaw-create-paw-site" / "SKILL.md").read_text()
+
+    # Conversion-role grammar + the site identity it stamps.
+    assert 'pattern="landing"' in body
+    assert 'type="site"' in body
+
+    # Rule 1 — flat native lead form, never the form/newsletter widget.
+    assert 'type="submit"' in body or 'type": "submit"' in body
+    assert "newsletter" in body  # named so the brain knows to avoid it
+
+    # Rule 2 — pricing-table uses tiers, not plans/columns.
+    assert "tiers" in body
+
+    # Rule 3 — FAQ via heading+text, never accordion.
+    assert "accordion" in body  # named as the thing to avoid
+
+    # Rule 5 — the marketing hero, never the dashboard hero+grid.
+    assert "hero+grid" in body
+
+    # Tier-0 animation gate — static-safe widgets allowed, JS ones forbidden.
+    assert "aurora" in body
+    assert "parallax" in body  # named as a forbidden (JS-driven) widget
+
+
 # ---------------------------------------------------------------------------
 # Local-plugin entry (the claude_agent_sdk path)
 # ---------------------------------------------------------------------------
@@ -194,6 +240,9 @@ def test_plugin_dir_points_at_valid_local_plugin() -> None:
     names = {p.name for p in skills_dir.iterdir() if p.is_dir()}
     assert "pocketpaw-create-site" in names
     assert "pocketpaw-create-pocket" in names
+    # The marketing landing brain must reach the claude_agent_sdk backend
+    # too — it's the default backend, where new-site requests land.
+    assert "pocketpaw-create-paw-site" in names
 
 
 def test_plugin_dir_none_when_manifest_missing(monkeypatch, tmp_path: Path) -> None:
