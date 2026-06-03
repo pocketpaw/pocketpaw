@@ -4,13 +4,19 @@
 # Updated: 2026-06-03 (pm) — Bundled skills now load on the SDK backend (local
 # plugin via the SDK `plugins=` option), so the preamble PREFERS the
 # `pocketpaw-create-site` skill and keeps the raw MCP tools only as a fallback.
+# Updated: 2026-06-03 (feat/sites-landing-brain, Task P4) — the preamble now
+# prefers the dedicated `pocketpaw-create-paw-site` marketing brain and stamps
+# `pattern="landing"`. It also drops the `form-layout` lead-form nudge: the
+# `form`/`newsletter` widgets nest an invalid `<form>` inside the static
+# template's outer POST form (the broken-dashboard render). The lead-form test
+# now pins the FLAT-native-input guidance instead of a form widget.
 # These tests assert the preamble carries:
 #   1. The orientation — surface kind="sites", talk "site" not "pocket".
-#   2. The preferred path — the `pocketpaw-create-site` skill.
+#   2. The preferred path — the `pocketpaw-create-paw-site` marketing brain.
 #   3. The fallback path — the create MCP tool + the publish MCP tool — still
 #      present so the flow never breaks when the skill is unavailable.
-#   4. A lead-capture form with named fields so the published site captures
-#      leads out of the box.
+#   4. A lead-capture form with named fields, built FLAT (no form widget) so the
+#      published static site captures leads out of the box.
 
 from __future__ import annotations
 
@@ -37,14 +43,17 @@ async def test_sites_handler_carries_orientation() -> None:
     assert "build a 'pocket'" not in preamble.lower()
 
 
-async def test_sites_handler_prefers_create_site_skill() -> None:
-    """The preamble points the agent at the create-site skill as the primary
-    path now that bundled skills load on the SDK backend."""
+async def test_sites_handler_prefers_create_paw_site_brain() -> None:
+    """The preamble points the agent at the dedicated marketing brain
+    (`pocketpaw-create-paw-site`) as the primary path — NOT the generic
+    create-pocket flow, which publishes as a broken dashboard."""
     preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
-    assert "pocketpaw-create-site" in preamble
+    assert "pocketpaw-create-paw-site" in preamble
     # It must be framed as the preferred route, not an afterthought.
     assert "prefer" in preamble.lower()
+    # It stamps the landing intent so the generator renders a landing page.
+    assert 'pattern="landing"' in preamble
 
 
 async def test_sites_handler_keeps_mcp_fallback() -> None:
@@ -61,12 +70,18 @@ async def test_sites_handler_keeps_mcp_fallback() -> None:
     assert "fall back" in preamble.lower() or "fallback" in preamble.lower()
 
 
-async def test_sites_handler_specifies_lead_capture_form() -> None:
-    """The procedure asks for a lead-capture form with clear field names."""
+async def test_sites_handler_specifies_flat_lead_capture_form() -> None:
+    """The procedure asks for a FLAT-native lead form with clear field names,
+    and explicitly steers OFF the `form`/`newsletter` widget that nests an
+    invalid <form> on a static site (the broken-render trap)."""
     preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
     lower = preamble.lower()
-    # A form is part of the marketing/landing build.
+    # A lead-capture form is part of the marketing/landing build.
     assert "form" in lower
     # At least one concrete, named field so leads are actually captured.
-    assert "email" in lower or "full_name" in lower
+    assert "email" in lower
+    # The flat-native rule: it must mention input + submit, and name the
+    # form/newsletter widget as the thing to avoid.
+    assert "flat" in lower
+    assert "newsletter" in lower
