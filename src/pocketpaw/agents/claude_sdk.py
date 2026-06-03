@@ -1147,6 +1147,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 "max_turns": self.settings.claude_sdk_max_turns or None,
             }
 
+            # Load PocketPaw's bundled skills as a Claude Code *local plugin*.
+            # ``setting_sources=[]`` above disables the SDK's ~/.claude/skills
+            # discovery, so the boot-time ~/.claude/skills mirror is invisible
+            # to this backend and a local plugin is the ONLY way the bundled
+            # skills reach it. Persona isolation is preserved — a plugin loads
+            # only its own ``skills/`` directory, never the rest of ~/.claude
+            # (CLAUDE.md, output styles). Empirically verified 2026-06-03: the
+            # ``skills=`` option is also gated by setting_sources, but
+            # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
+            if self.settings.sdk_load_bundled_skills:
+                from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+                plugin_dir = bundled_skills_plugin_dir()
+                if plugin_dir is not None:
+                    options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
+                    logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
+
             # Configure LLM provider for the Claude CLI subprocess.
             # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
             sdk_env = llm.to_sdk_env()
