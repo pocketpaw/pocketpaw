@@ -62,15 +62,30 @@ def _ripple_dep_source() -> str:
     return os.environ.get("PAW_SITES_RIPPLE_DEP", "0.2.0")
 
 
+def _ripple_motion_dep() -> str:
+    """Version spec for motion.dev — the animation runtime ripple's dist
+    lazy-loads via a client-only ``import('motion')``. ripple does NOT bundle
+    motion (it stays out of the SSR/workerd pass), so the generated site has to
+    declare it as a direct dep or `bun run build` can't resolve the dynamic
+    import. Matters most on the local ``file:`` ripple path: a ``file:`` dep
+    isn't hoisted, so ripple's own motion never reaches the consumer. Override
+    with PAW_SITES_MOTION_DEP; keep it in lockstep with ripple's motion pin."""
+    return os.environ.get("PAW_SITES_MOTION_DEP", "^12.40.0")
+
+
 def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
-    """Point the generated package.json's @ripple-ui/svelte dep at a resolvable
-    source so `bun install` succeeds. The template pins the (unpublished) version
-    "0.2.0"; we overwrite just that one key, leaving every other dep intact."""
+    """Make the generated package.json install: point @ripple-ui/svelte at a
+    resolvable source AND ensure motion.dev is declared. The template pins the
+    (unpublished) ripple version "0.2.0" and omits motion; we overwrite that one
+    key and add motion if absent, leaving every other dep intact. Without motion
+    the generator's `bun run build` smoke fails to resolve ripple's runtime
+    ``import('motion')`` (the same break that hit paw-enterprise)."""
     pkg_path = Path(project_dir, "package.json")
     pkg = json.loads(pkg_path.read_text())
     deps = pkg.setdefault("dependencies", {})
     if "@ripple-ui/svelte" in deps:
         deps["@ripple-ui/svelte"] = source
+        deps.setdefault("motion", _ripple_motion_dep())
         pkg_path.write_text(json.dumps(pkg, indent=2))
 
 
