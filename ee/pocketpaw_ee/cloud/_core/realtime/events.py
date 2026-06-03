@@ -546,6 +546,16 @@ class CallEnded(Event):
     EVENT_TYPE: ClassVar[str] = "call.ended"
 
 
+@dataclass
+class CallParticipantJoined(Event):
+    EVENT_TYPE: ClassVar[str] = "call.participant_joined"
+
+
+@dataclass
+class CallParticipantLeft(Event):
+    EVENT_TYPE: ClassVar[str] = "call.participant_left"
+
+
 # Meetings — scheduled group meeting lifecycle
 @dataclass
 class MeetingScheduled(Event):

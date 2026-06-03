@@ -130,8 +130,52 @@ async def list_meetings(workspace_id: str, body: ListMeetingsRequest) -> list[Me
     Read-only. Tenant filter on the Beanie query (rule §7). Returns a
     plain list — pagination via cursor lands in Phase 1.5 once we have
     real data volumes to size against.
+
+    Before returning, hydrates stale meeting statuses:
+      - ``scheduled`` → ``ended`` when ``scheduled_end + 5 min`` grace has passed
+      - ``in_progress`` → ``ended`` when ``scheduled_end + 5 min`` grace has passed
+    This self-heals any statuses that the APScheduler auto-end job missed
+    (server restart, job scheduling bug, etc.).
     """
     body = ListMeetingsRequest.model_validate(body)
+
+    # ── Hydration: auto-transition stale statuses ──────────────────────
+    now_utc = datetime.now(UTC)
+    grace = timedelta(minutes=5)
+
+    # scheduled → ended (meeting never started)
+    stale_scheduled = await _MeetingDoc.find(
+        {
+            "workspace": workspace_id,
+            "status": "scheduled",
+            "scheduled_end": {"$ne": None},
+        }
+    ).to_list()
+    for doc in stale_scheduled:
+        end = _aware(doc.scheduled_end)
+        if end and end + grace < now_utc:
+            doc.status = "ended"
+            doc.actual_end = now_utc
+            await doc.save()
+            logger.info("Hydrated meeting %s: scheduled → ended (past scheduled_end)", doc.id)
+
+    # in_progress → ended (meeting ran past scheduled_end + grace)
+    stale_running = await _MeetingDoc.find(
+        {
+            "workspace": workspace_id,
+            "status": "in_progress",
+            "scheduled_end": {"$ne": None},
+        }
+    ).to_list()
+    for doc in stale_running:
+        end = _aware(doc.scheduled_end)
+        if end and end + grace < now_utc:
+            doc.status = "ended"
+            doc.actual_end = now_utc
+            await doc.save()
+            logger.info("Hydrated meeting %s: in_progress → ended (past scheduled_end)", doc.id)
+
+    # ── Main query ────────────────────────────────────────────────────
     query: dict = {"workspace": workspace_id}
     if body.provider:
         query["provider"] = body.provider
