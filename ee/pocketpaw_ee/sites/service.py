@@ -61,6 +61,18 @@
 # cmux smoke. The REAL Cloudflare path is unchanged and stays the default when
 # creds ARE present (or a CF client is injected, e.g. by tests). PROD TODO: local
 # mode is a dev shim — production always takes the CF path.
+#
+# Updated 2026-06-03 (Sites backend fixes A+B): (A) added site_pocket_ids() — the
+# set of pocket_ids that have a Site in a workspace, so the /pockets gallery can
+# exclude already-published pockets WITHOUT the pockets service importing the Site
+# model (entity isolation: the Site read stays here, the sole owner of Site
+# reads). (B) publish() now resolves a blank ``name`` to the source pocket's own
+# display name (via the pockets service's PUBLIC ``get`` — no Beanie import),
+# falling back to "Untitled site" only when the pocket has no name. This makes the
+# publish schema's "defaults to the pocket's own name" promise true at the
+# source-of-truth layer, so sites no longer land unnamed when the caller omits a
+# name. The resolved name flows into BOTH the generated site ``title`` and the
+# stored ``Site.name``.
 
 from __future__ import annotations
 
@@ -191,8 +203,29 @@ async def publish(
       * LOCAL fake-deploy (no CF creds / PAW_SITES_LOCAL=1, and no injected CF
         client): persist the built static site and serve it from localhost,
         storing that URL on the Site so the response is openable. Cloudflare is
-        not contacted at all."""
+        not contacted at all.
+
+    ``name`` defaults to the source pocket's own display name when the caller
+    omits it (the publish schema promises this). The fallback reads the pocket
+    through the pockets service's PUBLIC ``get`` (a wire dict — no Beanie import,
+    respecting entity isolation) and uses its ``name`` field; only when the pocket
+    has no name does it fall back to "Untitled site". Callers that pre-resolve the
+    name (e.g. ``publish_pocket``, which already holds the wire dict) pass it in,
+    so the common path does not re-fetch."""
     generator = _generator or GeneratorClient()
+
+    # Default a blank name to the source pocket's own display name so the schema's
+    # "defaults to the pocket's own name" promise is true at the source-of-truth
+    # layer. Cross-entity read goes through the pockets service's PUBLIC function
+    # (wire dict), never the Pocket Beanie model.
+    site_name = name.strip() if name else ""
+    if not site_name:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        pocket = await pockets_service.get(pocket_id, user_id)
+        site_name = (pocket.get("name") or "").strip()
+    if not site_name:
+        site_name = "Untitled site"
 
     site_id = str(ObjectId())
     signed_key = f"site_key_{secrets.token_urlsafe(24)}"
@@ -201,7 +234,7 @@ async def publish(
         ripple_spec=ripple_spec,
         theme=theme,
         site_id=site_id,
-        title=name or "Untitled site",
+        title=site_name,
         capture_api_base=_capture_base(),
         capture_signed_key=signed_key,
     )
@@ -225,7 +258,7 @@ async def publish(
         workspace=workspace_id,
         pocket_id=pocket_id,
         owner=user_id,
-        name=name,
+        name=site_name,
         script_name=site_id,
         deployed=True,
         signed_key=signed_key,
@@ -338,7 +371,10 @@ async def publish_pocket(
     ``POST /sites/publish`` endpoint and the ``sites_manager__publish`` MCP tool
     call this so the two surfaces share one code path: a single place reads the
     pocket, derives the theme, and names the site. ``name`` falls back to the
-    pocket's own name when the caller does not override it.
+    pocket's own name when the caller does not override it — resolved HERE from the
+    wire dict this function already holds, so ``publish`` does not re-fetch the
+    pocket on this path. (``publish`` carries the same fallback as a safety net for
+    direct callers who pass a blank name.)
 
     The generator / Cloudflare / bundle-reader / local-deploy seams are forwarded
     straight through to ``publish`` so the shared path is unit-testable without
@@ -369,6 +405,19 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     return [_to_response(doc) async for doc in cursor]
 
 
+async def site_pocket_ids(workspace_id: str) -> set[str]:
+    """Return the set of ``pocket_id``s that have a published Site in this
+    workspace.
+
+    Lets the /pockets gallery hide pockets that have been published as a Site
+    (they show under /sites instead) WITHOUT the pockets service importing the
+    Site Beanie model — the Site read stays in this service, which is the sole
+    owner of Site reads (entity isolation). Tenant-scoped on ``workspace``.
+    """
+    cursor = _SiteDoc.find({"workspace": workspace_id})
+    return {doc.pocket_id async for doc in cursor}
+
+
 __all__ = [
     "publish",
     "publish_pocket",
@@ -376,4 +425,5 @@ __all__ = [
     "domain_status",
     "list_domains",
     "list_for_workspace",
+    "site_pocket_ids",
 ]

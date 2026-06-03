@@ -51,6 +51,7 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
         quickask,
         settings,
         sidepanel,
+        sites,
     )
     from pocketpaw_ee.cloud.surface.handlers import (
         agent as agent_handler,
@@ -83,6 +84,7 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
         SurfaceKind.SETTINGS: settings.build_preamble,
         SurfaceKind.SIDEPANEL: sidepanel.build_preamble,
         SurfaceKind.FORESIGHT: foresight_handler.build_preamble,
+        SurfaceKind.SITES: sites.build_preamble,
         SurfaceKind.GENERIC: generic.build_preamble,
     }
 

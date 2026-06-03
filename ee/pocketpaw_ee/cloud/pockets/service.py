@@ -114,6 +114,13 @@ RETURNS ``(authored_keys, skipped_keys)``; both widget paths stash the
 result on the returned view under ``_source_merge`` so the agent_context
 wrappers can build an HONEST tool result — the agent can confirm only the
 sources that actually persisted and can't claim a binding that was dropped.
+Changes: 2026-06-03 (Sites fix A) — ``list_pockets`` gained an optional
+``exclude_pocket_ids: set[str] | None`` kwarg. When provided it adds
+``{"_id": {"$nin": [...]}}`` to the query (pocket ids are stored as
+strings, so no ObjectId cast). The /pockets gallery route passes the ids
+of pockets already published as Sites so they don't appear in both the
+pocket gallery and the sites list. ``None`` is a no-op, so mission
+control / kb / surface / planner callers are unchanged.
 """
 
 from __future__ import annotations
@@ -127,6 +134,7 @@ from pathlib import Path
 from typing import Any
 
 from beanie import PydanticObjectId
+from bson.errors import InvalidId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -942,6 +950,7 @@ async def list_pockets(
     user_id: str,
     *,
     project_id: str | None = None,
+    exclude_pocket_ids: set[str] | None = None,
 ) -> list[dict]:
     """List pockets visible to the user (owned, shared_with, or workspace-visible).
 
@@ -955,6 +964,17 @@ async def list_pockets(
     whose ``project_id`` matches. Pass an empty string to filter for
     "no project assigned" — that's the Mission Control "Unassigned"
     bucket. Kept as a kwarg so existing callers don't change.
+
+    ``exclude_pocket_ids`` filter: when provided, drops pockets whose id is
+    in the set via ``{"_id": {"$nin": [...]}}``. The /pockets gallery passes
+    the ids of pockets already published as Sites (they show under /sites,
+    not in the pocket gallery). The ids arrive as STRINGS (the wire form), but
+    Beanie persists ``_id`` as an ``ObjectId`` (the ``Pocket.id: str`` annotation
+    is overridden by the Document base), so each id is cast to ``PydanticObjectId``
+    before the ``$nin`` — a string ``$nin`` would silently match nothing and
+    leak every site back into the gallery. Malformed ids are skipped (they can't
+    match any stored ``_id`` anyway). A ``None`` / empty set is a no-op so every
+    other caller (mission control, planners, kb, surface) is unchanged.
     """
     query: dict = {
         "workspace": workspace_id,
@@ -967,6 +987,17 @@ async def list_pockets(
     if project_id is not None:
         # Empty string is intentional → "no project assigned".
         query["project_id"] = project_id or None
+    if exclude_pocket_ids:
+        # _id is stored as an ObjectId — cast the wire-string ids. Skip any
+        # malformed id rather than raise: it can't match a stored _id anyway.
+        oids: list[PydanticObjectId] = []
+        for pid in exclude_pocket_ids:
+            try:
+                oids.append(PydanticObjectId(pid))
+            except (InvalidId, TypeError, ValueError):
+                continue
+        if oids:
+            query["_id"] = {"$nin": oids}
     docs = await _PocketDoc.find(query).to_list()
     return [await _resolved_wire_dict(d, user_id) for d in docs]
 
