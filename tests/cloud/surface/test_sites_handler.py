@@ -1,15 +1,16 @@
 # tests/cloud/surface/test_sites_handler.py — Sites surface handler.
 #
-# Created: 2026-06-03 — Guards the /sites surface preamble. The create-site
-# skill can't load under the chat agent's `setting_sources=[]` SDK config
-# (skill discovery disabled for persona isolation), so the create→publish
-# PROCEDURE has to live in the always-on /sites preamble instead. These
-# tests assert the preamble carries:
-#   1. The orientation it already had — surface kind="sites", talk "site"
-#      not "pocket" as the deliverable.
-#   2. The folded-in procedure — the create MCP tool, the publish MCP tool,
-#      and a lead-capture form with named fields so the published site
-#      captures leads out of the box.
+# Created: 2026-06-03 — Guards the /sites surface preamble.
+# Updated: 2026-06-03 (pm) — Bundled skills now load on the SDK backend (local
+# plugin via the SDK `plugins=` option), so the preamble PREFERS the
+# `pocketpaw-create-site` skill and keeps the raw MCP tools only as a fallback.
+# These tests assert the preamble carries:
+#   1. The orientation — surface kind="sites", talk "site" not "pocket".
+#   2. The preferred path — the `pocketpaw-create-site` skill.
+#   3. The fallback path — the create MCP tool + the publish MCP tool — still
+#      present so the flow never breaks when the skill is unavailable.
+#   4. A lead-capture form with named fields so the published site captures
+#      leads out of the box.
 
 from __future__ import annotations
 
@@ -36,14 +37,28 @@ async def test_sites_handler_carries_orientation() -> None:
     assert "build a 'pocket'" not in preamble.lower()
 
 
-async def test_sites_handler_carries_create_publish_procedure() -> None:
-    """The preamble folds the create→publish two-step in via the MCP tools."""
+async def test_sites_handler_prefers_create_site_skill() -> None:
+    """The preamble points the agent at the create-site skill as the primary
+    path now that bundled skills load on the SDK backend."""
+    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+
+    assert "pocketpaw-create-site" in preamble
+    # It must be framed as the preferred route, not an afterthought.
+    assert "prefer" in preamble.lower()
+
+
+async def test_sites_handler_keeps_mcp_fallback() -> None:
+    """The raw MCP tools remain as a fallback so the create→publish flow never
+    breaks when the skill is unavailable (e.g. sdk_load_bundled_skills off, or a
+    backend without the bundled plugin)."""
     preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
 
     # Step 1 — create the source pocket via the pocket specialist MCP tool.
     assert "mcp__pocketpaw_pocket_specialist__create" in preamble
     # Step 2 — publish it as a live site via the sites manager MCP tool.
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
+    # Framed as a fallback, not the primary instruction.
+    assert "fall back" in preamble.lower() or "fallback" in preamble.lower()
 
 
 async def test_sites_handler_specifies_lead_capture_form() -> None:

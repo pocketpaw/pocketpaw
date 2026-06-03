@@ -6,16 +6,19 @@
 # a publishable website (the operator-reported "agent builds pockets not sites"
 # drift). Static orientation — no live data to fake.
 #
-# Updated: 2026-06-03 — Folded the create→publish PROCEDURE into the preamble.
-# The /sites create flow used to fire a `/pocketpaw-create-site` slash command
-# to invoke the create-site skill, but the chat agent runs the Claude Agent SDK
-# with `setting_sources=[]` (persona isolation) which disables skill discovery,
-# so the slash command was a silent no-op. The frontend now sends the user's
-# description as PLAIN TEXT, so the two-step the skill used to carry (create the
-# source pocket via the pocket-specialist MCP tool, then publish it via the
-# sites-manager MCP tool, then show the live URL) has to live in this always-on
-# preamble instead. We instruct the agent to call the MCP tools DIRECTLY — not
-# to invoke a Skill, since skills can't load under setting_sources=[].
+# Updated: 2026-06-03 (pm) — Point the procedure back at the `pocketpaw-create-site`
+# skill now that bundled skills actually load on the SDK backend. The earlier
+# note here ("skills can't load under setting_sources=[]") is obsolete: the
+# claude_agent_sdk backend now loads the bundled skills as a Claude Code local
+# plugin via the SDK `plugins=` option (see `bundled_skills_plugin_dir` +
+# `settings.sdk_load_bundled_skills`), so the agent can invoke the skill by
+# natural-language intent — no slash command, no setting_sources change. The
+# skill carries the full create→publish flow (build the source pocket via
+# create-pocket, publish via the sites-manager tool, surface the live URL, relay
+# errors), so the preamble PREFERS it and keeps the raw MCP tools only as a
+# fallback for when the skill is unavailable (e.g. sdk_load_bundled_skills off).
+# The rail still sends the user's description as PLAIN TEXT; intent invocation
+# does not need a slash.
 
 from __future__ import annotations
 
@@ -39,20 +42,20 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "</sites-orientation>\n"
         "<sites-procedure>\n"
         "Treat the user's message on this surface as a request to BUILD AND "
-        "PUBLISH a site. Do it directly via the MCP tools below — do NOT invoke a "
-        "skill or slash command (they don't load here):\n"
-        "1. CREATE the source spec by calling the "
-        "`mcp__pocketpaw_pocket_specialist__create` tool with a marketing/landing "
-        "layout: a hero (page-header), a few value/content sections, and a "
-        "contact / lead-capture form (form-layout) whose inputs have CLEAR field "
-        "names — e.g. full_name, email, phone, message — so the published site "
-        "captures leads out of the box.\n"
-        "2. PUBLISH it as a live site by calling the "
-        "`mcp__pocketpaw_sites_manager__publish` tool with the new pocket_id "
-        "returned in step 1. If it returns an error, relay it — never claim a "
-        "phantom publish.\n"
-        "3. SHOW the user the live `url` from the publish response plus a link to "
-        "/sites where they manage their sites. Keep talking 'site' / 'page'.\n"
+        "PUBLISH a site. PREFER the `pocketpaw-create-site` skill — invoke it by "
+        "intent (no slash command needed). It carries the whole flow: build the "
+        "source pocket as a marketing/landing page — a hero (page-header), a few "
+        "value/content sections, and a contact / lead-capture form (form-layout) "
+        "whose inputs have CLEAR field names like full_name, email, phone, "
+        "message so the published site captures leads out of the box — then "
+        "publish it and show the live URL.\n"
+        "If the skill is unavailable, fall back to the same two steps directly "
+        "with the MCP tools: call `mcp__pocketpaw_pocket_specialist__create` to "
+        "build the landing-page spec, then `mcp__pocketpaw_sites_manager__publish` "
+        "with the returned pocket_id.\n"
+        "Either way: relay any publish error — never claim a phantom publish — and "
+        "after it succeeds, SHOW the live `url` plus a link to /sites where the "
+        "user manages their sites. Keep talking 'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>"
     )
 
