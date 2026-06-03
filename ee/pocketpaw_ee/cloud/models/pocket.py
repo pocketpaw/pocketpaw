@@ -17,6 +17,13 @@ legacy pockets (no template) read back as ``None`` without a Mongo
 migration. ``pockets.service.resolve_pocket_template`` reads this field
 and feeds the resolved template to the bulk dispatcher + temporal
 scheduler.
+Updated: 2026-06-03 (feat/sites-landing-brain) — added the optional
+``Pocket.pattern`` field: the create-pocket layout pattern this pocket
+was built as (``dashboard`` | ``app`` | ``viewer`` | ... | ``landing``).
+Records site/landing intent as first-class metadata so a published Paw
+Site renders as a marketing landing page rather than a dashboard.
+Optional (default ``None``) so legacy pockets read back as ``None`` with
+no Mongo migration.
 """
 
 from __future__ import annotations
@@ -88,6 +95,13 @@ class Pocket(TimestampedDocument):
     # actions against it. Legacy pockets (no template) read as ``None``
     # — no Mongo migration needed for adding an optional field.
     template_slug: str | None = None
+    # Optional create-pocket layout pattern (e.g. ``"dashboard"``,
+    # ``"viewer"``, ``"app"``, ``"landing"``). Records the conversion /
+    # layout intent the pocket was authored as. ``pattern="landing"``
+    # (set by the marketing-site brain) tells the sites generator to
+    # render a marketing landing page, not a dashboard. Legacy pockets
+    # read back as ``None`` — no Mongo migration for an optional field.
+    pattern: str | None = None
     icon: str = ""
     color: str = ""
     owner: str

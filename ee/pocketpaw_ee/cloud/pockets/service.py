@@ -248,6 +248,9 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         project_id=getattr(doc, "project_id", None),
         # Wave 3e — optional. ``getattr`` for legacy docs that pre-date the field.
         template_slug=getattr(doc, "template_slug", None),
+        # Sites landing brain — optional layout pattern. ``getattr`` for
+        # legacy docs that pre-date the field.
+        pattern=getattr(doc, "pattern", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -858,6 +861,7 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         widgets=widget_docs,
         rippleSpec=normalized_spec,
         template_slug=body.template_slug,
+        pattern=body.pattern,
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)
@@ -1315,6 +1319,7 @@ async def create_from_ripple_spec(
     owner_id: str,
     ripple_spec: dict,
     description: str = "",
+    pattern: str | None = None,
 ) -> str | None:
     """Auto-create a pocket from an agent-generated ripple spec.
     Returns the pocket id on success, None on failure.
@@ -1327,6 +1332,10 @@ async def create_from_ripple_spec(
     no LLM-retry loop, so blocking + logging is the strict behavior here
     (the specialist edit tools, which can retry, surface the corrective
     message instead).
+
+    ``pattern`` records the create-pocket layout pattern (``"landing"``
+    for a marketing site). Optional; defaults to ``None`` so the
+    pre-existing inline auto-create path is unchanged.
     """
     try:
         normalized = normalize_ripple_spec(ripple_spec)
@@ -1352,6 +1361,7 @@ async def create_from_ripple_spec(
             owner=owner_id,
             visibility="workspace",
             rippleSpec=normalized,
+            pattern=pattern,
         )
         await doc.insert()
         pocket_id = str(doc.id)

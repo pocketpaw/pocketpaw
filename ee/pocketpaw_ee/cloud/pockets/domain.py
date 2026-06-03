@@ -9,6 +9,10 @@ Updated: 2026-05-28 (feat/wave-3e-template-slug) — added optional
 ``Pocket.template_slug`` so the wire layer + bulk dispatcher can read
 the RFC 03 v2 template the pocket was instantiated from. ``None`` for
 legacy pockets.
+Updated: 2026-06-03 (feat/sites-landing-brain) — added optional
+``Pocket.pattern`` so the wire layer + sites generator can read the
+layout/conversion intent the pocket was authored as (``"landing"`` for
+marketing sites). ``None`` for legacy pockets.
 """
 
 from __future__ import annotations
@@ -95,6 +99,11 @@ class Pocket:
     # instantiated from (e.g. ``"todo-task-tracker"``). ``None`` for
     # cold-generated or legacy pockets.
     template_slug: str | None = None
+    # The create-pocket layout pattern the pocket was authored as
+    # (``"dashboard"`` | ``"viewer"`` | ``"app"`` | ``"landing"`` | ...).
+    # ``"landing"`` marks a marketing site so the generator renders a
+    # landing page. ``None`` for legacy pockets.
+    pattern: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
