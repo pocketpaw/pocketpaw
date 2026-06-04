@@ -476,6 +476,143 @@ def test_validate_unknown_widget_type_is_ignored():
 
 
 # ---------------------------------------------------------------------------
+# relax_ssr_props — site-aware relaxation of renderer-honored node-level props
+# (feat/sites-validator-site-aware, 2026-06-04).
+#
+# A statically-rendered Paw Site (csr=false) depends on three node-level props
+# the renderer honors on EVERY widget but the manifest's per-widget `props`
+# map omits: `id` (anchor targets like #services/#book), `name` (native form
+# POST field), and `href` (anchor CTA, no client JS). The default validator
+# flags these as `unknown_props`, which drives the agent's redraft loop into
+# dropping the marketing widgets. `relax_ssr_props=True` stops the WARNING on
+# exactly those prop/widget combos; everything else (and every other widget)
+# is validated unchanged. Dashboard specs pass relax_ssr_props=False and see
+# the old behavior, so this can't weaken non-site validation.
+# ---------------------------------------------------------------------------
+
+
+# A manifest mirroring the real marketing/scaffold widgets that the
+# landing-page skeleton uses. Mirrors the live ripple manifest shape (props
+# is a map of name -> spec). NONE of these declare `id` / `name` / `href`
+# in their per-widget props — exactly like the published manifest — because
+# those are universal node-level props the renderer wraps on.
+SITE_MANIFEST = {
+    "schema": "ripple.manifest/v1",
+    "version": "0.2.0",
+    "widgets": [
+        {"type": "section", "props": {"title": {}, "description": {}}},
+        {
+            "type": "card",
+            "props": {"title": {}, "description": {}, "variant": {}, "density": {}},
+        },
+        {"type": "input", "props": {"label": {}, "placeholder": {}, "type": {}, "required": {}}},
+        {"type": "textarea", "props": {"label": {}, "placeholder": {}, "rows": {}}},
+        {"type": "button", "props": {"label": {}, "type": {}, "variant": {}}},
+        {"type": "feature-grid", "props": {"columns": {}, "features": {}}},
+        {"type": "testimonial", "props": {"quote": {}, "author": {}, "role": {}}},
+        {"type": "cta", "props": {"headline": {}, "subtext": {}, "button": {}, "href": {}}},
+        {"type": "footer", "props": {"columns": {}, "copyright": {}}},
+    ],
+}
+
+
+def test_ssr_props_flagged_by_default_no_regression():
+    """Default behavior (relax_ssr_props=False) STILL flags `id`/`name` on the
+    site widgets — proving the relaxation is opt-in and dashboard validation is
+    untouched. This is the no-regression guard."""
+    from pocketpaw.ripple import manifest as m
+
+    spec = {
+        "ui": {
+            "type": "section",
+            "props": {"id": "services"},
+            "children": [
+                {"type": "input", "props": {"name": "email", "label": "Email"}},
+                {"type": "textarea", "props": {"name": "msg"}},
+            ],
+        }
+    }
+    issues = m.validate_against_manifest(spec, SITE_MANIFEST)
+    flagged = {(i["type"], tuple(i["unknown_props"])) for i in issues}
+    assert ("section", ("id",)) in flagged
+    assert ("input", ("name",)) in flagged
+    assert ("textarea", ("name",)) in flagged
+
+
+def test_ssr_props_relaxed_when_site_mode():
+    """relax_ssr_props=True drops the WARNING on the SSR-essential
+    renderer-honored props: `id` on section/card, `name` on input/textarea,
+    `href` on button/cta. The spliced marketing skeleton then validates
+    clean — no redraft loop, marketing widgets survive to persistence."""
+    from pocketpaw.ripple import manifest as m
+
+    spec = {
+        "ui": {
+            "type": "flex",
+            "children": [
+                {"type": "section", "props": {"id": "services"}},
+                {"type": "section", "props": {"id": "pricing"}},
+                {
+                    "type": "card",
+                    "props": {"id": "book", "title": "Book"},
+                    "children": [
+                        {"type": "input", "props": {"name": "name", "label": "Name"}},
+                        {"type": "input", "props": {"name": "email", "type": "email"}},
+                        {"type": "textarea", "props": {"name": "message"}},
+                        {"type": "button", "props": {"label": "Send", "type": "submit"}},
+                    ],
+                },
+                {"type": "cta", "props": {"headline": "Go", "button": "Book", "href": "#book"}},
+            ],
+        }
+    }
+    issues = m.validate_against_manifest(spec, SITE_MANIFEST, relax_ssr_props=True)
+    assert issues == [], f"site skeleton should validate clean, got: {issues}"
+
+
+def test_ssr_props_relaxed_honors_button_href_combo():
+    """`href` on `button` is renderer-honored (anchor CTA on a static page) —
+    relaxed so an anchor button doesn't trip the redraft loop."""
+    from pocketpaw.ripple import manifest as m
+
+    spec = {"ui": {"type": "button", "props": {"label": "Book", "href": "#book"}}}
+    assert m.validate_against_manifest(spec, SITE_MANIFEST, relax_ssr_props=True) == []
+    # …but still flagged in default mode (dashboard buttons don't use href).
+    issues = m.validate_against_manifest(spec, SITE_MANIFEST)
+    assert issues and issues[0]["unknown_props"] == ["href"]
+
+
+def test_relax_ssr_props_still_flags_genuinely_unknown_props():
+    """Relaxation is surgical — it whitelists ONLY id/name/href on the SSR
+    widgets. A genuinely hallucinated prop (e.g. a typo) is STILL flagged even
+    in site mode, so the validator keeps catching real drift on a site."""
+    from pocketpaw.ripple import manifest as m
+
+    spec = {
+        "ui": {
+            "type": "section",
+            "props": {"id": "services", "titel": "Servces"},  # `titel` is a typo
+        }
+    }
+    issues = m.validate_against_manifest(spec, SITE_MANIFEST, relax_ssr_props=True)
+    assert len(issues) == 1
+    # `id` is relaxed away; the typo survives as the only unknown prop.
+    assert issues[0]["unknown_props"] == ["titel"]
+
+
+def test_relax_ssr_props_does_not_relax_id_on_arbitrary_widget():
+    """The relaxation is keyed to the SSR widget set. `id` on a widget that is
+    NOT an anchor host (e.g. `feature-grid`) is still flagged — relaxation is
+    a closed combo list, not a blanket `id` allow."""
+    from pocketpaw.ripple import manifest as m
+
+    spec = {"ui": {"type": "feature-grid", "props": {"columns": 3, "id": "x"}}}
+    issues = m.validate_against_manifest(spec, SITE_MANIFEST, relax_ssr_props=True)
+    assert len(issues) == 1
+    assert issues[0]["unknown_props"] == ["id"]
+
+
+# ---------------------------------------------------------------------------
 # agent_context._validate_ripple_spec — the wiring on the write path.
 # ---------------------------------------------------------------------------
 

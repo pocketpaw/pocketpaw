@@ -34,6 +34,15 @@ marketing-site brain's type="site" + pattern="landing" land on the
 pocket. Only forwarded when set (the service keeps its type="custom",
 pattern=None defaults otherwise); the update path is untouched — editing
 an existing pocket doesn't restamp create intent.
+Changes: 2026-06-04 (feat/sites-validator-site-aware) —
+``make_persist_pocket_tool`` now derives ``is_site`` from the same
+``type``/``pattern`` args (type=="site" or pattern=="landing") and passes
+``relax_ssr_props=is_site`` to ``validate_against_manifest``. A spliced
+marketing skeleton's renderer-honored SSR props (section/card ``id``
+anchors, input/textarea ``name`` POST fields, button/cta ``href`` anchor
+CTAs) no longer surface as warnings on the site path, so the validation
+retry/redraft loop stops downgrading sites to generic widgets. Dashboard /
+pocket creates pass the flag False and validate unchanged.
 """
 
 from __future__ import annotations
@@ -231,9 +240,27 @@ def make_persist_pocket_tool(
             settings.ripple_manifest_url,
             ttl_seconds=settings.ripple_manifest_ttl_seconds,
         )
+        # Site-generation path: when the create intent is a Paw Site
+        # (type="site" or pattern="landing"), the spliced marketing skeleton
+        # is renderer-valid and authoritative — its SSR-essential node-level
+        # props (section/card ``id`` anchors, input/textarea ``name`` POST
+        # fields, button/cta ``href`` anchor CTAs) render fine on a static
+        # page but the manifest omits them from per-widget props. Relax those
+        # specific combos so they don't surface as warnings and trip the
+        # redraft loop into stripping the marketing widgets. Dashboard /
+        # pocket creates (the common case) pass relax_ssr_props=False and
+        # validate exactly as before.
+        is_site = (isinstance(type, str) and type == "site") or (
+            isinstance(pattern, str) and pattern == "landing"
+        )
         warnings: list[str] = []
         if manifest is not None:
-            issues = validate_against_manifest(ripple_spec, manifest, apply_aliases=True)
+            issues = validate_against_manifest(
+                ripple_spec,
+                manifest,
+                apply_aliases=True,
+                relax_ssr_props=is_site,
+            )
             warnings = [_format_issue(issue) for issue in issues]
         if capture is not None:
             capture["warnings"] = warnings
