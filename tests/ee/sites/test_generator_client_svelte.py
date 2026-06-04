@@ -9,11 +9,20 @@
 # The fake runner captures the exact input_json so we assert the dict the real
 # generator would parse, without spawning bun/node/workerd. siteConfig + theme
 # ride both tracks unchanged; install + smoke stay track-agnostic.
+#
+# Updated 2026-06-04: added test_svelte_result_shape_no_ripple_version, a
+# regression for an integration KeyError. A's real generator returns
+# ``{"projectDir", "engine"}`` for svelte (NO ``rippleVersion`` — types.ts §4.2),
+# but build() used to read ``gen["rippleVersion"]`` unconditionally, so every real
+# svelte publish raised ``KeyError: 'rippleVersion'`` before deploy. The other
+# fakes here returned a ripple-shaped result (with ``rippleVersion``) for BOTH
+# tracks, which masked it. This test pins the REAL svelte output shape so the
+# regression can't return.
 
 from __future__ import annotations
 
 import pytest
-from pocketpaw_ee.sites.generator_client import GeneratorClient
+from pocketpaw_ee.sites.generator_client import BuildResult, GeneratorClient
 
 _SOURCE_MAP = {
     "src/routes/+page.svelte": (
@@ -118,3 +127,42 @@ async def test_engine_defaults_to_ripple_when_unspecified() -> None:
     assert sent["engine"] == "ripple"
     assert "rippleSpec" in sent
     assert "source" not in sent
+
+
+class _SvelteShapeRunner:
+    """Fake runner returning the EXACT shape A's generator emits for svelte:
+    ``{"projectDir", "engine"}`` with NO ``rippleVersion`` (paw-sites types.ts
+    §4.2 — no ripple runtime ships on this track). Distinct from
+    ``_CapturingRunner``, which returns a ripple-shaped result for both tracks."""
+
+    async def generate(self, input_json: dict, out_dir: str) -> dict:
+        return {"projectDir": "/tmp/site_sv", "engine": "svelte"}
+
+    async def install(self, project_dir: str) -> tuple[bool, str]:
+        return True, "ok"
+
+    async def smoke(self, project_dir: str) -> tuple[bool, str]:
+        return True, "ok"
+
+
+@pytest.mark.asyncio
+async def test_svelte_result_shape_no_ripple_version() -> None:
+    """Regression: build() must accept the real svelte GenerateResult, which
+    omits ``rippleVersion``. The old ``gen["rippleVersion"]`` subscript raised
+    ``KeyError`` here, crashing every svelte publish before deploy. build() now
+    reads it defensively, so a svelte build returns a BuildResult with
+    ``ripple_version=None`` instead of raising."""
+    client = GeneratorClient(_runner=_SvelteShapeRunner())
+    result = await client.build(
+        engine="svelte",
+        source=_SOURCE_MAP,
+        ripple_spec=None,
+        theme={},
+        site_id="site_sv",
+        title="Tally",
+        capture_api_base="https://api.paw.example",
+        capture_signed_key="pp_tok_x",
+    )
+    assert isinstance(result, BuildResult)
+    assert result.project_dir == "/tmp/site_sv"
+    assert result.ripple_version is None

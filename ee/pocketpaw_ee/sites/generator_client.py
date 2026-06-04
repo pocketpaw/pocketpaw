@@ -7,6 +7,12 @@
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
 # Updated 2026-06-04 (feat/sites-svelte-engine — Paw Sites "Svelte track"):
+#   * FIX: BuildResult.ripple_version is now optional and build() reads it with
+#     gen.get("rippleVersion") (was gen["rippleVersion"]). The svelte
+#     GenerateResult omits rippleVersion entirely (paw-sites types.ts §4.2 — no
+#     ripple runtime ships), so the old subscript raised KeyError on EVERY svelte
+#     publish, crashing the chain before deploy. Ripple path is unchanged (it
+#     still carries rippleVersion).
 #   * build() is now engine-aware. It stamps ``engine`` ("ripple" | "svelte")
 #     onto the generator input and forks the STAGE-2 payload on it (design spec
 #     §4.2): the ripple path is unchanged except for the new ``engine: "ripple"``
@@ -55,7 +61,12 @@ class SmokeGateFailed(RuntimeError):
 @dataclass(frozen=True)
 class BuildResult:
     project_dir: str
-    ripple_version: str
+    # The pinned ripple version the generated app bundles. Echoed for audit on the
+    # RIPPLE path only — the svelte generator ships no ripple runtime and its
+    # GenerateResult omits ``rippleVersion`` entirely (paw-sites types.ts §4.2), so
+    # this is ``None`` on the svelte path. Optional so reading the svelte result
+    # does not KeyError.
+    ripple_version: str | None = None
 
 
 def _gen_cmd_argv() -> list[str]:
@@ -232,4 +243,9 @@ class GeneratorClient:
         ok, reason = await self._runner.smoke(gen["projectDir"])
         if not ok:
             raise SmokeGateFailed(reason)
-        return BuildResult(project_dir=gen["projectDir"], ripple_version=gen["rippleVersion"])
+        # ``rippleVersion`` is present only on the ripple GenerateResult; the svelte
+        # path omits it (paw-sites types.ts §4.2), so read it defensively — a svelte
+        # build must not KeyError here.
+        return BuildResult(
+            project_dir=gen["projectDir"], ripple_version=gen.get("rippleVersion")
+        )
