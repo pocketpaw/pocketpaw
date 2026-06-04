@@ -56,6 +56,14 @@
       "pattern": "app",
       "keywords": ["decision graph", "decisions", "audit", "audit trail", "why did we", "explain", "lineage", "trace", "decision log", "decision history", "decision audit", "policy decisions", "approval graph"],
       "connectors_hint": []
+    },
+    {
+      "slug": "landing-page",
+      "title": "Landing Page",
+      "shape": "custom",
+      "pattern": "landing",
+      "keywords": ["landing page", "landing site", "marketing page", "marketing site", "sales page", "website for", "site for"],
+      "connectors_hint": []
     }
   ]
 }

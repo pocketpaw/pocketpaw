@@ -30,7 +30,43 @@ conversion role** out of Ripple's marketing widgets, persist it as a
 pocket stamped ``type="site"`` + ``pattern="landing"``, and hand the
 pocket id to the publish step.
 
-## STEP 0 — This page renders with NO JavaScript
+## STEP 0 — Match the brief to the landing-page skeleton (the fast-path)
+
+**Do this FIRST, before drafting anything.** PocketPaw ships a pre-baked
+``landing-page`` template — a complete, conversion-ordered rippleSpec
+skeleton built from the real marketing widgets, with ``[bracketed]``
+placeholder copy. When the brief is a landing/marketing/sales site, you
+**instantiate that skeleton** instead of cold-drafting the whole tree.
+This is the difference between a ~4-minute cold draft and a near-instant
+fill.
+
+The match is a simple, case-insensitive substring check — the same one
+the bundled template registry uses:
+
+1. Lower-case the user's brief.
+2. Read the keyword rows in
+   ``src/pocketpaw/bundled_templates/_bundled/index.json``. The
+   ``landing-page`` row registers:
+   ``landing page``, ``landing site``, ``marketing page``,
+   ``marketing site``, ``sales page``, ``website for``, ``site for``.
+3. If **any** of those keywords is a substring of the lowered brief, it's
+   a landing match.
+
+On a landing match: **set ``hints.template_id = "landing-page"`` on the
+create call (STEP 4) and STOP cold-drafting.** The specialist's shared
+template splice then loads the skeleton and injects it into the build
+prompt under an "INSTANTIATE AND CUSTOMIZE, DO NOT REDESIGN" banner — the
+skeleton already encodes the conversion order, every marketing widget, and
+the five SSR rules below **by construction.** Your job collapses to STEP 1:
+replace the ``[bracketed]`` copy. You do **not** re-pick widgets, re-derive
+the section order, or hand-compose the tree.
+
+(If the brief is genuinely not a landing site — no keyword matches — fall
+back to the full compose path: confirm widget props with
+``get_widget_spec`` and build by conversion role using the section grammar
+and the worked example further down as your reference.)
+
+## The static-render fact (drives every SSR rule below)
 
 The single most important fact: **the site is prerendered static HTML.**
 Client-side JS does not run for the visitor on first paint (and for many
@@ -43,9 +79,38 @@ The site template wraps the whole page in one outer
 ``<form method="POST">`` so a native form submit posts the lead back to
 the platform. That single fact creates the nested-form trap in rule 1.
 
-## STEP 1 — Confirm the widget props before you draft
+## STEP 1 — Fill the spliced skeleton (replace the [bracketed] copy)
 
-Before writing the spec, call ``mcp__pocketpaw_pocket__get_widget_spec``
+On a landing match (STEP 0) you are handed the ``landing-page`` skeleton
+already spliced into your build prompt. **Do NOT call ``get_widget_spec``
+per widget and do NOT hand-compose the tree — the skeleton already did
+both correctly.** Instantiate it:
+
+- Replace every ``[bracketed]`` placeholder with concrete, on-domain copy:
+  the business name, the real services, real testimonial quotes with
+  names, real tier names + prices, the address/phone in the footer. A
+  dentist brief gets New Patient Exam / Whitening / Invisalign — never
+  "TBD" or "Service one".
+- **Preserve the structure.** The node tree, the conversion order, the
+  marketing widget at each section, the anchor ``id``s on the wrapping
+  ``section`` / ``card``, the flat lead form, the ``tiers`` shape — all
+  correct already. Do not swap a marketing widget for ``grid`` + ``card``,
+  do not reorder the funnel, do not add a ``form`` / ``accordion`` widget.
+- Keep the lead form flat and named (rule 1), keep ``pricing-table`` on
+  ``tiers`` (rule 2), keep every CTA an anchor ``href`` (rule 4).
+- Drop the ``_placeholder_note`` and any ``_``-prefixed key before persist.
+
+Then go straight to STEP 4 (persist) and STEP 5 (publish). The SSR rules
+in STEP 3 are your **review checklist** over the filled skeleton — verify
+them, don't re-derive the page from them.
+
+<details>
+<summary><b>Fallback only — the full compose path (no landing keyword matched)</b></summary>
+
+When STEP 0 found no landing match you build the page by hand. First
+confirm the widget props, then compose by conversion role.
+
+**Confirm the widget props.** Call ``mcp__pocketpaw_pocket__get_widget_spec``
 for **every** marketing widget you'll use:
 
 > ``navbar``, ``hero``, ``feature-grid``, ``testimonial``,
@@ -59,28 +124,12 @@ abandon the widget and hand-roll the section from ``grid`` + ``card``
 instead. Don't. Confirm the prop shape, fill it correctly, and the widget
 renders polished.
 
-**Why you must ask by name.** These widgets are scattered across the
-catalog's ``layout`` / ``display`` / ``input`` / ``vertical`` categories,
-not grouped under a single "marketing" heading. You will not stumble on
-them by browsing a category — this skill is the index. Ask
-``get_widget_spec`` for each of the nine by name, every time.
-
-The real prop shapes (confirmed against the manifest — still re-confirm
-with ``get_widget_spec``, which is the live source of truth) are pasted
-into STEP 2 so you can draft without guessing.
-
-## STEP 2 — Compose by conversion role (the section grammar)
-
-**THE RULE: build every section with its purpose-built marketing widget.
-Do NOT hand-roll services / proof / nav / footer / CTA / logos / email as
-generic ``grid`` + ``card`` + ``text`` + ``flex``.** That hand-rolled path
-is exactly what produces a plain, un-Ripple-polished page that reads like
-a wireframe instead of a finished marketing site. Each conversion job
-below has ONE mandated widget. Use it. The only section built from flat
-primitives is the lead form (rule 1, an SSR requirement — not a style
-choice).
-
-Lay the page out in this order. Top to bottom, this is the funnel.
+**Compose by conversion role.** Build every section with its purpose-built
+marketing widget. Do NOT hand-roll services / proof / nav / footer / CTA /
+logos / email as generic ``grid`` + ``card`` + ``text`` + ``flex``. Each
+conversion job below has ONE mandated widget. Use it. The only section
+built from flat primitives is the lead form (rule 1). Lay the page out in
+this order. Top to bottom, this is the funnel.
 
 | # | Conversion job | MANDATED widget | NEVER hand-roll as |
 |---|---|---|---|
@@ -265,13 +314,22 @@ titled ``columns`` + ``copyright`` (no ``brand`` / flat ``links``); two
 quotes = two ``testimonial`` nodes; anchor ids live on wrapping
 ``section`` / ``card`` because the marketing widgets carry none. This is
 the polished, Ripple-native page — not a ``grid`` + ``card`` wireframe.
+(The ``landing-page`` skeleton you splice in STEP 0 is this exact shape
+with ``[bracketed]`` copy — the fast-path is just "fill this in".)
 
-## STEP 3 — The HARD SSR rules (non-negotiable; the page breaks without them)
+</details>
+
+## STEP 3 — The HARD SSR rules (your checklist over the filled skeleton)
 
 Rules 1–5 are the **SSR contract** — the difference between a shippable
 landing page and a broken one; each was a real failure on a real render.
-Rule 6 is the matching **widget-integrity** rule for ``logo-cloud``. Do
-not soften any of them.
+Rule 6 is the matching **widget-integrity** rule for ``logo-cloud``. The
+``landing-page`` skeleton already satisfies all six **by construction**, so
+on the fast-path these are your **review checklist** — verify the filled
+spec still honors them (and that your copy edits didn't reintroduce a
+``form`` widget, an ``accordion``, a ``plans`` key, or an ``on_click``).
+On the fallback compose path they are the rules you build to. Do not
+soften any of them.
 
 ### Rule 1 — Lead form = FLAT native inputs. NEVER a `form` or `newsletter` widget.
 
@@ -397,21 +455,27 @@ beats a broken animated one.
 
 ## STEP 4 — Persist the pocket (stamp type=site + pattern=landing)
 
-Draft the full rippleSpec, then create the pocket via the specialist
-create path, stamping the site identity:
+Create the pocket via the specialist create path, stamping the site
+identity:
 
 - ``type="site"`` — this pocket IS a site, not a dashboard pocket.
 - ``pattern="landing"`` — records the landing/conversion intent as
   first-class metadata, so the generator and any later edit flow treat it
   as a marketing page.
+- ``template_id="landing-page"`` — **set this on the fast-path** (STEP 0
+  matched a landing keyword). It tells the specialist to splice the
+  pre-baked landing skeleton into the build prompt, so the model
+  instantiates rather than cold-drafts. Omit it only on the fallback
+  compose path (no keyword matched), where you supply a fully hand-built
+  ``spec`` instead.
 
 Call ``mcp__pocketpaw_pocket_specialist__create`` with the brief, the
-hints (set ``type: "site"`` and ``pattern: "landing"`` in the hints), and
-the drafted ``spec``. If your deployment routes custom multi-section
-builds through the merge endpoint, use
-``POST /api/v1/pockets/<id>/spec/merge`` to assemble the sections — but
-the create call must carry ``type="site"`` + ``pattern="landing"`` so the
-identity lands on the pocket.
+hints (set ``type: "site"``, ``pattern: "landing"``, and on the fast-path
+``template_id: "landing-page"``), and — on the fallback path — the drafted
+``spec``. If your deployment routes custom multi-section builds through the
+merge endpoint, use ``POST /api/v1/pockets/<id>/spec/merge`` to assemble
+the sections — but the create call must carry ``type="site"`` +
+``pattern="landing"`` so the identity lands on the pocket.
 
 ```json
 {
@@ -421,13 +485,18 @@ identity lands on the pocket.
     "description": "Family dentist landing page",
     "type": "site",
     "pattern": "landing",
+    "template_id": "landing-page",
     "color": "#0ea5e9",
     "icon": "tooth",
     "purpose": "Capture new-patient appointment requests"
-  },
-  "spec": { ... your conversion-ordered rippleSpec ... }
+  }
 }
 ```
+
+On the fast-path the spliced skeleton IS the starting spec; you fill its
+``[bracketed]`` copy in the build prompt, so you don't pass a hand-drafted
+``spec`` here. On the fallback path, add your conversion-ordered
+``"spec": { ... }`` to the call.
 
 ## STEP 5 — Publish
 
