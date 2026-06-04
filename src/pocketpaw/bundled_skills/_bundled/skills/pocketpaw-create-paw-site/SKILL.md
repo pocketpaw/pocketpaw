@@ -46,39 +46,232 @@ the platform. That single fact creates the nested-form trap in rule 1.
 ## STEP 1 — Confirm the widget props before you draft
 
 Before writing the spec, call ``mcp__pocketpaw_pocket__get_widget_spec``
-for each marketing widget you'll use — at minimum ``hero``,
-``feature-grid``, ``testimonial``, ``pricing-table``, ``cta``,
-``navbar``, ``footer``. Copy prop names verbatim from the spec. The
-renderer has a **closed registry**: an invented widget ``type`` or an
-invented prop name renders as a red "Unknown widget type" box or silently
-drops. Never guess ``pricing-table``'s shape — confirm it.
+for **every** marketing widget you'll use:
+
+> ``navbar``, ``hero``, ``feature-grid``, ``testimonial``,
+> ``logo-cloud``, ``pricing-table``, ``cta``, ``newsletter``, ``footer``
+
+Copy prop names **verbatim** from the spec. The renderer has a **closed
+registry**: an invented widget ``type`` renders as a red "Unknown widget
+type" box, and an invented or mis-shaped prop **silently drops** — the
+widget renders empty. That empty-render is the trap that makes a brain
+abandon the widget and hand-roll the section from ``grid`` + ``card``
+instead. Don't. Confirm the prop shape, fill it correctly, and the widget
+renders polished.
+
+**Why you must ask by name.** These widgets are scattered across the
+catalog's ``layout`` / ``display`` / ``input`` / ``vertical`` categories,
+not grouped under a single "marketing" heading. You will not stumble on
+them by browsing a category — this skill is the index. Ask
+``get_widget_spec`` for each of the nine by name, every time.
+
+The real prop shapes (confirmed against the manifest — still re-confirm
+with ``get_widget_spec``, which is the live source of truth) are pasted
+into STEP 2 so you can draft without guessing.
 
 ## STEP 2 — Compose by conversion role (the section grammar)
 
-Lay the page out in this order. Each row is a conversion job, then the
-widget that does it. Top to bottom, this is the funnel.
+**THE RULE: build every section with its purpose-built marketing widget.
+Do NOT hand-roll services / proof / nav / footer / CTA / logos / email as
+generic ``grid`` + ``card`` + ``text`` + ``flex``.** That hand-rolled path
+is exactly what produces a plain, un-Ripple-polished page that reads like
+a wireframe instead of a finished marketing site. Each conversion job
+below has ONE mandated widget. Use it. The only section built from flat
+primitives is the lead form (rule 1, an SSR requirement — not a style
+choice).
 
-| # | Conversion job | Widget(s) |
-|---|---|---|
-| 1 | **Navigation** — brand + anchor links to the sections below | ``navbar`` (links are anchor ``href`` to ``#services`` / ``#pricing`` / ``#book``) |
-| 2 | **Hook** — above-the-fold promise + primary CTA | ``hero`` (eyebrow + title + subtitle; the CTA child is an anchor ``href="#book"``) |
-| 3 | **Offer** — what you do, as scannable benefits | ``feature-grid`` (the services / value props) |
-| 4 | **Proof** — social proof, trust | ``testimonial`` (one or more) and/or ``logo-cloud`` |
-| 5 | **Price** — plans the visitor can choose | ``pricing-table`` with ``tiers`` |
-| 6 | **Mid-page nudge** — a second conversion band | ``cta`` (its button is an anchor ``href="#book"``) |
-| 7 | **Capture** — the lead form | a ``section``/``card`` of **flat** ``input`` / ``textarea`` / ``button{type:"submit"}`` (see rule 1) |
-| 8 | **Close** — footer with contact + links | ``footer`` |
+Lay the page out in this order. Top to bottom, this is the funnel.
 
-Wrap the whole thing in a ``flex`` (``direction: column``) root, or use
-the ``section``/``card`` containers between roles for rhythm. Give each
-section an ``id`` (``services``, ``pricing``, ``book``) so the navbar and
-CTA anchors land.
+| # | Conversion job | MANDATED widget | NEVER hand-roll as |
+|---|---|---|---|
+| 1 | **Navigation** — brand + anchor links | ``navbar`` | ~~``flex`` + ``text`` + ``button``~~ |
+| 2 | **Hook** — above-the-fold promise | ``hero`` | ~~``page-header`` + ``stat`` grid~~ |
+| 3 | **Offer** — services / value props | ``feature-grid`` | ~~``grid`` + ``card``~~ |
+| 4 | **Proof** — testimonials | ``testimonial`` (one per quote) | ~~``grid`` + ``card``~~ |
+| 5 | **Trust** — client / partner logos | ``logo-cloud`` | ~~``flex`` + broken ``img``~~ |
+| 6 | **Price** — plans | ``pricing-table`` (``tiers``) | ~~``grid`` + ``card``~~ |
+| 7 | **Mid-page nudge** — 2nd conversion band | ``cta`` | ~~``flex`` + ``text`` + ``button``~~ |
+| 8 | **Email** (optional) — list signup | ``newsletter`` | ~~``flex`` + ``input`` + ``button``~~ |
+| 9 | **Capture** — the lead form | **flat** ``input`` / ``textarea`` / ``button{type:"submit"}`` in a ``card`` (rule 1 — UNCHANGED) | — |
+| 10 | **Close** — footer | ``footer`` | ~~``flex`` + ``text``~~ |
+
+Wrap the whole thing in a ``flex`` (``direction: column``) root. The
+marketing widgets carry **no ``id`` prop of their own**, so where the
+navbar / CTA anchors need a landing target (``#services``, ``#pricing``,
+``#reviews``, ``#book``), wrap that widget — or place the lead form — in a
+``section`` / ``card`` that carries the ``id``. Anchors point at the
+wrapper's ``id``; the widget renders inside it.
+
+### The mandated widgets — real prop shapes (paste-ready)
+
+Confirm each with ``get_widget_spec`` (live source of truth), but these
+are the shapes you'll fill. **Watch the shapes marked ⚠ — they are the
+ones a brain most often gets wrong, which is why the widget renders empty
+and tempts a fall back to ``grid`` + ``card``.**
+
+- **``navbar``** — ``brand`` (string), ``links`` (``Array<{label, href}>``),
+  ``cta`` (string label ⚠ — a **string**, not an object),
+  ``ctaHref`` (string ⚠ — the CTA destination is a **separate** prop, not
+  nested in ``cta``), ``sticky`` (boolean).
+- **``hero``** — ``title`` *(required)*, ``subtitle``, ``eyebrow``,
+  ``align`` (``"left"|"center"``). ⚠ **``hero`` has no CTA prop.** Put the
+  primary call-to-action in the ``navbar``'s ``cta`` or in a following
+  ``cta`` band — do not invent a ``hero`` button.
+- **``feature-grid``** — ``features`` *(required)*,
+  ``Array<{title, description?, icon?}>`` — each item's optional ``icon``
+  is a **lucide icon name** (e.g. ``"tooth"``, ``"sparkles"``,
+  ``"shield"``); ``columns`` (``2|3|4``, default 3).
+- **``testimonial``** — ``quote`` *(required)*, ``author``, ``role``,
+  ``avatar`` (image URL). ⚠ **One testimonial per widget** — no ``items``
+  array; for three quotes, emit three ``testimonial`` nodes. There is **no
+  ``rating`` prop and no ``id`` prop** — don't add them (they silently
+  drop).
+- **``logo-cloud``** — ``heading`` (e.g. "Trusted by"),
+  ``logos`` (``Array<{src, alt, href?}>``).
+- **``pricing-table``** — ``tiers`` *(required)*,
+  ``Array<{id, name, price, period?, description?, features?, cta?, popular?}>``;
+  ``currency`` (a **symbol** like ``"$"`` ⚠ — not ``"USD"``). ⚠ Inside a
+  tier, ``cta`` is a **string** button label (not an object), ``price`` is
+  a string **or** number, and ``features`` is ``Array<string>`` **or**
+  ``Array<{label, included?}>`` (use the object form to show
+  ✓/✗ rows). Mark one tier ``popular: true``.
+- **``cta``** — ``headline`` *(required)* ⚠ (**not** ``title``),
+  ``subtext`` ⚠ (**not** ``subtitle``), ``button`` (string label ⚠ — not
+  an object), ``href`` (the destination ⚠ — a sibling prop, not nested in
+  ``button``), ``align``.
+- **``newsletter``** — ``heading``, ``subtext``, ``placeholder``
+  (default ``"you@example.com"``), ``button`` (default ``"Subscribe"``).
+  Emits the email via ``on_submit``. (For the **lead-capture** form, use
+  flat inputs per rule 1 — ``newsletter`` is only for an optional
+  list-signup band, and even then it emits its own ``<form>``; if SSR
+  capture matters, prefer flat inputs.)
+- **``footer``** — ``columns``
+  (``Array<{title, links: Array<{label, href}>}>``), ``copyright`` (the
+  legal line). ⚠ **No ``brand`` / ``tagline`` / flat ``links`` props** —
+  group links into titled ``columns`` and put the business name in
+  ``copyright``.
+
+### WORKED EXAMPLE — a full landing spec with the real widgets
+
+A dentist landing page. Every section is its purpose-built widget; only
+the lead form is flat (rule 1). Copy this shape and adapt the copy.
+
+```json
+{
+  "version": "1.0",
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "0" },
+    "children": [
+      { "type": "navbar", "props": {
+          "brand": "Bright Smile Dental",
+          "links": [
+            { "label": "Services", "href": "#services" },
+            { "label": "Reviews",  "href": "#reviews" },
+            { "label": "Pricing",  "href": "#pricing" },
+            { "label": "Book",     "href": "#book" }
+          ],
+          "cta": "Book a visit",
+          "ctaHref": "#book",
+          "sticky": true
+      }},
+
+      { "type": "hero", "props": {
+          "eyebrow": "Family & cosmetic dentistry",
+          "title": "Care that fits your whole family",
+          "subtitle": "Gentle, modern dentistry in downtown Austin. Same-week appointments, transparent pricing, no surprises.",
+          "align": "center"
+      }},
+
+      { "type": "section", "props": { "id": "services" }, "children": [
+        { "type": "feature-grid", "props": {
+            "columns": 4,
+            "features": [
+              { "icon": "tooth",    "title": "New Patient Exams", "description": "Full exam, digital X-rays, and a cleaning in one visit." },
+              { "icon": "sparkles", "title": "Teeth Whitening",   "description": "In-office whitening up to 8 shades brighter in an hour." },
+              { "icon": "smile",    "title": "Invisalign",        "description": "Clear aligners with a custom plan and a free consult." },
+              { "icon": "shield",   "title": "Emergency Care",    "description": "Same-day relief for pain, chips, and lost fillings." }
+            ]
+        }}
+      ]},
+
+      { "type": "section", "props": { "id": "reviews" }, "children": [
+        { "type": "testimonial", "props": {
+            "quote": "Best dental experience I've had. They explained every option and the cleaning was painless.",
+            "author": "Maria G.", "role": "Patient since 2023"
+        }},
+        { "type": "testimonial", "props": {
+            "quote": "Booking went from a phone-tag headache to one tap. The team is wonderful.",
+            "author": "James T.", "role": "Patient since 2021"
+        }},
+        { "type": "logo-cloud", "props": {
+            "heading": "Trusted by families across Austin",
+            "logos": [
+              { "src": "/logos/delta-dental.svg", "alt": "Delta Dental" },
+              { "src": "/logos/cigna.svg",        "alt": "Cigna" },
+              { "src": "/logos/metlife.svg",      "alt": "MetLife" }
+            ]
+        }}
+      ]},
+
+      { "type": "section", "props": { "id": "pricing" }, "children": [
+        { "type": "pricing-table", "props": {
+            "currency": "$",
+            "tiers": [
+              { "id": "exam",  "name": "New Patient Exam", "price": "89",  "period": "one-time",
+                "features": ["Full exam", "Digital X-rays", "Cleaning"], "cta": "Book" },
+              { "id": "white", "name": "Whitening",        "price": "299", "period": "one-time", "popular": true,
+                "features": ["In-office session", "Up to 8 shades", "Take-home trays"], "cta": "Book" },
+              { "id": "invis", "name": "Invisalign",       "price": "3,900", "period": "full plan",
+                "features": ["Custom aligners", "All visits", "Retainers included"], "cta": "Free consult" }
+            ]
+        }}
+      ]},
+
+      { "type": "cta", "props": {
+          "headline": "Ready for a healthier smile?",
+          "subtext": "Same-week appointments are filling up.",
+          "button": "Request an appointment",
+          "href": "#book",
+          "align": "center"
+      }},
+
+      { "type": "card", "props": { "id": "book", "title": "Book your visit" },
+        "children": [
+          { "type": "input",    "props": { "name": "name",  "label": "Your name", "placeholder": "Jane Doe", "required": true } },
+          { "type": "input",    "props": { "name": "email", "label": "Email", "type": "email", "placeholder": "jane@email.com", "required": true } },
+          { "type": "input",    "props": { "name": "phone", "label": "Phone", "type": "tel", "placeholder": "(555) 010-1234" } },
+          { "type": "textarea", "props": { "name": "message", "label": "What do you need?", "placeholder": "I'd like a checkup and cleaning..." } },
+          { "type": "button",   "props": { "label": "Request appointment", "type": "submit", "variant": "primary" } }
+        ]
+      },
+
+      { "type": "footer", "props": {
+          "columns": [
+            { "title": "Visit",   "links": [ { "label": "421 Congress Ave, Austin TX", "href": "#book" }, { "label": "(555) 010-1234", "href": "tel:5550101234" } ] },
+            { "title": "Explore", "links": [ { "label": "Services", "href": "#services" }, { "label": "Pricing", "href": "#pricing" }, { "label": "Book", "href": "#book" } ] }
+          ],
+          "copyright": "© 2026 Bright Smile Dental"
+      }}
+    ]
+  }
+}
+```
+
+Note in the example: ``navbar`` carries the only ``cta`` (the ``hero`` has
+none); ``cta`` uses ``headline`` / ``subtext`` / ``button`` / ``href``;
+each tier ``cta`` is a **string**; ``currency`` is ``"$"``; the footer is
+titled ``columns`` + ``copyright`` (no ``brand`` / flat ``links``); two
+quotes = two ``testimonial`` nodes; anchor ids live on wrapping
+``section`` / ``card`` because the marketing widgets carry none. This is
+the polished, Ripple-native page — not a ``grid`` + ``card`` wireframe.
 
 ## STEP 3 — The HARD SSR rules (non-negotiable; the page breaks without them)
 
-These five rules are the difference between a shippable landing page and
-a broken one. Each was a real failure on a real render. Do not soften
-them.
+Rules 1–5 are the **SSR contract** — the difference between a shippable
+landing page and a broken one; each was a real failure on a real render.
+Rule 6 is the matching **widget-integrity** rule for ``logo-cloud``. Do
+not soften any of them.
 
 ### Rule 1 — Lead form = FLAT native inputs. NEVER a `form` or `newsletter` widget.
 
@@ -120,15 +313,19 @@ catalog). ``plans`` and ``columns`` are **wrong** — they render an empty
 table. Each tier:
 
 ```json
-{"id": "checkup", "name": "New Patient Exam", "price": "$89", "period": "one-time",
+{"id": "checkup", "name": "New Patient Exam", "price": "89", "period": "one-time",
  "features": ["Full exam", "X-rays", "Cleaning"], "popular": true,
- "cta": {"label": "Book", "href": "#book"}}
+ "cta": "Book"}
 ```
 
-Set ``currency`` on the widget if the spec supports it. Mark one tier
-``popular: true``. Each tier's ``cta`` is an **anchor ``href``** (rule 4).
-**Call ``get_widget_spec`` for ``pricing-table`` before drafting** to
-confirm the exact tier-object keys.
+The tier ``cta`` is a **string** button label, not an object — the
+pricing-table renders the tier card and routes the click itself. Set
+``currency`` to a **symbol** (``"$"``, ``"€"``), not a code like
+``"USD"``. ``price`` is a string or number; ``features`` is
+``Array<string>`` or ``Array<{label, included?}>`` (object form shows
+✓/✗ rows). Mark one tier ``popular: true``. **Call
+``get_widget_spec`` for ``pricing-table`` before drafting** to confirm the
+exact tier-object keys.
 
 ### Rule 3 — FAQ = flat `heading` + `text` pairs. NEVER `accordion`.
 
@@ -139,20 +336,46 @@ a static site the answers never expand and the FAQ is unreadable.
 
 ### Rule 4 — Every CTA is an anchor `href`. NEVER `on_click`.
 
-Buttons and CTAs link via ``href`` (e.g. ``href="#book"``, or a
-``tel:`` / ``mailto:`` for "call us"). An ``on_click`` handler needs
-client JS, which doesn't run — an ``on_click`` CTA is a **dead button**
-on a static site. The only native action is the lead form's submit
-(rule 1). Everything else navigates by anchor.
+CTAs link by **anchor destination**, never a click handler. An
+``on_click`` handler needs client JS, which doesn't run — an ``on_click``
+CTA is a **dead button** on a static site. The native action is the lead
+form's submit (rule 1); everything else navigates by anchor:
+
+- ``navbar`` CTA → set ``ctaHref`` (e.g. ``"#book"``).
+- standalone ``cta`` band → set ``href`` (e.g. ``"#book"``, or
+  ``tel:`` / ``mailto:`` for "call us").
+- ``navbar`` / ``footer`` link items → each carries its own ``href``.
+- ``pricing-table`` tiers → the tier ``cta`` is a string **label**; the
+  pricing-table wires the click to the page's lead anchor itself. Don't
+  bolt an ``on_click`` onto a tier.
 
 ### Rule 5 — `hero` is the marketing Hero widget. NEVER the dashboard `hero+grid`.
 
-Use the ``hero`` widget — eyebrow, headline, subhead, and a CTA child.
-Do **not** build the dashboard "``hero+grid``" layout (a ``page-header``
-followed by a grid of KPI ``stat`` tiles). That is a dashboard pattern; a
-KPI grid at the top of a sales page screams "internal tool", not
-"landing page". No ``stat`` tiles, no metric grid, no charts. This is
-marketing, not analytics.
+Use the ``hero`` widget — ``eyebrow`` + ``title`` + ``subtitle`` +
+``align``. It carries **no CTA prop** (don't invent one); the primary
+call-to-action lives in the ``navbar`` (``cta`` + ``ctaHref``) and in the
+mid-page ``cta`` band. Do **not** build the dashboard "``hero+grid``"
+layout (a ``page-header`` followed by a grid of KPI ``stat`` tiles). That
+is a dashboard pattern; a KPI grid at the top of a sales page screams
+"internal tool", not "landing page". No ``stat`` tiles, no metric grid, no
+charts. This is marketing, not analytics.
+
+### Rule 6 — `logo-cloud` with no real logos: text-mode or omit. NEVER broken `<img>`s.
+
+``logo-cloud`` renders ``logos: Array<{src, alt, href?}>`` as ``<img>``
+tags. If you don't have **real, resolvable** logo URLs, a made-up ``src``
+(``/logos/acme.svg``) renders as a **broken-image icon** on the live site
+— worse than no logo wall at all. So when the brief gives you no real
+logos:
+
+- **Prefer omit** — drop the ``logo-cloud`` entirely and lean on
+  ``testimonial`` for social proof.
+- **Or go text-mode** — keep the ``heading`` (e.g. "Trusted by 400+
+  Austin families") and skip ``logos`` (empty array), so the trust line
+  renders without any broken images.
+
+Never ship invented ``src`` paths. A broken-image row reads as
+"unfinished site".
 
 ## Animated polish — Tier-0 widgets ONLY
 
@@ -229,24 +452,36 @@ wireframe.
 
 The site is built right when:
 
-1. **It reads as a funnel.** Top to bottom: nav → hero → services →
+1. **Every section is its purpose-built marketing widget.** ``navbar`` /
+   ``hero`` / ``feature-grid`` / ``testimonial`` / ``logo-cloud`` /
+   ``pricing-table`` / ``cta`` / ``footer`` — **not** hand-rolled from
+   ``grid`` + ``card`` + ``text`` + ``flex``. (The lead form is the lone
+   flat exception, per rule 1.) If services or proof or the nav/footer are
+   built from generic primitives, the page reads as a wireframe and the
+   build is wrong.
+2. **It reads as a funnel.** Top to bottom: nav → hero → services →
    proof → pricing → CTA → lead form → footer. A visitor can scan it and
    know what's sold and how to buy.
-2. **The lead form is flat + named.** Real ``<input name>``s and a submit
+3. **The lead form is flat + named.** Real ``<input name>``s and a submit
    button — no ``form`` / ``newsletter`` widget — so the published page
    POSTs natively and captures leads on the first paint with zero JS.
-3. **Pricing is populated.** ``pricing-table`` with real ``tiers`` — not
-   ``plans``/``columns``, not an empty table.
-4. **Every CTA navigates.** Anchor ``href``s (or ``tel:`` / ``mailto:``)
-   — no dead ``on_click`` buttons, no ``accordion`` FAQ.
-5. **No dashboard widgets.** No KPI ``stat`` grid, no ``hero+grid``, no
+4. **Pricing is populated.** ``pricing-table`` with real ``tiers`` — not
+   ``plans``/``columns``, not an empty table; tier ``cta`` a string,
+   ``currency`` a symbol.
+5. **Every CTA navigates.** Anchor destinations (``navbar.ctaHref`` /
+   ``cta.href`` / link ``href``s, or ``tel:`` / ``mailto:``) — no dead
+   ``on_click`` buttons, no ``accordion`` FAQ.
+6. **No dashboard widgets.** No KPI ``stat`` grid, no ``hero+grid``, no
    charts. It's a marketing page, stamped ``pattern="landing"``.
 
 ## Related tools (via MCP)
 
 - ``mcp__pocketpaw_pocket__get_widget_spec`` — **call this first** for
-  every marketing widget; confirm ``pricing-table``'s ``tiers`` shape and
-  the ``hero`` / ``feature-grid`` / ``testimonial`` props.
+  every marketing widget by name: ``navbar`` / ``hero`` / ``feature-grid``
+  / ``testimonial`` / ``logo-cloud`` / ``pricing-table`` / ``cta`` /
+  ``newsletter`` / ``footer``. Confirm ``pricing-table``'s string-``cta``
+  tier shape, ``cta``'s ``headline`` / ``button`` / ``href``, and
+  ``footer``'s ``columns`` before drafting.
 - ``mcp__pocketpaw_pocket_specialist__create`` — persist the pocket
   (stamp ``type="site"`` + ``pattern="landing"``).
 - ``mcp__pocketpaw_sites_manager__publish`` — publish the pocket as a
