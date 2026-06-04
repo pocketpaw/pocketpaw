@@ -27,6 +27,13 @@ Changes: 2026-05-22 (RFC 05 M2a) — added the ``set_action`` /
 ``remove_action`` edit-tool factories so the specialist can author the
 pocket's top-level ``rippleSpec.actions`` block (write bindings —
 POST/PUT/PATCH/DELETE). Registered in ``make_edit_pocket_tools``.
+Changes: 2026-06-04 (feat/sites-landing-brain) — ``make_persist_pocket_tool``
+(``persist_pocket``) now accepts optional ``type`` + ``pattern`` args and
+forwards them to ``_agent_create`` on the CREATE path so the
+marketing-site brain's type="site" + pattern="landing" land on the
+pocket. Only forwarded when set (the service keeps its type="custom",
+pattern=None defaults otherwise); the update path is untouched — editing
+an existing pocket doesn't restamp create intent.
 """
 
 from __future__ import annotations
@@ -154,6 +161,21 @@ class _PersistPocketArgs(BaseModel):
     description: str | None = None
     icon: str | None = None
     color: str | None = None
+    type: str | None = Field(
+        default=None,
+        description=(
+            "Create intent. Defaults to 'custom'. The marketing-site brain "
+            "sets 'site' so the pocket renders as a published page, not a "
+            "dashboard. Ignored when target_pocket_id is set."
+        ),
+    )
+    pattern: str | None = Field(
+        default=None,
+        description=(
+            "Layout pattern (e.g. 'landing', 'dashboard'). The marketing-site "
+            "brain sets 'landing'. Ignored when target_pocket_id is set."
+        ),
+    )
     ripple_spec: dict[str, Any] = Field(..., description="The validated rippleSpec.")
     target_pocket_id: str | None = Field(
         default=None,
@@ -195,6 +217,8 @@ def make_persist_pocket_tool(
         description: str | None = None,
         icon: str | None = None,
         color: str | None = None,
+        type: str | None = None,
+        pattern: str | None = None,
         target_pocket_id: str | None = None,
     ) -> dict[str, Any]:
         # Inline manifest validation — replaces the separate validate_spec
@@ -250,6 +274,15 @@ def make_persist_pocket_tool(
             if capture is not None:
                 capture["pocket"] = view
             return view
+        # ``type`` / ``pattern`` carry the create intent (e.g. the
+        # marketing-site brain's type="site" + pattern="landing"). Only
+        # forward them when set so the service keeps its defaults
+        # (type="custom", pattern=None) for a bare create — additive.
+        create_kwargs: dict[str, Any] = {}
+        if type:
+            create_kwargs["type_"] = type
+        if pattern:
+            create_kwargs["pattern"] = pattern
         view, new_pocket_id, err = await _agent_create(
             workspace_id=workspace_id,
             owner_id=user_id,
@@ -258,6 +291,7 @@ def make_persist_pocket_tool(
             icon=icon or "",
             color=color or "",
             ripple_spec=ripple_spec,
+            **create_kwargs,
         )
         if err is not None or view is None or new_pocket_id is None:
             raise RuntimeError(f"persist failed: {err or 'create returned no view'}")

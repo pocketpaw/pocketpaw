@@ -51,6 +51,12 @@
 # unknown (zero ops actually applied). That silent-failure state — the
 # agent-mode root-replace symptom — now returns ``ok=False,
 # action="failed"`` with the reason in ``error`` + ``warnings``.
+# Modified: 2026-06-04 (feat/sites-landing-brain) — ``_validate_and_persist``
+# now forwards ``hints.type`` + ``hints.pattern`` into the persist tool's
+# args so the marketing-site brain's type="site" + pattern="landing"
+# reach the persisted pocket. Previously these were dropped here (the
+# tool_args dict only carried name/description/icon/color/target_pocket_id),
+# so sites persisted as type="custom", pattern=None.
 """Mode-specific adapters for the pocket specialist's create + edit endpoints.
 
 The MCP tool handlers (``mcp_tool._create_handler`` / ``_edit_handler``)
@@ -617,6 +623,12 @@ async def _validate_and_persist(
         "description": getattr(hints, "description", None),
         "icon": getattr(hints, "icon", None),
         "color": getattr(hints, "color", None),
+        # Create intent (e.g. the marketing-site brain's type="site" +
+        # pattern="landing"). Forwarded so the stamped intent reaches the
+        # persisted pocket; the persist tool keeps service defaults when
+        # these are None.
+        "type": getattr(hints, "type", None),
+        "pattern": getattr(hints, "pattern", None),
         "target_pocket_id": getattr(hints, "target_pocket_id", None),
     }
 

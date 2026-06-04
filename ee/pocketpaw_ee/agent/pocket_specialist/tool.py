@@ -13,6 +13,15 @@ consume PocketPaw ``BaseTool``s — it uses native SDK tools + MCP only.
 Identity (workspace_id, user_id) is read from the per-stream ContextVars
 in ``ee.cloud.chat.agent_service``. Outside of a cloud chat session the
 tool returns a clear error envelope rather than running.
+
+Changes: 2026-06-04 (feat/sites-landing-brain) — ``PocketSpecialistHintsModel``
+and the params JSON schema's ``hints`` object gain ``type`` + ``pattern``.
+The marketing-site brain sets type="site" + pattern="landing"; without
+these the hints schema (``additionalProperties: False``) dropped them
+before they reached the runtime, so sites persisted as type="custom",
+pattern=None. (This is the BaseTool surface used by deep_agents /
+google_adk / openai_agents; the claude_agent_sdk path is wired via
+``mcp_tool``.)
 """
 
 from __future__ import annotations
@@ -45,6 +54,10 @@ class PocketSpecialistHintsModel(BaseModel):
     color: str | None = None
     icon: str | None = None
     target_pocket_id: str | None = None
+    # Create intent — the marketing-site brain sets type="site" +
+    # pattern="landing" so the published page renders as a landing page.
+    type: str | None = None
+    pattern: str | None = None
 
 
 class PocketSpecialistArgs(BaseModel):
@@ -83,6 +96,22 @@ _PARAMS_JSON_SCHEMA: dict[str, Any] = {
                 "color": {"type": "string"},
                 "icon": {"type": "string"},
                 "target_pocket_id": {"type": "string"},
+                "type": {
+                    "type": "string",
+                    "description": (
+                        "Create intent stamped onto the pocket. The "
+                        "marketing-site brain sets 'site'; defaults to "
+                        "'custom' when omitted."
+                    ),
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": (
+                        "Layout pattern stamped onto the pocket (e.g. "
+                        "'landing', 'dashboard'). Tells the sites generator "
+                        "how to render."
+                    ),
+                },
             },
             "description": (
                 "Optional caller-supplied overrides for fields the user named explicitly."
