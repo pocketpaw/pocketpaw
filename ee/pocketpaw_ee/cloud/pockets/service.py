@@ -3122,6 +3122,7 @@ async def agent_create(
     icon: str = "",
     color: str = "",
     ripple_spec: dict | None = None,
+    trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
 
@@ -3136,6 +3137,20 @@ async def agent_create(
     page renders as a landing page rather than a dashboard. Both keep
     today's defaults (``type_="custom"``, ``pattern=None``) for callers
     that pass neither, so the change is additive — no Mongo migration.
+
+    ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
+    code-assembled spec the caller fully controls (the deterministic Paw Site
+    fast-path's ``assemble_landing_spec``), never for raw LLM output. The strict
+    gate's allow-list is the PUBLISHED widget manifest, which lags the renderer:
+    the real marketing widgets (navbar/feature-grid/testimonial/logo-cloud/cta/
+    footer) ship in the renderer but are absent from the current published
+    manifest, so the gate false-rejects a perfectly valid landing page and its
+    "suggestion" pushes the caller toward generic widgets (avatar/data-grid/…) —
+    the exact downgrade the deterministic fast-path exists to prevent. The spec
+    is still normalized + structurally validated (``validate_ripple_spec_logged``)
+    and the embed audit still runs; only the manifest-type allow-list (which is
+    the stale part) is bypassed. The normal agent path keeps ``trusted=False``
+    and the strict gate unchanged.
     """
     if not name:
         return None, None, "name is required"
@@ -3146,14 +3161,25 @@ async def agent_create(
         # returned as the error string so the specialist sees the
         # corrective detail and can retry, instead of persisting a spec
         # the renderer would draw as a red "Unknown widget type" box.
-        try:
-            await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
-        except CatalogViolationError as exc:
-            return None, None, format_violations_for_agent(exc.violations)
-        except ActionWiringViolationError as exc:
-            return None, None, format_action_violations_for_agent(exc.violations)
-        except MissingRequiredPropError as exc:
-            return None, None, format_required_prop_violations_for_agent(exc.violations)
+        # Trusted code-assembled specs skip the STRICT gate (the published
+        # manifest is stale for marketing widgets — see the docstring) but
+        # still get the LOGGED catalog walk so the embed audit runs and any
+        # genuine drift is recorded, just not blocked.
+        if trusted:
+            await _gate_catalog(
+                normalized, strict=False, actor=owner_id, workspace_id=workspace_id
+            )
+        else:
+            try:
+                await _gate_catalog(
+                    normalized, strict=True, actor=owner_id, workspace_id=workspace_id
+                )
+            except CatalogViolationError as exc:
+                return None, None, format_violations_for_agent(exc.violations)
+            except ActionWiringViolationError as exc:
+                return None, None, format_action_violations_for_agent(exc.violations)
+            except MissingRequiredPropError as exc:
+                return None, None, format_required_prop_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,

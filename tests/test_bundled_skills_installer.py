@@ -181,34 +181,46 @@ def test_install_includes_create_paw_site(tmp_path: Path) -> None:
     assert "name: pocketpaw-create-paw-site" in skill_file.read_text()
 
 
-def test_create_paw_site_carries_ssr_guardrails(tmp_path: Path) -> None:
-    """The brain's body must keep its five load-bearing SSR guardrails.
-    Each maps to a real static-render failure; a silent edit that drops
-    one would let the broken-dashboard output come back. We pin the
+def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> None:
+    """The brain's body must keep its load-bearing DETERMINISTIC contract: the
+    agent writes COPY ONLY and calls the deterministic ``create_landing_site``
+    tool — it does NOT draft a rippleSpec and does NOT route through the
+    pocket specialist's create/redraft loop (the path that silently downgraded
+    landing pages to generic dashboard widgets). A silent edit that reintroduced
+    spec-drafting or the specialist route would bring the downgrade back. We pin
     discriminating tokens, not prose, so wording can evolve."""
     install_bundled_skills(destination_root=tmp_path)
     body = (tmp_path / "pocketpaw-create-paw-site" / "SKILL.md").read_text()
 
-    # Conversion-role grammar + the site identity it stamps.
+    # The site identity it stamps (the published page renders as a landing page).
     assert 'pattern="landing"' in body
     assert 'type="site"' in body
 
-    # Rule 1 — flat native lead form, never the form/newsletter widget.
-    assert 'type="submit"' in body or 'type": "submit"' in body
-    assert "newsletter" in body  # named so the brain knows to avoid it
+    # The deterministic create tool is the path — the agent calls it, the tool
+    # owns the structure.
+    assert "create_landing_site" in body
 
-    # Rule 2 — pricing-table uses tiers, not plans/columns.
+    # Copy-only contract: the agent does NOT compose a rippleSpec. Pin the
+    # explicit "copy only" steer AND the "do NOT compose" instruction.
+    assert "COPY ONLY" in body
+    assert "do NOT compose" in body
+
+    # The old downgrade route must NOT be the active instruction. It may only
+    # appear under a negative ("do not call pocket_specialist__create"), so we
+    # assert the negative phrasing is present rather than banning the token.
+    lowered = body.lower()
+    assert "do not call" in lowered and "pocket_specialist__create" in body
+
+    # The marketing widgets the page is built from are still named, so a silent
+    # edit that drops the marketing steer (back toward a dashboard) is caught.
+    for widget in ("navbar", "feature-grid", "testimonial", "pricing-table", "cta", "footer"):
+        assert widget in body, f"marketing widget {widget!r} no longer named in the brain"
+
+    # The dashboard anti-pattern is still warned against (no hero+grid KPI page).
+    assert "hero + grid" in body or "hero+grid" in body
+    # Pricing uses tiers; CTAs navigate by anchor not on_click.
     assert "tiers" in body
-
-    # Rule 3 — FAQ via heading+text, never accordion.
-    assert "accordion" in body  # named as the thing to avoid
-
-    # Rule 5 — the marketing hero, never the dashboard hero+grid.
-    assert "hero+grid" in body
-
-    # Tier-0 animation gate — static-safe widgets allowed, JS ones forbidden.
-    assert "aurora" in body
-    assert "parallax" in body  # named as a forbidden (JS-driven) widget
+    assert "on_click" in body
 
 
 # ---------------------------------------------------------------------------
