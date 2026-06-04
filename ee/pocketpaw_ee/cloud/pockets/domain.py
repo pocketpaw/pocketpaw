@@ -13,6 +13,12 @@ Updated: 2026-06-03 (feat/sites-landing-brain) — added optional
 ``Pocket.pattern`` so the wire layer + sites generator can read the
 layout/conversion intent the pocket was authored as (``"landing"`` for
 marketing sites). ``None`` for legacy pockets.
+Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
+"Svelte track" fields ``Pocket.engine`` (``"ripple"`` | ``"svelte"``) and
+``Pocket.source`` (the SvelteKit source map, or ``None``) so the wire
+layer + generator can read which track the pocket was built on and, for
+svelte sites, the hand-written source to materialize. Defaults
+(``engine="ripple"``, ``source=None``) keep legacy pockets unchanged.
 """
 
 from __future__ import annotations
@@ -104,6 +110,13 @@ class Pocket:
     # ``"landing"`` marks a marketing site so the generator renders a
     # landing page. ``None`` for legacy pockets.
     pattern: str | None = None
+    # Paw Sites generation track: ``"ripple"`` (default) compiles
+    # ``ripple_spec``; ``"svelte"`` materializes ``source`` instead.
+    engine: str = "ripple"
+    # The svelte-track source map ``{relative_path: file_contents}`` — the
+    # SvelteKit files the generator writes onto the skeleton. ``None`` for
+    # ripple pockets.
+    source: dict[str, str] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

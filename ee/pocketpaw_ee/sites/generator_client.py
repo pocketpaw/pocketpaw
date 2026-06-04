@@ -6,6 +6,19 @@
 # without Bun/workerd present.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-04 (feat/sites-svelte-engine — Paw Sites "Svelte track"):
+#   * build() is now engine-aware. It stamps ``engine`` ("ripple" | "svelte")
+#     onto the generator input and forks the STAGE-2 payload on it (design spec
+#     §4.2): the ripple path is unchanged except for the new ``engine: "ripple"``
+#     tag and still sends ``rippleSpec``; the svelte path sends ``source`` (the
+#     pocket's hand-written SvelteKit source map ``{path: contents}``) INSTEAD of
+#     ``rippleSpec`` and omits ``rippleSpec`` entirely. ``engine`` defaults to
+#     "ripple" so existing callers keep the old behaviour. ``ripple_spec`` is now
+#     optional (the svelte path has none).
+#   * Install + smoke (stages 1,3-8) stay track-agnostic. ``_rewrite_ripple_dep``
+#     is a no-op on the svelte path because the svelte-variant package.json carries
+#     no ``@ripple-ui/svelte`` dep (spec §5.1), so the shared install path is safe.
+#
 # Updated 2026-06-01 (Phase 3 Gap 1 — close the dep-install gap so a generated
 # project actually builds in a fresh environment):
 #   * The generate command is now overridable via PAW_SITES_GEN_CMD (default
@@ -170,16 +183,32 @@ class GeneratorClient:
     async def build(
         self,
         *,
-        ripple_spec: dict[str, Any],
+        ripple_spec: dict[str, Any] | None = None,
         theme: dict[str, Any],
         site_id: str,
         title: str,
         capture_api_base: str,
         capture_signed_key: str,
+        engine: str = "ripple",
+        source: dict[str, str] | None = None,
     ) -> BuildResult:
+        """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
+
+        ``engine="ripple"`` (default) compiles ``ripple_spec`` into the site;
+        ``engine="svelte"`` materializes ``source`` (the pocket's hand-written
+        SvelteKit source map ``{relative_path: file_contents}``) instead. Per
+        design spec §4.2 the two payloads are mutually exclusive: the svelte
+        input carries ``source`` and OMITS ``rippleSpec``; the ripple input
+        carries ``rippleSpec`` and OMITS ``source`` (gaining only the
+        ``engine: "ripple"`` tag). ``siteConfig`` + ``theme`` are sent on both
+        tracks unchanged. Stages 1, 3-8 (install/smoke/...) are track-agnostic.
+        """
         out_dir = tempfile.mkdtemp(prefix=f"paw-site-{site_id}-")
-        input_json = {
-            "rippleSpec": ripple_spec,
+        # §4.2: ``engine`` is always present; the STAGE-2 payload key forks on
+        # it. svelte → ``source`` (no rippleSpec); ripple → ``rippleSpec`` (no
+        # source). siteConfig + theme ride both tracks unchanged.
+        input_json: dict[str, Any] = {
+            "engine": engine,
             "theme": theme,
             "siteConfig": {
                 "siteId": site_id,
@@ -188,6 +217,10 @@ class GeneratorClient:
                 "captureSignedKey": capture_signed_key,
             },
         }
+        if engine == "svelte":
+            input_json["source"] = source or {}
+        else:
+            input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)
         # Install the generated project's deps (rewriting the @ripple-ui/svelte
         # pin to a resolvable source) BEFORE the smoke build, or `bun run build`

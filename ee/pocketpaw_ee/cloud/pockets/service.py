@@ -259,6 +259,11 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         # Sites landing brain — optional layout pattern. ``getattr`` for
         # legacy docs that pre-date the field.
         pattern=getattr(doc, "pattern", None),
+        # Sites svelte track — generation engine + svelte source map.
+        # ``getattr`` for legacy docs that pre-date the fields (read back
+        # as ``engine="ripple"``, ``source=None``).
+        engine=getattr(doc, "engine", "ripple"),
+        source=getattr(doc, "source", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -870,6 +875,8 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         rippleSpec=normalized_spec,
         template_slug=body.template_slug,
         pattern=body.pattern,
+        engine=body.engine,
+        source=body.source,
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)
@@ -3122,6 +3129,8 @@ async def agent_create(
     icon: str = "",
     color: str = "",
     ripple_spec: dict | None = None,
+    engine: str = "ripple",
+    source: dict[str, str] | None = None,
     trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
@@ -3137,6 +3146,18 @@ async def agent_create(
     page renders as a landing page rather than a dashboard. Both keep
     today's defaults (``type_="custom"``, ``pattern=None``) for callers
     that pass neither, so the change is additive — no Mongo migration.
+
+    ``engine`` / ``source`` select the Paw Sites generation track. The
+    default ``engine="ripple"`` compiles ``ripple_spec`` into the site;
+    ``engine="svelte"`` materializes ``source`` (a hand-written SvelteKit
+    source map ``{relative_path: file_contents}``) instead — the svelte
+    analog of ``ripple_spec``. The svelte-site create flow
+    (``create_svelte_site`` / ``pocketpaw-create-svelte-site``) passes
+    ``engine="svelte"`` + ``source=<map>`` with ``ripple_spec=None`` and
+    ``trusted=True`` (the source is author-controlled component files, not
+    LLM-drafted ripple JSON, so there is no catalog gate to run). Both keep
+    today's defaults (``engine="ripple"``, ``source=None``) for ripple
+    callers — additive, no Mongo migration.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site
@@ -3166,9 +3187,7 @@ async def agent_create(
         # still get the LOGGED catalog walk so the embed audit runs and any
         # genuine drift is recorded, just not blocked.
         if trusted:
-            await _gate_catalog(
-                normalized, strict=False, actor=owner_id, workspace_id=workspace_id
-            )
+            await _gate_catalog(normalized, strict=False, actor=owner_id, workspace_id=workspace_id)
         else:
             try:
                 await _gate_catalog(
@@ -3191,6 +3210,8 @@ async def agent_create(
             color=color,
             owner=owner_id,
             rippleSpec=normalized,
+            engine=engine,
+            source=source,
             visibility="workspace",
         )
         await doc.insert()

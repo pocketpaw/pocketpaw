@@ -1,6 +1,20 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
+# create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
+# ``create_landing_site`` (same direct ``agent_create`` persistence, same
+# session-bind + SSE side effects, same one server) but the payload is a
+# hand-written SvelteKit ``source`` MAP ``{relative_path: file_contents}`` (the
+# pocketpaw-create-svelte-site skill authors it via the design skills) instead of
+# a ``content`` copy object. There is no ``assemble_*`` step — the agent IS the
+# author — so the tool persists ``source`` verbatim via ``agent_create(
+# engine="svelte", source=<map>, type_="site", pattern="landing",
+# ripple_spec=None, trusted=True)``. ``trusted=True`` is correct here for a
+# different reason than the landing tool: there is NO rippleSpec to gate at all
+# (the catalog walk only runs on a non-null spec), so the source files pass
+# straight through to persistence and the generator materializes them at publish.
+#
 # This is the decisive bypass of the dashboard-built ``pocket_specialist``
 # create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
 # subagent delegation + the validate-redraft loop) kept downgrading landing
@@ -55,8 +69,12 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "pocketpaw_sites_manager"
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
 CREATE_LANDING_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_landing_site"
+# The svelte-track create tool — registers on the SAME server (see the publish
+# server in sites.py). The skill flow is: author the source map → create_svelte_site
+# → publish.
+CREATE_SVELTE_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_svelte_site"
 
-SITES_CREATE_TOOL_IDS = (CREATE_LANDING_SITE_TOOL_ID,)
+SITES_CREATE_TOOL_IDS = (CREATE_LANDING_SITE_TOOL_ID, CREATE_SVELTE_SITE_TOOL_ID)
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -77,6 +95,38 @@ def _success_response(body: dict[str, Any]) -> dict[str, Any]:
             }
         ]
     }
+
+
+# ── Svelte-track source map (design spec §4.3) ──────────────────────────────
+# The keys a svelte-engine ``source`` map MUST carry — paths relative to the
+# SvelteKit project root. These are the composition root + the resting-frame
+# essentials the paw-sites generator materializes onto the skeleton; the
+# skeleton itself provides everything else (package.json, svelte.config, vite,
+# adapter, app.html, api/submit). ``src/lib/components/*`` and ``src/lib/*.js``
+# are validated by PREFIX (variable filenames — Hero/Pricing/Faq, reveal.js).
+SVELTE_REQUIRED_EXACT_KEYS = (
+    "src/routes/+page.svelte",  # composes the section components
+    "src/routes/+layout.svelte",  # imports ../app.css (finding #5)
+    "src/routes/+page.ts",  # export const prerender = true
+    "src/app.css",  # tokens, fonts, base
+)
+SVELTE_REQUIRED_PREFIXES = (
+    "src/lib/components/",  # at least one section component (Hero, ...)
+)
+
+
+def _missing_source_keys(source: dict[str, str]) -> list[str]:
+    """Return the §4.3 required keys absent from ``source`` (empty list = valid).
+
+    Checks the exact composition/resting-frame keys plus that at least one
+    ``src/lib/components/*.svelte`` section exists. Used to fail the create
+    closed with an actionable message rather than persisting a half-authored
+    map the generator can't build into a page."""
+    missing = [k for k in SVELTE_REQUIRED_EXACT_KEYS if k not in source]
+    for prefix in SVELTE_REQUIRED_PREFIXES:
+        if not any(k.startswith(prefix) for k in source):
+            missing.append(f"{prefix}*.svelte")
+    return missing
 
 
 def _identity() -> tuple[str | None, str | None]:
@@ -283,9 +333,183 @@ def make_create_landing_site_tool(tool: Any) -> Any:
     return create_landing_site
 
 
+async def _create_svelte_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_svelte_site`` (the Svelte track).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``source`` map against the §4.3 required keys, and persists it DIRECTLY via
+    ``agent_create`` (engine="svelte", source=<map>, type="site",
+    pattern="landing", ripple_spec=None, trusted=True). Returns
+    ``{ok, pocket_id, pocket}`` on success; sets ``is_error`` when identity is
+    missing, ``source`` is absent/malformed/incomplete, or the persist fails.
+
+    Unlike ``create_landing_site`` there is no ``assemble_*`` step — the agent
+    authored the SvelteKit components (via the design skills), so the map is
+    persisted verbatim and the generator materializes it at publish.
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_svelte_site requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    source = args.get("source")
+    if not isinstance(source, dict) or not source:
+        return _error_response(
+            "create_svelte_site requires a `source` object — the SvelteKit source "
+            "map { relative_path: file_contents } you authored (the +page.svelte "
+            "composition root, +layout.svelte, +page.ts, app.css, and the "
+            "src/lib/components/*.svelte sections). You write the components; this "
+            "tool persists them."
+        )
+    # Every value must be a string (file contents) — the map is {path: contents}.
+    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    if bad:
+        return _error_response(
+            "create_svelte_site `source` values must be file-content strings; "
+            f"these keys are not strings: {', '.join(sorted(bad)[:8])}."
+        )
+    missing = _missing_source_keys(source)
+    if missing:
+        return _error_response(
+            "create_svelte_site `source` is missing required SvelteKit files "
+            f"(design spec §4.3): {', '.join(missing)}. Author them before "
+            "creating — the page can't prerender without the composition root, "
+            "+layout.svelte (imports app.css), +page.ts (prerender=true), app.css, "
+            "and at least one section component."
+        )
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "Svelte site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="svelte"``
+    # + ``source`` stamp the svelte track so the generator materializes the map;
+    # ``type_="site"`` + ``pattern="landing"`` keep the site identity the rest of
+    # the pipeline (publish, refine, /sites listing) keys on. ``trusted=True``
+    # short-circuits the strict catalog gate, which only runs on a non-null
+    # rippleSpec anyway — the svelte path passes ``ripple_spec=None``.
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="landing",
+            icon=icon,
+            color=color,
+            ripple_spec=None,
+            engine="svelte",
+            source=source,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_svelte_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": new_pocket_id,
+            "pocket": {
+                "id": new_pocket_id,
+                "name": view.get("name"),
+                "type": view.get("type"),
+                "pattern": view.get("pattern"),
+                "engine": view.get("engine"),
+            },
+        }
+    )
+
+
+def make_create_svelte_site_tool(tool: Any) -> Any:
+    """Build the ``create_svelte_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site (see ``make_create_landing_site_tool`` for why one
+    server)."""
+
+    @tool(
+        "create_svelte_site",
+        (
+            "Create a Paw Site landing page on the SVELTE TRACK. You AUTHOR the "
+            "SvelteKit components yourself (premium hand-written Svelte via the "
+            "design skills — the quality bar is the proven spike) and pass them as "
+            "a `source` MAP { relative_path: file_contents }; the tool persists "
+            "the map and stamps the pocket type='site', pattern='landing', "
+            "engine='svelte'. You do NOT compose a rippleSpec, do NOT call "
+            "get_widget_spec, do NOT call pocket_specialist. Required `source` "
+            "keys (design spec §4.3): 'src/routes/+page.svelte' (imports + "
+            "composes the section components), 'src/routes/+layout.svelte' "
+            "(<script>import '../app.css'</script>), 'src/routes/+page.ts' "
+            "(export const prerender = true), 'src/app.css' (tokens/fonts/base), "
+            "and at least one 'src/lib/components/*.svelte' section (Hero, "
+            "Pricing, Faq, ...); add 'src/lib/*.js' helpers (e.g. reveal.js) as "
+            "needed. CRITICAL authoring rule: every component must render its "
+            "resting/final state in MARKUP — never set it only in onMount — "
+            "because the page is PRERENDERED and onMount does not run at prerender "
+            "time (a count-up initialized to 0 bakes '$0.00'; initialize it to the "
+            "final value). Returns {ok, pocket_id, pocket}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "error means relay the reason, do NOT report a created pocket."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": (
+                        "The SvelteKit source map { relative_path: file_contents } "
+                        "you authored — paths relative to the project root, values "
+                        "are the file contents as strings. Must include the §4.3 "
+                        "required files (see the tool description)."
+                    ),
+                    "additionalProperties": {"type": "string"},
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'Svelte site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["source"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_svelte_site(args):  # type: ignore[no-untyped-def]
+        return await _create_svelte_site_handler(args)
+
+    return create_svelte_site
+
+
 __all__ = [
     "CREATE_LANDING_SITE_TOOL_ID",
+    "CREATE_SVELTE_SITE_TOOL_ID",
     "SERVER_NAME",
     "SITES_CREATE_TOOL_IDS",
+    "SVELTE_REQUIRED_EXACT_KEYS",
+    "SVELTE_REQUIRED_PREFIXES",
     "make_create_landing_site_tool",
+    "make_create_svelte_site_tool",
 ]

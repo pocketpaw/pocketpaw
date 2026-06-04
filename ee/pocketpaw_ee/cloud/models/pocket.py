@@ -24,6 +24,14 @@ Records site/landing intent as first-class metadata so a published Paw
 Site renders as a marketing landing page rather than a dashboard.
 Optional (default ``None``) so legacy pockets read back as ``None`` with
 no Mongo migration.
+Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
+"Svelte track" fields: ``Pocket.engine`` (``"ripple"`` default |
+``"svelte"``) selects the site-generation track, and ``Pocket.source``
+(``{relative_path: file_contents}`` | ``None``) holds the hand-written
+SvelteKit source map a svelte-engine site materializes from (the svelte
+analog of ``rippleSpec``). ``engine`` defaults to ``"ripple"`` and
+``source`` to ``None`` so every existing pocket reads back as a ripple
+pocket with no source map — additive, no Mongo migration.
 """
 
 from __future__ import annotations
@@ -109,6 +117,17 @@ class Pocket(TimestampedDocument):
     agents: list[Any] = Field(default_factory=list)  # Agent IDs or populated objects
     widgets: list[Widget] = Field(default_factory=list)
     rippleSpec: dict[str, Any] | None = Field(default=None, alias="rippleSpec")
+    # Paw Sites generation track. ``"ripple"`` (the default) compiles
+    # ``rippleSpec`` into the site; ``"svelte"`` materializes ``source``
+    # (hand-written SvelteKit files) instead. The toggle is persisted on
+    # the pocket so the generator + any later refine pick the same track.
+    # Legacy pockets default to ``"ripple"`` — additive, no migration.
+    engine: str = "ripple"
+    # The svelte-track source map: ``{relative_path: file_contents}`` for a
+    # SvelteKit project (e.g. ``"src/routes/+page.svelte"`` → contents). The
+    # svelte analog of ``rippleSpec`` — the generator writes these files onto
+    # the paw-sites skeleton and prerenders. ``None`` for ripple pockets.
+    source: dict[str, str] | None = None
     # Default "workspace": new pockets are visible to every workspace member.
     # Owner can tighten to "private" (owner-only + explicit shared_with) via
     # the visibility toggle in the pocket UI.
