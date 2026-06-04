@@ -15,6 +15,12 @@
 # ``site_id`` hint. The /sites/[siteId] refine chat stamps the published
 # site id (and the underlying pocket_id) so the sites handler can branch onto
 # a LANDING-AWARE REFINE preamble instead of the create-a-new-site one.
+# Updated: 2026-06-04 (feat/sites-svelte-engine) — ``SurfaceMeta`` grows an
+# ``engine`` hint ("ripple" | "svelte"). The /sites create UI's "Use Svelte
+# pages" toggle stamps it so the sites handler routes the CREATE preamble to
+# the svelte-track authoring skill (engine="svelte") instead of the
+# ripple/default marketing brain. Persisted setting is pocket.engine; this is
+# only the per-turn routing signal.
 
 from __future__ import annotations
 
@@ -82,6 +88,12 @@ class SurfaceMeta:
     # site's source pocket) so the handler routes to the refine/edit path
     # instead of the create-a-new-site path. Absent on the /sites gallery.
     site_id: str | None = None
+    # Sites create hint — set by the /sites create UI's "Use Svelte pages"
+    # toggle: "ripple" (default) | "svelte". On the create branch the handler
+    # branches on this to prefer the svelte-track authoring skill when
+    # "svelte"; absent / "ripple" keeps the default marketing brain. Does not
+    # affect the refine branch (keyed on ``pocket_id``).
+    engine: str | None = None
 
 
 @dataclass(frozen=True)

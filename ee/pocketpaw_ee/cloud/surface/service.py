@@ -118,6 +118,7 @@ def _meta_from_request(req: SurfaceMetaRequest) -> SurfaceMeta:
         scenario_id=req.scenario_id,
         panel=req.panel,
         site_id=req.site_id,
+        engine=req.engine,
     )
 
 

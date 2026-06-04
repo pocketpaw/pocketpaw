@@ -38,6 +38,15 @@
 # treat it as a dashboard pocket — while preserving the landing structure and
 # the same 5 SSR rules the create brain enforces. Refine-mode rules mirror
 # `src/pocketpaw/bundled_skills/_bundled/skills/pocketpaw-create-paw-site/SKILL.md`.
+# Updated: 2026-06-04 (feat/sites-svelte-engine) — the CREATE branch now forks on
+# `meta.engine` ("ripple" | "svelte"), set by the /sites create UI's "Use Svelte
+# pages" toggle. `engine="svelte"` returns a parallel create preamble that
+# PREFERS the `pocketpaw-create-svelte-site` skill (the Svelte-track authoring
+# brain — it writes hand-written SvelteKit components, no rippleSpec/catalog) and
+# points the MCP fallback at `mcp__pocketpaw_sites_manager__create_svelte_site`.
+# Every other engine value (None / "ripple") keeps the existing ripple marketing
+# brain (`pocketpaw-create-paw-site` + create_landing_site) byte-for-byte. The
+# refine branch (keyed on `pocket_id`) is untouched by the toggle.
 
 from __future__ import annotations
 
@@ -61,7 +70,19 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
 
 
 def _create_preamble(meta: SurfaceMeta) -> str:
-    """The /sites gallery preamble — build AND publish a brand-new site."""
+    """The /sites gallery preamble — build AND publish a brand-new site.
+
+    Two engines, keyed on ``meta.engine`` (the "Use Svelte pages" toggle):
+
+    * ``"svelte"`` — the Svelte track. Prefer the
+      ``pocketpaw-create-svelte-site`` skill (hand-written SvelteKit
+      components, prerendered static) and point the MCP fallback at
+      ``create_svelte_site``.
+    * anything else (``None`` / ``"ripple"``) — the default ripple marketing
+      brain, unchanged.
+    """
+    if meta.engine == "svelte":
+        return _svelte_create_preamble(meta)
     route = meta.route_path or "/sites"
     return (
         f'<surface kind="sites" route="{route}" />\n'
@@ -96,6 +117,62 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "`pattern=\"landing\"`, flat named lead inputs, `pricing-table` tiers, "
         "anchor CTAs), then `mcp__pocketpaw_sites_manager__publish` with the "
         "returned pocket_id.\n"
+        "Either way: relay any publish error — never claim a phantom publish — and "
+        "after it succeeds, SHOW the live `url` plus a link to /sites where the "
+        "user manages their sites. Keep talking 'site' / 'page', never 'pocket'.\n"
+        "</sites-procedure>"
+    )
+
+
+def _svelte_create_preamble(meta: SurfaceMeta) -> str:
+    """The /sites create preamble on the SVELTE track (``engine="svelte"``).
+
+    Parallel to the ripple ``_create_preamble`` body, but the deliverable is
+    authored as hand-written SvelteKit components rather than a ripple widget
+    spec. Prefers the ``pocketpaw-create-svelte-site`` skill (which owns the
+    component-authoring how-to) and points the MCP fallback at
+    ``create_svelte_site``. The orientation framing — publishable static
+    website, conversion funnel, talk 'site' not 'pocket' — matches the ripple
+    path so the toggle only changes the authoring brain, not the goal.
+    """
+    route = meta.route_path or "/sites"
+    return (
+        f'<surface kind="sites" route="{route}" engine="svelte" />\n'
+        "<sites-orientation>\n"
+        "The user is on the SITES surface with the Svelte engine selected ('Use "
+        "Svelte pages'), building a publishable WEBSITE that deploys as a "
+        "standalone static page on the edge — not an in-app pocket dashboard. It "
+        "renders as a real marketing landing page read top to bottom as a "
+        "conversion funnel: nav, hero, services, social proof, pricing, a "
+        "call-to-action, a lead-capture form, footer. Talk about it as a 'site' "
+        "or 'page' — never a 'pocket'. The pocket is only the source; it "
+        "auto-publishes to a live URL. On this track the page is built from "
+        "hand-written SvelteKit components and PRERENDERED to static HTML (no "
+        "JavaScript runs for the visitor on first paint), so favor premium "
+        "marketing copy, real sections, anchor-link CTAs, and a working lead form "
+        "over generic dashboard / KPI widgets.\n"
+        "</sites-orientation>\n"
+        "<sites-procedure>\n"
+        "Treat the user's message on this surface as a request to BUILD AND "
+        "PUBLISH a marketing site on the Svelte track. PREFER the "
+        "`pocketpaw-create-svelte-site` skill — invoke it by intent (no slash "
+        "command needed). It is the dedicated Svelte-track authoring brain: YOU "
+        "write premium hand-written SvelteKit components (Hero, Pricing, Faq, …) "
+        "at the design quality bar, assemble them into the source map, and it "
+        "persists the source pocket `type=\"site\"` + `pattern=\"landing\"` + "
+        "`engine=\"svelte\"` and then publishes it and shows the live URL. There "
+        "is NO rippleSpec and NO widget catalog on this track — do not draft a "
+        "rippleSpec, do not call `get_widget_spec`, do not use the pocket "
+        "specialist; the component files ARE the page. The create-svelte-site "
+        "skill owns the authoring how-to (the source-map shape and the "
+        "resting-state SSR rule — render the final state in markup, never only in "
+        "`onMount`, because prerender bakes the resting frame).\n"
+        "If that skill is unavailable, fall back directly with the MCP tools: "
+        "author the SvelteKit source map yourself, then call "
+        "`mcp__pocketpaw_sites_manager__create_svelte_site` with the `source` "
+        "object (it stamps `type=\"site\"` + `pattern=\"landing\"` + "
+        "`engine=\"svelte\"` and persists the pocket), then "
+        "`mcp__pocketpaw_sites_manager__publish` with the returned pocket_id.\n"
         "Either way: relay any publish error — never claim a phantom publish — and "
         "after it succeeds, SHOW the live `url` plus a link to /sites where the "
         "user manages their sites. Keep talking 'site' / 'page', never 'pocket'.\n"

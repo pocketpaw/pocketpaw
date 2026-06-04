@@ -18,6 +18,13 @@
 # below pin the no-pocket_id branch; the new refine-mode tests pin the
 # pocket_id branch (existing-site orientation, edit tool, the same 5 SSR rules,
 # and that it does NOT say "build a new site").
+# Updated: 2026-06-04 (feat/sites-svelte-engine) — the CREATE branch now forks on
+# `meta.engine` ("ripple" | "svelte"), set by the /sites create UI's "Use Svelte
+# pages" toggle. The engine-routing tests at the bottom pin that `engine="svelte"`
+# yields a create preamble preferring the `pocketpaw-create-svelte-site` skill
+# (and the `create_svelte_site` MCP fallback) and NOT preferring create-paw-site,
+# while the default (engine None / "ripple") create preamble is unchanged — still
+# names `pocketpaw-create-paw-site`. The toggle does not touch the refine branch.
 # These tests assert the create-mode preamble carries:
 #   1. The orientation — surface kind="sites", talk "site" not "pocket".
 #   2. The preferred path — the `pocketpaw-create-paw-site` marketing brain.
@@ -180,3 +187,83 @@ async def test_sites_handler_refine_mode_is_landing_aware() -> None:
     assert "href" in lower
     # Animation Tier-0 only.
     assert "tier-0" in lower or "tier 0" in lower
+
+
+# --- Engine routing (the /sites create "Use Svelte pages" toggle) ---
+#
+# The create branch (no pocket_id) forks on meta.engine. engine="svelte" must
+# route to the Svelte-track authoring brain; engine None/"ripple" must keep the
+# existing ripple marketing brain byte-for-byte.
+
+
+async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> None:
+    """engine="svelte" routes the create preamble to the Svelte-track skill.
+
+    It must PREFER `pocketpaw-create-svelte-site`, point the MCP fallback at
+    `create_svelte_site`, and stamp engine="svelte" — while NOT preferring the
+    ripple `create-paw-site` brain."""
+    preamble = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="svelte")
+    )
+    lower = preamble.lower()
+
+    # Still the sites surface, now tagged with the svelte engine.
+    assert '<surface kind="sites"' in preamble
+    assert 'engine="svelte"' in preamble
+    # Still a build-AND-publish create flow (not refine).
+    assert "build and publish" in lower
+    assert "refine" not in lower
+
+    # PREFERRED path: the dedicated Svelte-track authoring skill.
+    assert "pocketpaw-create-svelte-site" in preamble
+    assert "prefer" in lower
+    # MCP fallback points at the svelte create tool + publish.
+    assert "mcp__pocketpaw_sites_manager__create_svelte_site" in preamble
+    assert "mcp__pocketpaw_sites_manager__publish" in preamble
+    assert "fall back" in lower or "fallback" in lower
+
+    # It must NOT route to the ripple marketing brain on this track.
+    assert "pocketpaw-create-paw-site" not in preamble
+    # The svelte track explicitly forbids the ripple-spec machinery (the term
+    # appears only inside the "no rippleSpec / do not draft one" prohibition).
+    assert "no ripplespec" in lower
+    assert "do not draft a ripplespec" in lower
+
+
+async def test_create_mode_default_engine_unchanged_prefers_create_paw_site() -> None:
+    """Default engine (None) keeps the ripple create brain: prefers
+    `pocketpaw-create-paw-site` and never mentions the svelte track."""
+    preamble = await sites_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/sites"))
+
+    # Ripple brain preferred, svelte track absent.
+    assert "pocketpaw-create-paw-site" in preamble
+    assert "create-svelte-site" not in preamble
+    assert "create_svelte_site" not in preamble
+    assert 'engine="svelte"' not in preamble
+
+
+async def test_create_mode_engine_ripple_is_byte_identical_to_default() -> None:
+    """engine="ripple" is the explicit form of the default — the create preamble
+    must be byte-for-byte identical to the no-engine (None) preamble, proving the
+    fork only diverges for "svelte"."""
+    default_preamble = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites")
+    )
+    ripple_preamble = await sites_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/sites", engine="ripple")
+    )
+
+    assert ripple_preamble == default_preamble
+    # And it is the ripple brain, not the svelte one.
+    assert "pocketpaw-create-paw-site" in ripple_preamble
+    assert "create-svelte-site" not in ripple_preamble
+
+
+async def test_engine_threads_through_meta_from_request() -> None:
+    """The wire `engine` hint survives DTO→domain mapping so the handler can
+    branch on it (mirrors how site_id is threaded)."""
+    from pocketpaw_ee.cloud.surface.dto import SurfaceMetaRequest
+    from pocketpaw_ee.cloud.surface.service import _meta_from_request
+
+    meta = _meta_from_request(SurfaceMetaRequest(engine="svelte", route_path="/sites"))
+    assert meta.engine == "svelte"
