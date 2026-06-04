@@ -10,6 +10,11 @@
 # ``SurfaceContext`` (resolved snapshot + rendered preamble). Per the
 # 11 entity rules, tenancy is enforced at construction — ``workspace_id``
 # and ``user_id`` are required on ``SurfaceContext``.
+#
+# Updated: 2026-06-04 (feat/sites-refine-surface) — ``SurfaceMeta`` grows a
+# ``site_id`` hint. The /sites/[siteId] refine chat stamps the published
+# site id (and the underlying pocket_id) so the sites handler can branch onto
+# a LANDING-AWARE REFINE preamble instead of the create-a-new-site one.
 
 from __future__ import annotations
 
@@ -72,6 +77,11 @@ class SurfaceMeta:
     run_id: str | None = None
     scenario_id: str | None = None
     panel: str | None = None
+    # Sites surface hint — set by the /sites/[siteId] refine chat. The id of
+    # the published Paw Site being refined; paired with ``pocket_id`` (the
+    # site's source pocket) so the handler routes to the refine/edit path
+    # instead of the create-a-new-site path. Absent on the /sites gallery.
+    site_id: str | None = None
 
 
 @dataclass(frozen=True)
