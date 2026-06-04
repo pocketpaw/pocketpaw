@@ -77,6 +77,11 @@ truthy, the pipeline:
 The flag defaults False so existing behavior is unchanged — both paths
 coexist until the captain greenlights deletion of the granular surface
 after the live-test cycle.
+Changes: 2026-06-04 (feat/sites-landing-brain) — ``PocketSpecialistHints``
+gains ``type`` + ``pattern`` (create intent). The marketing-site brain
+sets type="site" + pattern="landing"; ``_validate_and_persist`` forwards
+them to the persist tool so they land on the pocket. Both default to the
+service defaults (type="custom", pattern=None) when unset — additive.
 """
 
 from __future__ import annotations
@@ -127,6 +132,26 @@ class PocketSpecialistHints(BaseModel):
     color: str | None = None
     icon: str | None = None
     target_pocket_id: str | None = None
+
+    # ---- create intent (stamped onto the persisted pocket) ----
+    # The marketing-site brain (pocketpaw-create-paw-site) sets
+    # type="site" + pattern="landing" so the published page renders as a
+    # landing page, not a dashboard. Both default to the service's
+    # defaults (type="custom", pattern=None) when unset.
+    type: str | None = Field(
+        default=None,
+        description=(
+            "Create intent stamped onto the pocket. 'site' marks a "
+            "published-page pocket; defaults to 'custom' when unset."
+        ),
+    )
+    pattern: str | None = Field(
+        default=None,
+        description=(
+            "Layout pattern stamped onto the pocket (e.g. 'landing', "
+            "'dashboard'). Tells the sites generator how to render."
+        ),
+    )
 
     # ---- structural plan (parent agent decides these before delegating) ----
     purpose: str | None = Field(

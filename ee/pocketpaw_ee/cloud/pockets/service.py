@@ -121,6 +121,14 @@ strings, so no ObjectId cast). The /pockets gallery route passes the ids
 of pockets already published as Sites so they don't appear in both the
 pocket gallery and the sites list. ``None`` is a no-op, so mission
 control / kb / surface / planner callers are unchanged.
+Changes: 2026-06-04 (feat/sites-landing-brain) — ``agent_create`` now
+accepts an optional ``pattern`` (alongside the existing ``type_``) and
+stamps both onto the persisted ``Pocket``. The marketing-site brain
+(``pocketpaw-create-paw-site``) creates via the specialist path with
+``type="site"`` + ``pattern="landing"``; previously that path defaulted
+``type_="custom"`` and never carried ``pattern``, so site intent was
+dropped (pockets persisted as type="custom", pattern=None). Both keep
+today's defaults when unset — additive, no Mongo migration.
 """
 
 from __future__ import annotations
@@ -3110,6 +3118,7 @@ async def agent_create(
     name: str,
     description: str = "",
     type_: str = "custom",
+    pattern: str | None = None,
     icon: str = "",
     color: str = "",
     ripple_spec: dict | None = None,
@@ -3120,6 +3129,13 @@ async def agent_create(
     ``(None, None, error)`` on failure. Returning the id alongside the
     view lets the caller link sessions / push SSE events without
     re-parsing the dict.
+
+    ``type_`` / ``pattern`` carry the create intent. The marketing-site
+    brain (``pocketpaw-create-paw-site``) passes ``type_="site"`` +
+    ``pattern="landing"`` via the specialist create path so the published
+    page renders as a landing page rather than a dashboard. Both keep
+    today's defaults (``type_="custom"``, ``pattern=None``) for callers
+    that pass neither, so the change is additive — no Mongo migration.
     """
     if not name:
         return None, None, "name is required"
@@ -3144,6 +3160,7 @@ async def agent_create(
             name=name,
             description=description,
             type=type_,
+            pattern=pattern,
             icon=icon,
             color=color,
             owner=owner_id,
