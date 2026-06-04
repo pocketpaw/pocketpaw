@@ -11,6 +11,10 @@
 # response shape. There is no response DTO here because the surface
 # context is consumed in-process by ``chat/agent_service`` (no HTTP
 # round-trip).
+#
+# Updated: 2026-06-04 (feat/sites-refine-surface) — mirror ``SurfaceMeta``'s
+# new ``site_id`` hint so the /sites/[siteId] refine chat can stamp the
+# published site id on the wire and the sites handler can branch to refine.
 
 from __future__ import annotations
 
@@ -36,6 +40,9 @@ class SurfaceMetaRequest(BaseModel):
     run_id: str | None = None
     scenario_id: str | None = None
     panel: str | None = None
+    # Sites hint — mirror SurfaceMeta. Set by the /sites/[siteId] refine chat
+    # alongside pocket_id so the handler refines the existing site. Optional.
+    site_id: str | None = None
 
 
 class SurfaceRequest(BaseModel):

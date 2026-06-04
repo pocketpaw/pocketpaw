@@ -28,6 +28,16 @@
 # leads (the broken "Option A" render). The lead form must be FLAT native
 # `input`/`button{type:submit}` with real `name=`. create-site Path A (publish an
 # existing pocket) is unchanged; only a brand-new-site description routes here.
+# Updated: 2026-06-04 (feat/sites-refine-surface) — The /sites surface now has
+# TWO modes. The gallery (no pocket_id) keeps the create-a-new-site preamble
+# above. The per-site refine chat at /sites/[siteId] stamps `pocket_id` (the
+# site's source pocket) + `site_id` in the surface meta; when `pocket_id` is
+# present, `build_preamble` branches to a LANDING-AWARE REFINE preamble that
+# tells the agent to EDIT the existing published pocket via
+# `mcp__pocketpaw_pocket_specialist__edit` — never rebuild from scratch, never
+# treat it as a dashboard pocket — while preserving the landing structure and
+# the same 5 SSR rules the create brain enforces. Refine-mode rules mirror
+# `src/pocketpaw/bundled_skills/_bundled/skills/pocketpaw-create-paw-site/SKILL.md`.
 
 from __future__ import annotations
 
@@ -35,7 +45,23 @@ from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 
 
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
-    """Render the /sites surface preamble (static orientation + build procedure)."""
+    """Render the /sites surface preamble.
+
+    Two modes, keyed on whether the meta carries a ``pocket_id``:
+
+    * **Create** (no ``pocket_id``) — the /sites gallery / describe-to-create
+      rail. Build AND publish a brand-new marketing site.
+    * **Refine** (``pocket_id`` present) — the per-site chat at
+      ``/sites/[siteId]``. Refine the EXISTING published site by editing its
+      source pocket in place; never rebuild from scratch.
+    """
+    if meta.pocket_id:
+        return _refine_preamble(meta)
+    return _create_preamble(meta)
+
+
+def _create_preamble(meta: SurfaceMeta) -> str:
+    """The /sites gallery preamble — build AND publish a brand-new site."""
     route = meta.route_path or "/sites"
     return (
         f'<surface kind="sites" route="{route}" />\n'
@@ -73,6 +99,65 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "Either way: relay any publish error — never claim a phantom publish — and "
         "after it succeeds, SHOW the live `url` plus a link to /sites where the "
         "user manages their sites. Keep talking 'site' / 'page', never 'pocket'.\n"
+        "</sites-procedure>"
+    )
+
+
+def _refine_preamble(meta: SurfaceMeta) -> str:
+    """The /sites/[siteId] refine preamble — edit an EXISTING published site.
+
+    Landing-aware: mirrors the create-paw-site brain's structure + 5 SSR rules
+    so an edit can't reintroduce a static-site trap. Carries the source
+    ``pocket_id`` so the agent edits the right pocket in place.
+    """
+    route = meta.route_path or "/sites"
+    pocket_id = meta.pocket_id or ""
+    return (
+        f'<surface kind="sites" route="{route}" pocket="{pocket_id}" mode="refine" />\n'
+        "<sites-orientation>\n"
+        f"The user is REFINING an EXISTING published Paw Site (source pocket "
+        f"`{pocket_id}`) — a live standalone marketing website already deployed "
+        "as a static page on the edge. They are on its per-site chat, asking for "
+        "a CHANGE to that page. Do NOT rebuild the site from scratch, do NOT "
+        "create a new site or a new pocket, and do NOT treat it as an in-app "
+        "dashboard pocket. It is a real marketing landing page that reads top to "
+        "bottom as a conversion funnel: nav, hero, services, social proof, "
+        "pricing, a call-to-action, a flat lead-capture form, footer. Talk about "
+        "it as a 'site' or 'page' — never a 'pocket'. The page renders STATICALLY "
+        "(no JavaScript runs for the visitor), so every change must still work as "
+        "plain HTML.\n"
+        "</sites-orientation>\n"
+        "<sites-procedure>\n"
+        "Treat the user's message as an edit to APPLY to the existing site, then "
+        f"re-publish. Apply the change to pocket `{pocket_id}` via "
+        "`mcp__pocketpaw_pocket_specialist__edit` (the merge/edit path — it "
+        "mutates the existing spec in place). NEVER use the create path and NEVER "
+        "rebuild the page from scratch; a refine is a targeted edit on top of the "
+        "current landing spec. After the edit lands it can be re-published (the "
+        "site auto-publishes from its source pocket); relay any publish error — "
+        "never claim a phantom publish — and show the live `url`.\n"
+        "PRESERVE the landing structure (nav → hero → services → proof → pricing "
+        "→ flat lead form → footer) and keep the 5 static-site (SSR) rules intact "
+        "while you edit:\n"
+        "1. Lead capture stays FLAT native `input`/`textarea`/"
+        "`button{type:\"submit\"}` with real field names (name, email, phone, "
+        "message) — NEVER the `form` or `newsletter` widget, which nests an "
+        "invalid `<form>` inside the site template's outer POST form and captures "
+        "zero leads.\n"
+        "2. `pricing-table` uses `tiers` (never `plans`/`columns`).\n"
+        "3. An FAQ is `heading` + `text` pairs — NEVER the `accordion` widget "
+        "(its panels only open with JS, so on a static site the answers never "
+        "expand).\n"
+        "4. Every CTA is an anchor `href` (or `tel:` / `mailto:`) — never an "
+        "`on_click` handler, which is a dead button with no client JS.\n"
+        "5. `hero` is the marketing Hero widget — never the dashboard "
+        "`hero+grid` (a page-header plus a KPI `stat` grid); no metric grid, no "
+        "charts. This is marketing, not analytics.\n"
+        "Any animation stays Tier-0 (CSS-only, static-safe) — `aurora`, "
+        "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
+        "`parallax`, or `spotlight` (they need client JS and hide content on a "
+        "static page). Keep `type=\"site\"` + `pattern=\"landing\"` on the pocket. "
+        "Keep talking 'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>"
     )
 
