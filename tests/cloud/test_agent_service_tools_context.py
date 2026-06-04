@@ -447,6 +447,86 @@ def test_non_home_pocket_scope_keeps_specialist_delegation_rule():
     assert "<pocket-delegation>" in block
 
 
+# ---------------------------------------------------------------------------
+# Home agent backend-summary surfacing (feat/home-agent-source-authoring).
+#
+# Mirrors how the pocket_specialist surfaces a non-secret backend summary so
+# it knows whether a backend is configured before authoring a `sources`
+# block. The home agent must SEE the configured backend + its base_url so it
+# stops claiming "no integration wired up" and authors a source on add_widget.
+# ---------------------------------------------------------------------------
+
+
+def _home_ctx(backend_summary):
+    return ScopeContext(
+        kind=ScopeKind.POCKET,
+        scope_id="home-pocket-1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        pocket_id="home-pocket-1",
+        pocket_type="home",
+        backend_summary=backend_summary,
+    )
+
+
+def test_home_prompt_surfaces_configured_backend_summary():
+    """When the resolved home scope carries a configured backend summary, the
+    behavior instructions must render the base_url so the agent can SEE the
+    backend exists (and stop saying "no integration wired up")."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = _home_ctx(
+        {"configured": True, "base_url": "https://api.acme.test", "auth_type": "bearer"}
+    )
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<home-pocket>" in block
+    # The configured base_url is rendered into the prompt verbatim.
+    assert "https://api.acme.test" in block
+    # The literal token never leaks.
+    assert "__BACKEND_SUMMARY__" not in block
+
+
+def test_home_prompt_renders_not_configured_when_no_backend():
+    """A home scope with an explicit `configured: False` summary renders the
+    "not configured" state — the agent must NOT author a source then."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = _home_ctx({"configured": False})
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<home-pocket>" in block
+    assert "not configured" in block
+    assert "__BACKEND_SUMMARY__" not in block
+
+
+def test_home_prompt_renders_unknown_when_summary_absent():
+    """No backend summary on the scope renders the "unknown — call get_pocket"
+    fallback rather than asserting there is no backend."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    ctx = _home_ctx(None)
+    block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
+    assert "<home-pocket>" in block
+    assert "configured state unknown" in block
+    assert "__BACKEND_SUMMARY__" not in block
+
+
+def test_home_prompt_carries_source_authoring_guidance():
+    """The home prompt must teach the agent to author a `widget.sources` GET
+    binding when a backend is configured — borrowed from the specialist's
+    live-data guidance — and the data-shape rule (bind a field path / scalar,
+    never a whole object)."""
+    from pocketpaw.ripple import HOME_POCKET_PROMPT
+
+    assert "sources" in HOME_POCKET_PROMPT
+    # The read-only GET binding shape.
+    assert "refresh" in HOME_POCKET_PROMPT and "pocket_open" in HOME_POCKET_PROMPT
+    # The data-shape rule the smoke test surfaced.
+    assert "field path" in HOME_POCKET_PROMPT.lower() or "field-path" in HOME_POCKET_PROMPT.lower()
+
+
 def _session_ctx() -> ScopeContext:
     return ScopeContext(
         kind=ScopeKind.SESSION,

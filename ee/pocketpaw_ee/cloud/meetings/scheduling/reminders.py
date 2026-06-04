@@ -56,6 +56,10 @@ def _autostart_job_id(meeting_id: str) -> str:
     return f"autostart:{meeting_id}"
 
 
+def _autoend_job_id(meeting_id: str) -> str:
+    return f"autoend:{meeting_id}"
+
+
 # ---------------------------------------------------------------------------
 # Job callbacks
 # ---------------------------------------------------------------------------
@@ -111,6 +115,23 @@ async def _send_reminder(doc: _MeetingDoc) -> None:
             )
 
 
+async def _auto_end_meeting(doc: _MeetingDoc) -> None:
+    """Auto-end a meeting at its scheduled end time.
+
+    Transitions ``in_progress`` → ``ended`` so the frontend correctly
+    shows the meeting as over rather than stuck at "Live" forever.
+    Idempotent — safe to call from both the APScheduler job and the
+    query-time hydration in ``list_meetings``.
+    """
+    current = await _MeetingDoc.get(doc.id)
+    if current is None or current.status != "in_progress":
+        return
+
+    from pocketpaw_ee.cloud.meetings.scheduling import service as scheduling_service
+
+    await scheduling_service.end_meeting(doc.workspace, str(doc.id))
+
+
 async def _auto_start_meeting(doc: _MeetingDoc) -> None:
     """Auto-start a meeting at its scheduled time.
 
@@ -156,7 +177,7 @@ async def _auto_start_meeting(doc: _MeetingDoc) -> None:
 
 
 def schedule_meeting_jobs(doc: _MeetingDoc) -> None:
-    """Schedule the reminder + auto-start APScheduler jobs for a meeting.
+    """Schedule the reminder + auto-start + auto-end APScheduler jobs for a meeting.
 
     Call after ``doc.insert()`` or after changing ``scheduled_start``.
     Idempotent — replaces existing jobs with the same ID.
@@ -196,11 +217,34 @@ def schedule_meeting_jobs(doc: _MeetingDoc) -> None:
         replace_existing=True,
     )
 
+    # Auto-end: at scheduled_end (with UTC tzinfo)
+    duration_min = (doc.raw_provider_payload or {}).get("duration_minutes", 30)
+    end_time = (
+        doc.scheduled_end or (doc.scheduled_start + timedelta(minutes=duration_min))
+        if doc.scheduled_start
+        else None
+    )
+    if end_time:
+        autoend_at = end_time.replace(tzinfo=UTC)
+        if autoend_at > datetime.now(UTC):
+            sched.add_job(
+                _auto_end_meeting,
+                trigger=_DateTrigger(run_date=autoend_at),
+                args=[doc],
+                id=_autoend_job_id(mid),
+                replace_existing=True,
+            )
+        logger.debug("Scheduled auto-end for meeting %s at %s", mid, autoend_at)
+
 
 def unschedule_meeting_jobs(meeting_id: str) -> None:
     """Remove a meeting's APScheduler jobs (on cancel / status change)."""
     sched = _get_scheduler()
-    for job_id in (_reminder_job_id(meeting_id), _autostart_job_id(meeting_id)):
+    for job_id in (
+        _reminder_job_id(meeting_id),
+        _autostart_job_id(meeting_id),
+        _autoend_job_id(meeting_id),
+    ):
         try:
             sched.remove_job(job_id)
         except Exception:
@@ -213,23 +257,70 @@ async def _recover_jobs_on_startup() -> None:
     Called on startup to recover jobs that were lost during a server restart.
     Queries MongoDB for all meetings with status ``scheduled`` whose
     ``scheduled_start`` is still in the future and schedules reminder +
-    auto-start jobs.
+    auto-start jobs. Also recovers auto-end jobs for ``in_progress``
+    meetings whose ``scheduled_end`` is still in the future.
     """
-    now = datetime.now(UTC).replace(tzinfo=None)
-    docs = await _MeetingDoc.find(
-        {"status": "scheduled", "scheduled_start": {"$gte": now}}
+    now_naive = datetime.now(UTC).replace(tzinfo=None)
+
+    # Recover scheduled meetings (reminder + auto-start + auto-end)
+    scheduled_docs = await _MeetingDoc.find(
+        {"status": "scheduled", "scheduled_start": {"$gte": now_naive}}
     ).to_list()
 
     count = 0
-    for doc in docs:
+    for doc in scheduled_docs:
         try:
             schedule_meeting_jobs(doc)
             count += 1
         except Exception as exc:
             logger.warning("Failed to re-schedule meeting %s on startup: %s", doc.id, exc)
 
+    # Recover in-progress meetings (auto-end only)
+    in_progress_docs = await _MeetingDoc.find(
+        {"status": "in_progress", "scheduled_end": {"$gte": now_naive}}
+    ).to_list()
+
+    for doc in in_progress_docs:
+        try:
+            _schedule_autoend_only(doc)
+            count += 1
+        except Exception as exc:
+            logger.warning(
+                "Failed to schedule auto-end for in_progress meeting %s on startup: %s",
+                doc.id,
+                exc,
+            )
+
     if count:
         logger.info("Re-scheduled %d meeting job(s) from DB on startup", count)
+
+
+def _schedule_autoend_only(doc: _MeetingDoc) -> None:
+    """Schedule only the auto-end job for an in-progress meeting.
+
+    Used during recovery — the reminder and auto-start jobs already fired
+    (or should not fire), so we only add the auto-end job.
+    """
+    sched = _get_scheduler()
+    mid = str(doc.id)
+
+    duration_min = (doc.raw_provider_payload or {}).get("duration_minutes", 30)
+    end_time = (
+        doc.scheduled_end or (doc.scheduled_start + timedelta(minutes=duration_min))
+        if doc.scheduled_start
+        else None
+    )
+    if end_time:
+        autoend_at = end_time.replace(tzinfo=UTC)
+        if autoend_at > datetime.now(UTC):
+            sched.add_job(
+                _auto_end_meeting,
+                trigger=_DateTrigger(run_date=autoend_at),
+                args=[doc],
+                id=_autoend_job_id(mid),
+                replace_existing=True,
+            )
+            logger.debug("Recovered auto-end job for in_progress meeting %s at %s", mid, autoend_at)
 
 
 # ---------------------------------------------------------------------------

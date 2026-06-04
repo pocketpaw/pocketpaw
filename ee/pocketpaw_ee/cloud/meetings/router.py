@@ -32,7 +32,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer
 
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.meetings import service as meetings_service
@@ -278,6 +278,12 @@ class BotStatusResponseDTO(BaseModel):
     status_detail: str | None = None
     status_at: datetime | None = None
     summary: str
+
+    @field_serializer("status_at")
+    def _serialize_status_at(v: datetime | None) -> str | None:
+        if v is None:
+            return None
+        return v.isoformat() + "Z"
 
 
 @router.get("/{meeting_id}/bot", response_model=BotStatusResponseDTO)

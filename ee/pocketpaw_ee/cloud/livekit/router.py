@@ -28,7 +28,12 @@ from pocketpaw_ee.cloud.chat.group_service import (
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.livekit import service as livekit_service
 from pocketpaw_ee.cloud.realtime.emit import emit
-from pocketpaw_ee.cloud.realtime.events import CallEnded, CallStarted
+from pocketpaw_ee.cloud.realtime.events import (
+    CallEnded,
+    CallParticipantJoined,
+    CallParticipantLeft,
+    CallStarted,
+)
 from pocketpaw_ee.cloud.shared.deps import current_user, current_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -175,7 +180,7 @@ async def create_room(
     group = await _get_group_domain_or_404(body.group_id)
     _require_domain_group_member(group, str(user.id))
 
-    result = await livekit_service.create_room(body.group_id)
+    result = await livekit_service.create_room(body.group_id, workspace_id, str(user.id))
 
     # Only emit call.started when the room was actually created (not when
     # someone joins an existing room). The is_new flag is set atomically
@@ -231,6 +236,23 @@ async def generate_token(
         can_subscribe=body.can_subscribe,
         ttl_seconds=body.ttl_seconds,
     )
+
+    # Notify group members that someone joined the call.
+    if gid:
+        try:
+            await emit(
+                CallParticipantJoined(
+                    data={
+                        "group_id": gid,
+                        "room_name": body.room_name,
+                        "identity": body.identity,
+                        "name": display_name,
+                    }
+                )
+            )
+        except Exception:
+            pass
+
     return TokenResponse(
         token=token,
         url=livekit_service.LIVEKIT_URL,
@@ -267,6 +289,29 @@ async def get_room_info(
     return RoomInfoResponse(**info)
 
 
+@router.post("/rooms/{group_id}/leave")
+async def leave_call(
+    group_id: str,
+    user=Depends(current_user),
+):
+    """Notify that a participant left a call without ending it."""
+    gid = group_id
+    try:
+        await emit(
+            CallParticipantLeft(
+                data={
+                    "group_id": gid,
+                    "room_name": livekit_service.room_name_for_group(gid),
+                    "identity": str(user.id),
+                    "name": user.full_name or str(user.id),
+                }
+            )
+        )
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 @router.delete("/rooms/{group_id}")
 async def end_call(
     group_id: str,
@@ -284,7 +329,7 @@ async def end_call(
     group = await _get_group_domain_or_404(group_id)
     _require_domain_group_member(group, str(user.id))
 
-    result = await livekit_service.end_room(group_id)
+    result = await livekit_service.end_room(group_id, workspace_id)
 
     # Emit realtime event so group members know the call ended
     try:

@@ -23,7 +23,14 @@ from livekit.protocol.room import (
 )
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallNotesPosted, CallStarted
+from pocketpaw_ee.cloud._core.realtime.events import (
+    CallEnded,
+    CallNotesPosted,
+    CallStarted,
+    MessageNew,
+)
+from pocketpaw_ee.cloud.models.meeting import Meeting as MeetingDoc
+from pocketpaw_ee.cloud.models.meeting import MeetingTranscript
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +241,7 @@ async def _collect_agent_notes(
 async def _reap_agent_process(
     group_id: str,
     proc: asyncio.subprocess.Process,
+    workspace_id: str = "",
 ) -> None:
     """Wait for an agent subprocess to finish, then clean up the registry.
 
@@ -279,6 +287,7 @@ async def _reap_agent_process(
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
                 duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
             )
             logger.info("Posted meeting notes for group %s from agent payload", group_id)
         except Exception:
@@ -522,7 +531,11 @@ async def get_recording_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-async def create_room(group_id: str) -> dict[str, Any]:
+async def create_room(
+    group_id: str,
+    workspace_id: str = "",
+    user_id: str = "",
+) -> dict[str, Any]:
     """Create a LiveKit room for a group call.
 
     Returns room metadata including the room name and the admin token.
@@ -530,7 +543,9 @@ async def create_room(group_id: str) -> dict[str, Any]:
     Automatically starts the meeting notes agent for this room.
 
     The returned dict includes an ``is_new`` boolean indicating whether
-    the room was just created or already existed.
+    the room was just created or already existed. When a new room is
+    created, a ``Meeting`` document is also persisted so the call
+    appears in the scheduled meetings sidebar as "Live".
     """
     _ensure_configured()
 
@@ -556,6 +571,47 @@ async def create_room(group_id: str) -> dict[str, Any]:
             is_new = True
         else:
             logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
+
+    # Persist a Meeting document when a new room is created so the
+    # call shows up in the scheduled meetings sidebar as "Live".
+    if is_new and workspace_id:
+        try:
+            now = datetime.now(UTC)
+            meeting = MeetingDoc(
+                workspace=workspace_id,
+                source="livekit",
+                provider=None,
+                provider_meeting_id=room_name,
+                title="Instant call",
+                join_url="",
+                scheduled_start=now,
+                scheduled_end=None,
+                actual_start=now,
+                status="in_progress",
+                participants=[],
+                recording_file_ids=[],
+                raw_provider_payload={"group_id": group_id},
+                created_by_user_id=user_id or None,
+            )
+            await meeting.insert()
+            logger.info("Created Meeting doc for instant call in group %s", group_id)
+
+            # Emit meeting.started so other clients pick it up
+            from pocketpaw_ee.cloud.meetings.events import MeetingStarted
+
+            await emit(
+                MeetingStarted(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "group_id": group_id,
+                    }
+                )
+            )
+            logger.info("Emitted meeting.started for instant call in group %s", group_id)
+        except Exception as exc:
+            logger.warning("Failed to create Meeting doc for instant call: %s", exc)
 
     # Generate a subscriber-only token for the call bot (no agent flag
     # so it auto-subscribes to remote tracks for transcription).
@@ -586,7 +642,7 @@ async def create_room(group_id: str) -> dict[str, Any]:
 
         # Background task: wait for the subprocess to finish, then clean
         # up the registry so we don't leak agent references.
-        asyncio.create_task(_reap_agent_process(group_id, proc))
+        asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
 
         logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
 
@@ -635,11 +691,13 @@ async def generate_participant_token(
     )
 
 
-async def end_room(group_id: str) -> dict[str, Any]:
+async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
     """End an active call by deleting the LiveKit room.
 
     When the room is deleted, all participants are disconnected and the
     call bot's cleanup logic (posting meeting notes) is triggered.
+    Also transitions the associated Meeting document to ``ended`` so
+    the call shows as "Over" in the scheduled meetings sidebar.
     """
     _ensure_configured()
 
@@ -672,6 +730,7 @@ async def end_room(group_id: str) -> dict[str, Any]:
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
                 duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
             )
             logger.info("Posted meeting notes for group %s (end_room)", group_id)
         except Exception as exc:
@@ -691,6 +750,24 @@ async def end_room(group_id: str) -> dict[str, Any]:
                 raise
 
     await emit(CallEnded(data={"group_id": group_id, "room_name": room_name}))
+
+    # Transition the Meeting doc to ended so the call shows as "Over".
+    if workspace_id:
+        try:
+            now = datetime.now(UTC)
+            meeting = await MeetingDoc.find_one(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+                MeetingDoc.status == "in_progress",
+            )
+            if meeting is not None:
+                meeting.status = "ended"
+                meeting.actual_end = now
+                await meeting.save()
+                logger.info("Marked Meeting %s as ended for group %s", meeting.id, group_id)
+        except Exception as exc:
+            logger.warning("Failed to end Meeting for group %s: %s", group_id, exc)
 
     return {
         "room_name": room_name,
@@ -754,12 +831,15 @@ async def post_meeting_notes_to_group(
     action_items: list[str],
     participants: list[str],
     duration_seconds: int,
+    workspace_id: str = "",
 ) -> None:
     """Post meeting notes to a group after a call ends.
 
     Creates a system message directly (bypassing membership check since the
     call-bot is not a group member) and emits a real-time event so all
-    group members see it.
+    group members see it. Also stores the transcript as a file and creates
+    a MeetingTranscript record so the meeting detail in /meetings can
+    display the transcript.
     """
     lines = [
         "📋 **Meeting Notes**",
@@ -824,10 +904,89 @@ async def post_meeting_notes_to_group(
                 }
             )
         )
+        await emit(
+            MessageNew(
+                data={
+                    "group": group_id,
+                    "group_id": group_id,
+                    "sender": CALL_BOT_USER_ID,
+                    "senderName": "Meeting Notes",
+                    "senderType": "user",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "message_id": domain_msg.id,
+                    "_id": domain_msg.id,
+                    "content": content,
+                    "mentions": [],
+                }
+            )
+        )
         logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
     except Exception as exc:
         logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
         raise
+
+    # Store transcript as a file and create MeetingTranscript doc.
+    if workspace_id and transcript:
+        try:
+            from pocketpaw_ee.cloud.meetings.events import MeetingTranscriptReady
+            from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+            room_name = room_name_for_group(group_id)
+            meeting = await MeetingDoc.find_one(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+            )
+            if meeting is None:
+                return
+
+            safe_title = (meeting.title or "call").replace("/", "-")[:80]
+            file_rec = await write_text_file(
+                workspace_id=workspace_id,
+                owner_id=meeting.created_by_user_id or "system",
+                folder_path="/transcripts",
+                filename=f"{safe_title}-transcript.vtt",
+                content=transcript,
+                mime="text/vtt",
+            )
+
+            import re as _re
+
+            cue_count = transcript.count("\n--> ") + transcript.count(" --> ")
+            # For plain-text transcripts (no VTT cues), fall back to line count
+            entry_count = max(cue_count, 1) if transcript.strip() else 0
+            speaker_count = len({m.group(1) for m in _re.finditer(r"<v\s+([^>]+)>", transcript)})
+
+            transcript_doc = MeetingTranscript(
+                workspace=workspace_id,
+                meeting_id=str(meeting.id),
+                provider_transcript_id=room_name,
+                file_id=file_rec.id,
+                entry_count=entry_count,
+                speaker_count=speaker_count,
+                language=None,
+                fetched_at=datetime.now(UTC),
+                indexed_in_kb=False,
+                kb_indexed_version=1,
+            )
+            await transcript_doc.insert()
+
+            await emit(
+                MeetingTranscriptReady(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "file_id": file_rec.id,
+                        "entry_count": entry_count,
+                        "speaker_count": speaker_count,
+                        "language": None,
+                    }
+                )
+            )
+            logger.info("Stored transcript for meeting %s (%d cues)", meeting.id, cue_count)
+        except Exception as exc:
+            logger.warning("Failed to store transcript: %s", exc)
 
 
 # ---------------------------------------------------------------------------

@@ -460,6 +460,11 @@
             "icon": "lucide:search"
           },
           {
+            "label": "Zero-Config Tools",
+            "href": "/tools/zero-config",
+            "icon": "lucide:zap"
+          },
+          {
             "label": "Image Generation",
             "href": "/tools/image-generation",
             "icon": "lucide:image"

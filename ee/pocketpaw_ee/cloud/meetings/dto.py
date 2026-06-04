@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 MeetingSourceName = Literal["recall", "livekit"]
 MeetingProviderName = Literal["google_meet", "zoom"]
@@ -85,6 +85,24 @@ class MeetingResponse(BaseModel):
     # don't originate from a calendar event.
     calendar_event_id: str | None = None
 
+    # ── Force UTC serialization ───────────────────────────────────────
+    # Backend stores all datetimes as naive (timezone-unaware) UTC values.
+    # Pydantic's default JSON serialisation omits the timezone suffix,
+    # making JS `new Date()` interpret them as LOCAL time instead of UTC.
+    # Appending 'Z' ensures every consumer correctly treats them as UTC.
+    @field_serializer(
+        "scheduled_start",
+        "scheduled_end",
+        "actual_start",
+        "actual_end",
+        "created_at",
+        "bot_status_at",
+    )
+    def _serialize_dt(v: datetime | None) -> str | None:
+        if v is None:
+            return None
+        return v.isoformat() + "Z"
+
 
 class MeetingDetailResponse(MeetingResponse):
     """GET /meetings/{id} — includes the full participants snapshot."""
@@ -107,6 +125,12 @@ class TranscriptResponse(BaseModel):
     language: str | None
     fetched_at: datetime | None
     indexed_in_kb: bool
+
+    @field_serializer("fetched_at")
+    def _serialize_fetched_at(v: datetime | None) -> str | None:
+        if v is None:
+            return None
+        return v.isoformat() + "Z"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +172,12 @@ class CredentialsResponse(BaseModel):
     has_credentials: bool
     last_validated_at: datetime | None = None
     last_error: str = ""
+
+    @field_serializer("last_validated_at")
+    def _serialize_validated_at(v: datetime | None) -> str | None:
+        if v is None:
+            return None
+        return v.isoformat() + "Z"
 
 
 class GoogleMeetAuthUrlResponse(BaseModel):

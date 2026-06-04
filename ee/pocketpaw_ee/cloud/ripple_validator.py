@@ -23,6 +23,15 @@ new token / method added to the resolver should be added here too — the
 two files together are the contract.
 
 Changes:
+  - 2026-05-31 (constraint-zone enforcer): added the required-prop gate —
+    ``MissingRequiredPropError`` plus ``validate_required_props_strict``
+    (agent-generation path, RAISES) and ``..._logged`` (human/import path,
+    structured warn, does not block). Mirrors the catalog / action-wiring
+    strict/logged split. The pure walk + the manifest required-prop reader
+    live in OSS ``pocketpaw.ripple.manifest``; this module supplies the
+    EE-side strict/logged wiring + the agent-readable error formatting. It
+    is the rippleSpec analogue of the genesis "Constraint Zones" 🔒 HARD
+    ``required_fields`` zone.
   - 2026-05-30 (issue #1301): added ``find_unreferenced_state_keys`` —
     a pure ui-walk collector (mirrors ``find_unwired_live_buttons``) that
     returns top-level ``state`` keys no ui node references. Closes the
@@ -52,6 +61,7 @@ from pocketpaw.ripple.manifest import (
     find_unwired_live_buttons,
     validate_action_verbs,
     validate_against_catalog,
+    validate_required_props,
 )
 
 log = logging.getLogger(__name__)
@@ -668,6 +678,128 @@ def validate_action_wiring_strict(
 
 
 # ---------------------------------------------------------------------------
+# Required-prop gate (constraint-zone enforcer, 2026-05-31).
+#
+# The widget manifest marks the props a widget cannot render without as
+# ``required: true``. That flag was previously surfaced only in the system
+# prompt — a node like ``{"type": "chart", "props": {}}`` passed the catalog
+# gate (its ``type`` is known) and the action-wiring gate (no handlers) and
+# rendered an empty box. This gate closes that hole: the genesis "Constraint
+# Zones" model's 🔒 HARD ``required_fields`` zone, re-expressed for rippleSpec
+# at the widget-prop level. The pure walk lives in OSS
+# ``pocketpaw.ripple.manifest``; this layer adds the strict / logged wiring +
+# the agent-readable error formatting, symmetric with the catalog gate above.
+# ---------------------------------------------------------------------------
+
+
+class MissingRequiredPropError(Exception):
+    """Raised by :func:`validate_required_props_strict` when a spec carries a
+    node missing a prop the widget manifest marks ``required: true``.
+
+    Same shape as :class:`CatalogViolationError` / :class:`ActionWiringViolationError`:
+    ``.violations`` plus a class-level formatter so the chat agent's retry
+    loop can surface a focused corrective hint naming the missing prop.
+    """
+
+    def __init__(self, violations: list[dict[str, Any]]) -> None:
+        self.violations = violations
+        super().__init__(self._format(violations))
+
+    @staticmethod
+    def _format(violations: list[dict[str, Any]]) -> str:
+        lines = [f"{len(violations)} required-prop violation(s) in rippleSpec:"]
+        for v in violations[:20]:
+            missing = ", ".join(v.get("missing", []))
+            lines.append(
+                f"  - [missing_required_prop] {v['path']}: '{v['type']}' is missing "
+                f"required prop(s): {missing}"
+            )
+        if len(violations) > 20:
+            lines.append(f"  - …and {len(violations) - 20} more")
+        return "\n".join(lines)
+
+
+def format_required_prop_violations_for_agent(violations: list[dict[str, Any]]) -> str:
+    """Build a compact, agent-readable summary of required-prop violations.
+
+    Suitable as the ``error`` field on an MCP tool result so the specialist
+    sees specifically which node is missing which required prop and can target
+    its fix.
+    """
+    if not violations:
+        return ""
+    lines = ["The rippleSpec was rejected — some widgets are missing required props:"]
+    for v in violations[:10]:
+        missing = ", ".join(v.get("missing", []))
+        lines.append(
+            f"  • {v['path']}: '{v['type']}' must set {missing} "
+            f"(required props for this widget: {', '.join(v.get('required', []))})."
+        )
+    if len(violations) > 10:
+        lines.append(f"  • …and {len(violations) - 10} more")
+    lines.append(
+        "Every prop the widget catalog marks `required` must be present on the node "
+        "(a literal value or a bound `{...}` expression). A missing required prop "
+        "renders the widget empty / broken even though every other gate passes."
+    )
+    return "\n".join(lines)
+
+
+def validate_required_props_logged(
+    spec: dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+    *,
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Validate manifest-required props, emit one ``log.warning`` per
+    violation, and return the violations list.
+
+    Use this on the human / import path — a violation is recorded for triage
+    but does NOT block the write (an older imported spec may predate a prop
+    becoming required).
+    """
+    violations = validate_required_props(spec, manifest_or_required)
+    for v in violations:
+        log.warning(
+            "ripple_spec.missing_required_prop",
+            extra={
+                "pocket_id": pocket_id,
+                "workspace_id": workspace_id,
+                "field_path": v["path"],
+                "widget_type": v["type"],
+                "missing_props": v.get("missing"),
+            },
+        )
+    return violations
+
+
+def validate_required_props_strict(
+    spec: dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+    *,
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Validate manifest-required props; raise :class:`MissingRequiredPropError`
+    if any node omits a prop its widget marks ``required: true``.
+
+    Use this only on the agent-generation path where the caller can handle a
+    retry. Human / import callers should use
+    :func:`validate_required_props_logged` — strict mode would block a
+    legitimate import of an older spec.
+    """
+    violations = validate_required_props_logged(
+        spec,
+        manifest_or_required,
+        pocket_id=pocket_id,
+        workspace_id=workspace_id,
+    )
+    if violations:
+        raise MissingRequiredPropError(violations)
+
+
+# ---------------------------------------------------------------------------
 # Orphan-state gate (issue #1301, 2026-05-30).
 #
 # An add-widget intent that lands as a STATE-ONLY merge patch is
@@ -816,15 +948,19 @@ __all__ = [
     "ActionWiringViolationError",
     "CatalogViolationError",
     "ExpressionWarning",
+    "MissingRequiredPropError",
     "RippleSpecGrammarError",
     "find_unreferenced_state_keys",
     "format_action_violations_for_agent",
+    "format_required_prop_violations_for_agent",
     "format_violations_for_agent",
     "format_warnings_for_agent",
     "validate_action_wiring_logged",
     "validate_action_wiring_strict",
     "validate_against_catalog_logged",
     "validate_against_catalog_strict",
+    "validate_required_props_logged",
+    "validate_required_props_strict",
     "validate_ripple_spec",
     "validate_ripple_spec_logged",
     "validate_ripple_spec_strict",

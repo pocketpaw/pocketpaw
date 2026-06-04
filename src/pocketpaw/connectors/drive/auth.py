@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 import os
 
-from soul_protocol.engine.retrieval import Credential
+from soul_protocol.spec.retrieval import Credential
 
 from .errors import DriveAuthError
 
