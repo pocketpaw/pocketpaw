@@ -8,6 +8,14 @@
 # client on the very next turn. Per-turn KB/memory/history (appended after the
 # behavioral prefix) are excluded so the warm-client optimization still holds
 # for normal turns.
+#
+# Modified: 2026-06-05 (feat/surface-profile-bias-kill) — Added
+# test_sites_surface_behavior_prefix_changes_key (RED driver). Mirrors the home
+# flip guard for the surface dimension: a /sites-surface ctx and a non-sites
+# ctx must produce DIFFERENT behavior instructions (sites omits the ripple
+# block), so the persistent-client cache keys must differ. Fails today because
+# build_behavior_instructions ignores surface entirely — both ctxs get the same
+# ripple-laden instructions, the same prefix digest, and the same key.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -150,4 +158,73 @@ def test_real_home_behavior_instructions_flip_changes_key():
     assert key_before != key_after, (
         "a mid-session backend config change must rebuild the warm client so "
         "the agent reads the CURRENT backend state on the next message"
+    )
+
+
+def test_sites_surface_behavior_prefix_changes_key():
+    """RED driver (feat/surface-profile-bias-kill): build the ACTUAL behavior
+    instructions for a /sites-surface ctx vs a non-sites ctx and assert the
+    persistent-client cache keys differ.
+
+    On /sites the agent hand-authors a Svelte Paw Site, so its behavior
+    instructions must OMIT the ~20k-char INLINE_RIPPLE_SYSTEM_PROMPT ("default
+    to ui-spec" LAW); a non-sites surface keeps it. Different instructions →
+    different behavioral prefix → different prefix digest → different key, so
+    switching surfaces mid-session rebuilds the warm client with the right
+    instructions on the next message.
+
+    Fails today: build_behavior_instructions never gates the ripple block on
+    surface, so both ctxs produce identical ripple-laden instructions, an
+    identical prefix digest, and an identical key."""
+    # build_behavior_instructions / the surface value objects live in the
+    # enterprise layer; skip when the OSS-only test job runs without it.
+    import pytest
+
+    pytest.importorskip("pocketpaw_ee")
+    from pocketpaw_ee.cloud.chat.agent_service import (
+        ScopeContext,
+        ScopeKind,
+        build_behavior_instructions,
+    )
+    from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceKind, SurfaceMeta
+
+    def _ctx(surface_kind):
+        return ScopeContext(
+            kind=ScopeKind.SESSION,
+            scope_id="s1",
+            session_id="s1",
+            workspace_id="w1",
+            user_id="u1",
+            members=["u1"],
+            target_agent_id="a1",
+            agent_ids_in_scope=["a1"],
+            surface_context=SurfaceContext(
+                workspace_id="w1",
+                user_id="u1",
+                kind=surface_kind,
+                meta=SurfaceMeta(),
+                preamble="",
+            ),
+        )
+
+    sites = build_behavior_instructions(_ctx(SurfaceKind.SITES), backend_name="claude_agent_sdk")
+    non_sites = build_behavior_instructions(
+        _ctx(SurfaceKind.POCKETS_LIST), backend_name="claude_agent_sdk"
+    )
+    assert sites != non_sites, (
+        "behavior instructions must differ by surface — /sites omits the ripple "
+        "block that non-sites surfaces keep"
+    )
+
+    # Wrap each as ``AgentPool.run`` does: persona + behavior prefix, then a
+    # volatile per-turn KB tail that differs between the two (it must NOT mask
+    # the surface flip).
+    sp_sites = f"persona\n\n{sites}\n\n## Your Knowledge Base\nsites turn snippet"
+    sp_non_sites = f"persona\n\n{non_sites}\n\n## Your Knowledge Base\npockets turn snippet"
+    key_sites = ClaudeSDKBackend._client_cache_key(_opts(sp_sites), session_key="s1")
+    key_non_sites = ClaudeSDKBackend._client_cache_key(_opts(sp_non_sites), session_key="s1")
+    assert key_sites != key_non_sites, (
+        "the /sites and non-sites behavioral prefixes must produce different "
+        "cache keys so switching surfaces mid-session rebuilds the warm client "
+        "with surface-correct instructions"
     )

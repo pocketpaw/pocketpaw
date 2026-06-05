@@ -21,11 +21,23 @@
 # the svelte-track authoring skill (engine="svelte") instead of the
 # ripple/default marketing brain. Persisted setting is pocket.engine; this is
 # only the per-turn routing signal.
+# Changes: 2026-06-05 (feat/surface-profile-bias-kill) — added the typed
+# ``SurfaceProfile`` descriptor, the per-surface POLICY object (the data
+# backbone of the "ripple-default bias" fix). Its ``ripple_mode`` drives
+# whether ``build_behavior_instructions`` includes the ~20k-char
+# INLINE_RIPPLE_SYSTEM_PROMPT ("default to ui-spec" LAW); ``off`` omits it
+# so the /sites surface stops defaulting to a ripple ui-spec instead of
+# hand-authored Svelte. ``deny_mcp_tool_ids`` / ``skill_names`` /
+# ``allowed_sdk_tools`` / ``system_message_override`` are DECLARED here but
+# only ``ripple_mode`` is consumed in PR 1 — the tool/skill fields are the
+# tested DATA that PR 2 will wire (tool-deny + skill-surfacing). The
+# resolver lives in ``service.py`` (a pure SurfaceKind table).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Literal
 
 
 class SurfaceKind(StrEnum):
@@ -117,4 +129,40 @@ class SurfaceContext:
     preamble: str
 
 
-__all__ = ["SurfaceKind", "SurfaceMeta", "SurfaceContext"]
+@dataclass(frozen=True)
+class SurfaceProfile:
+    """The behavioral policy a surface imposes on the chat agent.
+
+    Resolved once per request from ``SurfaceKind`` via ``resolve_profile``.
+    The single source of truth for surface-specific agent shaping, so
+    consumers branch on a typed field rather than re-deriving rules from a
+    bare ``kind ==`` check scattered across the codebase.
+
+    Fields:
+      * ``ripple_mode`` — whether the ripple LAW applies. ``"on"`` (default,
+        every surface except /sites) keeps INLINE_RIPPLE_SYSTEM_PROMPT;
+        ``"off"`` omits it (the /sites row — the agent hand-authors Svelte,
+        so the "default to ui-spec" LAW is actively wrong); ``"trim"`` is
+        reserved for a future slimmed variant (declared, not yet used).
+      * ``allowed_sdk_tools`` — optional SDK-tool allowlist (``None`` = no
+        surface restriction). Declared for PR 2; not consumed in PR 1.
+      * ``deny_mcp_tool_ids`` — MCP tool ids this surface forbids. Declared
+        + tested DATA for PR 2's tool-deny pass; not enforced in PR 1.
+      * ``skill_names`` — skills this surface surfaces to the agent. Declared
+        + tested DATA for PR 2's skill-surfacing pass; not enforced in PR 1.
+      * ``system_message_override`` — optional full system-message swap for a
+        surface. Declared for a future PR; not consumed in PR 1.
+
+    PR 1 CONSUMES ``ripple_mode`` only. The other fields are intentionally
+    populated-but-inert so the descriptor's shape is locked now and later
+    PRs add enforcement without re-designing the primitive.
+    """
+
+    ripple_mode: Literal["on", "off", "trim"]
+    allowed_sdk_tools: frozenset[str] | None = None
+    deny_mcp_tool_ids: frozenset[str] = field(default_factory=frozenset)
+    skill_names: frozenset[str] = field(default_factory=frozenset)
+    system_message_override: str | None = None
+
+
+__all__ = ["SurfaceKind", "SurfaceMeta", "SurfaceContext", "SurfaceProfile"]

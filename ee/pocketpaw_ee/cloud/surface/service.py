@@ -10,16 +10,87 @@
 # Failure stays inert: any handler error logs and returns a
 # ``GENERIC`` context with empty preamble. The chat path is the consumer
 # — never let a surface failure break a chat send.
+#
+# Changes: 2026-06-05 (feat/surface-profile-bias-kill) — added
+# ``resolve_profile(surface_kind, meta) -> SurfaceProfile``, the resolver
+# for the new per-surface policy descriptor (the data backbone of the
+# "ripple-default bias" fix). It is a PURE table lookup keyed on
+# ``SurfaceKind`` (sync — no I/O), so unlike ``resolve_surface_context`` it
+# never touches Mongo or a handler. ONLY the ``sites`` row changes behavior
+# (``ripple_mode="off"`` so the ripple LAW is omitted on /sites); every
+# other kind AND any unmapped kind falls through to the default
+# (``ripple_mode="on"``) — today's behavior, zero regression. PR 1 consumes
+# ``ripple_mode`` only; the deny/skill fields on the sites row are tested
+# DATA that PR 2 will enforce.
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from pocketpaw_ee.cloud.surface.domain import SurfaceContext, SurfaceKind, SurfaceMeta
+from pocketpaw_ee.cloud.surface.domain import (
+    SurfaceContext,
+    SurfaceKind,
+    SurfaceMeta,
+    SurfaceProfile,
+)
 from pocketpaw_ee.cloud.surface.dto import SurfaceMetaRequest, SurfaceRequest
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Surface profile resolution (the "ripple-default bias" policy table)
+#
+# A SurfaceProfile is the per-surface behavioral policy the chat agent
+# applies. ``resolve_profile`` resolves it from the surface kind via a
+# single static table. Keep this a PURE function (no I/O): it runs once per
+# request on the hot chat path and must not block on Mongo or a handler.
+#
+# Only surfaces whose policy DIFFERS from the default appear in the table.
+# Everything else — and any unmapped/future kind — gets ``_DEFAULT_PROFILE``
+# (ripple on, no denies, no skills), which is exactly today's behavior. That
+# is the zero-regression guarantee: the only surface that changes is /sites.
+# ---------------------------------------------------------------------------
+
+# Ripple on, no surface-specific policy. The behavior every surface had
+# before this primitive existed.
+_DEFAULT_PROFILE = SurfaceProfile(ripple_mode="on")
+
+# Per-kind overrides. Add a row only when a surface needs to deviate from
+# ``_DEFAULT_PROFILE``. Today only /sites does: it hand-authors a Svelte Paw
+# Site, so the ripple LAW ("default to ui-spec") is wrong there.
+#
+# The ``deny_mcp_tool_ids`` / ``skill_names`` on the sites row are DECLARED +
+# tested DATA for PR 2 (tool-deny + skill-surfacing); PR 1 consumes only
+# ``ripple_mode``.
+_PROFILES: dict[SurfaceKind, SurfaceProfile] = {
+    SurfaceKind.SITES: SurfaceProfile(
+        ripple_mode="off",
+        deny_mcp_tool_ids=frozenset(
+            {
+                "mcp__pocketpaw_sites_manager__create_landing_site",
+                "mcp__pocketpaw_pocket_specialist__create",
+            }
+        ),
+        skill_names=frozenset({"create-svelte-site"}),
+    ),
+}
+
+
+def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProfile:
+    """Resolve a ``SurfaceKind`` to its behavioral ``SurfaceProfile``.
+
+    Pure table lookup — no I/O, safe to call once per request on the hot
+    chat path. Unknown / unmapped kinds (and every kind whose policy matches
+    the default) return ``_DEFAULT_PROFILE`` (``ripple_mode="on"``), so the
+    only surface that deviates from today's behavior is /sites.
+
+    ``meta`` is accepted for forward compatibility — a future surface may
+    branch its profile on a meta hint (e.g. a /pocket surface in
+    widget-focus mode) — but no current profile reads it.
+    """
+    return _PROFILES.get(surface_kind, _DEFAULT_PROFILE)
 
 
 # Handler registry: SurfaceKind -> async callable returning the preamble.
@@ -199,4 +270,4 @@ async def resolve_surface_context(
     )
 
 
-__all__ = ["resolve_surface_context"]
+__all__ = ["resolve_surface_context", "resolve_profile"]
