@@ -46,7 +46,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
-from pocketpaw_ee.cloud.surface import resolve_profile
+from pocketpaw_ee.cloud.surface import resolve_profile, resolve_surface_context
 
 logger = logging.getLogger(__name__)
 
@@ -655,6 +655,21 @@ async def execute_run(spec: RunSpec) -> None:
     except Exception:
         logger.exception("ensure session failed for run %s", spec.run_id)
         ctx.session_id = None
+
+    # Mirror agent_router:77 — re-resolve the surface context from the spec.
+    # The HTTP handler resolves ``ctx.surface_context`` on ITS request ctx,
+    # but submits a RunSpec to the executor, which rebuilds its own ctx via
+    # resolve_scope_context (scope only — surface_context stays None). Without
+    # this the whole SurfaceProfile gate silently no-ops on the /agent path:
+    # the tool-deny (run_core:457), the ripple-block omission + create-svelte
+    # skill (build_behavior_instructions), and the surface preamble
+    # (build_dynamic_context) all see None and fall back to the legacy shape.
+    # The resolver never raises; a missing/legacy hint -> GENERIC + empty deny.
+    ctx.surface_context = await resolve_surface_context(
+        ctx.workspace_id,
+        ctx.user_id,
+        {"surface": spec.surface, "meta": spec.surface_meta},
+    )
 
     await _mark_running(spec.run_id)
     await _broadcast_agent_typing(ctx, active=True)

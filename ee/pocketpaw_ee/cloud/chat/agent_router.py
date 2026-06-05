@@ -118,6 +118,11 @@ async def post_agent_chat(
         attachments=body.attachments or [],
         mentions=[],
         reply_to=body.reply_to,
+        # Carry the surface hint to the executor so it can re-resolve
+        # ``ctx.surface_context`` — the resolution at :77 lives on THIS
+        # request's ctx and is dropped when the run is submitted.
+        surface=body.surface,
+        surface_meta=body.surface_meta or {},
     )
     # create_run is idempotent on (workspace, client_message_id) — when a doc
     # already exists, re-use its run_id so the executor + SSE stream both
