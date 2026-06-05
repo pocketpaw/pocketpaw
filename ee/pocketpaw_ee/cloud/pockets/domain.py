@@ -19,6 +19,11 @@ Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
 layer + generator can read which track the pocket was built on and, for
 svelte sites, the hand-written source to materialize. Defaults
 (``engine="ripple"``, ``source=None``) keep legacy pockets unchanged.
+Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
+chunk ②) — added optional ``Pocket.surface_profile`` (the JSON-shaped
+per-entity surface-profile override dict, or ``None``) so the wire layer +
+the entity-aware resolve_profile (chunk ①) can read an entity pocket's
+ripple_mode / tools / skills override. ``None`` for legacy pockets.
 """
 
 from __future__ import annotations
@@ -117,6 +122,11 @@ class Pocket:
     # SvelteKit files the generator writes onto the skeleton. ``None`` for
     # ripple pockets.
     source: dict[str, str] | None = None
+    # Optional per-entity surface-profile override (the JSON-shaped dict that
+    # mirrors the surface-domain ``SurfaceProfile``). Consumed by the
+    # entity-aware resolve_profile (entity-rooms chunk ①). ``None`` = use the
+    # surface-kind default (legacy pockets).
+    surface_profile: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

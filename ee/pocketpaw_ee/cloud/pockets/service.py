@@ -234,6 +234,23 @@ def _widget_to_domain(w: _WidgetDoc) -> Widget:
     )
 
 
+def _surface_profile_to_dict(sp: Any) -> dict[str, Any] | None:
+    """Normalize a pocket's ``surface_profile`` to the JSON wire shape.
+
+    Accepts the Beanie ``PocketSurfaceProfile`` sub-model, a plain dict (an
+    already-JSON value), or ``None`` (legacy pockets / no override). Returns a
+    plain dict (or ``None``) so the domain + wire layers never carry the
+    Pydantic sub-model. Entity-rooms chunk ②.
+    """
+    if sp is None:
+        return None
+    if hasattr(sp, "model_dump"):
+        return sp.model_dump()
+    if isinstance(sp, dict):
+        return dict(sp)
+    return None
+
+
 def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
     return Pocket(
         id=str(doc.id),
@@ -264,6 +281,11 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         # as ``engine="ripple"``, ``source=None``).
         engine=getattr(doc, "engine", "ripple"),
         source=getattr(doc, "source", None),
+        # Entity-rooms chunk ② — optional per-entity surface-profile override.
+        # ``getattr`` for legacy docs that pre-date the field. Dumped to a plain
+        # JSON dict so the domain layer carries the wire shape, not the Beanie
+        # sub-model. ``None`` for legacy pockets.
+        surface_profile=_surface_profile_to_dict(getattr(doc, "surface_profile", None)),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -877,6 +899,7 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         pattern=body.pattern,
         engine=body.engine,
         source=body.source,
+        surface_profile=body.surface_profile,
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)

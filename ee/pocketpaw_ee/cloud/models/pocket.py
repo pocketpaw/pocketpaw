@@ -32,11 +32,20 @@ SvelteKit source map a svelte-engine site materializes from (the svelte
 analog of ``rippleSpec``). ``engine`` defaults to ``"ripple"`` and
 ``source`` to ``None`` so every existing pocket reads back as a ripple
 pocket with no source map — additive, no Mongo migration.
+Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
+chunk ②) — added the optional ``PocketSurfaceProfile`` sub-model and the
+``Pocket.surface_profile`` field: a per-entity override that MIRRORS the
+surface-domain ``SurfaceProfile`` (``ripple_mode`` / ``allowed_sdk_tools``
+/ ``deny_mcp_tool_ids`` / ``skill_names`` / ``system_message_override``)
+with JSON-friendly types (lists, not frozensets) for Mongo. ALL sub-fields
+optional; the whole field defaults to ``None`` → zero behaviour change for
+existing pockets, no Mongo migration. Consumed by the entity-aware
+``resolve_profile`` (chunk ①), which hydrates a ``SurfaceProfile`` from it.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from beanie import Indexed
 from bson import ObjectId
@@ -76,6 +85,32 @@ class Widget(BaseModel):
     spec: dict[str, Any] | None = None
     assignedAgent: str | None = Field(default=None, alias="assignedAgent")
     position: WidgetPosition = Field(default_factory=WidgetPosition)
+
+    model_config = {"populate_by_name": True}
+
+
+class PocketSurfaceProfile(BaseModel):
+    """Per-entity surface-profile override embedded on a Pocket.
+
+    MIRRORS the surface-domain ``SurfaceProfile``
+    (``ee/.../surface/domain.py``) field-for-field, but with JSON-friendly
+    types — plain ``list``s instead of ``frozenset``s — so it round-trips
+    cleanly through Mongo and the wire. ALL fields are optional: a populated
+    override may set only the dimensions an entity cares about and leave the
+    rest ``None`` / empty.
+
+    The entity-aware ``resolve_profile`` (entity-rooms chunk ①) hydrates a
+    real ``SurfaceProfile`` from this, coercing the lists back to frozensets
+    (roughly ``SurfaceProfile(**pocket.surface_profile)`` with the set
+    fields wrapped). ``ripple_mode=None`` means "no opinion — fall back to
+    the surface-kind default."
+    """
+
+    ripple_mode: Literal["on", "off", "trim"] | None = None
+    allowed_sdk_tools: list[str] | None = None
+    deny_mcp_tool_ids: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
+    system_message_override: str | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -139,6 +174,10 @@ class Pocket(TimestampedDocument):
     # performed inside this pocket. Each entry is free-form so built-in IDs,
     # workspace MCP refs, and inline declarative tools can coexist.
     tool_specs: list[dict[str, Any]] = Field(default_factory=list)
+    # Optional per-entity surface-profile override. Consumed by the
+    # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
+    # surface-kind default.
+    surface_profile: PocketSurfaceProfile | None = None
 
     model_config = {"populate_by_name": True}
 
