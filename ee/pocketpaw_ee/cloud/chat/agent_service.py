@@ -65,7 +65,7 @@ from pocketpaw.ripple import (
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
 from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
-from pocketpaw_ee.cloud.surface import SurfaceContext
+from pocketpaw_ee.cloud.surface import SurfaceContext, resolve_profile
 
 logger = logging.getLogger(__name__)
 
@@ -586,7 +586,27 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     HOME_POCKET_PROMPT`` and NOT the delegation rule, because the home
     agent mutates widgets directly via the ``add_widget`` MCP tool rather
     than delegating to the pocket specialist.
+
+    Surface gating ("ripple-default bias" fix): the resolved per-request
+    ``SurfaceProfile`` decides whether the ripple LAW applies at all. On the
+    /sites surface the agent hand-authors a Svelte Paw Site, so its profile
+    has ``ripple_mode="off"`` and we OMIT INLINE_RIPPLE_SYSTEM_PROMPT,
+    POCKET_DELEGATION_RULE, and the inline ripple-creation prompt — otherwise
+    the "default to ui-spec" LAW biases the agent toward emitting a ripple
+    ui-spec instead of Svelte. Every other surface (and the legacy
+    ``surface_context is None`` path) keeps ``ripple_mode="on"`` — unchanged.
+    The profile is the single source of truth; we never branch on a bare
+    ``kind == SITES`` check here.
     """
+    # Resolve the surface policy once. ``surface_context is None`` is the
+    # legacy path — default to ripple ON (do NOT omit) so surface-less clients
+    # keep today's behavior exactly. Only an explicit ``ripple_mode="off"``
+    # profile (the /sites row) suppresses the ripple block.
+    ripple_off = (
+        ctx.surface_context is not None
+        and resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta).ripple_mode == "off"
+    )
+
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
     # Composio auth/search guidance is injected whenever Composio is
@@ -615,15 +635,23 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         # specialist-delegation rule (MCP backends) or the heavy
         # interaction prompt (CLI backends) — both carry the contradicting
         # "delegate, don't call add_widget" framing. Just the base ripple
-        # conventions, then HOME_POCKET_PROMPT.
+        # conventions, then HOME_POCKET_PROMPT. (No /sites home pocket exists,
+        # so the surface gate doesn't apply here.)
         parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
     elif backend_name in _MCP_POCKET_BACKENDS:
-        parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
-        parts.append(POCKET_DELEGATION_RULE)
+        # Surface gate: omit the ripple LAW + delegation rule on a
+        # ripple-off surface (/sites). The agent there hand-authors Svelte —
+        # the "default to ui-spec" LAW would bias it away from that.
+        if not ripple_off:
+            parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
+            parts.append(POCKET_DELEGATION_RULE)
     else:
         creation_prompt, interaction_prompt = get_pocket_prompts(backend_name=backend_name)
         if ctx.intent == "pocket_create":
-            parts.append(creation_prompt)
+            # The creation prompt is the ripple-authoring LAW for CLI
+            # backends — omit it on a ripple-off surface for the same reason.
+            if not ripple_off:
+                parts.append(creation_prompt)
         elif ctx.pocket_id:
             # build_behavior_instructions is sync — it cannot await the
             # backend-summary read. The main chat agent delegates edits
@@ -631,7 +659,7 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
             # "configured state unknown — call get_pocket to check",
             # and get_pocket now carries the real backend summary.
             parts.append(fill_current_pocket(interaction_prompt, ctx.pocket_id, None))
-        else:
+        elif not ripple_off:
             parts.append(INLINE_RIPPLE_SYSTEM_PROMPT)
     # Home surface: append the home-surface prompt so the agent calls
     # add_widget for an explicit widget request and answers directly

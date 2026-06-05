@@ -1,3 +1,15 @@
+# test_agent_service_tools_context.py — Toolset assembly + context block helpers.
+#
+# Modified: 2026-06-05 (feat/surface-profile-bias-kill) — Added two surface-gate
+# tests for the "ripple-default bias" RED phase:
+#   * test_sites_surface_omits_ripple_block (RED driver) — proves that a /sites
+#     surface ScopeContext must NOT carry INLINE_RIPPLE_SYSTEM_PROMPT. Fails
+#     today because build_behavior_instructions never gates the ripple block on
+#     surface, so the agent on /sites still gets the full "default to ui-spec"
+#     LAW and writes ripple instead of hand-authored Svelte.
+#   * test_non_sites_surface_keeps_ripple_block (no-regression guard) — locks in
+#     current behavior for non-sites / surface-less scopes so the fix doesn't
+#     over-omit. Passes today.
 """Toolset assembly + context block helpers."""
 
 from __future__ import annotations
@@ -12,7 +24,9 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     build_context_block,
     build_knowledge_context,
 )
+from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceKind, SurfaceMeta
 
+from pocketpaw.ripple import INLINE_RIPPLE_SYSTEM_PROMPT
 from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
 
 
@@ -445,6 +459,120 @@ def test_non_home_pocket_scope_keeps_specialist_delegation_rule():
     )
     block = build_behavior_instructions(ctx, backend_name="claude_agent_sdk")
     assert "<pocket-delegation>" in block
+
+
+# ---------------------------------------------------------------------------
+# Surface gate — the "ripple-default bias" (feat/surface-profile-bias-kill).
+#
+# build_behavior_instructions injects the full ~20k-char
+# INLINE_RIPPLE_SYSTEM_PROMPT ("default to ui-spec / use the widget" LAW) on
+# every turn, gated only on backend + pocket_type, NEVER on surface. On the
+# /sites surface the user is describe-to-creating a hand-authored Svelte Paw
+# Site, so the ripple LAW is actively wrong — it biases the agent toward
+# emitting a ui-spec instead of writing Svelte. The fix adds a
+# SurfaceProfile-driven branch that OMITS the ripple block when the surface is
+# SITES. These two tests encode that desired behavior.
+# ---------------------------------------------------------------------------
+
+
+def _sites_surface_ctx() -> ScopeContext:
+    """A SESSION scope whose resolved surface is /sites.
+
+    Surface arrives ONLY via the optional ``surface_context`` field — there is
+    no ``surface_kind`` shortcut on ScopeContext. Tenancy (workspace_id,
+    user_id) is required on SurfaceContext at construction per the entity
+    rules, and ``meta`` / ``preamble`` are required positional-ish fields, so
+    populate them explicitly.
+    """
+    return ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        surface_context=SurfaceContext(
+            workspace_id="w1",
+            user_id="u1",
+            kind=SurfaceKind.SITES,
+            meta=SurfaceMeta(),
+            preamble="",
+        ),
+    )
+
+
+def test_sites_surface_omits_ripple_block():
+    """RED driver: on the /sites surface the agent is hand-authoring a Svelte
+    Paw Site, so it must NOT receive INLINE_RIPPLE_SYSTEM_PROMPT (the "default
+    to ui-spec / use the widget" LAW). Today this FAILS — the ripple block is
+    gated on backend + pocket_type only and is always injected for an MCP
+    backend, so the sites agent gets the full ripple LAW and defaults to a
+    ui-spec instead of Svelte."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    block = build_behavior_instructions(_sites_surface_ctx(), backend_name="claude_agent_sdk")
+    # The whole inline ripple prompt must be gone.
+    assert INLINE_RIPPLE_SYSTEM_PROMPT not in block, (
+        "INLINE_RIPPLE_SYSTEM_PROMPT must be omitted on the /sites surface — "
+        "its 'default to ui-spec' LAW biases the agent away from hand-authored "
+        "Svelte"
+    )
+    # A couple of distinctive ripple phrases must also be absent, so a future
+    # refactor that splits the block can't silently leak the LAW back in.
+    assert "<ripple>" not in block, "the <ripple> framing tag leaked onto /sites"
+    assert "Default to ui-spec whenever the answer has structure" not in block, (
+        "the ripple 'default to ui-spec' decision rule leaked onto /sites"
+    )
+
+
+def test_non_sites_surface_keeps_ripple_block():
+    """No-regression guard (NOT a RED driver): a non-sites surface — and a
+    surface-less scope — must KEEP INLINE_RIPPLE_SYSTEM_PROMPT. This locks in
+    today's behavior so the SITES omission fix doesn't over-omit and strip
+    ripple from ordinary chat surfaces. Passes today."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    # A non-sites resolved surface (the /pockets index) keeps ripple.
+    pockets_ctx = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+        surface_context=SurfaceContext(
+            workspace_id="w1",
+            user_id="u1",
+            kind=SurfaceKind.POCKETS_LIST,
+            meta=SurfaceMeta(),
+            preamble="",
+        ),
+    )
+    block = build_behavior_instructions(pockets_ctx, backend_name="claude_agent_sdk")
+    assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
+        "a non-sites surface must keep INLINE_RIPPLE_SYSTEM_PROMPT — the SITES "
+        "omission must not regress ordinary chat surfaces"
+    )
+
+    # And the legacy surface-less path (surface_context is None) also keeps it.
+    legacy_ctx = ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        session_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+        agent_ids_in_scope=["a1"],
+    )
+    legacy_block = build_behavior_instructions(legacy_ctx, backend_name="claude_agent_sdk")
+    assert INLINE_RIPPLE_SYSTEM_PROMPT in legacy_block, (
+        "the surface-less legacy path must keep INLINE_RIPPLE_SYSTEM_PROMPT"
+    )
 
 
 # ---------------------------------------------------------------------------
