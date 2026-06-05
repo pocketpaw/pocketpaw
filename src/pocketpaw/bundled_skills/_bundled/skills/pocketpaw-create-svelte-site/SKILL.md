@@ -1,15 +1,3 @@
-<!--
-  pocketpaw-create-svelte-site/SKILL.md — Created 2026-06-04 (feat/sites-svelte-engine).
-  The Paw Sites "Svelte track" authoring brain. Copy-only authoring like its sibling
-  pocketpaw-create-paw-site (#1339 deterministic bypass — no get_widget_spec, no
-  rippleSpec, no catalog/validator/strict-gate), but the payload is hand-written
-  SvelteKit COMPONENTS instead of a copy object an assembler turns into widgets. The
-  agent writes premium Svelte via the design skills, assembles the §4.3 source map, and
-  calls mcp__pocketpaw_sites_manager__create_svelte_site (which persists the pocket
-  type=site / pattern=landing / engine=svelte / source=<map> via agent_create), then
-  publishes. Bakes in the §5.3 resting-state authoring rule (prerender bakes the resting
-  frame; never set final state only in onMount).
--->
 ---
 name: pocketpaw-create-svelte-site
 description: |
