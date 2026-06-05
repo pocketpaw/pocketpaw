@@ -9,6 +9,14 @@
 # surfaces share ONE code path that reads the pocket, derives the theme, and
 # names the site.
 #
+# Updated 2026-06-04 (feat/sites-svelte-engine — Paw Sites "Svelte track"):
+# publish_pocket() now also reads the pocket's ``engine`` ("ripple" | "svelte")
+# and, for svelte sites, its ``source`` map from the wire dict, and forwards
+# both to publish() → generator.build(), which forks STAGE 2 on the engine
+# (design spec §4.2). Ripple pockets read ``engine="ripple"`` / ``source=None``
+# and behave exactly as before. ``ripple_spec`` is now optional on publish()
+# (svelte sites have none).
+#
 # publish() runs: mint site id + signed key → generate +
 # smoke-gate the SvelteKit app (generator_client) → PUT the Worker into the WfP
 # dispatch namespace → persist the Site. add_domain()/domain_status() drive
@@ -185,9 +193,11 @@ async def publish(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
-    ripple_spec: dict[str, Any],
+    ripple_spec: dict[str, Any] | None = None,
     theme: dict[str, Any],
     name: str = "",
+    engine: str = "ripple",
+    source: dict[str, str] | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -237,6 +247,8 @@ async def publish(
         title=site_name,
         capture_api_base=_capture_base(),
         capture_signed_key=signed_key,
+        engine=engine,
+        source=source,
     )
 
     # Local mode only when the caller did NOT inject a CF client (tests inject a
@@ -385,6 +397,14 @@ async def publish_pocket(
     pocket = await pockets_service.get(pocket_id, user_id)
     ripple_spec = pocket.get("rippleSpec") or {}
     theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    # Paw Sites "Svelte track" — the pocket carries which generation engine it
+    # was authored on and, for svelte sites, the hand-written source map. The
+    # wire dict from the pockets service exposes both (``engine`` defaults to
+    # "ripple", ``source`` to None). Forwarded so ``publish`` → ``build`` forks
+    # STAGE 2 on the engine (design spec §4.2): svelte materializes ``source``
+    # instead of compiling ``rippleSpec``.
+    engine = pocket.get("engine") or "ripple"
+    source = pocket.get("source") if isinstance(pocket.get("source"), dict) else None
 
     return await publish(
         workspace_id=workspace_id,
@@ -392,6 +412,8 @@ async def publish_pocket(
         pocket_id=pocket_id,
         ripple_spec=ripple_spec,
         theme=theme,
+        engine=engine,
+        source=source,
         name=name or pocket.get("name", ""),
         _generator=_generator,
         _cloudflare=_cloudflare,

@@ -51,6 +51,20 @@
 # unknown (zero ops actually applied). That silent-failure state — the
 # agent-mode root-replace symptom — now returns ``ok=False,
 # action="failed"`` with the reason in ``error`` + ``warnings``.
+# Modified: 2026-06-04 (feat/sites-landing-brain) — ``_validate_and_persist``
+# now forwards ``hints.type`` + ``hints.pattern`` into the persist tool's
+# args so the marketing-site brain's type="site" + pattern="landing"
+# reach the persisted pocket. Previously these were dropped here (the
+# tool_args dict only carried name/description/icon/color/target_pocket_id),
+# so sites persisted as type="custom", pattern=None.
+# Modified: 2026-06-04 (feat/sites-validator-site-aware) — added the
+# marketing pack (navbar/feature-grid/testimonial/logo-cloud/cta/footer; hero
+# + pricing-table were already present) to ``_STARTER_WIDGET_KINDS`` and a
+# ``landing`` bucket to ``rich_widgets_by_pattern``. The manifest already
+# carries these widgets; the curated agent-mode hint list did not, so a direct
+# agent-mode landing draft couldn't reach for them. With this, direct agent
+# mode (no template short-circuit) can compose a real marketing page instead
+# of falling back to dashboard/showcase widgets.
 """Mode-specific adapters for the pocket specialist's create + edit endpoints.
 
 The MCP tool handlers (``mcp_tool._create_handler`` / ``_edit_handler``)
@@ -97,6 +111,18 @@ _STARTER_WIDGET_KINDS: tuple[str, ...] = (
     "section",
     "page-header",
     "hero",
+    # marketing pack (use when pattern=landing / a Paw Site) — these compose
+    # a real sales page by conversion role. Reach for the marketing widget,
+    # NOT a grid+card hand-roll: navbar (sticky nav + CTA), feature-grid
+    # (services/benefits), testimonial + logo-cloud (social proof),
+    # pricing-table (tiers), cta (conversion band), footer (sitemap). hero +
+    # pricing-table above double as the landing hero + pricing.
+    "navbar",
+    "feature-grid",
+    "testimonial",
+    "logo-cloud",
+    "cta",
+    "footer",
     # full-fledged app shell (use when the brief is "an app for X")
     "app-shell",
     "sidebar",
@@ -438,6 +464,20 @@ def _draft_kit_response(input: Any, *, started: float) -> Any:
                 "comment-thread",
                 "notification-center",
             ],
+            # A Paw Site landing page is composed from the marketing pack by
+            # conversion role — not grid+card primitives. Top→bottom: navbar →
+            # hero → feature-grid (services) → testimonial + logo-cloud (proof)
+            # → pricing-table (tiers) → cta band → flat lead form → footer.
+            "landing": [
+                "navbar",
+                "hero",
+                "feature-grid",
+                "testimonial",
+                "logo-cloud",
+                "pricing-table",
+                "cta",
+                "footer",
+            ],
         },
         "widget_quality_bar": (
             "If you're tempted to compose a dashboard out of a 3-stat grid "
@@ -617,6 +657,12 @@ async def _validate_and_persist(
         "description": getattr(hints, "description", None),
         "icon": getattr(hints, "icon", None),
         "color": getattr(hints, "color", None),
+        # Create intent (e.g. the marketing-site brain's type="site" +
+        # pattern="landing"). Forwarded so the stamped intent reaches the
+        # persisted pocket; the persist tool keeps service defaults when
+        # these are None.
+        "type": getattr(hints, "type", None),
+        "pattern": getattr(hints, "pattern", None),
         "target_pocket_id": getattr(hints, "target_pocket_id", None),
     }
 

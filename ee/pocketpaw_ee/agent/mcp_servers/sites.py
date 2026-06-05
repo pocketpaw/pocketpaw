@@ -45,8 +45,15 @@ SERVER_NAME = "pocketpaw_sites_manager"
 # Claude Code namespaces in-process MCP tools as ``mcp__<server>__<tool>``.
 # Allowlist entries must use this exact form.
 PUBLISH_TOOL_ID = f"mcp__{SERVER_NAME}__publish"
+# The deterministic landing-site create tool registers on the SAME server (see
+# sites_create.py — two create_sdk_mcp_server calls under one name would clobber
+# each other, so create + publish share one server object).
+CREATE_LANDING_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_landing_site"
+# The svelte-track create tool also registers on this SAME server (see
+# sites_create.py).
+CREATE_SVELTE_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_svelte_site"
 
-SITES_TOOL_IDS = (PUBLISH_TOOL_ID,)
+SITES_TOOL_IDS = (PUBLISH_TOOL_ID, CREATE_LANDING_SITE_TOOL_ID, CREATE_SVELTE_SITE_TOOL_ID)
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -196,15 +203,32 @@ def build_sites_manager_server() -> tuple[str, Any] | None:
     async def publish(args):  # type: ignore[no-untyped-def]
         return await _publish_handler(args)
 
+    # Register the deterministic landing-site create tool on this SAME server.
+    # The SKILL flow is: produce the `content` copy → create_landing_site →
+    # publish, so the two hops sit on one allowlisted server. Built here (not as a
+    # separate create_sdk_mcp_server) because the claude_sdk registration loop
+    # keys servers by name and a second server under this name would clobber it.
+    from pocketpaw_ee.agent.mcp_servers.sites_create import (
+        make_create_landing_site_tool,
+        make_create_svelte_site_tool,
+    )
+
+    create_landing_site = make_create_landing_site_tool(tool)
+    # The svelte-track create tool — same server, so the author-source-map →
+    # create_svelte_site → publish hops sit on one allowlisted server.
+    create_svelte_site = make_create_svelte_site_tool(tool)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[publish],
+        tools=[publish, create_landing_site, create_svelte_site],
     )
     return SERVER_NAME, server
 
 
 __all__ = [
+    "CREATE_LANDING_SITE_TOOL_ID",
+    "CREATE_SVELTE_SITE_TOOL_ID",
     "PUBLISH_TOOL_ID",
     "SERVER_NAME",
     "SITES_TOOL_IDS",

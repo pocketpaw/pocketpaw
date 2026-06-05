@@ -10,6 +10,10 @@
 # missing-dir test now patches _SKILLS_DIR; added coverage for
 # bundled_skills_plugin_dir() (the path the claude_agent_sdk backend passes
 # via plugins=) and for create-site landing in the mirror.
+# Updated: 2026-06-03 (feat/sites-landing-brain, Task P2) — added coverage
+# for the new pocketpaw-create-paw-site marketing brain: it ships in the
+# mirror AND the local plugin, and carries its load-bearing SSR guardrails
+# (flat lead form, tiers pricing, no accordion, anchor CTAs, marketing hero).
 """Tests for ``pocketpaw.bundled_skills.installer.install_bundled_skills``.
 
 Each test installs into a tmp_path destination (no touching the user's
@@ -165,6 +169,60 @@ def test_install_includes_create_site(tmp_path: Path) -> None:
     assert "name: pocketpaw-create-site" in site_file.read_text()
 
 
+def test_install_includes_create_paw_site(tmp_path: Path) -> None:
+    """The marketing landing brain ships in the mirror. A dropped
+    create-paw-site skill would route every new-site request back to the
+    dashboard create-pocket flow → the broken-dashboard render."""
+    results = install_bundled_skills(destination_root=tmp_path)
+    assert any(r.name == "pocketpaw-create-paw-site" for r in results)
+
+    skill_file = tmp_path / "pocketpaw-create-paw-site" / "SKILL.md"
+    assert skill_file.is_file()
+    assert "name: pocketpaw-create-paw-site" in skill_file.read_text()
+
+
+def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> None:
+    """The brain's body must keep its load-bearing DETERMINISTIC contract: the
+    agent writes COPY ONLY and calls the deterministic ``create_landing_site``
+    tool — it does NOT draft a rippleSpec and does NOT route through the
+    pocket specialist's create/redraft loop (the path that silently downgraded
+    landing pages to generic dashboard widgets). A silent edit that reintroduced
+    spec-drafting or the specialist route would bring the downgrade back. We pin
+    discriminating tokens, not prose, so wording can evolve."""
+    install_bundled_skills(destination_root=tmp_path)
+    body = (tmp_path / "pocketpaw-create-paw-site" / "SKILL.md").read_text()
+
+    # The site identity it stamps (the published page renders as a landing page).
+    assert 'pattern="landing"' in body
+    assert 'type="site"' in body
+
+    # The deterministic create tool is the path — the agent calls it, the tool
+    # owns the structure.
+    assert "create_landing_site" in body
+
+    # Copy-only contract: the agent does NOT compose a rippleSpec. Pin the
+    # explicit "copy only" steer AND the "do NOT compose" instruction.
+    assert "COPY ONLY" in body
+    assert "do NOT compose" in body
+
+    # The old downgrade route must NOT be the active instruction. It may only
+    # appear under a negative ("do not call pocket_specialist__create"), so we
+    # assert the negative phrasing is present rather than banning the token.
+    lowered = body.lower()
+    assert "do not call" in lowered and "pocket_specialist__create" in body
+
+    # The marketing widgets the page is built from are still named, so a silent
+    # edit that drops the marketing steer (back toward a dashboard) is caught.
+    for widget in ("navbar", "feature-grid", "testimonial", "pricing-table", "cta", "footer"):
+        assert widget in body, f"marketing widget {widget!r} no longer named in the brain"
+
+    # The dashboard anti-pattern is still warned against (no hero+grid KPI page).
+    assert "hero + grid" in body or "hero+grid" in body
+    # Pricing uses tiers; CTAs navigate by anchor not on_click.
+    assert "tiers" in body
+    assert "on_click" in body
+
+
 # ---------------------------------------------------------------------------
 # Local-plugin entry (the claude_agent_sdk path)
 # ---------------------------------------------------------------------------
@@ -194,6 +252,9 @@ def test_plugin_dir_points_at_valid_local_plugin() -> None:
     names = {p.name for p in skills_dir.iterdir() if p.is_dir()}
     assert "pocketpaw-create-site" in names
     assert "pocketpaw-create-pocket" in names
+    # The marketing landing brain must reach the claude_agent_sdk backend
+    # too — it's the default backend, where new-site requests land.
+    assert "pocketpaw-create-paw-site" in names
 
 
 def test_plugin_dir_none_when_manifest_missing(monkeypatch, tmp_path: Path) -> None:

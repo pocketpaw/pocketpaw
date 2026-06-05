@@ -7,12 +7,12 @@ description: |
   this pocket", "turn this dashboard into a website", or
   "/pocketpaw-create-site". A site is always published FROM a pocket: if
   the user describes a brand-new site ("build a dentist landing site"),
-  first create the pocket with the create-pocket flow, then publish it.
-  The skill bundles the publish flow and the create-pocket → publish
-  two-step so the chat agent reuses pocket creation instead of rebuilding
-  it. Loading this skill keeps the chat agent's always-on system prompt
-  small while still delivering the full publish flow when a site is
-  actually requested.
+  build the landing pocket with the create-paw-site marketing brain, then
+  publish it. The skill bundles the publish flow and the create-paw-site →
+  publish two-step so the chat agent reuses the marketing brain instead of
+  rebuilding the page. Loading this skill keeps the chat agent's always-on
+  system prompt small while still delivering the full publish flow when a
+  site is actually requested.
 ---
 
 # Publish a Pocket as a Paw Site
@@ -58,25 +58,34 @@ online. You already have the pocket id — it's the current pocket.
 That's it. Do **not** re-create or edit the pocket — publish the one
 that's already there.
 
-### Path B — a brand-new site from a description (create-pocket → publish)
+### Path B — a brand-new site from a description (create-paw-site → publish)
 
 If the user describes a site that does **not** exist yet — "build a
 dentist landing site", "make me a marketing page for my bakery" — a site
-still has to come from a pocket. So this is a **two-step**:
+still has to come from a pocket, and it must render as a **marketing
+landing page**, not a dashboard. So this is a **two-step**:
 
-1. **Create the pocket first.** Invoke ``Skill('pocketpaw-create-pocket')``
-   and follow it to build the pocket from the user's description (it picks
-   the pattern, focal widget, mock data, and persists via
-   ``mcp__pocketpaw_pocket_specialist__create``). For a marketing/landing
-   site, lean on the marketing patterns — a ``page-header`` / hero, a
-   value section, and a **contact form** (``form-layout``) so the
-   published site can capture leads out of the box.
-2. **Then publish that pocket.** Take the pocket id the create flow
-   returned and call ``mcp__pocketpaw_sites_manager__publish`` with it.
+1. **Build the landing pocket with the marketing brain.** Invoke
+   ``Skill('pocketpaw-create-paw-site')`` and follow it. That skill is the
+   dedicated marketing author: it composes the page by conversion role
+   (navbar → hero → services → social proof → pricing → CTA → lead form →
+   footer), stamps the pocket ``type="site"`` + ``pattern="landing"``, and
+   persists via ``mcp__pocketpaw_pocket_specialist__create``. It bakes in
+   the static-render rules — the lead form is **flat** ``input`` /
+   ``button{type:"submit"}`` with real ``name``s (never the ``form`` /
+   ``newsletter`` widget, which nests an invalid ``<form>``),
+   ``pricing-table`` uses ``tiers``, CTAs are anchor ``href``s, and the
+   hero is the marketing Hero (not the dashboard ``hero+grid``).
+2. **Then publish that pocket.** Take the pocket id the create-paw-site
+   flow returned and call ``mcp__pocketpaw_sites_manager__publish`` with
+   it.
 3. Show the user the live ``url`` + the link to **/sites**.
 
-**Do NOT rebuild pocket creation here.** Reuse the create-pocket skill for
-the spec; this skill only adds the publish hop on top.
+**Do NOT rebuild the landing page here, and do NOT route a new site
+through ``pocketpaw-create-pocket``** — that builds a dashboard pocket,
+which publishes as a broken dashboard, not a landing page. Use
+``pocketpaw-create-paw-site`` for the spec; this skill only adds the
+publish hop on top.
 
 ## Calling the publish tool
 
@@ -90,7 +99,7 @@ Call ``mcp__pocketpaw_sites_manager__publish`` with the pocket id:
 ```
 
 - ``pocket_id`` (**required**) — the pocket to publish. In Path A it's the
-  current pocket; in Path B it's the one the create-pocket flow just made.
+  current pocket; in Path B it's the one the create-paw-site flow just made.
 - ``name`` (optional) — the site name. Omit it to inherit the pocket's own
   name.
 
@@ -130,8 +139,9 @@ A publish is done right when:
 1. **The site came from a pocket.** You published an existing pocket (Path
    A) or created one first (Path B) — you never tried to "publish" without
    a pocket id.
-2. **You reused create-pocket for new sites.** No hand-rolled pocket
-   creation inside this skill.
+2. **You reused create-paw-site for new sites.** No hand-rolled pocket
+   creation inside this skill — and a new site went through the marketing
+   brain, not the dashboard create-pocket flow.
 3. **You showed the live URL.** The user got the ``url`` from the response
    and a pointer to /sites — not just "done".
 4. **Errors were relayed, not masked.** An ``ok: false`` became a clear
@@ -142,6 +152,7 @@ A publish is done right when:
 - ``mcp__pocketpaw_pocket__list_pockets`` — find the pocket to publish if
   the user names one that isn't the current pocket.
 - ``mcp__pocketpaw_pocket_specialist__create`` — create the pocket (Path
-  B); reached via the ``pocketpaw-create-pocket`` skill.
+  B); reached via the ``pocketpaw-create-paw-site`` marketing brain, which
+  stamps ``type="site"`` + ``pattern="landing"``.
 - ``mcp__pocketpaw_sites_manager__publish`` — this skill's tool: publish a
   pocket as a site.

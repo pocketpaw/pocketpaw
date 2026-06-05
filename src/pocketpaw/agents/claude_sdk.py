@@ -1,5 +1,23 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` now accepts a threaded
+  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
+  upstream from the request's ``SurfaceProfile`` and forwarded by
+  ``AgentPool.run``) and subtracts those ids from ``allowed_tools`` BEFORE the
+  SDK launches, so the agent is physically unable to call them. This REPLACES the
+  prior prompt-SNIFFING gate that string-matched a ``<surface ... engine="svelte"
+  />`` marker in the system prompt to strip the ripple-create tools — brittle (a
+  preamble wording change or an unrelated prompt quoting the marker flipped it)
+  and unable to express the three-mode /sites policy the ``SurfaceProfile``
+  resolver now owns. On /sites svelte-create the resolved set forbids the two
+  ripple-create tools (``create_landing_site`` + ``pocket_specialist__create``)
+  so the agent cannot fall back to a rippleSpec landing page — leaving
+  ``create_svelte_site`` + ``publish`` as the only create path; prose-only routing
+  ("PREFER create_svelte_site, do NOT call create_landing_site") was proven
+  insufficient (the ``ripple_spec.unknown_widget_type`` warnings). The set is
+  empty for refine / ripple-engine / non-sites runs, so their tools (incl.
+  ``pocket_specialist__edit``) are untouched. The OSS backend takes a plain
+  ``frozenset[str]`` and never imports ``pocketpaw_ee``.
 Updated: 2026-05-31 (fix/home-backend-summary-per-turn) — the persistent-client
   cache key now folds in a digest of the system prompt's STABLE behavioral
   prefix (``_client_cache_key`` / ``_behavior_prefix``), not just
@@ -878,10 +896,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``deny_mcp_tool_ids`` is a per-surface MCP-tool deny set threaded down
+        from the chat loop (resolved from the request's ``SurfaceProfile``).
+        Any id in it is subtracted from ``allowed_tools`` before the SDK
+        launches, so the agent is physically unable to call those tools. Empty
+        by default (a no-op for legacy / non-/sites runs); non-empty only on the
+        /sites svelte-create surface, where it forbids the two ripple-create
+        tools so the agent cannot fall back to a rippleSpec landing page. This
+        is the typed replacement for the deleted prompt-sniffing gate.
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -1094,6 +1122,27 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # both read tools (get_pocket / list_pockets) and the writable
             # ``add_widget`` tool — they all flow through the loop below.
             allowed_tools.extend(self._collect_mcp_tool_ids())
+
+            # Per-surface MCP-tool deny set (threaded from the chat loop's
+            # resolved ``SurfaceProfile``). Any denied id is subtracted from the
+            # allowlist BEFORE the SDK launches, so the agent is physically
+            # unable to call it. On the /sites svelte-create surface this forbids
+            # the two ripple-create tools (``create_landing_site`` +
+            # ``pocket_specialist__create``) so the agent CANNOT fall back to
+            # building a rippleSpec landing page — prose-only "do not call the
+            # ripple tool" routing was proven to fail. Empty for every other
+            # surface (a no-op), so ``create_svelte_site`` / ``publish`` /
+            # ``pocket_specialist__edit`` and the ripple-engine / refine /
+            # non-sites flows are untouched. This is the typed replacement for
+            # the old prompt-sniffing ``engine="svelte"`` marker gate.
+            if deny_mcp_tool_ids:
+                before_count = len(allowed_tools)
+                allowed_tools = [t for t in allowed_tools if t not in deny_mcp_tool_ids]
+                if len(allowed_tools) < before_count:
+                    logger.info(
+                        "Surface tool-deny: excluded %s from allowlist",
+                        sorted(deny_mcp_tool_ids),
+                    )
 
             # Build hooks for security
             hooks = {

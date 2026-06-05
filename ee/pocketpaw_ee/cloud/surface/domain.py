@@ -11,17 +11,30 @@
 # 11 entity rules, tenancy is enforced at construction — ``workspace_id``
 # and ``user_id`` are required on ``SurfaceContext``.
 #
+# Updated: 2026-06-04 (feat/sites-refine-surface) — ``SurfaceMeta`` grows a
+# ``site_id`` hint. The /sites/[siteId] refine chat stamps the published
+# site id (and the underlying pocket_id) so the sites handler can branch onto
+# a LANDING-AWARE REFINE preamble instead of the create-a-new-site one.
+# Updated: 2026-06-04 (feat/sites-svelte-engine) — ``SurfaceMeta`` grows an
+# ``engine`` hint ("ripple" | "svelte"). The /sites create UI's "Use Svelte
+# pages" toggle stamps it so the sites handler routes the CREATE preamble to
+# the svelte-track authoring skill (engine="svelte") instead of the
+# ripple/default marketing brain. Persisted setting is pocket.engine; this is
+# only the per-turn routing signal.
 # Changes: 2026-06-05 (feat/surface-profile-bias-kill) — added the typed
 # ``SurfaceProfile`` descriptor, the per-surface POLICY object (the data
 # backbone of the "ripple-default bias" fix). Its ``ripple_mode`` drives
 # whether ``build_behavior_instructions`` includes the ~20k-char
 # INLINE_RIPPLE_SYSTEM_PROMPT ("default to ui-spec" LAW); ``off`` omits it
-# so the /sites surface stops defaulting to a ripple ui-spec instead of
-# hand-authored Svelte. ``deny_mcp_tool_ids`` / ``skill_names`` /
-# ``allowed_sdk_tools`` / ``system_message_override`` are DECLARED here but
-# only ``ripple_mode`` is consumed in PR 1 — the tool/skill fields are the
-# tested DATA that PR 2 will wire (tool-deny + skill-surfacing). The
-# resolver lives in ``service.py`` (a pure SurfaceKind table).
+# so the /sites svelte-create surface stops defaulting to a ripple ui-spec
+# instead of hand-authored Svelte.
+# Changes: 2026-06-05 (feat/sites-svelte-engine) — ``deny_mcp_tool_ids`` is now
+# ENFORCED end-to-end: the resolver's set is threaded to the OSS backend's
+# ``run`` as a plain ``frozenset[str]`` and subtracted from the SDK allowlist
+# (replacing the deleted prompt-sniffing tool gate in ``claude_sdk.py``).
+# ``skill_names`` / ``allowed_sdk_tools`` / ``system_message_override`` remain
+# DECLARED-but-inert tested DATA for later passes. The resolver lives in
+# ``service.py`` and is META-AWARE on /sites (three modes).
 
 from __future__ import annotations
 
@@ -85,6 +98,17 @@ class SurfaceMeta:
     run_id: str | None = None
     scenario_id: str | None = None
     panel: str | None = None
+    # Sites surface hint — set by the /sites/[siteId] refine chat. The id of
+    # the published Paw Site being refined; paired with ``pocket_id`` (the
+    # site's source pocket) so the handler routes to the refine/edit path
+    # instead of the create-a-new-site path. Absent on the /sites gallery.
+    site_id: str | None = None
+    # Sites create hint — set by the /sites create UI's "Use Svelte pages"
+    # toggle: "ripple" (default) | "svelte". On the create branch the handler
+    # branches on this to prefer the svelte-track authoring skill when
+    # "svelte"; absent / "ripple" keeps the default marketing brain. Does not
+    # affect the refine branch (keyed on ``pocket_id``).
+    engine: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,23 +142,29 @@ class SurfaceProfile:
     bare ``kind ==`` check scattered across the codebase.
 
     Fields:
-      * ``ripple_mode`` — whether the ripple LAW applies. ``"on"`` (default,
-        every surface except /sites) keeps INLINE_RIPPLE_SYSTEM_PROMPT;
-        ``"off"`` omits it (the /sites row — the agent hand-authors Svelte,
-        so the "default to ui-spec" LAW is actively wrong); ``"trim"`` is
-        reserved for a future slimmed variant (declared, not yet used).
+      * ``ripple_mode`` — whether the ripple LAW applies. ``"on"`` (the default
+        — every surface, plus the /sites ripple-create and refine modes) keeps
+        INLINE_RIPPLE_SYSTEM_PROMPT; ``"off"`` omits it (the /sites *svelte
+        create* mode only — the agent hand-authors SvelteKit, so the "default to
+        ui-spec" LAW is actively wrong; the ripple-create and refine /sites modes
+        still author/edit a ripple spec and KEEP it); ``"trim"`` is reserved for
+        a future slimmed variant (declared, not yet used).
       * ``allowed_sdk_tools`` — optional SDK-tool allowlist (``None`` = no
         surface restriction). Declared for PR 2; not consumed in PR 1.
-      * ``deny_mcp_tool_ids`` — MCP tool ids this surface forbids. Declared
-        + tested DATA for PR 2's tool-deny pass; not enforced in PR 1.
-      * ``skill_names`` — skills this surface surfaces to the agent. Declared
-        + tested DATA for PR 2's skill-surfacing pass; not enforced in PR 1.
+      * ``deny_mcp_tool_ids`` — MCP tool ids this surface forbids. ENFORCED: the
+        resolved set is threaded to the OSS backend's ``run`` as a plain
+        ``frozenset[str]`` (``deny_mcp_tool_ids``) and subtracted from
+        ``allowed_tools`` before the SDK launches. Non-empty only on the /sites
+        svelte-create row.
+      * ``skill_names`` — skills this surface surfaces to the agent. Tested DATA;
+        skill-surfacing consumption lands in a later pass.
       * ``system_message_override`` — optional full system-message swap for a
-        surface. Declared for a future PR; not consumed in PR 1.
+        surface. Declared for a future PR; not consumed yet.
 
-    PR 1 CONSUMES ``ripple_mode`` only. The other fields are intentionally
-    populated-but-inert so the descriptor's shape is locked now and later
-    PRs add enforcement without re-designing the primitive.
+    ``ripple_mode`` and ``deny_mcp_tool_ids`` are CONSUMED today; the remaining
+    fields are intentionally populated-but-inert so the descriptor's shape is
+    locked now and later passes add enforcement without re-designing the
+    primitive.
     """
 
     ripple_mode: Literal["on", "off", "trim"]

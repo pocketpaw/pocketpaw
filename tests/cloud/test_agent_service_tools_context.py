@@ -10,6 +10,23 @@
 #   * test_non_sites_surface_keeps_ripple_block (no-regression guard) — locks in
 #     current behavior for non-sites / surface-less scopes so the fix doesn't
 #     over-omit. Passes today.
+#
+# Modified: 2026-06-05 (feat/sites-svelte-engine) — make the SITES gate
+# META-AWARE. PR 1's resolver omitted ripple for ALL /sites, but only the
+# svelte-CREATE mode should. These tests pin the three modes through
+# build_behavior_instructions:
+#   * test_sites_svelte_create_omits_ripple_block (guard) — engine="svelte",
+#     no pocket_id → ripple block ABSENT (hand-authored Svelte). Passes today.
+#   * test_sites_ripple_create_keeps_ripple_block (RED driver) — engine None/
+#     "ripple", no pocket_id → ripple block PRESENT (authors a ripple page).
+#     Fails today: PR 1 wrongly omits it for every /sites meta.
+#   * test_sites_refine_keeps_ripple_block (RED driver) — pocket_id set → ripple
+#     block PRESENT (edits an existing ripple spec). Fails today, same reason.
+# The existing ``test_sites_surface_omits_ripple_block`` used a bare
+# SurfaceMeta() (now the ripple-create mode that KEEPS ripple) so it encoded the
+# over-reach — it is updated to construct a svelte-engine surface so it stays a
+# valid svelte-omit assertion. No test in this file asserts "all SITES omit
+# ripple" any more. ``_sites_surface_ctx`` now takes an optional ``meta``.
 """Toolset assembly + context block helpers."""
 
 from __future__ import annotations
@@ -475,7 +492,7 @@ def test_non_home_pocket_scope_keeps_specialist_delegation_rule():
 # ---------------------------------------------------------------------------
 
 
-def _sites_surface_ctx() -> ScopeContext:
+def _sites_surface_ctx(meta: SurfaceMeta | None = None) -> ScopeContext:
     """A SESSION scope whose resolved surface is /sites.
 
     Surface arrives ONLY via the optional ``surface_context`` field — there is
@@ -483,6 +500,12 @@ def _sites_surface_ctx() -> ScopeContext:
     user_id) is required on SurfaceContext at construction per the entity
     rules, and ``meta`` / ``preamble`` are required positional-ish fields, so
     populate them explicitly.
+
+    ``meta`` selects the /sites mode (feat/sites-svelte-engine):
+    ``SurfaceMeta(engine="svelte")`` is svelte-create (ripple omitted),
+    ``SurfaceMeta()`` / ``SurfaceMeta(engine="ripple")`` is ripple-create
+    (ripple kept), ``SurfaceMeta(pocket_id=...)`` is refine (ripple kept).
+    Defaults to svelte-create so a bare call is the ripple-OMIT case.
     """
     return ScopeContext(
         kind=ScopeKind.SESSION,
@@ -497,33 +520,39 @@ def _sites_surface_ctx() -> ScopeContext:
             workspace_id="w1",
             user_id="u1",
             kind=SurfaceKind.SITES,
-            meta=SurfaceMeta(),
+            meta=meta if meta is not None else SurfaceMeta(engine="svelte"),
             preamble="",
         ),
     )
 
 
 def test_sites_surface_omits_ripple_block():
-    """RED driver: on the /sites surface the agent is hand-authoring a Svelte
-    Paw Site, so it must NOT receive INLINE_RIPPLE_SYSTEM_PROMPT (the "default
-    to ui-spec / use the widget" LAW). Today this FAILS — the ripple block is
-    gated on backend + pocket_type only and is always injected for an MCP
-    backend, so the sites agent gets the full ripple LAW and defaults to a
-    ui-spec instead of Svelte."""
+    """RED driver: on the /sites SVELTE-CREATE surface the agent is
+    hand-authoring a Svelte Paw Site, so it must NOT receive
+    INLINE_RIPPLE_SYSTEM_PROMPT (the "default to ui-spec / use the widget" LAW).
+
+    NOTE (feat/sites-svelte-engine): this test now pins the svelte-create mode
+    explicitly (``engine="svelte"``). Its PR-1 form used a bare ``SurfaceMeta()``
+    — which now resolves to the ripple-create mode that KEEPS ripple — so it had
+    become the over-reach ("all /sites omit ripple"). Pinned to svelte so it
+    stays a valid svelte-omit assertion alongside the new ripple-create /
+    refine "keep" tests below."""
     from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
 
-    block = build_behavior_instructions(_sites_surface_ctx(), backend_name="claude_agent_sdk")
+    block = build_behavior_instructions(
+        _sites_surface_ctx(SurfaceMeta(engine="svelte")), backend_name="claude_agent_sdk"
+    )
     # The whole inline ripple prompt must be gone.
     assert INLINE_RIPPLE_SYSTEM_PROMPT not in block, (
-        "INLINE_RIPPLE_SYSTEM_PROMPT must be omitted on the /sites surface — "
-        "its 'default to ui-spec' LAW biases the agent away from hand-authored "
-        "Svelte"
+        "INLINE_RIPPLE_SYSTEM_PROMPT must be omitted on the /sites svelte-create "
+        "surface — its 'default to ui-spec' LAW biases the agent away from "
+        "hand-authored Svelte"
     )
     # A couple of distinctive ripple phrases must also be absent, so a future
     # refactor that splits the block can't silently leak the LAW back in.
-    assert "<ripple>" not in block, "the <ripple> framing tag leaked onto /sites"
+    assert "<ripple>" not in block, "the <ripple> framing tag leaked onto /sites svelte-create"
     assert "Default to ui-spec whenever the answer has structure" not in block, (
-        "the ripple 'default to ui-spec' decision rule leaked onto /sites"
+        "the ripple 'default to ui-spec' decision rule leaked onto /sites svelte-create"
     )
 
 
@@ -573,6 +602,71 @@ def test_non_sites_surface_keeps_ripple_block():
     assert INLINE_RIPPLE_SYSTEM_PROMPT in legacy_block, (
         "the surface-less legacy path must keep INLINE_RIPPLE_SYSTEM_PROMPT"
     )
+
+
+# ---------------------------------------------------------------------------
+# /sites is META-AWARE in build_behavior_instructions too (feat/sites-svelte-engine).
+#
+# The ripple block must be omitted ONLY for the svelte-create mode. The
+# ripple-create and refine modes both AUTHOR/EDIT a ripple landing spec, so they
+# must KEEP INLINE_RIPPLE_SYSTEM_PROMPT. These three tests pin each mode.
+# ---------------------------------------------------------------------------
+
+
+def test_sites_svelte_create_omits_ripple_block():
+    """GUARD (passes today): the svelte-CREATE /sites surface (engine="svelte",
+    no pocket_id) hand-authors SvelteKit, so INLINE_RIPPLE_SYSTEM_PROMPT must be
+    ABSENT. This is the engine-scoped form of the bias-kill — the ONLY /sites
+    mode that drops ripple."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    block = build_behavior_instructions(
+        _sites_surface_ctx(SurfaceMeta(engine="svelte")), backend_name="claude_agent_sdk"
+    )
+    assert INLINE_RIPPLE_SYSTEM_PROMPT not in block, (
+        "INLINE_RIPPLE_SYSTEM_PROMPT must be omitted on the /sites svelte-create surface"
+    )
+    assert "<ripple>" not in block, "the <ripple> framing tag leaked onto /sites svelte-create"
+
+
+def test_sites_ripple_create_keeps_ripple_block():
+    """RED DRIVER (fails today): the ripple-CREATE /sites surface (engine None
+    or "ripple", no pocket_id) AUTHORS a ripple marketing landing page, so it
+    MUST KEEP INLINE_RIPPLE_SYSTEM_PROMPT. PR 1 wrongly omits the ripple block
+    for every /sites meta, so this fails — the resolver returns ripple_mode="off"
+    and the gate strips the block even though the agent needs the widget LAW to
+    author the ripple spec."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    for meta in (SurfaceMeta(engine=None), SurfaceMeta(engine="ripple")):
+        block = build_behavior_instructions(
+            _sites_surface_ctx(meta), backend_name="claude_agent_sdk"
+        )
+        assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
+            f"ripple-create /sites meta {meta!r} must KEEP INLINE_RIPPLE_SYSTEM_PROMPT "
+            "— it authors a ripple landing page and needs the widget LAW"
+        )
+
+
+def test_sites_refine_keeps_ripple_block():
+    """RED DRIVER (fails today): the REFINE /sites surface (pocket_id set) edits
+    the existing RIPPLE landing spec via pocket_specialist__edit, so it MUST KEEP
+    INLINE_RIPPLE_SYSTEM_PROMPT. Refine wins over engine — even with
+    ``engine="svelte"`` stamped, a pocket_id means refine. PR 1 wrongly omits the
+    ripple block for every /sites meta, so this fails today."""
+    from pocketpaw_ee.cloud.chat.agent_service import build_behavior_instructions
+
+    for meta in (
+        SurfaceMeta(pocket_id="pkt_1"),
+        SurfaceMeta(pocket_id="pkt_1", engine="svelte"),  # refine wins over engine
+    ):
+        block = build_behavior_instructions(
+            _sites_surface_ctx(meta), backend_name="claude_agent_sdk"
+        )
+        assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
+            f"refine /sites meta {meta!r} must KEEP INLINE_RIPPLE_SYSTEM_PROMPT — "
+            "it edits an existing ripple landing spec"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -63,6 +63,19 @@ When supplied on create, the service loads the named bundled template,
 compiles it, and merges the runtime-shaped dict into the pocket's
 ``rippleSpec`` (compile-on-install). Legacy callers that omit it see
 the same shape they always have.
+Updated: 2026-06-03 (feat/sites-landing-brain) — added the optional
+``pattern`` field on ``CreatePocketRequest`` / ``PocketResponse`` (and
+threaded onto the wire dict). Records the create-pocket layout pattern
+(``"landing"`` for marketing sites). Single-word key, so the wire form
+is the same snake_case ``"pattern"`` on both DTOs and the legacy wire
+dict. Legacy callers that omit it read back ``None``.
+Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
+"Svelte track" fields ``engine`` (``"ripple"`` default | ``"svelte"``)
+and ``source`` (the SvelteKit source map, or ``None``) on
+``CreatePocketRequest`` / ``PocketResponse`` and threaded onto the wire
+dict. Both are single-word snake_case keys (no camelCase split), matching
+the read-back form. Defaults keep legacy callers reading ``engine="ripple"``,
+``source=None``.
 """
 
 from __future__ import annotations
@@ -90,6 +103,17 @@ class CreatePocketRequest(BaseModel):
     # template at create time and merges the result into ``rippleSpec``.
     # Omitting it preserves the pre-Wave-3e behaviour.
     template_slug: str | None = Field(default=None, alias="templateSlug")
+    # The create-pocket layout pattern (``"dashboard"`` | ``"viewer"`` |
+    # ``"app"`` | ``"landing"`` | ...). The marketing-site brain stamps
+    # ``"landing"`` so the published site renders as a landing page.
+    # Optional; omitting it persists ``None`` (legacy behaviour).
+    pattern: str | None = None
+    # Paw Sites generation track (``"ripple"`` default | ``"svelte"``) and,
+    # for svelte sites, the hand-written SvelteKit source map
+    # ``{relative_path: file_contents}``. Omitting them persists the ripple
+    # defaults (``engine="ripple"``, ``source=None``).
+    engine: str = "ripple"
+    source: dict[str, str] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -217,6 +241,13 @@ class PocketResponse(BaseModel):
     # RFC 03 v2 (Wave 3e) — the bundled-template slug, or ``None`` for
     # legacy pockets / cold-generated rippleSpecs.
     template_slug: str | None = None
+    # The create-pocket layout pattern (``"landing"`` for marketing
+    # sites), or ``None`` for legacy pockets.
+    pattern: str | None = None
+    # Paw Sites generation track (``"ripple"`` | ``"svelte"``) and the
+    # svelte source map (or ``None`` for ripple pockets).
+    engine: str = "ripple"
+    source: dict[str, str] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -592,6 +623,15 @@ def pocket_to_wire_dict(p) -> dict:
         # RFC 03 v2 (Wave 3e) — the bundled-template slug the pocket was
         # instantiated from. ``None`` for legacy / cold-generated pockets.
         "templateSlug": getattr(p, "template_slug", None),
+        # The create-pocket layout pattern (``"landing"`` for marketing
+        # sites). Single-word key — no camelCase split. ``None`` for
+        # legacy pockets.
+        "pattern": getattr(p, "pattern", None),
+        # Paw Sites generation track + svelte source map. Single-word keys,
+        # no camelCase split. ``engine`` defaults to ``"ripple"`` and
+        # ``source`` to ``None`` for legacy / ripple pockets.
+        "engine": getattr(p, "engine", "ripple"),
+        "source": getattr(p, "source", None),
         "createdAt": iso_utc(p.created_at),
         "updatedAt": iso_utc(p.updated_at),
     }
