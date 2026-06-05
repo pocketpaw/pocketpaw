@@ -4,34 +4,44 @@
 # Paw Sites "svelte create must use create_svelte_site, not ripple" fix, so the fix can
 # be checked WITHOUT manually creating a site in the UI.
 #
-# THE FIX UNDER TEST (claude_sdk.py ~L1166): a deterministic "robust gate" in
-# ``ClaudeSDKBackend.run``. It builds ``_svelte_gate_text`` from
-# (final_prompt OR message OR system_prompt) and, when that text carries BOTH the
-# ``kind="sites"`` and ``engine="svelte"`` markers, strips ``_RIPPLE_CREATE_TOOL_IDS``
-# (create_landing_site + pocket_specialist__create) from ``allowed_tools`` — so the LLM
-# is physically unable to fall back to building a rippleSpec landing page. The
-# ``[SVELTE-GATE-DBG]`` print there reports which input carried the marker.
+# Updated: 2026-06-05 (feat/sites-svelte-engine) — rewired to the THREADED
+# ``deny_mcp_tool_ids`` path. The prompt-SNIFFING gate it used to validate
+# (``_is_svelte_sites_create_prompt`` + ``_RIPPLE_CREATE_TOOL_IDS`` +
+# ``[SVELTE-GATE-DBG]`` print in ``claude_sdk.run``) was DELETED. The tool-deny is
+# now a typed ``SurfaceProfile.deny_mcp_tool_ids`` resolved per-meta by
+# ``resolve_profile`` and threaded into ``ClaudeSDKBackend.run(...,
+# deny_mcp_tool_ids=...)``, which subtracts it from ``allowed_tools`` before the
+# SDK launches. This verifier now exercises THAT path.
+#
+# THE FIX UNDER TEST: ``resolve_profile(SurfaceKind.SITES, meta)`` returns a
+# ``deny_mcp_tool_ids`` of {create_landing_site, pocket_specialist__create} ONLY
+# for the svelte-create mode (engine="svelte", no pocket_id). The chat loop
+# (run_core) passes that set into ``AgentPool.run`` → ``ClaudeSDKBackend.run``,
+# which drops those ids from the allowlist — so the LLM is physically unable to
+# fall back to building a rippleSpec landing page. The ripple-create and refine
+# modes resolve to an EMPTY deny set, so their ripple tools survive.
 #
 # Two parts, ONE command (``uv run --project . python scripts/test_svelte_create.py``):
-#   PART A — UNIT (fast, deterministic, no LLM): feed the REAL ``_svelte_create_preamble``
-#     through ``_is_svelte_sites_create_prompt`` as final_prompt / message / system_prompt;
-#     assert the gate detects it in EACH position; assert the exclusion drops the two
-#     ripple create tools but keeps create_svelte_site + publish; assert REFINE and
-#     non-sites prompts are NOT gated.
+#   PART A — UNIT (fast, deterministic, no LLM): resolve the SurfaceProfile for each
+#     /sites mode via ``resolve_profile``; assert the svelte-create mode's
+#     ``deny_mcp_tool_ids`` is exactly the two ripple-create ids; assert subtracting
+#     it from a full toolset drops those two but keeps create_svelte_site + publish +
+#     edit; assert the REFINE and ripple-create modes resolve to an EMPTY deny set
+#     (their tools survive).
 #   PART B — E2E (the decisive test, real LLM turn ~30-60s, costs tokens): drive a REAL
 #     svelte /sites create through the agent IN-PROCESS (no HTTP, no auth — replicates the
 #     agent-invocation the licensed POST /cloud/chat/{scope}/{id}/agent endpoint performs:
 #     resolve_surface_context(engine=svelte) -> build_knowledge_context (preamble) ->
-#     pool.run system-prompt assembly -> ClaudeSDKBackend.run). Captures the
-#     ``[SVELTE-GATE-DBG]`` line, the ``allowed_tools`` actually handed to the SDK, the
-#     agent's tool_use events, and the persisted pocket (ground truth from Mongo). Asserts:
-#       (1) gate fired / ripple create tools excluded from allowed_tools;
+#     resolve_profile(...).deny_mcp_tool_ids -> ClaudeSDKBackend.run(deny_mcp_tool_ids=...)).
+#     Captures the ``allowed_tools`` actually handed to the SDK, the agent's tool_use
+#     events, and the persisted pocket (ground truth from Mongo). Asserts:
+#       (1) ripple create tools excluded from allowed_tools; create_svelte_site kept;
 #       (2) agent called create_svelte_site, NOT create_landing_site /
 #           pocket_specialist__create / pocket__add_widget;
 #       (3) resulting pocket has engine="svelte" + a source map + rippleSpec is None;
 #       (4) zero ``ripple_spec.unknown_widget_type`` warnings.
-#     NOTE: pocket__add_widget is NOT (yet) in _RIPPLE_CREATE_TOOL_IDS; if the agent uses
-#     add_widget to build ripple, the script FLAGS it (the gate set may need to include it).
+#     NOTE: pocket__add_widget is NOT in the deny set; if the agent uses add_widget to
+#     build ripple, the script FLAGS it (the deny set may need to include it).
 #
 # Run: uv run --project . python scripts/test_svelte_create.py                # unit + e2e
 #      uv run --project . python scripts/test_svelte_create.py --unit-only    # unit only
@@ -86,17 +96,9 @@ class _Results:
 # PART A — UNIT (fast, deterministic, no LLM)
 # ════════════════════════════════════════════════════════════════════════════
 def run_unit(res: _Results) -> None:
-    print("\n=== PART A — UNIT (gate detection + tool exclusion) ===", flush=True)
+    print("\n=== PART A — UNIT (SurfaceProfile deny set + tool subtraction) ===", flush=True)
 
-    from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
-    from pocketpaw_ee.cloud.surface.handlers import sites as sites_handler
-
-    from pocketpaw.agents.claude_sdk import (
-        _RIPPLE_CREATE_TOOL_IDS,
-        _SITES_SURFACE_MARKER,
-        _SITES_SVELTE_SURFACE_MARKER,
-        _is_svelte_sites_create_prompt,
-    )
+    from pocketpaw_ee.cloud.surface import SurfaceKind, SurfaceMeta, resolve_profile
 
     _CREATE_LANDING = "mcp__pocketpaw_sites_manager__create_landing_site"
     _SPECIALIST_CREATE = "mcp__pocketpaw_pocket_specialist__create"
@@ -104,44 +106,34 @@ def run_unit(res: _Results) -> None:
     _PUBLISH = "mcp__pocketpaw_sites_manager__publish"
     _SPECIALIST_EDIT = "mcp__pocketpaw_pocket_specialist__edit"
 
-    svelte_preamble = sites_handler._svelte_create_preamble(SurfaceMeta(route_path="/sites"))
-    refine_preamble = sites_handler._refine_preamble(
-        SurfaceMeta(route_path="/sites", pocket_id="pk-1")
-    )
+    # The exact subtraction the backend runs (claude_sdk.run): drop any denied id
+    # from the allowlist. ``deny_mcp_tool_ids`` is resolved per-meta upstream.
+    def apply_deny(allowed: list[str], deny: frozenset[str]) -> list[str]:
+        return [t for t in allowed if t not in deny]
 
-    # The exact gate expression the backend runs (claude_sdk.run ~L1169-1183):
-    # build _svelte_gate_text from (final_prompt, message, system_prompt) then exclude.
-    def gate_text(final_prompt=None, message=None, system_prompt=None) -> str:
-        return "\n".join(s for s in (final_prompt, message, system_prompt) if s)
+    # The svelte-create mode (engine="svelte", no pocket_id) is the ONLY /sites
+    # mode that denies tools.
+    svelte_profile = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
+    svelte_deny = svelte_profile.deny_mcp_tool_ids
 
-    def apply_gate(allowed: list[str], text: str) -> list[str]:
-        if _is_svelte_sites_create_prompt(text):
-            return [t for t in allowed if t not in _RIPPLE_CREATE_TOOL_IDS]
-        return list(allowed)
-
-    # 1. Sanity: real preamble carries both markers.
+    # 1. The svelte-create profile drops ripple and denies exactly the two ripple
+    #    create ids, and surfaces the create-svelte-site skill.
     res.check(
-        _SITES_SURFACE_MARKER in svelte_preamble
-        and _SITES_SVELTE_SURFACE_MARKER in svelte_preamble,
-        "svelte create preamble carries BOTH markers",
-        f"{_SITES_SURFACE_MARKER!r}+{_SITES_SVELTE_SURFACE_MARKER!r}",
-    )
-
-    # 2. Detector fires when the marker rides in EACH of the three run() prompt inputs.
-    res.check(
-        _is_svelte_sites_create_prompt(gate_text(final_prompt=svelte_preamble)),
-        "gate detects marker carried as final_prompt",
+        svelte_profile.ripple_mode == "off",
+        "svelte-create SurfaceProfile turns ripple OFF",
+        f"ripple_mode={svelte_profile.ripple_mode!r}",
     )
     res.check(
-        _is_svelte_sites_create_prompt(gate_text(message=svelte_preamble)),
-        "gate detects marker carried as message",
+        svelte_deny == frozenset({_CREATE_LANDING, _SPECIALIST_CREATE}),
+        "svelte-create deny_mcp_tool_ids is exactly the two ripple create ids",
+        f"deny={sorted(t.split('__')[-1] for t in svelte_deny)}",
     )
     res.check(
-        _is_svelte_sites_create_prompt(gate_text(system_prompt=svelte_preamble)),
-        "gate detects marker carried as system_prompt (the REAL pool.run path)",
+        "create-svelte-site" in svelte_profile.skill_names,
+        "svelte-create profile surfaces the create-svelte-site skill",
     )
 
-    # 3. Exclusion: drops both ripple create tools, keeps svelte create + publish + edit.
+    # 2. Subtraction: drops both ripple create tools, keeps svelte create + publish + edit.
     full_toolset = [
         "Agent",
         "Bash",
@@ -152,43 +144,49 @@ def run_unit(res: _Results) -> None:
         _SPECIALIST_CREATE,
         _SPECIALIST_EDIT,
     ]
-    gated = apply_gate(full_toolset, gate_text(system_prompt=svelte_preamble))
+    gated = apply_deny(full_toolset, svelte_deny)
     res.check(
         _CREATE_LANDING not in gated and _SPECIALIST_CREATE not in gated,
-        "gate REMOVES create_landing_site + pocket_specialist__create",
+        "deny REMOVES create_landing_site + pocket_specialist__create",
         f"gated={[t.split('__')[-1] for t in gated if t.startswith('mcp__')]}",
     )
     res.check(
         _CREATE_SVELTE in gated and _PUBLISH in gated,
-        "gate KEEPS create_svelte_site + publish",
+        "deny KEEPS create_svelte_site + publish",
     )
-    res.check(_SPECIALIST_EDIT in gated, "gate KEEPS pocket_specialist__edit (refine path)")
+    res.check(_SPECIALIST_EDIT in gated, "deny KEEPS pocket_specialist__edit (refine path)")
 
-    # 4. Negative: REFINE preamble (mode="refine") is NOT gated.
-    res.check(
-        'mode="refine"' in refine_preamble and 'engine="svelte"' not in refine_preamble,
-        "refine preamble is mode=refine with NO svelte marker",
-    )
-    refine_gated = apply_gate(full_toolset, gate_text(system_prompt=refine_preamble))
-    res.check(
-        _CREATE_LANDING in refine_gated and _SPECIALIST_CREATE in refine_gated,
-        "REFINE prompt is NOT gated (ripple tools survive)",
-    )
+    # 3. Negative: REFINE mode (pocket_id set, ANY engine) resolves to an EMPTY deny set.
+    for refine_meta in (
+        SurfaceMeta(route_path="/sites", pocket_id="pk-1"),
+        SurfaceMeta(route_path="/sites", pocket_id="pk-1", engine="svelte"),  # refine wins
+    ):
+        refine_profile = resolve_profile(SurfaceKind.SITES, refine_meta)
+        res.check(
+            refine_profile.ripple_mode == "on" and refine_profile.deny_mcp_tool_ids == frozenset(),
+            f"REFINE meta {refine_meta.engine or 'no-engine'} keeps ripple + denies nothing",
+            f"ripple_mode={refine_profile.ripple_mode!r}",
+        )
+        refine_gated = apply_deny(full_toolset, refine_profile.deny_mcp_tool_ids)
+        res.check(
+            _CREATE_LANDING in refine_gated and _SPECIALIST_CREATE in refine_gated,
+            f"REFINE meta {refine_meta.engine or 'no-engine'} is NOT gated (ripple tools survive)",
+        )
 
-    # 5. Negative: a non-sites prompt that merely mentions the engine word is NOT gated.
-    res.check(
-        not _is_svelte_sites_create_prompt('a dashboard prompt mentioning engine="svelte"'),
-        "non-sites prompt mentioning engine word is NOT gated",
-    )
-    res.check(
-        not _is_svelte_sites_create_prompt("<pocket-scope>\nedit this dashboard"),
-        "pocket-scope (non-sites) prompt is NOT gated",
-    )
+    # 4. Negative: ripple-create mode (engine None/"ripple", no pocket_id) → EMPTY deny set.
+    for ripple_meta in (SurfaceMeta(), SurfaceMeta(engine="ripple")):
+        ripple_profile = resolve_profile(SurfaceKind.SITES, ripple_meta)
+        res.check(
+            ripple_profile.ripple_mode == "on" and ripple_profile.deny_mcp_tool_ids == frozenset(),
+            f"ripple-create meta {ripple_meta.engine or 'no-engine'} keeps ripple + denies nothing",
+            f"ripple_mode={ripple_profile.ripple_mode!r}",
+        )
 
-    # 6. Guard the exclusion set so a future edit can't silently widen/narrow it.
+    # 5. Negative: a non-sites surface resolves to an EMPTY deny set (no gating).
+    non_sites_profile = resolve_profile(SurfaceKind.POCKETS_LIST, SurfaceMeta())
     res.check(
-        _RIPPLE_CREATE_TOOL_IDS == frozenset({_CREATE_LANDING, _SPECIALIST_CREATE}),
-        "_RIPPLE_CREATE_TOOL_IDS is exactly the two ripple create ids",
+        non_sites_profile.deny_mcp_tool_ids == frozenset(),
+        "non-sites surface denies nothing (no tool gating)",
     )
 
 
@@ -256,7 +254,8 @@ async def run_e2e(res: _Results) -> None:
     print("\n=== PART B — E2E (real svelte /sites create through the agent) ===", flush=True)
     _set_e2e_env_defaults()
     print(
-        "  env: PAW_SITES_GEN_CMD={!r} PAW_SITES_LOCAL={} PAW_SITES_LOCAL_DIR={} MONGO_URL={}".format(
+        "  env: PAW_SITES_GEN_CMD={!r} PAW_SITES_LOCAL={} "
+        "PAW_SITES_LOCAL_DIR={} MONGO_URL={}".format(
             os.environ.get("PAW_SITES_GEN_CMD"),
             os.environ.get("PAW_SITES_LOCAL"),
             os.environ.get("PAW_SITES_LOCAL_DIR"),
@@ -281,7 +280,7 @@ async def run_e2e(res: _Results) -> None:
         detach_agent_identity,
     )
     from pocketpaw_ee.cloud.models.pocket import Pocket as PocketDoc
-    from pocketpaw_ee.cloud.surface import resolve_surface_context
+    from pocketpaw_ee.cloud.surface import resolve_profile, resolve_surface_context
 
     from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
     from pocketpaw.config import Settings
@@ -376,12 +375,22 @@ async def run_e2e(res: _Results) -> None:
 
         backend._ClaudeAgentOptions = _capturing_options  # type: ignore[assignment]
 
-        # 8. Drive the real agent turn. Capture stdout so the gate's
-        #    ``[SVELTE-GATE-DBG]`` print is recorded alongside our own logging.
+        # 8. Drive the real agent turn. Capture stdout so the backend's
+        #    "Surface tool-deny" log line is recorded alongside our own logging.
         session_key = f"e2e:{ctx.scope_id}"
         tool_calls: list[str] = []
         assistant_text: list[str] = []
         stdout_buf = io.StringIO()
+
+        # Resolve the per-surface deny set EXACTLY as run_core does, and thread it
+        # into backend.run — this is the production seam that strips the ripple
+        # create tools (the typed replacement for the deleted prompt-sniff gate).
+        surface_deny = resolve_profile(surface_ctx.kind, surface_ctx.meta).deny_mcp_tool_ids
+        res.check(
+            surface_deny == frozenset({_CREATE_LANDING, _SPECIALIST_CREATE}),
+            "resolve_profile(svelte create) deny set is the two ripple create ids",
+            f"deny={sorted(t.split('__')[-1] for t in surface_deny)}",
+        )
 
         print(
             f"  running real LLM turn (~30-60s, costs tokens): {user_message!r}",
@@ -394,6 +403,7 @@ async def run_e2e(res: _Results) -> None:
                     system_prompt=system_prompt,
                     history=None,
                     session_key=session_key,
+                    deny_mcp_tool_ids=surface_deny,
                 ):
                     etype = getattr(event, "type", None)
                     meta = getattr(event, "metadata", None) or {}
@@ -415,10 +425,12 @@ async def run_e2e(res: _Results) -> None:
                 pass
 
         captured_stdout = stdout_buf.getvalue()
-        # Echo the gate-debug + key lines back to the real console (we swallowed stdout).
-        gate_dbg_lines = [ln for ln in captured_stdout.splitlines() if "[SVELTE-GATE-DBG]" in ln]
-        print("  --- captured [SVELTE-GATE-DBG] ---", flush=True)
-        for ln in gate_dbg_lines or ["(none captured)"]:
+        # Echo the backend's "Surface tool-deny: excluded ..." log line back to the
+        # real console (we swallowed stdout). This is the deterministic evidence the
+        # threaded deny set reached claude_sdk.run and trimmed the allowlist.
+        deny_log_lines = [ln for ln in captured_stdout.splitlines() if "Surface tool-deny" in ln]
+        print("  --- captured 'Surface tool-deny' log ---", flush=True)
+        for ln in deny_log_lines or ["(none captured — relying on allowed_tools below)"]:
             print(f"    {ln}", flush=True)
 
         # ── allowed_tools actually passed to the SDK ──
@@ -428,7 +440,8 @@ async def run_e2e(res: _Results) -> None:
         ]
         svelte_in_allowed = _CREATE_SVELTE in final_allowed
         print(
-            f"  allowed_tools handed to SDK ({len(final_allowed)} total); svelte_create_present={svelte_in_allowed}; "
+            f"  allowed_tools handed to SDK ({len(final_allowed)} total); "
+            f"svelte_create_present={svelte_in_allowed}; "
             f"ripple_create_present={ripple_create_in_allowed}",
             flush=True,
         )
@@ -442,14 +455,11 @@ async def run_e2e(res: _Results) -> None:
         ).to_list()
 
         # ── ASSERTIONS ──────────────────────────────────────────────────────────
-        # (1) gate fired / ripple create tools excluded from allowed_tools
-        gate_fired = bool(gate_dbg_lines) and "sites=True" in (
-            gate_dbg_lines[-1] if gate_dbg_lines else ""
-        )
+        # (1) threaded deny set fired / ripple create tools excluded from allowed_tools
         res.check(
             len(captured_allowed) > 0 and not ripple_create_in_allowed and svelte_in_allowed,
             "(1) ripple create tools EXCLUDED from allowed_tools; create_svelte_site kept",
-            f"gate_dbg_seen={gate_fired}",
+            f"deny_log_seen={bool(deny_log_lines)}",
         )
 
         # (2) agent called create_svelte_site and NOT any ripple/landing/add_widget create tool
@@ -464,13 +474,14 @@ async def run_e2e(res: _Results) -> None:
         )
         res.check(
             not called_ripple,
-            "(2b) agent did NOT call create_landing_site / pocket_specialist__create / pocket__add_widget",
+            "(2b) agent did NOT call create_landing_site / "
+            "pocket_specialist__create / pocket__add_widget",
             f"ripple_calls={called_ripple}",
         )
         if _ADD_WIDGET in tool_calls:
             print(
                 "  !!! FLAG: agent used pocket__add_widget to build ripple — it is NOT in "
-                "_RIPPLE_CREATE_TOOL_IDS, so the gate set may need to include it.",
+                "the svelte-create deny set, so the deny set may need to include it.",
                 flush=True,
             )
 

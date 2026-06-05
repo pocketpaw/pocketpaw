@@ -1,18 +1,23 @@
 """
 Claude Agent SDK backend for PocketPaw.
-Updated: 2026-06-05 (feat/sites-svelte-engine) — deterministically forbid the
-  ripple create tools (``create_landing_site`` + ``pocket_specialist__create``)
-  on the Paw Sites Svelte track. When the system prompt carries the
-  ``<surface kind="sites" ... engine="svelte" />`` marker (emitted by the Svelte
-  create preamble), those two ids are stripped from ``allowed_tools`` BEFORE the
-  SDK launches, so the agent is physically unable to fall back to building a
-  rippleSpec landing page — leaving ``create_svelte_site`` + ``publish`` as the
-  only create path. Prose-only routing ("PREFER create_svelte_site, do NOT call
-  create_landing_site") was proven insufficient: the agent ignored it and called
-  the easier ripple tool (the ``ripple_spec.unknown_widget_type`` warnings). Uses
-  the same prompt-marker mechanism as the ``is_pocket_session`` tool-narrowing
-  gate. Refine (``mode="refine"``), ripple-engine, and non-sites prompts carry no
-  svelte marker, so their tools (incl. ``pocket_specialist__edit``) are untouched.
+Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` now accepts a threaded
+  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
+  upstream from the request's ``SurfaceProfile`` and forwarded by
+  ``AgentPool.run``) and subtracts those ids from ``allowed_tools`` BEFORE the
+  SDK launches, so the agent is physically unable to call them. This REPLACES the
+  prior prompt-SNIFFING gate that string-matched a ``<surface ... engine="svelte"
+  />`` marker in the system prompt to strip the ripple-create tools — brittle (a
+  preamble wording change or an unrelated prompt quoting the marker flipped it)
+  and unable to express the three-mode /sites policy the ``SurfaceProfile``
+  resolver now owns. On /sites svelte-create the resolved set forbids the two
+  ripple-create tools (``create_landing_site`` + ``pocket_specialist__create``)
+  so the agent cannot fall back to a rippleSpec landing page — leaving
+  ``create_svelte_site`` + ``publish`` as the only create path; prose-only routing
+  ("PREFER create_svelte_site, do NOT call create_landing_site") was proven
+  insufficient (the ``ripple_spec.unknown_widget_type`` warnings). The set is
+  empty for refine / ripple-engine / non-sites runs, so their tools (incl.
+  ``pocket_specialist__edit``) are untouched. The OSS backend takes a plain
+  ``frozenset[str]`` and never imports ``pocketpaw_ee``.
 Updated: 2026-05-31 (fix/home-backend-summary-per-turn) — the persistent-client
   cache key now folds in a digest of the system prompt's STABLE behavioral
   prefix (``_client_cache_key`` / ``_behavior_prefix``), not just
@@ -101,51 +106,6 @@ _DEFAULT_IDENTITY = (
 )
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
-
-# ── Paw Sites Svelte track — deterministic ripple-tool exclusion ──
-# The /sites create preamble on the Svelte track stamps the surface marker
-# ``<surface kind="sites" ... engine="svelte" />`` into the system prompt (see
-# ``pocketpaw_ee.cloud.surface.handlers.sites._svelte_create_preamble``). When a
-# Svelte-track create prompt is detected, the two ripple-building create tools
-# are removed from ``allowed_tools`` BEFORE the SDK is launched, so the agent is
-# physically unable to call a ripple create tool and silently produce a
-# rippleSpec landing page instead of a hand-written Svelte site. Prose-only
-# routing ("PREFER create_svelte_site, do NOT call create_landing_site") was
-# proven insufficient — the agent ignored it and reached for the easier ripple
-# tool (the ``ripple_spec.unknown_widget_type`` warnings). This is the same
-# mechanism the ``is_pocket_session`` gate already uses to narrow the tool
-# surface from a marker in the prompt. The ids are spelled out here (rather than
-# imported from the EE package) so the OSS backend keeps no ``pocketpaw_ee``
-# dependency; the EE layer is the source of truth for the values
-# (``mcp_servers.sites_create.SITES_CREATE_TOOL_IDS`` /
-# ``pocket_specialist.tool.TOOL_NAME``). The svelte create tool
-# (``create_svelte_site``) and ``publish`` are left in place, and the refine
-# preamble (``mode="refine"``, no ``engine="svelte"`` marker) is never matched,
-# so ``pocket_specialist__edit`` and the ripple-engine / non-sites flows are
-# untouched.
-_SITES_SVELTE_SURFACE_MARKER = 'engine="svelte"'
-_SITES_SURFACE_MARKER = 'kind="sites"'
-_RIPPLE_CREATE_TOOL_IDS: frozenset[str] = frozenset(
-    {
-        "mcp__pocketpaw_sites_manager__create_landing_site",
-        "mcp__pocketpaw_pocket_specialist__create",
-    }
-)
-
-
-def _is_svelte_sites_create_prompt(prompt: str | None) -> bool:
-    """True when the system prompt carries the Svelte-track /sites create marker.
-
-    Matches the ``<surface kind="sites" ... engine="svelte" />`` tag the Svelte
-    create preamble emits. Requires BOTH the sites-surface marker and the
-    svelte-engine marker so a non-sites prompt that merely mentions
-    ``engine="svelte"`` can't trip the gate. The refine preamble emits
-    ``mode="refine"`` without ``engine="svelte"`` and the ripple create preamble
-    omits the engine attribute entirely, so neither is matched.
-    """
-    if not prompt:
-        return False
-    return _SITES_SURFACE_MARKER in prompt and _SITES_SVELTE_SURFACE_MARKER in prompt
 
 
 class ClaudeSDKBackend(BaseAgentBackend):
@@ -936,10 +896,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``deny_mcp_tool_ids`` is a per-surface MCP-tool deny set threaded down
+        from the chat loop (resolved from the request's ``SurfaceProfile``).
+        Any id in it is subtracted from ``allowed_tools`` before the SDK
+        launches, so the agent is physically unable to call those tools. Empty
+        by default (a no-op for legacy / non-/sites runs); non-empty only on the
+        /sites svelte-create surface, where it forbids the two ripple-create
+        tools so the agent cannot fall back to a rippleSpec landing page. This
+        is the typed replacement for the deleted prompt-sniffing gate.
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -1153,23 +1123,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # ``add_widget`` tool — they all flow through the loop below.
             allowed_tools.extend(self._collect_mcp_tool_ids())
 
-            # Paw Sites Svelte track: deterministically forbid the ripple
-            # create tools. The Svelte create preamble stamps an
-            # ``engine="svelte"`` marker in the prompt; when present, drop
-            # ``create_landing_site`` and ``pocket_specialist__create`` from the
-            # allowlist so the agent CANNOT fall back to building a rippleSpec
-            # landing page (prose-only "do not call the ripple tool" routing was
-            # proven to fail). ``create_svelte_site`` + ``publish`` remain, and
-            # the refine / ripple-engine / non-sites prompts carry no svelte
-            # marker so their tools (incl. ``pocket_specialist__edit``) are
-            # untouched.
-            if _is_svelte_sites_create_prompt(final_prompt):
+            # Per-surface MCP-tool deny set (threaded from the chat loop's
+            # resolved ``SurfaceProfile``). Any denied id is subtracted from the
+            # allowlist BEFORE the SDK launches, so the agent is physically
+            # unable to call it. On the /sites svelte-create surface this forbids
+            # the two ripple-create tools (``create_landing_site`` +
+            # ``pocket_specialist__create``) so the agent CANNOT fall back to
+            # building a rippleSpec landing page — prose-only "do not call the
+            # ripple tool" routing was proven to fail. Empty for every other
+            # surface (a no-op), so ``create_svelte_site`` / ``publish`` /
+            # ``pocket_specialist__edit`` and the ripple-engine / refine /
+            # non-sites flows are untouched. This is the typed replacement for
+            # the old prompt-sniffing ``engine="svelte"`` marker gate.
+            if deny_mcp_tool_ids:
                 before_count = len(allowed_tools)
-                allowed_tools = [t for t in allowed_tools if t not in _RIPPLE_CREATE_TOOL_IDS]
+                allowed_tools = [t for t in allowed_tools if t not in deny_mcp_tool_ids]
                 if len(allowed_tools) < before_count:
                     logger.info(
-                        "Sites Svelte track: excluded ripple create tools %s from allowlist",
-                        sorted(_RIPPLE_CREATE_TOOL_IDS),
+                        "Surface tool-deny: excluded %s from allowlist",
+                        sorted(deny_mcp_tool_ids),
                     )
 
             # Build hooks for security

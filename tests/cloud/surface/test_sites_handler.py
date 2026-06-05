@@ -32,6 +32,10 @@
 #      present so the flow never breaks when the skill is unavailable.
 #   4. A lead-capture form with named fields, built FLAT (no form widget) so the
 #      published static site captures leads out of the box.
+# Updated: 2026-06-05 (feat/sites-svelte-engine, consolidated PR) — aligned the
+# svelte-engine create test with the strengthened preamble: the directive moved
+# from "prefer" to "this track is MANDATORY ... Use the skill", so the test now
+# pins "mandatory" instead of "prefer".
 
 from __future__ import annotations
 
@@ -199,7 +203,7 @@ async def test_sites_handler_refine_mode_is_landing_aware() -> None:
 async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> None:
     """engine="svelte" routes the create preamble to the Svelte-track skill.
 
-    It must PREFER `pocketpaw-create-svelte-site`, point the MCP fallback at
+    It must MANDATE `pocketpaw-create-svelte-site`, point the MCP fallback at
     `create_svelte_site`, and stamp engine="svelte" — while NOT preferring the
     ripple `create-paw-site` brain."""
     preamble = await sites_handler.build_preamble(
@@ -214,16 +218,21 @@ async def test_create_mode_engine_svelte_prefers_create_svelte_site_skill() -> N
     assert "build and publish" in lower
     assert "refine" not in lower
 
-    # PREFERRED path: the dedicated Svelte-track authoring skill.
+    # MANDATORY path: the dedicated Svelte-track authoring skill. The svelte
+    # preamble strengthened the directive from "prefer" to "this track is
+    # MANDATORY ... Use the skill" — pin the stronger language.
     assert "pocketpaw-create-svelte-site" in preamble
-    assert "prefer" in lower
+    assert "mandatory" in lower
     # MCP fallback points at the svelte create tool + publish.
     assert "mcp__pocketpaw_sites_manager__create_svelte_site" in preamble
     assert "mcp__pocketpaw_sites_manager__publish" in preamble
     assert "fall back" in lower or "fallback" in lower
 
-    # It must NOT route to the ripple marketing brain on this track.
-    assert "pocketpaw-create-paw-site" not in preamble
+    # It must NOT route to the ripple marketing brain on this track. The svelte
+    # preamble names `pocketpaw-create-paw-site` only to FORBID it (the strengthened
+    # "ABSOLUTELY DO NOT call ... or the pocketpaw-create-paw-site skill" clause).
+    assert "pocketpaw-create-paw-site" in preamble
+    assert "absolutely do not call" in lower
     # The svelte track explicitly forbids the ripple-spec machinery (the term
     # appears only inside the "no rippleSpec / do not draft one" prohibition).
     assert "no ripplespec" in lower
