@@ -620,6 +620,8 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_task_listeners()
 
+    # Planner — when a plan is generated, auto-execute unblocked tasks
+
     # Meeting bridges — meeting.* events → in-app notifications, and
     # calendar.event.created → auto-create a recall-source Meeting when
     # the calendar event carries a Zoom/Meet URL. Source-agnostic on

@@ -143,6 +143,13 @@ async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = N
     return {p["_id"] for p in pockets if p.get("_id")}
 
 
+async def _pocket_name_map(ctx: RequestContext, *, project_id: str | None = None) -> dict[str, str]:
+    """Build pocket_id → pocket_name mapping for visible pockets."""
+    workspace_id = _require_workspace(ctx)
+    pockets = await pockets_service.list_pockets(workspace_id, ctx.user_id, project_id=project_id)
+    return {p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")}
+
+
 def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkItemStatus]:
     """Map Instinct ``ActionStatus`` to the (section, status) pair Mission
     Control consumes."""
@@ -161,7 +168,7 @@ def _status_to_section_status(s: ActionStatus) -> tuple[WorkItemSection, WorkIte
     return WorkItemSection.SNAGS, WorkItemStatus.BLOCKED
 
 
-def _action_to_work_item(action: Action, workspace_id: str) -> WorkItem:
+def _action_to_work_item(action: Action, workspace_id: str, pocket_name: str = "") -> WorkItem:
     """Project an Instinct ``Action`` into a Mission Control ``WorkItem``.
 
     The assignee field on Instinct is optional — when missing we surface
@@ -172,6 +179,7 @@ def _action_to_work_item(action: Action, workspace_id: str) -> WorkItem:
     section, status = _status_to_section_status(action.status)
     assignee_id = action.assignee or _trigger_assignee(action) or ""
     agent_id = action.trigger.source if action.trigger.type == "agent" else None
+    agent_name = action.trigger.source if action.trigger.type == "agent" else ""
     return WorkItem(
         id=f"nudge:{action.id}",
         workspace_id=workspace_id,
@@ -181,8 +189,11 @@ def _action_to_work_item(action: Action, workspace_id: str) -> WorkItem:
         description=action.description or action.recommendation or "",
         assignee_kind=AssigneeKind.USER,
         assignee_id=assignee_id,
-        pocket_id=action.pocket_id,
+        assignee_name=_trigger_assignee_name(action) or assignee_id,
         agent_id=agent_id,
+        agent_name=agent_name,
+        pocket_id=action.pocket_id,
+        pocket_name=pocket_name,
         source_kind="nudge",
         source_id=action.id,
         priority=action.priority.value,
@@ -203,6 +214,15 @@ def _trigger_assignee(action: Action) -> str | None:
     """
     if action.trigger and action.trigger.type == "user":
         return action.trigger.source
+    return None
+
+
+def _trigger_assignee_name(action: Action) -> str | None:
+    """Extract a human-readable assignee name from the trigger source."""
+    if action.trigger and action.trigger.type == "user":
+        return action.trigger.source
+    if action.assignee:
+        return action.assignee
     return None
 
 
@@ -236,7 +256,7 @@ def _task_section(task_status: str, assignee_kind: str) -> WorkItemSection:
     return WorkItemSection.TRAY
 
 
-def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
+def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> WorkItem:
     """Project a ``Task`` (or its DTO) into a Mission Control ``WorkItem``.
 
     Accepts either a ``tasks.domain.Task`` or a ``TaskResponse`` DTO —
@@ -248,6 +268,8 @@ def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
     """
     assignee = task.assignee
     assignee_kind = AssigneeKind.AGENT if assignee.kind == "agent" else AssigneeKind.USER
+    assignee_name = assignee.name or assignee.id
+    agent_name = assignee.name if assignee.kind == "agent" else ""
     status = _TASK_STATUS_MAP.get(task.status, WorkItemStatus.IN_PROGRESS)
     section = _task_section(task.status, assignee.kind)
     blocked_by_raw = getattr(task, "blocked_by", None) or ()
@@ -261,8 +283,11 @@ def _task_to_work_item(task: Any, workspace_id: str) -> WorkItem:
         description=task.summary or "",
         assignee_kind=assignee_kind,
         assignee_id=assignee.id,
-        pocket_id=task.pocket_id or None,
+        assignee_name=assignee_name,
         agent_id=assignee.id if assignee.kind == "agent" else None,
+        agent_name=agent_name,
+        pocket_id=task.pocket_id or None,
+        pocket_name=pocket_name,
         source_kind="task",
         source_id=task.id,
         priority=task.priority,
@@ -291,6 +316,7 @@ async def agent_list_work_items(
     body = ListWorkItemsRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx, project_id=body.project_id)
+    name_map = await _pocket_name_map(ctx, project_id=body.project_id)
 
     items: list[WorkItem] = []
 
@@ -314,7 +340,14 @@ async def agent_list_work_items(
                 continue
             seen.add(a.id)
             actions.append(a)
-        items.extend(_action_to_work_item(a, workspace_id) for a in actions)
+        items.extend(
+            _action_to_work_item(
+                a,
+                workspace_id,
+                pocket_name=name_map.get(a.pocket_id, a.pocket_id or ""),
+            )
+            for a in actions
+        )
 
     # --- Tasks (workspace-scoped) ------------------------------------------
     # Lazy import keeps the façade installable on forks that haven't
@@ -335,7 +368,13 @@ async def agent_list_work_items(
         for t in tasks:
             if body.agent and (t.assignee.kind != "agent" or t.assignee.name != body.agent):
                 continue
-            items.append(_task_to_work_item(t, workspace_id))
+            items.append(
+                _task_to_work_item(
+                    t,
+                    workspace_id,
+                    pocket_name=name_map.get(t.pocket_id or "", t.pocket_id or ""),
+                )
+            )
 
     if body.section is not None:
         items = [it for it in items if it.section == body.section]
@@ -347,28 +386,68 @@ async def agent_list_work_items(
 async def agent_bulk_approve(
     ctx: RequestContext, body: BulkActionRequest | dict[str, Any]
 ) -> dict[str, Any]:
-    """Approve N pending Nudges in one call.
+    """Approve N pending items in one call.
 
-    Tenancy: each id is checked against the caller's visible-pocket set
-    before fanning out to Instinct. Ids that fail that check come back
-    in ``missing`` rather than approving across tenants. The shared
-    ``bulk_id`` lives in every audit row's ``context.bulk_id`` so the
-    operator can recover the bulk transaction.
+    Works for both Nudges (Instinct store) and Tasks (Tasks service).
+    Items prefixed with ``task:`` are routed to the Tasks service's
+    ``agent_complete_task``; everything else goes through the Instinct
+    store's ``bulk_approve``. The shared ``bulk_id`` lives in every
+    audit row's ``context.bulk_id`` so the operator can recover the
+    bulk transaction.
     """
+    from uuid import uuid4
+
     body = BulkActionRequest.model_validate(body)
     _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
-    eligible, blocked = await _split_ids_by_tenancy(store, list(body.ids), visible)
-    approved, missing, bulk_id = await store.bulk_approve(
-        eligible, approver=ctx.user_id, note=body.note
-    )
-    # no-event: per-item approve/reject inside the loop already emits the events
-    return {
-        "bulk_id": bulk_id,
-        "approved": [a.model_dump(mode="json") for a in approved],
-        "missing": [*missing, *blocked],
-    }
+
+    bulk_id = uuid4().hex
+    approved: list[dict] = []
+    missing: list[str] = []
+
+    # Split IDs into nudges and tasks
+    nudge_ids: list[str] = []
+    task_ids: list[str] = []
+    for raw_id in body.ids:
+        tid = _classify_task_id(raw_id)
+        if tid is not None:
+            task_ids.append(raw_id)
+        else:
+            nudge_ids.append(raw_id)
+
+    # Handle tasks: call agent_complete_task for each
+    if task_ids:
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+        from pocketpaw_ee.cloud.tasks.dto import CompleteTaskRequest
+
+        for raw_id in task_ids:
+            task_id = _classify_task_id(raw_id)
+            if task_id is None:
+                missing.append(raw_id)
+                continue
+            try:
+                result = await tasks_service.agent_complete_task(
+                    ctx,
+                    task_id,
+                    CompleteTaskRequest(next_action="archive"),
+                )
+                approved.append(result.model_dump(mode="json"))
+            except Exception as e:
+                logger.info("bulk_approve: task %s failed: %s", raw_id, e)
+                missing.append(raw_id)
+
+    # Handle nudges via Instinct store
+    if nudge_ids:
+        visible = await _visible_pocket_ids(ctx)
+        store = get_instinct_store()
+        eligible, blocked = await _split_ids_by_tenancy(store, nudge_ids, visible)
+        nudge_approved, nudge_missing, _ = await store.bulk_approve(
+            eligible, approver=ctx.user_id, note=body.note
+        )
+        approved.extend(a.model_dump(mode="json") for a in nudge_approved)
+        missing.extend(nudge_missing)
+        missing.extend(blocked)
+
+    return {"bulk_id": bulk_id, "approved": approved, "missing": missing}
 
 
 async def agent_bulk_reject(
@@ -504,8 +583,10 @@ def _activity_to_response(e: ActivityEvent) -> ActivityEventResponse:
         workspace_id=e.workspace_id,
         kind=e.kind,
         agent_id=e.agent_id,
+        agent_name=e.agent_name,
         summary=e.summary,
         pocket_id=e.pocket_id,
+        pocket_name=e.pocket_name,
         ts=e.ts,
     )
 
@@ -678,6 +759,7 @@ def _plan_session_to_dto(summary: Any) -> PlanSessionDTO:
     wire_status = _WIRE_STATUS_BY_DOC.get(summary.status, "draft")
     return PlanSessionDTO(
         id=summary.id,
+        project_id=summary.project_id,
         name=summary.name,
         status=wire_status,  # type: ignore[arg-type]
         task_count=summary.task_count,
