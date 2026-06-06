@@ -154,7 +154,7 @@ def _svelte_create_preamble(meta: SurfaceMeta) -> str:
         "</sites-orientation>\n"
         "<sites-procedure>\n"
         "Treat the user's message on this surface as a request to BUILD AND "
-        "PUBLISH a marketing site on the Svelte track. This track is MANDATORY - author the page as hand-written SvelteKit components, never ripple widgets. Use the"
+        "PUBLISH a marketing site on the Svelte track. This track is MANDATORY - author the page as hand-written SvelteKit components, never ripple widgets. Use the"  # noqa: E501
         "`pocketpaw-create-svelte-site` skill — invoke it by intent (no slash "
         "command needed). It is the dedicated Svelte-track authoring brain: YOU "
         "write premium hand-written SvelteKit components (Hero, Pricing, Faq, …) "
@@ -163,7 +163,7 @@ def _svelte_create_preamble(meta: SurfaceMeta) -> str:
         "`engine=\"svelte\"` and then publishes it and shows the live URL. There "
         "is NO rippleSpec and NO widget catalog on this track — do not draft a "
         "rippleSpec, do not call `get_widget_spec`, do not use the pocket "
-        "specialist, and ABSOLUTELY DO NOT call `mcp__pocketpaw_sites_manager__create_landing_site` or the `pocketpaw-create-paw-site` skill - those build a RIPPLE widget site, which is the WRONG output for this track. The Svelte component files ARE the page. The ONLY sanctioned create tool on this track is `create_svelte_site`; if you cannot use it, STOP and say so rather than falling back to any ripple/landing tool. The create-svelte-site "
+        "specialist, and ABSOLUTELY DO NOT call `mcp__pocketpaw_sites_manager__create_landing_site` or the `pocketpaw-create-paw-site` skill - those build a RIPPLE widget site, which is the WRONG output for this track. The Svelte component files ARE the page. The ONLY sanctioned create tool on this track is `create_svelte_site`; if you cannot use it, STOP and say so rather than falling back to any ripple/landing tool. The create-svelte-site "  # noqa: E501
         "skill owns the authoring how-to (the source-map shape and the "
         "resting-state SSR rule — render the final state in markup, never only in "
         "`onMount`, because prerender bakes the resting frame).\n"
