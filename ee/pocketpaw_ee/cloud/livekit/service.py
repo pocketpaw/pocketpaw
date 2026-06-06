@@ -286,6 +286,7 @@ async def _reap_agent_process(
                 summary=payload.get("summary", "Call ended."),
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
                 duration_seconds=payload.get("duration_seconds", 0),
                 workspace_id=workspace_id,
             )
@@ -729,6 +730,7 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
                 summary=payload.get("summary", "Call ended."),
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
                 duration_seconds=payload.get("duration_seconds", 0),
                 workspace_id=workspace_id,
             )
@@ -832,6 +834,7 @@ async def post_meeting_notes_to_group(
     participants: list[str],
     duration_seconds: int,
     workspace_id: str = "",
+    participant_map: list[dict[str, str]] | None = None,
 ) -> None:
     """Post meeting notes to a group after a call ends.
 
@@ -996,13 +999,14 @@ async def post_meeting_notes_to_group(
 
     # ── Create Mission Control tasks from action items ──
     # Parse the ## ✅ Action Items section from the markdown summary
-    # and create unassigned Tasks so they appear in Mission Control.
+    # and create Tasks assigned to the matched participant.
     if workspace_id and summary:
         try:
             await _create_tasks_from_meeting_notes(
                 workspace_id=workspace_id,
                 group_id=group_id,
                 summary=summary,
+                participant_map=participant_map,
             )
         except Exception as exc:
             logger.warning("Failed to create tasks from meeting notes: %s", exc)
@@ -1085,12 +1089,25 @@ async def _create_tasks_from_meeting_notes(
     workspace_id: str,
     group_id: str,
     summary: str,
+    participant_map: list[dict[str, str]] | None = None,
 ) -> None:
     """Parse action items from the meeting notes summary and create Tasks."""
     action_items = _extract_action_items_from_markdown(summary)
     if not action_items:
         logger.info("No action items found in meeting notes for group %s", group_id)
         return
+
+    # Build name→id lookup from participant_map (sent by agent, no DB needed)
+    name_to_id: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "")
+            if pid and pname:
+                name_to_id[pname.lower()] = pid
+                first_word = pname.split(" ", 1)[0].lower()
+                if first_word not in name_to_id:
+                    name_to_id[first_word] = pid
 
     from datetime import UTC, datetime
 
@@ -1109,15 +1126,19 @@ async def _create_tasks_from_meeting_notes(
     created = 0
     for item in action_items:
         try:
+            # Parse @Name prefix from the action item, e.g. "@Admin: do X"
+            assignee_name, description = _parse_action_item_assignee(item)
+            assignee_id = name_to_id.get(assignee_name.lower(), "__unassigned__")
+
             await tasks_service.agent_create_task(
                 ctx,
                 CreateTaskRequest(
-                    title=item[:200],  # title is max 200 chars
+                    title=(description or item)[:200],
                     summary=f"(from meeting notes, group {group_id})",
                     assignee=AssigneeDTO(
                         kind="human",
-                        id="__unassigned__",
-                        name="Unassigned",
+                        id=assignee_id,
+                        name=assignee_name,
                     ),
                     source=SourceDTO(
                         type="meeting_notes",
@@ -1131,6 +1152,16 @@ async def _create_tasks_from_meeting_notes(
             logger.warning("Failed to create task for action item %r: %s", item, exc)
 
     logger.info("Created %d tasks from meeting notes for group %s", created, group_id)
+
+
+def _parse_action_item_assignee(item: str) -> tuple[str, str]:
+    """Extract ``@Name`` prefix from an action item, returning (assignee, rest)."""
+    import re
+
+    m = re.match(r"@(\S[\w\s]*?)\s*[:—\-]\s*(.*)", item.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "__unassigned__", item
 
 
 def _extract_action_items_from_markdown(markdown: str) -> list[str]:

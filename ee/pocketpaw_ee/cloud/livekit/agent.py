@@ -78,6 +78,7 @@ class CallMeetingAgent:
         # Accumulated transcript segments
         self.transcript_segments: list[dict[str, Any]] = []
         self._participant_identities: set[str] = set()
+        self._participant_info: dict[str, str] = {}  # identity → display_name
         self._has_ever_had_humans: bool = False
         self._call_start_time: float = 0.0
 
@@ -227,6 +228,7 @@ class CallMeetingAgent:
 
                 pname = participant.name or pid
                 self._participant_identities.add(pid)
+                self._participant_info[pid] = pname
                 logger.info("Agent: setting up audio pipe for %s (from_participant)", pname)
 
                 try:
@@ -512,6 +514,7 @@ class CallMeetingAgent:
                         if pid and pid != "call-bot":
                             human_count += 1
                             self._participant_identities.add(pid)
+                            self._participant_info[pid] = p.get("name", "") or pid
                             self._has_ever_had_humans = True
 
                 if human_count == 0:
@@ -644,6 +647,14 @@ class CallMeetingAgent:
         # Merge participant identities from room tracking + transcript
         all_participants = list(self._participant_identities | speakers_seen)
 
+        # Build structured participant info (identity → display_name) so the
+        # service can resolve @mentions in action items to real user IDs
+        # without querying the User collection.
+        participant_map = [
+            {"identity": pid, "name": self._participant_info.get(pid, pid)}
+            for pid in sorted(self._participant_identities)
+        ]
+
         # ── Emit notes payload to stdout ──
         # Instead of calling post_meeting_notes_to_group directly (which
         # requires Beanie/MongoDB initialized in this subprocess), we write
@@ -657,6 +668,7 @@ class CallMeetingAgent:
                 "summary": summary,
                 "action_items": action_items,
                 "participants": all_participants,
+                "participant_map": participant_map,
                 "duration_seconds": duration,
             }
         )
