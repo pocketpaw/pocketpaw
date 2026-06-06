@@ -6,6 +6,21 @@
 # without Bun/workerd present.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-06 (feat/1346-cf-deploy — Cloudflare deploy pipeline):
+#   * NEW build_and_deploy(): the single seam the publish path (#1345) calls. It
+#     runs build() (generate → install → workerd smoke gate) and, ONLY if the
+#     gate passes, deploys the artifact, returning a DeployResult
+#     {success: bool, url: str|None, error: str|None}. It NEVER raises for an
+#     expected failure (smoke-gate fail OR deploy fail) — both come back as
+#     success=False with the reason in `error`, so the caller flips "Live" off
+#     cleanly instead of catching exceptions. Deploy target is chosen by the
+#     caller: pass a `cloudflare` client (real edge: cf.deploy_site uploads the
+#     worker + static assets + bindings) OR a `local_deploy` callable (the
+#     no-CF/PAW_SITES_LOCAL dev path: serve the build from localhost). This keeps
+#     the CF-vs-local POLICY in the service layer (which reads the env) and the
+#     build→gate→deploy MECHANICS here. build() is unchanged, so existing callers
+#     and the dentist/local integration tests keep working.
+#
 # Updated 2026-06-04 (feat/sites-svelte-engine — Paw Sites "Svelte track"):
 #   * FIX: BuildResult.ripple_version is now optional and build() reads it with
 #     gen.get("rippleVersion") (was gen["rippleVersion"]). The svelte
@@ -49,6 +64,7 @@ import json
 import os
 import shlex
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -67,6 +83,29 @@ class BuildResult:
     # this is ``None`` on the svelte path. Optional so reading the svelte result
     # does not KeyError.
     ripple_version: str | None = None
+
+
+@dataclass(frozen=True)
+class DeployResult:
+    """The result of build_and_deploy — the seam the publish path (#1345) reads
+    to set "Live". Shape: ``{success: bool, url: str | None, error: str | None}``.
+
+    ``success`` is True only when the build passed the workerd smoke gate AND the
+    deploy reported 200. On any expected failure (smoke gate failed, or the
+    deploy call failed) ``success`` is False, ``url`` is None, and ``error`` holds
+    the human-readable reason — build_and_deploy does NOT raise for these, so the
+    caller flips "Live" off without a try/except."""
+
+    success: bool
+    url: str | None = None
+    error: str | None = None
+
+
+class _CloudflareDeployer(Protocol):
+    """The deploy surface build_and_deploy needs from a Cloudflare client. The
+    real ``CloudflareClient`` satisfies it; tests pass a fake."""
+
+    async def deploy_site(self, *, script_name: str, project_dir: str) -> str: ...
 
 
 def _gen_cmd_argv() -> list[str]:
@@ -247,3 +286,75 @@ class GeneratorClient:
         # path omits it (paw-sites types.ts §4.2), so read it defensively — a svelte
         # build must not KeyError here.
         return BuildResult(project_dir=gen["projectDir"], ripple_version=gen.get("rippleVersion"))
+
+    async def build_and_deploy(
+        self,
+        *,
+        ripple_spec: dict[str, Any] | None = None,
+        theme: dict[str, Any],
+        site_id: str,
+        title: str,
+        capture_api_base: str,
+        capture_signed_key: str,
+        engine: str = "ripple",
+        source: dict[str, str] | None = None,
+        cloudflare: _CloudflareDeployer | None = None,
+        local_deploy: Callable[[str, str], str] | None = None,
+    ) -> DeployResult:
+        """Build, smoke-gate, and deploy a Paw Site — the ONE call the publish
+        path (#1345) makes. Returns a ``DeployResult``
+        ``{success: bool, url: str | None, error: str | None}``.
+
+        Flow: ``build()`` (generate → install → workerd smoke gate). If the gate
+        fails, return ``DeployResult(success=False, error=<reason>)`` WITHOUT
+        deploying — the gate fails closed (Contract clause 4). If it passes,
+        deploy and return the live URL.
+
+        Deploy target (caller picks; the service layer reads the env to decide):
+          * ``cloudflare`` set → real edge deploy: ``cf.deploy_site`` uploads the
+            worker + static assets + bindings into the dispatch namespace and
+            returns the stable URL.
+          * else ``local_deploy`` set → the no-CF dev path: a ``(site_id,
+            project_dir) -> url`` callable (local_server.deploy_local) serves the
+            build from localhost.
+          * neither set → ``DeployResult(success=False, error=...)`` (a deploy
+            with no target is a misconfiguration, surfaced not raised).
+
+        Never raises for an expected failure: a smoke-gate failure OR a deploy
+        error both come back as ``success=False`` with the reason in ``error``, so
+        the caller sets "Live" off without a try/except. (An unexpected
+        programming error still propagates.)"""
+        try:
+            build = await self.build(
+                ripple_spec=ripple_spec,
+                theme=theme,
+                site_id=site_id,
+                title=title,
+                capture_api_base=capture_api_base,
+                capture_signed_key=capture_signed_key,
+                engine=engine,
+                source=source,
+            )
+        except SmokeGateFailed as exc:
+            # The workerd smoke gate (or the pre-build install) failed — the site
+            # is broken and must NOT go live. Surface, don't raise.
+            return DeployResult(success=False, error=str(exc))
+
+        try:
+            if cloudflare is not None:
+                url = await cloudflare.deploy_site(
+                    script_name=site_id, project_dir=build.project_dir
+                )
+            elif local_deploy is not None:
+                url = local_deploy(site_id, build.project_dir)
+            else:
+                return DeployResult(
+                    success=False,
+                    error="no deploy target: pass a cloudflare client or a local_deploy callable",
+                )
+        except Exception as exc:  # noqa: BLE001 - any deploy failure → success=False
+            # A failed deploy (CF non-2xx → ValidationError, a missing artifact,
+            # a network error) must report failure, never a false "Live".
+            return DeployResult(success=False, error=f"deploy failed: {exc}")
+
+        return DeployResult(success=True, url=url)
