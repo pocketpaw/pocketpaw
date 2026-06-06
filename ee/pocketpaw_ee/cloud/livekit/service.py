@@ -847,9 +847,15 @@ async def post_meeting_notes_to_group(
         f"**Duration:** {_format_duration(duration_seconds)}",
         f"**Participants:** {', '.join(participants) if participants else 'N/A'}",
         "",
-        "**Summary:**",
-        summary,
     ]
+
+    # If the summary is rich markdown (has its own headings), use it directly.
+    # Otherwise, wrap it in a "**Summary:**" label.
+    if summary.strip().startswith("## "):
+        lines.append(summary)
+    else:
+        lines.append("**Summary:**")
+        lines.append(summary)
 
     if action_items:
         lines.append("")

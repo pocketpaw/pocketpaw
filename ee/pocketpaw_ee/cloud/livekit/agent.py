@@ -629,8 +629,17 @@ class CallMeetingAgent:
                 action_items = ["Transcript captured but summarization failed."]
         else:
             transcript_text = ""
-            summary = "Call ended with no speech detected."
-            action_items = []
+
+            # Still attempt AI summarization so DeepSeek can process
+            # whatever context is available (room info, participant IDs).
+            try:
+                summary, action_items = await self._generate_summary(
+                    transcript_text or "(no speech captured)",
+                )
+            except Exception:
+                logger.exception("Agent: AI summarization failed — posting notes without summary")
+                summary = "Call ended with no speech detected."
+                action_items = []
 
         # Merge participant identities from room tracking + transcript
         all_participants = list(self._participant_identities | speakers_seen)
@@ -667,13 +676,22 @@ class CallMeetingAgent:
     ) -> tuple[str, list[str]]:
         """Generate a meeting summary and action items from transcript.
 
-        Uses Anthropic Claude by default, falls back to OpenAI.
-        Falls back to heuristic extraction if no LLM is configured.
+        Uses DeepSeek by default (OpenAI-compatible API), falls back to
+        Anthropic Claude, then OpenAI. Falls back to heuristic extraction
+        if no LLM is configured.
         """
         if not transcript:
             return "No speech detected during the call.", []
 
-        # Try Anthropic first
+        # Try DeepSeek first (OpenAI-compatible API)
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if deepseek_key:
+            try:
+                return await self._summarize_with_deepseek(transcript, deepseek_key)
+            except Exception as exc:
+                logger.warning("DeepSeek summarization failed: %s", exc)
+
+        # Fall back to Anthropic
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if api_key:
             try:
@@ -728,6 +746,62 @@ class CallMeetingAgent:
             data = resp.json()
 
         content = data.get("content", [{}])[0].get("text", "")
+        return self._parse_summary_json(content)
+
+    async def _summarize_with_deepseek(
+        self,
+        transcript: str,
+        api_key: str,
+    ) -> tuple[str, list[str]]:
+        """Use DeepSeek (OpenAI-compatible API) to summarize the transcript."""
+        import httpx
+
+        prompt = (
+            "You are a professional meeting notes assistant. Given the following transcript of a "
+            "group call, produce a comprehensive, well-structured Markdown meeting summary.\n\n"
+            "Include the following sections where applicable:\n\n"
+            "## 📋 Overview\n"
+            "A concise 1-2 paragraph summary of what was discussed — the context, "
+            "the main agenda, and the overall outcome of the call.\n\n"
+            "## 📌 Topics Covered\n"
+            "A bullet-point or numbered list of the main topics / subjects discussed "
+            "during the call. Describe each topic in a sentence or two.\n\n"
+            "## ⚙️ Technical Decisions\n"
+            "Any architectural decisions, tool choices, code changes, or implementation "
+            "plans that were agreed upon.\n\n"
+            "## ✅ Action Items\n"
+            "A bullet list of clear action items with who is responsible (e.g. "
+            "'@Admin: merge the notification PR', '@Amritesh: test the deployment'). "
+            "Be specific — mention the person and what they need to do.\n\n"
+            "## ❓ Key Questions\n"
+            "Any open questions, unresolved issues, or things that need further "
+            "discussion.\n\n"
+            "## 🔜 Next Steps\n"
+            "What happens next — any follow-ups, pending reviews, or scheduled items.\n\n"
+            "Format your ENTIRE response as raw Markdown (no wrapping JSON, no code fences). "
+            "Use bold, headings, lists as appropriate. Make it look like a polished "
+            "meeting notes document.\n\n"
+            f"Transcript:\n{transcript}"
+        )
+        logger.info("DeepSeek prompt length: %d chars", len(prompt))
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 4096,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         return self._parse_summary_json(content)
 
     async def _summarize_with_openai(
