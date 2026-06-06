@@ -117,6 +117,9 @@ codex-sdk = [
 google-adk = [
     "google-adk>=1.0.0",
 ]
+antigravity = [
+    "google-antigravity>=0.1.0",
+]
 copilot-sdk = [
     "github-copilot-sdk>=0.1.0",
 ]
@@ -261,7 +264,7 @@ all-tools = [
     "soul-protocol[engine]>=0.3.0",
 ]
 all-backends = [
-    "pocketpaw[openai-agents,google-adk,copilot-sdk,deep-agents,litellm]",
+    "pocketpaw[openai-agents,google-adk,antigravity,copilot-sdk,deep-agents,litellm]",
 ]
 # NOTE: the `enterprise` extra was removed in the OSS-EE split (Phase 4).
 # Enterprise features now ship as the separate `pocketpaw-ee` package
@@ -298,6 +301,7 @@ all = [
     # backends
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
+    "google-antigravity>=0.1.0",
     "github-copilot-sdk>=0.1.0",
     "deepagents>=0.5.8,<0.6.0",
     "langchain-mcp-adapters>=0.2.2,<0.3.0",
@@ -331,6 +335,7 @@ dev = [
     "mcp>=1.0.0",
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
+    "google-antigravity>=0.1.0",
     "github-copilot-sdk>=0.1.0",
     "deepagents>=0.5.8,<0.6.0",
     "langchain-mcp-adapters>=0.2.2,<0.3.0",
@@ -441,6 +446,7 @@ dev = [
     "mcp>=1.0.0",
     "openai-agents>=0.2.0",
     "google-adk>=1.0.0",
+    "google-antigravity>=0.1.0",
     "github-copilot-sdk>=0.1.0",
     "deepagents>=0.5.8,<0.6.0",
     "langchain-mcp-adapters>=0.2.2,<0.3.0",

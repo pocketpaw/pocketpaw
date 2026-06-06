@@ -418,6 +418,41 @@ def _make_adk_wrapper(tool: Any):
     return _adk_tool_wrapper
 
 
+def build_antigravity_function_tools(
+    settings: Any, backend: str = "antigravity", policy: ToolPolicy | None = None
+) -> list:
+    """Build PocketPaw tools as plain callables for the Antigravity SDK.
+
+    The Google Antigravity SDK accepts plain Python functions with docstrings
+    and type annotations as tools (``LocalAgentConfig(tools=[...])``) — the exact
+    shape ``_make_adk_wrapper`` already produces, so we reuse it without the
+    ADK ``FunctionTool`` envelope.
+
+    Only tools permitted by the active ToolPolicy are included. Returns an empty
+    list if the tool registry can't be built.
+    """
+    if policy is None:
+        policy = ToolPolicy(
+            profile=settings.tool_profile,
+            allow=settings.tools_allow,
+            deny=settings.tools_deny,
+        )
+
+    registry = ToolRegistry(policy=policy)
+    for tool in _instantiate_all_tools(backend=backend):
+        registry.register(tool)
+
+    callables: list = []
+    for tool_name in registry.allowed_tool_names:
+        tool = registry.get(tool_name)
+        if tool is None:
+            continue
+        callables.append(_make_adk_wrapper(tool))
+
+    logger.info("Built %d Antigravity function tools from PocketPaw tools", len(callables))
+    return callables
+
+
 def build_deep_agents_tools(
     settings: Any, backend: str = "deep_agents", policy: ToolPolicy | None = None
 ) -> list:

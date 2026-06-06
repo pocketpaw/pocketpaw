@@ -420,6 +420,11 @@
             "icon": "lucide:hexagon"
           },
           {
+            "label": "Google Antigravity",
+            "href": "/backends/antigravity",
+            "icon": "lucide:orbit"
+          },
+          {
             "label": "Codex CLI",
             "href": "/backends/codex-cli",
             "icon": "lucide:code"

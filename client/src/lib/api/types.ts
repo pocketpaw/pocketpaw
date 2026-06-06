@@ -65,6 +65,9 @@ export interface Settings {
   openai_agents_max_turns?: number;
   google_adk_model?: string;
   google_adk_max_turns?: number;
+  antigravity_model?: string;
+  antigravity_max_turns?: number;
+  antigravity_api_key?: string;
   codex_cli_model?: string;
   codex_cli_max_turns?: number;
   copilot_sdk_provider?: string;

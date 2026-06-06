@@ -95,6 +95,10 @@
       modelField: "google_adk_model",
       maxTurnsField: "google_adk_max_turns",
     },
+    antigravity: {
+      modelField: "antigravity_model",
+      maxTurnsField: "antigravity_max_turns",
+    },
     codex_cli: {
       modelField: "codex_cli_model",
       maxTurnsField: "codex_cli_max_turns",

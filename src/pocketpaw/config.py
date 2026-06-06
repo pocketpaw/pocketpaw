@@ -204,9 +204,9 @@ class Settings(BaseSettings):
         default="claude_agent_sdk",
         description=(
             "Agent backend: 'claude_agent_sdk', 'openai_agents', 'google_adk', "
-            "'codex_cli', 'opencode', 'copilot_sdk', 'deep_agents', or "
-            "'langchain_react'. All backends support 'litellm' as a provider "
-            "for open-source model access."
+            "'codex_cli', 'opencode', 'copilot_sdk', 'deep_agents', "
+            "'langchain_react', or 'antigravity'. All backends support 'litellm' "
+            "as a provider for open-source model access."
         ),
     )
     # backend fallback chain
@@ -263,6 +263,24 @@ class Settings(BaseSettings):
     )
     google_adk_max_turns: int = Field(
         default=100, description="Max turns per query in Google ADK backend (0 = unlimited)"
+    )
+
+    # Google Antigravity Settings
+    antigravity_model: str = Field(
+        default="gemini-3-pro-preview",
+        description="Model for the Google Antigravity backend (Gemini family)",
+    )
+    antigravity_max_turns: int = Field(
+        default=100,
+        description="Max turns per query in the Antigravity backend (0 = unlimited)",
+    )
+    antigravity_api_key: str | None = Field(
+        default=None,
+        description=(
+            "API key for the Google Antigravity backend (read as GEMINI_API_KEY "
+            "by the SDK). Falls back to gemini_api_key, then google_api_key when "
+            "unset, so a key configured for Google ADK is reused automatically."
+        ),
     )
 
     # Codex CLI Settings
