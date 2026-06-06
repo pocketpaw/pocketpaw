@@ -2,12 +2,14 @@
 
 Recent change: added the optional ``surface`` field so the frontend can tell
 where a session-scope row originated (``chat`` vs ``files`` vs
-``pocket_creation``). Without it the three /chat / /files / /pockets
-chat surfaces all produced ``Session`` rows indistinguishable on
-``pocket=None`` + ``context_type="session"``, which the /chat sidebar then
-listed together (the "session bleed" bug). Legacy rows keep ``surface=None``
-and are still returned from unfiltered listings so the migration is non-
-disruptive.
+``pocket_creation`` vs ``foresight``). Without it the /chat / /files /
+/pockets / foresight chat surfaces all produced ``Session`` rows
+indistinguishable on ``pocket=None`` + ``context_type="session"``, which the
+/chat sidebar then listed together (the "session bleed" bug). ``foresight``
+was added so Foresight chats isolate server-side instead of relying on a
+client-side manifest. Legacy rows keep ``surface=None``; they are treated as
+``chat`` (returned only by the chat-surface listing, never files/pocket/
+foresight) so the migration is non-disruptive and no backfill is needed.
 """
 
 from __future__ import annotations
@@ -22,9 +24,9 @@ from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 ContextType = Literal["pocket", "group", "session"]
 # Surface tags the chat UI that minted this session — used by the /chat
-# sidebar to filter out pocket-creation / files-panel sessions that would
-# otherwise appear alongside DM threads (see "session bleed" fix).
-SurfaceType = Literal["chat", "files", "pocket_creation"]
+# sidebar to filter out pocket-creation / files-panel / foresight sessions
+# that would otherwise appear alongside DM threads (see "session bleed" fix).
+SurfaceType = Literal["chat", "files", "pocket_creation", "foresight"]
 
 
 class Session(TimestampedDocument):
