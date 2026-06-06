@@ -103,9 +103,9 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "PUBLISH a marketing site. PREFER the `pocketpaw-create-paw-site` skill — "
         "invoke it by intent (no slash command needed). It is the dedicated "
         "marketing brain: it composes the page by conversion role, stamps the "
-        "source pocket `type=\"site\"` + `pattern=\"landing\"`, and then publishes "
+        'source pocket `type="site"` + `pattern="landing"`, and then publishes '
         "it and shows the live URL. Critically, the lead-capture form must be "
-        "FLAT native `input`/`textarea`/`button{type:\"submit\"}` widgets with "
+        'FLAT native `input`/`textarea`/`button{type:"submit"}` widgets with '
         "real field names (name, email, phone, message) — NEVER the `form` or "
         "`newsletter` widget, which nests an invalid `<form>` inside the site "
         "template's outer POST form and captures zero leads. Pricing uses "
@@ -113,8 +113,8 @@ def _create_preamble(meta: SurfaceMeta) -> str:
         "stays CSS-only (Tier-0).\n"
         "If that skill is unavailable, fall back directly with the MCP tools: "
         "call `mcp__pocketpaw_pocket_specialist__create` to build the "
-        "conversion-ordered landing spec (stamp `type=\"site\"` + "
-        "`pattern=\"landing\"`, flat named lead inputs, `pricing-table` tiers, "
+        'conversion-ordered landing spec (stamp `type="site"` + '
+        '`pattern="landing"`, flat named lead inputs, `pricing-table` tiers, '
         "anchor CTAs), then `mcp__pocketpaw_sites_manager__publish` with the "
         "returned pocket_id.\n"
         "Either way: relay any publish error — never claim a phantom publish — and "
@@ -159,8 +159,8 @@ def _svelte_create_preamble(meta: SurfaceMeta) -> str:
         "command needed). It is the dedicated Svelte-track authoring brain: YOU "
         "write premium hand-written SvelteKit components (Hero, Pricing, Faq, …) "
         "at the design quality bar, assemble them into the source map, and it "
-        "persists the source pocket `type=\"site\"` + `pattern=\"landing\"` + "
-        "`engine=\"svelte\"` and then publishes it and shows the live URL. There "
+        'persists the source pocket `type="site"` + `pattern="landing"` + '
+        '`engine="svelte"` and then publishes it and shows the live URL. There '
         "is NO rippleSpec and NO widget catalog on this track — do not draft a "
         "rippleSpec, do not call `get_widget_spec`, do not use the pocket "
         "specialist, and ABSOLUTELY DO NOT call `mcp__pocketpaw_sites_manager__create_landing_site` or the `pocketpaw-create-paw-site` skill - those build a RIPPLE widget site, which is the WRONG output for this track. The Svelte component files ARE the page. The ONLY sanctioned create tool on this track is `create_svelte_site`; if you cannot use it, STOP and say so rather than falling back to any ripple/landing tool. The create-svelte-site "  # noqa: E501
@@ -170,8 +170,8 @@ def _svelte_create_preamble(meta: SurfaceMeta) -> str:
         "If that skill is unavailable, fall back directly with the MCP tools: "
         "author the SvelteKit source map yourself, then call "
         "`mcp__pocketpaw_sites_manager__create_svelte_site` with the `source` "
-        "object (it stamps `type=\"site\"` + `pattern=\"landing\"` + "
-        "`engine=\"svelte\"` and persists the pocket), then "
+        'object (it stamps `type="site"` + `pattern="landing"` + '
+        '`engine="svelte"` and persists the pocket), then '
         "`mcp__pocketpaw_sites_manager__publish` with the returned pocket_id.\n"
         "Either way: relay any publish error — never claim a phantom publish — and "
         "after it succeeds, SHOW the live `url` plus a link to /sites where the "
@@ -217,7 +217,7 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
         "→ flat lead form → footer) and keep the 5 static-site (SSR) rules intact "
         "while you edit:\n"
         "1. Lead capture stays FLAT native `input`/`textarea`/"
-        "`button{type:\"submit\"}` with real field names (name, email, phone, "
+        '`button{type:"submit"}` with real field names (name, email, phone, '
         "message) — NEVER the `form` or `newsletter` widget, which nests an "
         "invalid `<form>` inside the site template's outer POST form and captures "
         "zero leads.\n"
@@ -233,7 +233,7 @@ def _refine_preamble(meta: SurfaceMeta) -> str:
         "Any animation stays Tier-0 (CSS-only, static-safe) — `aurora`, "
         "`marquee`, `border-beam`, `shimmer`, `text-effect`; never `reveal`, "
         "`parallax`, or `spotlight` (they need client JS and hide content on a "
-        "static page). Keep `type=\"site\"` + `pattern=\"landing\"` on the pocket. "
+        'static page). Keep `type="site"` + `pattern="landing"` on the pocket. '
         "Keep talking 'site' / 'page', never 'pocket'.\n"
         "</sites-procedure>"
     )

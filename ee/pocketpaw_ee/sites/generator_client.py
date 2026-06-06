@@ -246,6 +246,4 @@ class GeneratorClient:
         # ``rippleVersion`` is present only on the ripple GenerateResult; the svelte
         # path omits it (paw-sites types.ts §4.2), so read it defensively — a svelte
         # build must not KeyError here.
-        return BuildResult(
-            project_dir=gen["projectDir"], ripple_version=gen.get("rippleVersion")
-        )
+        return BuildResult(project_dir=gen["projectDir"], ripple_version=gen.get("rippleVersion"))
