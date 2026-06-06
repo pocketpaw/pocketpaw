@@ -52,11 +52,13 @@ def _get_client():
         raise RuntimeError("POCKETPAW_MAILTRAP_API_TOKEN is not set")
     import mailtrap as mt  # noqa: PLC0415 — lazy import
 
-    _client = mt.MailtrapClient(
+    kwargs: dict[str, object] = dict(
         token=_MAILTRAP_API_TOKEN,
         sandbox=_USE_SANDBOX,
-        inbox_id=_INBOX_ID,
     )
+    if _USE_SANDBOX and _INBOX_ID is not None:
+        kwargs["inbox_id"] = _INBOX_ID
+    _client = mt.MailtrapClient(**kwargs)
     return _client
 
 
