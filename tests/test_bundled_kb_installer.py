@@ -5,6 +5,12 @@
 # with tests/test_bundled_skills_installer.py — same state machine
 # (installed / updated / skipped / failed), same hash-compare
 # semantics, separate target directory.
+# Updated: 2026-06-03 (feat/sites-landing-brain, Task P3) — added
+# coverage for the bundled landing-marketing recipe: the compiled wiki
+# article ships, index.json lists it under articles + the marketing
+# concepts (so BM25 retrieval can reach it), and the raw doc carries the
+# SSR guardrails. The recipe was compiled + indexed via kb-go's agent
+# mode, so the cache search index stays consistent with the article set.
 """Tests for ``pocketpaw.bundled_kb.install_bundled_kb_scopes``.
 
 Each test installs into a tmp_path destination (no touching the
@@ -123,3 +129,52 @@ def test_result_is_frozen_dataclass(tmp_path: Path) -> None:
     assert isinstance(r, KbInstallResult)
     with pytest.raises(Exception):
         r.status = "tampered"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# Landing recipe (feat/sites-landing-brain, Task P3)
+# ---------------------------------------------------------------------------
+
+
+def test_landing_recipe_ships_and_is_indexed(tmp_path: Path) -> None:
+    """The marketing landing recipe must ship in the bundled scope AND be
+    wired into index.json — both the article entry and the marketing
+    concepts — or BM25 retrieval can't reach it and the builder never sees
+    it. The recipe was compiled + indexed via kb-go agent mode so the
+    cache search index is consistent; this guards the article+index pair
+    that retrieval depends on."""
+    import json
+
+    install_bundled_kb_scopes(destination_root=tmp_path)
+    scope_dir = tmp_path / "ripple-recipes"
+
+    # The compiled wiki article ships.
+    article_id = "marketing-landing-page-conversion-ordered-paw-site-recipe"
+    wiki_file = scope_dir / "wiki" / f"{article_id}.md"
+    assert wiki_file.is_file(), "landing recipe wiki article missing from bundle"
+    body = wiki_file.read_text()
+    # Load-bearing SSR rules the recipe must keep (each = a render trap).
+    assert "tiers" in body  # pricing-table prop, not plans/columns
+    assert "accordion" in body  # named as the FAQ anti-pattern
+    assert "newsletter" in body or "nested" in body  # the flat-form rule
+
+    # index.json lists the article and at least one marketing concept that
+    # points at it — the retrieval path keys off both.
+    index = json.loads((scope_dir / "index.json").read_text())
+    assert article_id in index["articles"]
+    landing_concept = index["concepts"].get("landing")
+    assert landing_concept is not None, "no 'landing' concept in the recipe index"
+    assert article_id in landing_concept["articles"]
+
+
+def test_landing_recipe_raw_doc_present(tmp_path: Path) -> None:
+    """The raw source doc backing the landing article ships too, so a
+    `kb recompile` can regenerate the article from source. A wiki article
+    with no raw backing would be an orphan kb-go can't rebuild."""
+    install_bundled_kb_scopes(destination_root=tmp_path)
+    raw_dir = tmp_path / "ripple-recipes" / "raw"
+    # The landing recipe's raw doc carries the conversion-ordered spec.
+    raw_blob = "\n".join(p.read_text() for p in raw_dir.glob("*.json"))
+    assert "Marketing Landing Page" in raw_blob
+    assert "pricing-table" in raw_blob
+    assert 'pattern="landing"' in raw_blob or "pattern: landing" in raw_blob

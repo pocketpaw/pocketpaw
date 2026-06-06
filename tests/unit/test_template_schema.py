@@ -220,7 +220,8 @@ def test_bad_shape_enum_rejected() -> None:
 
 
 def test_bad_pattern_enum_rejected() -> None:
-    """``pattern`` must be one of the 7 RFC-listed values."""
+    """``pattern`` must be one of the RFC-listed values (app, dashboard,
+    browser, feed, composer, viewer, wizard, landing)."""
     bad = _minimal_v2_dict()
     bad["pattern"] = "not-a-real-pattern"
     with pytest.raises(Exception):  # noqa: B017

@@ -6,6 +6,11 @@
 # state.id_field-resolves rule. CEL expressions parse via the
 # expressions.py validator. Fabric tier-registered + via_link registry
 # enforcement is intentionally out of scope for this PR.
+# Modified: 2026-06-04 (feat/sites-landing-template-fastpath) — added
+# "landing" to PatternT so the marketing landing-page fast-path template
+# (a Paw Site composed by conversion role) validates. The landing-page
+# template uses shape:"custom", which is already exempt from the
+# columns-required and default_view-matrix rules — no shape change needed.
 """Pydantic v2 model for the RFC 03 v2 Pocket Template Schema.
 
 This module is the **schema chokepoint** — every bundled template, every
@@ -74,6 +79,7 @@ PatternT = Literal[
     "composer",
     "viewer",
     "wizard",
+    "landing",
 ]
 
 DefaultViewT = Literal["list", "grid", "kanban", "calendar", "map"]

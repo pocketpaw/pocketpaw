@@ -418,17 +418,36 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "On dashboard startup, mirror bundled AgentSkills-format "
-            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/`` "
-            "into ``~/.claude/skills/<name>/SKILL.md``. That destination "
-            "is covered by both Claude Code's native skill discovery AND "
-            "PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the skill works "
-            "for all chat backends (claude_agent_sdk via natural-language "
-            "invocation, codex_cli / openai_agents / deep_agents via the "
-            "``/<skill-name>`` slash command). Idempotent — SHA-256 hash "
-            "compare per file. Set ``false`` to freeze a manually-customized "
-            "copy or disable bundled skills entirely. Skill installation "
-            "is best-effort: pocket creation still works via the MCP tool "
-            "surface even when no skill is installed."
+            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/skills/`` "
+            "into ``~/.claude/skills/<name>/SKILL.md``. That destination is "
+            "covered by PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the "
+            "skill works on the non-SDK backends (codex_cli / openai_agents / "
+            "deep_agents) via the ``/<skill-name>`` slash command, and on the "
+            "desktop dashboard. NOTE: this mirror is INVISIBLE to the default "
+            "claude_agent_sdk backend (it runs ``setting_sources=[]`` which "
+            "disables filesystem skill discovery) — that backend loads the "
+            "bundled skills via ``sdk_load_bundled_skills`` instead. "
+            "Idempotent — SHA-256 hash compare per file. Set ``false`` to "
+            "freeze a manually-customized copy. Best-effort: pocket creation "
+            "still works via the MCP tool surface even when no skill loads."
+        ),
+    )
+    sdk_load_bundled_skills: bool = Field(
+        default=True,
+        description=(
+            "Load PocketPaw's bundled skills into the claude_agent_sdk "
+            "backend as a Claude Code local plugin (SDK ``plugins=`` option). "
+            "This is the ONLY mechanism that reaches that backend: it runs "
+            "``setting_sources=[]`` for persona isolation, which disables the "
+            "SDK's ``~/.claude/skills`` discovery, so the "
+            "``auto_install_bundled_skills`` mirror above does not help it. "
+            "A local plugin loads regardless of setting_sources, so the "
+            "bundled skills (pocket/site creation, editing, planning, "
+            "foresight) become invokable via both slash command and "
+            "natural-language intent without leaking the rest of ``~/.claude`` "
+            "(CLAUDE.md, output styles) into the agent. Set ``false`` to keep "
+            "the backend skill-free and drive everything via the per-surface "
+            "MCP-tool preambles only."
         ),
     )
     auto_install_bundled_kb_scopes: bool = Field(

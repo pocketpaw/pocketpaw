@@ -1,5 +1,12 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-03 (Sites fix A) — the desktop ``GET /pockets`` gallery
+route now hides pockets that have been published as Paw Sites (they show
+under ``/sites`` instead). It calls ``sites_service.site_pocket_ids`` (a
+cross-entity read via the sites SERVICE, never the Site Beanie model) and
+passes the result as ``exclude_pocket_ids`` to ``list_pockets``. Only this
+route excludes sites — every other ``list_pockets`` caller is unchanged.
+
 Updated: 2026-05-25 (PR #1222 R1 fixes) — the loopback bypass on the
 spec-merge + pocket-read endpoints now requires a process-local
 internal token in addition to the previous loopback + magic header +
@@ -320,7 +327,18 @@ async def list_pockets(
     user_id: str = Depends(current_user_id),
     project_id: str | None = Query(default=None, alias="project_id"),
 ) -> list[dict]:
-    return await pockets_service.list_pockets(workspace_id, user_id, project_id=project_id)
+    # Desktop /pockets gallery. Hide pockets already published as Paw Sites —
+    # they show under /sites instead. The site→pocket lookup goes through the
+    # sites SERVICE (cross-entity read via a service function, not the Site
+    # Beanie model) to respect entity isolation. Only this gallery route
+    # excludes sites; other list_pockets callers (mission control, planners,
+    # kb, surface) keep listing every pocket.
+    from pocketpaw_ee.sites import service as sites_service
+
+    exclude = await sites_service.site_pocket_ids(workspace_id)
+    return await pockets_service.list_pockets(
+        workspace_id, user_id, project_id=project_id, exclude_pocket_ids=exclude
+    )
 
 
 @router.get("/home", response_model=HomePocketResponse)

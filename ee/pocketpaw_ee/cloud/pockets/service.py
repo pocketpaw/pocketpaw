@@ -114,6 +114,21 @@ RETURNS ``(authored_keys, skipped_keys)``; both widget paths stash the
 result on the returned view under ``_source_merge`` so the agent_context
 wrappers can build an HONEST tool result — the agent can confirm only the
 sources that actually persisted and can't claim a binding that was dropped.
+Changes: 2026-06-03 (Sites fix A) — ``list_pockets`` gained an optional
+``exclude_pocket_ids: set[str] | None`` kwarg. When provided it adds
+``{"_id": {"$nin": [...]}}`` to the query (pocket ids are stored as
+strings, so no ObjectId cast). The /pockets gallery route passes the ids
+of pockets already published as Sites so they don't appear in both the
+pocket gallery and the sites list. ``None`` is a no-op, so mission
+control / kb / surface / planner callers are unchanged.
+Changes: 2026-06-04 (feat/sites-landing-brain) — ``agent_create`` now
+accepts an optional ``pattern`` (alongside the existing ``type_``) and
+stamps both onto the persisted ``Pocket``. The marketing-site brain
+(``pocketpaw-create-paw-site``) creates via the specialist path with
+``type="site"`` + ``pattern="landing"``; previously that path defaulted
+``type_="custom"`` and never carried ``pattern``, so site intent was
+dropped (pockets persisted as type="custom", pattern=None). Both keep
+today's defaults when unset — additive, no Mongo migration.
 """
 
 from __future__ import annotations
@@ -127,6 +142,7 @@ from pathlib import Path
 from typing import Any
 
 from beanie import PydanticObjectId
+from bson.errors import InvalidId
 from pydantic import ValidationError as PydanticValidationError
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -240,6 +256,14 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         project_id=getattr(doc, "project_id", None),
         # Wave 3e — optional. ``getattr`` for legacy docs that pre-date the field.
         template_slug=getattr(doc, "template_slug", None),
+        # Sites landing brain — optional layout pattern. ``getattr`` for
+        # legacy docs that pre-date the field.
+        pattern=getattr(doc, "pattern", None),
+        # Sites svelte track — generation engine + svelte source map.
+        # ``getattr`` for legacy docs that pre-date the fields (read back
+        # as ``engine="ripple"``, ``source=None``).
+        engine=getattr(doc, "engine", "ripple"),
+        source=getattr(doc, "source", None),
         created_at=getattr(doc, "createdAt", None),
         updated_at=getattr(doc, "updatedAt", None),
     )
@@ -850,6 +874,9 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         widgets=widget_docs,
         rippleSpec=normalized_spec,
         template_slug=body.template_slug,
+        pattern=body.pattern,
+        engine=body.engine,
+        source=body.source,
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)
@@ -942,6 +969,7 @@ async def list_pockets(
     user_id: str,
     *,
     project_id: str | None = None,
+    exclude_pocket_ids: set[str] | None = None,
 ) -> list[dict]:
     """List pockets visible to the user (owned, shared_with, or workspace-visible).
 
@@ -955,6 +983,17 @@ async def list_pockets(
     whose ``project_id`` matches. Pass an empty string to filter for
     "no project assigned" — that's the Mission Control "Unassigned"
     bucket. Kept as a kwarg so existing callers don't change.
+
+    ``exclude_pocket_ids`` filter: when provided, drops pockets whose id is
+    in the set via ``{"_id": {"$nin": [...]}}``. The /pockets gallery passes
+    the ids of pockets already published as Sites (they show under /sites,
+    not in the pocket gallery). The ids arrive as STRINGS (the wire form), but
+    Beanie persists ``_id`` as an ``ObjectId`` (the ``Pocket.id: str`` annotation
+    is overridden by the Document base), so each id is cast to ``PydanticObjectId``
+    before the ``$nin`` — a string ``$nin`` would silently match nothing and
+    leak every site back into the gallery. Malformed ids are skipped (they can't
+    match any stored ``_id`` anyway). A ``None`` / empty set is a no-op so every
+    other caller (mission control, planners, kb, surface) is unchanged.
     """
     query: dict = {
         "workspace": workspace_id,
@@ -967,6 +1006,17 @@ async def list_pockets(
     if project_id is not None:
         # Empty string is intentional → "no project assigned".
         query["project_id"] = project_id or None
+    if exclude_pocket_ids:
+        # _id is stored as an ObjectId — cast the wire-string ids. Skip any
+        # malformed id rather than raise: it can't match a stored _id anyway.
+        oids: list[PydanticObjectId] = []
+        for pid in exclude_pocket_ids:
+            try:
+                oids.append(PydanticObjectId(pid))
+            except (InvalidId, TypeError, ValueError):
+                continue
+        if oids:
+            query["_id"] = {"$nin": oids}
     docs = await _PocketDoc.find(query).to_list()
     return [await _resolved_wire_dict(d, user_id) for d in docs]
 
@@ -1284,6 +1334,7 @@ async def create_from_ripple_spec(
     owner_id: str,
     ripple_spec: dict,
     description: str = "",
+    pattern: str | None = None,
 ) -> str | None:
     """Auto-create a pocket from an agent-generated ripple spec.
     Returns the pocket id on success, None on failure.
@@ -1296,6 +1347,10 @@ async def create_from_ripple_spec(
     no LLM-retry loop, so blocking + logging is the strict behavior here
     (the specialist edit tools, which can retry, surface the corrective
     message instead).
+
+    ``pattern`` records the create-pocket layout pattern (``"landing"``
+    for a marketing site). Optional; defaults to ``None`` so the
+    pre-existing inline auto-create path is unchanged.
     """
     try:
         normalized = normalize_ripple_spec(ripple_spec)
@@ -1321,6 +1376,7 @@ async def create_from_ripple_spec(
             owner=owner_id,
             visibility="workspace",
             rippleSpec=normalized,
+            pattern=pattern,
         )
         await doc.insert()
         pocket_id = str(doc.id)
@@ -3069,9 +3125,13 @@ async def agent_create(
     name: str,
     description: str = "",
     type_: str = "custom",
+    pattern: str | None = None,
     icon: str = "",
     color: str = "",
     ripple_spec: dict | None = None,
+    engine: str = "ripple",
+    source: dict[str, str] | None = None,
+    trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
 
@@ -3079,6 +3139,39 @@ async def agent_create(
     ``(None, None, error)`` on failure. Returning the id alongside the
     view lets the caller link sessions / push SSE events without
     re-parsing the dict.
+
+    ``type_`` / ``pattern`` carry the create intent. The marketing-site
+    brain (``pocketpaw-create-paw-site``) passes ``type_="site"`` +
+    ``pattern="landing"`` via the specialist create path so the published
+    page renders as a landing page rather than a dashboard. Both keep
+    today's defaults (``type_="custom"``, ``pattern=None``) for callers
+    that pass neither, so the change is additive — no Mongo migration.
+
+    ``engine`` / ``source`` select the Paw Sites generation track. The
+    default ``engine="ripple"`` compiles ``ripple_spec`` into the site;
+    ``engine="svelte"`` materializes ``source`` (a hand-written SvelteKit
+    source map ``{relative_path: file_contents}``) instead — the svelte
+    analog of ``ripple_spec``. The svelte-site create flow
+    (``create_svelte_site`` / ``pocketpaw-create-svelte-site``) passes
+    ``engine="svelte"`` + ``source=<map>`` with ``ripple_spec=None`` and
+    ``trusted=True`` (the source is author-controlled component files, not
+    LLM-drafted ripple JSON, so there is no catalog gate to run). Both keep
+    today's defaults (``engine="ripple"``, ``source=None``) for ripple
+    callers — additive, no Mongo migration.
+
+    ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
+    code-assembled spec the caller fully controls (the deterministic Paw Site
+    fast-path's ``assemble_landing_spec``), never for raw LLM output. The strict
+    gate's allow-list is the PUBLISHED widget manifest, which lags the renderer:
+    the real marketing widgets (navbar/feature-grid/testimonial/logo-cloud/cta/
+    footer) ship in the renderer but are absent from the current published
+    manifest, so the gate false-rejects a perfectly valid landing page and its
+    "suggestion" pushes the caller toward generic widgets (avatar/data-grid/…) —
+    the exact downgrade the deterministic fast-path exists to prevent. The spec
+    is still normalized + structurally validated (``validate_ripple_spec_logged``)
+    and the embed audit still runs; only the manifest-type allow-list (which is
+    the stale part) is bypassed. The normal agent path keeps ``trusted=False``
+    and the strict gate unchanged.
     """
     if not name:
         return None, None, "name is required"
@@ -3089,24 +3182,36 @@ async def agent_create(
         # returned as the error string so the specialist sees the
         # corrective detail and can retry, instead of persisting a spec
         # the renderer would draw as a red "Unknown widget type" box.
-        try:
-            await _gate_catalog(normalized, strict=True, actor=owner_id, workspace_id=workspace_id)
-        except CatalogViolationError as exc:
-            return None, None, format_violations_for_agent(exc.violations)
-        except ActionWiringViolationError as exc:
-            return None, None, format_action_violations_for_agent(exc.violations)
-        except MissingRequiredPropError as exc:
-            return None, None, format_required_prop_violations_for_agent(exc.violations)
+        # Trusted code-assembled specs skip the STRICT gate (the published
+        # manifest is stale for marketing widgets — see the docstring) but
+        # still get the LOGGED catalog walk so the embed audit runs and any
+        # genuine drift is recorded, just not blocked.
+        if trusted:
+            await _gate_catalog(normalized, strict=False, actor=owner_id, workspace_id=workspace_id)
+        else:
+            try:
+                await _gate_catalog(
+                    normalized, strict=True, actor=owner_id, workspace_id=workspace_id
+                )
+            except CatalogViolationError as exc:
+                return None, None, format_violations_for_agent(exc.violations)
+            except ActionWiringViolationError as exc:
+                return None, None, format_action_violations_for_agent(exc.violations)
+            except MissingRequiredPropError as exc:
+                return None, None, format_required_prop_violations_for_agent(exc.violations)
     try:
         doc = _PocketDoc(
             workspace=workspace_id,
             name=name,
             description=description,
             type=type_,
+            pattern=pattern,
             icon=icon,
             color=color,
             owner=owner_id,
             rippleSpec=normalized,
+            engine=engine,
+            source=source,
             visibility="workspace",
         )
         await doc.insert()

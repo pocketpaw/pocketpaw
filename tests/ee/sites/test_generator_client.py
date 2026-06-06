@@ -24,6 +24,7 @@ from pocketpaw_ee.sites.generator_client import (
     _gen_cmd_argv,
     _rewrite_ripple_dep,
     _ripple_dep_source,
+    _ripple_motion_dep,
 )
 
 
@@ -143,8 +144,29 @@ def test_rewrite_ripple_dep_points_at_resolvable_source(tmp_path: Path):
     _rewrite_ripple_dep(str(tmp_path), "file:/tmp/ripple-ui-svelte-0.2.0.tgz")
     out = json.loads(pkg.read_text())
     assert out["dependencies"]["@ripple-ui/svelte"] == "file:/tmp/ripple-ui-svelte-0.2.0.tgz"
+    # motion.dev is injected too — ripple's runtime lazy-loads it and the file:
+    # ripple dep won't hoist it, so the generated build can't resolve it without
+    # an explicit dep. (Same break that hit paw-enterprise.)
+    assert "motion" in out["dependencies"]
     # Other deps are untouched.
     assert out["devDependencies"]["svelte"] == "^5.0.0"
+
+
+def test_rewrite_keeps_an_explicit_motion_pin(tmp_path: Path):
+    """If the template already declares motion, the rewrite respects that pin
+    rather than clobbering it."""
+    pkg = tmp_path / "package.json"
+    pkg.write_text(
+        json.dumps(
+            {
+                "name": "paw-site-x",
+                "dependencies": {"@ripple-ui/svelte": "0.2.0", "motion": "^12.99.0"},
+            }
+        )
+    )
+    _rewrite_ripple_dep(str(tmp_path), "file:/tmp/ripple.tgz")
+    out = json.loads(pkg.read_text())
+    assert out["dependencies"]["motion"] == "^12.99.0"
 
 
 def test_gen_cmd_and_ripple_dep_env_knobs(monkeypatch):
@@ -160,3 +182,8 @@ def test_gen_cmd_and_ripple_dep_env_knobs(monkeypatch):
     monkeypatch.setenv("PAW_SITES_RIPPLE_DEP", "file:/tmp/ripple-ui-svelte-0.2.0.tgz")
     assert _gen_cmd_argv() == ["node", "/abs/paw-sites/dist/cli.js"]
     assert _ripple_dep_source() == "file:/tmp/ripple-ui-svelte-0.2.0.tgz"
+    # motion dep spec is env-overridable too, defaulting to ripple's pin.
+    monkeypatch.delenv("PAW_SITES_MOTION_DEP", raising=False)
+    assert _ripple_motion_dep() == "^12.40.0"
+    monkeypatch.setenv("PAW_SITES_MOTION_DEP", "^12.41.0")
+    assert _ripple_motion_dep() == "^12.41.0"
