@@ -16,6 +16,13 @@
 # openable address for the cmux smoke. In the real CF path it is left "" in v1
 # (the deployed Worker is reached via its custom domain, surfaced through the
 # domains list) until a canonical workers.dev URL is wired.
+#
+# Updated 2026-06-06 (feat/1345-draft-published): added ``status`` ("draft" |
+# "published"), the denormalized version state the sites service keeps in sync
+# with the pocket_versions log. Paired with ``deployed`` (the real-deploy axis),
+# it lets the SiteResponse tell the frontend draft vs published vs live without a
+# version-log scan on every read — the fix for "a site is stamped deployed the
+# moment it's created". A freshly created site is status="draft", deployed=False.
 
 from __future__ import annotations
 
@@ -45,7 +52,17 @@ class Site(TimestampedDocument):
     name: str = ""
     # Workers-for-Platforms script name (== site id) once deployed.
     script_name: str = ""
+    # The REAL-deploy axis: True ONLY after a successful publish/deploy. A site
+    # created as a draft is deployed=False until an explicit publish succeeds.
     deployed: bool = False
+    # Draft/published version state (pocketpaw#1345). "draft" = there are
+    # unpublished edits (the latest version is newer than the published one, or
+    # nothing is published yet); "published" = the published version IS the
+    # latest. Denormalized from the pocket_versions log by the sites service so
+    # ``_to_response`` is a sync read. Combined with ``deployed``, the frontend
+    # shows: draft (status=draft), published+live (published & deployed),
+    # published-with-pending-edits (status=draft & deployed — refined since live).
+    status: str = "draft"
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""

@@ -1,6 +1,34 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-06 (feat/1345-draft-published — draft/published state machine,
+# pocketpaw#1345): stop "Live" from lying. New flow on top of the versions module
+# (ee/pocketpaw_ee/cloud/versions):
+#   * create_draft_site() records the content as the first DRAFT version and
+#     persists a Site doc that is NOT deployed and NOT live (status="draft",
+#     deployed=False) — creating a site no longer claims it's live.
+#   * record_site_draft() is the refine buffer: it writes a NEW draft version and
+#     flips the site to "draft", leaving the published version + live deploy
+#     untouched until the next publish.
+#   * publish() now builds + deploys FIRST, and only on a SUCCESSFUL deploy
+#     promotes the draft → published and marks the site deployed/live. A failed
+#     build (SmokeGateFailed) or failed Worker upload leaves a recoverable draft
+#     and never a phantom-live site. It reuses the draft site's row/identity per
+#     pocket instead of stacking a second Site, and records a draft from the
+#     passed content if none exists (the direct-publish path).
+#   * site_status() returns the draft/published + is_live badge state (works
+#     before the first publish); preview()/preview_content() return the current
+#     DRAFT content the builder renders (fixes the dead-published-URL iframe).
+# _to_response now carries status + is_live. The deploy seam is unchanged: publish
+# still calls generator.build(...) and cf.put_worker(...)/local deploy as-is.
+#
+# Updated 2026-06-06 (code review BLOCK-2): publish() no longer calls the versions
+# module's PRIVATE _sync_pocket_pointers. The post-deploy "mark live" pointer
+# write is now folded into the public versions_service.publish_draft(...,
+# deploy_status="live") call one line above — so sites/service makes exactly one
+# public versions call to promote + mark-live, and no private cross-module call
+# remains.
+#
 # Updated 2026-06-01 (Phase 4 — chat→create-site): added publish_pocket(), the
 # shared "publish a pocket by id" path. It reads the pocket's rippleSpec + theme
 # via pockets_service (logic lifted verbatim from the router) and delegates to
@@ -95,8 +123,14 @@ from bson.errors import InvalidId
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
+from pocketpaw_ee.cloud.versions import service as versions_service
 from pocketpaw_ee.sites.domain import HostnameStatus
-from pocketpaw_ee.sites.dto import DomainStatusResponse, SiteResponse
+from pocketpaw_ee.sites.dto import (
+    DomainStatusResponse,
+    PreviewResponse,
+    SiteResponse,
+    SiteStatusResponse,
+)
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
@@ -177,6 +211,9 @@ def _local_mode() -> bool:
 
 
 def _to_response(doc: _SiteDoc) -> SiteResponse:
+    # ``status`` is the denormalized version state on the doc ("draft" |
+    # "published"); ``is_live`` is the deploy-confirmed axis (the site was
+    # actually deployed). A draft site reads status="draft", is_live=False.
     return SiteResponse(
         id=str(doc.id),
         pocket_id=doc.pocket_id,
@@ -185,7 +222,134 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         deployed=doc.deployed,
         signed_key=doc.signed_key,
         url=doc.url,
+        status=getattr(doc, "status", "draft"),
+        is_live=bool(doc.deployed),
     )
+
+
+def _version_content(
+    *, engine: str, ripple_spec: dict[str, Any] | None, source: dict[str, str] | None
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    """Split the publish payload into the (content, source) snapshot pair the
+    versions log stores. Svelte sites version their ``source`` map; ripple sites
+    version their ``rippleSpec``. The other field is None on each track."""
+    if engine == "svelte":
+        return None, source
+    return ripple_spec, None
+
+
+async def _find_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The Site row (if any) for a pocket in a workspace. A pocket has at most one
+    site (the compound (workspace, pocket_id) index), so publish reuses it rather
+    than stacking a second row when a draft was created first."""
+    return await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+
+
+async def _resolve_site_name(*, name: str, pocket_id: str, user_id: str) -> str:
+    """Default a blank name to the source pocket's own display name (the publish
+    schema promises this), falling back to "Untitled site". Reads the pocket via
+    the pockets service's PUBLIC ``get`` (a wire dict — no Beanie import)."""
+    site_name = name.strip() if name else ""
+    if not site_name:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        pocket = await pockets_service.get(pocket_id, user_id)
+        site_name = (pocket.get("name") or "").strip()
+    if not site_name:
+        site_name = "Untitled site"
+    return site_name
+
+
+async def create_draft_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    ripple_spec: dict[str, Any] | None = None,
+    theme: dict[str, Any],
+    name: str = "",
+    engine: str = "ripple",
+    source: dict[str, str] | None = None,
+) -> _SiteDoc:
+    """Create a site as a DRAFT — record its content as the first draft version
+    and persist a Site doc that is NOT deployed and NOT live (status="draft",
+    deployed=False). This is the fix for "a site is stamped deployed the moment
+    it's created": creating a site no longer claims it's live. An explicit
+    ``publish`` builds, deploys, and flips it live.
+
+    The site id + signed key + script name are minted here (they're identifiers,
+    not deploy state) so the draft has a stable identity the later publish reuses.
+    Idempotent per pocket: if a site already exists for this pocket, the new
+    content is recorded as a fresh draft and the existing doc is returned
+    (status reset to "draft" — there are now unpublished edits)."""
+    content, src = _version_content(engine=engine, ripple_spec=ripple_spec, source=source)
+    await versions_service.record_draft(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        content=content,
+        source=src,
+        engine=engine,
+        author=user_id,
+        origin="create",
+    )
+    site_name = await _resolve_site_name(name=name, pocket_id=pocket_id, user_id=user_id)
+
+    existing = await _find_site_for_pocket(workspace_id, pocket_id)
+    if existing is not None:
+        existing.name = site_name
+        existing.status = "draft"  # new unpublished edits
+        await existing.save()
+        return existing
+
+    site_id = str(ObjectId())
+    signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+    doc = _SiteDoc(
+        id=ObjectId(site_id),
+        workspace=workspace_id,
+        pocket_id=pocket_id,
+        owner=user_id,
+        name=site_name,
+        script_name=site_id,
+        deployed=False,
+        status="draft",
+        signed_key=signed_key,
+        url="",
+        allowed_origins=_default_allowed_origins(),
+        event_mapping=_DEFAULT_EVENT_MAPPING,
+    )
+    await doc.insert()
+    return doc
+
+
+async def record_site_draft(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    content: dict[str, Any] | None = None,
+    source: dict[str, str] | None = None,
+    engine: str = "ripple",
+) -> _SiteDoc | None:
+    """Refine a site's content: write a NEW draft version and mark the site
+    "draft" (there are unpublished edits). The published version's content — and
+    the live deploy — are untouched until the next publish. This is the buffer the
+    bug report asked for ("every refine overwrites the live thing with no draft
+    buffer and no way back"). Returns the Site doc if one exists yet (a site can
+    be refined before it is first published), else None."""
+    await versions_service.record_draft(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        content=content,
+        source=source,
+        engine=engine,
+        author=user_id,
+        origin="refine",
+    )
+    doc = await _find_site_for_pocket(workspace_id, pocket_id)
+    if doc is not None:
+        doc.status = "draft"
+        await doc.save()
+    return doc
 
 
 async def publish(
@@ -203,9 +367,23 @@ async def publish(
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
 ) -> _SiteDoc:
-    """Generate, smoke-gate, deploy, and persist a site. Raises SmokeGateFailed
-    (from generator_client) if the workerd smoke render fails — the site is not
-    deployed and not persisted as deployed.
+    """Promote the pocket's draft to published, build, smoke-gate, deploy, and
+    persist the site as live. Raises SmokeGateFailed (from generator_client) if
+    the workerd smoke render fails, or the deploy error if the Worker upload
+    fails — in BOTH cases the version stays a draft and the site is NOT marked
+    live (the "Live only after a successful deploy" guarantee).
+
+    Order matters: build + deploy run FIRST; only on success does the draft
+    version get promoted to published and the Site doc persisted as
+    deployed/published. So a failed publish leaves a recoverable draft and never
+    a phantom-live site.
+
+    Idempotent per pocket: reuses the Site row created by ``create_draft_site``
+    (and its minted id / signed key / script name) when one exists, instead of
+    stacking a second row; otherwise mints a fresh identity (the direct-publish
+    path, e.g. ``publish_pocket``). If no draft version exists yet (direct
+    publish), one is recorded from the passed content before promotion, so publish
+    always has a version to promote.
 
     Deploy has two branches:
       * REAL Cloudflare (default when creds are present, or when a CF client is
@@ -224,22 +402,36 @@ async def publish(
     so the common path does not re-fetch."""
     generator = _generator or GeneratorClient()
 
-    # Default a blank name to the source pocket's own display name so the schema's
-    # "defaults to the pocket's own name" promise is true at the source-of-truth
-    # layer. Cross-entity read goes through the pockets service's PUBLIC function
-    # (wire dict), never the Pocket Beanie model.
-    site_name = name.strip() if name else ""
-    if not site_name:
-        from pocketpaw_ee.cloud.pockets import service as pockets_service
+    site_name = await _resolve_site_name(name=name, pocket_id=pocket_id, user_id=user_id)
 
-        pocket = await pockets_service.get(pocket_id, user_id)
-        site_name = (pocket.get("name") or "").strip()
-    if not site_name:
-        site_name = "Untitled site"
+    # Reuse the draft site's identity if it exists, so publish updates that row
+    # rather than creating a second site for the same pocket.
+    existing = await _find_site_for_pocket(workspace_id, pocket_id)
+    if existing is not None:
+        site_id = str(existing.id)
+        signed_key = existing.signed_key
+    else:
+        site_id = str(ObjectId())
+        signed_key = f"site_key_{secrets.token_urlsafe(24)}"
 
-    site_id = str(ObjectId())
-    signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+    # Ensure there is a draft version to promote. The create-then-publish path
+    # already recorded one (the user's working content); the direct-publish path
+    # (no prior draft) records one now from the passed content so the published
+    # version reflects exactly what was deployed.
+    if await versions_service.get_draft(workspace_id=workspace_id, pocket_id=pocket_id) is None:
+        content, src = _version_content(engine=engine, ripple_spec=ripple_spec, source=source)
+        await versions_service.record_draft(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            content=content,
+            source=src,
+            engine=engine,
+            author=user_id,
+            origin="publish",
+        )
 
+    # Build + deploy FIRST. A failure here propagates BEFORE any promotion or
+    # live-marking, so the version stays a draft and the site is not live.
     build = await generator.build(
         ripple_spec=ripple_spec,
         theme=theme,
@@ -265,24 +457,42 @@ async def publish(
         bundle = _bundle_reader(build.project_dir)
         await cf.put_worker(script_name=site_id, bundle=bundle)
 
-    doc = _SiteDoc(
-        id=ObjectId(site_id),
-        workspace=workspace_id,
-        pocket_id=pocket_id,
-        owner=user_id,
-        name=site_name,
-        script_name=site_id,
-        deployed=True,
-        signed_key=signed_key,
-        url=url,
-        # Seed capture config so a lead lands with no manual Mongo edit: a default
-        # mapping keyed on the form_type the generated endpoint sends, and the
-        # local dev origins so the local smoke works. add_domain() appends the
-        # production hostname when a custom domain is connected.
-        allowed_origins=_default_allowed_origins(),
-        event_mapping=_DEFAULT_EVENT_MAPPING,
+    # Deploy succeeded — NOW promote the draft to published and mark the site
+    # live. publish_draft advances the version pointers AND mirrors the deploy
+    # status ("live") onto the Pocket pointer cache in one write, so this stays a
+    # single PUBLIC call (no reaching into the versions module's privates).
+    await versions_service.publish_draft(
+        workspace_id=workspace_id, pocket_id=pocket_id, deploy_status="live"
     )
-    await doc.insert()
+
+    if existing is not None:
+        existing.name = site_name
+        existing.deployed = True
+        existing.status = "published"
+        existing.url = url
+        await existing.save()
+        doc = existing
+    else:
+        doc = _SiteDoc(
+            id=ObjectId(site_id),
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=True,
+            status="published",
+            signed_key=signed_key,
+            url=url,
+            # Seed capture config so a lead lands with no manual Mongo edit: a
+            # default mapping keyed on the form_type the generated endpoint sends,
+            # and the local dev origins so the local smoke works. add_domain()
+            # appends the production hostname when a custom domain is connected.
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+
     return doc
 
 
@@ -440,9 +650,58 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     return {doc.pocket_id async for doc in cursor}
 
 
+async def site_status(*, workspace_id: str, pocket_id: str) -> SiteStatusResponse:
+    """The draft/published status for a site, by source pocket id — backs the
+    Draft/Live badge. ``status`` is the version state (draft = unpublished edits |
+    published = the live candidate is the latest version), and ``is_live`` is the
+    deploy-confirmed axis (the Site was actually deployed). Works before the first
+    publish (no Site doc yet): version state comes from the versions log,
+    ``is_live`` is False until a deploy succeeds. ``status`` "none" surfaces as
+    "draft" to the badge (a pocket with no versions yet is, practically, a draft).
+    """
+    vstatus = await versions_service.status_for(workspace_id=workspace_id, pocket_id=pocket_id)
+    site = await _find_site_for_pocket(workspace_id, pocket_id)
+    is_live = bool(site.deployed) if site is not None else False
+    # Map the version "none" (no versions yet) to the badge's "draft".
+    badge_status = "published" if vstatus.status == "published" else "draft"
+    return SiteStatusResponse(
+        pocket_id=pocket_id,
+        site_id=str(site.id) if site is not None else None,
+        status=badge_status,
+        is_live=is_live,
+        draft_version=vstatus.draft_version,
+        published_version=vstatus.published_version,
+        url=site.url if site is not None else "",
+    )
+
+
+async def preview_content(*, workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
+    """The current DRAFT content the builder preview renders — the rippleSpec for
+    a ripple site, or the svelte source map for a svelte site. Returns the WORKING
+    version (the latest draft), NOT the published URL — this is the fix for the
+    builder preview iframing a dead local-serve URL. ``None`` when the pocket has
+    no versions yet."""
+    return await versions_service.get_draft_content(workspace_id=workspace_id, pocket_id=pocket_id)
+
+
+async def preview(*, workspace_id: str, pocket_id: str) -> PreviewResponse:
+    """``preview_content`` wrapped in the response DTO (with the engine), for the
+    REST preview endpoint."""
+    draft = await versions_service.get_draft(workspace_id=workspace_id, pocket_id=pocket_id)
+    if draft is None:
+        return PreviewResponse(pocket_id=pocket_id, engine="ripple", content=None)
+    content = draft.source if draft.engine == "svelte" else draft.content
+    return PreviewResponse(pocket_id=pocket_id, engine=draft.engine, content=content)
+
+
 __all__ = [
     "publish",
     "publish_pocket",
+    "create_draft_site",
+    "record_site_draft",
+    "site_status",
+    "preview",
+    "preview_content",
     "add_domain",
     "domain_status",
     "list_domains",

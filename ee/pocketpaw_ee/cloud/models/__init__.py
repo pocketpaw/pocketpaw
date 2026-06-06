@@ -1,5 +1,9 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-06-06 (feat/1345-draft-published) — added ``PocketVersion`` (the
+draft/published pocket-content version-history log, pocketpaw#1345 Phase 1) to
+the imports, ``__all__``, and ``get_all_documents()`` so the versions collection
+is wired into ``init_beanie``.
 Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2) — added the
 ``Lead`` and ``Site`` tenant-scoped Paw Sites documents (plus their
 ``LeadSource`` / ``SiteDomain`` subdocs) to the imports, ``__all__``, and the
@@ -69,6 +73,7 @@ from pocketpaw_ee.cloud.models.notification import Notification, NotificationSou
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
+from pocketpaw_ee.cloud.models.pocket_version import PocketVersion
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.session import Session
@@ -153,6 +158,7 @@ __all__ = [
     "PlanSession",
     "PlanSessionAgentGap",
     "Pocket",
+    "PocketVersion",
     "Project",
     "Reaction",
     "ReadState",
@@ -183,6 +189,7 @@ def get_all_documents():
         Agent,
         Pocket,
         PocketBackendCredential,
+        PocketVersion,
         Session,
         Comment,
         Notification,
