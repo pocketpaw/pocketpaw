@@ -14,6 +14,11 @@
 # Uses the shared ``mongo_db`` fixture (tests/cloud/conftest.py) which inits
 # Beanie against an in-memory Mongo with ALL_DOCUMENTS (Pocket + Site both
 # registered) and auto-installs a RecordingBus so the create() emit() succeeds.
+#
+# Updated 2026-06-06 (feat/sites-publish-deploy-wire — CF deploy seam): publish()
+# now goes through the generator's build_and_deploy() seam, so the publish fakes
+# expose build_and_deploy (dispatching to the CF target) + deploy_site instead of
+# the old build() + put_worker pair.
 
 from __future__ import annotations
 
@@ -33,15 +38,21 @@ _USER = "user_gallery"
 
 
 class _FakeGenerator:
-    async def build(self, **kw):
-        from pocketpaw_ee.sites.generator_client import BuildResult
+    async def build_and_deploy(self, *, cloudflare=None, local_deploy=None, **kw):
+        from pocketpaw_ee.sites.generator_client import DeployResult
 
-        return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
+        if cloudflare is not None:
+            url = await cloudflare.deploy_site(script_name=kw["site_id"], project_dir="/tmp/site")
+        elif local_deploy is not None:
+            url = local_deploy(kw["site_id"], "/tmp/site")
+        else:
+            return DeployResult(success=False, error="no deploy target")
+        return DeployResult(success=True, url=url)
 
 
 class _FakeCF:
-    async def put_worker(self, *, script_name, bundle):
-        return True
+    async def deploy_site(self, *, script_name, project_dir):
+        return f"https://paw-sites.workers.dev/{script_name}/"
 
 
 async def _make_pocket(name: str) -> str:

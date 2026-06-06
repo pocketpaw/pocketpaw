@@ -21,48 +21,75 @@
 # failed-re-publish test on an ALREADY-LIVE site (refine v2 → publish v2 fails →
 # the site must stay live on v1, published pointer unmoved — the existing
 # failed-publish tests only covered the never-published case).
+# Updated 2026-06-06 (feat/sites-publish-deploy-wire — CF deploy seam): publish()
+# now goes through the generator's build_and_deploy() seam (build → smoke gate →
+# deploy → DeployResult), so the fakes follow: _FakeGenerator.build_and_deploy
+# DISPATCHES to the cloudflare / local_deploy target publish() hands it and
+# returns a DeployResult; _FakeCF exposes deploy_site (records the deploy URL);
+# _FailingGenerator returns DeployResult(success=False) (the seam never raises for
+# an expected failure); _FailingCF.deploy_site raises (the seam catches it →
+# success=False). publish() still RAISES on a failed DeployResult so the caller
+# contract (MCP is_error / REST error) is preserved — but now it is always a
+# SmokeGateFailed carrying the DeployResult.error, so the failed-deploy test
+# asserts SmokeGateFailed (was RuntimeError). All the #1345 state-machine
+# guarantees (not-live on failure, failed-re-publish keeps old version live) are
+# unchanged.
 from __future__ import annotations
 
 import pytest
 from pocketpaw_ee.cloud.versions import service as versions_service
 from pocketpaw_ee.sites import service as sites_service
-from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+from pocketpaw_ee.sites.generator_client import DeployResult, SmokeGateFailed
 
 
 class _FakeGenerator:
-    """Successful build: returns a project dir, never raises."""
+    """Successful build: dispatches to the deploy target publish() selected
+    (cloudflare or local_deploy), mirroring the real build_and_deploy seam, and
+    returns a successful DeployResult carrying that target's URL."""
 
     def __init__(self) -> None:
         self.built: dict | None = None
 
-    async def build(self, **kw):
-        from pocketpaw_ee.sites.generator_client import BuildResult
-
+    async def build_and_deploy(self, *, cloudflare=None, local_deploy=None, **kw):
         self.built = kw
-        return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
+        project_dir = "/tmp/site"
+        try:
+            if cloudflare is not None:
+                url = await cloudflare.deploy_site(
+                    script_name=kw["site_id"], project_dir=project_dir
+                )
+            elif local_deploy is not None:
+                url = local_deploy(kw["site_id"], project_dir)
+            else:
+                return DeployResult(success=False, error="no deploy target")
+        except Exception as exc:  # noqa: BLE001 - mirror the seam: deploy failure → success=False
+            return DeployResult(success=False, error=f"deploy failed: {exc}")
+        return DeployResult(success=True, url=url)
 
 
 class _FailingGenerator:
-    """Build/smoke gate fails — the deploy must NOT proceed and Live must stay
-    false (the 'Live only after a successful deploy' guarantee)."""
+    """Build/smoke gate fails — the seam returns success=False WITHOUT deploying
+    (it never raises for an expected failure). publish() then raises so Live
+    stays false (the 'Live only after a successful deploy' guarantee)."""
 
-    async def build(self, **kw):
-        raise SmokeGateFailed("workerd SSR failure: window is not defined")
+    async def build_and_deploy(self, **kw):
+        return DeployResult(success=False, error="workerd SSR failure: window is not defined")
 
 
 class _FakeCF:
     def __init__(self) -> None:
-        self.put_calls: list[str] = []
+        self.deploy_calls: list[str] = []
 
-    async def put_worker(self, *, script_name, bundle):
-        self.put_calls.append(script_name)
-        return True
+    async def deploy_site(self, *, script_name, project_dir):
+        self.deploy_calls.append(script_name)
+        return f"https://paw-sites.workers.dev/{script_name}/"
 
 
 class _FailingCF:
-    """Worker upload fails after a good build — Live must stay false."""
+    """Edge deploy fails after a good build — the seam catches the raise and
+    returns success=False, so publish() raises and Live stays false."""
 
-    async def put_worker(self, *, script_name, bundle):
+    async def deploy_site(self, *, script_name, project_dir):
         raise RuntimeError("cloudflare 500: dispatch namespace upload failed")
 
 
@@ -123,7 +150,10 @@ async def test_publish_sets_live_after_successful_deploy(beanie_test_db):
     assert resp.status == "published"
     assert resp.is_live is True
     assert published.deployed is True
-    assert cf.put_calls == [published.script_name]
+    # The seam deployed via cf.deploy_site (the real edge step) and the live URL
+    # it returned landed on the Site.
+    assert cf.deploy_calls == [published.script_name]
+    assert published.url == f"https://paw-sites.workers.dev/{published.script_name}/"
     # Same Site doc (publish reuses the draft site for this pocket, not a 2nd row).
     assert str(published.id) == str(site.id)
 
@@ -159,7 +189,9 @@ async def test_publish_failed_build_leaves_site_not_live(beanie_test_db):
 
 @pytest.mark.asyncio
 async def test_publish_failed_deploy_leaves_site_not_live(beanie_test_db):
-    """A good build but a failed Worker upload must NOT mark the site live."""
+    """A good build but a failed edge deploy must NOT mark the site live. The seam
+    turns the deploy raise into DeployResult(success=False), and publish() raises
+    SmokeGateFailed (carrying the reason) so the caller still sees a failure."""
     await sites_service.create_draft_site(
         workspace_id="ws1",
         user_id="u1",
@@ -168,7 +200,7 @@ async def test_publish_failed_deploy_leaves_site_not_live(beanie_test_db):
         theme={},
         name="Site",
     )
-    with pytest.raises(RuntimeError):
+    with pytest.raises(SmokeGateFailed):
         await sites_service.publish(
             workspace_id="ws1",
             user_id="u1",
@@ -408,5 +440,6 @@ async def test_failed_republish_keeps_site_live_on_previous_version(beanie_test_
     assert pub.version_no == 1
     assert pub.content == {"type": "container", "rev": 1}
 
-    # A failed deploy must NOT have uploaded a v2 worker.
-    assert cf.put_calls == [live_v1.script_name]  # only the v1 publish uploaded
+    # A failed (build-gated) v2 publish must NOT have deployed a v2 worker; only
+    # the v1 publish reached the edge.
+    assert cf.deploy_calls == [live_v1.script_name]
