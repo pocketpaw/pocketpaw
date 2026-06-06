@@ -16,6 +16,17 @@ Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` accepts a
   (subtracting the ids from its tool allowlist before launch); it is withheld
   from the call when empty so backends that don't accept the kwarg are
   unaffected. Non-empty only on /sites svelte-create.
+Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
+  ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
+  additive SDK-tool allowlist (resolved from the entity pocket's
+  ``surface_profile.allowed_sdk_tools`` upstream). It mirrors the
+  ``deny_mcp_tool_ids`` threading EXACTLY: a plain ``frozenset[str]`` forwarded
+  to the backend's ``run`` ONLY when non-empty (so the 6 non-Claude backends
+  keep their narrower signature), and consumed only by the Claude SDK backend,
+  which UNIONs it into the allowlist BEFORE subtracting the deny set —
+  precedence ``effective = (agent_tools ∪ allow) − deny`` (deny is the hard
+  cap). Empty for every legacy / non-entity run, so ordinary runs are untouched.
+  No ``pocketpaw_ee`` symbol crosses the boundary — only the frozenset.
 """
 
 from __future__ import annotations
@@ -169,6 +180,7 @@ class AgentPool:
         knowledge_context: str = "",
         instructions: str = "",
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_sdk_tools: frozenset[str] = frozenset(),
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -188,6 +200,14 @@ class AgentPool:
         SDK backend — the one backend that consumes it — without passing an
         unexpected kwarg to backends that don't accept it. Empty for every
         surface except /sites svelte-create, so ordinary runs are untouched.
+
+        ``allow_sdk_tools`` is the per-entity ADDITIVE SDK-tool allowlist
+        (resolved from the entity pocket's ``surface_profile.allowed_sdk_tools``
+        upstream — entity-rooms chunk ①). It mirrors ``deny_mcp_tool_ids``
+        exactly: forwarded to the backend's ``run`` ONLY when non-empty, and
+        consumed only by the Claude SDK backend, which UNIONs it into the
+        allowlist BEFORE subtracting the deny set (``(agent ∪ allow) − deny``).
+        Empty for every legacy / non-entity run.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -278,6 +298,11 @@ class AgentPool:
             }
             if deny_mcp_tool_ids:
                 run_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
+            # Same withhold-when-empty rule as the deny set: only the Claude SDK
+            # backend accepts ``allow_sdk_tools``; the others keep the narrower
+            # signature, so an entity allowlist is forwarded only when non-empty.
+            if allow_sdk_tools:
+                run_kwargs["allow_sdk_tools"] = allow_sdk_tools
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event

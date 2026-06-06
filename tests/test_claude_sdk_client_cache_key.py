@@ -196,9 +196,15 @@ def test_sites_surface_behavior_prefix_changes_key():
         ScopeKind,
         build_behavior_instructions,
     )
-    from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceKind, SurfaceMeta
+    from pocketpaw_ee.cloud.surface import (
+        SurfaceContext,
+        SurfaceKind,
+        SurfaceMeta,
+        resolve_profile,
+    )
 
     def _ctx(surface_kind, meta=None):
+        resolved_meta = meta if meta is not None else SurfaceMeta()
         return ScopeContext(
             kind=ScopeKind.SESSION,
             scope_id="s1",
@@ -212,9 +218,13 @@ def test_sites_surface_behavior_prefix_changes_key():
                 workspace_id="w1",
                 user_id="u1",
                 kind=surface_kind,
-                meta=meta if meta is not None else SurfaceMeta(),
+                meta=resolved_meta,
                 preamble="",
             ),
+            # entity-rooms chunk ①: build_behavior_instructions reads the
+            # pre-resolved profile. Mirror the run-driver's once-per-run
+            # resolution (no entity override here) so the ripple gate fires.
+            resolved_profile=resolve_profile(surface_kind, resolved_meta),
         )
 
     sites = build_behavior_instructions(

@@ -8,6 +8,10 @@
 # new ``SurfaceProfile`` descriptor and its ``resolve_profile`` resolver so
 # the chat agent_service can gate the ripple block on the per-surface policy
 # (the "ripple-default bias" fix) via the package's public surface.
+# Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①)
+# — also re-export ``compose_entity_profile``, the pure helper that folds an
+# entity pocket's ``surface_profile`` override over a base profile so the chat
+# run can resolve an ENTITY-AWARE profile once per run.
 
 from __future__ import annotations
 
@@ -17,7 +21,11 @@ from pocketpaw_ee.cloud.surface.domain import (
     SurfaceMeta,
     SurfaceProfile,
 )
-from pocketpaw_ee.cloud.surface.service import resolve_profile, resolve_surface_context
+from pocketpaw_ee.cloud.surface.service import (
+    compose_entity_profile,
+    resolve_profile,
+    resolve_surface_context,
+)
 
 __all__ = [
     "SurfaceContext",
@@ -26,4 +34,5 @@ __all__ = [
     "SurfaceProfile",
     "resolve_surface_context",
     "resolve_profile",
+    "compose_entity_profile",
 ]

@@ -1,5 +1,17 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
+  ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
+  ADDITIVE SDK-tool allowlist (resolved upstream from the entity pocket's
+  ``surface_profile.allowed_sdk_tools`` and forwarded by ``AgentPool.run``). It
+  is UNIONed into ``allowed_tools`` BEFORE the deny set is subtracted, so the
+  precedence is ``effective = (agent_tools ∪ allow) − deny`` (the surface deny is
+  the HARD cap — an allow can never re-add a denied id). Empty for every legacy /
+  non-entity run, so the allowlist is unchanged there. Like the deny set, it
+  crosses the EE→OSS boundary as a plain ``frozenset[str]`` and never imports
+  ``pocketpaw_ee``. The persistent-client cache key already folds in
+  ``allowed_tools``, so an entity's allow/deny change rebuilds the warm
+  subprocess on the next turn automatically.
 Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` now accepts a threaded
   ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
   upstream from the request's ``SurfaceProfile`` and forwarded by
@@ -897,6 +909,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         history: list[dict] | None = None,
         session_key: str | None = None,
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_sdk_tools: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -910,6 +923,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         /sites svelte-create surface, where it forbids the two ripple-create
         tools so the agent cannot fall back to a rippleSpec landing page. This
         is the typed replacement for the deleted prompt-sniffing gate.
+
+        ``allow_sdk_tools`` is the per-entity ADDITIVE SDK-tool allowlist
+        (entity-rooms chunk ①), resolved from the entity pocket's
+        ``surface_profile.allowed_sdk_tools``. It is UNIONed into
+        ``allowed_tools`` BEFORE the deny subtraction — precedence
+        ``effective = (agent_tools ∪ allow) − deny`` (the deny is the hard cap,
+        so an allow can never re-enable a denied id). Empty by default (a no-op
+        for legacy / non-entity runs).
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -1122,6 +1143,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # both read tools (get_pocket / list_pockets) and the writable
             # ``add_widget`` tool — they all flow through the loop below.
             allowed_tools.extend(self._collect_mcp_tool_ids())
+
+            # Per-entity ADDITIVE allowlist (entity-rooms chunk ①). UNION the
+            # entity's ``allowed_sdk_tools`` into the allowlist BEFORE the deny
+            # subtraction below, so the precedence is
+            # ``effective = (agent_tools ∪ allow) − deny``. Dedup-preserve order:
+            # only append ids not already present. Empty for legacy / non-entity
+            # runs, so this is a no-op there. The deny set (subtracted next) is
+            # the hard cap — an id in BOTH allow and deny stays denied.
+            if allow_sdk_tools:
+                existing = set(allowed_tools)
+                for tool_id in allow_sdk_tools:
+                    if tool_id not in existing:
+                        allowed_tools.append(tool_id)
+                        existing.add(tool_id)
+                logger.info(
+                    "Surface tool-allow: unioned %s into allowlist", sorted(allow_sdk_tools)
+                )
 
             # Per-surface MCP-tool deny set (threaded from the chat loop's
             # resolved ``SurfaceProfile``). Any denied id is subtracted from the

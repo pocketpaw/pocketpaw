@@ -41,7 +41,12 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     build_context_block,
     build_knowledge_context,
 )
-from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceKind, SurfaceMeta
+from pocketpaw_ee.cloud.surface import (
+    SurfaceContext,
+    SurfaceKind,
+    SurfaceMeta,
+    resolve_profile,
+)
 
 from pocketpaw.ripple import INLINE_RIPPLE_SYSTEM_PROMPT
 from pocketpaw.ripple._design import RIPPLE_DESIGN_RULES
@@ -506,7 +511,15 @@ def _sites_surface_ctx(meta: SurfaceMeta | None = None) -> ScopeContext:
     ``SurfaceMeta()`` / ``SurfaceMeta(engine="ripple")`` is ripple-create
     (ripple kept), ``SurfaceMeta(pocket_id=...)`` is refine (ripple kept).
     Defaults to svelte-create so a bare call is the ripple-OMIT case.
+
+    entity-rooms chunk ①: ``build_behavior_instructions`` now reads the
+    PRE-RESOLVED ``ctx.resolved_profile`` (the run-driver resolves it once),
+    NOT ``surface_context`` directly. Mirror the run-driver here by also
+    stamping ``resolved_profile`` from the pure ``resolve_profile`` lookup —
+    the no-entity (no pocket override) case, where the resolved profile is just
+    the surface base.
     """
+    resolved_meta = meta if meta is not None else SurfaceMeta(engine="svelte")
     return ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id="s1",
@@ -520,9 +533,10 @@ def _sites_surface_ctx(meta: SurfaceMeta | None = None) -> ScopeContext:
             workspace_id="w1",
             user_id="u1",
             kind=SurfaceKind.SITES,
-            meta=meta if meta is not None else SurfaceMeta(engine="svelte"),
+            meta=resolved_meta,
             preamble="",
         ),
+        resolved_profile=resolve_profile(SurfaceKind.SITES, resolved_meta),
     )
 
 
@@ -580,6 +594,7 @@ def test_non_sites_surface_keeps_ripple_block():
             meta=SurfaceMeta(),
             preamble="",
         ),
+        resolved_profile=resolve_profile(SurfaceKind.POCKETS_LIST, SurfaceMeta()),
     )
     block = build_behavior_instructions(pockets_ctx, backend_name="claude_agent_sdk")
     assert INLINE_RIPPLE_SYSTEM_PROMPT in block, (
