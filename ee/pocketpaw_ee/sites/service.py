@@ -1,6 +1,34 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-06 (feat/sites-publish-deploy-wire — wire publish() to the CF
+# deploy seam, pocketpaw#1346): publish() now calls the generator client's
+# build_and_deploy() seam INSTEAD of the old manual build() + put_worker() /
+# deploy_local() sequence. build_and_deploy runs build → workerd smoke gate →
+# real Workers-for-Platforms deploy (cf.deploy_site, which ships the worker +
+# static assets + bindings, not just a raw module) and returns one total
+# DeployResult{success, url, error}; it never raises for an expected failure.
+#   * CF-vs-local selection is unchanged POLICY (this layer reads the env): the
+#     same use_local = (no injected CF client) AND _local_mode() decides which
+#     deploy target build_and_deploy gets — cloudflare=<client> for the real edge
+#     path, local_deploy=<callable> for the PAW_SITES_LOCAL / no-creds dev path.
+#     BOTH paths are preserved.
+#   * State machine is unchanged: on result.success the draft is promoted to
+#     published and the Site is marked deployed/live (url=result.url); on
+#     failure publish() raises SmokeGateFailed(result.error) BEFORE any promotion
+#     or live-marking, so #1345's guarantees hold verbatim — a failed publish
+#     leaves a recoverable draft, and a failed RE-publish on an already-live site
+#     keeps it live on the OLD published version (publish_draft is the only write
+#     that advances the published pointer + mirrors deploy_status="live", and it
+#     is never reached on failure). Raising (vs. returning the not-live doc) keeps
+#     the existing caller contract: the MCP tool's is_error / the REST 5xx path
+#     still surface a failed deploy instead of reporting a phantom publish.
+#   * The raw build() + put_worker()/deploy_local() sequence is removed from
+#     publish(); those client methods stay defined (back-compat, other callers).
+#     The legacy ``_bundle_reader`` param is now UNUSED by publish() (deploy_site
+#     reads its own bundle) — kept on the signature so existing callers/tests that
+#     pass it don't break.
+#
 # Updated 2026-06-06 (feat/1345-draft-published — draft/published state machine,
 # pocketpaw#1345): stop "Live" from lying. New flow on top of the versions module
 # (ee/pocketpaw_ee/cloud/versions):
@@ -131,7 +159,7 @@ from pocketpaw_ee.sites.dto import (
     SiteResponse,
     SiteStatusResponse,
 )
-from pocketpaw_ee.sites.generator_client import GeneratorClient
+from pocketpaw_ee.sites.generator_client import GeneratorClient, SmokeGateFailed
 
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
 _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
@@ -368,15 +396,21 @@ async def publish(
     _local_deploy: Callable[[str, str], str] | None = None,
 ) -> _SiteDoc:
     """Promote the pocket's draft to published, build, smoke-gate, deploy, and
-    persist the site as live. Raises SmokeGateFailed (from generator_client) if
-    the workerd smoke render fails, or the deploy error if the Worker upload
-    fails — in BOTH cases the version stays a draft and the site is NOT marked
-    live (the "Live only after a successful deploy" guarantee).
+    persist the site as live. Raises SmokeGateFailed if the build/smoke gate OR
+    the deploy fails (the failure reason is the exception message) — in BOTH
+    cases the version stays a draft and the site is NOT marked live (the "Live
+    only after a successful deploy" guarantee).
 
-    Order matters: build + deploy run FIRST; only on success does the draft
-    version get promoted to published and the Site doc persisted as
-    deployed/published. So a failed publish leaves a recoverable draft and never
-    a phantom-live site.
+    Build + deploy run through the generator client's ONE ``build_and_deploy``
+    seam (generate → workerd smoke gate → real Workers-for-Platforms deploy),
+    which returns a total ``DeployResult{success, url, error}`` and never raises
+    for an expected failure. Order matters: that seam runs FIRST; only on
+    ``result.success`` does the draft version get promoted to published and the
+    Site doc persisted as deployed/published with ``url=result.url``. On failure
+    publish() raises BEFORE any promotion or live-marking, so a failed publish
+    leaves a recoverable draft and never a phantom-live site — and a failed
+    RE-publish on an already-live site keeps it live on the OLD published version
+    (the publish-pointer advance only happens on success).
 
     Idempotent per pocket: reuses the Site row created by ``create_draft_site``
     (and its minted id / signed key / script name) when one exists, instead of
@@ -385,13 +419,16 @@ async def publish(
     publish), one is recorded from the passed content before promotion, so publish
     always has a version to promote.
 
-    Deploy has two branches:
+    Deploy target is chosen HERE (the policy layer reads the env) and handed to
+    ``build_and_deploy`` as one of two params:
       * REAL Cloudflare (default when creds are present, or when a CF client is
-        injected): PUT the Worker bundle into the dispatch namespace.
+        injected): ``cloudflare=<client>`` → ``cf.deploy_site`` ships the worker
+        + static assets + bindings into the dispatch namespace and returns the
+        live URL.
       * LOCAL fake-deploy (no CF creds / PAW_SITES_LOCAL=1, and no injected CF
-        client): persist the built static site and serve it from localhost,
-        storing that URL on the Site so the response is openable. Cloudflare is
-        not contacted at all.
+        client): ``local_deploy=<callable>`` → the built static site is served
+        from localhost and that URL is stored on the Site so the response is
+        openable. Cloudflare is not contacted at all.
 
     ``name`` defaults to the source pocket's own display name when the caller
     omits it (the publish schema promises this). The fallback reads the pocket
@@ -430,9 +467,23 @@ async def publish(
             origin="publish",
         )
 
-    # Build + deploy FIRST. A failure here propagates BEFORE any promotion or
-    # live-marking, so the version stays a draft and the site is not live.
-    build = await generator.build(
+    # Pick the deploy target (POLICY lives here; MECHANICS live in the seam).
+    # Local mode only when the caller did NOT inject a CF client (tests inject a
+    # fake CF and expect the real branch) AND the environment selects it.
+    use_local = _cloudflare is None and _local_mode()
+    if use_local:
+        from pocketpaw_ee.sites import local_server
+
+        cloudflare = None
+        local_deploy: Callable[[str, str], str] | None = _local_deploy or local_server.deploy_local
+    else:
+        cloudflare = _cloudflare or _cf_client()
+        local_deploy = None
+
+    # Build + deploy through the ONE seam (generate → smoke gate → deploy). It
+    # returns a total DeployResult and never raises for an expected failure, so a
+    # broken site / failed deploy comes back as success=False.
+    result = await generator.build_and_deploy(
         ripple_spec=ripple_spec,
         theme=theme,
         site_id=site_id,
@@ -441,21 +492,22 @@ async def publish(
         capture_signed_key=signed_key,
         engine=engine,
         source=source,
+        cloudflare=cloudflare,
+        local_deploy=local_deploy,
     )
 
-    # Local mode only when the caller did NOT inject a CF client (tests inject a
-    # fake CF and expect the real branch) AND the environment selects it.
-    use_local = _cloudflare is None and _local_mode()
-    url = ""
-    if use_local:
-        from pocketpaw_ee.sites import local_server
+    if not result.success:
+        # The build/smoke gate or the deploy failed. Raise BEFORE any promotion
+        # or live-marking so the version stays a draft and the site is NOT
+        # marked live — and an already-live site keeps its OLD published version
+        # live (publish_draft below, the only write that advances the published
+        # pointer + flips deploy_status="live", is never reached). Raising (not
+        # returning the not-live doc) keeps the caller contract: the MCP tool's
+        # is_error / the REST error path surface the failure instead of a phantom
+        # publish.
+        raise SmokeGateFailed(result.error or "publish failed: deploy unsuccessful")
 
-        deploy = _local_deploy or local_server.deploy_local
-        url = deploy(site_id, build.project_dir)
-    else:
-        cf = _cloudflare or _cf_client()
-        bundle = _bundle_reader(build.project_dir)
-        await cf.put_worker(script_name=site_id, bundle=bundle)
+    url = result.url or ""
 
     # Deploy succeeded — NOW promote the draft to published and mark the site
     # live. publish_draft advances the version pointers AND mirrors the deploy

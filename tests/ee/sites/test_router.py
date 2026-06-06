@@ -17,6 +17,10 @@
 # require_license, and stubs get_workspace_plan -> "business" so the plan gate
 # passes (fabric is a business+ feature). add_error_handler maps the service's
 # NotFound (cross-tenant) to a 404.
+#
+# Updated 2026-06-06 (feat/sites-publish-deploy-wire — CF deploy seam): publish()
+# now goes through build_and_deploy(); the seed fakes expose build_and_deploy
+# (dispatching to the CF target) + deploy_site instead of build() + put_worker.
 
 from __future__ import annotations
 
@@ -32,15 +36,21 @@ from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 
 class _FakeGenerator:
-    async def build(self, **kw):
-        from pocketpaw_ee.sites.generator_client import BuildResult
+    async def build_and_deploy(self, *, cloudflare=None, local_deploy=None, **kw):
+        from pocketpaw_ee.sites.generator_client import DeployResult
 
-        return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
+        if cloudflare is not None:
+            url = await cloudflare.deploy_site(script_name=kw["site_id"], project_dir="/tmp/site")
+        elif local_deploy is not None:
+            url = local_deploy(kw["site_id"], "/tmp/site")
+        else:
+            return DeployResult(success=False, error="no deploy target")
+        return DeployResult(success=True, url=url)
 
 
 class _FakeCF:
-    async def put_worker(self, *, script_name, bundle):
-        return True
+    async def deploy_site(self, *, script_name, project_dir):
+        return f"https://paw-sites.workers.dev/{script_name}/"
 
     async def create_custom_hostname(self, hostname):
         return CustomHostname(

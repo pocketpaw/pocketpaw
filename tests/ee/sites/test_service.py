@@ -17,7 +17,8 @@
 # branch — with no CF creds and no injected CF client, publish() does NOT contact
 # Cloudflare, persists the site via the local deployer, and stores+returns a local
 # URL on the Site (and SiteResponse). Also asserts an injected CF client always
-# wins (the real branch), so the existing CF tests keep exercising put_worker.
+# wins (the real branch), so the existing CF tests keep exercising the edge
+# deploy (cf.deploy_site after the seam rewire).
 # Updated 2026-06-01 (Phase 4 — chat→create-site): coverage for publish_pocket(),
 # the shared pocket-read + publish path the REST router and the in-process MCP
 # tool both call — mocks pockets_service.get to prove it derives the theme from
@@ -30,6 +31,14 @@
 # "Untitled site" only when the pocket has no name. Also pins the end-to-end
 # publish_pocket path: a pocket named "Flower Shop Landing Page" published with no
 # name lands a Site named "Flower Shop Landing Page".
+# Updated 2026-06-06 (feat/sites-publish-deploy-wire — CF deploy seam): publish()
+# now calls the generator's build_and_deploy() seam instead of build() +
+# put_worker()/deploy_local(). The fakes follow suit: _FakeGenerator exposes
+# build_and_deploy(...) which DISPATCHES to the cloudflare / local_deploy target
+# publish() hands it (mirroring the real seam) and returns a DeployResult, and
+# _FakeCF exposes deploy_site (the real CF deploy step) instead of put_worker. The
+# CF-path test now asserts the deploy URL lands on the Site (the seam's
+# cf.deploy_site returns a real URL — the old put_worker left url empty).
 from __future__ import annotations
 
 import pytest
@@ -39,20 +48,40 @@ from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 
 class _FakeGenerator:
-    async def build(self, **kw):
-        from pocketpaw_ee.sites.generator_client import BuildResult
+    """Stands in for GeneratorClient. ``build_and_deploy`` mirrors the real seam:
+    a successful build, then it dispatches to whichever deploy target publish()
+    selected (``cloudflare`` for the edge path, ``local_deploy`` for the local
+    path), and returns a DeployResult carrying that target's URL. This keeps the
+    service tests focused on publish()'s wiring (target selection + reading the
+    DeployResult) without re-testing the seam's build→gate→deploy internals
+    (that's tests/ee/sites/test_generator_client_deploy.py)."""
+
+    async def build_and_deploy(self, *, cloudflare=None, local_deploy=None, **kw):
+        from pocketpaw_ee.sites.generator_client import DeployResult
 
         self.built = kw
-        return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
+        project_dir = "/tmp/site"
+        try:
+            if cloudflare is not None:
+                url = await cloudflare.deploy_site(
+                    script_name=kw["site_id"], project_dir=project_dir
+                )
+            elif local_deploy is not None:
+                url = local_deploy(kw["site_id"], project_dir)
+            else:
+                return DeployResult(success=False, error="no deploy target")
+        except Exception as exc:  # noqa: BLE001 - mirror the seam: deploy failure → success=False
+            return DeployResult(success=False, error=f"deploy failed: {exc}")
+        return DeployResult(success=True, url=url)
 
 
 class _FakeCF:
     def __init__(self):
-        self.put_calls = []
+        self.deploy_calls = []
 
-    async def put_worker(self, *, script_name, bundle):
-        self.put_calls.append(script_name)
-        return True
+    async def deploy_site(self, *, script_name, project_dir):
+        self.deploy_calls.append(script_name)
+        return f"https://paw-sites.workers.dev/{script_name}/"
 
     async def create_custom_hostname(self, hostname):
         return CustomHostname(
@@ -85,7 +114,10 @@ async def test_publish_generates_deploys_and_persists_site(beanie_test_db):
     # is typed str + used as the CF URL path segment); ``site.id`` is an
     # ObjectId, so compare against its str form.
     assert site.script_name == str(site.id)
-    assert cf.put_calls == [site.script_name]
+    # The seam deployed via cf.deploy_site (the real edge step) with the script
+    # name, and the returned live URL landed on the Site.
+    assert cf.deploy_calls == [site.script_name]
+    assert site.url == f"https://paw-sites.workers.dev/{site.script_name}/"
     assert site.signed_key  # a per-site signed key was minted
 
 
@@ -137,7 +169,7 @@ async def test_publish_injected_cf_takes_real_branch_even_without_creds(
 ):
     """Phase 3 Gap 2 (additive, not a replacement): injecting a CF client forces
     the REAL Cloudflare branch even with no env creds, so the existing CF tests
-    keep exercising put_worker and the local branch never hijacks them."""
+    keep exercising the edge deploy and the local branch never hijacks them."""
     monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
     cf = _FakeCF()
 
@@ -156,8 +188,11 @@ async def test_publish_injected_cf_takes_real_branch_even_without_creds(
         _bundle_reader=lambda d: b"export default {}",
         _local_deploy=boom,
     )
-    assert cf.put_calls == [site.script_name]
-    assert site.url == ""  # CF path leaves url empty in v1
+    # The CF path ran (deploy_site), not the local one (boom would have raised).
+    # The seam's cf.deploy_site returns a real URL now, so the Site carries it
+    # (the old put_worker path left url empty).
+    assert cf.deploy_calls == [site.script_name]
+    assert site.url == f"https://paw-sites.workers.dev/{site.script_name}/"
 
 
 @pytest.mark.asyncio
