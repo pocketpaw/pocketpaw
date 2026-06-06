@@ -29,12 +29,25 @@
 # Beanie/Mongo. Phase 1 ships only the Beanie store.
 #
 # Created 2026-06-06 (feat/1345-draft-published).
+# Updated 2026-06-06 (code review BLOCK-1): record_draft is now race-safe. The
+# (workspace, pocket_id, version_no) index is UNIQUE, so two concurrent
+# record_draft calls that compute the same version_no no longer both succeed —
+# the loser gets a DuplicateKeyError. record_draft catches it and retries (re-read
+# latest_version_no → re-increment → re-insert) up to a small bound, so two quick
+# "Refine" clicks both land as distinct versions instead of one surfacing a 500.
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from pymongo.errors import DuplicateKeyError
+
 from pocketpaw_ee.cloud.models.pocket_version import PocketVersion
+
+# How many times record_draft re-derives version_no after losing the unique-index
+# race before giving up. Contention is between a user's own near-simultaneous
+# edits (a double "Refine" click), so a handful of attempts is plenty.
+_RECORD_DRAFT_MAX_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -59,16 +72,12 @@ class VersionStoreProtocol(Protocol):
 
     async def latest_version_no(self, workspace_id: str, pocket_id: str) -> int | None: ...
     async def latest(self, workspace_id: str, pocket_id: str) -> PocketVersion | None: ...
-    async def latest_published(
-        self, workspace_id: str, pocket_id: str
-    ) -> PocketVersion | None: ...
+    async def latest_published(self, workspace_id: str, pocket_id: str) -> PocketVersion | None: ...
     async def get(
         self, workspace_id: str, pocket_id: str, version_no: int
     ) -> PocketVersion | None: ...
     async def insert(self, version: PocketVersion) -> PocketVersion: ...
-    async def list_versions(
-        self, workspace_id: str, pocket_id: str
-    ) -> list[PocketVersion]: ...
+    async def list_versions(self, workspace_id: str, pocket_id: str) -> list[PocketVersion]: ...
 
 
 class _BeanieVersionStore:
@@ -95,9 +104,7 @@ class _BeanieVersionStore:
             .first_or_none()
         )
 
-    async def latest_published(
-        self, workspace_id: str, pocket_id: str
-    ) -> PocketVersion | None:
+    async def latest_published(self, workspace_id: str, pocket_id: str) -> PocketVersion | None:
         return (
             await PocketVersion.find(
                 PocketVersion.workspace == workspace_id,
@@ -108,9 +115,7 @@ class _BeanieVersionStore:
             .first_or_none()
         )
 
-    async def get(
-        self, workspace_id: str, pocket_id: str, version_no: int
-    ) -> PocketVersion | None:
+    async def get(self, workspace_id: str, pocket_id: str, version_no: int) -> PocketVersion | None:
         return await PocketVersion.find_one(
             PocketVersion.workspace == workspace_id,
             PocketVersion.pocket_id == pocket_id,
@@ -121,9 +126,7 @@ class _BeanieVersionStore:
         await version.insert()
         return version
 
-    async def list_versions(
-        self, workspace_id: str, pocket_id: str
-    ) -> list[PocketVersion]:
+    async def list_versions(self, workspace_id: str, pocket_id: str) -> list[PocketVersion]:
         return (
             await PocketVersion.find(
                 PocketVersion.workspace == workspace_id,
@@ -186,24 +189,40 @@ async def record_draft(
     """Write a NEW draft version — the edit/refine operation. version_no is the
     previous max + 1; parent_version_no links the chain. The published pointer is
     untouched. Both content (rippleSpec) and source (svelte map) are snapshotted
-    so the engine round-trips on rollback."""
+    so the engine round-trips on rollback.
+
+    Race-safe: version_no is read-then-written, so two concurrent calls can derive
+    the same number. The (workspace, pocket_id, version_no) unique index makes the
+    loser's insert fail with DuplicateKeyError; we re-read the max and retry up to
+    ``_RECORD_DRAFT_MAX_ATTEMPTS`` times so both edits land as distinct versions."""
     store = _store or _default_store
-    prev_no = await store.latest_version_no(workspace_id, pocket_id)
-    version_no = (prev_no or 0) + 1
-    version = PocketVersion(
-        workspace=workspace_id,
-        pocket_id=pocket_id,
-        version_no=version_no,
-        content=content,
-        source=source,
-        engine=engine,
-        author=author,
-        label=label,
-        status="draft",
-        parent_version_no=prev_no,
-        origin=origin or "refine",
-    )
-    await store.insert(version)
+    version: PocketVersion | None = None
+    for attempt in range(_RECORD_DRAFT_MAX_ATTEMPTS):
+        prev_no = await store.latest_version_no(workspace_id, pocket_id)
+        version_no = (prev_no or 0) + 1
+        candidate = PocketVersion(
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            version_no=version_no,
+            content=content,
+            source=source,
+            engine=engine,
+            author=author,
+            label=label,
+            status="draft",
+            parent_version_no=prev_no,
+            origin=origin or "refine",
+        )
+        try:
+            await store.insert(candidate)
+        except DuplicateKeyError:
+            # Another writer claimed this version_no first. Re-read and retry.
+            if attempt == _RECORD_DRAFT_MAX_ATTEMPTS - 1:
+                raise
+            continue
+        version = candidate
+        break
+    assert version is not None  # the loop either sets this or re-raises
     published = await store.latest_published(workspace_id, pocket_id)
     await _sync_pocket_pointers(
         workspace_id,
@@ -219,12 +238,19 @@ async def publish_draft(
     workspace_id: str,
     pocket_id: str,
     version_no: int | None = None,
+    deploy_status: str | None = None,
     _store: VersionStoreProtocol | None = None,
 ) -> PocketVersion:
     """Promote a version to published (tag it). Defaults to the current draft (the
     latest version); pass ``version_no`` to publish a specific one. Returns the
     promoted version. The caller triggers the deploy and flips "Live" — this only
-    moves the version state (deploy is a separate axis, architect review #2)."""
+    moves the version state (deploy is a separate axis, architect review #2).
+
+    ``deploy_status`` is the optional deploy-axis value to mirror onto the Pocket
+    pointer cache in the SAME write that advances the version pointers (e.g.
+    sites/service.publish passes "live" once its deploy succeeds). Folding it in
+    here keeps callers to ONE public call instead of reaching for the private
+    pointer sync."""
     store = _store or _default_store
     if version_no is None:
         target = await store.latest(workspace_id, pocket_id)
@@ -239,6 +265,7 @@ async def publish_draft(
         pocket_id,
         draft_no=target.version_no,
         published_no=target.version_no,
+        deploy_status=deploy_status,
     )
     return target
 

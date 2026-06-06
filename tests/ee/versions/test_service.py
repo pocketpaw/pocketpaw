@@ -16,6 +16,11 @@
 #   * get_draft_content returns the working version's content (for the preview).
 #
 # Created 2026-06-06 (feat/1345-draft-published).
+# Updated 2026-06-06 (code review TEST-1 + BLOCK-1): added a svelte-track snapshot
+# round-trip (record_draft(engine="svelte") → get_draft_content returns the SOURCE
+# map, not None — the #1 data-loss risk, previously zero-covered), and a race
+# regression test proving the unique index + record_draft retry never produce two
+# rows with the same version_no.
 from __future__ import annotations
 
 import pytest
@@ -198,3 +203,126 @@ async def test_versions_are_workspace_scoped(beanie_test_db):
     # Each workspace's first version is version_no 1 (counter is per (ws, pocket)).
     status_a = await versions_service.status_for(workspace_id="ws_a", pocket_id="pk1")
     assert status_a.draft_version == 1
+
+
+# ---------------------------------------------------------------------------
+# TEST-1: svelte-track snapshot round-trip. The #1 data-loss risk — every other
+# test runs engine="ripple", so the svelte branch of get_draft_content (return
+# ``source``, not ``content``) had zero coverage. If the engine branch were
+# flipped, these fail.
+# ---------------------------------------------------------------------------
+
+_SVELTE_SOURCE = {
+    "src/routes/+page.svelte": "<h1>hi</h1>",
+    "src/routes/+layout.svelte": "<slot />",
+}
+
+
+@pytest.mark.asyncio
+async def test_record_draft_svelte_source_round_trips(beanie_test_db):
+    """A svelte version stores its content in ``source`` (content=None).
+    get_draft_content must return that source map — NOT None, NOT the empty
+    ``content``. Flipping the engine branch (returning ``content``) makes this
+    return None and the test fails."""
+    v = await versions_service.record_draft(
+        workspace_id="ws1",
+        pocket_id="pk1",
+        engine="svelte",
+        source=_SVELTE_SOURCE,
+        content=None,
+    )
+    assert v.engine == "svelte"
+    assert v.source == _SVELTE_SOURCE
+    assert v.content is None
+
+    draft_content = await versions_service.get_draft_content(workspace_id="ws1", pocket_id="pk1")
+    assert draft_content == _SVELTE_SOURCE  # the source map, not None
+
+
+@pytest.mark.asyncio
+async def test_svelte_version_rolls_back_with_source(beanie_test_db):
+    """A svelte rollback clones ``source`` (not ``content``) into the new draft,
+    so the svelte track round-trips through publish → refine → rollback."""
+    await versions_service.record_draft(
+        workspace_id="ws1", pocket_id="pk1", engine="svelte", source=_SVELTE_SOURCE
+    )
+    await versions_service.publish_draft(workspace_id="ws1", pocket_id="pk1")
+    await versions_service.record_draft(
+        workspace_id="ws1",
+        pocket_id="pk1",
+        engine="svelte",
+        source={"src/routes/+page.svelte": "<h1>v2</h1>"},
+    )
+    rolled = await versions_service.rollback(workspace_id="ws1", pocket_id="pk1", target_version=1)
+    assert rolled.engine == "svelte"
+    assert rolled.source == _SVELTE_SOURCE
+    assert rolled.content is None
+    content = await versions_service.get_draft_content(workspace_id="ws1", pocket_id="pk1")
+    assert content == _SVELTE_SOURCE
+
+
+# ---------------------------------------------------------------------------
+# BLOCK-1: record_draft is race-safe. The unique index on
+# (workspace, pocket_id, version_no) turns a lost check-then-act race into a
+# DuplicateKeyError; record_draft retries (re-read max → re-increment → insert).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_duplicate_version_no_is_rejected_by_unique_index(beanie_test_db):
+    """The unique index forbids two rows with the same (ws, pocket, version_no):
+    a raw second insert at v1 must raise DuplicateKeyError, not silently corrupt
+    the log. This is what makes the record_draft retry meaningful."""
+    from pocketpaw_ee.cloud.models.pocket_version import PocketVersion
+    from pymongo.errors import DuplicateKeyError
+
+    await PocketVersion(workspace="ws1", pocket_id="pk1", version_no=1, content={"rev": 1}).insert()
+    with pytest.raises(DuplicateKeyError):
+        await PocketVersion(
+            workspace="ws1", pocket_id="pk1", version_no=1, content={"rev": 1}
+        ).insert()
+
+
+@pytest.mark.asyncio
+async def test_record_draft_retries_when_version_no_is_stolen(beanie_test_db):
+    """Simulate the race deterministically: a concurrent writer has already taken
+    v2, but our ``latest_version_no`` reads a STALE max (1) on the first attempt,
+    so record_draft computes v2 and its insert hits the unique index. record_draft
+    must catch the DuplicateKeyError, re-read the now-current max (2), and insert
+    v3 — the edit lands as a distinct version instead of surfacing a 500."""
+    from pocketpaw_ee.cloud.models.pocket_version import PocketVersion
+    from pocketpaw_ee.cloud.versions.service import _BeanieVersionStore
+
+    # v1 already exists (an earlier edit), and a racing writer has claimed v2.
+    await versions_service.record_draft(workspace_id="ws1", pocket_id="pk1", content={"rev": 1})
+    await PocketVersion(
+        workspace="ws1", pocket_id="pk1", version_no=2, content={"rev": "racer"}
+    ).insert()
+
+    class _StaleOnceStore(_BeanieVersionStore):
+        """Reports a stale max (1) on the FIRST read so the caller computes the
+        already-taken v2 and collides; every later read returns the true max."""
+
+        def __init__(self) -> None:
+            self._served_stale = False
+
+        async def latest_version_no(self, workspace_id: str, pocket_id: str):
+            if not self._served_stale:
+                self._served_stale = True
+                return 1  # stale: hides the racer's v2 → caller computes v2, collides
+            return await super().latest_version_no(workspace_id, pocket_id)
+
+    v = await versions_service.record_draft(
+        workspace_id="ws1",
+        pocket_id="pk1",
+        content={"rev": 2},
+        _store=_StaleOnceStore(),
+    )
+    # Retry recovered: our edit landed AFTER the racer's v2, as v3 — never a
+    # duplicate, never a raised error.
+    assert v.version_no == 3
+    assert v.content == {"rev": 2}
+
+    versions = await versions_service.list_versions(workspace_id="ws1", pocket_id="pk1")
+    nums = sorted(x.version_no for x in versions)
+    assert nums == [1, 2, 3]  # no duplicates in the log

@@ -22,6 +22,13 @@
 # _to_response now carries status + is_live. The deploy seam is unchanged: publish
 # still calls generator.build(...) and cf.put_worker(...)/local deploy as-is.
 #
+# Updated 2026-06-06 (code review BLOCK-2): publish() no longer calls the versions
+# module's PRIVATE _sync_pocket_pointers. The post-deploy "mark live" pointer
+# write is now folded into the public versions_service.publish_draft(...,
+# deploy_status="live") call one line above — so sites/service makes exactly one
+# public versions call to promote + mark-live, and no private cross-module call
+# remains.
+#
 # Updated 2026-06-01 (Phase 4 — chat→create-site): added publish_pocket(), the
 # shared "publish a pocket by id" path. It reads the pocket's rippleSpec + theme
 # via pockets_service (logic lifted verbatim from the router) and delegates to
@@ -235,14 +242,10 @@ async def _find_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc |
     """The Site row (if any) for a pocket in a workspace. A pocket has at most one
     site (the compound (workspace, pocket_id) index), so publish reuses it rather
     than stacking a second row when a draft was created first."""
-    return await _SiteDoc.find_one(
-        {"workspace": workspace_id, "pocket_id": pocket_id}
-    )
+    return await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
 
 
-async def _resolve_site_name(
-    *, name: str, pocket_id: str, user_id: str
-) -> str:
+async def _resolve_site_name(*, name: str, pocket_id: str, user_id: str) -> str:
     """Default a blank name to the source pocket's own display name (the publish
     schema promises this), falling back to "Untitled site". Reads the pocket via
     the pockets service's PUBLIC ``get`` (a wire dict — no Beanie import)."""
@@ -416,9 +419,7 @@ async def publish(
     # (no prior draft) records one now from the passed content so the published
     # version reflects exactly what was deployed.
     if await versions_service.get_draft(workspace_id=workspace_id, pocket_id=pocket_id) is None:
-        content, src = _version_content(
-            engine=engine, ripple_spec=ripple_spec, source=source
-        )
+        content, src = _version_content(engine=engine, ripple_spec=ripple_spec, source=source)
         await versions_service.record_draft(
             workspace_id=workspace_id,
             pocket_id=pocket_id,
@@ -457,8 +458,12 @@ async def publish(
         await cf.put_worker(script_name=site_id, bundle=bundle)
 
     # Deploy succeeded — NOW promote the draft to published and mark the site
-    # live. The deploy status is mirrored onto the pocket pointer as "live".
-    await versions_service.publish_draft(workspace_id=workspace_id, pocket_id=pocket_id)
+    # live. publish_draft advances the version pointers AND mirrors the deploy
+    # status ("live") onto the Pocket pointer cache in one write, so this stays a
+    # single PUBLIC call (no reaching into the versions module's privates).
+    await versions_service.publish_draft(
+        workspace_id=workspace_id, pocket_id=pocket_id, deploy_status="live"
+    )
 
     if existing is not None:
         existing.name = site_name
@@ -488,18 +493,6 @@ async def publish(
         )
         await doc.insert()
 
-    # Mirror the real version pointers + the live deploy onto the pocket pointer
-    # cache in one write (best-effort — skipped if the pocket doc isn't present).
-    vstatus = await versions_service.status_for(
-        workspace_id=workspace_id, pocket_id=pocket_id
-    )
-    await versions_service._sync_pocket_pointers(
-        workspace_id,
-        pocket_id,
-        draft_no=vstatus.draft_version,
-        published_no=vstatus.published_version,
-        deploy_status="live",
-    )
     return doc
 
 
@@ -666,9 +659,7 @@ async def site_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespons
     ``is_live`` is False until a deploy succeeds. ``status`` "none" surfaces as
     "draft" to the badge (a pocket with no versions yet is, practically, a draft).
     """
-    vstatus = await versions_service.status_for(
-        workspace_id=workspace_id, pocket_id=pocket_id
-    )
+    vstatus = await versions_service.status_for(workspace_id=workspace_id, pocket_id=pocket_id)
     site = await _find_site_for_pocket(workspace_id, pocket_id)
     is_live = bool(site.deployed) if site is not None else False
     # Map the version "none" (no versions yet) to the badge's "draft".
@@ -684,25 +675,19 @@ async def site_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespons
     )
 
 
-async def preview_content(
-    *, workspace_id: str, pocket_id: str
-) -> dict[str, Any] | None:
+async def preview_content(*, workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
     """The current DRAFT content the builder preview renders — the rippleSpec for
     a ripple site, or the svelte source map for a svelte site. Returns the WORKING
     version (the latest draft), NOT the published URL — this is the fix for the
     builder preview iframing a dead local-serve URL. ``None`` when the pocket has
     no versions yet."""
-    return await versions_service.get_draft_content(
-        workspace_id=workspace_id, pocket_id=pocket_id
-    )
+    return await versions_service.get_draft_content(workspace_id=workspace_id, pocket_id=pocket_id)
 
 
 async def preview(*, workspace_id: str, pocket_id: str) -> PreviewResponse:
     """``preview_content`` wrapped in the response DTO (with the engine), for the
     REST preview endpoint."""
-    draft = await versions_service.get_draft(
-        workspace_id=workspace_id, pocket_id=pocket_id
-    )
+    draft = await versions_service.get_draft(workspace_id=workspace_id, pocket_id=pocket_id)
     if draft is None:
         return PreviewResponse(pocket_id=pocket_id, engine="ripple", content=None)
     content = draft.source if draft.engine == "svelte" else draft.content

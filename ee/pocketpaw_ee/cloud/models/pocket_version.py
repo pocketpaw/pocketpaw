@@ -22,12 +22,20 @@
 # (rippleSpec) + ``source`` (svelte map) + ``engine`` so the svelte track isn't
 # silently versioned empty; renamed parent → ``parent_version_no``; added
 # ``origin``; compound index ordered version_no DESC (newest-first reads).
+# Updated 2026-06-06 (code review BLOCK-1 + engine guard): made the
+# (workspace, pocket_id, version_no) index UNIQUE so a check-then-act race in
+# record_draft can no longer write two rows with the same version_no — the second
+# insert now fails loudly with a duplicate-key error (the service retries it
+# instead of silently corrupting the log). Constrained ``engine`` to
+# ^(ripple|svelte)$ so a bad engine value can't slip a snapshot into a track that
+# returns a None preview.
 from __future__ import annotations
 
 from typing import Any
 
 from beanie import Indexed
 from pydantic import Field
+from pymongo import IndexModel
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -47,8 +55,10 @@ class PocketVersion(TimestampedDocument):
     # entirely in ``source`` — is never versioned empty.
     source: dict[str, str] | None = None
     # Which generation track this snapshot belongs to ("ripple" | "svelte"), so a
-    # publish/rollback restores the right track.
-    engine: str = "ripple"
+    # publish/rollback restores the right track. Constrained to the two known
+    # tracks: a stray value would version into a track whose preview reader
+    # returns None (silent data loss on read-back).
+    engine: str = Field(default="ripple", pattern="^(ripple|svelte)$")
     # Optional human label for the version (e.g. "before redesign"). Phase 2 UI.
     label: str | None = None
     # Who created the version: a user id, or "agent" for an agent-authored edit.
@@ -67,6 +77,14 @@ class PocketVersion(TimestampedDocument):
         name = "pocket_versions"
         indexes = [
             # Every Phase-2 query is "this pocket's versions, newest first".
-            [("workspace", 1), ("pocket_id", 1), ("version_no", -1)],
-            [("workspace", 1), ("pocket_id", 1), ("status", 1)],
+            # UNIQUE: two concurrent record_draft calls for the same (workspace,
+            # pocket) would otherwise both read the same latest_version_no, +1, and
+            # insert duplicate version_no rows — corrupting the monotonic log.
+            # Uniqueness turns that race into a loud DuplicateKeyError the service
+            # retries (see versions/service.record_draft).
+            IndexModel(
+                [("workspace", 1), ("pocket_id", 1), ("version_no", -1)],
+                unique=True,
+            ),
+            IndexModel([("workspace", 1), ("pocket_id", 1), ("status", 1)]),
         ]
