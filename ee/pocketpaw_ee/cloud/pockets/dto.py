@@ -83,6 +83,12 @@ chunk ②) — added the optional ``surface_profile`` field (aliased
 ``PocketSurfaceProfile`` sub-model (all sub-fields optional, JSON-friendly
 lists) so the create/read DTOs share one shape with the persisted model.
 Defaults to ``None`` → legacy callers read back ``None`` with no migration.
+Updated: 2026-06-06 (feat/entity-pocket-profile-field) — added the
+``surface_profile`` field (aliased ``surfaceProfile``) to
+``UpdatePocketRequest`` so an existing pocket's override can be SET / CHANGED
+/ CLEARED (the auto-authoring write path). Three-way partial semantics live
+in ``pockets_service.update`` and key off ``model_fields_set``: present +
+non-null sets/replaces, explicit ``null`` clears, absent leaves it unchanged.
 """
 
 from __future__ import annotations
@@ -149,6 +155,16 @@ class UpdatePocketRequest(BaseModel):
     # Pass the same slug to force a recompile (template content edited
     # out-of-band). ``None`` (the default) means "leave it alone."
     template_slug: str | None = Field(default=None, alias="templateSlug")
+    # Optional per-entity surface-profile override (the auto-authoring
+    # foundation). Three-way partial semantics, distinguished by
+    # ``model_fields_set`` in the service: present + non-null SETs/REPLACEs,
+    # explicit ``null`` CLEARS (un-profiles the pocket), and absent (not in
+    # the partial update) leaves the existing value untouched. Reuses the
+    # persisted ``PocketSurfaceProfile`` sub-model (all sub-fields optional,
+    # JSON-friendly lists). Wire alias ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(
+        default=None, alias="surfaceProfile"
+    )
 
     model_config = {"populate_by_name": True}
 

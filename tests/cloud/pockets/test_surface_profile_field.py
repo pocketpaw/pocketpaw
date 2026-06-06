@@ -13,12 +13,23 @@
 # NO Mongo migration. Assertions follow the test_pattern_field.py precedent
 # (wire-dict round-trip via the shared ``mongo_db`` fixture) plus pure
 # model/DTO unit checks that need no Mongo.
+#
+# Updated: 2026-06-06 (feat/entity-pocket-profile-field) — added the UPDATE
+# path: ``UpdatePocketRequest`` carries the optional ``surface_profile`` and
+# ``pockets_service.update`` honours three-way partial semantics — present +
+# non-null SETs/REPLACEs, explicit ``null`` CLEARS, absent leaves the existing
+# value unchanged (no clobber on unrelated edits). Tests pin all four cases
+# end-to-end through Mongo (set, change, leave-unchanged, clear).
 
 from __future__ import annotations
 
 import pytest
 from pocketpaw_ee.cloud.models.pocket import Pocket, PocketSurfaceProfile
-from pocketpaw_ee.cloud.pockets.dto import CreatePocketRequest, PocketResponse
+from pocketpaw_ee.cloud.pockets.dto import (
+    CreatePocketRequest,
+    PocketResponse,
+    UpdatePocketRequest,
+)
 from pocketpaw_ee.cloud.surface.domain import SurfaceProfile
 
 # ---------------------------------------------------------------------------
@@ -101,6 +112,32 @@ def test_create_pocket_request_surface_profile_optional():
     )
     assert req2.surface_profile is not None
     assert req2.surface_profile.ripple_mode == "off"
+
+
+def test_update_pocket_request_surface_profile_three_way():
+    """The update DTO distinguishes absent / explicit-null / populated.
+
+    The three-way partial semantics ride on ``model_fields_set`` (the
+    ``exclude_unset`` convention): ``None`` is BOTH the default and the
+    "clear" signal, so absence is detected via whether the field was set.
+    """
+    # Absent — not in the partial update; leave-unchanged.
+    absent = UpdatePocketRequest(name="x")
+    assert "surface_profile" not in absent.model_fields_set
+    assert absent.surface_profile is None
+
+    # Explicit null — clear the override.
+    cleared = UpdatePocketRequest(surfaceProfile=None)
+    assert "surface_profile" in cleared.model_fields_set
+    assert cleared.surface_profile is None
+
+    # Populated — set/replace.
+    populated = UpdatePocketRequest(
+        surfaceProfile={"ripple_mode": "off", "skill_names": ["github"]}
+    )
+    assert "surface_profile" in populated.model_fields_set
+    assert populated.surface_profile is not None
+    assert populated.surface_profile.ripple_mode == "off"
 
 
 def test_pocket_response_serializes_surface_profile():
@@ -189,3 +226,100 @@ async def test_surface_profile_survives_get_roundtrip() -> None:
     fetched = await pockets_service.get(created["_id"], _USER)
     assert fetched["surfaceProfile"]["ripple_mode"] == "trim"
     assert fetched["surfaceProfile"]["deny_mcp_tool_ids"] == ["refund"]
+
+
+# ---------------------------------------------------------------------------
+# UPDATE path — set / change / leave-unchanged / clear (the auto-authoring
+# foundation). Mirrors the create round-trip; verifies persistence by
+# re-fetching by id, not echoing the update response.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_sets_surface_profile() -> None:
+    """Updating an un-profiled pocket SETS the surface_profile (persisted)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    created = await pockets_service.create(_WS, _USER, CreatePocketRequest(name="x"))
+    assert created["surfaceProfile"] is None
+
+    wire = await pockets_service.update(
+        created["_id"],
+        _USER,
+        UpdatePocketRequest(surfaceProfile={"ripple_mode": "off", "skill_names": ["github"]}),
+    )
+    assert wire["surfaceProfile"]["ripple_mode"] == "off"
+    assert wire["surfaceProfile"]["skill_names"] == ["github"]
+
+    fetched = await pockets_service.get(created["_id"], _USER)
+    assert fetched["surfaceProfile"]["ripple_mode"] == "off"
+    assert fetched["surfaceProfile"]["skill_names"] == ["github"]
+
+
+@pytest.mark.asyncio
+async def test_update_changes_surface_profile() -> None:
+    """Updating a profiled pocket REPLACES the surface_profile wholesale."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    created = await pockets_service.create(
+        _WS,
+        _USER,
+        CreatePocketRequest(
+            name="x", surface_profile={"ripple_mode": "off", "skill_names": ["github"]}
+        ),
+    )
+
+    await pockets_service.update(
+        created["_id"],
+        _USER,
+        UpdatePocketRequest(
+            surfaceProfile={"ripple_mode": "trim", "deny_mcp_tool_ids": ["refund"]}
+        ),
+    )
+
+    fetched = await pockets_service.get(created["_id"], _USER)
+    assert fetched["surfaceProfile"]["ripple_mode"] == "trim"
+    assert fetched["surfaceProfile"]["deny_mcp_tool_ids"] == ["refund"]
+    # Replaced wholesale — the old skill_names are gone.
+    assert fetched["surfaceProfile"]["skill_names"] == []
+
+
+@pytest.mark.asyncio
+async def test_update_absent_leaves_surface_profile_unchanged() -> None:
+    """An unrelated edit (surface_profile absent) must NOT clobber the override."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    created = await pockets_service.create(
+        _WS,
+        _USER,
+        CreatePocketRequest(
+            name="x", surface_profile={"ripple_mode": "off", "skill_names": ["github"]}
+        ),
+    )
+
+    # Edit only the name — surface_profile is not in the partial update.
+    await pockets_service.update(created["_id"], _USER, UpdatePocketRequest(name="renamed"))
+
+    fetched = await pockets_service.get(created["_id"], _USER)
+    assert fetched["name"] == "renamed"
+    assert fetched["surfaceProfile"]["ripple_mode"] == "off"
+    assert fetched["surfaceProfile"]["skill_names"] == ["github"]
+
+
+@pytest.mark.asyncio
+async def test_update_explicit_null_clears_surface_profile() -> None:
+    """An explicit null CLEARS the override so a pocket can be un-profiled."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    created = await pockets_service.create(
+        _WS,
+        _USER,
+        CreatePocketRequest(
+            name="x", surface_profile={"ripple_mode": "off", "skill_names": ["github"]}
+        ),
+    )
+
+    await pockets_service.update(created["_id"], _USER, UpdatePocketRequest(surfaceProfile=None))
+
+    fetched = await pockets_service.get(created["_id"], _USER)
+    assert fetched["surfaceProfile"] is None

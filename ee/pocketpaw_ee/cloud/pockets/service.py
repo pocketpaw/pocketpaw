@@ -1123,6 +1123,16 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
             doc.project_id = body.project_id
         else:
             doc.project_id = None
+    # Per-entity surface-profile override (the auto-authoring write path).
+    # ``None`` is BOTH the field default and the "clear" signal, so the
+    # absent-vs-explicit-null distinction rides on ``model_fields_set``
+    # (the ``exclude_unset`` convention) — NOT on ``is not None``:
+    #   present + non-null → set/replace; explicit null → clear; absent →
+    #   leave unchanged (no clobber on an unrelated edit). Assigns the
+    #   ``PocketSurfaceProfile`` sub-model (or ``None``) onto the doc field
+    #   exactly as the create path does — same shape, same normalization.
+    if "surface_profile" in body.model_fields_set:
+        doc.surface_profile = body.surface_profile
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
