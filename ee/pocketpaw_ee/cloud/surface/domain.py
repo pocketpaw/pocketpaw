@@ -151,11 +151,19 @@ class SurfaceProfile:
         a future slimmed variant (declared, not yet used).
       * ``allowed_sdk_tools`` — optional SDK-tool allowlist (``None`` = no
         surface restriction). Declared for PR 2; not consumed in PR 1.
+      * ``allow_mcp_tool_ids`` — optional per-surface MCP-tool ALLOW-list
+        (``None`` = no restriction, the agent keeps every MCP tool). ENFORCED:
+        when set, the OSS backend keeps only the MCP tools in this set PLUS the
+        universal pocket-creation grant, dropping the rest before the SDK
+        launches. This is how a mode keeps its agent context lean (Files,
+        Foresight, etc. carry only their own tools). Pocket creation stays
+        available everywhere via the grant. ``None`` on every surface today.
       * ``deny_mcp_tool_ids`` — MCP tool ids this surface forbids. ENFORCED: the
         resolved set is threaded to the OSS backend's ``run`` as a plain
         ``frozenset[str]`` (``deny_mcp_tool_ids``) and subtracted from
         ``allowed_tools`` before the SDK launches. Non-empty only on the /sites
-        svelte-create row.
+        svelte-create row. Applied AFTER the allow-list, so a mode can allow a
+        group and still deny a specific id.
       * ``skill_names`` — skills this surface surfaces to the agent. Tested DATA;
         skill-surfacing consumption lands in a later pass.
       * ``system_message_override`` — optional full system-message swap for a
@@ -169,6 +177,7 @@ class SurfaceProfile:
 
     ripple_mode: Literal["on", "off", "trim"]
     allowed_sdk_tools: frozenset[str] | None = None
+    allow_mcp_tool_ids: frozenset[str] | None = None
     deny_mcp_tool_ids: frozenset[str] = field(default_factory=frozenset)
     skill_names: frozenset[str] = field(default_factory=frozenset)
     system_message_override: str | None = None

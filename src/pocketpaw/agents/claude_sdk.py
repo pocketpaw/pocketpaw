@@ -107,6 +107,19 @@ _DEFAULT_IDENTITY = (
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
+# Universal pocket-creation grant. When a surface imposes an MCP allow-list
+# (``SurfaceProfile.allow_mcp_tool_ids``), these ids are always kept on top of
+# the mode's own set so "create a pocket" works from every chat mode — it's the
+# core capability. The create-pocket SKILL is plugin-loaded (not an MCP tool),
+# so it stays available regardless of this grant. Plain ids (no EE import): the
+# allow/deny sets cross the OSS boundary as bare ``frozenset[str]``.
+POCKET_CREATION_GRANT: frozenset[str] = frozenset(
+    {
+        "mcp__pocketpaw_pocket_specialist__create",
+        "mcp__pocketpaw_pocket_planner__plan_pocket",
+    }
+)
+
 
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
@@ -897,6 +910,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         history: list[dict] | None = None,
         session_key: str | None = None,
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -910,6 +924,13 @@ class ClaudeSDKBackend(BaseAgentBackend):
         /sites svelte-create surface, where it forbids the two ripple-create
         tools so the agent cannot fall back to a rippleSpec landing page. This
         is the typed replacement for the deleted prompt-sniffing gate.
+
+        ``allow_mcp_tool_ids`` is the per-surface MCP-tool ALLOW-list. ``None``
+        (the default) keeps every MCP tool. When a surface sets it, only the
+        MCP tools in it — PLUS the universal ``POCKET_CREATION_GRANT`` — survive;
+        the rest are dropped before launch so a mode's agent context stays lean.
+        Non-MCP (built-in SDK) tools are never touched by this filter. Applied
+        BEFORE ``deny_mcp_tool_ids``.
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -1122,6 +1143,26 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # both read tools (get_pocket / list_pockets) and the writable
             # ``add_widget`` tool — they all flow through the loop below.
             allowed_tools.extend(self._collect_mcp_tool_ids())
+
+            # Per-surface MCP-tool ALLOW-list (threaded from the resolved
+            # ``SurfaceProfile``). ``None`` keeps every MCP tool (legacy / broad
+            # surfaces like /chat). When set, a mode keeps only its own MCP
+            # tools plus the universal pocket-creation grant, so files /
+            # foresight / etc. carry a lean tool set instead of every server's
+            # ids. Built-in SDK tools (Read/Write/Bash/...) are never filtered
+            # here — only ``mcp__*`` ids — so scoping a mode can't strip the
+            # agent's core file/shell tools. Applied BEFORE the deny filter.
+            if allow_mcp_tool_ids is not None:
+                grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT
+                before_count = len(allowed_tools)
+                allowed_tools = [
+                    t for t in allowed_tools if not t.startswith("mcp__") or t in grant
+                ]
+                if len(allowed_tools) < before_count:
+                    logger.info(
+                        "Surface tool-allow: scoped MCP tools to %s (+ pocket grant)",
+                        sorted(allow_mcp_tool_ids),
+                    )
 
             # Per-surface MCP-tool deny set (threaded from the chat loop's
             # resolved ``SurfaceProfile``). Any denied id is subtracted from the

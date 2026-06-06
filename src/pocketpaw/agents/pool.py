@@ -169,6 +169,7 @@ class AgentPool:
         knowledge_context: str = "",
         instructions: str = "",
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -188,6 +189,12 @@ class AgentPool:
         SDK backend — the one backend that consumes it — without passing an
         unexpected kwarg to backends that don't accept it. Empty for every
         surface except /sites svelte-create, so ordinary runs are untouched.
+
+        ``allow_mcp_tool_ids`` is the per-surface MCP-tool allow-list (also
+        from the ``SurfaceProfile``). Forwarded only when not ``None`` so it
+        reaches the Claude SDK backend without tripping the narrower backend
+        signatures. ``None`` for broad surfaces (/chat), so ordinary runs keep
+        every tool.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -278,6 +285,8 @@ class AgentPool:
             }
             if deny_mcp_tool_ids:
                 run_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
+            if allow_mcp_tool_ids is not None:
+                run_kwargs["allow_mcp_tool_ids"] = allow_mcp_tool_ids
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event

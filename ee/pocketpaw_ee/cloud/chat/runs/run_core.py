@@ -454,10 +454,14 @@ async def _drive_agent_loop(
         # prompt-sniffing gate in claude_sdk.py). ``surface_context is None`` is
         # the legacy path — no deny.
         surface_deny: frozenset[str] = frozenset()
+        surface_allow: frozenset[str] | None = None
         if ctx.surface_context is not None:
-            surface_deny = resolve_profile(
-                ctx.surface_context.kind, ctx.surface_context.meta
-            ).deny_mcp_tool_ids
+            _profile = resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta)
+            surface_deny = _profile.deny_mcp_tool_ids
+            # Per-surface MCP allow-list (lean per-mode tool set). ``None`` on
+            # broad surfaces like /chat keeps every tool; a scoped mode keeps
+            # only its own tools plus the universal pocket-creation grant.
+            surface_allow = _profile.allow_mcp_tool_ids
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -466,6 +470,7 @@ async def _drive_agent_loop(
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
             deny_mcp_tool_ids=surface_deny,
+            allow_mcp_tool_ids=surface_allow,
         ).__aiter__()
 
         async def _next_event() -> Any:
