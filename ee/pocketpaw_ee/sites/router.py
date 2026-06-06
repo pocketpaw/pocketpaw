@@ -21,6 +21,15 @@
 # require_plan_feature("fabric") router gate + require_action_any_workspace
 # scoping as the other authed sites reads) so the Domains tab can rehydrate on
 # reload. A site in another workspace surfaces as a 404 (via the service _load).
+#
+# Updated 2026-06-06 (feat/1345-draft-published): added two pocket-keyed reads for
+# the draft/published state machine (pocketpaw#1345), both gated fabric.read:
+#   * GET /sites/by-pocket/{pocket_id}/status  — the Draft/Live badge state
+#     (status + is_live + draft/published version pointers). Keyed by SOURCE
+#     pocket id because a draft has no site_id until first publish.
+#   * GET /sites/by-pocket/{pocket_id}/preview — the current DRAFT content the
+#     builder iframe renders (rippleSpec or svelte source map), fixing the
+#     dead-published-URL preview.
 
 from __future__ import annotations
 
@@ -32,8 +41,10 @@ from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     DomainRequest,
     DomainStatusResponse,
+    PreviewResponse,
     PublishRequest,
     SiteResponse,
+    SiteStatusResponse,
 )
 
 router = APIRouter(
@@ -64,6 +75,36 @@ async def publish_site(
 @router.get("/sites", response_model=list[SiteResponse])
 async def list_sites(ctx: RequestContext = Depends(request_context)) -> list[SiteResponse]:
     return await sites_service.list_for_workspace(ctx.workspace_id)
+
+
+@router.get(
+    "/sites/by-pocket/{pocket_id}/status",
+    response_model=SiteStatusResponse,
+)
+async def site_status(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteStatusResponse:
+    """The draft/published + is_live badge state for a pocket's site. Works
+    before the first publish (no Site doc yet) — the version state comes from the
+    versions log and ``is_live`` is False until a deploy succeeds."""
+    return await sites_service.site_status(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+
+
+@router.get(
+    "/sites/by-pocket/{pocket_id}/preview",
+    response_model=PreviewResponse,
+)
+async def site_preview(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> PreviewResponse:
+    """The current DRAFT content the builder preview renders (rippleSpec for a
+    ripple site, svelte source map for a svelte site) — NOT the published URL.
+    Fixes the builder preview iframing a dead local-serve address."""
+    return await sites_service.preview(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
 
 
 @router.post("/sites/{site_id}/domains", response_model=DomainStatusResponse)

@@ -32,6 +32,15 @@ SvelteKit source map a svelte-engine site materializes from (the svelte
 analog of ``rippleSpec``). ``engine`` defaults to ``"ripple"`` and
 ``source`` to ``None`` so every existing pocket reads back as a ripple
 pocket with no source map — additive, no Mongo migration.
+Updated: 2026-06-06 (feat/1345-draft-published) — added the version-history
+pointer cache (pocketpaw#1345 Phase 1, plan §5): ``draft_version_no`` /
+``published_version_no`` denormalize the pocket's current draft/published
+``PocketVersion.version_no`` (the authoritative log is the
+``pocket_versions`` collection — these are a read-optimization the versions
+service keeps in sync), and ``last_deploy_status`` (``none|pending|live|
+failed``) is the REAL-deploy axis kept separate from the version status
+(a version is published once promoted; the deploy can still be pending or
+failed). All optional / defaulted — additive, no Mongo migration.
 """
 
 from __future__ import annotations
@@ -139,6 +148,18 @@ class Pocket(TimestampedDocument):
     # performed inside this pocket. Each entry is free-form so built-in IDs,
     # workspace MCP refs, and inline declarative tools can coexist.
     tool_specs: list[dict[str, Any]] = Field(default_factory=list)
+    # Version-history pointers (pocketpaw#1345 Phase 1). The authoritative log is
+    # the ``pocket_versions`` collection; these denormalize the current draft and
+    # published ``version_no`` so a pocket read knows its draft/published state
+    # without scanning the log. The versions service keeps them in sync. ``None``
+    # until the pocket has its first version — legacy pockets read back as None.
+    draft_version_no: int | None = None
+    published_version_no: int | None = None
+    # The REAL-deploy outcome, a SEPARATE axis from version status: a version is
+    # "published" once promoted, but the deploy can still be pending/failed. For
+    # sites the Site doc carries the canonical deploy state; this mirrors it onto
+    # the pocket. none | pending | live | failed.
+    last_deploy_status: str = "none"
 
     model_config = {"populate_by_name": True}
 

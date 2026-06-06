@@ -3,6 +3,12 @@
 # covers GET /sites/{site_id}/domains end-to-end through a FastAPI app — the new
 # tenant-scoped domains read backing the Domains tab's reload rehydration.
 #
+# Updated 2026-06-06 (feat/1345-draft-published): covers the two new pocket-keyed
+# reads end-to-end — GET /sites/by-pocket/{pocket_id}/status (the Draft/Live badge
+# state) and GET /sites/by-pocket/{pocket_id}/preview (the current draft content
+# the builder renders). Asserts a fresh draft reads status="draft"/is_live=False
+# and preview returns the working content.
+#
 # Auth wiring mirrors tests/cloud/test_ee_fabric_list_endpoints.py: the sites
 # router gates on require_plan_feature("fabric") (router level) +
 # require_action_any_workspace("fabric.read"), both of which resolve the caller
@@ -144,3 +150,47 @@ async def test_get_domains_cross_tenant_is_404(_seeded_site, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(f"/api/v1/sites/{site.script_name}/domains")
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_status_for_fresh_draft_is_draft_not_live(beanie_test_db, monkeypatch):
+    """GET /sites/by-pocket/{pocket_id}/status on a freshly created draft reports
+    status="draft", is_live=False — the badge no longer lies."""
+    await sites_service.create_draft_site(
+        workspace_id="ws_owner",
+        user_id="u1",
+        pocket_id="pk_status",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="Draft Site",
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_status/status")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "draft"
+    assert body["is_live"] is False
+    assert body["draft_version"] == 1
+    assert body["published_version"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_preview_returns_draft_content(beanie_test_db, monkeypatch):
+    """GET /sites/by-pocket/{pocket_id}/preview returns the working draft content
+    the builder renders, not the published URL."""
+    await sites_service.create_draft_site(
+        workspace_id="ws_owner",
+        user_id="u1",
+        pocket_id="pk_prev",
+        ripple_spec={"type": "container", "rev": 7},
+        theme={},
+        name="Preview Site",
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_prev/preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["engine"] == "ripple"
+    assert body["content"] == {"type": "container", "rev": 7}
