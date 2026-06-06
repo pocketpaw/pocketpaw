@@ -14,10 +14,19 @@ from __future__ import annotations
 
 import inspect
 
-from pocketpaw.agents.claude_sdk import POCKET_CREATION_GRANT, ClaudeSDKBackend
+from pocketpaw.agents.claude_sdk import (
+    ALWAYS_ALLOWED_MCP_SERVERS,
+    POCKET_CREATION_GRANT,
+    ClaudeSDKBackend,
+    _mcp_server_of,
+)
 
 _SPECIALIST_CREATE = "mcp__pocketpaw_pocket_specialist__create"
+_SPECIALIST_EDIT = "mcp__pocketpaw_pocket_specialist__edit"
 _PLAN_POCKET = "mcp__pocketpaw_pocket_planner__plan_pocket"
+_POCKET_GET = "mcp__pocketpaw_pocket__get_pocket"
+_WIDGET_SPEC = "mcp__pocketpaw_widgets__get_widget_spec"
+_COMPOSIO = "mcp__composio__GMAIL_SEND_EMAIL"
 _SCENARIO_RUN = "mcp__pocketpaw_foresight__run_scenario"
 _TASKS = "mcp__pocketpaw_tasks__create_task"
 _PUBLISH = "mcp__pocketpaw_sites_manager__publish"
@@ -29,10 +38,14 @@ _FULL_TOOLSET = [
     "Bash",
     "Skill",
     "WebSearch",
+    _WIDGET_SPEC,
+    _POCKET_GET,
+    _COMPOSIO,
     _SCENARIO_RUN,
     _TASKS,
     _PUBLISH,
     _SPECIALIST_CREATE,
+    _SPECIALIST_EDIT,
     _PLAN_POCKET,
 ]
 
@@ -40,14 +53,21 @@ _FULL_TOOLSET = [
 def _apply_allow(allowed_tools: list[str], allow_mcp_tool_ids: frozenset[str] | None) -> list[str]:
     """Mirror the filter the backend runs inside ``run()``.
 
-    ``None`` keeps every tool. Otherwise keep all non-``mcp__`` tools plus the
-    MCP ids in (allow ∪ POCKET_CREATION_GRANT). Kept tiny + pure so the test
-    pins the SAME expression the backend uses.
+    ``None`` keeps every tool. Otherwise keep all non-``mcp__`` tools, the MCP
+    ids in (allow ∪ pocket-creation grant ∪ widget tools), and any tool whose
+    server is always-allowed (connectors + pocket lifecycle). Kept tiny + pure
+    so the test pins the SAME logic the backend uses.
     """
     if allow_mcp_tool_ids is None:
         return list(allowed_tools)
-    grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT
-    return [t for t in allowed_tools if not t.startswith("mcp__") or t in grant]
+    grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | {_WIDGET_SPEC}
+    return [
+        t
+        for t in allowed_tools
+        if not t.startswith("mcp__")
+        or t in grant
+        or _mcp_server_of(t) in ALWAYS_ALLOWED_MCP_SERVERS
+    ]
 
 
 def test_run_accepts_allow_kwarg_defaulting_none() -> None:
@@ -65,26 +85,37 @@ def test_none_allow_keeps_all_tools() -> None:
     assert _apply_allow(_FULL_TOOLSET, None) == _FULL_TOOLSET
 
 
-def test_allow_scopes_mcp_but_keeps_builtins_and_grant() -> None:
-    """A foresight-style allow set keeps foresight MCP tools + built-ins + the
-    universal pocket-creation grant, and drops unrelated MCP servers."""
+def test_allow_scopes_mcp_but_keeps_general_everywhere() -> None:
+    """A foresight-style allow set keeps foresight tools + built-ins + the
+    'general everywhere' set (pocket lifecycle, ripple widgets, connectors),
+    and drops the other modes' specialized tools."""
     foresight_allow = frozenset({_SCENARIO_RUN})
     gated = _apply_allow(_FULL_TOOLSET, foresight_allow)
 
     # The mode's own MCP tool survives.
     assert _SCENARIO_RUN in gated
-    # Unrelated MCP servers are dropped — this is the lean-context win.
+    # Other modes' specialized tools are dropped — the lean-context win.
     assert _TASKS not in gated
     assert _PUBLISH not in gated
     # Built-in SDK tools are never filtered by the MCP allow-list.
     for builtin in ("Read", "Write", "Bash", "Skill", "WebSearch"):
         assert builtin in gated
-    # The universal pocket-creation grant survives even though the allow set
-    # never named it — create-a-pocket works from every mode.
-    assert _SPECIALIST_CREATE in gated
-    assert _PLAN_POCKET in gated
+    # General-everywhere survives without being named in the allow set:
+    assert _SPECIALIST_CREATE in gated  # pocket creation grant
+    assert _PLAN_POCKET in gated  # pocket creation grant
+    assert _SPECIALIST_EDIT in gated  # pocket lifecycle (always-allowed server)
+    assert _POCKET_GET in gated  # pocket read (always-allowed server)
+    assert _WIDGET_SPEC in gated  # ripple rendering
+    assert _COMPOSIO in gated  # connectors (always-allowed server)
 
 
 def test_grant_constant_is_pocket_creation() -> None:
     assert _SPECIALIST_CREATE in POCKET_CREATION_GRANT
     assert _PLAN_POCKET in POCKET_CREATION_GRANT
+
+
+def test_always_allowed_servers_cover_connectors_and_pocket() -> None:
+    assert "composio" in ALWAYS_ALLOWED_MCP_SERVERS
+    assert "pocketpaw_pocket" in ALWAYS_ALLOWED_MCP_SERVERS
+    assert _mcp_server_of(_COMPOSIO) == "composio"
+    assert _mcp_server_of("Read") == ""

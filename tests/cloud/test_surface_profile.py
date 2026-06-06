@@ -147,3 +147,51 @@ def test_resolve_profile_sites_refine_keeps_ripple():
         assert profile.deny_mcp_tool_ids == frozenset(), (
             f"refine meta {meta!r} must deny nothing — it edits an existing ripple spec"
         )
+
+
+# ---------------------------------------------------------------------------
+# Per-mode MCP tool allow-lists (feat/per-mode-tool-scope). Foresight / Files /
+# Sites carry a lean ``allow_mcp_tool_ids``; Chat stays unrestricted. The
+# "general everywhere" set (widgets, pocket lifecycle, connectors) is enforced
+# by the OSS backend, so these tests only pin the per-mode SPECIALIZED scoping.
+# ---------------------------------------------------------------------------
+
+
+def test_chat_profile_is_unrestricted():
+    """The broad /chat surface keeps every tool — allow-list stays None."""
+    profile = resolve_profile(SurfaceKind.CHAT, SurfaceMeta())
+    assert profile.allow_mcp_tool_ids is None
+
+
+def test_foresight_profile_scopes_to_foresight_tools():
+    from pocketpaw_ee.agent.mcp_servers.foresight import RUN_SCENARIO_TOOL_ID
+
+    profile = resolve_profile(SurfaceKind.FORESIGHT, SurfaceMeta())
+    assert profile.allow_mcp_tool_ids is not None
+    # Its own scenario tools are named…
+    assert RUN_SCENARIO_TOOL_ID in profile.allow_mcp_tool_ids
+    # …but another mode's specialized tool is NOT (that's the lean win; the
+    # general-everywhere tools are added by the OSS backend, not here).
+    assert "mcp__pocketpaw_tasks__create_task" not in profile.allow_mcp_tool_ids
+
+
+def test_files_profile_scopes_to_general_only():
+    """Files names no specialized MCP tools — empty allow-list means general
+    everywhere only (document scaffolding rides built-in Write/Edit)."""
+    profile = resolve_profile(SurfaceKind.FILES, SurfaceMeta())
+    assert profile.allow_mcp_tool_ids == frozenset()
+
+
+def test_sites_profiles_scope_to_sites_tools():
+    from pocketpaw_ee.agent.mcp_servers.sites import CREATE_SVELTE_SITE_TOOL_ID
+
+    ripple_create = resolve_profile(SurfaceKind.SITES, SurfaceMeta())
+    assert ripple_create.allow_mcp_tool_ids is not None
+    assert CREATE_SVELTE_SITE_TOOL_ID in ripple_create.allow_mcp_tool_ids
+
+    svelte_create = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
+    # svelte-create both allows the sites tools AND denies the two ripple-create
+    # ids (deny runs after allow, so create_svelte survives, ripple variants don't).
+    assert svelte_create.allow_mcp_tool_ids is not None
+    assert CREATE_SVELTE_SITE_TOOL_ID in svelte_create.allow_mcp_tool_ids
+    assert "mcp__pocketpaw_sites_manager__create_landing_site" in svelte_create.deny_mcp_tool_ids

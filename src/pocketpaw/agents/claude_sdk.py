@@ -120,6 +120,27 @@ POCKET_CREATION_GRANT: frozenset[str] = frozenset(
     }
 )
 
+# MCP servers whose tools survive ANY per-surface allow-list — the "general
+# tools everywhere" set: connectors (composio) plus the pocket lifecycle
+# (read / widget edit / create / edit / plan). A mode's allow-list only needs
+# to name its SPECIALIZED tools (foresight scenarios, sites authoring); these
+# servers are always available so every mode can still use connectors and
+# build/edit pockets. Server is the ``<server>`` in ``mcp__<server>__<tool>``.
+ALWAYS_ALLOWED_MCP_SERVERS: frozenset[str] = frozenset(
+    {
+        "composio",
+        "pocketpaw_pocket",
+        "pocketpaw_pocket_specialist",
+        "pocketpaw_pocket_planner",
+    }
+)
+
+
+def _mcp_server_of(tool_id: str) -> str:
+    """Extract ``<server>`` from an ``mcp__<server>__<tool>`` id (else "")."""
+    parts = tool_id.split("__")
+    return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
 
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
@@ -1153,14 +1174,24 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # here — only ``mcp__*`` ids — so scoping a mode can't strip the
             # agent's core file/shell tools. Applied BEFORE the deny filter.
             if allow_mcp_tool_ids is not None:
-                grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT
+                from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+
+                # Kept on top of the mode's set: the pocket-creation grant and
+                # the ripple widget-spec tools (UI rendering stays on every
+                # surface where the ripple LAW is active). Connectors + the
+                # pocket lifecycle are kept via ALWAYS_ALLOWED_MCP_SERVERS.
+                grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | frozenset(WIDGET_TOOL_IDS)
                 before_count = len(allowed_tools)
                 allowed_tools = [
-                    t for t in allowed_tools if not t.startswith("mcp__") or t in grant
+                    t
+                    for t in allowed_tools
+                    if not t.startswith("mcp__")
+                    or t in grant
+                    or _mcp_server_of(t) in ALWAYS_ALLOWED_MCP_SERVERS
                 ]
                 if len(allowed_tools) < before_count:
                     logger.info(
-                        "Surface tool-allow: scoped MCP tools to %s (+ pocket grant)",
+                        "Surface tool-allow: scoped MCP tools to %s (+ general grant)",
                         sorted(allow_mcp_tool_ids),
                     )
 
