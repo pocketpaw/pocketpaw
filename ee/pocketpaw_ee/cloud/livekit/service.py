@@ -994,6 +994,19 @@ async def post_meeting_notes_to_group(
         except Exception as exc:
             logger.warning("Failed to store transcript: %s", exc)
 
+    # ── Create Mission Control tasks from action items ──
+    # Parse the ## ✅ Action Items section from the markdown summary
+    # and create unassigned Tasks so they appear in Mission Control.
+    if workspace_id and summary:
+        try:
+            await _create_tasks_from_meeting_notes(
+                workspace_id=workspace_id,
+                group_id=group_id,
+                summary=summary,
+            )
+        except Exception as exc:
+            logger.warning("Failed to create tasks from meeting notes: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -1061,3 +1074,101 @@ def _format_joined_at(joined_at: Any) -> str | None:
     if isinstance(joined_at, int | float):
         return datetime.fromtimestamp(joined_at, tz=UTC).isoformat()
     return str(joined_at)
+
+
+# ---------------------------------------------------------------------------
+# Meeting notes → Mission Control tasks
+# ---------------------------------------------------------------------------
+
+
+async def _create_tasks_from_meeting_notes(
+    workspace_id: str,
+    group_id: str,
+    summary: str,
+) -> None:
+    """Parse action items from the meeting notes summary and create Tasks."""
+    action_items = _extract_action_items_from_markdown(summary)
+    if not action_items:
+        logger.info("No action items found in meeting notes for group %s", group_id)
+        return
+
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+    ctx = RequestContext(
+        user_id=CALL_BOT_USER_ID,
+        workspace_id=workspace_id,
+        request_id=f"meeting-notes-{group_id}",
+        scope=ScopeKind.NONE,
+        started_at=datetime.now(UTC),
+    )
+
+    created = 0
+    for item in action_items:
+        try:
+            await tasks_service.agent_create_task(
+                ctx,
+                CreateTaskRequest(
+                    title=item[:200],  # title is max 200 chars
+                    summary=f"(from meeting notes, group {group_id})",
+                    assignee=AssigneeDTO(
+                        kind="human",
+                        id="__unassigned__",
+                        name="Unassigned",
+                    ),
+                    source=SourceDTO(
+                        type="meeting_notes",
+                        ref_id=group_id,
+                        metadata={"group_id": group_id},
+                    ),
+                ),
+            )
+            created += 1
+        except Exception as exc:
+            logger.warning("Failed to create task for action item %r: %s", item, exc)
+
+    logger.info("Created %d tasks from meeting notes for group %s", created, group_id)
+
+
+def _extract_action_items_from_markdown(markdown: str) -> list[str]:
+    """Extract bullet-point action items from the ## ✅ Action Items section.
+
+    Looks for a heading matching "Action Items" (with optional emoji prefix)
+    and collects all following list items until the next heading or end of text.
+    """
+    import re
+
+    lines = markdown.split("\n")
+    in_section = False
+    items: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect the start of the Action Items section
+        if (
+            re.match(r"^##\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^##\s*✅\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^##\s*Action\s*Items", stripped, re.IGNORECASE)
+        ):
+            in_section = True
+            continue
+
+        # If we hit another heading, stop
+        if in_section and stripped.startswith("## "):
+            break
+
+        if in_section:
+            # Match bullet points: -, *, or numbered 1.
+            m = re.match(r"\s*[-*]\s+(.*)", stripped)
+            if not m:
+                m = re.match(r"\s*\d+[.)]\s+(.*)", stripped)
+            if m:
+                text = m.group(1).strip()
+                if text and text != "None" and not text.startswith("```"):
+                    items.append(text)
+
+    return items
