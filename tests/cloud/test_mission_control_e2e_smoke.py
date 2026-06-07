@@ -10,6 +10,12 @@
 # a fresh mongomock Beanie DB. The autouse `recording_bus` fixture
 # captures emitted events so we can assert wiring without poking the
 # realtime bus directly.
+#
+# Updated: 2026-06-07 — switched the `ee.cloud.*` imports to the canonical
+# `pocketpaw_ee.cloud.*` path (the house standard used by ~686 other files).
+# The short `ee.` alias resolves at runtime but isn't a discoverable package
+# in the OSS-only Lint CI env, so ruff's isort classified it as third-party
+# and flagged the import block (I001), reddening dev's Lint job.
 """End-to-end smoke for Mission Control's full primitive chain.
 
 This is the regression test for the 2026-05-16 "task disappears" bug:
@@ -26,14 +32,17 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from ee.cloud._core.context import RequestContext, ScopeKind, request_context
-from ee.cloud._core.http import add_error_handler
-from ee.cloud.cycles.router import router as cycles_router
-from ee.cloud.license import require_license
-from ee.cloud.mission_control.router import router as mc_router
-from ee.cloud.projects.router import router as projects_router
-from ee.cloud.tasks.router import router as tasks_router
+from pocketpaw_ee.cloud._core.context import (
+    RequestContext,
+    ScopeKind,
+    request_context,
+)
+from pocketpaw_ee.cloud._core.http import add_error_handler
+from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.mission_control.router import router as mc_router
+from pocketpaw_ee.cloud.projects.router import router as projects_router
+from pocketpaw_ee.cloud.tasks.router import router as tasks_router
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -101,7 +110,7 @@ class TestFullChain:
         # Tasks-only path, which is precisely what we want to test.
         from unittest.mock import AsyncMock
 
-        from ee.cloud.mission_control import service as mc_service
+        from pocketpaw_ee.cloud.mission_control import service as mc_service
 
         monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
 
@@ -192,7 +201,7 @@ class TestTenancy:
     ) -> None:
         from unittest.mock import AsyncMock
 
-        from ee.cloud.mission_control import service as mc_service
+        from pocketpaw_ee.cloud.mission_control import service as mc_service
 
         monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
 
@@ -228,7 +237,7 @@ class TestCycleSnapshotEndpoint:
         from datetime import date
         from unittest.mock import AsyncMock
 
-        from ee.cloud.mission_control import service as mc_service
+        from pocketpaw_ee.cloud.mission_control import service as mc_service
 
         monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
 
