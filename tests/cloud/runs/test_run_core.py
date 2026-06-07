@@ -629,6 +629,8 @@ async def test_start_flow_doc_extracts_through_canonical_path(flow_type):
     assert attachment["ui"].get("flowId")
     # ...and the fence is stripped from the persisted message body.
     assert "ui-spec" not in stripped
+
+
 # --- surface_context survives the RunSpec/executor boundary -----------------
 
 
