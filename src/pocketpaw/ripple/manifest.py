@@ -11,6 +11,13 @@ returns None — the caller is expected to fall back to a different
 source (today: kb scope search).
 
 Changes:
+  - 2026-06-07 (polish/rfc13-flow-nav-validation): made the catalog and
+    action-verb walkers (``_walk_catalog`` / ``_walk_action_verbs``) descend a
+    Chain Flow step's ``ui`` tree, its linear ``chain`` next step, and each
+    ``chain_map`` branch step — not just ``children`` / ``else_children``.
+    Previously a bad widget type or unknown action verb buried in step 2/3 of a
+    materialized flow escaped author-time validation; now every step's UI node
+    tree in the flow is checked, not just the root step's.
   - 2026-06-04 (feat/sites-validator-site-aware): added ``relax_ssr_props``
     to ``validate_against_manifest`` + the ``SSR_NODE_LEVEL_PROPS`` allowlist.
     On the site-generation path the renderer-honored SSR node-level props
@@ -407,6 +414,22 @@ def _walk_catalog(
             for i, child in enumerate(kids):
                 _walk_catalog(child, f"{path}.{key}[{i}]", allowed, pool, issues)
 
+    # Chain Flow descent (RFC 13): a step node carries its widget tree under
+    # `ui`, a linear next step under `chain`, and selection-branch steps under
+    # `chain_map`. Without descending these, a bad widget buried in step 2/3 of
+    # a materialized flow escapes catalog validation.
+    ui = node.get("ui")
+    if isinstance(ui, dict):
+        _walk_catalog(ui, f"{path}.ui", allowed, pool, issues)
+    chain = node.get("chain")
+    if isinstance(chain, dict):
+        _walk_catalog(chain, f"{path}.chain", allowed, pool, issues)
+    chain_map = node.get("chain_map")
+    if isinstance(chain_map, dict):
+        for branch_id, branch in chain_map.items():
+            if isinstance(branch, dict):
+                _walk_catalog(branch, f"{path}.chain_map[{branch_id}]", allowed, pool, issues)
+
 
 # ---------------------------------------------------------------------------
 # Embed URL / host policy (Increment 5).
@@ -727,6 +750,21 @@ def _walk_action_verbs(node: Any, path: str, issues: list[dict[str, Any]]) -> No
             if isinstance(kids, list):
                 for i, child in enumerate(kids):
                     _walk_action_verbs(child, f"{path}.{key}[{i}]", issues)
+
+        # Chain Flow descent (RFC 13): descend a step node's `ui` tree, its
+        # linear `chain` next step, and each `chain_map` branch step, so a bad
+        # action verb buried in a later flow step is caught at author time.
+        ui = node.get("ui")
+        if isinstance(ui, dict):
+            _walk_action_verbs(ui, f"{path}.ui", issues)
+        chain = node.get("chain")
+        if isinstance(chain, dict):
+            _walk_action_verbs(chain, f"{path}.chain", issues)
+        chain_map = node.get("chain_map")
+        if isinstance(chain_map, dict):
+            for branch_id, branch in chain_map.items():
+                if isinstance(branch, dict):
+                    _walk_action_verbs(branch, f"{path}.chain_map[{branch_id}]", issues)
 
 
 def validate_action_verbs(spec: dict[str, Any] | None) -> list[dict[str, Any]]:

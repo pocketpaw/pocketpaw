@@ -14,6 +14,16 @@
 #     NodeRenderer(ui) when no field data is present). The terminal review/confirm
 #     step carries structured `review_rows` for the same designed-render benefit.
 #
+# Changes:
+#   - 2026-06-07 (polish/rfc13-flow-nav-validation): added a `_back_button`
+#     helper (emits `flow.back`, mirroring `_continue_button`'s emit shape) and
+#     a `_nav_row` container, then wired Back into the intermediate (non-first,
+#     non-terminal) steps of BOTH templates — the onboarding details step and
+#     the due-diligence financials + risk steps. The runtime already supported
+#     `flow.back` via the history stack, but no template rendered the control,
+#     so users could not step backward. Root/first steps (nothing to go back
+#     to) and terminal confirm/review steps (Submit) deliberately get no Back.
+#
 # What this is:
 #   The DETERMINISTIC half of the `start_flow` authoring tool. The LLM emits a
 #   tiny descriptor — `flow_type` (an enum of known templates), an optional
@@ -186,6 +196,28 @@ def _review_row(label: str, value: str) -> dict[str, Any]:
     return {"label": label, "value": value}
 
 
+def _back_button(label: str = "Back") -> dict[str, Any]:
+    """A step-back button — fires `flow.back`, which pops the FlowRunner's
+    history stack and re-renders the previous step.
+
+    Mirrors `_continue_button` / `_submit_button`: same `emit` action shape,
+    targeting the `flow.back` verb the inline chat adapter routes into the
+    ChainExecutor. Carries an empty `value` — stepping back needs no payload;
+    the previously-accumulated step data is what the runner restores.
+    """
+    return {
+        "type": "button",
+        "props": {"label": label},
+        "on_click": {"action": "emit", "target": "flow.back", "value": {}},
+    }
+
+
+def _nav_row(children: list[dict[str, Any]]) -> dict[str, Any]:
+    """A small inline container grouping a step's navigation buttons so Back
+    and Continue sit together in one row."""
+    return _container(children, cls="flow-nav")
+
+
 def _container(children: list[dict[str, Any]], cls: str | None = None) -> dict[str, Any]:
     node: dict[str, Any] = {"type": "container", "children": children}
     if cls:
@@ -280,7 +312,14 @@ def build_onboarding_wizard(config: dict[str, Any] | None = None) -> dict[str, A
                 [
                     _heading(heading),
                     _input("workspace", "Workspace name", placeholder),
-                    _continue_button("Continue", ["workspace"]),
+                    # Intermediate step: Back (flow.back) sits before Continue
+                    # (flow.next) so the user can return to the goal pick.
+                    _nav_row(
+                        [
+                            _back_button("Back"),
+                            _continue_button("Continue", ["workspace"]),
+                        ]
+                    ),
                 ]
             ),
         }
@@ -420,7 +459,14 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
                 _heading("Note the top risk"),
                 _input("key_risk", "Biggest open risk", "Customer concentration"),
                 _input("mitigation", "Mitigation (optional)", "Diversifying pipeline"),
-                _continue_button("Continue to review", ["key_risk", "mitigation"]),
+                # Intermediate step: Back (flow.back) steps to the financials
+                # form; Continue (flow.next) advances to review.
+                _nav_row(
+                    [
+                        _back_button("Back"),
+                        _continue_button("Continue to review", ["key_risk", "mitigation"]),
+                    ]
+                ),
             ]
         ),
     }
@@ -439,7 +485,16 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
             children.append(_input(bind, label, placeholder))
             binds.append(bind)
             form_fields.append(_form_field(bind, label, placeholder))
-        children.append(_continue_button("Continue", binds))
+        # Intermediate step: Back (flow.back) returns to the stage pick;
+        # Continue (flow.next) advances to the risk step.
+        children.append(
+            _nav_row(
+                [
+                    _back_button("Back"),
+                    _continue_button("Continue", binds),
+                ]
+            )
+        )
         return {
             "version": "2.0",
             "id": step_id,
