@@ -66,8 +66,6 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from beanie import PydanticObjectId
-
 from pocketpaw.instinct.models import Action, ActionStatus
 from pocketpaw_ee.api import get_instinct_store
 from pocketpaw_ee.cloud._core.context import RequestContext
@@ -997,7 +995,6 @@ async def agent_attach_cycle_items(
 async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsResponse:
     """Compute the operator analytics dashboard for the given window."""
     _require_workspace(ctx)
-    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
     from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
 
     cutoff = datetime.now(tz=UTC) - _window_to_delta(window)
@@ -1061,12 +1058,11 @@ async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsR
         for name, v in sorted(agent_map.items(), key=lambda x: -x[1]["shipped"])
     ]
 
-    # By pocket — resolve pocket names
-    pocket_ids = {d.pocket_id for d in shipped if d.pocket_id}
-    pocket_docs = await _PocketDoc.find(
-        {"_id": {"$in": [PydanticObjectId(pid) for pid in pocket_ids]}}
-    ).to_list()
-    pocket_name_map: dict[str, str] = {str(p.id): p.name for p in pocket_docs}
+    # By pocket — resolve pocket names via the pockets service
+    pockets = await pockets_service.list_pockets(ctx.workspace_id, ctx.user_id)
+    pocket_name_map: dict[str, str] = {
+        p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")
+    }
 
     pocket_map: dict[str, int] = {}
     for d in shipped:
