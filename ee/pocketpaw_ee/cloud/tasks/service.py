@@ -171,6 +171,16 @@ def _event_payload(doc: _TaskDoc, task: Task | None = None) -> dict:
     }
 
 
+async def _is_workspace_owner(user_id: str, workspace_id: str) -> bool:
+    """Check if the user has the ``owner`` role in the given workspace."""
+    from pocketpaw_ee.cloud.models.user import User
+
+    user = await User.get(user_id)
+    if not user:
+        return False
+    return any(m.workspace == workspace_id and m.role == "owner" for m in user.workspaces)
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -448,11 +458,12 @@ async def agent_complete_task(
     doc = await _fetch_task(ctx, task_id)
 
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only the creator or the assignee can mark a task complete.
-        # Other workspace members must reassign or escalate.
-        raise Forbidden(
-            "task.complete_denied", "Only the creator or assignee can complete this task"
-        )
+        # Workspace owners can also complete tasks (bulk approve from MC).
+        if not await _is_workspace_owner(ctx.user_id, doc.workspace_id):
+            raise Forbidden(
+                "task.complete_denied",
+                "Only the creator, assignee, or workspace owner can complete this task",
+            )
 
     if doc.status in {"done", "reverted", "failed"}:
         raise ValidationError("task.terminal", f"task is already {doc.status!r}")
