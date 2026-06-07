@@ -139,9 +139,7 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
     return _PROFILES.get(surface_kind, _DEFAULT_PROFILE)
 
 
-def compose_entity_profile(
-    base: SurfaceProfile, override: dict[str, Any] | None
-) -> SurfaceProfile:
+def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None) -> SurfaceProfile:
     """Fold an entity pocket's ``surface_profile`` override OVER a base profile.
 
     PURE — no I/O. ``base`` is the surface-kind profile from ``resolve_profile``;

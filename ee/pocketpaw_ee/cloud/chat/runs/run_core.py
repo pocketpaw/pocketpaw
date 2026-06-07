@@ -84,9 +84,7 @@ def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
 
 
-async def _load_entity_profile_override(
-    workspace_id: str, pocket_id: str
-) -> dict[str, Any] | None:
+async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
     """Tenant-scoped load of a pocket's ``surface_profile`` override, or ``None``.
 
     Cloud Rule 7: the pocket MUST belong to ``workspace_id`` — a load that

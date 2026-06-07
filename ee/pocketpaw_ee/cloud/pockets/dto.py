@@ -79,7 +79,7 @@ the read-back form. Defaults keep legacy callers reading ``engine="ripple"``,
 Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
 chunk ②) — added the optional ``surface_profile`` field (aliased
 ``surfaceProfile`` on the wire) on ``CreatePocketRequest`` /
-``PocketResponse`` and threaded it onto the wire dict. Reuses the Beanie
+``PocketResponse`` and threaded it onto the wire dict. Reuses the
 ``PocketSurfaceProfile`` sub-model (all sub-fields optional, JSON-friendly
 lists) so the create/read DTOs share one shape with the persisted model.
 Defaults to ``None`` → legacy callers read back ``None`` with no migration.
@@ -89,6 +89,12 @@ Updated: 2026-06-06 (feat/entity-pocket-profile-field) — added the
 / CLEARED (the auto-authoring write path). Three-way partial semantics live
 in ``pockets_service.update`` and key off ``model_fields_set``: present +
 non-null sets/replaces, explicit ``null`` clears, absent leaves it unchanged.
+Updated: 2026-06-07 (feat/entity-pocket-profile-field) — import
+``PocketSurfaceProfile`` from ``surface.domain`` (its new home) instead of
+``models.pocket``. The OSS-EE boundary contract forbids ``pockets.dto`` from
+importing ``models.*``; the class is a plain value object, not a Beanie doc,
+so sharing it via the leaf domain module keeps one shape without crossing the
+boundary.
 """
 
 from __future__ import annotations
@@ -98,7 +104,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from pocketpaw_ee.cloud.models.pocket import PocketSurfaceProfile
+from pocketpaw_ee.cloud.surface.domain import PocketSurfaceProfile
 
 
 class CreatePocketRequest(BaseModel):
@@ -134,9 +140,7 @@ class CreatePocketRequest(BaseModel):
     # surface-kind default. Reuses the persisted ``PocketSurfaceProfile``
     # sub-model (all fields optional, JSON-friendly lists). Wire alias
     # ``surfaceProfile``.
-    surface_profile: PocketSurfaceProfile | None = Field(
-        default=None, alias="surfaceProfile"
-    )
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
 
     model_config = {"populate_by_name": True}
 
@@ -162,9 +166,7 @@ class UpdatePocketRequest(BaseModel):
     # the partial update) leaves the existing value untouched. Reuses the
     # persisted ``PocketSurfaceProfile`` sub-model (all sub-fields optional,
     # JSON-friendly lists). Wire alias ``surfaceProfile``.
-    surface_profile: PocketSurfaceProfile | None = Field(
-        default=None, alias="surfaceProfile"
-    )
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
 
     model_config = {"populate_by_name": True}
 
@@ -284,9 +286,7 @@ class PocketResponse(BaseModel):
     # Optional per-entity surface-profile override. Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
     # surface-kind default. Wire alias ``surfaceProfile``.
-    surface_profile: PocketSurfaceProfile | None = Field(
-        default=None, alias="surfaceProfile"
-    )
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
     created_at: datetime
     updated_at: datetime
 
