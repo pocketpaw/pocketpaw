@@ -41,6 +41,13 @@ chat agent surfaces the rejection reason instead of fabricating
 success while the canvas stays stale. The decline case
 (``ok=True, ops=[], warnings=[...]``) is intentionally NOT flagged —
 a planner that legitimately chose to do nothing is not a failure.
+Changes: 2026-06-04 (feat/sites-landing-brain) — the ``create`` tool's
+``hints`` schema now declares ``type`` + ``pattern`` properties. The
+hints object is ``additionalProperties: False``, so without these the
+marketing-site brain's type="site" + pattern="landing" were stripped at
+the MCP boundary before reaching ``run_specialist``. Now they thread
+through to the persisted pocket (this is the claude_agent_sdk backend's
+create path).
 """
 
 from __future__ import annotations
@@ -295,6 +302,25 @@ def build_pocket_specialist_server() -> Any:
                         "color": {"type": "string"},
                         "icon": {"type": "string"},
                         "target_pocket_id": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "description": (
+                                "Create intent stamped onto the pocket. The "
+                                "marketing-site brain sets 'site' so the "
+                                "published page renders as a landing page, "
+                                "not a dashboard. Defaults to 'custom' when "
+                                "omitted."
+                            ),
+                        },
+                        "pattern": {
+                            "type": "string",
+                            "description": (
+                                "Layout pattern stamped onto the pocket "
+                                "(e.g. 'landing', 'dashboard'). The "
+                                "marketing-site brain sets 'landing'; tells "
+                                "the sites generator how to render."
+                            ),
+                        },
                         "purpose": {
                             "type": "string",
                             "description": (

@@ -15,13 +15,24 @@ PocketPaw's existing `pocketpaw.skills` module is the **runtime side**
 
 The install destination (`~/.claude/skills/`) is one of the three
 paths PocketPaw's own `SkillLoader.SKILL_PATHS` scans, so bundled
-skills are available to **every chat backend** — claude_agent_sdk,
-codex_cli, openai_agents, deep_agents, langchain_react — via
-PocketPaw's slash-command dispatcher in `dashboard_ws.py`.
-claude_agent_sdk users get an extra bonus: Claude Code's CLI also
-auto-discovers `~/.claude/skills/` natively, so the agent can load
-the skill on natural-language intent without the user typing a slash
-command.
+skills are available to the **non-SDK** backends — codex_cli,
+openai_agents, deep_agents, langchain_react — via PocketPaw's
+slash-command dispatcher in `dashboard_ws.py`, plus the desktop
+dashboard.
+
+The default `claude_agent_sdk` backend is the exception: it launches
+with `setting_sources=[]` for persona isolation, which disables the
+SDK's filesystem skill discovery — `~/.claude/skills/` is invisible to
+it (verified 2026-06-03 — a slash hits the SDK as an unknown command
+and the run returns with no assistant turn; the SDK `skills=` option is
+gated by `setting_sources` too). So that backend gets the bundled
+skills a different way: the `_bundled/` directory is also a Claude Code
+**local plugin** (`.claude-plugin/plugin.json` + `skills/`), and the
+backend passes it via the SDK `plugins=` option, which loads regardless
+of `setting_sources`. The skills then load by slash command and by
+natural-language intent, without leaking the rest of `~/.claude`
+(CLAUDE.md, output styles) into the agent. Toggle with
+`POCKETPAW_SDK_LOAD_BUNDLED_SKILLS` (default on).
 
 ## Why ship them with PocketPaw
 
@@ -131,17 +142,18 @@ Planned (not yet shipped):
 ## How this fits across chat backends
 
 Bundled skills work for **every** backend because the AgentSkills
-format is universal:
+format is universal — but the *route* differs by backend, because
+the default SDK backend can't see `~/.claude/skills/`:
 
 | Backend | Discovery | Invocation |
 | --- | --- | --- |
-| `claude_agent_sdk` | Claude Code CLI scans `~/.claude/skills/` natively + PocketPaw's `SkillLoader` also scans it | Natural-language intent (chat agent loads skill on its own) OR `/<skill>` slash command |
+| `claude_agent_sdk` | `_bundled/` passed as a local plugin via the SDK `plugins=` option (NOT `~/.claude/skills/` — `setting_sources=[]` disables that) | Natural-language intent OR `/<skill>` slash command, handled inside the SDK run |
 | `codex_cli`, `openai_agents`, `deep_agents`, `langchain_react` | PocketPaw's `SkillLoader.SKILL_PATHS` (includes `~/.claude/skills/`) | `/<skill>` slash command in chat UI → `dashboard_ws.py` → `SkillExecutor.execute_skill` |
 
-The chat UI's slash-command dispatcher runs the skill body through
-`AgentRouter.run(prompt)` against whatever backend the user has
-configured. So the skill is single-source — same SKILL.md, same
-shipping pipeline, every backend benefits.
+Both routes read the same single-source SKILL.md files under
+`_bundled/skills/`. The `~/.claude/skills/` mirror and the local
+plugin are two installs of one set of files, so a skill added once is
+picked up by every backend.
 
 ## Implementation notes
 

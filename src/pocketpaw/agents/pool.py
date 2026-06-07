@@ -9,6 +9,13 @@ Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
   ``ToolPolicy.mcp_servers_allow`` frozenset, and passes the resulting
   policy to the Claude SDK backend. This is how a cloud agent opts into
   the planner MCP server.
+Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` accepts a
+  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
+  from the request's ``SurfaceProfile`` in the EE chat loop) and forwards it to
+  the backend's ``run`` when non-empty. Only the Claude SDK backend consumes it
+  (subtracting the ids from its tool allowlist before launch); it is withheld
+  from the call when empty so backends that don't accept the kwarg are
+  unaffected. Non-empty only on /sites svelte-create.
 """
 
 from __future__ import annotations
@@ -161,6 +168,7 @@ class AgentPool:
         history: list[dict] | None = None,
         knowledge_context: str = "",
         instructions: str = "",
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -173,6 +181,13 @@ class AgentPool:
 
         ``knowledge_context`` remains reference material (KB snippets +
         per-turn scope/participants tags). Kept under the wrapper.
+
+        ``deny_mcp_tool_ids`` is a per-surface MCP-tool deny set (resolved
+        from the request's ``SurfaceProfile`` upstream). It is forwarded to
+        the backend's ``run`` ONLY when non-empty so it reaches the Claude
+        SDK backend — the one backend that consumes it — without passing an
+        unexpected kwarg to backends that don't accept it. Empty for every
+        surface except /sites svelte-create, so ordinary runs are untouched.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -249,12 +264,21 @@ class AgentPool:
         # LRU evictor honor.
         instance.active_runs += 1
         try:
-            async for event in instance.backend.run(
-                message,
-                system_prompt=system_prompt,
-                history=history,
-                session_key=session_key,
-            ):
+            # Only forward the deny set when non-empty: the Claude SDK backend
+            # accepts ``deny_mcp_tool_ids``, but the other backends keep the
+            # narrower ``(message, *, system_prompt, history, session_key)``
+            # signature, so passing the kwarg to them would raise TypeError.
+            # The set is empty for every surface except /sites svelte-create
+            # (which always runs on the Claude SDK backend), so this never
+            # withholds a needed deny from a backend that would honor it.
+            run_kwargs: dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "history": history,
+                "session_key": session_key,
+            }
+            if deny_mcp_tool_ids:
+                run_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
+            async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
         finally:

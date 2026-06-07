@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 
 from pocketpaw_ee.cloud._core.realtime.bus import get_bus
-from pocketpaw_ee.cloud._core.realtime.events import Event, TaskProposed
+from pocketpaw_ee.cloud._core.realtime.events import Event, TaskProposed, TaskResolved
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,26 @@ async def notify_human_assignee(event: Event) -> None:
         logger.warning("task.proposed → notification fan-out failed", exc_info=True)
 
 
+async def cascade_plan_tasks(event: Event) -> None:
+    """When a plan-generated task completes, cascade-dispatch dependents.
+
+    Extracts workspace_id and project_id from the task.resolved payload
+    and delegates to the planner service's cascade handler, which finds
+    newly unblocked tasks and executes them.
+    """
+    data = getattr(event, "data", None) or {}
+    ws = data.get("workspace_id")
+    if not ws:
+        return
+    task_data = data.get("task") or {}
+    proj = task_data.get("project_id")
+    if not proj:
+        return
+    from pocketpaw_ee.cloud.planner.service import on_plan_task_resolved
+
+    await on_plan_task_resolved(workspace_id=ws, project_id=proj)
+
+
 def register_task_listeners() -> None:
     """Wire the Tasks subscribers into the bus.
 
@@ -94,6 +114,7 @@ def register_task_listeners() -> None:
 
     bus = get_bus()
     bus.subscribe(TaskProposed.EVENT_TYPE, notify_human_assignee)
+    bus.subscribe(TaskResolved.EVENT_TYPE, cascade_plan_tasks)
 
 
-__all__ = ["notify_human_assignee", "register_task_listeners"]
+__all__ = ["notify_human_assignee", "register_task_listeners", "cascade_plan_tasks"]

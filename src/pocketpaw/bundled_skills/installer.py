@@ -1,10 +1,18 @@
 # src/pocketpaw/bundled_skills/installer.py
 # Created: 2026-05-14 (feat/pocket-creator-skill) — auto-installs the
 # bundled Claude Code skill files from
-# ``src/pocketpaw/bundled_skills/_bundled/<name>/`` into the user's
+# ``src/pocketpaw/bundled_skills/_bundled/skills/<name>/`` into the user's
 # ``~/.claude/skills/<name>/`` so the chat agent can invoke them
 # without the operator manually staging the files. Idempotent via
 # SHA-256 hash comparison.
+# Updated: 2026-06-03 (feat/sdk-bundled-skills-plugin) — the bundled skills
+# now live under ``_bundled/skills/`` and ``_bundled`` carries a
+# ``.claude-plugin/plugin.json`` so the whole directory is a valid Claude
+# Code *local plugin*. ``bundled_skills_plugin_dir()`` exposes that path for
+# the claude_agent_sdk backend, which passes it via ``plugins=`` — the only
+# way bundled skills reach the SDK under ``setting_sources=[]`` (the
+# ~/.claude/skills mirror below is invisible to that backend; it serves the
+# desktop SkillLoader + non-SDK backends).
 """Auto-install bundled Claude Code skills into the user config dir.
 
 Why this exists
@@ -53,8 +61,33 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Where the bundled skill files live inside the Python package.
+# Where the bundled skills live inside the Python package. ``_BUNDLED_DIR``
+# is itself a Claude Code *local plugin* (carries ``.claude-plugin/plugin.json``);
+# the individual SKILL.md files sit under ``_BUNDLED_DIR/skills/<name>/``.
 _BUNDLED_DIR = Path(__file__).parent / "_bundled"
+_SKILLS_DIR = _BUNDLED_DIR / "skills"
+_PLUGIN_MANIFEST = _BUNDLED_DIR / ".claude-plugin" / "plugin.json"
+
+
+def bundled_skills_plugin_dir() -> Path | None:
+    """Return the bundled-skills local-plugin directory, or ``None``.
+
+    The claude_agent_sdk backend passes this path via the SDK ``plugins=``
+    option (``[{"type": "local", "path": <dir>}]``). That is the ONLY way the
+    bundled skills reach that backend: it launches with ``setting_sources=[]``
+    for persona isolation, which disables the SDK's filesystem skill discovery
+    (``~/.claude/skills`` and ``.claude/skills`` are both invisible). A local
+    plugin loads regardless of ``setting_sources``, so the skills become
+    invokable via both slash command and natural language without leaking the
+    rest of ``~/.claude`` (CLAUDE.md, output styles) into the agent.
+
+    Returns the directory only when it actually contains a plugin manifest, so
+    a partial/old install can't hand the SDK an invalid plugin path.
+    """
+
+    if _PLUGIN_MANIFEST.is_file() and _SKILLS_DIR.is_dir():
+        return _BUNDLED_DIR.resolve()
+    return None
 
 
 @dataclass(frozen=True)
@@ -96,15 +129,15 @@ def install_bundled_skills(*, destination_root: Path | None = None) -> list[Inst
     if destination_root is None:
         destination_root = Path.home() / ".claude" / "skills"
 
-    if not _BUNDLED_DIR.is_dir():
+    if not _SKILLS_DIR.is_dir():
         logger.warning(
-            "bundled_skills.installer: bundled dir %s missing — nothing to install",
-            _BUNDLED_DIR,
+            "bundled_skills.installer: bundled skills dir %s missing — nothing to install",
+            _SKILLS_DIR,
         )
         return []
 
     results: list[InstallResult] = []
-    for skill_dir in sorted(p for p in _BUNDLED_DIR.iterdir() if p.is_dir()):
+    for skill_dir in sorted(p for p in _SKILLS_DIR.iterdir() if p.is_dir()):
         result = _install_one(skill_dir, destination_root)
         results.append(result)
         logger.info(
@@ -189,4 +222,8 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-__all__ = ["InstallResult", "install_bundled_skills"]
+__all__ = [
+    "InstallResult",
+    "bundled_skills_plugin_dir",
+    "install_bundled_skills",
+]

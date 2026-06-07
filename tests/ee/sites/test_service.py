@@ -23,6 +23,13 @@
 # tool both call — mocks pockets_service.get to prove it derives the theme from
 # rippleSpec, falls back to the pocket's name, applies a name override, and
 # propagates NotFound rather than swallowing it.
+# Updated 2026-06-03 (Sites fix B — published site name defaults to the pocket
+# name): coverage that publish() resolves a BLANK name to the source pocket's own
+# display name (read via the pockets service's public get, no Beanie import) for
+# both the stored Site.name and the generated site title, falling back to
+# "Untitled site" only when the pocket has no name. Also pins the end-to-end
+# publish_pocket path: a pocket named "Flower Shop Landing Page" published with no
+# name lands a Site named "Flower Shop Landing Page".
 from __future__ import annotations
 
 import pytest
@@ -457,3 +464,121 @@ async def test_publish_pocket_propagates_not_found(beanie_test_db):
                 user_id="u1",
                 pocket_id="pk_missing",
             )
+
+
+# ---------------------------------------------------------------------------
+# Fix B — a published site's name defaults to the source pocket's own name when
+# the caller omits it (the publish schema promises this). Resolved in publish()
+# itself (the source of truth) so a blank name never lands an unnamed site.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_publish_blank_name_defaults_to_pocket_name(beanie_test_db):
+    """publish() with a blank name looks up the source pocket (via the pockets
+    service's public get) and uses its display name for BOTH the stored Site.name
+    and the generated site title."""
+    from unittest.mock import AsyncMock, patch
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    wire = {"name": "Flower Shop Landing Page", "rippleSpec": {"type": "container"}}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ) as mock_get:
+        site = await sites_service.publish(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk1",
+            ripple_spec={"type": "container"},
+            theme={},
+            # name deliberately omitted (defaults to "")
+            _generator=gen,
+            _cloudflare=cf,
+            _bundle_reader=lambda d: b"export default {}",
+        )
+
+    mock_get.assert_awaited_once_with("pk1", "u1")
+    assert site.name == "Flower Shop Landing Page"
+    # The generated site title used the same resolved name (not "Untitled site").
+    assert gen.built["title"] == "Flower Shop Landing Page"
+
+
+@pytest.mark.asyncio
+async def test_publish_explicit_name_skips_pocket_lookup(beanie_test_db):
+    """A non-blank name wins and publish() does NOT read the pocket for a name."""
+    from unittest.mock import AsyncMock, patch
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value={"name": "Pocket Name"}),
+    ) as mock_get:
+        site = await sites_service.publish(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk1",
+            ripple_spec={"type": "container"},
+            theme={},
+            name="Explicit Name",
+            _generator=gen,
+            _cloudflare=cf,
+            _bundle_reader=lambda d: b"export default {}",
+        )
+
+    mock_get.assert_not_awaited()
+    assert site.name == "Explicit Name"
+    assert gen.built["title"] == "Explicit Name"
+
+
+@pytest.mark.asyncio
+async def test_publish_blank_name_and_nameless_pocket_falls_back_to_untitled(
+    beanie_test_db,
+):
+    """When the name is blank AND the pocket has no name, publish() falls back to
+    'Untitled site' rather than persisting an empty name."""
+    from unittest.mock import AsyncMock, patch
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value={"name": ""}),
+    ):
+        site = await sites_service.publish(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk1",
+            ripple_spec={"type": "container"},
+            theme={},
+            _generator=gen,
+            _cloudflare=cf,
+            _bundle_reader=lambda d: b"export default {}",
+        )
+
+    assert site.name == "Untitled site"
+
+
+@pytest.mark.asyncio
+async def test_publish_pocket_no_name_lands_site_with_pocket_name(beanie_test_db):
+    """End-to-end: publishing a pocket named 'Flower Shop Landing Page' WITHOUT a
+    name (the shared publish_pocket path the REST + MCP surfaces use) results in a
+    Site named 'Flower Shop Landing Page'."""
+    from unittest.mock import AsyncMock, patch
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    wire = {"name": "Flower Shop Landing Page", "rippleSpec": {"type": "container"}}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        site = await sites_service.publish_pocket(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk1",
+            # no name passed — the agent / UI omitted it
+            _generator=gen,
+            _cloudflare=cf,
+            _bundle_reader=lambda d: b"export default {}",
+        )
+
+    assert site.name == "Flower Shop Landing Page"

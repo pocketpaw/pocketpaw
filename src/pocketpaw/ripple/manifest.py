@@ -11,6 +11,15 @@ returns None — the caller is expected to fall back to a different
 source (today: kb scope search).
 
 Changes:
+  - 2026-06-04 (feat/sites-validator-site-aware): added ``relax_ssr_props``
+    to ``validate_against_manifest`` + the ``SSR_NODE_LEVEL_PROPS`` allowlist.
+    On the site-generation path the renderer-honored SSR node-level props
+    (``section``/``card`` ``id`` anchors, ``input``/``textarea`` ``name`` POST
+    fields, ``button``/``cta`` ``href`` anchor CTAs) are no longer flagged as
+    ``unknown_props`` — they render on a static Paw Site but the manifest omits
+    them from per-widget props, so the default walk was driving the agent's
+    redraft loop into stripping the marketing widgets. Closed combo list, gated
+    on the flag; dashboard validation (flag defaults False) is unchanged.
   - 2026-05-31 (constraint-zone enforcer): added ``validate_required_props``
     + ``required_props_from_manifest`` — a mechanical walker that flags any
     node missing a prop the manifest marks ``required: true`` for its
@@ -142,11 +151,46 @@ _KNOWN_ITEM_ALIASES: dict[str, dict[str, dict[str, str]]] = {
 }
 
 
+# SSR-essential node-level props that the renderer honors on specific widgets
+# but the manifest's per-widget ``props`` map omits (they are universal
+# node-level attributes the renderer wraps on, not per-widget props). A
+# statically-rendered Paw Site (csr=false, no client JS) REQUIRES these:
+#
+#   * ``id`` on ``section`` / ``card`` — emitted as the HTML element ``id``
+#     so in-page anchor links (#services, #book) resolve. Confirmed in the
+#     ripple source: ``<section {id} …>`` / ``<div {id} … (Card)>``.
+#   * ``name`` on ``input`` / ``textarea`` — emitted on the native control so
+#     the page's outer <form> POSTs the field. Confirmed: ``<input {name} …>``
+#     / ``<textarea {name} …>``.
+#   * ``href`` on ``button`` — renders the button as an anchor CTA on a static
+#     page; ``href`` on ``cta`` is already a declared manifest prop but is
+#     included here so the relaxation is symmetric for anchor CTAs.
+#
+# These are flagged as ``unknown_props`` by the default manifest walk, which
+# drives the agent's redraft loop into stripping the marketing widgets. The
+# walk relaxes them ONLY when ``relax_ssr_props=True`` (the site-generation
+# path), keyed to this closed combo list — it is NOT a blanket "allow ``id``
+# everywhere". Dashboard / pocket validation passes the flag False and is
+# unaffected. When a new SSR-honored prop/widget combo is confirmed in the
+# renderer, add it here.
+#
+# Format: ``{ widget_type: frozenset({prop, …}) }``
+SSR_NODE_LEVEL_PROPS: dict[str, frozenset[str]] = {
+    "section": frozenset({"id"}),
+    "card": frozenset({"id"}),
+    "input": frozenset({"name"}),
+    "textarea": frozenset({"name"}),
+    "button": frozenset({"href", "name"}),
+    "cta": frozenset({"href"}),
+}
+
+
 def validate_against_manifest(
     spec: dict[str, Any] | None,
     manifest: dict[str, Any],
     *,
     apply_aliases: bool = False,
+    relax_ssr_props: bool = False,
 ) -> list[dict[str, Any]]:
     """Walk a rippleSpec tree and flag nodes whose ``props`` keys are not
     declared in the manifest for that ``type``.
@@ -155,6 +199,19 @@ def validate_against_manifest(
     drifted in production (see ``_KNOWN_ITEM_ALIASES``). When
     ``apply_aliases=True``, the spec is mutated in place to rewrite the
     known wrong keys to their canonical form.
+
+    ``relax_ssr_props`` (site-generation path only): when True, the
+    SSR-essential renderer-honored node-level props in
+    :data:`SSR_NODE_LEVEL_PROPS` (``section.id`` / ``card.id`` anchor
+    targets, ``input.name`` / ``textarea.name`` native POST fields,
+    ``button.href`` / ``cta.href`` anchor CTAs) are NOT reported as
+    ``unknown_props``. They render correctly on a static Paw Site
+    (csr=false) but the manifest omits them from per-widget props, so the
+    default walk would flag them and trigger the agent's redraft loop into
+    stripping the marketing widgets. The relaxation is a closed combo list,
+    keyed to the specific widget — it does NOT blanket-allow ``id``/``name``/
+    ``href`` everywhere. Dashboard / pocket validation passes False (the
+    default) and is unaffected.
 
     Returns one issue dict per offending node; ``[]`` when ``spec`` is not
     a dict or no issues are found. Issue shape::
@@ -185,7 +242,7 @@ def validate_against_manifest(
 
     root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
     issues: list[dict[str, Any]] = []
-    _walk_validate(root, "ui", by_type, apply_aliases, issues)
+    _walk_validate(root, "ui", by_type, apply_aliases, issues, relax_ssr_props)
     return issues
 
 
@@ -195,6 +252,7 @@ def _walk_validate(
     by_type: dict[str, set[str]],
     apply_aliases: bool,
     issues: list[dict[str, Any]],
+    relax_ssr_props: bool = False,
 ) -> None:
     if not isinstance(node, dict):
         return
@@ -203,7 +261,14 @@ def _walk_validate(
     props = node.get("props")
     if isinstance(wtype, str) and wtype in by_type and isinstance(props, dict):
         allowed = by_type[wtype]
-        unknown = sorted(k for k in props.keys() if k not in allowed)
+        # On the site-generation path, the SSR-essential renderer-honored
+        # node-level props (anchor ``id``, native-POST ``name``, anchor
+        # ``href``) are treated as allowed for the specific widget that
+        # carries them — they render fine on a static page but the manifest
+        # omits them from per-widget props. Closed combo list, NOT a blanket
+        # allow; dashboard validation (relax_ssr_props=False) is untouched.
+        ssr_ok = SSR_NODE_LEVEL_PROPS.get(wtype, frozenset()) if relax_ssr_props else frozenset()
+        unknown = sorted(k for k in props.keys() if k not in allowed and k not in ssr_ok)
         item_issues: list[dict[str, Any]] = []
 
         for items_key, alias_map in _KNOWN_ITEM_ALIASES.get(wtype, {}).items():
@@ -241,7 +306,14 @@ def _walk_validate(
     children = node.get("children")
     if isinstance(children, list):
         for i, child in enumerate(children):
-            _walk_validate(child, f"{path}.children[{i}]", by_type, apply_aliases, issues)
+            _walk_validate(
+                child,
+                f"{path}.children[{i}]",
+                by_type,
+                apply_aliases,
+                issues,
+                relax_ssr_props,
+            )
 
 
 # ---------------------------------------------------------------------------

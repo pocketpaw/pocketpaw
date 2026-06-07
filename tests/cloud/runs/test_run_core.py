@@ -13,9 +13,11 @@ from typing import Any
 
 import fakeredis.aioredis
 import pytest
+from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
 from pocketpaw_ee.cloud.chat.runs import run_core
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.redis_stream import RedisStreamTransport
+from pocketpaw_ee.cloud.surface import resolve_profile
 
 pytestmark = pytest.mark.asyncio
 
@@ -627,3 +629,136 @@ async def test_start_flow_doc_extracts_through_canonical_path(flow_type):
     assert attachment["ui"].get("flowId")
     # ...and the fence is stripped from the persisted message body.
     assert "ui-spec" not in stripped
+# --- surface_context survives the RunSpec/executor boundary -----------------
+
+
+def _sites_svelte_spec() -> RunSpec:
+    """A /sites svelte-CREATE turn: ``surface="sites"`` + ``engine="svelte"``,
+    no ``pocket_id`` (so the resolver picks the svelte-create profile that
+    denies the two ripple-create tools)."""
+    return RunSpec(
+        run_id="r1",
+        workspace_id="w1",
+        context_type="session",
+        scope_id="s1",
+        session_key="session:s1",
+        group=None,
+        user_id="u1",
+        agent_id="a1",
+        client_message_id="c1",
+        user_message_id="m1",
+        content="build a dentist landing site",
+        history=[],
+        intent=None,
+        surface="sites",
+        surface_meta={"engine": "svelte"},
+    )
+
+
+def _scope_only_ctx() -> ScopeContext:
+    """A real ``ScopeContext`` exactly as ``resolve_scope_context`` builds it:
+    scope/tenancy fields populated, ``surface_context`` left ``None``. This is
+    the executor's starting point — the bug is that nothing re-populates
+    ``surface_context`` from the spec before the agent loop reads it."""
+    return ScopeContext(
+        kind=ScopeKind.SESSION,
+        scope_id="s1",
+        workspace_id="w1",
+        user_id="u1",
+        members=["u1"],
+        target_agent_id="a1",
+    )
+
+
+async def test_execute_run_threads_surface_meta_into_ctx(monkeypatch):
+    """Regression: the /sites SurfaceProfile gate must survive the
+    RunSpec/executor boundary.
+
+    The HTTP handler resolves ``ctx.surface_context`` but submits a
+    ``RunSpec`` to the executor; the executor rebuilds its OWN ctx via
+    ``resolve_scope_context`` (scope only) and used to leave
+    ``surface_context`` as ``None``. That silently no-ops the entire
+    SurfaceProfile mechanism (tool-deny, ripple-block omission, preamble,
+    skill) on the real ``/agent`` path. Here we assert the executor
+    re-resolves ``surface_context`` from the spec, so the resolved deny set
+    reaching the agent loop is the non-empty ripple-create pair.
+    """
+    captured: dict[str, Any] = {}
+
+    async def _capture_ctx(spec, ctx):
+        # Intercept exactly where the executor hands its ctx to the agent
+        # loop. By this point ``execute_run`` must have re-resolved
+        # ``surface_context`` from the spec.
+        captured["surface_context"] = ctx.surface_context
+        return
+        yield  # pragma: no cover - make this an async generator
+
+    async def _fake_resolve_scope_context(**_):
+        return _scope_only_ctx()
+
+    async def _noop_ensure(**_):
+        return None
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", _capture_ctx)
+    monkeypatch.setattr(run_core, "resolve_scope_context", _fake_resolve_scope_context)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr("pocketpaw_ee.cloud.sessions.service.ensure_for_agent_scope", _noop_ensure)
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+
+    await run_core.execute_run(_sites_svelte_spec())
+
+    surface_context = captured.get("surface_context")
+    # BEFORE the fix this is ``None`` (surface info dropped at the boundary).
+    assert surface_context is not None, (
+        "executor dropped surface_context — RunSpec carried no surface/surface_meta"
+    )
+    deny = resolve_profile(surface_context.kind, surface_context.meta).deny_mcp_tool_ids
+    # The two ripple-create tools the /sites svelte-create profile forbids.
+    assert deny == frozenset(
+        {
+            "mcp__pocketpaw_sites_manager__create_landing_site",
+            "mcp__pocketpaw_pocket_specialist__create",
+        }
+    )
+
+
+async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
+    """A spec with no surface hint (older clients) must keep the legacy path:
+    ``surface_context`` resolves to a GENERIC context with an empty deny set,
+    so non-/sites turns are unchanged."""
+    captured: dict[str, Any] = {}
+
+    async def _capture_ctx(spec, ctx):
+        captured["surface_context"] = ctx.surface_context
+        return
+        yield  # pragma: no cover - make this an async generator
+
+    async def _fake_resolve_scope_context(**_):
+        return _scope_only_ctx()
+
+    async def _noop_ensure(**_):
+        return None
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", _capture_ctx)
+    monkeypatch.setattr(run_core, "resolve_scope_context", _fake_resolve_scope_context)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr("pocketpaw_ee.cloud.sessions.service.ensure_for_agent_scope", _noop_ensure)
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+
+    await run_core.execute_run(_spec())  # _spec() has no surface fields
+
+    surface_context = captured.get("surface_context")
+    # resolve_surface_context never raises; a missing hint -> GENERIC, no deny.
+    assert surface_context is not None
+    deny = resolve_profile(surface_context.kind, surface_context.meta).deny_mcp_tool_ids
+    assert deny == frozenset()

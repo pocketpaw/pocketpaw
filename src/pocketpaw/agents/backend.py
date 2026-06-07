@@ -2,6 +2,15 @@
 
 Every agent backend (Claude SDK, OpenAI Agents, Gemini CLI, OpenCode CLI)
 must expose a ``info()`` staticmethod and an async ``run()`` generator.
+
+Updated: 2026-06-05 (feat/sites-svelte-engine) — the shared ``run`` signature
+grows a ``deny_mcp_tool_ids: frozenset[str] = frozenset()`` keyword: a
+per-surface MCP-tool deny set the chat loop threads through (resolved from the
+request's ``SurfaceProfile``). Only the Claude SDK backend acts on it today
+(subtracting the ids from its tool allowlist before launch); ``AgentPool.run``
+only forwards it when non-empty, so backends that keep the narrower signature
+are unaffected. It replaces the prompt-sniffing ripple-tool gate that lived in
+``claude_sdk.py``.
 """
 
 from __future__ import annotations
@@ -66,6 +75,7 @@ class AgentBackend(Protocol):
         system_prompt: str | None = None,
         history: list[dict] | None = None,
         session_key: str | None = None,
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]: ...
 
     async def stop(self) -> None: ...

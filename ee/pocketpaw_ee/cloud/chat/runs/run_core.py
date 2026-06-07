@@ -1,13 +1,24 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
-Changes: 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
-Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
-as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
-tells the agent to emit and the one paw-enterprise ``MarkdownRenderer`` tokenizes
-as a ``ui-spec`` segment. The legacy ``json`` fence + ``{widgets, lifecycle}``
-shape is still accepted via a transitional branch so in-flight conversations
-don't break; that branch is deprecated and slated for removal once no active
-conversation references the old shape (cutover window is RFC 13 open question #6).
+Changes:
+- 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
+  Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
+  as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
+  tells the agent to emit and the one paw-enterprise ``MarkdownRenderer`` tokenizes
+  as a ``ui-spec`` segment. The legacy ``json`` fence + ``{widgets, lifecycle}``
+  shape is still accepted via a transitional branch so in-flight conversations
+  don't break; that branch is deprecated and slated for removal once no active
+  conversation references the old shape (cutover window is RFC 13 open question #6).
+- 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
+  resolves the per-request ``SurfaceProfile`` and threads its
+  ``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
+  ``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
+  allowlist before launch. This replaces the deleted prompt-sniffing tool gate
+  in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
+  ripple-create tools via typed policy (resolved from ``meta``) instead of the
+  backend string-matching ``engine="svelte"`` in the system prompt. The set is
+  empty for every other surface, so the call is a no-op outside /sites
+  svelte-create.
 """
 
 from __future__ import annotations
@@ -44,6 +55,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
+from pocketpaw_ee.cloud.surface import resolve_profile, resolve_surface_context
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +544,17 @@ async def _drive_agent_loop(
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
     try:
         session_key = session_key_for(ctx)
+        # Resolve the per-surface tool-deny policy once and thread it to the
+        # backend. Empty for every surface except /sites svelte-create, where it
+        # forbids the two ripple-create tools so the agent cannot fall back to a
+        # rippleSpec landing page (the typed replacement for the deleted
+        # prompt-sniffing gate in claude_sdk.py). ``surface_context is None`` is
+        # the legacy path — no deny.
+        surface_deny: frozenset[str] = frozenset()
+        if ctx.surface_context is not None:
+            surface_deny = resolve_profile(
+                ctx.surface_context.kind, ctx.surface_context.meta
+            ).deny_mcp_tool_ids
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -539,6 +562,7 @@ async def _drive_agent_loop(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
+            deny_mcp_tool_ids=surface_deny,
         ).__aiter__()
 
         async def _next_event() -> Any:
@@ -728,6 +752,21 @@ async def execute_run(spec: RunSpec) -> None:
     except Exception:
         logger.exception("ensure session failed for run %s", spec.run_id)
         ctx.session_id = None
+
+    # Mirror agent_router:77 — re-resolve the surface context from the spec.
+    # The HTTP handler resolves ``ctx.surface_context`` on ITS request ctx,
+    # but submits a RunSpec to the executor, which rebuilds its own ctx via
+    # resolve_scope_context (scope only — surface_context stays None). Without
+    # this the whole SurfaceProfile gate silently no-ops on the /agent path:
+    # the tool-deny (run_core:457), the ripple-block omission + create-svelte
+    # skill (build_behavior_instructions), and the surface preamble
+    # (build_dynamic_context) all see None and fall back to the legacy shape.
+    # The resolver never raises; a missing/legacy hint -> GENERIC + empty deny.
+    ctx.surface_context = await resolve_surface_context(
+        ctx.workspace_id,
+        ctx.user_id,
+        {"surface": spec.surface, "meta": spec.surface_meta},
+    )
 
     await _mark_running(spec.run_id)
     await _broadcast_agent_typing(ctx, active=True)

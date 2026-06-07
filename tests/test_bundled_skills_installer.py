@@ -5,6 +5,15 @@
 # per file), best-effort (errors logged not raised), and discovers
 # new skills by directory iteration so adding a skill doesn't need
 # code changes.
+# Updated: 2026-06-03 (feat/sdk-bundled-skills-plugin) — bundled skills moved
+# under _bundled/skills/ and _bundled became a Claude Code local plugin. The
+# missing-dir test now patches _SKILLS_DIR; added coverage for
+# bundled_skills_plugin_dir() (the path the claude_agent_sdk backend passes
+# via plugins=) and for create-site landing in the mirror.
+# Updated: 2026-06-03 (feat/sites-landing-brain, Task P2) — added coverage
+# for the new pocketpaw-create-paw-site marketing brain: it ships in the
+# mirror AND the local plugin, and carries its load-bearing SSR guardrails
+# (flat lead form, tiers pricing, no accordion, anchor CTAs, marketing hero).
 """Tests for ``pocketpaw.bundled_skills.installer.install_bundled_skills``.
 
 Each test installs into a tmp_path destination (no touching the user's
@@ -21,6 +30,7 @@ import pytest
 
 from pocketpaw.bundled_skills.installer import (
     InstallResult,
+    bundled_skills_plugin_dir,
     install_bundled_skills,
 )
 
@@ -123,7 +133,10 @@ def test_install_skips_when_bundled_dir_missing(monkeypatch, tmp_path: Path) -> 
     than crashing the boot."""
     import pocketpaw.bundled_skills.installer as installer_mod
 
-    monkeypatch.setattr(installer_mod, "_BUNDLED_DIR", tmp_path / "definitely-does-not-exist")
+    # The installer iterates ``_SKILLS_DIR`` (``_bundled/skills/``); patching it
+    # to a missing path simulates a corrupt package without touching the real
+    # bundled tree.
+    monkeypatch.setattr(installer_mod, "_SKILLS_DIR", tmp_path / "definitely-does-not-exist")
     results = install_bundled_skills(destination_root=tmp_path)
     assert results == []
 
@@ -144,3 +157,111 @@ def test_install_result_is_frozen_dataclass(tmp_path: Path) -> None:
         # ``frozen=True`` raises ``dataclasses.FrozenInstanceError``,
         # subclass of ``AttributeError``. We just want it to refuse.
         r.status = "tampered"  # type: ignore[misc]
+
+
+def test_install_includes_create_site(tmp_path: Path) -> None:
+    """The site-publish skill ships in the mirror too. Regression guard for
+    the /sites flow — a dropped create-site skill would leave the publish
+    path with no skill body on the non-SDK backends."""
+    install_bundled_skills(destination_root=tmp_path)
+    site_file = tmp_path / "pocketpaw-create-site" / "SKILL.md"
+    assert site_file.is_file()
+    assert "name: pocketpaw-create-site" in site_file.read_text()
+
+
+def test_install_includes_create_paw_site(tmp_path: Path) -> None:
+    """The marketing landing brain ships in the mirror. A dropped
+    create-paw-site skill would route every new-site request back to the
+    dashboard create-pocket flow → the broken-dashboard render."""
+    results = install_bundled_skills(destination_root=tmp_path)
+    assert any(r.name == "pocketpaw-create-paw-site" for r in results)
+
+    skill_file = tmp_path / "pocketpaw-create-paw-site" / "SKILL.md"
+    assert skill_file.is_file()
+    assert "name: pocketpaw-create-paw-site" in skill_file.read_text()
+
+
+def test_create_paw_site_is_copy_only_deterministic_brain(tmp_path: Path) -> None:
+    """The brain's body must keep its load-bearing DETERMINISTIC contract: the
+    agent writes COPY ONLY and calls the deterministic ``create_landing_site``
+    tool — it does NOT draft a rippleSpec and does NOT route through the
+    pocket specialist's create/redraft loop (the path that silently downgraded
+    landing pages to generic dashboard widgets). A silent edit that reintroduced
+    spec-drafting or the specialist route would bring the downgrade back. We pin
+    discriminating tokens, not prose, so wording can evolve."""
+    install_bundled_skills(destination_root=tmp_path)
+    body = (tmp_path / "pocketpaw-create-paw-site" / "SKILL.md").read_text()
+
+    # The site identity it stamps (the published page renders as a landing page).
+    assert 'pattern="landing"' in body
+    assert 'type="site"' in body
+
+    # The deterministic create tool is the path — the agent calls it, the tool
+    # owns the structure.
+    assert "create_landing_site" in body
+
+    # Copy-only contract: the agent does NOT compose a rippleSpec. Pin the
+    # explicit "copy only" steer AND the "do NOT compose" instruction.
+    assert "COPY ONLY" in body
+    assert "do NOT compose" in body
+
+    # The old downgrade route must NOT be the active instruction. It may only
+    # appear under a negative ("do not call pocket_specialist__create"), so we
+    # assert the negative phrasing is present rather than banning the token.
+    lowered = body.lower()
+    assert "do not call" in lowered and "pocket_specialist__create" in body
+
+    # The marketing widgets the page is built from are still named, so a silent
+    # edit that drops the marketing steer (back toward a dashboard) is caught.
+    for widget in ("navbar", "feature-grid", "testimonial", "pricing-table", "cta", "footer"):
+        assert widget in body, f"marketing widget {widget!r} no longer named in the brain"
+
+    # The dashboard anti-pattern is still warned against (no hero+grid KPI page).
+    assert "hero + grid" in body or "hero+grid" in body
+    # Pricing uses tiers; CTAs navigate by anchor not on_click.
+    assert "tiers" in body
+    assert "on_click" in body
+
+
+# ---------------------------------------------------------------------------
+# Local-plugin entry (the claude_agent_sdk path)
+# ---------------------------------------------------------------------------
+
+
+def test_plugin_dir_points_at_valid_local_plugin() -> None:
+    """``bundled_skills_plugin_dir`` returns the ``_bundled`` directory, and
+    that directory is a structurally valid Claude Code local plugin: a
+    ``.claude-plugin/plugin.json`` manifest beside a ``skills/`` tree. This is
+    the path the claude_agent_sdk backend hands to the SDK ``plugins=`` option
+    — the only route bundled skills reach that backend under
+    ``setting_sources=[]``."""
+    import json
+
+    plugin_dir = bundled_skills_plugin_dir()
+    assert plugin_dir is not None
+    assert plugin_dir.is_dir()
+
+    manifest = plugin_dir / ".claude-plugin" / "plugin.json"
+    assert manifest.is_file()
+    data = json.loads(manifest.read_text())
+    assert data["name"]  # a plugin must declare a name to load
+
+    # The skills the plugin advertises live under skills/<name>/SKILL.md.
+    skills_dir = plugin_dir / "skills"
+    assert skills_dir.is_dir()
+    names = {p.name for p in skills_dir.iterdir() if p.is_dir()}
+    assert "pocketpaw-create-site" in names
+    assert "pocketpaw-create-pocket" in names
+    # The marketing landing brain must reach the claude_agent_sdk backend
+    # too — it's the default backend, where new-site requests land.
+    assert "pocketpaw-create-paw-site" in names
+
+
+def test_plugin_dir_none_when_manifest_missing(monkeypatch, tmp_path: Path) -> None:
+    """If the plugin manifest is absent (partial / corrupt package), the
+    helper returns ``None`` so the SDK backend never gets an invalid plugin
+    path — it just runs skill-free instead of failing to launch."""
+    import pocketpaw.bundled_skills.installer as installer_mod
+
+    monkeypatch.setattr(installer_mod, "_PLUGIN_MANIFEST", tmp_path / "nope" / "plugin.json")
+    assert bundled_skills_plugin_dir() is None

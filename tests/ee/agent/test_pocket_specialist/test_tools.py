@@ -114,3 +114,120 @@ class TestPersistPocketTool:
             call = mocked.await_args
             assert call.kwargs.get("pocket_id") == "p1"
             assert result["id"] == "p1"
+
+
+# A manifest mirroring the marketing/scaffold widgets a Paw Site uses. None
+# declare id/name/href in per-widget props (matches the live manifest) — those
+# are universal node-level props the renderer wraps on.
+_SITE_MANIFEST = {
+    "schema": "ripple.manifest/v1",
+    "widgets": [
+        {"type": "section", "props": {"title": {}}},
+        {"type": "card", "props": {"title": {}}},
+        {"type": "input", "props": {"label": {}, "type": {}}},
+        {"type": "textarea", "props": {"label": {}}},
+        {"type": "button", "props": {"label": {}, "type": {}}},
+        {"type": "navbar", "props": {"brand": {}, "links": {}, "cta": {}, "ctaHref": {}}},
+        {"type": "feature-grid", "props": {"columns": {}, "features": {}}},
+        {"type": "testimonial", "props": {"quote": {}, "author": {}, "role": {}}},
+        {"type": "cta", "props": {"headline": {}, "button": {}, "href": {}}},
+        {"type": "footer", "props": {"columns": {}, "copyright": {}}},
+    ],
+}
+
+# A spliced landing skeleton (trimmed) carrying the SSR-essential props that
+# the default manifest validator flags: section.id (anchors), input/textarea
+# .name (native POST), card.id (anchor). This is the exact shape that was
+# being downgraded to generics.
+_SITE_SPEC = {
+    "version": "1.0",
+    "ui": {
+        "type": "flex",
+        "children": [
+            {"type": "navbar", "props": {"brand": "X", "cta": "Book", "ctaHref": "#book"}},
+            {
+                "type": "section",
+                "props": {"id": "services"},
+                "children": [{"type": "feature-grid", "props": {"columns": 3, "features": []}}],
+            },
+            {"type": "testimonial", "props": {"quote": "q", "author": "a", "role": "r"}},
+            {"type": "cta", "props": {"headline": "Go", "button": "Book", "href": "#book"}},
+            {
+                "type": "card",
+                "props": {"id": "book", "title": "Book"},
+                "children": [
+                    {"type": "input", "props": {"name": "email", "type": "email"}},
+                    {"type": "textarea", "props": {"name": "message"}},
+                    {"type": "button", "props": {"label": "Send", "type": "submit"}},
+                ],
+            },
+            {"type": "footer", "props": {"columns": [], "copyright": "c"}},
+        ],
+    },
+}
+
+
+class TestPersistPocketSiteAware:
+    """The site-aware trust path: a spliced marketing skeleton (type='site' /
+    pattern='landing') with renderer-honored SSR props must NOT trip the
+    redraft loop. In dashboard mode the same props DO trip it — proving the
+    relaxation is gated on site mode and doesn't weaken non-site validation."""
+
+    @pytest.mark.asyncio
+    async def test_site_skeleton_persists_without_redraft(self):
+        """type='site' + the SSR props → persists (no redraft short-circuit).
+        This is the regression fix: the marketing widgets survive."""
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.tools._get_manifest",
+                new=AsyncMock(return_value=_SITE_MANIFEST),
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.tools._agent_create",
+                new=AsyncMock(return_value=({"id": "site-1", "name": "Landing"}, "site-1", None)),
+            ) as created,
+        ):
+            capture: dict = {}
+            tool = make_persist_pocket_tool(workspace_id="ws-1", user_id="user-A", capture=capture)
+            result = await tool.ainvoke(
+                {
+                    "name": "Landing",
+                    "type": "site",
+                    "pattern": "landing",
+                    "ripple_spec": _SITE_SPEC,
+                }
+            )
+            # Persisted — not a redraft short-circuit.
+            created.assert_awaited_once()
+            assert result.get("redraft_required") is not True
+            assert result["id"] == "site-1"
+            # The SSR props produced no blocking warnings.
+            assert capture.get("warnings") == []
+
+    @pytest.mark.asyncio
+    async def test_dashboard_spec_with_ssr_props_still_redrafts(self):
+        """Same SSR props, but WITHOUT site mode → the validator flags them and
+        the tool short-circuits to redraft on attempt 1 (unchanged behavior).
+        This proves the relaxation is gated and dashboards are unaffected."""
+        with (
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.tools._get_manifest",
+                new=AsyncMock(return_value=_SITE_MANIFEST),
+            ),
+            patch(
+                "pocketpaw_ee.agent.pocket_specialist.tools._agent_create",
+                new=AsyncMock(return_value=({"id": "x", "name": "x"}, "x", None)),
+            ) as created,
+        ):
+            capture: dict = {}
+            tool = make_persist_pocket_tool(workspace_id="ws-1", user_id="user-A", capture=capture)
+            result = await tool.ainvoke(
+                {
+                    "name": "Dash",
+                    "ripple_spec": _SITE_SPEC,  # no type/pattern → dashboard path
+                }
+            )
+            # Short-circuited to redraft — NOT persisted.
+            created.assert_not_awaited()
+            assert result.get("redraft_required") is True
+            assert result["warnings"], "dashboard mode must still surface the prop warnings"
