@@ -71,16 +71,20 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
 from pocketpaw_ee.cloud.models.task import TaskAssignee as _AssigneeDoc
 from pocketpaw_ee.cloud.models.task import TaskSource as _SourceDoc
+from pocketpaw_ee.cloud.models.task_event import TaskEvent as _TaskEventDoc
 from pocketpaw_ee.cloud.tasks.domain import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.tasks.dto import (
     BlockTaskRequest,
     ClaimTaskRequest,
     CompleteTaskRequest,
+    CreateTaskEventRequest,
     CreateTaskRequest,
     ListTasksRequest,
     ReassignTaskRequest,
+    TaskEventResponse,
     TaskResponse,
     UpdateTaskRequest,
+    task_event_to_dto,
     task_to_dto,
 )
 
@@ -624,12 +628,66 @@ async def unassign_project_on_tasks(workspace_id: str, project_id: str) -> int:
     return getattr(result, "modified_count", 0) or 0
 
 
+# ---------------------------------------------------------------------------
+# Task Event (comments/activity on a task)
+# ---------------------------------------------------------------------------
+
+
+async def agent_create_task_event(
+    ctx: RequestContext, task_id: str, body: CreateTaskEventRequest
+) -> TaskEventResponse:
+    """Post a comment/activity entry on a task."""
+    body = CreateTaskEventRequest.model_validate(body)
+    task_doc = await _fetch_task(ctx, task_id)
+    from pocketpaw_ee.cloud.models.user import User
+
+    user = await User.get(ctx.user_id)
+    author_name = user.full_name if user else ctx.user_id
+    doc = _TaskEventDoc(
+        workspace_id=task_doc.workspace_id,
+        task_id=task_id,
+        author_id=ctx.user_id,
+        author_name=author_name,
+        body=body.body,
+    )
+    await doc.insert()
+    # Emit a bus event so the frontend gets a realtime update
+    event_dto = task_event_to_dto(doc)
+    await emit(TaskUpdated(data={
+        "task_id": task_id,
+        "task": None,
+        "event": event_dto.model_dump(mode="json"),
+        "workspace_id": task_doc.workspace_id,
+        "recipient_ids": [task_doc.creator_id],
+    }))
+    return event_dto
+
+
+async def agent_list_task_events(
+    ctx: RequestContext, task_id: str, limit: int = 50
+) -> list[TaskEventResponse]:
+    """List events for a task, newest first."""
+    _ = await _fetch_task(ctx, task_id)  # tenant guard
+    docs = (
+        await _TaskEventDoc.find(
+            _TaskEventDoc.task_id == task_id,
+            _TaskEventDoc.workspace_id == ctx.workspace_id,
+        )
+        .sort(-_TaskEventDoc.createdAt)  # type: ignore[operator]
+        .limit(max(1, min(limit, 200)))
+        .to_list()
+    )
+    return [task_event_to_dto(d) for d in docs]
+
+
 __all__ = [
     "agent_block_task",
     "agent_claim_task",
     "agent_complete_task",
     "agent_create_task",
+    "agent_create_task_event",
     "agent_get_task",
+    "agent_list_task_events",
     "agent_list_tasks",
     "agent_reassign_task",
     "agent_reassign_task_cycle",
