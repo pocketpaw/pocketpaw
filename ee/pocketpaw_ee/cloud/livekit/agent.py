@@ -37,6 +37,12 @@ import os
 import time
 from typing import Any
 
+from pocketpaw_ee.cloud.livekit.prompts import (
+    ANTHROPIC_SUMMARY_PROMPT,
+    DEEPSEEK_SUMMARY_PROMPT,
+    OPENAI_SUMMARY_PROMPT,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -730,15 +736,7 @@ class CallMeetingAgent:
         """Use Anthropic Claude to summarize the transcript."""
         import httpx
 
-        prompt = (
-            "You are a meeting notes assistant. Given the following transcript of a group call, "
-            "provide:\n"
-            "1. A concise summary (2-3 paragraphs) of what was discussed\n"
-            "2. A list of action items / decisions made\n\n"
-            "Format your response as JSON with keys 'summary' (string) and "
-            "'action_items' (list of strings).\n\n"
-            f"Transcript:\n{transcript}"
-        )
+        prompt = ANTHROPIC_SUMMARY_PROMPT.format(transcript=transcript)
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -768,33 +766,7 @@ class CallMeetingAgent:
         """Use DeepSeek (OpenAI-compatible API) to summarize the transcript."""
         import httpx
 
-        prompt = (
-            "You are a professional meeting notes assistant. Given the following transcript of a "
-            "group call, produce a comprehensive, well-structured Markdown meeting summary.\n\n"
-            "Include the following sections where applicable:\n\n"
-            "## 📋 Overview\n"
-            "A concise 1-2 paragraph summary of what was discussed — the context, "
-            "the main agenda, and the overall outcome of the call.\n\n"
-            "## 📌 Topics Covered\n"
-            "A bullet-point or numbered list of the main topics / subjects discussed "
-            "during the call. Describe each topic in a sentence or two.\n\n"
-            "## ⚙️ Technical Decisions\n"
-            "Any architectural decisions, tool choices, code changes, or implementation "
-            "plans that were agreed upon.\n\n"
-            "## ✅ Action Items\n"
-            "A bullet list of clear action items with who is responsible (e.g. "
-            "'@Admin: merge the notification PR', '@Amritesh: test the deployment'). "
-            "Be specific — mention the person and what they need to do.\n\n"
-            "## ❓ Key Questions\n"
-            "Any open questions, unresolved issues, or things that need further "
-            "discussion.\n\n"
-            "## 🔜 Next Steps\n"
-            "What happens next — any follow-ups, pending reviews, or scheduled items.\n\n"
-            "Format your ENTIRE response as raw Markdown (no wrapping JSON, no code fences). "
-            "Use bold, headings, lists as appropriate. Make it look like a polished "
-            "meeting notes document.\n\n"
-            f"Transcript:\n{transcript}"
-        )
+        prompt = DEEPSEEK_SUMMARY_PROMPT.format(transcript=transcript)
         logger.info("DeepSeek prompt length: %d chars", len(prompt))
 
         async with httpx.AsyncClient(timeout=120) as client:
@@ -824,15 +796,7 @@ class CallMeetingAgent:
         """Use OpenAI GPT to summarize the transcript."""
         import httpx
 
-        prompt = (
-            "You are a meeting notes assistant. Given the following transcript of a group call, "
-            "provide:\n"
-            "1. A concise summary (2-3 paragraphs) of what was discussed\n"
-            "2. A list of action items / decisions made\n\n"
-            "Format your response as JSON with keys 'summary' (string) and "
-            "'action_items' (list of strings).\n\n"
-            f"Transcript:\n{transcript}"
-        )
+        prompt = OPENAI_SUMMARY_PROMPT.format(transcript=transcript)
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
