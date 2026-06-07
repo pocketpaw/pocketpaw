@@ -1,6 +1,11 @@
 # DirectREST YAML engine — reads connector YAML definitions and executes REST actions.
 # Created: 2026-03-27 — Primary adapter. One YAML per service.
 # Updated: 2026-03-28 — Real HTTP execution via httpx (was placeholder).
+# Updated: 2026-06-07 (M3 connector→skill auto-authoring) — ConnectorDef grows an
+#   optional ``surface_profile`` block (skill / allow_tools / deny_tools) parsed
+#   from the YAML. It is the per-connector mapping source for deriving a pocket's
+#   PocketSurfaceProfile when the connector is bound to a pocket. Backward-compat:
+#   connectors with no block parse with ``surface_profile=None``.
 
 from __future__ import annotations
 
@@ -20,6 +25,28 @@ from pocketpaw.connectors.protocol import (
 )
 
 
+@dataclass(frozen=True)
+class ConnectorSurfaceProfile:
+    """The surface-profile contribution a connector makes to a pocket.
+
+    Parsed from the OPTIONAL ``surface_profile:`` block on a connector YAML.
+    When a connector is bound to a pocket (scope=pocket), the cloud derivation
+    helper folds every enabled connector's ``ConnectorSurfaceProfile`` into the
+    pocket's ``PocketSurfaceProfile`` (skill_names + tool allow/deny). A
+    connector with no block contributes nothing (``ConnectorDef.surface_profile``
+    is ``None``).
+
+    Fields (all optional):
+      * ``skill`` — a single skill name to load for rooms with this connector.
+      * ``allow_tools`` — tool-id glob/patterns to add to the SDK allowlist.
+      * ``deny_tools`` — tool-id glob/patterns to deny.
+    """
+
+    skill: str | None = None
+    allow_tools: tuple[str, ...] = field(default_factory=tuple)
+    deny_tools: tuple[str, ...] = field(default_factory=tuple)
+
+
 @dataclass
 class ConnectorDef:
     """Parsed connector YAML definition."""
@@ -31,6 +58,30 @@ class ConnectorDef:
     auth: dict[str, Any] = field(default_factory=dict)
     actions: list[dict[str, Any]] = field(default_factory=list)
     sync: dict[str, Any] = field(default_factory=dict)
+    # M3 — optional connector→skill/tool mapping. ``None`` when the YAML has
+    # no ``surface_profile:`` block (the common case / backward-compat).
+    surface_profile: ConnectorSurfaceProfile | None = None
+
+
+def _parse_surface_profile(raw: Any) -> ConnectorSurfaceProfile | None:
+    """Parse the optional ``surface_profile:`` YAML block.
+
+    Returns ``None`` when the block is absent or not a mapping, so connectors
+    without the block stay byte-identical to pre-M3 behavior. Tolerates a bare
+    string or a list for ``skill`` only by ignoring non-string values; the
+    canonical shape is a mapping with ``skill`` / ``allow_tools`` / ``deny_tools``.
+    """
+    if not isinstance(raw, dict):
+        return None
+    skill = raw.get("skill")
+    skill = skill if isinstance(skill, str) and skill else None
+    allow = raw.get("allow_tools") or []
+    deny = raw.get("deny_tools") or []
+    allow_tuple = tuple(str(t) for t in allow if t) if isinstance(allow, list) else ()
+    deny_tuple = tuple(str(t) for t in deny if t) if isinstance(deny, list) else ()
+    if skill is None and not allow_tuple and not deny_tuple:
+        return None
+    return ConnectorSurfaceProfile(skill=skill, allow_tools=allow_tuple, deny_tools=deny_tuple)
 
 
 def parse_connector_yaml(path: Path) -> ConnectorDef:
@@ -46,6 +97,7 @@ def parse_connector_yaml(path: Path) -> ConnectorDef:
         auth=raw.get("auth", {}),
         actions=raw.get("actions", []),
         sync=raw.get("sync", {}),
+        surface_profile=_parse_surface_profile(raw.get("surface_profile")),
     )
 
 

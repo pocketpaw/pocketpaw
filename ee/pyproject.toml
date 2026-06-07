@@ -257,6 +257,13 @@ source_modules = [
     # ``action_executor.run_action``. Never imports a Beanie document
     # class directly.
     "pocketpaw_ee.cloud.pockets.temporal_dispatcher",
+    # M3 connector→skill auto-authoring — the connectors service re-derives a
+    # pocket's surface_profile on bind/unbind and persists it through
+    # ``pockets.service.apply_derived_surface_profile`` (the Beanie writer). It
+    # must NOT import the Pocket Beanie model directly; the derivation module is
+    # pure. Both go through ``pockets.service`` only.
+    "pocketpaw_ee.cloud.connectors.service",
+    "pocketpaw_ee.cloud.connectors.derivation",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",

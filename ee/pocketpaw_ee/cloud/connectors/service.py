@@ -1,5 +1,11 @@
 # Connectors — workspace-scoped business logic.
 # Created: 2026-05-03 — PR-1 of Phase 1 connector consolidation.
+# Updated: 2026-06-07 (M3 connector→skill auto-authoring) — enable/disable of a
+#   POCKET-scoped connector now RE-DERIVES the pocket's surface_profile from ALL
+#   its enabled pocket-scoped connectors (``_rederive_pocket_surface_profile``)
+#   and persists it via ``pockets.service.apply_derived_surface_profile`` (the
+#   Beanie-write boundary — this service never imports the Pocket doc). Derivation
+#   itself is the pure ``derivation.derive_surface_profile``.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -27,7 +33,11 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     ConnectorEnabled,
     ConnectorSyncRecorded,
 )
-from pocketpaw_ee.cloud.connectors.domain import AvailableConnector, WorkspaceConnector
+from pocketpaw_ee.cloud.connectors.domain import (
+    AvailableConnector,
+    ConnectorSurfaceContribution,
+    WorkspaceConnector,
+)
 from pocketpaw_ee.cloud.connectors.dto import (
     ConnectorDetailResponse,
     ConnectorResponse,
@@ -74,6 +84,20 @@ def _available_from_registry() -> list[AvailableConnector]:
             a.get("name", "") for a in (d.actions or []) if isinstance(a, dict) and a.get("name")
         )
         auth_method = (d.auth or {}).get("method", "none") if isinstance(d.auth, dict) else "none"
+        # M3 — carry the connector's surface-profile contribution (skill + tool
+        # patterns) into the cloud domain, translating the OSS
+        # ``ConnectorSurfaceProfile`` to the cloud-side mirror. ``None`` when the
+        # YAML has no block.
+        sp = getattr(d, "surface_profile", None)
+        contribution = (
+            ConnectorSurfaceContribution(
+                skill=sp.skill,
+                allow_tools=tuple(sp.allow_tools),
+                deny_tools=tuple(sp.deny_tools),
+            )
+            if sp is not None
+            else None
+        )
         out.append(
             AvailableConnector(
                 name=d.name,
@@ -82,9 +106,49 @@ def _available_from_registry() -> list[AvailableConnector]:
                 icon=d.icon,
                 auth_method=auth_method,
                 actions=actions,
+                surface_profile=contribution,
             ),
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# M3 — connector→skill/tool surface-profile auto-authoring
+# ---------------------------------------------------------------------------
+
+
+async def _rederive_pocket_surface_profile(workspace_id: str, pocket_id: str) -> None:
+    """Re-derive + persist a pocket's surface_profile from its enabled connectors.
+
+    Triggered on enable/disable of a POCKET-scoped connector. Loads ALL connectors
+    enabled at ``scope=pocket`` for this ``pocket_id`` (tenant-filtered, cloud rule
+    §7), merges each with its registry def to recover its ``surface_profile``
+    contribution, runs the pure ``derive_surface_profile`` over the full set, then
+    hands the result to ``pockets.service.apply_derived_surface_profile`` for the
+    Beanie write.
+
+    Deriving from the FULL enabled set (not just the toggled connector) is what
+    makes enable AND disable correct: a disabled connector simply isn't in the set,
+    so its contribution drops on the next re-derive.
+
+    The Pocket-doc write lives in ``pockets.service`` (Beanie-write boundary —
+    this connectors service must not import the Pocket model). Imported lazily to
+    keep import-linter's static graph clean and avoid an import cycle.
+    """
+    from pocketpaw_ee.cloud.connectors.derivation import derive_surface_profile
+    from pocketpaw_ee.cloud.pockets.service import apply_derived_surface_profile
+
+    enabled_docs = await _WCDoc.find(
+        _WCDoc.workspace == workspace_id,
+        _WCDoc.pocket_id == pocket_id,
+        _WCDoc.scope == "pocket",
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    ).to_list()
+
+    available = {a.name: a for a in _available_from_registry()}
+    contributing = [available[d.name] for d in enabled_docs if d.name in available]
+    profile = derive_surface_profile(contributing)
+    await apply_derived_surface_profile(workspace_id, pocket_id, profile)
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +292,12 @@ async def enable_connector(
             }
         )
     )
+
+    # M3 — auto-author the pocket's surface_profile from its enabled connectors.
+    # Re-derive from the FULL enabled set so this is idempotent and order-free.
+    if body.scope == "pocket" and body.pocket_id:
+        await _rederive_pocket_surface_profile(workspace_id, body.pocket_id)
+
     return _row_response(a, doc)
 
 
@@ -245,6 +315,11 @@ async def disable_connector(workspace_id: str, name: str) -> ConnectorResponse:
     if doc is None:
         # Already not enabled — return the disconnected row.
         return _row_response(available[name], None)
+    # Capture the binding BEFORE flipping the flag — a pocket-scoped connector
+    # being disabled must re-derive that pocket's surface_profile so its
+    # contribution drops out of the union.
+    was_pocket_scoped = doc.scope == "pocket" and bool(doc.pocket_id)
+    pocket_id_for_rederive = doc.pocket_id
     doc.enabled = False
     await doc.save()
     await event_bus.emit(
@@ -259,6 +334,12 @@ async def disable_connector(workspace_id: str, name: str) -> ConnectorResponse:
             }
         )
     )
+
+    # M3 — re-derive after the flag flip so the disabled connector (now
+    # ``enabled=False``) is excluded from the enabled set used by derivation.
+    if was_pocket_scoped and pocket_id_for_rederive:
+        await _rederive_pocket_surface_profile(workspace_id, pocket_id_for_rederive)
+
     return _row_response(available[name], doc)
 
 

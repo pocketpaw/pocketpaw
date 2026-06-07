@@ -3,12 +3,32 @@
 # dataclasses constructed from Beanie docs in service.py. Tenancy is
 # required at construction (workspace_id has no default) per the
 # ee/cloud rule §3.
+# Updated: 2026-06-07 (M3 connector→skill auto-authoring) — ``AvailableConnector``
+#   grows an optional ``surface_profile`` field carrying the connector's
+#   skill/tool contribution (mirrors the OSS ``ConnectorSurfaceProfile``). The
+#   pure derivation helper in ``derivation.py`` folds these across a pocket's
+#   enabled connectors into a ``PocketSurfaceProfile``.
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ConnectorSurfaceContribution:
+    """A connector's surface-profile contribution, in the cloud domain.
+
+    JSON-friendly mirror of the OSS ``yaml_engine.ConnectorSurfaceProfile``
+    (tuples instead of the raw YAML lists). Built in ``service.py`` from the
+    registry definition and carried on ``AvailableConnector`` so the derivation
+    helper never reaches across into the OSS registry types.
+    """
+
+    skill: str | None = None
+    allow_tools: tuple[str, ...] = field(default_factory=tuple)
+    deny_tools: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -52,3 +72,7 @@ class AvailableConnector:
     icon: str
     auth_method: str
     actions: tuple[str, ...] = field(default_factory=tuple)
+    # M3 — the connector's surface-profile contribution (skill + tool patterns),
+    # or ``None`` when the YAML has no ``surface_profile:`` block. Consumed by
+    # the derivation helper when the connector is bound to a pocket.
+    surface_profile: ConnectorSurfaceContribution | None = None
