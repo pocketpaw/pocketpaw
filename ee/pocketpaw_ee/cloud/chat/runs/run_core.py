@@ -560,18 +560,39 @@ async def _drive_agent_loop(
         # is the legacy path: empty deny, no allow → unchanged behavior.
         surface_deny: frozenset[str] = frozenset()
         surface_allow: frozenset[str] = frozenset()
+        # entity-rooms A1/A2: the per-entity system-message override (a base swap)
+        # and the per-entity skill subset. Both READ here and forwarded as plain
+        # data (a ``str`` and a ``frozenset[str]``) — never an EE symbol crossing
+        # into the OSS pool (import-linter forbids EE→OSS imports). Withheld when
+        # None / empty so legacy and non-entity runs are byte-identical.
+        surface_sys_override: str | None = None
+        surface_skills: frozenset[str] = frozenset()
         if ctx.resolved_profile is not None:
             surface_deny = ctx.resolved_profile.deny_mcp_tool_ids
             surface_allow = ctx.resolved_profile.allowed_sdk_tools or frozenset()
-        agent_iter = pool.run(
-            ctx.target_agent_id,
-            user_content,
-            session_key,
+            surface_sys_override = ctx.resolved_profile.system_message_override
+            surface_skills = ctx.resolved_profile.skill_names or frozenset()
+        run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
             deny_mcp_tool_ids=surface_deny,
             allow_sdk_tools=surface_allow,
+        )
+        # Forward the override only when the entity actually set one — withholding
+        # keeps the prompt assembly untouched on every other run.
+        if surface_sys_override is not None:
+            run_kwargs["system_message_override"] = surface_sys_override
+        # Forward the skill subset only when non-empty — the OSS pool's
+        # withhold-when-empty idiom then keeps the 6 non-Claude backends'
+        # narrower signature safe.
+        if surface_skills:
+            run_kwargs["skill_names"] = surface_skills
+        agent_iter = pool.run(
+            ctx.target_agent_id,
+            user_content,
+            session_key,
+            **run_kwargs,
         ).__aiter__()
 
         async def _next_event() -> Any:

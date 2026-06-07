@@ -27,6 +27,18 @@ Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) �
   precedence ``effective = (agent_tools ∪ allow) − deny`` (deny is the hard
   cap). Empty for every legacy / non-entity run, so ordinary runs are untouched.
   No ``pocketpaw_ee`` symbol crosses the boundary — only the frozenset.
+Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A1/A2) —
+  ``run`` grows two more entity-profile knobs, both plain data across the EE→OSS
+  boundary:
+   * ``system_message_override: str | None`` — when set, REPLACES the base
+     persona/soul identity portion of the system prompt while the downstream
+     layers (authoritative ``instructions`` incl. ripple LAW, soul memory recall,
+     knowledge-base wrapper) STILL append. So the final prompt is
+     ``override + instructions + soul-memory + knowledge``. ``None`` = unchanged.
+   * ``skill_names: frozenset[str]`` — the per-entity skill subset, forwarded to
+     the Claude SDK backend (withhold-when-empty, same idiom as deny/allow). The
+     SDK backend materializes those skills into a throwaway local plugin so ONLY
+     the named skills are surfaced. Empty = legacy all-skills behavior.
 """
 
 from __future__ import annotations
@@ -181,6 +193,8 @@ class AgentPool:
         instructions: str = "",
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
+        system_message_override: str | None = None,
+        skill_names: frozenset[str] = frozenset(),
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -208,6 +222,22 @@ class AgentPool:
         consumed only by the Claude SDK backend, which UNIONs it into the
         allowlist BEFORE subtracting the deny set (``(agent ∪ allow) − deny``).
         Empty for every legacy / non-entity run.
+
+        ``system_message_override`` (entity-rooms A1), when set, REPLACES the base
+        persona/soul identity portion of the assembled system prompt — the text
+        built from soul bootstrap / persona / config ``system_prompt`` BEFORE the
+        authoritative ``instructions`` are appended. The override SWAPS that base
+        but KEEPS every downstream layer: ``instructions`` (incl. the ripple LAW),
+        the query-specific soul-memory recall, and the knowledge-base wrapper all
+        still append. Net prompt = ``override + instructions + soul-memory +
+        knowledge``. ``None`` (the default / legacy path) leaves the base intact.
+
+        ``skill_names`` (entity-rooms A2) is the per-entity skill subset. It is
+        forwarded to the backend's ``run`` ONLY when non-empty (same
+        withhold-when-empty idiom as deny/allow, so the 6 non-Claude backends keep
+        their narrower signature). The Claude SDK backend materializes exactly
+        those skills into a throwaway local plugin so ONLY the named skills are
+        surfaced to the agent for this run. Empty = legacy all-skills behavior.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -231,6 +261,17 @@ class AgentPool:
             persona = instance.config.get("soul_persona", "")
             extra = instance.config.get("system_prompt", "")
             system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
+
+        # Per-entity system-message override (entity-rooms A1): SWAP the base,
+        # KEEP the layers. Everything assembled ABOVE this point is the base
+        # persona/soul identity — exactly what the override replaces. The
+        # downstream layers (authoritative ``instructions`` incl. the ripple LAW,
+        # the soul-memory recall, the knowledge wrapper) are appended BELOW, so
+        # they still ride on top of the override. ``None`` leaves the base
+        # untouched (legacy path). Applied here so a backend never needs to know
+        # the override exists — it rides the existing ``system_prompt`` channel.
+        if system_message_override is not None:
+            system_prompt = system_message_override
 
         # Authoritative behavior rules — injected BEFORE the knowledge
         # wrapper so the model reads them as instructions, not reference.
@@ -303,6 +344,13 @@ class AgentPool:
             # signature, so an entity allowlist is forwarded only when non-empty.
             if allow_sdk_tools:
                 run_kwargs["allow_sdk_tools"] = allow_sdk_tools
+            # Per-entity skill subset (entity-rooms A2). Same withhold-when-empty
+            # rule: only the Claude SDK backend accepts ``skill_names`` (it
+            # materializes them into a per-run local plugin); the other backends
+            # keep the narrower signature, so the subset is forwarded only when
+            # non-empty. Empty = legacy all-skills advertise behavior.
+            if skill_names:
+                run_kwargs["skill_names"] = skill_names
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event

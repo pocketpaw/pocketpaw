@@ -1,5 +1,18 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``run``
+  also accepts ``skill_names: frozenset[str]``, the per-entity skill subset
+  (resolved upstream from the entity pocket's ``surface_profile.skill_names``).
+  When non-empty, those skills are MATERIALIZED into a throwaway local-plugin
+  dir (``pocketpaw.skills.materialize``) and appended to the SDK ``plugins=``
+  list so the agent sees ONLY the named skills (coexisting with the bundled
+  plugin). Because ``setting_sources=[]`` disables filesystem + ``skills=``
+  discovery, a local plugin is the only working channel — same mechanism the
+  bundled skills use. The persistent ("warm") client is BYPASSED for skill runs
+  (its cache key omits ``plugins=`` and it only applies options at first
+  connect), so the run goes through a fresh stateless query whose options carry
+  the plugin; the temp dir is removed in the outer ``finally``. Empty
+  ``skill_names`` is a no-op. Crosses the EE→OSS boundary as a plain frozenset.
 Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
   ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
   ADDITIVE SDK-tool allowlist (resolved upstream from the entity pocket's
@@ -910,6 +923,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
+        skill_names: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -931,6 +945,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
         ``effective = (agent_tools ∪ allow) − deny`` (the deny is the hard cap,
         so an allow can never re-enable a denied id). Empty by default (a no-op
         for legacy / non-entity runs).
+
+        ``skill_names`` is the per-entity skill subset (entity-rooms A2), resolved
+        from the entity pocket's ``surface_profile.skill_names``. When non-empty,
+        the named skills are MATERIALIZED into a throwaway local-plugin directory
+        and appended to the SDK ``plugins=`` list, so the agent sees ONLY those
+        skills (coexisting with the bundled-skills plugin when that is enabled).
+        ``setting_sources=[]`` disables both filesystem discovery and the SDK
+        ``skills=`` option, so a local plugin is the only working channel — the
+        same mechanism the bundled skills already use. CRITICAL: the persistent
+        ("warm") client applies its options only at first ``connect()`` and the
+        cache key does NOT include ``plugins=``, so a warm client connected
+        WITHOUT these skills would silently ignore them. So when ``skill_names``
+        is non-empty we BYPASS the warm client and run on a fresh stateless query
+        whose options carry the materialized plugin. The temp dir is removed in a
+        ``finally`` after the stream drains. Empty by default (a no-op).
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -976,6 +1005,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         )
 
         _stderr_lines: list[str] = []
+
+        # Per-run materialized-skills plugin dir (entity-rooms A2). Declared
+        # above the try so the finally can always clean it up, even if an
+        # exception fires before/after materialization. None on every run that
+        # doesn't pass a non-empty ``skill_names``.
+        run_skills_root: Path | None = None
 
         # Ownership flag — True only if THIS run acquired the shared
         # _client_in_use lease. Declared above the try/except so it is always
@@ -1251,6 +1286,28 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
                     logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
 
+            # Per-entity skill subset (entity-rooms A2). Materialize ONLY the
+            # named skills into a throwaway local plugin and append it to the
+            # ``plugins=`` list (creating the list if the bundled plugin above
+            # was off). It coexists with the bundled entry. ``run_skills_root`` is
+            # cleaned up in the ``finally`` after the stream drains, and its
+            # presence forces the fresh stateless path below (the warm client
+            # would ignore these plugins). Empty ``skill_names`` is a no-op.
+            if skill_names:
+                from pocketpaw.skills import materialize_run_skills
+
+                run_skills_root = materialize_run_skills(skill_names, run_id=session_key)
+                if run_skills_root is not None:
+                    options_kwargs.setdefault("plugins", [])
+                    options_kwargs["plugins"].append(
+                        {"type": "local", "path": str(run_skills_root)}
+                    )
+                    logger.info(
+                        "SDK: loading per-run skill plugin (%d requested) from %s",
+                        len(skill_names),
+                        run_skills_root,
+                    )
+
             # Configure LLM provider for the Claude CLI subprocess.
             # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
             sdk_env = llm.to_sdk_env()
@@ -1362,7 +1419,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_key,
             )
             _persistent_client = None
-            if not self._client_in_use:
+            # WARM-CLIENT BYPASS (entity-rooms A2): when this run materialized a
+            # per-entity skill plugin, the warm client MUST NOT be reused. The
+            # persistent client applies its options (incl. ``plugins=``) only at
+            # first ``connect()``, and ``_client_cache_key`` does NOT hash
+            # ``plugins=`` — so a warm client connected without these skills would
+            # silently ignore them, and conversely a warm client connected WITH
+            # them would leak them into later non-skill turns. A fresh stateless
+            # query rebuilds the subprocess with this run's exact ``options``, so
+            # the materialized plugin actually takes effect and never persists.
+            skip_warm_client = run_skills_root is not None
+            if not self._client_in_use and not skip_warm_client:
                 try:
                     self._client_in_use = True
                     acquired_lease = True
@@ -1400,7 +1467,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     _persistent_client = None
 
             if event_stream is None:
-                logger.info("Starting stateless query (fallback — _client_in_use was True)")
+                logger.info(
+                    "Starting stateless query (reason: %s)",
+                    "per-run skill plugin (warm-client bypass)"
+                    if skip_warm_client
+                    else "fallback — _client_in_use was True",
+                )
                 # final_prompt already carries Mongo history (injected above),
                 # so the stateless path uses the same options as the persistent
                 # path — no separate system prompt swap is needed.
@@ -1695,6 +1767,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     type="error",
                     content=llm.format_api_error(e, stderr=stderr_text),
                 )
+        finally:
+            # Always remove the per-run materialized-skills plugin dir
+            # (entity-rooms A2), whether the run finished cleanly, errored, or
+            # the generator was closed early. Best-effort; never raises.
+            if run_skills_root is not None:
+                from pocketpaw.skills import cleanup_run_skills
+
+                cleanup_run_skills(run_skills_root)
 
     async def stop(self) -> None:
         """Stop the agent execution and disconnect persistent client."""
