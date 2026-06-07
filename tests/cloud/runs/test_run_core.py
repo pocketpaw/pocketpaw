@@ -692,6 +692,7 @@ async def test_execute_run_threads_surface_meta_into_ctx(monkeypatch):
         # loop. By this point ``execute_run`` must have re-resolved
         # ``surface_context`` from the spec.
         captured["surface_context"] = ctx.surface_context
+        captured["resolved_profile"] = ctx.resolved_profile
         return
         yield  # pragma: no cover - make this an async generator
 
@@ -727,6 +728,13 @@ async def test_execute_run_threads_surface_meta_into_ctx(monkeypatch):
             "mcp__pocketpaw_pocket_specialist__create",
         }
     )
+    # entity-rooms chunk ①: the deny now reaches the loop via the once-per-run
+    # ``ctx.resolved_profile`` (resolved in execute_run). For a no-pocket /sites
+    # svelte-create turn the resolved profile == the surface base, so its deny
+    # matches the surface deny above.
+    resolved = captured.get("resolved_profile")
+    assert resolved is not None, "execute_run must stash ctx.resolved_profile"
+    assert resolved.deny_mcp_tool_ids == deny
 
 
 async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
@@ -737,6 +745,7 @@ async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
 
     async def _capture_ctx(spec, ctx):
         captured["surface_context"] = ctx.surface_context
+        captured["resolved_profile"] = ctx.resolved_profile
         return
         yield  # pragma: no cover - make this an async generator
 
@@ -764,3 +773,8 @@ async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
     assert surface_context is not None
     deny = resolve_profile(surface_context.kind, surface_context.meta).deny_mcp_tool_ids
     assert deny == frozenset()
+    # entity-rooms chunk ①: the legacy / no-pocket path still resolves a profile
+    # (the GENERIC base) — its deny is empty, so the run is unchanged.
+    resolved = captured.get("resolved_profile")
+    assert resolved is not None
+    assert resolved.deny_mcp_tool_ids == frozenset()

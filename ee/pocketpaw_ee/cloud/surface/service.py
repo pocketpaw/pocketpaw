@@ -34,6 +34,17 @@
 # regression. The deny set on the svelte row is now ENFORCED end-to-end (it is
 # threaded to the OSS backend's ``run`` via ``deny_mcp_tool_ids`` — see
 # ``run_core._drive_agent_loop`` → ``AgentPool.run`` → ``ClaudeSDKBackend.run``).
+# Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①)
+# — added ``compose_entity_profile(base, override)``, the PURE (no-I/O) helper
+# that folds an entity pocket's ``PocketSurfaceProfile`` override (the
+# JSON-shaped dict from ``Pocket.surface_profile``, lists not frozensets) OVER a
+# base ``SurfaceProfile`` resolved from the surface kind. Precedence: ripple_mode
+# entity-wins-if-set else base; deny_mcp_tool_ids UNION (hard cap grows);
+# allowed_sdk_tools / skill_names UNION; system_message_override entity-wins-if-set.
+# A ``None`` / empty override returns the base unchanged → zero regression for the
+# no-pocket / legacy path. ``resolve_profile`` stays PURE/no-I/O (the hot lookup);
+# the actual once-per-run async pocket load that supplies the override dict lives
+# tenant-scoped in ``run_core.execute_run`` (entity I/O never enters this module).
 
 from __future__ import annotations
 
@@ -126,6 +137,64 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
             return _SITES_SVELTE_CREATE_PROFILE
         return _DEFAULT_PROFILE
     return _PROFILES.get(surface_kind, _DEFAULT_PROFILE)
+
+
+def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None) -> SurfaceProfile:
+    """Fold an entity pocket's ``surface_profile`` override OVER a base profile.
+
+    PURE — no I/O. ``base`` is the surface-kind profile from ``resolve_profile``;
+    ``override`` is the JSON-shaped dict persisted on ``Pocket.surface_profile``
+    (the ``PocketSurfaceProfile`` mirror, with plain ``list``s where the
+    descriptor wants ``frozenset``s, and ``ripple_mode``/``allowed_sdk_tools``/
+    ``system_message_override`` optionally ``None`` = "no opinion").
+
+    Compose precedence (the entity-rooms payoff):
+
+      * ``ripple_mode`` — entity wins WHEN SET (non-``None``), else base. A
+        ``None`` override means "no opinion — fall back to the surface default."
+      * ``deny_mcp_tool_ids`` — UNION. The entity's denies ADD to the base's;
+        the hard cap can only GROW, never shrink (an entity can't re-enable a
+        tool a surface forbade).
+      * ``allowed_sdk_tools`` — UNION across the two sides, treating ``None`` as
+        "no contribution." If BOTH sides are ``None`` the result stays ``None``
+        (no surface restriction); an empty frozenset would wrongly deny all.
+      * ``skill_names`` — UNION (the entity adds its skills to the base set).
+      * ``system_message_override`` — entity wins WHEN SET, else base.
+
+    ``override`` of ``None`` (no per-entity profile) returns ``base`` unchanged —
+    the no-pocket / legacy path, byte-identical to today's behavior.
+    """
+    if override is None:
+        return base
+
+    # ripple_mode: entity wins when set, else base.
+    ripple_mode = override.get("ripple_mode") or base.ripple_mode
+
+    # deny: union of base + entity (the hard cap only grows).
+    deny = base.deny_mcp_tool_ids | frozenset(override.get("deny_mcp_tool_ids") or ())
+
+    # skill_names: union.
+    skills = base.skill_names | frozenset(override.get("skill_names") or ())
+
+    # allowed_sdk_tools: union, but None on BOTH sides stays None (no
+    # restriction). An empty frozenset would deny every SDK tool, so we only
+    # produce a concrete set when at least one side contributes one.
+    entity_allow = override.get("allowed_sdk_tools")
+    if base.allowed_sdk_tools is None and entity_allow is None:
+        allowed: frozenset[str] | None = None
+    else:
+        allowed = (base.allowed_sdk_tools or frozenset()) | frozenset(entity_allow or ())
+
+    # system_message_override: entity wins when set, else base.
+    sys_override = override.get("system_message_override") or base.system_message_override
+
+    return SurfaceProfile(
+        ripple_mode=ripple_mode,
+        allowed_sdk_tools=allowed,
+        deny_mcp_tool_ids=deny,
+        skill_names=skills,
+        system_message_override=sys_override,
+    )
 
 
 # Handler registry: SurfaceKind -> async callable returning the preamble.
@@ -305,4 +374,4 @@ async def resolve_surface_context(
     )
 
 
-__all__ = ["resolve_surface_context", "resolve_profile"]
+__all__ = ["resolve_surface_context", "resolve_profile", "compose_entity_profile"]
