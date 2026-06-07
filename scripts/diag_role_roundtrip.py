@@ -16,10 +16,9 @@ async def main() -> int:
 
     from beanie import init_beanie
     from motor.motor_asyncio import AsyncIOMotorClient
-
-    from ee.cloud.memory.bootstrap import register_default_backend
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     await init_beanie(
         connection_string=uri,
@@ -47,7 +46,7 @@ async def main() -> int:
     await manager.add_to_session(bus_key, "assistant", "hi assistant 2")
 
     print("\n--- raw Mongo dump ---")
-    from ee.cloud.models.message import Message
+    from pocketpaw_ee.cloud.models.message import Message
 
     rows = await Message.find({"session_key": ui_key}).sort("createdAt").to_list()
     for m in rows:

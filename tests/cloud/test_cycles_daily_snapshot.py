@@ -13,11 +13,10 @@ import types
 from datetime import UTC, date, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.realtime.events import CycleSnapshotted
-from ee.cloud.cycles import service as cycles_service
-from ee.cloud.cycles.dto import CreateCycleRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.realtime.events import CycleSnapshotted
+from pocketpaw_ee.cloud.cycles import service as cycles_service
+from pocketpaw_ee.cloud.cycles.dto import CreateCycleRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 
@@ -54,9 +53,9 @@ def _install_fake_tasks(tasks_to_return: list[_FakeTask] | None = None) -> None:
     job's behavior can be exercised without depending on PR 2 having
     landed.
     """
-    mod_tasks = types.ModuleType("ee.cloud.tasks")
-    mod_service = types.ModuleType("ee.cloud.tasks.service")
-    mod_dto = types.ModuleType("ee.cloud.tasks.dto")
+    mod_tasks = types.ModuleType("pocketpaw_ee.cloud.tasks")
+    mod_service = types.ModuleType("pocketpaw_ee.cloud.tasks.service")
+    mod_dto = types.ModuleType("pocketpaw_ee.cloud.tasks.dto")
 
     class _ListReq:
         def __init__(self, cycle_id: str | None = None, **_: object) -> None:
@@ -71,13 +70,17 @@ def _install_fake_tasks(tasks_to_return: list[_FakeTask] | None = None) -> None:
     mod_tasks.service = mod_service  # type: ignore[attr-defined]
     mod_tasks.dto = mod_dto  # type: ignore[attr-defined]
 
-    sys.modules["ee.cloud.tasks"] = mod_tasks
-    sys.modules["ee.cloud.tasks.service"] = mod_service
-    sys.modules["ee.cloud.tasks.dto"] = mod_dto
+    sys.modules["pocketpaw_ee.cloud.tasks"] = mod_tasks
+    sys.modules["pocketpaw_ee.cloud.tasks.service"] = mod_service
+    sys.modules["pocketpaw_ee.cloud.tasks.dto"] = mod_dto
 
 
 def _uninstall_fake_tasks() -> None:
-    for name in ("ee.cloud.tasks", "ee.cloud.tasks.service", "ee.cloud.tasks.dto"):
+    for name in (
+        "pocketpaw_ee.cloud.tasks",
+        "pocketpaw_ee.cloud.tasks.service",
+        "pocketpaw_ee.cloud.tasks.dto",
+    ):
         sys.modules.pop(name, None)
 
 
@@ -217,7 +220,7 @@ async def test_snapshot_noop_when_tasks_unavailable(monkeypatch) -> None:
 async def test_snapshot_all_active_handles_multiple_workspaces(fake_tasks) -> None:
     """The job-level wrapper iterates every active cycle in the
     workspace and counts how many got a fresh point."""
-    from ee.cloud.cycles import snapshot_job
+    from pocketpaw_ee.cloud.cycles import snapshot_job
 
     fake_tasks.append(_FakeTask("in_progress"))
 

@@ -21,8 +21,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
-from ee.cloud.pockets.layouts import (
+from pocketpaw_ee.cloud.pockets.layouts import (
     UserPocketTemplate,
     UserTemplateStore,
     export_layout_yaml,

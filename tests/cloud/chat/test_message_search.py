@@ -7,10 +7,9 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.chat import message_service
-from ee.cloud.models.group import Group
-from ee.cloud.models.message import Message
+from pocketpaw_ee.cloud.chat import message_service
+from pocketpaw_ee.cloud.models.group import Group
+from pocketpaw_ee.cloud.models.message import Message
 
 
 async def _mk_channel(ws: str, name: str, members: list[str]) -> Group:

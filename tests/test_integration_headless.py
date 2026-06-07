@@ -621,11 +621,13 @@ class TestToolBridgePipelineIntegration:
         """Non-SDK backends split into two groups by pocket_specialist integration.
 
         Function-tool bridge backends (``openai_agents``, ``google_adk``) receive
-        ``PocketSpecialistTool`` as a native function tool, so their count is
-        exactly one more than shell-CLI backends (``opencode``, ``codex_cli``,
+        ``PocketSpecialistTool`` as a native function tool, so — when the
+        enterprise package ``pocketpaw_ee`` is installed — their count is exactly
+        one more than shell-CLI backends (``opencode``, ``codex_cli``,
         ``copilot_sdk``), which dispatch the specialist via
         ``cloud_pocket_specialist_create`` from ``_CLOUD_HANDLERS`` instead.
-        See ``_SPECIALIST_FUNCTION_TOOL_BACKENDS`` in ``tool_bridge.py``.
+        See ``_SPECIALIST_FUNCTION_TOOL_BACKENDS`` in ``tool_bridge.py``. On an
+        OSS-only install the specialist is absent and the groups match exactly.
 
         Within each group the counts must match exactly. Any other divergence
         is a backend-specific exclusion that crept in by accident.
@@ -649,10 +651,18 @@ class TestToolBridgePipelineIntegration:
 
         fn_count = next(iter(fn_counts.values()))
         cli_count = next(iter(cli_counts.values()))
-        assert fn_count == cli_count + 1, (
-            f"Function-tool backends ({fn_count}) should have exactly one more "
-            f"tool than shell-CLI backends ({cli_count}) — the pocket_specialist "
-            f"function tool. Got fn={fn_counts}, cli={cli_counts}."
+        # The extra function tool is PocketSpecialistTool, supplied by the
+        # enterprise package (pocketpaw_ee). On an OSS-only install it is
+        # absent, so the two groups match exactly; with pocketpaw_ee installed
+        # the function-tool backends carry exactly one more.
+        import importlib.util
+
+        specialist_delta = 1 if importlib.util.find_spec("pocketpaw_ee") else 0
+        assert fn_count == cli_count + specialist_delta, (
+            f"Function-tool backends ({fn_count}) should have exactly "
+            f"{specialist_delta} more tool(s) than shell-CLI backends ({cli_count}) "
+            f"— the pocket_specialist function tool, present only when "
+            f"pocketpaw_ee is installed. Got fn={fn_counts}, cli={cli_counts}."
         )
 
     def test_claude_sdk_backend_has_fewer_tools_than_others(self):

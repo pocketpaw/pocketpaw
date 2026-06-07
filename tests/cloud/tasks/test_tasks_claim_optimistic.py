@@ -12,10 +12,9 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.tasks import service as tasks_service
-from ee.cloud.tasks.dto import AssigneeDTO, ClaimTaskRequest, CreateTaskRequest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.tasks import service as tasks_service
+from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, ClaimTaskRequest, CreateTaskRequest
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
 

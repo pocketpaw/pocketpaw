@@ -20,8 +20,7 @@ Beanie, no subprocess. They lock in:
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.kb.workspace_aggregator import (
+from pocketpaw_ee.cloud.kb.workspace_aggregator import (
     AggregatedArticle,
     aggregate_workspace_articles,
 )

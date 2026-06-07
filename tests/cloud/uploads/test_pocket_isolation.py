@@ -11,9 +11,9 @@ import uuid
 from datetime import datetime
 
 import pytest
+from pocketpaw_ee.cloud.files.service import UnifiedFilesService
+from pocketpaw_ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 
-from ee.cloud.files.service import UnifiedFilesService
-from ee.cloud.uploads.mongo_store import LIST_WORKSPACE_ONLY, MongoFileStore
 from pocketpaw.uploads.file_store import FileRecord
 
 

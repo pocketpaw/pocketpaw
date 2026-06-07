@@ -16,15 +16,14 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import (
     ConflictError,
     Forbidden,
     NotFound,
     SeatLimitError,
 )
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceDeleted,
     WorkspaceInviteAccepted,
     WorkspaceInviteCreated,
@@ -34,10 +33,10 @@ from ee.cloud._core.realtime.events import (
     WorkspaceMemberRole,
     WorkspaceUpdated,
 )
-from ee.cloud.models.invite import Invite as _InviteDoc
-from ee.cloud.models.user import User as _UserDoc
-from ee.cloud.workspace import service as workspace_service
-from ee.cloud.workspace.dto import (
+from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.user import User as _UserDoc
+from pocketpaw_ee.cloud.workspace import service as workspace_service
+from pocketpaw_ee.cloud.workspace.dto import (
     CreateInviteRequest,
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
@@ -82,7 +81,7 @@ def captured_legacy_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, d
         async def emit(self, name: str, payload: dict) -> None:
             events.append((name, payload))
 
-    monkeypatch.setattr("ee.cloud.workspace.service.event_bus", _FakeBus())
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.event_bus", _FakeBus())
     return events
 
 
@@ -91,7 +90,7 @@ def resolver_mock(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Stub the resolver so get_resolver() doesn't explode (real one
     needs init_realtime which we don't run in unit tests)."""
     mock = MagicMock()
-    monkeypatch.setattr("ee.cloud.workspace.service.get_resolver", lambda: mock)
+    monkeypatch.setattr("pocketpaw_ee.cloud.workspace.service.get_resolver", lambda: mock)
     return mock
 
 
@@ -215,7 +214,9 @@ async def test_remove_member_emits_both_paths(
 
 
 async def test_create_invite_seat_limit(owner, monkeypatch) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -231,7 +232,9 @@ async def test_create_invite_seat_limit(owner, monkeypatch) -> None:
 
 
 async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -246,7 +249,9 @@ async def test_create_invite_rejects_duplicate_pending(owner, monkeypatch) -> No
 
 
 async def test_create_invite_emits_invite_created(owner, recording_bus, monkeypatch) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -265,7 +270,9 @@ async def test_create_invite_to_existing_user_includes_user_id_and_notifies(
     async def fake_notify(**kwargs):
         notifications.append(kwargs)
 
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", fake_notify)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", fake_notify
+    )
     invitee = await _seed_user(email="invitee@x.c")
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
@@ -284,7 +291,9 @@ async def test_create_invite_to_existing_user_includes_user_id_and_notifies(
 async def test_accept_invite_adds_member_and_emits(
     owner, recording_bus, resolver_mock, monkeypatch
 ) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     invitee = await _seed_user(email="invitee@x.c")
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
@@ -306,7 +315,9 @@ async def test_accept_invite_adds_member_and_emits(
 
 
 async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -327,7 +338,9 @@ async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
 
 
 async def test_revoke_invite_emits_invite_revoked(owner, recording_bus, monkeypatch) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
     )
@@ -340,7 +353,9 @@ async def test_revoke_invite_emits_invite_revoked(owner, recording_bus, monkeypa
 
 
 async def test_validate_invite_returns_workspace_name(owner, monkeypatch) -> None:
-    monkeypatch.setattr("ee.cloud.workspace.service.notifications_service.create", _async_noop)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="Acme", slug="acme")
     )

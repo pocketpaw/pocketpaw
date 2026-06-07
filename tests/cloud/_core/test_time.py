@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 
-from ee.cloud._core.time import iso_utc
+from pocketpaw_ee.cloud._core.time import iso_utc
 
 
 def test_none_returns_none() -> None:

@@ -22,16 +22,16 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from soul_protocol.engine.journal import open_journal
-from soul_protocol.spec.journal import Actor, EventEntry
-
-from ee.cloud.license import require_license
-from ee.cloud.pockets.journal_stream_router import (
+from pocketpaw_ee.cloud.license import require_license
+from pocketpaw_ee.cloud.pockets.journal_stream_router import (
     _entry_matches_pocket,
     router,
 )
-from ee.cloud.shared.deps import require_pocket_edit
-from ee.journal_dep import get_journal, reset_journal_cache
+from pocketpaw_ee.cloud.shared.deps import require_pocket_edit
+from soul_protocol.engine.journal import open_journal
+from soul_protocol.spec.journal import Actor, EventEntry
+
+from pocketpaw.journal_dep import get_journal, reset_journal_cache
 
 # ---------------------------------------------------------------------------
 # Fixtures

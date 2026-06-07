@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.uploads.paths import (
+from pocketpaw_ee.cloud.uploads.paths import (
     basename,
     is_subpath,
     join_path,

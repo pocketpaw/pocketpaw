@@ -122,7 +122,8 @@ class TestSearch:
 class TestProtocolConformance:
     def test_satisfies_memory_store_protocol(self):
         """Structural type check — MongoMemoryStore conforms to MemoryStoreProtocol."""
-        from ee.cloud.memory.mongo_store import MongoMemoryStore
+        from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+
         from pocketpaw.memory.protocol import MemoryStoreProtocol
 
         store: MemoryStoreProtocol = MongoMemoryStore()  # static check via assignment
@@ -180,8 +181,7 @@ class TestEdgeCases:
         entry_id = await store.save(_long_term("owned", user_id="u7"))
         # Read the raw document to confirm metadata is clean.
         from beanie import PydanticObjectId
-
-        from ee.cloud.memory.documents import MemoryFactDoc
+        from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
 
         raw = await MemoryFactDoc.get(PydanticObjectId(entry_id))
         assert raw is not None

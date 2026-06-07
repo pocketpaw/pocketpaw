@@ -21,10 +21,22 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from ee.cloud.shared.events import event_bus
+from pocketpaw._registry import first
 from pocketpaw.connectors.registry import ConnectorRegistry, _create_native_adapter
 
 logger = logging.getLogger(__name__)
+
+
+def _get_event_bus() -> Any:
+    """Return the event bus from the registered provider, or ``None``.
+
+    The bus is an enterprise extension (entry-point group
+    ``pocketpaw.event_bus``). An OSS install with no provider has no
+    cross-domain bus — the connector listener simply does not register.
+    """
+    provider = first("pocketpaw.event_bus")
+    return provider.get_event_bus() if provider else None
+
 
 # Topics shared with ee/cloud/connectors/service.py
 EXEC_REQUESTED = "connector.exec.requested"
@@ -51,8 +63,12 @@ def register_listener(connectors_dir: Path | None = None) -> None:
     global _registered
     if _registered:
         return
+    bus = _get_event_bus()
+    if bus is None:
+        logger.debug("connector bus listener skipped — no event_bus provider")
+        return
     handler = _build_handler(connectors_dir or Path("connectors"))
-    event_bus.subscribe(EXEC_REQUESTED, handler)
+    bus.subscribe(EXEC_REQUESTED, handler)
     _registered = True
     logger.info("connector bus listener registered on %s", EXEC_REQUESTED)
 
@@ -160,7 +176,11 @@ async def _emit_completed(
     connector: str = "",
     action: str = "",
 ) -> None:
-    await event_bus.emit(
+    bus = _get_event_bus()
+    if bus is None:
+        logger.debug("connector exec result dropped — no event_bus provider")
+        return
+    await bus.emit(
         EXEC_COMPLETED,
         {
             "request_id": request_id,

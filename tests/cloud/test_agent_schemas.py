@@ -8,9 +8,7 @@ new ScopeAssignmentRequest / ScopeAssignmentResponse envelopes.
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError as PydanticValidationError
-
-from ee.cloud.agents.dto import (
+from pocketpaw_ee.cloud.agents.dto import (
     AgentResponse,
     CreateAgentRequest,
     DiscoverRequest,
@@ -18,6 +16,7 @@ from ee.cloud.agents.dto import (
     ScopeAssignmentResponse,
     UpdateAgentRequest,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 
 def test_create_agent_required_fields():

@@ -33,18 +33,18 @@ def _require_enterprise() -> None:
     """Skip the calling fixture if the ee/cloud dependencies are missing.
 
     The fixtures in this module mount the real ee/cloud router tree, which
-    pulls in ``beanie``, ``motor``, ``fastapi-users``, etc. Those only land
-    when the ``enterprise`` extra is installed (``uv sync --extra enterprise``
-    or the package ``[enterprise]`` install). When they're missing we emit
-    a ``skip`` rather than an ``ImportError`` so the rest of the ``tests/ee/``
-    suite keeps collecting.
+    pulls in ``beanie``, ``motor``, ``fastapi-users``, etc. Those ship with
+    the ``pocketpaw-ee`` package (ee/), which is installed by the ``ee``
+    dependency group (``uv sync --dev --group ee``). When they're missing we
+    emit a ``skip`` rather than an ``ImportError`` so the rest of the
+    ``tests/ee/`` suite keeps collecting.
     """
 
     for module in ("beanie", "motor", "mongomock_motor"):
         if importlib.util.find_spec(module) is None:
             pytest.skip(
                 f"Shared ee fixtures require the '{module}' module "
-                "(install with: uv sync --extra enterprise).",
+                "(install with: uv sync --dev --group ee).",
                 allow_module_level=False,
             )
 
@@ -109,7 +109,7 @@ def license_env(_license_env_vars: dict[str, str]):
     """
 
     with patch.dict(os.environ, _license_env_vars):
-        import ee.cloud.license as lic_mod
+        import pocketpaw_ee.cloud.license as lic_mod
 
         lic_mod._cached_license = None
         lic_mod._license_error = None
@@ -142,9 +142,8 @@ async def beanie_test_db():
 
     from beanie import init_beanie
     from mongomock_motor import AsyncMongoMockClient
-
-    from ee.cloud.memory.documents import MemoryFactDoc
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     db_name = f"test_ee_shared_{uuid.uuid4().hex[:8]}"
     client = AsyncMongoMockClient()
@@ -177,7 +176,7 @@ async def app(license_env, beanie_test_db) -> FastAPI:
 
     _require_enterprise()
 
-    from ee.cloud import mount_cloud
+    from pocketpaw_ee.cloud import mount_cloud
 
     test_app = FastAPI()
 

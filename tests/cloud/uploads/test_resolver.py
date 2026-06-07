@@ -6,8 +6,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+from pocketpaw_ee.cloud.uploads.resolver import EEUploadResolver, resolve_media_paths_scoped
 
-from ee.cloud.uploads.resolver import EEUploadResolver, resolve_media_paths_scoped
 from pocketpaw.uploads.file_store import FileRecord
 from pocketpaw.uploads.local import LocalStorageAdapter
 

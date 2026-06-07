@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.models.message import Message
-from ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.message import Message
+from pocketpaw_ee.cloud.models.session import Session
 
 
 class TestMessageDiscriminator:
@@ -67,7 +66,7 @@ class TestMessageDiscriminator:
             )
 
     def test_pocket_message_cannot_carry_mentions(self):
-        from ee.cloud.models.message import Mention
+        from pocketpaw_ee.cloud.models.message import Mention
 
         with pytest.raises(ValueError, match="must not have mentions"):
             Message(

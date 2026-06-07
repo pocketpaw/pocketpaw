@@ -96,9 +96,7 @@ class TestAnthropicCachePatch:
             {"type": "text", "text": "Header block A. " * 100},
             {"type": "text", "text": "Header block B. " * 200},
         ]
-        system, _ = _format_messages(
-            [SystemMessage(content=blocks), HumanMessage(content="hi")]
-        )
+        system, _ = _format_messages([SystemMessage(content=blocks), HumanMessage(content="hi")])
         assert isinstance(system, list)
         assert len(system) == 2
         # First block untagged, last block carries cache_control.
@@ -119,9 +117,7 @@ class TestAnthropicCachePatch:
             },
             {"type": "text", "text": "Trailing. " * 200},
         ]
-        system, _ = _format_messages(
-            [SystemMessage(content=blocks), HumanMessage(content="hi")]
-        )
+        system, _ = _format_messages([SystemMessage(content=blocks), HumanMessage(content="hi")])
         assert system[0]["cache_control"] == {"type": "ephemeral"}
         # Patch must not add a second cache breakpoint.
         assert "cache_control" not in system[1]
@@ -133,9 +129,7 @@ class TestAnthropicCachePatch:
         from langchain_anthropic.chat_models import _format_messages
 
         blocks = [{"type": "text", "text": "Small system."}]
-        system, _ = _format_messages(
-            [SystemMessage(content=blocks), HumanMessage(content="hi")]
-        )
+        system, _ = _format_messages([SystemMessage(content=blocks), HumanMessage(content="hi")])
         assert isinstance(system, list)
         assert "cache_control" not in system[0]
 
@@ -150,9 +144,7 @@ class TestAnthropicCachePatch:
 
         assert first is second  # same function object after the second call
 
-        system, _ = first(
-            [SystemMessage(content=long_prompt), HumanMessage(content="hi")]
-        )
+        system, _ = first([SystemMessage(content=long_prompt), HumanMessage(content="hi")])
         # Exactly one cache breakpoint after two patch installs.
         assert isinstance(system, list)
         assert len(system) == 1

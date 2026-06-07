@@ -13,12 +13,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from ee.agent.pocket_specialist.runtime import (
+from pocketpaw_ee.agent.pocket_specialist.runtime import (
     PocketSpecialistCreateInput,
     PocketSpecialistHints,
     run_specialist,
 )
+
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 
@@ -103,11 +103,11 @@ class TestRunSpecialistHappyPath:
 
         with (
             patch(
-                "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
                 return_value=fake_backend,
             ),
             patch(
-                "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
                 side_effect=_persist_factory_stub(captured_pocket),
             ),
         ):
@@ -137,11 +137,11 @@ class TestRunSpecialistHappyPath:
 
         with (
             patch(
-                "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
                 return_value=fake_backend,
             ),
             patch(
-                "ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.make_persist_pocket_tool",
                 side_effect=_persist_factory_stub(captured_pocket),
             ),
         ):
@@ -179,7 +179,7 @@ class TestRunSpecialistFailureMode:
 
         with (
             patch(
-                "ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
+                "pocketpaw_ee.agent.pocket_specialist.runtime.AgentRouter.create_isolated_backend",
                 return_value=fake_backend,
             ),
         ):

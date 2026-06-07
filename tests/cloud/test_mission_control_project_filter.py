@@ -12,12 +12,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud.mission_control import service as mc_service
+from pocketpaw_ee.cloud.mission_control.dto import ListWorkItemsRequest
 
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud.mission_control import service as mc_service
-from ee.cloud.mission_control.dto import ListWorkItemsRequest
-from ee.instinct.models import ActionTrigger
-from ee.instinct.store import InstinctStore
+from pocketpaw.instinct.models import ActionTrigger
+from pocketpaw.instinct.store import InstinctStore
 
 
 def _ctx(workspace_id: str | None = "w1", user_id: str = "u1") -> RequestContext:
@@ -46,7 +46,9 @@ def _patch_store(monkeypatch, store: InstinctStore):
     monkeypatch.setattr(mc_service, "get_instinct_store", lambda: store)
     # Façade composes Tasks alongside Nudges; stub the Tasks read so the
     # Instinct-only project-filter tests don't need a Beanie test DB.
-    monkeypatch.setattr("ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.tasks.service.agent_list_tasks", AsyncMock(return_value=[])
+    )
     yield
 
 

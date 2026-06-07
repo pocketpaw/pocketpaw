@@ -80,6 +80,9 @@ async def run_whatsapp_bot(settings: Settings) -> None:
         host=settings.web_host,
         port=settings.web_port,
         log_level="info",
+        # Bound graceful shutdown — uvicorn's default (None) waits forever
+        # for open connections, hanging Ctrl+C / the port.
+        timeout_graceful_shutdown=5,
     )
     server = uvicorn.Server(config)
 

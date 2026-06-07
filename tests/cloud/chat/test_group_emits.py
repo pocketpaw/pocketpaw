@@ -15,17 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from ee.cloud.chat import group_service
-from ee.cloud.chat.schemas import (
+from pocketpaw_ee.cloud.chat import group_service
+from pocketpaw_ee.cloud.chat.schemas import (
     AddGroupAgentRequest,
     CreateGroupRequest,
     UpdateGroupAgentRequest,
     UpdateGroupRequest,
 )
-from ee.cloud.models.group import Group as _GroupDoc
-from ee.cloud.models.group import GroupAgent as _GroupAgentDoc
-from ee.cloud.realtime.events import (
+from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
+from pocketpaw_ee.cloud.models.group import GroupAgent as _GroupAgentDoc
+from pocketpaw_ee.cloud.realtime.events import (
     GroupAgentAdded,
     GroupAgentRemoved,
     GroupAgentUpdated,
@@ -48,7 +47,7 @@ async def _empty_lookups(_groups):
 def patched_lookups(monkeypatch):
     """Replace ``_populate_lookups_for_domain_groups`` with an empty stub."""
     monkeypatch.setattr(
-        "ee.cloud.chat.group_service._populate_lookups_for_domain_groups", _empty_lookups
+        "pocketpaw_ee.cloud.chat.group_service._populate_lookups_for_domain_groups", _empty_lookups
     )
 
 
@@ -56,7 +55,7 @@ def patched_lookups(monkeypatch):
 def resolver_mock(monkeypatch):
     """Replace ``get_resolver()`` so we can assert invalidate_group calls."""
     rmock = MagicMock()
-    monkeypatch.setattr("ee.cloud.chat.group_service.get_resolver", lambda: rmock)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.group_service.get_resolver", lambda: rmock)
     return rmock
 
 
@@ -368,8 +367,8 @@ async def test_get_or_create_agent_dm_emits_when_created(
     )
     fake_agent_cls = MagicMock()
     fake_agent_cls.get = AsyncMock(return_value=fake_agent_doc)
-    monkeypatch.setattr("ee.cloud.models.agent.Agent", fake_agent_cls)
-    monkeypatch.setattr("ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
+    monkeypatch.setattr("pocketpaw_ee.cloud.models.agent.Agent", fake_agent_cls)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
 
     await group_service.get_or_create_agent_dm("w1", "u1", "a1")
 
@@ -398,8 +397,8 @@ async def test_get_or_create_agent_dm_no_emit_when_existing(
     )
     fake_agent_cls = MagicMock()
     fake_agent_cls.get = AsyncMock(return_value=fake_agent_doc)
-    monkeypatch.setattr("ee.cloud.models.agent.Agent", fake_agent_cls)
-    monkeypatch.setattr("ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
+    monkeypatch.setattr("pocketpaw_ee.cloud.models.agent.Agent", fake_agent_cls)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.group_service.PydanticObjectId", lambda x: x)
 
     await group_service.get_or_create_agent_dm("w1", "u1", "a1")
 
@@ -425,7 +424,7 @@ async def test_join_group_allows_channel_type(
 @pytest.mark.asyncio
 async def test_join_group_still_rejects_private(mongo_db, recording_bus):
     """Private groups must remain invite-only."""
-    from ee.cloud.shared.errors import Forbidden
+    from pocketpaw_ee.cloud.shared.errors import Forbidden
 
     group = await _make_group(owner="u1", type="private", members=["u1"])
 

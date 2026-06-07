@@ -16,9 +16,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-
-from ee.cloud._core.realtime.events import FileReady
-from ee.cloud.extraction.adapter import ExtractionResult
+from pocketpaw_ee.cloud._core.realtime.events import FileReady
+from pocketpaw_ee.cloud.extraction.adapter import ExtractionResult
 
 
 class _FakeChain:
@@ -73,11 +72,11 @@ def _patch_listener(
     ingest: AsyncMock | None = None,
 ):
     """Wire the listener's collaborators with test doubles."""
-    from ee.cloud.uploads import listeners
+    from pocketpaw_ee.cloud.uploads import listeners
 
     if chain is not None:
         monkeypatch.setattr(
-            "ee.cloud.extraction.build_chain",
+            "pocketpaw_ee.cloud.extraction.build_chain",
             lambda settings: chain,
         )
 
@@ -93,7 +92,7 @@ def _patch_listener(
         monkeypatch.setattr(listeners, "_resolve_adapter", lambda: fake)
 
     if ingest is not None:
-        from ee.cloud.agents import knowledge as kn
+        from pocketpaw_ee.cloud.agents import knowledge as kn
 
         monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
 
@@ -101,7 +100,7 @@ def _patch_listener(
 @pytest.mark.asyncio
 async def test_index_uploaded_file_calls_chain_then_kb(monkeypatch, tmp_path):
     """Happy path: extraction runs, KB ingest gets the right scope/source."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     fake_path = tmp_path / "doc.pdf"
     fake_path.write_bytes(b"unused; chain.run is mocked")
@@ -132,7 +131,7 @@ async def test_index_uploaded_file_calls_chain_then_kb(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_index_skips_when_workspace_id_missing(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
@@ -146,7 +145,7 @@ async def test_index_skips_when_workspace_id_missing(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_index_skips_when_file_id_missing(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
@@ -161,7 +160,7 @@ async def test_index_skips_when_file_id_missing(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_index_skips_when_no_storage_key(monkeypatch):
     """No storage_key in the event → no path to extract from; bail cleanly."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
@@ -185,7 +184,7 @@ async def test_index_skips_when_no_storage_key(monkeypatch):
 async def test_remote_adapter_streams_into_temp_then_extracts(monkeypatch):
     """S3 / GCS path: local_path=None → listener streams adapter.open() bytes
     into a NamedTemporaryFile, runs extraction on it, deletes the file."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="caption from gemini", backend="gemini-flash"))
     adapter = _FakeAdapter(
@@ -231,7 +230,7 @@ async def test_remote_adapter_streams_into_temp_then_extracts(monkeypatch):
 @pytest.mark.asyncio
 async def test_remote_adapter_stream_failure_bails_cleanly(monkeypatch):
     """If adapter.open() raises mid-stream, listener swallows + skips."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="never reached", backend="local"))
     adapter = _FakeAdapter(
@@ -264,7 +263,7 @@ async def test_remote_adapter_temp_suffix_falls_back_to_mime(monkeypatch):
     """Filename has no extension → guess from MIME. Keeps suffix-routed
     extractors (LocalExtractor's pypdf path, etc.) working in the remote
     case too."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="extracted", backend="local"))
     adapter = _FakeAdapter(local_path_value=None, open_chunks=[b"%PDF-1.4 ..."])
@@ -294,7 +293,7 @@ async def test_local_adapter_uses_direct_path_no_temp(monkeypatch, tmp_path):
     """Local-disk adapter: listener uses the direct path, no temp file is
     created — the regression case for the S3 fallback not breaking the
     fast path."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     direct = tmp_path / "doc.pdf"
     direct.write_bytes(b"%PDF-1.4 ...")
@@ -333,14 +332,14 @@ async def test_local_adapter_uses_direct_path_no_temp(monkeypatch, tmp_path):
 async def test_index_skips_when_adapter_unavailable(monkeypatch):
     """Test contexts without the upload router mounted: _resolve_adapter
     returns None → listener logs and skips, never calls extraction."""
-    from ee.cloud.uploads import listeners
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads import listeners
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="ignored", backend="local"))
     ingest = AsyncMock()
     monkeypatch.setattr(listeners, "_resolve_adapter", lambda: None)
-    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: chain)
-    from ee.cloud.agents import knowledge as kn
+    monkeypatch.setattr("pocketpaw_ee.cloud.extraction.build_chain", lambda settings: chain)
+    from pocketpaw_ee.cloud.agents import knowledge as kn
 
     monkeypatch.setattr(kn.KnowledgeService, "ingest_text_to_scope", ingest)
 
@@ -362,7 +361,7 @@ async def test_index_skips_when_adapter_unavailable(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_index_skips_when_extraction_returns_empty(monkeypatch, tmp_path):
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="   ", backend="local"))
     ingest = AsyncMock()
@@ -386,13 +385,15 @@ async def test_index_skips_when_extraction_returns_empty(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_extraction_failure_does_not_propagate(monkeypatch, tmp_path):
     """Chain raises → listener swallows the error and skips ingest."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     class _ExplodingChain:
         async def run(self, *_args, **_kwargs):
             raise RuntimeError("kaboom")
 
-    monkeypatch.setattr("ee.cloud.extraction.build_chain", lambda settings: _ExplodingChain())
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.extraction.build_chain", lambda settings: _ExplodingChain()
+    )
     ingest = AsyncMock()
     _patch_listener(monkeypatch, storage_path=tmp_path / "x", ingest=ingest)
 
@@ -417,7 +418,7 @@ async def test_extraction_failure_does_not_propagate(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_kb_failure_does_not_propagate(monkeypatch, tmp_path):
     """KB ingest raises → listener swallows so the publisher never sees it."""
-    from ee.cloud.uploads.listeners import index_uploaded_file
+    from pocketpaw_ee.cloud.uploads.listeners import index_uploaded_file
 
     chain = _FakeChain(ExtractionResult(text="content", backend="local"))
     ingest = AsyncMock(side_effect=RuntimeError("kb missing"))
@@ -442,10 +443,10 @@ async def test_kb_failure_does_not_propagate(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_register_upload_listeners_subscribes_to_file_ready():
     """Bootstrap path: register_upload_listeners hooks the bus."""
-    from ee.cloud._core.realtime import bus as bus_mod
-    from ee.cloud._core.realtime.audience import AudienceResolver
-    from ee.cloud._core.realtime.bus import InProcessBus
-    from ee.cloud.uploads.listeners import (
+    from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
+    from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
+    from pocketpaw_ee.cloud._core.realtime.bus import InProcessBus
+    from pocketpaw_ee.cloud.uploads.listeners import (
         index_uploaded_file,
         register_upload_listeners,
     )

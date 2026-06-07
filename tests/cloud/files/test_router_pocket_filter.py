@@ -14,9 +14,9 @@ from beanie import init_beanie
 from fastapi import FastAPI, Header
 from fastapi.testclient import TestClient
 from mongomock_motor import AsyncMongoMockClient
+from pocketpaw_ee.cloud.uploads.models import FileUpload
+from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
 
-from ee.cloud.uploads.models import FileUpload
-from ee.cloud.uploads.mongo_store import MongoFileStore
 from pocketpaw.uploads.file_store import FileRecord
 
 
@@ -53,11 +53,11 @@ async def _seed(workspace: str, *, name: str, pocket_id: str | None = None) -> s
 
 def _build_app(monkeypatch, *, member_check):
     """Mount the files router with patched auth + pocket ACL."""
-    from ee.cloud.files.router import router as files_router
+    from pocketpaw_ee.cloud.files.router import router as files_router
 
     app = FastAPI()
-    from ee.cloud.license import require_license
-    from ee.cloud.shared.deps import current_user_id, current_workspace_id
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
     app.dependency_overrides[require_license] = lambda: None
 
@@ -70,7 +70,7 @@ def _build_app(monkeypatch, *, member_check):
     app.dependency_overrides[current_user_id] = _user_dep
     app.dependency_overrides[current_workspace_id] = _workspace_dep
 
-    from ee.cloud.pockets import service as ps
+    from pocketpaw_ee.cloud.pockets import service as ps
 
     monkeypatch.setattr(ps, "is_member", member_check)
 

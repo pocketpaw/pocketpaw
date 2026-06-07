@@ -51,14 +51,14 @@ def mock_vertex(monkeypatch):
 
 
 def test_init_calls_vertexai_init_and_loads_model(mock_vertex) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     VertexMultimodal001(project_id="proj-1", location="us-central1", dim=512)
     mock_vertex["vertexai"].init.assert_called_once_with(project="proj-1", location="us-central1")
 
 
 def test_dim_snaps_to_valid_native_choice(mock_vertex) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     a512 = VertexMultimodal001(project_id="p", dim=512)
     a1408 = VertexMultimodal001(project_id="p", dim=1408)
@@ -81,7 +81,7 @@ def test_init_raises_clear_error_when_sdk_missing(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "vertexai", None)
     monkeypatch.setitem(sys.modules, "vertexai.vision_models", None)
 
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     with pytest.raises(ImportError, match="google-cloud-aiplatform"):
         VertexMultimodal001(project_id="p")
@@ -89,7 +89,7 @@ def test_init_raises_clear_error_when_sdk_missing(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_embed_file_image(mock_vertex, tmp_path: Path) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     img = tmp_path / "diagram.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -109,7 +109,7 @@ async def test_embed_file_image(mock_vertex, tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_embed_file_rejects_non_image_mime(mock_vertex, tmp_path: Path) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     pdf = tmp_path / "doc.pdf"
     pdf.write_bytes(b"%PDF-1.4")
@@ -121,7 +121,7 @@ async def test_embed_file_rejects_non_image_mime(mock_vertex, tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_embed_query_with_text_and_image(mock_vertex) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     adapter = VertexMultimodal001(project_id="p", dim=1408)
     image_bytes = b"\x89PNG\r\n\x1a\n"
@@ -139,7 +139,7 @@ async def test_embed_query_with_text_and_image(mock_vertex) -> None:
 async def test_embed_query_text_only_returns_text_embedding(mock_vertex) -> None:
     """When the call is pure text the SDK returns only a text embedding;
     the adapter must fall back to it instead of returning empty."""
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     # Drop image_embedding so the fallback path is exercised.
     mock_vertex["embed"].image_embedding = None
@@ -154,7 +154,7 @@ async def test_embed_query_text_only_returns_text_embedding(mock_vertex) -> None
 
 @pytest.mark.asyncio
 async def test_embed_query_raises_when_both_embeddings_empty(mock_vertex) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     mock_vertex["embed"].image_embedding = None
     mock_vertex["embed"].text_embedding = None
@@ -165,7 +165,7 @@ async def test_embed_query_raises_when_both_embeddings_empty(mock_vertex) -> Non
 
 
 def test_estimate_cost_for_image_returns_per_image_rate(mock_vertex, tmp_path) -> None:
-    from ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
+    from pocketpaw_ee.cloud.embeddings.vertex_mm001 import VertexMultimodal001
 
     img = tmp_path / "x.png"
     img.write_bytes(b"\x89PNG")

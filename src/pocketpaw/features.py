@@ -1,8 +1,9 @@
 """Feature flag resolution.
 
-Reads OSS settings, but allows ``ee.cloud.features`` to force-on specific
-capabilities when running in cloud mode. ee.cloud is imported lazily so OSS
-builds without the ee package continue to work.
+Reads OSS settings, but lets enterprise capability providers force-on
+specific features when running in cloud mode. Providers are registered via
+the ``pocketpaw.capabilities`` entry-point and discovered through the
+extension registry — core never imports ``pocketpaw_ee`` directly.
 """
 
 from __future__ import annotations
@@ -11,18 +12,17 @@ from pocketpaw.config import Settings
 
 
 def _cloud_override(name: str) -> bool | None:
-    """Return True/False if ee.cloud forces a feature on/off, else None."""
-    try:
-        from ee.cloud import features as cloud_features  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-    getter = getattr(cloud_features, name, None)
-    if getter is None:
-        return None
-    try:
-        return bool(getter())
-    except Exception:
-        return None
+    """Return True/False if a capability provider forces *name*, else None."""
+    from pocketpaw._registry import providers
+
+    for provider in providers("pocketpaw.capabilities"):
+        try:
+            caps = provider.capabilities()
+        except Exception:
+            continue
+        if name in caps:
+            return bool(caps[name])
+    return None
 
 
 def chat_titles_enabled(settings: Settings) -> bool:

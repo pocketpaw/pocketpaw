@@ -11,14 +11,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from pocketpaw.ee.automations.models import (
+from pocketpaw.automations.models import (
     CreateRuleRequest,
     Rule,
     RuleType,
     UpdateRuleRequest,
 )
-from pocketpaw.ee.automations.router import router
-from pocketpaw.ee.automations.store import AutomationStore
+from pocketpaw.automations.router import router
+from pocketpaw.automations.store import AutomationStore
 
 # ============================================================================
 # Helpers / shared factories
@@ -93,7 +93,7 @@ def client(app: FastAPI, tmp_path: Path) -> TestClient:
     """TestClient with the singleton store replaced by a tmp_path-backed instance."""
     isolated_store = AutomationStore(path=tmp_path / "rules.json")
     with patch(
-        "pocketpaw.ee.automations.router.get_automation_store",
+        "pocketpaw.automations.router.get_automation_store",
         return_value=isolated_store,
     ):
         yield TestClient(app)

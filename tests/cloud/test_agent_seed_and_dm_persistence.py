@@ -22,8 +22,7 @@ async def beanie_db():
     """Isolated Beanie session for these tests (all EE documents registered)."""
     from beanie import init_beanie
     from mongomock_motor import AsyncMongoMockClient
-
-    from ee.cloud.models import ALL_DOCUMENTS
+    from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
     db_name = f"test_agent_seed_{uuid.uuid4().hex[:8]}"
     client = AsyncMongoMockClient()
@@ -42,8 +41,8 @@ async def beanie_db():
 
 class TestSeedDefaultAgent:
     async def test_creates_agent_with_pocketpaw_slug(self, beanie_db) -> None:
-        from ee.cloud.auth.core import seed_default_agent
-        from ee.cloud.models.agent import Agent
+        from pocketpaw_ee.cloud.auth.core import seed_default_agent
+        from pocketpaw_ee.cloud.models.agent import Agent
 
         agent, created = await seed_default_agent(workspace_id="ws-1", owner_id="user-1")
         assert agent is not None
@@ -57,8 +56,8 @@ class TestSeedDefaultAgent:
         assert found is not None
 
     async def test_is_idempotent(self, beanie_db) -> None:
-        from ee.cloud.auth.core import seed_default_agent
-        from ee.cloud.models.agent import Agent
+        from pocketpaw_ee.cloud.auth.core import seed_default_agent
+        from pocketpaw_ee.cloud.models.agent import Agent
 
         first, first_created = await seed_default_agent("ws-1", "user-1")
         second, second_created = await seed_default_agent("ws-1", "user-1")
@@ -73,7 +72,7 @@ class TestSeedDefaultAgent:
         assert count == 1
 
     async def test_per_workspace_agents(self, beanie_db) -> None:
-        from ee.cloud.auth.core import seed_default_agent
+        from pocketpaw_ee.cloud.auth.core import seed_default_agent
 
         a1, _ = await seed_default_agent("ws-1", "user-1")
         a2, _ = await seed_default_agent("ws-2", "user-1")
@@ -84,9 +83,9 @@ class TestSeedDefaultAgent:
 
 class TestEnsureDefaultAgentBackfill:
     async def test_backfills_existing_workspaces(self, beanie_db) -> None:
-        from ee.cloud.auth.core import ensure_default_agent_all_workspaces
-        from ee.cloud.models.agent import Agent
-        from ee.cloud.models.workspace import Workspace, WorkspaceSettings
+        from pocketpaw_ee.cloud.auth.core import ensure_default_agent_all_workspaces
+        from pocketpaw_ee.cloud.models.agent import Agent
+        from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
         ws1 = Workspace(name="A", slug="a", owner="u-1", settings=WorkspaceSettings())
         ws2 = Workspace(name="B", slug="b", owner="u-2", settings=WorkspaceSettings())
@@ -103,9 +102,9 @@ class TestEnsureDefaultAgentBackfill:
         assert a2.owner == "u-2"
 
     async def test_backfill_is_idempotent(self, beanie_db) -> None:
-        from ee.cloud.auth.core import ensure_default_agent_all_workspaces
-        from ee.cloud.models.agent import Agent
-        from ee.cloud.models.workspace import Workspace, WorkspaceSettings
+        from pocketpaw_ee.cloud.auth.core import ensure_default_agent_all_workspaces
+        from pocketpaw_ee.cloud.models.agent import Agent
+        from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 
         ws = Workspace(name="A", slug="a", owner="u-1", settings=WorkspaceSettings())
         await ws.insert()
@@ -130,8 +129,8 @@ class TestMongoMemoryStoreAttachments:
     the content — not a second row."""
 
     async def _session(self, workspace_id: str = "ws-1") -> str:
-        from ee.cloud.models.session import Session
-        from ee.cloud.models.user import User, WorkspaceMembership
+        from pocketpaw_ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
 
         user = User(
             email="m@example.com",
@@ -153,8 +152,9 @@ class TestMongoMemoryStoreAttachments:
         return str(user.id)
 
     async def test_attachments_from_metadata_persist_on_single_row(self, beanie_db) -> None:
-        from ee.cloud.memory.mongo_store import MongoMemoryStore
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+        from pocketpaw_ee.cloud.models.message import Message
+
         from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
         await self._session()
@@ -194,8 +194,9 @@ class TestMongoMemoryStoreAttachments:
         assert att.meta["size"] == 137747
 
     async def test_no_attachments_key_yields_empty_list(self, beanie_db) -> None:
-        from ee.cloud.memory.mongo_store import MongoMemoryStore
-        from ee.cloud.models.message import Message
+        from pocketpaw_ee.cloud.memory.mongo_store import MongoMemoryStore
+        from pocketpaw_ee.cloud.models.message import Message
+
         from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
         await self._session()
@@ -218,10 +219,10 @@ class TestMongoMemoryStoreAttachments:
 
 class TestHistoryReturnsAttachments:
     async def test_pocket_history_exposes_attachments(self, beanie_db) -> None:
-        from ee.cloud.models.message import Attachment, Message
-        from ee.cloud.models.session import Session
-        from ee.cloud.models.user import User, WorkspaceMembership
-        from ee.cloud.sessions import service as sessions_service
+        from pocketpaw_ee.cloud.models.message import Attachment, Message
+        from pocketpaw_ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.models.user import User, WorkspaceMembership
+        from pocketpaw_ee.cloud.sessions import service as sessions_service
 
         user = User(
             email="u2@example.com",
@@ -271,9 +272,9 @@ class TestHistoryReturnsAttachments:
 
 class TestListByAgent:
     async def test_filters_sessions_to_given_agent(self, beanie_db) -> None:
-        from ee.cloud.models.session import Session
-        from ee.cloud.sessions import service as sessions_service
-        from ee.cloud.sessions.dto import session_to_wire_dict
+        from pocketpaw_ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.sessions import service as sessions_service
+        from pocketpaw_ee.cloud.sessions.dto import session_to_wire_dict
 
         s_match = Session(
             sessionId="s1",
@@ -311,8 +312,8 @@ class TestListByAgent:
     async def test_respects_soft_delete(self, beanie_db) -> None:
         from datetime import UTC, datetime
 
-        from ee.cloud.models.session import Session
-        from ee.cloud.sessions import service as sessions_service
+        from pocketpaw_ee.cloud.models.session import Session
+        from pocketpaw_ee.cloud.sessions import service as sessions_service
 
         deleted = Session(
             sessionId="s-dead",

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import pytest
-
-from ee.cloud.chat.agent_router import _persist_assistant_message, _persist_user_message
-from ee.cloud.chat.agent_schemas import CloudAgentChatRequest
-from ee.cloud.chat.agent_service import ScopeContext, ScopeKind
+from pocketpaw_ee.cloud.chat.agent_router import _persist_assistant_message, _persist_user_message
+from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
+from pocketpaw_ee.cloud.chat.agent_service import ScopeContext, ScopeKind
 
 
 def _session_ctx() -> ScopeContext:
@@ -33,7 +32,7 @@ async def test_persist_user_message_session_scope(monkeypatch):
         async def insert(self):
             return None
 
-    monkeypatch.setattr("ee.cloud.chat.message_service._MessageDoc", _StubMessage)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.message_service._MessageDoc", _StubMessage)
 
     body = CloudAgentChatRequest(content="hello session")
     mid = await _persist_user_message(_session_ctx(), body)
@@ -65,8 +64,8 @@ async def test_persist_assistant_message_session_scope(monkeypatch):
         def __init__(self, **kw):
             self.__dict__.update(kw)
 
-    monkeypatch.setattr("ee.cloud.chat.message_service._MessageDoc", _StubMessage)
-    monkeypatch.setattr("ee.cloud.chat.message_service._AttachmentDoc", _StubAttachment)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.message_service._MessageDoc", _StubMessage)
+    monkeypatch.setattr("pocketpaw_ee.cloud.chat.message_service._AttachmentDoc", _StubAttachment)
 
     await _persist_assistant_message(_session_ctx(), "hi back", [])
 
@@ -81,7 +80,7 @@ async def test_persist_assistant_message_session_scope(monkeypatch):
 
 def test_message_model_accepts_session_context_type():
     """Validator must accept context_type=session with pocket-shape fields."""
-    from ee.cloud.models.message import Message
+    from pocketpaw_ee.cloud.models.message import Message
 
     # Use model_construct to bypass Beanie's DB-requiring __init__, then run
     # the validator manually — same pattern as tests/cloud/test_models.py.
@@ -101,7 +100,7 @@ def test_message_model_accepts_session_context_type():
 
 def test_message_model_session_rejects_group_field():
     """Validator must reject session messages that carry a group field."""
-    from ee.cloud.models.message import Message
+    from pocketpaw_ee.cloud.models.message import Message
 
     msg = Message.model_construct(
         context_type="session",

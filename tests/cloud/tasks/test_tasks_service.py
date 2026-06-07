@@ -11,17 +11,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-
-from ee.cloud._core.context import RequestContext, ScopeKind
-from ee.cloud._core.errors import Forbidden, NotFound, ValidationError
-from ee.cloud._core.realtime.events import (
+from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.realtime.events import (
     TaskBlocked,
     TaskProposed,
     TaskResolved,
     TaskUpdated,
 )
-from ee.cloud.tasks import service as tasks_service
-from ee.cloud.tasks.dto import (
+from pocketpaw_ee.cloud.tasks import service as tasks_service
+from pocketpaw_ee.cloud.tasks.dto import (
     AssigneeDTO,
     BlockTaskRequest,
     CompleteTaskRequest,
@@ -311,7 +310,7 @@ async def test_list_for_agent_runtime_status_filter() -> None:
         ctx,
         CreateTaskRequest(title="in-progress", assignee=_agent_assignee("agent-a")),
     )
-    from ee.cloud.tasks.dto import ClaimTaskRequest
+    from pocketpaw_ee.cloud.tasks.dto import ClaimTaskRequest
 
     result = await tasks_service.agent_claim_task(
         ctx, created.id, ClaimTaskRequest(agent_id="agent-a")

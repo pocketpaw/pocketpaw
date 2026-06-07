@@ -10,8 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.session import Session
 
 pytestmark = pytest.mark.asyncio
 

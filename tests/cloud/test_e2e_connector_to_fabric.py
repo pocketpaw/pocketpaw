@@ -13,11 +13,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ee.fabric.models import FabricQuery, PropertyDef
-from ee.fabric.store import FabricStore
-from ee.instinct.models import ActionTrigger
-from ee.instinct.store import InstinctStore
 from pocketpaw.connectors.yaml_engine import DirectRESTAdapter, parse_connector_yaml
+from pocketpaw.fabric.models import FabricQuery, PropertyDef
+from pocketpaw.fabric.store import FabricStore
+from pocketpaw.instinct.models import ActionTrigger
+from pocketpaw.instinct.store import InstinctStore
 
 CONNECTORS_DIR = Path(__file__).parent.parent.parent / "connectors"
 

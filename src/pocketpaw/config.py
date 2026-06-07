@@ -34,8 +34,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AfterValidator, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from pocketpaw.security.url_validators import validate_external_url
 
@@ -1168,6 +1168,83 @@ class Settings(BaseSettings):
     max_concurrent_conversations: int = Field(
         default=5, gt=0, description="Max parallel conversations processed simultaneously"
     )
+
+    # Composio — MCP-direct tool provider for the parent cloud chat agent.
+    # Wired into src/pocketpaw/agents/claude_sdk.py::_get_mcp_servers; the
+    # pocket specialist does NOT receive Composio MCP. When api_key is set,
+    # composio_enterprise_id is required to namespace the per-user Composio
+    # user_id (avoids collisions across PocketPaw enterprise deployments
+    # that share one Composio org).
+    composio_api_key: str | None = Field(
+        default=None, description="Composio API key (enables Composio MCP for the parent agent)"
+    )
+    composio_base_url: str | None = Field(
+        default=None,
+        description="Composio base URL. None = Composio cloud; set for self-hosted runtime.",
+    )
+    # ``NoDecode`` keeps pydantic-settings from trying to JSON-parse the raw
+    # env string; the ``field_validator`` below handles CSV → list[str].
+    composio_toolkits: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Allow-list of Composio toolkit slugs (e.g. 'gmail,slack,github'). "
+            "Comma-separated when set via env. Empty = fail closed (no toolkits exposed)."
+        ),
+    )
+    composio_enterprise_id: str | None = Field(
+        default=None,
+        description=(
+            "Namespace prefix for Composio user_id (f'{enterprise_id}:{user_id}'). "
+            "Required when composio_api_key is set."
+        ),
+    )
+    composio_mcp_url_ttl_seconds: int = Field(
+        default=3600,
+        gt=0,
+        description=(
+            "How long per-user Composio tools are cached in-process before "
+            "re-fetching via the provider's ``composio.create(user_id=...)`` + "
+            "``session.tools()``. The Composio call is a network round-trip "
+            "and the per-user toolset rarely changes mid-session, so caching "
+            "covers the common case. Default: 1h."
+        ),
+    )
+    composio_connect_link_inline: bool = Field(
+        default=True,
+        description=(
+            "When True, Composio 'needs auth' responses render as an inline Ripple button "
+            "instead of a raw URL in the chat. Set False to disable if detection is brittle."
+        ),
+    )
+
+    @field_validator("composio_toolkits", mode="before")
+    @classmethod
+    def _parse_composio_toolkits_csv(cls, v: object) -> object:
+        """Accept comma-separated env values (e.g. 'gmail, slack ,github').
+
+        pydantic-settings normally requires JSON for list fields; this
+        before-validator lets ops set the allow-list as plain CSV in
+        ``POCKETPAW_COMPOSIO_TOOLKITS`` without quoting brackets.
+        """
+        if isinstance(v, str):
+            return [item.strip() for item in v.split(",") if item.strip()]
+        return v
+
+    @model_validator(mode="after")
+    def _validate_composio_invariants(self) -> Settings:
+        """Enforce composio_api_key → composio_enterprise_id required.
+
+        Without the enterprise_id namespace, two PocketPaw deployments
+        sharing one Composio org would collide on user_id space. Fail at
+        startup rather than at first tool call.
+        """
+        if self.composio_api_key and not self.composio_enterprise_id:
+            raise ValueError(
+                "composio_enterprise_id is required when composio_api_key is set "
+                "(POCKETPAW_COMPOSIO_ENTERPRISE_ID). Prevents user_id collisions "
+                "across enterprise deployments sharing one Composio org."
+            )
+        return self
 
     @model_validator(mode="after")
     def _migrate_kb_scope(self) -> Settings:

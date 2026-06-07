@@ -11,10 +11,9 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
-from ee.cloud._core.realtime import events as ev_mod
-from ee.cloud._core.realtime.audience import AudienceResolver
-from ee.cloud._core.realtime.events import Event
+from pocketpaw_ee.cloud._core.realtime import events as ev_mod
+from pocketpaw_ee.cloud._core.realtime.audience import AudienceResolver
+from pocketpaw_ee.cloud._core.realtime.events import Event
 
 
 async def _members(_key: str) -> list[str]:

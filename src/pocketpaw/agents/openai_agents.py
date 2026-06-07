@@ -248,6 +248,17 @@ class OpenAIAgentsBackend(BaseAgentBackend):
                 instructions = self._inject_history(instructions, history)
 
             custom_tools = self._build_custom_tools()
+
+            # Composio — per-stream integration tools via the documented
+            # ``composio_openai_agents`` provider, discovered through the
+            # ``pocketpaw.composio_tools`` entry point.
+            from pocketpaw.agents.tool_bridge import composio_tools_for
+
+            composio_tools = composio_tools_for("openai_agents", self.settings)
+            if composio_tools:
+                custom_tools = list(custom_tools) + list(composio_tools)
+                logger.info("Composio: appended %d openai-agents tools", len(composio_tools))
+
             agent = Agent(
                 name="PocketPaw",
                 instructions=instructions,

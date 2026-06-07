@@ -5,11 +5,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-
-from ee.cloud._core.realtime import bus as bus_mod
-from ee.cloud._core.realtime.bus import set_bus
-from ee.cloud._core.realtime.emit import emit
-from ee.cloud._core.realtime.events import GroupCreated
+from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
+from pocketpaw_ee.cloud._core.realtime.bus import set_bus
+from pocketpaw_ee.cloud._core.realtime.emit import emit
+from pocketpaw_ee.cloud._core.realtime.events import GroupCreated
 
 
 @pytest.mark.asyncio
