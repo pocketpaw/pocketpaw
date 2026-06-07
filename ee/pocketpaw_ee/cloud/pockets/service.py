@@ -121,6 +121,14 @@ strings, so no ObjectId cast). The /pockets gallery route passes the ids
 of pockets already published as Sites so they don't appear in both the
 pocket gallery and the sites list. ``None`` is a no-op, so mission
 control / kb / surface / planner callers are unchanged.
+Changes: 2026-06-07 (M3 connector→skill auto-authoring) — added
+``apply_derived_surface_profile``: the SOLE Beanie-write entry point for a
+connector-derived ``PocketSurfaceProfile``. The connectors service derives the
+profile (pure) and calls this; this owns the Pocket-doc write (tenant-filtered,
+mirroring the :1134 assignment) so the connectors package never imports the
+Pocket Beanie model. It OWNS the connector-contributed dims (``skill_names`` /
+``allowed_sdk_tools`` / ``deny_mcp_tool_ids``) and PRESERVES the user-owned
+``ripple_mode`` / ``system_message_override`` already on the pocket.
 Changes: 2026-06-04 (feat/sites-landing-brain) — ``agent_create`` now
 accepts an optional ``pattern`` (alongside the existing ``type_``) and
 stamps both onto the persisted ``Pocket``. The marketing-site brain
@@ -196,6 +204,7 @@ from pocketpaw_ee.cloud.ripple_validator import (
 )
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.shared.events import event_bus
+from pocketpaw_ee.cloud.surface.domain import PocketSurfaceProfile
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +258,76 @@ def _surface_profile_to_dict(sp: Any) -> dict[str, Any] | None:
     if isinstance(sp, dict):
         return dict(sp)
     return None
+
+
+async def apply_derived_surface_profile(
+    workspace_id: str,
+    pocket_id: str,
+    profile: PocketSurfaceProfile | None,
+) -> None:
+    """Persist a CONNECTOR-DERIVED surface profile onto a pocket.
+
+    M3 connector→skill auto-authoring. This is the SOLE Beanie-write path for a
+    connector-derived ``PocketSurfaceProfile`` — the connectors service derives
+    the profile (pure) and calls this so the connectors package never imports the
+    ``Pocket`` Beanie document (cloud Beanie-write boundary, enforced by
+    import-linter).
+
+    Tenancy (cloud rule §7): the doc is loaded by id then verified to belong to
+    ``workspace_id``; a mismatch raises ``NotFound`` rather than writing across
+    tenants.
+
+    Coexistence rule: the derivation OWNS the connector-contributed dims
+    (``skill_names`` / ``allowed_sdk_tools`` / ``deny_mcp_tool_ids``) — it sets
+    them to the union from the pocket's enabled connectors, OVERWRITING any prior
+    connector-derived (or hand-set) values for those dims. It PRESERVES the
+    user-owned ``ripple_mode`` and ``system_message_override`` already on the
+    pocket. ``profile=None`` (no connector contributes anything) clears the
+    connector dims back to empty while still preserving the user-owned dims.
+
+    No event is emitted: this is an internal re-derive triggered by a
+    connector enable/disable that already emitted ``connector.enabled`` /
+    ``connector.disabled``. # no-event — covered by the connector lifecycle event.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if doc.workspace != workspace_id:
+        raise NotFound("pocket", pocket_id)
+
+    existing = getattr(doc, "surface_profile", None)
+    # Preserve the user-owned dims regardless of whether a connector contributes.
+    ripple_mode = getattr(existing, "ripple_mode", None)
+    sys_override = getattr(existing, "system_message_override", None)
+
+    if profile is None:
+        skill_names: list[str] = []
+        allowed_sdk_tools: list[str] | None = None
+        deny_mcp_tool_ids: list[str] = []
+    else:
+        skill_names = list(profile.skill_names)
+        allowed_sdk_tools = (
+            list(profile.allowed_sdk_tools) if profile.allowed_sdk_tools is not None else None
+        )
+        deny_mcp_tool_ids = list(profile.deny_mcp_tool_ids)
+
+    # If nothing remains set on any dim, drop the override entirely (legacy
+    # ``None`` shape) so a pocket that never had connector skills stays clean.
+    if (
+        ripple_mode is None
+        and sys_override is None
+        and not skill_names
+        and allowed_sdk_tools is None
+        and not deny_mcp_tool_ids
+    ):
+        doc.surface_profile = None
+    else:
+        doc.surface_profile = PocketSurfaceProfile(
+            ripple_mode=ripple_mode,
+            allowed_sdk_tools=allowed_sdk_tools,
+            deny_mcp_tool_ids=deny_mcp_tool_ids,
+            skill_names=skill_names,
+            system_message_override=sys_override,
+        )
+    await doc.save()
 
 
 def _pocket_to_domain(doc: _PocketDoc) -> Pocket:

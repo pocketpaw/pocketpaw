@@ -1,3 +1,12 @@
+<!--
+  Connectors documentation.
+  Updated: 2026-06-07 (M3 connector→skill auto-authoring) — documented the
+  optional ``surface_profile`` YAML block and the connector→skill/tool
+  auto-authoring path (derivation at bind/unbind from the full enabled set, the
+  Gmail reference, and the coexistence rule with hand-set ripple_mode /
+  system_message_override).
+-->
+
 # Connectors — Data Source Integration
 
 Connectors bring external data into PocketPaw Pockets. Each service is defined in a YAML file — the engine reads the definition and handles auth, execution, and sync.
@@ -74,7 +83,15 @@ sync:
     name: name
     price: price
     created: created_at
+
+surface_profile:                  # OPTIONAL — connector→skill/tool auto-authoring
+  skill: my_service               # a skill to load in rooms with this connector
+  allow_tools: []                 # tool-id patterns to add to the SDK allowlist
+  deny_tools: []                  # tool-id patterns to deny
 ```
+
+The `surface_profile` block is optional. Connectors without it parse and behave
+exactly as before. See [Connector → Skill / Tool auto-authoring](#connector--skill--tool-auto-authoring) below.
 
 ## Auth Methods
 
@@ -95,6 +112,76 @@ Each action has a trust level that controls how much human oversight the agent n
 | `auto` | Agent executes without asking | Read-only operations (list, search) |
 | `confirm` | Agent asks user before executing | Write operations (create, update, delete) |
 | `restricted` | Requires admin approval | Destructive or financial operations |
+
+## Connector → Skill / Tool auto-authoring
+
+When a connector is **bound to a pocket** (`scope=pocket`), PocketPaw can
+auto-derive that pocket's behavioral profile — the skill the agent loads and the
+tool allow/deny lists — straight from the connector. No hand-setting. Bind Gmail
+to a room and the room's agent gets the Gmail skill automatically; unbind it and
+the skill drops back off.
+
+### The `surface_profile` YAML block
+
+The mapping source is a per-connector field, not a hard-coded table. Add an
+optional `surface_profile` block to the connector YAML:
+
+```yaml
+surface_profile:
+  skill: gmail                    # skill name loaded for rooms with this connector
+  allow_tools: ["mcp__*gmail*"]   # tool-id glob patterns to ALLOW (optional)
+  deny_tools: []                  # tool-id glob patterns to DENY (optional)
+```
+
+All three keys are optional; a block with none of them is treated as no block.
+Connectors with no block contribute nothing.
+
+### How it derives at bind / unbind
+
+A pocket's profile is **derived from ALL of its enabled pocket-scoped
+connectors**, not just the one being toggled:
+
+- **`skill_names`** — the union of every bound connector's `skill`.
+- **`allowed_sdk_tools`** — the union of every connector's `allow_tools`
+  (stays unrestricted/`None` when no connector contributes one).
+- **`deny_mcp_tool_ids`** — the union of every connector's `deny_tools`.
+
+Because it re-derives from the full enabled set every time, **enable and disable
+both converge correctly**: enabling adds a connector's contribution to the union;
+disabling removes the connector from the set, so its contribution drops on the
+next re-derive. The derivation is deterministic and idempotent — re-deriving from
+the same set yields the same profile.
+
+The derived profile flows end-to-end immediately: the entity-aware resolver
+unions it over the surface base, and the run forwards `skill_names` /
+`allowed_sdk_tools` / `deny_mcp_tool_ids` to the agent.
+
+### Coexistence with hand-set profiles
+
+The derivation **owns the connector-contributed dimensions** (`skill_names`,
+`allowed_sdk_tools`, `deny_mcp_tool_ids`) — it sets them to the connector union,
+overwriting any prior values on those dimensions. It **preserves the user-owned
+dimensions** (`ripple_mode`, `system_message_override`) already on the pocket.
+
+Practical consequence: a skill you hand-set on a pocket via the surface_profile
+override may be overwritten the next time a connector is bound or unbound. That's
+intentional — auto-authoring is the point. Keep durable, hand-set behavior in
+`ripple_mode` / `system_message_override`, which the derivation never touches.
+
+### Gmail — the reference
+
+`connectors/gmail.yaml` ships the block (`skill: gmail`). The bundled
+[`gmail` skill](../src/pocketpaw/bundled_skills/_bundled/skills/gmail/SKILL.md)
+teaches the agent the Gmail action surface (search → read → act) and the
+safe-by-default workflow (read before you act; confirm before you send or
+destroy). Bind Gmail to a pocket and the room gets that skill with zero
+configuration.
+
+`allow_tools` is left empty on Gmail today: its agent tools are hand-written
+classes (`gmail_search`, `gmail_send`, …) that are not yet wrapped as stable
+`mcp__<server>__<tool>` SDK tool ids. An empty allow means "no SDK-tool
+restriction" (the union only adds to the allowlist, never narrows it), so the
+skill is the load-bearing contribution until those ids exist.
 
 ## Using with Existing Integrations
 
