@@ -1,5 +1,10 @@
 # chat.py — /chat surface preamble.
 #
+# Updated: 2026-06-06 — ``_session_count`` now passes ``surface="chat"`` so
+# the preamble reports only chat-surface (+ legacy null) threads, not the
+# files / pocket-creation / foresight sessions that live in their own rails
+# (session-isolation fix).
+#
 # Updated: 2026-05-24 — The sessions service now exposes a real
 # ``list_for_user`` helper, so the forward-compat getattr probe in
 # ``_session_count`` can go. Direct call, graceful try/except remains
@@ -37,7 +42,12 @@ async def _session_count(workspace_id: str, user_id: str) -> int | None:
     try:
         from pocketpaw_ee.cloud.sessions import service as sessions_service
 
-        sessions = await sessions_service.list_for_user(workspace_id=workspace_id, user_id=user_id)
+        # Scope to the chat surface (chat + legacy null rows) so the count
+        # reflects the /chat sidebar, not files / pocket-creation / foresight
+        # threads that live in their own rails.
+        sessions = await sessions_service.list_for_user(
+            workspace_id=workspace_id, user_id=user_id, surface="chat"
+        )
         return len(sessions or [])
     except Exception:
         logger.debug("chat_handler: session count failed", exc_info=True)

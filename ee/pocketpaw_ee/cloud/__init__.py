@@ -670,11 +670,14 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Start/stop agent pool with app lifecycle.
     #
-    # Chat persistence lives entirely in ``MongoMemoryStore.save`` — it
-    # writes the message row, auto-creates/touches the linked Session, and
-    # receives attachments via ``InboundMessage.metadata["attachments"]``.
-    # The old ``ee.cloud.shared.chat_persistence`` bus subscriber was
-    # removed because it dual-wrote every turn.
+    # Chat persistence: the cloud ``/agent`` HTTP path writes through the
+    # ``persist_*_for_scope`` helpers (chat/runs) with an explicit
+    # ``workspace_id``. ``MongoMemoryStore.save`` is the writer for the
+    # OSS-bus / dashboard-WebSocket path — it writes the message row,
+    # auto-creates/touches the linked Session, and receives attachments via
+    # ``InboundMessage.metadata["attachments"]``. The old
+    # ``ee.cloud.shared.chat_persistence`` bus subscriber was removed because
+    # it dual-wrote every turn.
     @app.on_event("startup")
     async def _start_agent_pool():
         from pocketpaw.agents.pool import get_agent_pool

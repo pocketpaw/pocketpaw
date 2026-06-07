@@ -84,48 +84,103 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
     }
 )
 
-# The /sites SVELTE-CREATE profile: hand-authored SvelteKit, so ripple OFF, the
-# two ripple-create tools denied, and the create-svelte-site skill surfaced.
-_SITES_SVELTE_CREATE_PROFILE = SurfaceProfile(
-    ripple_mode="off",
-    deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
-    skill_names=frozenset({"create-svelte-site"}),
-)
+# Per-mode MCP-tool allow-lists keep a chat mode's agent context lean: only the
+# mode's SPECIALIZED tools are named here. The "general everywhere" set — ripple
+# widgets, the pocket lifecycle (read/create/edit/plan), and connectors
+# (composio) — is kept by the OSS backend itself (``ALWAYS_ALLOWED_MCP_SERVERS``
+# + the pocket-creation grant + widget tools), so a scoped mode still renders
+# UI, makes pockets, and uses connectors. Chat stays unmapped → unrestricted.
+#
+# Built lazily + memoized (not at import): pulling the EE mcp-server tool-id
+# constants at module load could cycle with the agent layer, and ``resolve_profile``
+# is on the hot path. Built once on first call; a failed import degrades to
+# ripple-only profiles (unrestricted tools) so tool-scoping can never break chat.
+_PROFILE_CACHE: dict[str, Any] | None = None
 
-# Per-kind static overrides for NON-sites surfaces. Add a row only when a
-# surface needs to deviate from ``_DEFAULT_PROFILE``. /sites is NOT here — it is
-# resolved per-meta in ``resolve_profile``.
-_PROFILES: dict[SurfaceKind, SurfaceProfile] = {}
+
+def _build_profiles() -> dict[str, Any]:
+    sites_allow: frozenset[str] | None
+    foresight_allow: frozenset[str] | None
+    try:
+        from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
+
+        foresight_allow = frozenset(FORESIGHT_TOOL_IDS)
+        sites_allow = frozenset(SITES_TOOL_IDS)
+    except Exception:  # noqa: BLE001 — degrade to unrestricted, never break chat
+        logger.warning(
+            "surface: could not load mcp tool ids; per-mode scoping disabled",
+            exc_info=True,
+        )
+        foresight_allow = None
+        sites_allow = None
+
+    return {
+        "by_kind": {
+            # Foresight: its scenario tools + the general-everywhere set.
+            SurfaceKind.FORESIGHT: SurfaceProfile(
+                ripple_mode="on", allow_mcp_tool_ids=foresight_allow
+            ),
+            # Files: no specialized MCP tools — document scaffolding runs on the
+            # built-in Read/Write/Edit tools (never filtered). Empty allow-list
+            # = general-everywhere only (drops the other modes' tools). ``None``
+            # when the import degraded, so chat-like breadth is the safe fallback.
+            SurfaceKind.FILES: SurfaceProfile(
+                ripple_mode="on",
+                allow_mcp_tool_ids=frozenset() if sites_allow is not None else None,
+            ),
+        },
+        # /sites is meta-aware (below). Both modes scope to the sites authoring
+        # tools + general. svelte-create additionally denies the two ripple-create
+        # tools (deny runs AFTER allow, so create_svelte survives and the ripple
+        # variants don't) and drops ripple + surfaces the svelte skill.
+        "sites_default": SurfaceProfile(ripple_mode="on", allow_mcp_tool_ids=sites_allow),
+        "sites_svelte_create": SurfaceProfile(
+            ripple_mode="off",
+            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
+            allow_mcp_tool_ids=sites_allow,
+            skill_names=frozenset({"create-svelte-site"}),
+        ),
+    }
+
+
+def _profiles() -> dict[str, Any]:
+    global _PROFILE_CACHE
+    if _PROFILE_CACHE is None:
+        _PROFILE_CACHE = _build_profiles()
+    return _PROFILE_CACHE
 
 
 def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProfile:
     """Resolve a ``SurfaceKind`` (+ ``meta``) to its behavioral ``SurfaceProfile``.
 
-    Pure lookup — no I/O, safe to call once per request on the hot chat path.
+    Pure lookup (memoized table; no I/O), safe to call once per request on the
+    hot chat path.
 
     /sites is META-AWARE — it carries three modes, and only the svelte-CREATE
     one loses ripple:
 
       * refine (``meta.pocket_id`` set, ANY engine) edits the existing ripple
-        landing spec → KEEP ripple (``_DEFAULT_PROFILE``). Refine WINS over
+        landing spec → KEEP ripple (``sites_default``). Refine WINS over
         engine: a ``pocket_id`` present means refine even if ``engine="svelte"``.
       * create + svelte (``meta.engine == "svelte"``, no ``pocket_id``)
         hand-authors SvelteKit → DROP ripple, deny the two ripple-create tools,
-        surface the create-svelte-site skill (``_SITES_SVELTE_CREATE_PROFILE``).
+        surface the create-svelte-site skill (``sites_svelte_create``).
       * create + ripple (``engine`` None/"ripple", no ``pocket_id``) authors a
-        ripple landing page → KEEP ripple (``_DEFAULT_PROFILE``).
+        ripple landing page → KEEP ripple (``sites_default``).
 
-    Every other kind (and any unmapped/future kind, and every kind whose policy
-    matches the default) returns ``_DEFAULT_PROFILE`` (``ripple_mode="on"``), so
-    the only surface that deviates from today's behavior is /sites svelte-create.
+    Foresight and Files carry a per-mode MCP allow-list (lean tool set). Every
+    other kind (and any unmapped/future kind) returns ``_DEFAULT_PROFILE``
+    (``ripple_mode="on"``, no tool restriction) — today's behavior, e.g. /chat.
     """
+    profiles = _profiles()
     if surface_kind == SurfaceKind.SITES:
         # refine (pocket_id) edits the existing ripple landing spec → keep ripple.
         # It wins over engine, so check it FIRST.
         if meta.pocket_id is None and meta.engine == "svelte":
-            return _SITES_SVELTE_CREATE_PROFILE
-        return _DEFAULT_PROFILE
-    return _PROFILES.get(surface_kind, _DEFAULT_PROFILE)
+            return profiles["sites_svelte_create"]
+        return profiles["sites_default"]
+    return profiles["by_kind"].get(surface_kind, _DEFAULT_PROFILE)
 
 
 # Handler registry: SurfaceKind -> async callable returning the preamble.
