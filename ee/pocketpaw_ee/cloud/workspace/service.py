@@ -20,7 +20,9 @@ Public API:
   the plan-feature gate dependency; returns "team" on any failure so the
   dep fails open on plan rather than crashing with a 500.
 
-Changes: added get_workspace_plan helper for plan-feature gate dep.
+Changes: added get_workspace_plan helper for plan-feature gate dep; added
+slug_reason() (format + reserved + uniqueness) backing the live
+slug-available check, and create() now also rejects reserved slugs.
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     CreateWorkspaceRequest,
     UpdateWorkspaceRequest,
 )
+from pocketpaw_ee.cloud.workspace.slug import SlugReason, static_slug_reason
 
 if TYPE_CHECKING:
     from pocketpaw_ee.cloud.models.user import User
@@ -221,13 +224,33 @@ async def _find_user_id_by_email(email: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace:
+async def slug_reason(slug: str) -> SlugReason | None:
+    """Why ``slug`` can't be claimed, or ``None`` if it's free.
+
+    Layers the DB uniqueness check on top of the static format + reserved
+    gates (``slug.static_slug_reason``). The uniqueness query mirrors
+    ``create``'s exactly — soft-deleted workspaces don't hold their slug —
+    so the live availability answer can't disagree with what create() does.
+    """
+    static = static_slug_reason(slug)
+    if static is not None:
+        return static
     existing = await _WorkspaceDoc.find_one(
-        _WorkspaceDoc.slug == body.slug,
+        _WorkspaceDoc.slug == slug,
         _WorkspaceDoc.deleted_at == None,  # noqa: E711
     )
-    if existing is not None:
+    return "taken" if existing is not None else None
+
+
+async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace:
+    # Format is already enforced by the DTO validator; this catches reserved
+    # handles and the uniqueness race so create() agrees with the live
+    # slug-available check the UI runs first.
+    reason = await slug_reason(body.slug)
+    if reason == "taken":
         raise ConflictError("workspace.slug_taken", f"Slug '{body.slug}' is already in use")
+    if reason == "reserved":
+        raise ConflictError("workspace.slug_reserved", f"Slug '{body.slug}' is reserved")
 
     doc = _WorkspaceDoc(name=body.name, slug=body.slug, owner=ctx.user_id)
     await doc.insert()
