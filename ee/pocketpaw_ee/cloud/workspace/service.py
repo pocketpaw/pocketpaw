@@ -21,6 +21,10 @@ Public API:
   dep fails open on plan rather than crashing with a 500.
 
 Changes: added get_workspace_plan helper for plan-feature gate dep.
+2026-06-07: _mint_invite_for_email now maps a DuplicateKeyError on insert to
+a ConflictError (409) instead of letting it escape as an unhandled 500 — the
+leftover unique index on the nullable legacy ``token`` column made every
+second invite collide on ``token=null``.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from beanie import PydanticObjectId
+from pymongo.errors import DuplicateKeyError
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.errors import (
@@ -688,7 +693,25 @@ async def _mint_invite_for_email(
         token_hash=hash_token(plaintext),
         group=group_id,
     )
-    await invite_doc.insert()
+    try:
+        await invite_doc.insert()
+    except DuplicateKeyError as exc:
+        # An insert collision here is an EXPECTED failure, not a server fault,
+        # so surface it as a CloudError (409) rather than letting it escape as
+        # an unhandled 500 (which also drops the CORS header above the
+        # middleware and shows up in the browser as a misleading CORS error).
+        #
+        # Two ways this fires:
+        #   - A leftover unique index on the nullable legacy `token` column
+        #     (token=null for every new invite). The startup reconciler in
+        #     shared/db.py drops it; this guards the window before that runs
+        #     (e.g. a multi-instance deploy mid-rollout).
+        #   - A genuine token_hash collision (astronomically unlikely with a
+        #     256-bit token, but still expected-failure semantics).
+        raise ConflictError(
+            "invite.create_conflict",
+            "Could not create the invite due to a conflicting record. Please retry.",
+        ) from exc
     return _invite_to_domain(invite_doc, plaintext_token=plaintext)
 
 
