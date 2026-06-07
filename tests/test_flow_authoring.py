@@ -167,8 +167,14 @@ def test_exactly_one_terminal_step_with_on_complete(builder) -> None:
     action = terminal.get("onComplete")
     assert isinstance(action, dict)
     assert action.get("kind") in {"emit", "navigate", "chat"}
-    assert action["kind"] == "emit"  # both non-commerce templates emit
-    assert isinstance(action.get("event"), str) and action["event"]
+    # Both shipped templates loop the collected answers back to the AGENT: the
+    # terminal onComplete is a `chat` FlowAction carrying a human-readable prompt
+    # (NOT a dead host `emit` event). The runtime appends the accumulated payload
+    # to `message` downstream.
+    assert action["kind"] == "chat"
+    assert isinstance(action.get("message"), str) and action["message"].strip()
+    # The retired `emit` shape must be gone — no stray `event` key.
+    assert "event" not in action
 
     for step in steps:
         if not _is_terminal(step):
@@ -251,6 +257,61 @@ def test_form_steps_carry_inputs_forward(builder) -> None:
         )
 
 
+@_BUILDERS
+def test_form_steps_carry_structured_field_data(builder) -> None:
+    """Each form step ALSO carries genesis-style `form_fields` so ripple's
+    FormLayout renders a designed form. Each field has the documented shape
+    `{id, label, type, placeholder?, required, options?}`, and every field id
+    maps to a real bound input in the raw `ui` fallback (so both render paths
+    agree on the keys)."""
+    for step in _iter_steps(builder()["ui"]):
+        if step.get("intent") != "form":
+            continue
+        fields = step.get("form_fields")
+        assert isinstance(fields, list) and fields, (
+            f"form step {step.get('id')!r} carries no form_fields"
+        )
+        bound_inputs = {
+            n["bind"]
+            for n in _walk_nodes(step["ui"])
+            if n.get("type") == "input" and isinstance(n.get("bind"), str)
+        }
+        for field in fields:
+            assert set(field) >= {"id", "label", "type", "required"}, (
+                f"field {field!r} in {step.get('id')!r} missing required keys"
+            )
+            assert isinstance(field["id"], str) and field["id"]
+            assert isinstance(field["label"], str) and field["label"]
+            assert isinstance(field["type"], str) and field["type"]
+            assert isinstance(field["required"], bool)
+            if "options" in field:
+                assert isinstance(field["options"], list)
+            # The structured field's id must match a raw-ui bind: both paths key
+            # the same accumulated formData.
+            assert field["id"] in bound_inputs, (
+                f"form_field id {field['id']!r} in {step.get('id')!r} has no "
+                f"matching bound input (binds={bound_inputs})"
+            )
+
+
+@_BUILDERS
+def test_terminal_step_carries_structured_review_rows(builder) -> None:
+    """The terminal confirm/summary step carries structured `review_rows`
+    (label/value pairs) for a designed summary render; each value reuses the
+    same `{state.x}` pre-fill expression as the raw `ui` fallback."""
+    terminal = next(s for s in _iter_steps(builder()["ui"]) if _is_terminal(s))
+    rows = terminal.get("review_rows")
+    assert isinstance(rows, list) and rows
+    for row in rows:
+        assert set(row) == {"label", "value"}
+        assert isinstance(row["label"], str) and row["label"]
+        assert isinstance(row["value"], str) and row["value"]
+    # At least one row reads back a prior selection and one a prior formData.
+    values = " ".join(r["value"] for r in rows)
+    assert "_selection." in values
+    assert "_formData." in values
+
+
 # ---------------------------------------------------------------------------
 # The emitted spec passes pocketpaw's ingest validators (per-step).
 # ---------------------------------------------------------------------------
@@ -308,10 +369,40 @@ def test_config_overrides_copy_not_structure() -> None:
     assert "Foresight" not in _all_flow_text(base["ui"])
 
 
-def test_due_diligence_custom_submit_event() -> None:
+def test_terminal_onComplete_loops_to_agent_via_chat() -> None:
+    """Both shipped templates finish by handing the collected answers back to the
+    AGENT: the terminal onComplete is `{kind:"chat", message:<prompt>}`, never the
+    old dead-end `{kind:"emit", event:"onboarding.complete"}`."""
+    onboarding = next(s for s in _iter_steps(build_onboarding_wizard()["ui"]) if _is_terminal(s))
+    assert onboarding["onComplete"]["kind"] == "chat"
+    assert "onboard" in onboarding["onComplete"]["message"].lower()
+    assert "event" not in onboarding["onComplete"]
+
+    dd = next(s for s in _iter_steps(build_due_diligence_intake()["ui"]) if _is_terminal(s))
+    assert dd["onComplete"]["kind"] == "chat"
+    assert "diligence" in dd["onComplete"]["message"].lower()
+    assert "event" not in dd["onComplete"]
+
+
+def test_custom_complete_message_overrides_terminal_prompt() -> None:
+    """`config.complete_message` overrides the human-readable prompt the terminal
+    step hands the agent, on both templates."""
+    ob = build_onboarding_wizard({"complete_message": "Onboarding wrapped, go."})
+    ob_term = next(s for s in _iter_steps(ob["ui"]) if _is_terminal(s))
+    assert ob_term["onComplete"]["message"] == "Onboarding wrapped, go."
+
+    dd = build_due_diligence_intake({"complete_message": "Intake done, summarize."})
+    dd_term = next(s for s in _iter_steps(dd["ui"]) if _is_terminal(s))
+    assert dd_term["onComplete"]["message"] == "Intake done, summarize."
+
+
+def test_legacy_submit_event_config_is_ignored_not_error() -> None:
+    """The retired `submit_event` key is accepted (back-compat for old callers)
+    but no longer changes the terminal action — there is no host event anymore."""
     doc = build_due_diligence_intake({"submit_event": "deal.review.ready"})
     terminal = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
-    assert terminal["onComplete"]["event"] == "deal.review.ready"
+    assert terminal["onComplete"]["kind"] == "chat"
+    assert "event" not in terminal["onComplete"]
 
 
 # ---------------------------------------------------------------------------
