@@ -283,10 +283,10 @@ async def agent_update_task(
 
     body = UpdateTaskRequest.model_validate(body)
     doc = await _fetch_task(ctx, task_id)
-    if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only creator or assignee can edit. Other workspace members
-        # should escalate through reassignment / approval flows.
-        raise Forbidden("task.edit_denied", "Only the creator or assignee can edit this task")
+    # No creator/assignee guard here — metadata fields (title, summary,
+    # priority, etc.) are safe for any workspace member to edit. Status
+    # transitions are protected by their own dedicated endpoints
+    # (claim/complete/block/reassign) with tighter guards.
 
     if body.title is not None:
         doc.title = body.title
