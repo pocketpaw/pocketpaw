@@ -664,13 +664,17 @@ async def agent_create_task_event(
     await doc.insert()
     # Emit a bus event so the frontend gets a realtime update
     event_dto = task_event_to_dto(doc)
-    await emit(TaskUpdated(data={
-        "task_id": task_id,
-        "task": None,
-        "event": event_dto.model_dump(mode="json"),
-        "workspace_id": task_doc.workspace_id,
-        "recipient_ids": [task_doc.creator_id],
-    }))
+    await emit(
+        TaskUpdated(
+            data={
+                "task_id": task_id,
+                "task": None,
+                "event": event_dto.model_dump(mode="json"),
+                "workspace_id": task_doc.workspace_id,
+                "recipient_ids": [task_doc.creator_id],
+            }
+        )
+    )
     return event_dto
 
 

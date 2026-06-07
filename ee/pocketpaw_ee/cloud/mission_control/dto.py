@@ -366,8 +366,45 @@ class PlanSessionListResponse(BaseModel):
     total: int
 
 
+class AnalyticsDayDTO(BaseModel):
+    """Shipped count for one day."""
+
+    day: str  # e.g. "Mon"
+    shipped: int
+
+
+class AnalyticsAgentDTO(BaseModel):
+    """Per-agent shipped/reverted counts."""
+
+    agent: str
+    shipped: int
+    reverted: int
+
+
+class AnalyticsPocketDTO(BaseModel):
+    """Per-pocket shipped + share %."""
+
+    pocket: str
+    shipped: int
+    share: float
+
+
+class AnalyticsResponse(BaseModel):
+    """Full analytics snapshot for the operator dashboard."""
+
+    shipped: int
+    approval_rate: float  # 0-100
+    revert_rate: float  # 0-100
+    latency_p50_seconds: float
+    latency_p90_seconds: float
+    per_day: list[AnalyticsDayDTO]
+    by_agent: list[AnalyticsAgentDTO]
+    by_pocket: list[AnalyticsPocketDTO]
+
+
 __all__ = [
     "ActivityEventResponse",
+    "AnalyticsResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
     "BulkSnoozeRequest",
