@@ -505,6 +505,11 @@
             "icon": "lucide:wand-2"
           },
           {
+            "label": "Flow Authoring",
+            "href": "/tools/flow-authoring",
+            "icon": "lucide:list-ordered"
+          },
+          {
             "label": "Desktop",
             "href": "/tools/desktop",
             "icon": "lucide:monitor"

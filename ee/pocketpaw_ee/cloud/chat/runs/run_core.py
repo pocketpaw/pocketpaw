@@ -1,34 +1,48 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
-Changes: 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
-resolves the per-request ``SurfaceProfile`` and threads its
-``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
-``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
-allowlist before launch. This replaces the deleted prompt-sniffing tool gate
-in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
-ripple-create tools via typed policy (resolved from ``meta``) instead of the
-backend string-matching ``engine="svelte"`` in the system prompt. The set is
-empty for every other surface, so the call is a no-op outside /sites
-svelte-create.
-
-Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
-the per-run ``SurfaceProfile`` is now ENTITY-AWARE and resolved ONCE per run.
-``execute_run`` calls ``_resolve_entity_profile(ctx)`` right after it resolves
-``ctx.surface_context``: it takes the pure surface-kind base
-(``resolve_profile``), and — when the chat is bound to a pocket-entity
-(``meta.pocket_id`` set) whose pocket carries a ``surface_profile`` override —
-loads that pocket TENANT-SCOPED (cloud Rule 7) and folds the override OVER the
-base via ``compose_entity_profile`` (ripple entity-wins-if-set; deny / allow /
-skill UNION; system-message entity-wins). The result is stashed on
-``ctx.resolved_profile``. BOTH profile consumers now read that pre-resolved
-object instead of each calling ``resolve_profile``: ``build_behavior_instructions``
-(ripple-omit, stays sync) and ``_drive_agent_loop`` (tool-deny + the new
-tool-allow). Net effect: ``ripple_mode`` and ``deny_mcp_tool_ids`` are PER-ENTITY
-immediately — a pocket can flip ripple off or add tool-denies that take effect in
-its room. ``meta.pocket_id`` unset OR no ``pocket.surface_profile`` → the resolved
-profile equals the surface base → behavior byte-identical to today (zero
-regression). ``resolve_profile`` itself stays PURE/no-I/O; all entity I/O lives in
-the once-per-run async ``_resolve_entity_profile``.
+Changes:
+- 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
+  Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
+  as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
+  tells the agent to emit and the one paw-enterprise ``MarkdownRenderer`` tokenizes
+  as a ``ui-spec`` segment. The legacy ``json`` fence + ``{widgets, lifecycle}``
+  shape is still accepted via a transitional branch so in-flight conversations
+  don't break; that branch is deprecated and slated for removal once no active
+  conversation references the old shape (cutover window is RFC 13 open question #6).
+- 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
+  resolves the per-request ``SurfaceProfile`` and threads its
+  ``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
+  ``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
+  allowlist before launch. This replaces the deleted prompt-sniffing tool gate
+  in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
+  ripple-create tools via typed policy (resolved from ``meta``) instead of the
+  backend string-matching ``engine="svelte"`` in the system prompt. The set is
+  empty for every other surface, so the call is a no-op outside /sites
+  svelte-create.
+- 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
+  the per-run ``SurfaceProfile`` is now ENTITY-AWARE and resolved ONCE per run.
+  ``execute_run`` calls ``_resolve_entity_profile(ctx)`` right after it resolves
+  ``ctx.surface_context``: it takes the pure surface-kind base
+  (``resolve_profile``), and — when the chat is bound to a pocket-entity
+  (``meta.pocket_id`` set) whose pocket carries a ``surface_profile`` override —
+  loads that pocket TENANT-SCOPED (cloud Rule 7) and folds the override OVER the
+  base via ``compose_entity_profile`` (ripple entity-wins-if-set; deny / allow /
+  skill UNION; system-message entity-wins). The result is stashed on
+  ``ctx.resolved_profile``. BOTH profile consumers now read that pre-resolved
+  object instead of each calling ``resolve_profile``: ``build_behavior_instructions``
+  (ripple-omit, stays sync) and ``_drive_agent_loop`` (tool-deny + tool-allow).
+- 2026-06-07 (feat/entity-pocket-profile-field) — ``_drive_agent_loop`` also
+  reads ``ctx.resolved_profile.skill_names`` and ``.system_message_override`` and
+  forwards them as plain data into ``AgentPool.run`` (withhold-when-empty/None):
+  ``skill_names`` drives per-run skill materialization (SDK plugin) +
+  non-SDK skill filtering; ``system_message_override`` swaps the agent's base
+  system message while keeping the instruction / soul-memory / knowledge layers.
+  Net effect: ``ripple_mode``, ``deny_mcp_tool_ids``, ``allowed_sdk_tools``,
+  ``skill_names`` and ``system_message_override`` are all PER-ENTITY immediately.
+  ``meta.pocket_id`` unset OR no ``pocket.surface_profile`` → resolved profile
+  equals the surface base → behavior byte-identical to today (zero regression).
+  ``resolve_profile`` itself stays PURE/no-I/O; all entity I/O lives in the
+  once-per-run async ``_resolve_entity_profile``.
 """
 
 from __future__ import annotations
@@ -77,7 +91,55 @@ from pocketpaw_ee.cloud.surface import (
 logger = logging.getLogger(__name__)
 
 
+# Canonical inline-spec fence (RFC 13 M0). The prompt mandates a ``ui-spec``
+# fence carrying a ``{version, ui}`` envelope, and paw-enterprise's
+# ``MarkdownRenderer`` tokenizes exactly this fence as a ``ui-spec`` segment.
+# This is the path every new reply takes.
+RIPPLE_UISPEC_RE = re.compile(r"```ui-spec\s*(\{.*?\})\s*```", re.DOTALL)
+
+# DEPRECATED (RFC 13 M0): the legacy fence the cloud extractor used to be the
+# only path it knew. It pairs a ``json`` fence with a ``{widgets, lifecycle}``
+# shape — the contract before unification. Kept ONLY as a transitional accept
+# branch so conversations already holding a legacy block keep rendering. Remove
+# once no active conversation references the old shape; the cutover timeline is
+# RFC 13 open question #6 ("how long do we keep the legacy json accept-branch").
 RIPPLE_JSON_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _looks_like_ripple_spec(candidate: Any) -> bool:
+    """True when ``candidate`` is the canonical inline ``ui-spec`` envelope.
+
+    Recognizes the shapes ``normalize_ripple_spec`` accepts as a UISpec: the
+    canonical ``{version, ui}`` doc, a multi-pane ``{panes}`` doc, a spec whose
+    UI tree hides under a misnamed top-level key (``root`` / ``tree`` / ``view``
+    / ``body`` / ``content``), or a raw root node (``{type, props|children}``).
+    A plain ``json`` object that merely happens to sit in a ``ui-spec`` fence
+    (no ``ui``/``panes``/node shape) is rejected so we don't attach non-specs.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if isinstance(candidate.get("ui"), dict):
+        return True
+    if isinstance(candidate.get("panes"), dict):
+        return True
+    for alias in ("root", "tree", "view", "body", "content"):
+        node = candidate.get(alias)
+        if isinstance(node, dict) and isinstance(node.get("type"), str):
+            return True
+    # Raw root node: ``{type: "flex", props|children, ...}`` with no ``ui`` wrap.
+    if isinstance(candidate.get("type"), str) and ("props" in candidate or "children" in candidate):
+        return True
+    return False
+
+
+def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
+    """True for the DEPRECATED legacy ``{widgets, lifecycle}`` inline shape.
+
+    Transitional gate (RFC 13 M0). Mirrors the original ``_extract_ripple_attachment``
+    check. Slated for removal alongside ``RIPPLE_JSON_RE`` per RFC 13 open
+    question #6.
+    """
+    return isinstance(candidate, dict) and ("lifecycle" in candidate or "widgets" in candidate)
 
 
 def _stream_ttl() -> int:
@@ -426,17 +488,57 @@ def _new_run_id() -> str:
 
 
 def _extract_ripple_attachment(full_text: str) -> tuple[str, dict[str, Any] | None]:
-    """Strip the trailing ripple JSON fence and return ``(remaining_text, spec_or_None)``."""
-    match = RIPPLE_JSON_RE.search(full_text)
-    if not match:
+    """Strip the inline ripple fence and return ``(remaining_text, spec_or_None)``.
+
+    Contract (RFC 13 M0): the canonical fence is ``ui-spec`` carrying a
+    ``{version, ui}`` envelope (the prompt's contract and what ``MarkdownRenderer``
+    tokenizes). We try that first. If no canonical fence is present, we fall back
+    to the DEPRECATED legacy ``json`` fence + ``{widgets, lifecycle}`` shape so
+    in-flight conversations keep rendering — that branch ages out per RFC 13 open
+    question #6. On either path, the spec is normalized through
+    ``normalize_ripple_spec`` and the fence is stripped from the message body.
+    A truncated / unparseable fence leaves the text untouched and returns no
+    attachment (the frontend's ``ui-spec-error`` segment surfaces it).
+    """
+    # Canonical path: ``ui-spec`` fence + {version, ui}.
+    match = RIPPLE_UISPEC_RE.search(full_text)
+    if match is not None:
+        candidate = _parse_fence_json(match.group(1))
+        if _looks_like_ripple_spec(candidate):
+            return _normalize_and_strip(full_text, match, candidate)
+        # A ui-spec fence that doesn't parse / isn't a spec falls through; we do
+        # NOT then try the legacy json fence on the same text — a malformed
+        # canonical block stays inline rather than risk a wrong extraction.
         return full_text, None
+
+    # Transitional path (DEPRECATED): legacy ``json`` fence + {widgets, lifecycle}.
+    match = RIPPLE_JSON_RE.search(full_text)
+    if match is None:
+        return full_text, None
+    candidate = _parse_fence_json(match.group(1))
+    if not _looks_like_legacy_ripple_spec(candidate):
+        return full_text, None
+    return _normalize_and_strip(full_text, match, candidate)
+
+
+def _parse_fence_json(raw: str) -> Any:
+    """Parse a fence body to JSON, returning ``None`` on any failure.
+
+    A truncated or malformed block (the model cut off mid-spec) yields ``None``,
+    which both shape gates reject — so the fence is left inline for the
+    frontend's recovery / ``ui-spec-error`` path rather than half-extracted.
+    """
     try:
-        candidate = json.loads(match.group(1))
+        return json.loads(raw)
     except Exception:
         logger.debug("Ripple parse failed", exc_info=True)
-        return full_text, None
-    if not (isinstance(candidate, dict) and ("lifecycle" in candidate or "widgets" in candidate)):
-        return full_text, None
+        return None
+
+
+def _normalize_and_strip(
+    full_text: str, match: re.Match[str], candidate: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Normalize ``candidate`` and remove its fence from ``full_text``."""
     spec: dict[str, Any] = candidate
     try:
         from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
