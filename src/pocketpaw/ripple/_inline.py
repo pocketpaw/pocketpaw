@@ -15,6 +15,13 @@
 #
 # Modified: 2026-05-21 — prepended a ground-truth / do-not-mock rule to
 # the inline system prompt. Reworked from PR #1106.
+# Modified: 2026-05-31 (fix/bridge-start-flow-to-chat, RFC 13) — added
+#   `_MULTI_STEP_FLOW_RULE`: for any multi-step / wizard / step-by-step /
+#   collect-then-act flow, call the `start_flow` tool (descriptor only) and
+#   emit its returned doc verbatim. Do NOT hand-author nested chain /
+#   chain_map trees and do NOT fake a flow with a single `set`-stepped spec
+#   — that anti-pattern renders step 1 and never advances. Wired into the
+#   assembled prompt + the final self-check.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -305,6 +312,41 @@ true), `nextLabel`, `layout` ("inline" | "stacked", default inline).
 """
 
 
+_MULTI_STEP_FLOW_RULE = """\
+# MULTI-STEP FLOWS — CALL start_flow, DO NOT HAND-AUTHOR
+
+For ANY multi-step flow — a wizard, an intake form, a survey, an
+onboarding sequence, a step-by-step or collect-then-act flow where the
+user moves through more than one screen before you act — call the
+`start_flow` tool. Pass ONLY a tiny descriptor: a `flow_type` template
+(plus optional `domain` / `config`). The tool returns the ENTIRE nested
+flow as a `{version, ui}` doc; drop that doc VERBATIM into your `ui-spec`
+fence. The flow then advances entirely client-side — no further model
+calls between steps.
+
+DO NOT hand-author the flow yourself. Specifically, NEVER:
+- write a nested `chain` / `chain_map` step tree by hand — these are
+  recursively nested and fragile to author; a single misplaced key and
+  the flow renders step 1 and silently never advances.
+- fake a multi-step flow with ONE `set`-stepped single spec (a spec that
+  tries to swap its own content via `set` actions). That is the exact
+  anti-pattern `start_flow` exists to prevent: it renders the first step
+  and dead-ends.
+
+`ask-user-questions` (above) is for a SHORT stepped Q&A that gathers a
+few answers in one bubble. `start_flow` is for a real branching,
+multi-screen flow with its own step tree. When in doubt for anything
+wizard-shaped, reach for `start_flow` — the descriptor is ~3 fields and
+Python owns the tree, so it renders correctly on the first try.
+
+If no `flow_type` template fits the request, say so plainly and gather
+the requirements with `ask-user-questions` instead — do NOT fall back to
+hand-authoring a chain tree.
+
+---
+"""
+
+
 _INLINE_RULES = """\
 # RULES
 
@@ -327,6 +369,7 @@ Final self-check before sending:
 ✔ One focal widget — clean, minimal layout, no clutter
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
 ✔ Used a core widget, or called `get_inline_widget_help` BEFORE emitting the type
+✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
 ✔ Leads to a clear next step
 ✔ No static lists for open-ended queries
 ✔ Valid JSON, concrete values, one fence
@@ -341,6 +384,8 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + USE_THE_WIDGET_RULE
     + "\n"
     + _INLINE_CORE_CATALOG
+    + "\n"
+    + _MULTI_STEP_FLOW_RULE
     + "\n"
     + _INLINE_RULES
 )
