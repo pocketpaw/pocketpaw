@@ -76,7 +76,10 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     """Initialize Beanie ODM with all document models."""
     global _client
 
-    from pocketpaw_ee.cloud.memory.bootstrap import register_default_backend
+    from pocketpaw_ee.cloud.memory.bootstrap import (
+        register_default_backend,
+        verify_cloud_memory_backend,
+    )
     from pocketpaw_ee.cloud.memory.documents import MemoryFactDoc
     from pocketpaw_ee.cloud.models import ALL_DOCUMENTS
 
@@ -100,6 +103,11 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     # not-yet-initialized collection. The bootstrap is a no-op until this
     # point, so callers always see a working store.
     register_default_backend()
+
+    # Fail-fast: refuse to boot the cloud on a local memory backend. A
+    # POCKETPAW_MEMORY_BACKEND override (or an install failure) would route
+    # chat history to disk; the cloud must keep everything in Mongo.
+    verify_cloud_memory_backend()
 
 
 async def close_cloud_db() -> None:

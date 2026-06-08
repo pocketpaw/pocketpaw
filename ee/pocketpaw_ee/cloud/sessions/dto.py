@@ -1,9 +1,12 @@
 """Sessions domain — Pydantic request/response schemas + domain → wire mapper.
 
-Recent change: added the ``surface`` field on ``CreateSessionRequest`` and
-``SessionResponse`` (and the wire dict) so the frontend can stamp / read the
-originating chat surface (``chat`` / ``files`` / ``pocket_creation``). Field
-is optional everywhere so legacy callers and pre-fix rows still validate.
+Recent change: added ``foresight`` to the ``surface`` literal so Foresight
+chats are isolated server-side instead of piggybacking on ``chat`` + a
+client-side manifest. The ``surface`` field on ``CreateSessionRequest`` and
+``SessionResponse`` (and the wire dict) lets the frontend stamp / read the
+originating chat surface (``chat`` / ``files`` / ``pocket_creation`` /
+``foresight``). Field is optional everywhere so legacy callers and pre-fix
+rows (``surface=None``) still validate.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.sessions.domain import Session
 
 # Surface tag values — kept in lockstep with ``models.session.SurfaceType``.
-Surface = Literal["chat", "files", "pocket_creation"]
+Surface = Literal["chat", "files", "pocket_creation", "foresight"]
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +66,19 @@ class SessionResponse(BaseModel):
     surface: Surface | None = None
 
 
+class SessionPage(BaseModel):
+    """One keyset-paginated page of sessions for a single mode/surface.
+
+    ``sessions`` are legacy wire dicts (``session_to_wire_dict`` shape) for
+    drop-in compatibility with the existing list endpoints. ``nextCursor`` is
+    the opaque cursor for the following page, or ``None`` on the last page.
+    Backs ``GET /sessions/{chat,files,foresight,pocket-creation}``.
+    """
+
+    sessions: list[dict[str, Any]]
+    nextCursor: str | None = None
+
+
 def session_to_wire_dict(s: Session) -> dict[str, Any]:
     """Map a domain ``Session`` to the legacy wire-format dict.
 
@@ -89,6 +105,7 @@ def session_to_wire_dict(s: Session) -> dict[str, Any]:
 
 __all__ = [
     "CreateSessionRequest",
+    "SessionPage",
     "SessionResponse",
     "UpdateSessionRequest",
     "session_to_wire_dict",
