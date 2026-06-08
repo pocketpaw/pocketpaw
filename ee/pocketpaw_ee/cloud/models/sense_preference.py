@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from beanie import Indexed
+
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
 
