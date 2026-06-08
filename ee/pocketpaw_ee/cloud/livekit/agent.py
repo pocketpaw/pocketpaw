@@ -650,8 +650,15 @@ class CallMeetingAgent:
                 summary = "Call ended with no speech detected."
                 action_items = []
 
-        # Merge participant identities from room tracking + transcript
-        all_participants = list(self._participant_identities | speakers_seen)
+        # Merge participant identities from room tracking + transcript.
+        # Resolve identity strings to display names for the meeting notes.
+        all_participants_set: set[str] = set()
+        for pid in sorted(self._participant_identities):
+            display_name = self._participant_info.get(pid, pid)
+            all_participants_set.add(display_name)
+        for s in speakers_seen:
+            all_participants_set.add(s)
+        all_participants = sorted(all_participants_set)
 
         # Build structured participant info (identity → display_name) so the
         # service can resolve @mentions in action items to real user IDs

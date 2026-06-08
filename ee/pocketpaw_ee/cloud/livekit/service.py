@@ -844,11 +844,22 @@ async def post_meeting_notes_to_group(
     a MeetingTranscript record so the meeting detail in /meetings can
     display the transcript.
     """
+    # Resolve participant identities to display names using participant_map
+    # (which maps identity → name as sent by the agent).
+    name_map: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "") or pid
+            if pid:
+                name_map[pid] = pname
+    participant_names = [name_map.get(p, p) for p in participants]
+
     lines = [
         "📋 **Meeting Notes**",
         "",
         f"**Duration:** {_format_duration(duration_seconds)}",
-        f"**Participants:** {', '.join(participants) if participants else 'N/A'}",
+        f"**Participants:** {', '.join(participant_names) if participant_names else 'N/A'}",
         "",
     ]
 
@@ -998,13 +1009,14 @@ async def post_meeting_notes_to_group(
             logger.warning("Failed to store transcript: %s", exc)
 
     # ── Create Mission Control tasks from action items ──
-    # Parse the ## ✅ Action Items section from the markdown summary
-    # and create Tasks assigned to the matched participant.
-    if workspace_id and summary:
+    # Prefer the structured action_items list (already extracted by the LLM)
+    # over re-parsing the markdown summary.
+    if workspace_id and (action_items or summary):
         try:
             await _create_tasks_from_meeting_notes(
                 workspace_id=workspace_id,
                 group_id=group_id,
+                action_items=action_items,
                 summary=summary,
                 participant_map=participant_map,
             )
@@ -1088,12 +1100,23 @@ def _format_joined_at(joined_at: Any) -> str | None:
 async def _create_tasks_from_meeting_notes(
     workspace_id: str,
     group_id: str,
-    summary: str,
+    action_items: list[str] | None = None,
+    summary: str = "",
     participant_map: list[dict[str, str]] | None = None,
 ) -> None:
-    """Parse action items from the meeting notes summary and create Tasks."""
-    action_items = _extract_action_items_from_markdown(summary)
-    if not action_items:
+    """Create Mission Control tasks from meeting notes action items.
+
+    Prefers the structured ``action_items`` list (already extracted by the
+    LLM), falling back to parsing ``## ✅ Action Items`` from the markdown
+    ``summary`` for backwards compatibility.
+    """
+    items: list[str] = []
+    if action_items:
+        items = action_items
+    elif summary:
+        items = _extract_action_items_from_markdown(summary)
+
+    if not items:
         logger.info("No action items found in meeting notes for group %s", group_id)
         return
 
@@ -1124,11 +1147,23 @@ async def _create_tasks_from_meeting_notes(
     )
 
     created = 0
-    for item in action_items:
+    for item in items:
         try:
             # Parse @Name prefix from the action item, e.g. "@Admin: do X"
             assignee_name, description = _parse_action_item_assignee(item)
-            assignee_id = name_to_id.get(assignee_name.lower(), "__unassigned__")
+
+            # Resolve the @mention name to a user ID using participant_map.
+            q = assignee_name.strip().lower()
+            assignee_id = name_to_id.get(q)
+            if not assignee_id and participant_map:
+                # Check if mention is a substring of a participant name
+                # or if a participant name is a substring of the mention
+                for p in participant_map:
+                    pname = (p.get("name", "") or "").lower()
+                    if q in pname or pname in q:
+                        assignee_id = p.get("identity")
+                        break
+            assignee_id = assignee_id or "__unassigned__"
 
             await tasks_service.agent_create_task(
                 ctx,
