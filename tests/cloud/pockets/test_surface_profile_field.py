@@ -20,6 +20,13 @@
 # non-null SETs/REPLACEs, explicit ``null`` CLEARS, absent leaves the existing
 # value unchanged (no clobber on unrelated edits). Tests pin all four cases
 # end-to-end through Mongo (set, change, leave-unchanged, clear).
+#
+# Updated: 2026-06-08 (M3 v2 — create-time surface_profile derivation) — added
+# the CREATE-TIME-DERIVATION round-trips: create() calls the conservative
+# ``derive_create_time_profile`` helper when no explicit profile is supplied. The
+# helper table is empty today, so an un-profiled create still persists None
+# (zero regression); an explicit caller profile is still respected; and a
+# monkeypatched rule proves a derived profile DOES persist through create().
 
 from __future__ import annotations
 
@@ -323,3 +330,82 @@ async def test_update_explicit_null_clears_surface_profile() -> None:
 
     fetched = await pockets_service.get(created["_id"], _USER)
     assert fetched["surfaceProfile"] is None
+
+
+# ---------------------------------------------------------------------------
+# M3 v2 — create-time derivation through create(). The helper table is empty
+# today, so the live behaviour is: un-profiled create persists None, explicit
+# caller profile is respected. A monkeypatched rule proves the WIRING — a
+# derived profile reaches the persisted pocket.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_no_profile_no_mapping_persists_none() -> None:
+    """No explicit profile + no matching rule (empty table) → persists None.
+
+    This is the live zero-regression case: today's table is empty, so a
+    type="site"/pattern="landing" pocket inherits the surface-kind default
+    instead of carrying a redundant entity override.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    wire = await pockets_service.create(
+        _WS,
+        _USER,
+        CreatePocketRequest(name="Landing", type="site", pattern="landing"),
+    )
+    assert wire["surfaceProfile"] is None
+    fetched = await pockets_service.get(wire["_id"], _USER)
+    assert fetched["surfaceProfile"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_explicit_profile_never_overridden_by_derivation(monkeypatch) -> None:
+    """An explicit caller profile wins even when a derivation rule WOULD match."""
+    import pocketpaw_ee.cloud.pockets.create_profile_defaults as cpd
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    # Inject a rule that would fire for type="site" — it must be ignored because
+    # the caller supplied an explicit profile.
+    monkeypatch.setattr(
+        cpd,
+        "_CREATE_TIME_RULES",
+        [(("site", None), lambda: cpd.PocketSurfaceProfile(skill_names=["derived"]))],
+    )
+
+    wire = await pockets_service.create(
+        _WS,
+        _USER,
+        CreatePocketRequest(
+            name="Landing",
+            type="site",
+            pattern="landing",
+            surface_profile={"ripple_mode": "off", "skill_names": ["explicit"]},
+        ),
+    )
+    fetched = await pockets_service.get(wire["_id"], _USER)
+    assert fetched["surfaceProfile"]["ripple_mode"] == "off"
+    assert fetched["surfaceProfile"]["skill_names"] == ["explicit"]
+
+
+@pytest.mark.asyncio
+async def test_create_derives_profile_when_rule_matches(monkeypatch) -> None:
+    """A matching create-time rule (no explicit caller profile) → derived profile persists."""
+    import pocketpaw_ee.cloud.pockets.create_profile_defaults as cpd
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    monkeypatch.setattr(
+        cpd,
+        "_CREATE_TIME_RULES",
+        [(("site", "landing"), lambda: cpd.PocketSurfaceProfile(skill_names=["derived"]))],
+    )
+
+    wire = await pockets_service.create(
+        _WS,
+        _USER,
+        CreatePocketRequest(name="Landing", type="site", pattern="landing"),
+    )
+    assert wire["surfaceProfile"]["skill_names"] == ["derived"]
+    fetched = await pockets_service.get(wire["_id"], _USER)
+    assert fetched["surfaceProfile"]["skill_names"] == ["derived"]

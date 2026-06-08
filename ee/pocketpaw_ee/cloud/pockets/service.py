@@ -129,6 +129,14 @@ mirroring the :1134 assignment) so the connectors package never imports the
 Pocket Beanie model. It OWNS the connector-contributed dims (``skill_names`` /
 ``allowed_sdk_tools`` / ``deny_mcp_tool_ids``) and PRESERVES the user-owned
 ``ripple_mode`` / ``system_message_override`` already on the pocket.
+Changes: 2026-06-08 (M3 v2 — create-time surface_profile derivation) — ``create``
+now derives a default ``surface_profile`` from ``body.type`` / ``body.pattern``
+via the pure ``create_profile_defaults.derive_create_time_profile`` helper, but
+ONLY when the caller didn't supply an explicit profile (caller value always
+wins). The mapping table is intentionally conservative (empty today — the sites
+surface default already covers ``type="site"``), so this is a zero-regression
+no-op until a product policy adds a rule. The connector-bind re-derivation (v1,
+``apply_derived_surface_profile``) composes ON TOP of whatever this stamps.
 Changes: 2026-06-04 (feat/sites-landing-brain) — ``agent_create`` now
 accepts an optional ``pattern`` (alongside the existing ``type_``) and
 stamps both onto the persisted ``Pocket``. The marketing-site brain
@@ -175,6 +183,7 @@ from pocketpaw_ee.cloud.pockets import (
     state_ops,
 )
 from pocketpaw_ee.cloud.pockets._merge import merge_ripple_spec
+from pocketpaw_ee.cloud.pockets.create_profile_defaults import derive_create_time_profile
 from pocketpaw_ee.cloud.pockets.domain import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.pockets.dto import (
     AddCollaboratorRequest,
@@ -961,6 +970,16 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     if body.project_id:
         await _ensure_project_in_workspace(workspace_id, body.project_id)
 
+    # M3 v2 — create-time surface_profile derivation. When the caller didn't
+    # supply an explicit profile, derive a sensible default from the pocket's
+    # type / pattern (pure, conservative table). An explicit caller value always
+    # wins and is never overridden. ``None`` from the helper preserves today's
+    # behavior (no override; the surface-kind default applies). The connector-
+    # bind re-derivation (v1) later composes ON TOP of whatever lands here.
+    surface_profile = body.surface_profile
+    if surface_profile is None:
+        surface_profile = derive_create_time_profile(body.type, body.pattern)
+
     doc = _PocketDoc(
         workspace=workspace_id,
         project_id=body.project_id,
@@ -978,7 +997,7 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         pattern=body.pattern,
         engine=body.engine,
         source=body.source,
-        surface_profile=body.surface_profile,
+        surface_profile=surface_profile,
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)

@@ -5,6 +5,10 @@
   auto-authoring path (derivation at bind/unbind from the full enabled set, the
   Gmail reference, and the coexistence rule with hand-set ripple_mode /
   system_message_override).
+  Updated: 2026-06-08 (M3 v2 — create-time derivation) — documented the second
+  surface_profile derivation trigger: deriving a conservative default at pocket
+  CREATE from type / pattern, the (intentionally empty) mapping table, and that
+  explicit caller profiles win + connector-bind re-derivation composes on top.
 -->
 
 # Connectors — Data Source Integration
@@ -182,6 +186,43 @@ classes (`gmail_search`, `gmail_send`, …) that are not yet wrapped as stable
 `mcp__<server>__<tool>` SDK tool ids. An empty allow means "no SDK-tool
 restriction" (the union only adds to the allowlist, never narrows it), so the
 skill is the load-bearing contribution until those ids exist.
+
+### Create-time derivation (the second trigger)
+
+Connector bind/unbind is one of **two** triggers that can author a pocket's
+`surface_profile`. The other fires at **pocket create**: when a pocket is created
+*without* an explicit `surface_profile`, PocketPaw derives a conservative default
+from the pocket's `type` / `pattern` before persisting it.
+
+The mapping lives in a small, documented table
+(`pockets/create_profile_defaults.py`, `derive_create_time_profile(type, pattern)`).
+It is **intentionally conservative — empty today** — so every create currently
+returns no override and inherits the surface-kind default. That is a deliberate
+zero-regression stance, not an oversight:
+
+- **`type="site"` / `pattern="landing"` (marketing landing pages)** get **no
+  create-time override**. The surface a site is chatted on already resolves the
+  right profile: the `/sites` ripple-create and refine modes, and the
+  `/pockets/[id]` view, all default to `ripple_mode="on"`. Only the *svelte*
+  create mode turns ripple off, and that is keyed on a per-turn `engine="svelte"`
+  signal — a property of the chat turn, not of the pocket. Stamping
+  `ripple_mode="on"` here would be a redundant no-op; stamping `"off"` would be
+  wrong (ripple-track sites genuinely author a ripple spec). So the surface
+  default fully covers sites and the table does **not** duplicate it.
+- **Anything with no clear, safe default** returns `None` and inherits the
+  surface-kind default.
+
+The mechanism is fully wired and tested so a future product policy can add a row
+to the table without re-plumbing. To add one, append a
+`((type, pattern), factory)` rule — a `None` on either side of the key is a
+wildcard, and the first matching rule wins (list most-specific first).
+
+**Precedence.** An **explicit caller `surface_profile` always wins** — create-time
+derivation only runs when the caller didn't supply one, and never overrides an
+explicit value. The **connector-bind re-derivation (v1) composes on top**: it owns
+the connector dimensions (`skill_names` / `allowed_sdk_tools` / `deny_mcp_tool_ids`)
+and preserves the user-owned `ripple_mode` / `system_message_override`, so whatever
+create-time derivation stamps for those preserved dims survives a later bind/unbind.
 
 ## Using with Existing Integrations
 
