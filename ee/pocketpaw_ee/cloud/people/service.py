@@ -1,11 +1,18 @@
-"""People domain — materialize a workspace member as a Fabric ``Person``.
+"""People domain — materialize and read a workspace member's Fabric ``Person``.
 
 Created: 2026-06-08 (feat/vip-fabric-person, pp#1366).
+Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — added the read side,
+:func:`get_person`, that queries the journal projection for a member's
+deterministic Person id (workspace-scoped) and maps the projected object's
+property bag back to a typed :class:`Person`, or ``None`` when the member
+has no Person yet. The agent-orientation flow reads it to render an
+"about this member" block; the read mirrors the materializer's query +
+scope shape.
 
 When a workspace invite is accepted, ``accept_invite`` calls
 :func:`materialize_person_from_invite` to create (or update) a standalone
 Fabric ``Person`` object for the new member. The object is the identity
-"spine" a later VIP-onboarding flow reads.
+"spine" a later VIP-onboarding flow reads. :func:`get_person` is that read.
 
 Write path — the journal, not the legacy SQLite store
 -----------------------------------------------------
@@ -234,4 +241,73 @@ async def materialize_person_from_invite(
     return person
 
 
-__all__ = ["materialize_person_from_invite"]
+# ---------------------------------------------------------------------------
+# Read
+# ---------------------------------------------------------------------------
+
+
+def _person_from_object(obj: FabricObject, *, workspace_id: str) -> Person:
+    """Map a projected Fabric object back to a typed :class:`Person`.
+
+    The inverse of :meth:`Person.to_properties`. ``id`` comes from the
+    object's own id; ``workspace_id`` from the read scope (the journal does
+    NOT fold it into the property bag — it's carried by the event scope); the
+    remaining identity / provenance fields come straight from the property
+    bag. ``group`` stays ``None`` when the stored value is falsy.
+    """
+
+    props = obj.properties
+    return Person(
+        id=obj.id,
+        workspace_id=workspace_id,
+        user_id=str(props.get("user_id", "")),
+        name=str(props.get("name", "")),
+        email=str(props.get("email", "")),
+        avatar=str(props.get("avatar", "")),
+        role=str(props.get("role", "")),
+        group=props.get("group") or None,
+        focus=str(props.get("focus", "")),
+        profile_pic=str(props.get("profile_pic", "")),
+        invited_by=str(props.get("invited_by", "")),
+        source=str(props.get("source", SOURCE_ADMIN_CONTEXT)),
+    )
+
+
+async def get_person(
+    workspace_id: str,
+    user_id: str,
+    *,
+    store: FabricJournalStore | None = None,
+) -> Person | None:
+    """Read a member's materialized Fabric ``Person``, or ``None``.
+
+    Queries the journal projection for the ``Person`` type under the member's
+    own workspace scope and matches the deterministic id
+    (``person-{workspace_id}-{user_id}``). Returns the typed :class:`Person`
+    when present, ``None`` when this member was never materialized — e.g. a
+    pre-existing / non-invited user. The caller treats ``None`` as "no block",
+    never an error.
+
+    Tenant-scoped: ``requester_scopes`` is the single workspace scope, so the
+    read can only ever see this workspace's people. Mirrors the materializer's
+    query (same ``type_id`` + scope), then narrows to the deterministic id.
+
+    ``store`` is injectable for tests; production callers omit it and get the
+    process-wide journal-backed store.
+    """
+
+    fabric = store if store is not None else _default_store()
+    scope = _person_scope(workspace_id)
+    target_id = _person_object_id(workspace_id, user_id)
+
+    result = await fabric.query(
+        FabricQuery(type_id=PERSON_TYPE_ID, limit=10_000),
+        requester_scopes=scope,
+    )
+    for obj in result.objects:
+        if obj.id == target_id:
+            return _person_from_object(obj, workspace_id=workspace_id)
+    return None
+
+
+__all__ = ["get_person", "materialize_person_from_invite"]

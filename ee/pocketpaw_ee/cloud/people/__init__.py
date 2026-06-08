@@ -6,10 +6,15 @@
 # Read by a later VIP-onboarding flow. STANDALONE — models identity only,
 # independent of the per-pocket agent-policy surface profile.
 #
-# No router yet: the only entry point is the service function the workspace
-# accept_invite path calls. A read API can land in a later slice.
+# Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — exported the read
+# side, ``get_person``, so the agent-orientation flow can fetch a member's
+# Person to render an "about this member" block in the system prompt.
+#
+# No router yet: the entry points are the service functions the workspace
+# accept_invite path (write) and the chat agent-orientation path (read) call.
+# A read API can land in a later slice.
 
 from pocketpaw_ee.cloud.people.domain import Person
-from pocketpaw_ee.cloud.people.service import materialize_person_from_invite
+from pocketpaw_ee.cloud.people.service import get_person, materialize_person_from_invite
 
-__all__ = ["Person", "materialize_person_from_invite"]
+__all__ = ["Person", "get_person", "materialize_person_from_invite"]
