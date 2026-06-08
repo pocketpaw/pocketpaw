@@ -499,3 +499,180 @@ def test_loader_strict_default_is_false_for_back_compat(tmp_path: Path) -> None:
     # No ``strict`` kwarg at all — should NOT raise.
     result = load_template("bad-template", templates_dir=tmp_path)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Sense tier chunk 6a — PocketTemplate.needs (declared Sense ids)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_defaults_empty() -> None:
+    """A template with no ``needs:`` key reads back an empty list — the
+    field is backwards-compatible with every pre-Sense template."""
+    template = PocketTemplate.model_validate(_minimal_v2_dict())
+    assert template.needs == []
+
+
+def test_needs_with_valid_core_senses_parses() -> None:
+    """A template declaring valid core Sense ids validates and round-trips."""
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["paw.payments.v1", "paw.email.v1"]
+    template = PocketTemplate.model_validate(meta)
+    assert template.needs == ["paw.payments.v1", "paw.email.v1"]
+
+
+def test_needs_with_valid_extension_sense_parses() -> None:
+    """A vendor-namespace (extension) sense id is accepted freely."""
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["acme.crm.v1"]
+    template = PocketTemplate.model_validate(meta)
+    assert template.needs == ["acme.crm.v1"]
+
+
+def test_needs_with_unknown_paw_sense_raises() -> None:
+    """An unknown paw.* id fails validation — the core namespace is closed, so
+    a template can't silently fragment it. The ``needs`` field_validator calls
+    ``validate_sense_id``, which raises ``SenseValidationError``; Pydantic wraps
+    that in a ``ValidationError`` whose underlying cause is the SenseValidationError
+    (a ``ValueError`` subclass)."""
+    from pydantic import ValidationError
+
+    from pocketpaw.senses import SenseValidationError
+
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["paw.telepathy.v1"]
+    with pytest.raises(ValidationError) as exc_info:
+        PocketTemplate.model_validate(meta)
+    underlying = exc_info.value.errors()[0]["ctx"]["error"]
+    assert isinstance(underlying, SenseValidationError)
+    assert "unknown core sense id" in str(underlying)
+
+
+def test_needs_with_malformed_sense_raises() -> None:
+    """A malformed sense id (no version suffix) fails validation — the
+    underlying error is a SenseValidationError raised by validate_sense_id."""
+    from pydantic import ValidationError
+
+    from pocketpaw.senses import SenseValidationError
+
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["paw.email"]
+    with pytest.raises(ValidationError) as exc_info:
+        PocketTemplate.model_validate(meta)
+    underlying = exc_info.value.errors()[0]["ctx"]["error"]
+    assert isinstance(underlying, SenseValidationError)
+    assert "malformed core sense id" in str(underlying)
+
+
+# ---------------------------------------------------------------------------
+# DataSourceDef — http (default) + sense source types (Sense tier chunk 6b)
+# ---------------------------------------------------------------------------
+
+
+def test_data_source_http_default_parses() -> None:
+    """A bare source (no ``type``) defaults to http and requires ``path`` — the
+    backward-compatible shape every pre-Sense source uses."""
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+
+    src = DataSourceDef.model_validate({"name": "prs", "path": "/api/prs", "bind": "state.prs"})
+    assert src.type == "http"
+    assert src.path == "/api/prs"
+    assert src.sense_id is None
+
+
+def test_data_source_http_missing_path_raises() -> None:
+    """An http source with no ``path`` fails — the type validator requires it."""
+    from pydantic import ValidationError
+
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+
+    with pytest.raises(ValidationError) as exc_info:
+        DataSourceDef.model_validate({"name": "prs", "bind": "state.prs"})
+    assert "path is required when type='http'" in str(exc_info.value)
+
+
+def test_data_source_sense_parses() -> None:
+    """A sense source (type=sense, sense_id+action) validates and round-trips;
+    ``path`` is not required."""
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+
+    src = DataSourceDef.model_validate(
+        {
+            "name": "inbox",
+            "type": "sense",
+            "sense_id": "paw.email.v1",
+            "action": "gmail_search",
+            "params": {"q": "is:unread"},
+            "bind": "state.inbox",
+        }
+    )
+    assert src.type == "sense"
+    assert src.sense_id == "paw.email.v1"
+    assert src.action == "gmail_search"
+    assert src.params == {"q": "is:unread"}
+    assert src.path is None
+
+
+def test_data_source_sense_missing_sense_id_raises() -> None:
+    """A sense source without ``sense_id`` fails the type validator."""
+    from pydantic import ValidationError
+
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+
+    with pytest.raises(ValidationError) as exc_info:
+        DataSourceDef.model_validate(
+            {"name": "inbox", "type": "sense", "action": "gmail_search", "bind": "state.inbox"}
+        )
+    assert "sense_id and .action are required" in str(exc_info.value)
+
+
+def test_data_source_sense_missing_action_raises() -> None:
+    """A sense source without ``action`` fails the type validator."""
+    from pydantic import ValidationError
+
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+
+    with pytest.raises(ValidationError) as exc_info:
+        DataSourceDef.model_validate(
+            {"name": "inbox", "type": "sense", "sense_id": "paw.email.v1", "bind": "state.inbox"}
+        )
+    assert "sense_id and .action are required" in str(exc_info.value)
+
+
+def test_data_source_sense_unknown_paw_id_raises() -> None:
+    """A sense source with an unknown paw.* id fails — sense_id is validated via
+    ``validate_sense_id`` at parse, mirroring the template ``needs:`` rule."""
+    from pydantic import ValidationError
+
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+    from pocketpaw.senses import SenseValidationError
+
+    with pytest.raises(ValidationError) as exc_info:
+        DataSourceDef.model_validate(
+            {
+                "name": "inbox",
+                "type": "sense",
+                "sense_id": "paw.telepathy.v1",
+                "action": "read_minds",
+                "bind": "state.inbox",
+            }
+        )
+    # The SenseValidationError surfaces as the underlying cause of the model
+    # validator error.
+    msg = str(exc_info.value)
+    assert "unknown core sense id" in msg or isinstance(
+        exc_info.value.errors()[0].get("ctx", {}).get("error"), SenseValidationError
+    )
+
+
+def test_data_source_http_absolute_path_still_rejected() -> None:
+    """The relative-path SSRF guard still fires for http sources."""
+    from pydantic import ValidationError
+
+    from pocketpaw.bundled_templates.schema import DataSourceDef
+
+    with pytest.raises(ValidationError) as exc_info:
+        DataSourceDef.model_validate(
+            {"name": "prs", "path": "https://evil.example/api", "bind": "state.prs"}
+        )
+    assert "must be relative" in str(exc_info.value)

@@ -3,6 +3,10 @@
 # Updated: 2026-03-30 — Native adapter support for database connectors.
 # Updated: 2026-04-01 — Added Firebase CLI adapter registration.
 # Updated: 2026-04-01 — Added GCP adapter for gcloud CLI integration.
+# Updated: 2026-06-08 — Added the public ``definitions`` property (full
+#   ConnectorDef list incl. ``.senses``) so the EE SenseResolver can index
+#   connectors by sense without reaching into the private ``_definitions``
+#   dict. OSS-only change; must not import pocketpaw_ee.
 
 from __future__ import annotations
 
@@ -143,6 +147,18 @@ class ConnectorRegistry:
             }
             for d in self._definitions.values()
         ]
+
+    @property
+    def definitions(self) -> list[ConnectorDef]:
+        """All parsed connector definitions, including their ``.senses``.
+
+        Public accessor over the internal ``_definitions`` map so consumers
+        (notably the EE SenseResolver) can index connectors by sense via
+        ``pocketpaw.senses.connectors_for_sense`` without reaching into the
+        private dict. Returns a fresh list; mutating it does not affect the
+        registry.
+        """
+        return list(self._definitions.values())
 
     def get_definition(self, name: str) -> ConnectorDef | None:
         """Get a connector definition by name."""

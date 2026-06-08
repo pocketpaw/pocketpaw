@@ -14,6 +14,16 @@
 #   sites servers use. Tool ids namespace as ``mcp__pocketpaw_connectors__*``.
 #   OSS-EE boundary: this module imports only ``connectors.service`` (which owns
 #   the Beanie read), never the WorkspaceConnector doc directly.
+# Updated: 2026-06-08 (feat/sense-mcp / Sense tier chunk 4) — added the Sense
+#   agent surface alongside the connector surface: two more tools,
+#   ``list_senses`` (which provider-agnostic capabilities resolve in this
+#   pocket?) and ``sense_execute`` (run a READ action against a Sense without
+#   naming the connector). Both delegate to ``cloud.senses.resolver`` —
+#   ``list_senses`` resolves each CORE_SENSES entry via ``resolve`` and reports
+#   the bound connector; ``sense_execute`` calls ``execute_sense``, which OWNS
+#   the read-first gate (only trust=auto runs) so this module does NOT re-gate.
+#   Tool ids namespace as ``mcp__pocketpaw_connectors__list_senses`` /
+#   ``…__sense_execute``.
 """Agent-side MCP surface for executing a pocket's bound connectors.
 
 Tools registered:
@@ -48,10 +58,14 @@ SERVER_NAME = "pocketpaw_connectors"
 # Allowlist entries must use this exact form.
 LIST_CONNECTOR_ACTIONS_TOOL_ID = f"mcp__{SERVER_NAME}__list_connector_actions"
 CONNECTOR_EXECUTE_TOOL_ID = f"mcp__{SERVER_NAME}__connector_execute"
+LIST_SENSES_TOOL_ID = f"mcp__{SERVER_NAME}__list_senses"
+SENSE_EXECUTE_TOOL_ID = f"mcp__{SERVER_NAME}__sense_execute"
 
 CONNECTOR_TOOL_IDS = (
     LIST_CONNECTOR_ACTIONS_TOOL_ID,
     CONNECTOR_EXECUTE_TOOL_ID,
+    LIST_SENSES_TOOL_ID,
+    SENSE_EXECUTE_TOOL_ID,
 )
 
 # The agent-facing refusal for any write/confirm-trust action in v1. Kept as a
@@ -281,6 +295,140 @@ async def _connector_execute_handler(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Tool handlers — Sense tier (provider-agnostic capabilities above connectors)
+# ---------------------------------------------------------------------------
+
+
+async def _list_senses_handler(args: dict) -> dict:  # noqa: ARG001 — no args
+    workspace_id, _user_id, pocket_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "no active workspace — list_senses can only be called from inside a cloud chat stream"
+        )
+
+    from pocketpaw.senses import CORE_SENSES
+    from pocketpaw_ee.cloud.senses.resolver import resolve_many
+
+    # One enabled-connector read for all CORE_SENSES (was one query per sense).
+    try:
+        resolved_map = await resolve_many(
+            [s.id for s in CORE_SENSES], workspace_id, pocket_id=pocket_id
+        )
+    except Exception as exc:  # noqa: BLE001 — never let one sense break the list
+        logger.warning("list_senses: resolve_many failed", exc_info=True)
+        return _error_response(f"list_senses failed: {exc}")
+
+    senses_out: list[dict[str, Any]] = []
+    for sense in CORE_SENSES:
+        resolved = resolved_map.get(sense.id)
+        if resolved is None:
+            # No enabled connector fills this sense for the workspace — skip it
+            # so the agent only sees capabilities it can actually use.
+            continue
+        senses_out.append(
+            {
+                "sense": sense.id,
+                "display_name": sense.display_name,
+                "description": sense.description,
+                "connector": resolved.connector_name,
+                "ambiguous": resolved.ambiguous,
+                "candidates": resolved.candidates,
+            }
+        )
+
+    if not senses_out:
+        return _success_response(
+            {
+                "pocket_id": pocket_id,
+                "senses": [],
+                "message": (
+                    "No capabilities (Senses) are available here yet — no enabled "
+                    "connector fills any core sense for this workspace. Connect a "
+                    "provider (email, calendar, code, etc.) to use senses."
+                ),
+            }
+        )
+
+    return _success_response(
+        {
+            "pocket_id": pocket_id,
+            "senses": senses_out,
+            "note": (
+                "Call sense_execute(sense, action, params) to run a READ action "
+                "against a capability without naming the connector. If a sense is "
+                "ambiguous, the resolver picked the first candidate — the user can "
+                "set a preference to disambiguate. Write actions are blocked in v1."
+            ),
+        }
+    )
+
+
+async def _sense_execute_handler(args: dict) -> dict:
+    workspace_id, user_id, pocket_id = _identity()
+    if not workspace_id:
+        return _error_response(
+            "no active workspace — sense_execute can only be called from inside a cloud chat stream"
+        )
+    if not pocket_id:
+        return _error_response(
+            "this chat isn't anchored to a pocket — sense_execute needs a "
+            "pocket-scoped room with a bound connector"
+        )
+
+    sense = args.get("sense")
+    if not isinstance(sense, str) or not sense:
+        return _error_response("sense is required (string, e.g. 'paw.email.v1')")
+    action = args.get("action")
+    if not isinstance(action, str) or not action:
+        return _error_response("action is required (string)")
+    params = args.get("params") or {}
+    if not isinstance(params, dict):
+        return _error_response("params must be an object (dict)")
+
+    from pocketpaw.senses import SenseValidationError
+    from pocketpaw_ee.cloud.senses.resolver import execute_sense
+
+    try:
+        result = await execute_sense(
+            sense,
+            action,
+            params,
+            workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+        )
+    except SenseValidationError as exc:
+        return _error_response(f"unknown sense {sense!r}: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sense_execute failed", exc_info=True)
+        return _error_response(f"sense_execute failed: {exc}")
+
+    # execute_sense OWNS the read-first gate. A False result is a structured
+    # refusal (sense.no_provider / sense.action_needs_approval), not a crash.
+    if not result.ok:
+        return _error_response(result.message or result.error or "sense_execute refused")
+
+    # result.data is the underlying ExecuteActionResponse. Flatten it into the
+    # SAME shape connector_execute returns (json.dumps uses default=str, so a
+    # nested Pydantic model would serialize as an opaque repr the agent can't
+    # read) — keep the two tools' success payloads structurally identical.
+    resp = result.data
+    return _success_response(
+        {
+            "executed": True,
+            "sense": result.sense_id,
+            "connector": result.connector_name,
+            "action": result.action,
+            "success": getattr(resp, "success", True),
+            "data": getattr(resp, "data", None),
+            "error": getattr(resp, "error", None),
+            "records_affected": getattr(resp, "records_affected", 0),
+            "execution_mode": getattr(resp, "execution_mode", "cloud"),
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
 
@@ -356,10 +504,75 @@ def build_connectors_context_server() -> tuple[str, Any] | None:
     async def connector_execute(args):  # type: ignore[no-untyped-def]
         return await _connector_execute_handler(args)
 
+    @tool(
+        "list_senses",
+        (
+            "List the capabilities (Senses) you can use in the CURRENT "
+            "pocket/room. A Sense is a provider-agnostic capability (e.g. "
+            "'paw.email.v1' = email, 'paw.code.v1' = repos/issues/PRs) that the "
+            "resolver binds to whichever connector the tenant enabled — so you "
+            "address the capability, not a specific provider. Call this FIRST "
+            "when the user asks for something by capability ('check my email', "
+            "'what's on my calendar') rather than by provider name. Returns only "
+            "senses that resolve to a connector here, each with the bound "
+            "`connector`, whether the choice was `ambiguous` (more than one "
+            "provider, no preference set), and the `candidates`. No arguments — "
+            "the pocket is inferred from the active chat. Then call sense_execute "
+            "to run a READ action."
+        ),
+        {},
+    )
+    async def list_senses(args):  # type: ignore[no-untyped-def]
+        return await _list_senses_handler(args)
+
+    @tool(
+        "sense_execute",
+        (
+            "Run ONE READ action against a capability (Sense) for the current "
+            "pocket WITHOUT naming the provider. Use this when the user asks by "
+            "capability ('search my email for the invoice', 'list my open PRs') "
+            "and you want the resolver to pick the connector the tenant enabled. "
+            "Args: `sense` (a sense id from list_senses, e.g. 'paw.email.v1'), "
+            "`action` (an action name, e.g. 'gmail_search' or 'list_issues'), and "
+            "`params` (an object of that action's parameters). READ-FIRST: only "
+            "read (auto-trust) actions run; WRITE actions (create/send/modify/"
+            "delete) are refused with a 'needs approval' message and are NEVER "
+            "executed. If no connector fills the sense for this workspace you get "
+            "a clear 'no provider' error. Always call list_senses first to see "
+            "which senses resolve and pick a valid action."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "sense": {
+                    "type": "string",
+                    "description": (
+                        "Sense id from list_senses, e.g. 'paw.email.v1' or "
+                        "'paw.code.v1'. Names the capability, not a connector."
+                    ),
+                },
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "Action name to run, e.g. 'gmail_search' or 'list_issues'. "
+                        "Read actions only — writes are refused."
+                    ),
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Object of the action's parameters (may be empty).",
+                },
+            },
+            "required": ["sense", "action"],
+        },
+    )
+    async def sense_execute(args):  # type: ignore[no-untyped-def]
+        return await _sense_execute_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
-        version="1.0.0",
-        tools=[list_connector_actions, connector_execute],
+        version="1.1.0",
+        tools=[list_connector_actions, connector_execute, list_senses, sense_execute],
     )
     return SERVER_NAME, server
 
@@ -368,6 +581,8 @@ __all__ = [
     "CONNECTOR_EXECUTE_TOOL_ID",
     "CONNECTOR_TOOL_IDS",
     "LIST_CONNECTOR_ACTIONS_TOOL_ID",
+    "LIST_SENSES_TOOL_ID",
+    "SENSE_EXECUTE_TOOL_ID",
     "SERVER_NAME",
     "build_connectors_context_server",
 ]

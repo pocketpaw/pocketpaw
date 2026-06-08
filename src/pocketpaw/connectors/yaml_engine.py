@@ -6,6 +6,9 @@
 #   from the YAML. It is the per-connector mapping source for deriving a pocket's
 #   PocketSurfaceProfile when the connector is bound to a pocket. Backward-compat:
 #   connectors with no block parse with ``surface_profile=None``.
+# Updated: 2026-06-08 — Added `senses: list[str]` to ConnectorDef + parse-time
+#   validation via senses.validate_sense_id (Sense tier chunk 1). Unknown paw.*
+#   ids fail loudly; missing `senses:` key is backward compatible ([]).
 
 from __future__ import annotations
 
@@ -61,6 +64,9 @@ class ConnectorDef:
     # M3 — optional connector→skill/tool mapping. ``None`` when the YAML has
     # no ``surface_profile:`` block (the common case / backward-compat).
     surface_profile: ConnectorSurfaceProfile | None = None
+    # Sense tier — the provider-agnostic capabilities this connector fills
+    # (e.g. ["paw.email.v1"]). Empty when the YAML has no ``senses:`` key.
+    senses: list[str] = field(default_factory=list)
 
 
 def _parse_surface_profile(raw: Any) -> ConnectorSurfaceProfile | None:
@@ -89,8 +95,24 @@ def parse_connector_yaml(path: Path) -> ConnectorDef:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
+    name = raw.get("name", path.stem)
+
+    # Validate any declared senses at parse time. An unknown paw.* id must fail
+    # loudly with a message naming the connector + the bad id — this is the
+    # "no fragmentation of the core" rule (Sense tier chunk 1).
+    from pocketpaw.senses import SenseValidationError, validate_sense_id
+
+    senses = raw.get("senses", [])
+    for sense_id in senses:
+        try:
+            validate_sense_id(sense_id)
+        except SenseValidationError as e:
+            raise SenseValidationError(
+                f"connector {name!r} declares invalid sense {sense_id!r}: {e}"
+            ) from e
+
     return ConnectorDef(
-        name=raw.get("name", path.stem),
+        name=name,
         display_name=raw.get("display_name", raw.get("name", path.stem)),
         type=raw.get("type", "generic"),
         icon=raw.get("icon", "plug"),
@@ -98,6 +120,7 @@ def parse_connector_yaml(path: Path) -> ConnectorDef:
         actions=raw.get("actions", []),
         sync=raw.get("sync", {}),
         surface_profile=_parse_surface_profile(raw.get("surface_profile")),
+        senses=senses,
     )
 
 

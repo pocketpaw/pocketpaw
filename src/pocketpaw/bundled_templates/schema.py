@@ -11,6 +11,20 @@
 # (a Paw Site composed by conversion role) validates. The landing-page
 # template uses shape:"custom", which is already exempt from the
 # columns-required and default_view-matrix rules — no shape change needed.
+# Modified: 2026-06-08 (feat/sense-template-needs, Sense tier chunk 6a) —
+# added `needs: list[str]` to PocketTemplate: the Sense ids a vertical
+# template requires (e.g. ["paw.payments.v1"]). Each id is validated at
+# template-load via senses.validate_sense_id (a malformed / unknown paw.*
+# id raises SenseValidationError), mirroring the connector `senses:` field.
+# `needs` is tenant-capability METADATA, not ripple spec — it is read at
+# pocket-create to surface a prompt-to-connect when a provider is missing.
+# Modified: 2026-06-08 (feat/sense-source, Sense tier chunk 6b) — DataSourceDef
+# gains a `type: "http"|"sense"` field (default "http", backward compatible).
+# `path` is now optional (required only for http via the type validator);
+# sense sources add `sense_id`, `action`, `params`. A model validator enforces
+# path-required-for-http and sense_id+action-required-for-sense, and validates
+# sense_id via senses.validate_sense_id. The resolved Sense value binds into
+# state like any HTTP source, so Ripple needs no changes.
 """Pydantic v2 model for the RFC 03 v2 Pocket Template Schema.
 
 This module is the **schema chokepoint** — every bundled template, every
@@ -296,27 +310,62 @@ class TriggerDef(BaseModel):
 
 
 class DataSourceDef(BaseModel):
-    """One read-only source that hydrates state at runtime (RFC 04)."""
+    """One read-only source that hydrates state at runtime (RFC 04).
+
+    Two source ``type``s:
+
+    * ``http`` (default, backward-compatible) — a relative-path HTTP GET.
+      ``path`` is required.
+    * ``sense`` — resolves a provider-agnostic Sense (Sense tier chunk 6b).
+      ``sense_id`` + ``action`` are required; the resolved value lands in
+      ``bind`` like any other source, so Ripple needs no changes. ``params``
+      are STATIC in v1 (no ``{state.x}`` evaluation yet).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    type: Literal["http", "sense"] = "http"
     method: DataSourceMethodT = "GET"
-    path: str = Field(
-        ...,
-        description="Relative path; never absolute (SSRF-safe by RFC 04).",
+    path: str | None = Field(
+        default=None,
+        description="Relative path (http sources); never absolute (SSRF-safe by RFC 04).",
     )
     bind: str = Field(..., description="state path that receives the result.")
     refresh: list[str] = Field(default_factory=lambda: ["pocket_open", "manual"])
     transform: str | None = None
+    # Sense-source fields (type == "sense").
+    sense_id: str | None = None
+    action: str | None = None
+    params: dict[str, Any] | None = None
 
     @field_validator("path")
     @classmethod
-    def _path_is_relative(cls, v: str) -> str:
-        # SSRF safety per RFC 04: relative paths only.
-        if v.startswith(("http://", "https://", "//", "ftp://")):
+    def _path_is_relative(cls, v: str | None) -> str | None:
+        # SSRF safety per RFC 04: relative paths only. Only enforced when
+        # present — a sense source has no path.
+        if v is not None and v.startswith(("http://", "https://", "//", "ftp://")):
             raise ValueError("data_sources[].path must be relative, not absolute")
         return v
+
+    @model_validator(mode="after")
+    def _type_conditionals(self) -> DataSourceDef:
+        if self.type == "http":
+            if not self.path:
+                raise ValueError("data_sources[].path is required when type='http'")
+        elif self.type == "sense":
+            if not self.sense_id or not self.action:
+                raise ValueError(
+                    "data_sources[].sense_id and .action are required when type='sense'"
+                )
+            # Validate the sense id at template-load, consistent with the
+            # connector ``senses:`` and template ``needs:`` validation. Imported
+            # inside the validator to avoid a top-level import cycle with the
+            # senses catalog. A malformed/unknown paw.* id raises.
+            from pocketpaw.senses import validate_sense_id
+
+            validate_sense_id(self.sense_id)
+        return self
 
 
 class PermissionsDef(BaseModel):
@@ -376,6 +425,10 @@ class PocketTemplate(BaseModel):
     state: StateBinding
     actions: list[ActionDef] = Field(default_factory=list)
     connectors: list[str] = Field(default_factory=list)
+    needs: list[str] = Field(
+        default_factory=list,
+        description="Sense ids this template requires, e.g. ['paw.email.v1'].",
+    )
     agents: list[AgentDef] = Field(default_factory=list)
     triggers: list[TriggerDef] = Field(default_factory=list)
     outcomes: list[str] = Field(default_factory=list)
@@ -408,6 +461,19 @@ class PocketTemplate(BaseModel):
     def _vertical_is_lower_slug(cls, v: str) -> str:
         if not v or v != v.lower() or any(ch.isspace() for ch in v):
             raise ValueError("vertical must be a lower-case slug")
+        return v
+
+    @field_validator("needs")
+    @classmethod
+    def _needs_are_valid_senses(cls, v: list[str]) -> list[str]:
+        # Validate each declared sense id at template-load — a malformed or
+        # unknown paw.* id raises SenseValidationError, consistent with the
+        # connector ``senses:`` validation. Imported inside the validator to
+        # avoid a top-level import cycle with the senses catalog.
+        from pocketpaw.senses import validate_sense_id
+
+        for sense_id in v:
+            validate_sense_id(sense_id)
         return v
 
     @model_validator(mode="after")

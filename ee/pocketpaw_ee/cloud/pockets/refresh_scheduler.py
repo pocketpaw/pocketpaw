@@ -163,6 +163,7 @@ async def _refresh_one_pocket(pocket: dict) -> None:
                 auth_header=auth_header,
                 token=token,
                 only_source=key,
+                workspace_id=workspace_id,
             )
             if result.get("errors"):
                 logger.debug(

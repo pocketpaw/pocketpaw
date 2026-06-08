@@ -6,6 +6,9 @@ name: stripe
 display_name: Stripe
 type: payment
 icon: credit-card
+
+senses:
+  - paw.payments.v1
 auth:
   method: api_key
   credentials:

@@ -7,6 +7,9 @@ display_name: Google Calendar
 type: communication
 icon: calendar
 
+senses:
+  - paw.calendar.v1
+
 auth:
   method: oauth2
   credentials:

@@ -1,5 +1,10 @@
 <!--
   Connectors documentation.
+  Updated: 2026-06-08 (sense-mcp / Sense tier chunk 4) — added the Senses
+  section: the "Sense" glossary entry, the sense-vs-connector distinction, and
+  the two new agent tools (list_senses / sense_execute on the same
+  pocketpaw_connectors MCP server) that address a capability instead of a
+  provider, with the resolver binding it to the tenant's enabled connector.
   Updated: 2026-06-08 (connector-mcp-execution / keystone) — documented the
   agent-callable connector tool surface (list_connector_actions /
   connector_execute on the pocketpaw_connectors MCP server), the v1
@@ -273,6 +278,57 @@ connector_execute("gmail", "gmail_search",
 
 connector_execute("gmail", "gmail_send", {...})
   → blocked: "needs approval (coming in v2). Not executed."
+```
+
+## Senses — provider-agnostic capabilities above connectors
+
+> **Glossary — Sense.** A provider-agnostic capability that sits one layer above
+> connectors. Templates and agents address a Sense (e.g. `paw.email.v1`,
+> `paw.code.v1`) instead of a specific connector; the resolver binds the Sense
+> to whichever connector the tenant enabled for that capability in the current
+> workspace. A Sense is the *what* (email, calendar, code); a connector is the
+> *how* (Gmail, Google Calendar, GitHub). This is the anti-fragmentation rule:
+> the core Sense vocabulary is closed and curated, so one template works across
+> every tenant regardless of which providers they connected.
+
+A **Sense** is a capability addressed by what it *does*, not by which vendor
+provides it. `paw.email.v1` means "email" regardless of whether the tenant
+enabled Gmail, Outlook, or anything else; `paw.code.v1` means
+"repos/issues/PRs" whether that's GitHub or GitLab. Templates and agents
+address a Sense, and the **resolver** binds it to whichever connector the
+tenant actually enabled in this workspace. This keeps templates portable: a
+"weekly digest" template asks for `paw.email.v1` and works for every tenant
+without hard-coding a provider.
+
+Two MCP tools on the same `pocketpaw_connectors` server expose Senses to the
+chat agent:
+
+| Tool | What it does |
+|------|--------------|
+| `list_senses()` | Lists the capabilities (Senses) that resolve to a connector in the **current pocket** — each with the bound `connector`, whether the choice was `ambiguous` (more than one provider, no preference set), and the `candidates`. No arguments; the pocket comes from the active chat. |
+| `sense_execute(sense, action, params)` | Runs ONE READ action against a Sense **without naming the connector** — the resolver picks the provider. Read (auto-trust) actions execute; writes are refused. |
+
+**Sense vs connector.** Use `connector_execute` when you already know the
+provider (the user said "GitHub" or "Gmail"); use `sense_execute` when the
+user asks by capability ("check my email", "list my open PRs") and you want
+the resolver to pick the enabled provider. `sense_execute` enforces the same
+read-first policy as `connector_execute` — the resolver only runs `auto`-trust
+actions; `confirm` / `restricted` (write-shaped) actions are refused with a
+"needs approval" message and never executed. When no enabled connector fills
+the sense, `sense_execute` returns a clear "no provider" error so the agent
+can prompt the user to connect one.
+
+```
+list_senses()
+  → [{"sense": "paw.email.v1", "connector": "gmail", "ambiguous": false, ...},
+     {"sense": "paw.code.v1",  "connector": "github", ...}]
+
+sense_execute("paw.email.v1", "gmail_search",
+             {"query": "from:acme.com subject:invoice"})
+  → runs against the resolved connector (gmail), returns matching stubs
+
+sense_execute("paw.email.v1", "gmail_send", {...})
+  → refused: "needs approval … not executed in v1 (read-first)."
 ```
 
 ## Using with Existing Integrations

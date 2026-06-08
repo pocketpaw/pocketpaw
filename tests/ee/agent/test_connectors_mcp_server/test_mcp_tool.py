@@ -45,7 +45,8 @@ class TestConnectorsMcpServerRegistration:
         assert CONNECTOR_EXECUTE_TOOL_ID == "mcp__pocketpaw_connectors__connector_execute"
         assert LIST_CONNECTOR_ACTIONS_TOOL_ID in CONNECTOR_TOOL_IDS
         assert CONNECTOR_EXECUTE_TOOL_ID in CONNECTOR_TOOL_IDS
-        assert len(CONNECTOR_TOOL_IDS) == 2
+        # The server now also carries the two Sense-tier tools (chunk 4).
+        assert len(CONNECTOR_TOOL_IDS) == 4
 
     def test_extension_provider_advertises_tool_ids(self) -> None:
         """The entry-point provider's ``tool_ids()`` feeds the claude_sdk
@@ -437,3 +438,222 @@ class TestConnectorExecuteHandler:
 
         assert out.get("is_error") is True
         assert "connector_name is required" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# Handlers — Sense tier (list_senses / sense_execute)
+# ---------------------------------------------------------------------------
+
+
+class TestSenseTools:
+    @pytest.mark.asyncio
+    async def test_list_senses_reports_only_resolvable_senses(self) -> None:
+        """list_senses returns the senses that resolve to an enabled connector
+        for the workspace, and skips the ones with no provider."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import ResolvedSense
+
+        async def fake_resolve_many(sense_ids, workspace_id, *, pocket_id=None):
+            return {
+                sid: (
+                    ResolvedSense(
+                        sense_id="paw.email.v1",
+                        connector_name="gmail",
+                        ambiguous=False,
+                        candidates=["gmail"],
+                    )
+                    if sid == "paw.email.v1"
+                    else None  # no provider for the rest
+                )
+                for sid in sense_ids
+            }
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+                new=AsyncMock(side_effect=fake_resolve_many),
+            ),
+        ):
+            out = await connectors_mcp._list_senses_handler({})
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        ids = [s["sense"] for s in body["senses"]]
+        assert ids == ["paw.email.v1"]
+        assert body["senses"][0]["connector"] == "gmail"
+
+    @pytest.mark.asyncio
+    async def test_list_senses_no_workspace_errors(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        ws_patch, user_patch, pocket_patch = _patch_identity(None, None, None)
+        with ws_patch, user_patch, pocket_patch:
+            out = await connectors_mcp._list_senses_handler({})
+
+        assert out.get("is_error") is True
+        assert "no active workspace" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_success_flattens_response(self) -> None:
+        """A successful sense_execute flattens the underlying
+        ExecuteActionResponse into the SAME shape connector_execute returns —
+        not a nested Pydantic repr (json.dumps uses default=str)."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+        exec_result = SenseExecutionResult(
+            ok=True,
+            sense_id="paw.email.v1",
+            connector_name="gmail",
+            action="gmail_search",
+            data=ExecuteActionResponse(
+                success=True,
+                data=[{"id": "m1", "subject": "hello"}],
+                execution_mode="cloud",
+            ),
+        )
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.execute_sense",
+                new=AsyncMock(return_value=exec_result),
+            ) as mock_exec,
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search", "params": {"q": "hi"}}
+            )
+
+        assert not out.get("is_error")
+        body = _decode_payload(out)
+        # Flat shape, structurally identical to connector_execute's success.
+        assert body["executed"] is True
+        assert body["sense"] == "paw.email.v1"
+        assert body["connector"] == "gmail"
+        assert body["success"] is True
+        assert body["data"][0]["subject"] == "hello"
+        assert body["execution_mode"] == "cloud"
+        # Delegated to execute_sense with the resolved identity.
+        mock_exec.assert_awaited_once()
+        call = mock_exec.await_args
+        assert call.args[0] == "paw.email.v1"  # sense
+        assert call.args[1] == "gmail_search"  # action
+        assert call.kwargs["pocket_id"] == "pk_1"
+        assert call.kwargs["user_id"] == "u_1"
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_refusal_is_delegated_not_self_gated(self) -> None:
+        """A write/needs-approval refusal comes back as an error envelope, and
+        the handler still DELEGATED to execute_sense (it does not gate itself)."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+        refused = SenseExecutionResult(
+            ok=False,
+            sense_id="paw.email.v1",
+            connector_name="gmail",
+            action="gmail_send",
+            error="sense.action_needs_approval",
+            message="action 'gmail_send' needs approval — not executed in v1 (read-first).",
+        )
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.execute_sense",
+                new=AsyncMock(return_value=refused),
+            ) as mock_exec,
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_send", "params": {}}
+            )
+
+        assert out.get("is_error") is True
+        assert "needs approval" in out["content"][0]["text"]
+        mock_exec.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_no_provider_errors(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+        none_result = SenseExecutionResult(
+            ok=False,
+            sense_id="paw.email.v1",
+            action="gmail_search",
+            error="sense.no_provider",
+            message="no enabled connector can fill 'paw.email.v1' for this workspace.",
+        )
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.execute_sense",
+                new=AsyncMock(return_value=none_result),
+            ),
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search"}
+            )
+
+        assert out.get("is_error") is True
+        assert "no enabled connector" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_guards_and_validation(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        # No pocket → refused.
+        ws_p, u_p, pk_p = _patch_identity("ws_1", "u_1", None)
+        with ws_p, u_p, pk_p:
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.email.v1", "action": "gmail_search"}
+            )
+        assert out.get("is_error") is True
+        assert "pocket" in out["content"][0]["text"]
+
+        # Missing sense → refused.
+        ws_p, u_p, pk_p = _patch_identity("ws_1", "u_1", "pk_1")
+        with ws_p, u_p, pk_p:
+            out = await connectors_mcp._sense_execute_handler({"action": "gmail_search"})
+        assert out.get("is_error") is True
+        assert "sense is required" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_sense_execute_unknown_sense_is_clean_error(self) -> None:
+        """An unknown paw.* id raises SenseValidationError inside execute_sense;
+        the handler turns it into a clean error, not a crash."""
+        from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+
+        from pocketpaw.senses import SenseValidationError
+
+        ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
+        with (
+            ws_patch,
+            user_patch,
+            pocket_patch,
+            patch(
+                "pocketpaw_ee.cloud.senses.resolver.execute_sense",
+                new=AsyncMock(side_effect=SenseValidationError("unknown core sense id")),
+            ),
+        ):
+            out = await connectors_mcp._sense_execute_handler(
+                {"sense": "paw.unknown.v1", "action": "x"}
+            )
+
+        assert out.get("is_error") is True
+        assert "unknown sense" in out["content"][0]["text"]
