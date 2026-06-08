@@ -1,6 +1,12 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
+  identity binding now also passes ``pocket_id=ctx.pocket_id`` into
+  ``attach_agent_identity``, publishing the room's ``Pocket._id`` on the new
+  ``agent_service._active_pocket_id`` ContextVar. The connector-execution MCP
+  server reads it to scope ``list_connector_actions`` / ``connector_execute``
+  to the current pocket. ``None`` for non-pocket (DM/group) threads.
 - 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
   Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
   as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
@@ -631,6 +637,11 @@ async def _drive_agent_loop(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         session_mongo_id=session_mongo_id,
+        # Anchor the connector-execution MCP server to the room this stream is
+        # in: ``ctx.pocket_id`` is the Mongo ``Pocket._id`` for pocket-scoped
+        # chats (and session chats whose Session.pocket is set). ``None`` for
+        # plain DM/group threads — the connector tools then say "no pocket".
+        pocket_id=ctx.pocket_id,
     )
 
     if not history and ctx.session_id:

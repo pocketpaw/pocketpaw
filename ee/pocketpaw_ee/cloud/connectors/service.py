@@ -6,6 +6,14 @@
 #   and persists it via ``pockets.service.apply_derived_surface_profile`` (the
 #   Beanie-write boundary — this service never imports the Pocket doc). Derivation
 #   itself is the pure ``derivation.derive_surface_profile``.
+# Updated: 2026-06-08 (connector-mcp-execution / keystone) — added
+#   ``list_pocket_connectors`` so the cloud chat agent's in-process MCP server
+#   (``ee/pocketpaw_ee/agent/mcp_servers/connectors.py``) can enumerate a
+#   pocket's enabled, pocket-scoped connectors and each action's trust level /
+#   execution mode WITHOUT the MCP layer importing the WorkspaceConnector Beanie
+#   doc (OSS-EE boundary §2). The MCP ``connector_execute`` tool reuses the
+#   existing ``execute(...)`` for read (auto-trust) actions and blocks
+#   write/confirm-trust actions in v1.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -35,7 +43,9 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 )
 from pocketpaw_ee.cloud.connectors.domain import (
     AvailableConnector,
+    ConnectorActionInfo,
     ConnectorSurfaceContribution,
+    PocketConnectorInfo,
     WorkspaceConnector,
 )
 from pocketpaw_ee.cloud.connectors.dto import (
@@ -469,6 +479,112 @@ async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
     return recipes
 
 
+async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[PocketConnectorInfo]:
+    """List the connectors enabled + bound to ONE pocket, with their actions.
+
+    The agent-facing companion to ``list_connectors``: where that returns the
+    whole catalog with workspace state, this returns only the connectors a
+    specific room (pocket) can actually use, each with its action surface
+    classified by trust level so the agent MCP server can show read actions as
+    callable and write actions as "needs approval (v2)".
+
+    Tenant-filtered on ``workspace`` AND ``pocket_id`` (cloud rule §7) and
+    further on ``scope == "pocket"`` + ``enabled``. The Beanie read lives here
+    (not in the MCP layer) so the OSS-EE boundary holds: the MCP server imports
+    this service, never the ``WorkspaceConnector`` doc.
+
+    Trust gating: ``auto``-trust actions are read-first (``is_read=True``);
+    ``confirm`` / ``restricted`` actions are write-shaped and marked
+    ``is_read=False`` so the caller blocks them in v1.
+    """
+    enabled_docs = await _WCDoc.find(
+        _WCDoc.workspace == workspace_id,
+        _WCDoc.pocket_id == pocket_id,
+        _WCDoc.scope == "pocket",
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    ).to_list()
+    if not enabled_docs:
+        return []
+
+    reg = _get_registry()
+    available = {a.name: a for a in _available_from_registry()}
+    out: list[PocketConnectorInfo] = []
+    for doc in enabled_docs:
+        a = available.get(doc.name)
+        defn = reg.get_definition(doc.name)
+        if a is None or defn is None:
+            continue
+        adapter = _adapter_for_definition(defn, doc.name)
+        try:
+            schemas = await adapter.actions()
+        except Exception as exc:  # noqa: BLE001 — a bad adapter shouldn't drop the list
+            logger.warning("actions() raised for %s: %s", doc.name, exc)
+            continue
+        action_infos = tuple(
+            ConnectorActionInfo(
+                name=s.name,
+                description=s.description,
+                trust_level=str(s.trust_level),
+                execution_mode=str(s.execution_mode),
+                is_read=str(s.trust_level) == "auto",
+            )
+            for s in schemas
+        )
+        out.append(
+            PocketConnectorInfo(
+                name=a.name,
+                display_name=a.display_name,
+                type=a.type,
+                icon=a.icon,
+                actions=action_infos,
+            )
+        )
+    return out
+
+
+async def get_action_trust(name: str, action: str) -> ConnectorActionInfo | None:
+    """Look up one action's trust classification on a connector.
+
+    Used by the agent MCP server's ``connector_execute`` gate to decide read
+    (auto → execute) vs write (confirm/restricted → block) BEFORE calling
+    ``execute``. Registry-only (no tenant read) — the action schema is static
+    catalog metadata. Returns ``None`` when the connector or action is unknown.
+    """
+    reg = _get_registry()
+    defn = reg.get_definition(name)
+    if defn is None:
+        return None
+    adapter = _adapter_for_definition(defn, name)
+    schemas = await adapter.actions()
+    schema = next((s for s in schemas if s.name == action), None)
+    if schema is None:
+        return None
+    return ConnectorActionInfo(
+        name=schema.name,
+        description=schema.description,
+        trust_level=str(schema.trust_level),
+        execution_mode=str(schema.execution_mode),
+        is_read=str(schema.trust_level) == "auto",
+    )
+
+
+async def is_connector_bound_to_pocket(workspace_id: str, pocket_id: str, name: str) -> bool:
+    """True when ``name`` is enabled at ``scope=pocket`` for this exact pocket.
+
+    The tenant gate the MCP ``connector_execute`` tool checks first: an agent in
+    pocket A must not run a connector only bound to pocket B (or workspace-wide
+    only). Tenant-filtered (cloud rule §7).
+    """
+    doc = await _WCDoc.find_one(
+        _WCDoc.workspace == workspace_id,
+        _WCDoc.pocket_id == pocket_id,
+        _WCDoc.scope == "pocket",
+        _WCDoc.name == name,
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    )
+    return doc is not None
+
+
 def _adapter_for_definition(defn, name: str):
     """Build an adapter without connecting — for static metadata reads.
 
@@ -578,8 +694,11 @@ __all__ = [
     "disable_connector",
     "enable_connector",
     "execute",
+    "get_action_trust",
     "get_connector",
+    "is_connector_bound_to_pocket",
     "list_connectors",
+    "list_pocket_connectors",
     "list_widget_recipes",
     "record_sync",
     "update_config",

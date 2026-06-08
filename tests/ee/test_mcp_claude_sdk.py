@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) —
+  ``_strip_builtin_servers`` now also drops ``pocketpaw_connectors`` (the new
+  always-on connector-execution server: list_connector_actions /
+  connector_execute), so the external-config assertions stay focused after the
+  connector MCP server became ambient. Same regime as pocketpaw_sites_manager.
 Updated: 2026-06-01 (Phase 4 — chat→create-site) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_sites_manager`` (the new always-on Paw Sites
   publish server), so the external-config assertions stay focused after the
@@ -34,6 +39,7 @@ All SDK imports are mocked.
 import logging
 from unittest.mock import patch
 
+from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
@@ -78,6 +84,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_sites_manager`` is always-on too — the bundled
     # pocketpaw-create-site skill calls it without an explicit opt-in.
     out.pop(_SITES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
+    # (gmail/github) call connector_execute without an explicit opt-in.
+    out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
     return out
 
 

@@ -54,6 +54,14 @@ folds a pocket-entity's ``surface_profile`` override over the surface base).
 calling ``resolve_profile`` itself — so a pocket bound to a room can flip
 ripple off/on for that room. ``resolved_profile is None`` is the legacy /
 non-entity path → ripple ON, byte-identical to today.
+Changes: 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
+identity now carries the room's ``pocket_id`` too. ``attach_agent_identity``
+gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
+``current_workspace_id`` / ``current_user_id``; both are set in
+``run_core`` and read by the connector-execution MCP server
+(``mcp_servers/connectors.py``) so its tools scope to the current pocket.
+The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
+unaffected (``pocket_id`` defaults to ``None``).
 """
 
 from __future__ import annotations
@@ -107,27 +115,41 @@ _active_user_id: ContextVar[str | None] = ContextVar("agent_user_id", default=No
 _active_session_mongo_id: ContextVar[str | None] = ContextVar(
     "agent_session_mongo_id", default=None
 )
+# The Mongo ``Pocket._id`` this stream is anchored to, if any. Set alongside
+# workspace/user so in-process MCP tools that act on the CURRENT pocket — the
+# connector-execution server (``mcp_servers/connectors.py``) being the first —
+# can resolve which room they're in without a request scope. ``None`` when the
+# chat isn't bound to a pocket (a plain DM / group thread).
+_active_pocket_id: ContextVar[str | None] = ContextVar("agent_pocket_id", default=None)
 
 
 def attach_agent_identity(
-    *, workspace_id: str, user_id: str, session_mongo_id: str | None = None
-) -> tuple[Token, Token, Token]:
-    """Bind workspace / user / session identity for the active stream's
-    MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat is
-    streaming through — used by ``create_pocket`` to link the active
-    session to the freshly-created pocket."""
+    *,
+    workspace_id: str,
+    user_id: str,
+    session_mongo_id: str | None = None,
+    pocket_id: str | None = None,
+) -> tuple[Token, Token, Token, Token]:
+    """Bind workspace / user / session / pocket identity for the active
+    stream's MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat
+    is streaming through — used by ``create_pocket`` to link the active
+    session to the freshly-created pocket. ``pocket_id`` is the room the chat
+    is anchored to (when any) — read by the connector-execution MCP server to
+    scope ``list_connector_actions`` / ``connector_execute`` to this pocket."""
     return (
         _active_workspace_id.set(workspace_id),
         _active_user_id.set(user_id),
         _active_session_mongo_id.set(session_mongo_id),
+        _active_pocket_id.set(pocket_id),
     )
 
 
-def detach_agent_identity(tokens: tuple[Token, Token, Token]) -> None:
-    ws_token, user_token, session_token = tokens
+def detach_agent_identity(tokens: tuple[Token, Token, Token, Token]) -> None:
+    ws_token, user_token, session_token, pocket_token = tokens
     _active_workspace_id.reset(ws_token)
     _active_user_id.reset(user_token)
     _active_session_mongo_id.reset(session_token)
+    _active_pocket_id.reset(pocket_token)
 
 
 def current_workspace_id() -> str | None:
@@ -140,6 +162,10 @@ def current_user_id() -> str | None:
 
 def current_session_mongo_id() -> str | None:
     return _active_session_mongo_id.get()
+
+
+def current_pocket_id() -> str | None:
+    return _active_pocket_id.get()
 
 
 def push_sse_event(name: str, data: dict[str, Any]) -> None:

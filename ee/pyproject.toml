@@ -165,6 +165,7 @@ cloud = "pocketpaw_ee.extensions:CloudPocketWriter"
 
 [project.entry-points."pocketpaw.mcp_servers"]
 tasks = "pocketpaw_ee.extensions:CloudTasksMcpProvider"
+connectors = "pocketpaw_ee.extensions:CloudConnectorsMcpProvider"
 planner = "pocketpaw_ee.extensions:CloudPlannerMcpProvider"
 pocket_planner = "pocketpaw_ee.extensions:CloudPocketPlannerMcpProvider"
 pocket = "pocketpaw_ee.extensions:CloudPocketMcpProvider"

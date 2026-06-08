@@ -2,6 +2,12 @@
 # Created: 2026-05-03 — pins the mode-aware dispatch in
 # ee/cloud/connectors/service.execute() and the new endpoints
 # /widget-recipes + /{name}/execute on the cloud router.
+# Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) — added
+#   service-level coverage for the agent-MCP helpers: list_pocket_connectors
+#   (pocket-scoped, trust-classified), is_connector_bound_to_pocket (tenant
+#   gate), and get_action_trust (read/write classification). Also pins the
+#   GitHub read path through the cloud execute() with a mocked adapter so the
+#   keystone's "github reads run via DirectRESTAdapter" claim is proven offline.
 #
 # Mode dispatch:
 #   cloud   → runs in-process, returns 200 + result
@@ -259,3 +265,120 @@ async def test_execute_unknown_action_404(client: AsyncClient):
     )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "connector.action.not_found"
+
+
+# ---------------------------------------------------------------------------
+# keystone — agent-MCP service helpers (list_pocket_connectors,
+# is_connector_bound_to_pocket, get_action_trust) + github read path
+#
+# These exercise the service functions directly against Beanie (the
+# ``mongo_db`` fixture initializes the in-memory mongomock-motor DB). They
+# insert the WorkspaceConnector doc straight through the model rather than the
+# HTTP /enable route — the route carries an auth dependency the lightweight
+# test app doesn't satisfy, and the keystone surface is service-level (the MCP
+# server calls these service functions, never the router).
+# ---------------------------------------------------------------------------
+
+
+async def _bind_pocket_connector(
+    name: str, pocket_id: str, *, workspace: str = "ws-1", config: dict | None = None
+) -> None:
+    """Insert an enabled, pocket-scoped WorkspaceConnector doc directly."""
+    from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+
+    await WorkspaceConnector(
+        workspace=workspace,
+        name=name,
+        enabled=True,
+        scope="pocket",
+        pocket_id=pocket_id,
+        config=config or {},
+    ).insert()
+
+
+@pytest.mark.asyncio
+async def test_list_pocket_connectors_classifies_github_read_vs_write(mongo_db):  # noqa: ARG001
+    """A github connector bound at scope=pocket lists its read actions and its
+    write actions, classified by trust level."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    await _bind_pocket_connector("github", "pk-1", config={"GITHUB_TOKEN": "x"})
+
+    infos = await connectors_service.list_pocket_connectors("ws-1", "pk-1")
+    gh = next(i for i in infos if i.name == "github")
+    reads = {a.name for a in gh.actions if a.is_read}
+    writes = {a.name for a in gh.actions if not a.is_read}
+    # list_issues is auto-trust (read); create_issue is confirm-trust (write).
+    assert "list_issues" in reads
+    assert "create_issue" in writes
+
+
+@pytest.mark.asyncio
+async def test_list_pocket_connectors_excludes_other_pockets(mongo_db):  # noqa: ARG001
+    """A connector bound to pocket A must not show for pocket B."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    await _bind_pocket_connector("github", "pk-A")
+    infos_b = await connectors_service.list_pocket_connectors("ws-1", "pk-B")
+    assert infos_b == []
+
+
+@pytest.mark.asyncio
+async def test_is_connector_bound_to_pocket_tenant_gate(mongo_db):  # noqa: ARG001
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    await _bind_pocket_connector("github", "pk-1")
+    assert await connectors_service.is_connector_bound_to_pocket("ws-1", "pk-1", "github")
+    # Wrong pocket / wrong connector / wrong workspace → not bound.
+    assert not await connectors_service.is_connector_bound_to_pocket("ws-1", "pk-2", "github")
+    assert not await connectors_service.is_connector_bound_to_pocket("ws-1", "pk-1", "gmail")
+    assert not await connectors_service.is_connector_bound_to_pocket("ws-OTHER", "pk-1", "github")
+
+
+@pytest.mark.asyncio
+async def test_get_action_trust_reads_vs_writes(mongo_db):  # noqa: ARG001
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    read = await connectors_service.get_action_trust("github", "list_issues")
+    assert read is not None and read.is_read and read.trust_level == "auto"
+
+    write = await connectors_service.get_action_trust("github", "create_issue")
+    assert write is not None and not write.is_read and write.trust_level == "confirm"
+
+    assert await connectors_service.get_action_trust("github", "nope") is None
+
+
+@pytest.mark.asyncio
+async def test_github_read_executes_via_direct_rest_adapter(mongo_db):  # noqa: ARG001
+    """The github read path runs through the cloud execute() → DirectRESTAdapter.
+
+    Proves the keystone claim that github read actions execute over the
+    existing CLOUD path with a bearer token from config. The HTTP call itself
+    is mocked (DirectRESTAdapter.execute) so the test stays offline."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
+
+    from pocketpaw.connectors.protocol import ActionResult
+
+    await _bind_pocket_connector("github", "pk-1", config={"GITHUB_TOKEN": "ghp_test"})
+
+    with patch(
+        "pocketpaw.connectors.yaml_engine.DirectRESTAdapter.execute",
+        return_value=ActionResult(
+            success=True, data=[{"number": 1, "title": "first"}], records_affected=1
+        ),
+    ):
+        resp = await connectors_service.execute(
+            "ws-1",
+            "github",
+            ExecuteActionRequest(
+                action="list_issues",
+                params={"owner": "acme", "repo": "api"},
+                scope="pocket",
+                pocket_id="pk-1",
+            ),
+            user_id="u-1",
+        )
+    assert resp.success is True
+    assert resp.execution_mode == "cloud"
+    assert resp.data[0]["title"] == "first"

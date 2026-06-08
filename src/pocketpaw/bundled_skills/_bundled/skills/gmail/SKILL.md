@@ -13,15 +13,36 @@ description: |
   Gmail is actually available.
 ---
 
+<!--
+  Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) — the skill now
+  instructs the agent to invoke Gmail actions through the agent-callable
+  ``connector_execute`` tool (the new pocketpaw_connectors MCP server) instead
+  of the vague "call named actions". Read actions (search/read/list/summary)
+  run via connector_execute; the confirm-trust actions (send/trash/modify/...)
+  are BLOCKED in v1 by the tool, so the skill's confirm-before-act guidance now
+  also notes those are not executable from chat yet. The safety/workflow
+  guidance is otherwise unchanged.
+-->
+
 # Gmail in a Room
 
 This room has the **Gmail connector** bound to it. You can search, read,
-triage, and send email on the user's behalf through the connector's
-actions. The connector handles OAuth, MIME, and the Gmail API — you call
-named actions with simple parameters and get structured results back.
+and triage email on the user's behalf through the connector's actions.
+The connector handles OAuth, MIME, and the Gmail API.
+
+You reach those actions through two tools:
+
+- **`list_connector_actions`** — call this FIRST. It lists the connectors
+  bound to this pocket and the actions you can run. For Gmail it shows the
+  read actions you may execute and the write actions blocked in v1.
+- **`connector_execute(connector_name, action, params)`** — run one action.
+  For Gmail, `connector_name` is `"gmail"`. Example:
+  `connector_execute(connector_name="gmail", action="gmail_search",
+  params={"query": "from:acme.com subject:invoice", "max_results": 5})`.
 
 Treat the mailbox as the user's real inbox. Reading is cheap and safe;
-**sending and destroying are not**. Default to caution.
+**sending and destroying are not** — and in v1 those write actions are
+blocked by the tool (see Guardrails). Default to caution.
 
 ## The action surface
 
@@ -37,22 +58,29 @@ Treat the mailbox as the user's real inbox. Reading is cheap and safe;
 | `gmail_batch_modify` | Apply label changes to many messages | confirm |
 | `gmail_summary` | Inbox stats (unread / today) | auto |
 
-"Trust = confirm" means **show the user what you're about to do and get a
-yes before you do it.** Never send, trash, or relabel silently.
+"Trust = confirm" actions are **writes, and they are BLOCKED in v1.** When
+you call `connector_execute` for a send/trash/label/create-label action, the
+tool refuses it with a "needs approval — coming in v2" message and does NOT
+execute it. So today you can read and triage-by-reading, but you cannot send,
+trash, or relabel from chat. Don't pretend a blocked action succeeded — tell
+the user that Gmail writes aren't available from chat yet. (The "read before
+you act" workflow below still applies for when v2 lands.)
 
 ## Core workflow: read before you act
 
-Almost every request starts with a search, then a read.
+Almost every request starts with a search, then a read. Run each through
+`connector_execute(connector_name="gmail", action=..., params=...)`.
 
-1. **Search** to find the candidate messages. `gmail_search` takes a
-   `query` (Gmail's own search syntax) and an optional `max_results`
-   (default 5, capped at 20). It returns a list of message stubs, each
-   with an `id`, `from`, `subject`, and snippet.
-2. **Read** the specific message with `gmail_read` (pass the `message_id`
-   from the search result) when you need the full body — to summarize,
-   quote, or draft a reply.
-3. **Act** (send / label / trash) only after you've shown the user what
-   you found and they've confirmed the action.
+1. **Search** to find the candidate messages — `action="gmail_search"`,
+   `params={"query": <Gmail search syntax>, "max_results": <≤20>}`
+   (default 5). It returns a list of message stubs, each with an `id`,
+   `from`, `subject`, and snippet.
+2. **Read** the specific message — `action="gmail_read"`,
+   `params={"message_id": <id from the search result>}` — when you need the
+   full body to summarize, quote, or draft a reply.
+3. **Act** (send / label / trash) is a v1-blocked write: draft it in chat
+   and tell the user it can't be sent from here yet. (When writes unblock in
+   v2, the rule becomes: show the user, get a yes, then execute.)
 
 Don't dump raw search JSON at the user. Summarize: who, when, subject,
 and the one-line gist. Offer the obvious next step ("want me to open the
@@ -76,52 +104,56 @@ Examples:
 
 ```
 "unread email from my boss this week"
-  → gmail_search query="from:boss@company.com is:unread newer_than:7d"
+  → connector_execute(connector_name="gmail", action="gmail_search",
+      params={"query": "from:boss@company.com is:unread newer_than:7d"})
 
 "the latest invoice from Acme"
-  → gmail_search query="from:acme.com subject:invoice" max_results=5
-  → then gmail_read on the most recent id
+  → connector_execute(connector_name="gmail", action="gmail_search",
+      params={"query": "from:acme.com subject:invoice", "max_results": 5})
+  → then connector_execute(action="gmail_read",
+      params={"message_id": <most recent id>})
 ```
 
-## Sending mail
+## Sending mail (v1: blocked)
 
-`gmail_send` takes `to`, `subject`, and `body` (plain text). Before you
-call it:
+`gmail_send` is a confirm-trust write, so it is **blocked in v1** —
+`connector_execute` will refuse it. You can still help the user prepare:
 
 1. **Draft the full message in chat** — recipient, subject, and body.
-2. **Show it to the user verbatim** and ask for explicit confirmation.
-3. Only on a clear yes, call `gmail_send`.
+2. **Show it to the user verbatim.**
+3. Tell them sending from chat isn't available yet (coming in v2); they can
+   copy the draft into Gmail.
 
-For a reply, first `gmail_read` the original so your draft has the right
-context (quote sparingly, match the thread's subject). If the user edits
-your draft, re-show the final version before sending.
+For a reply, you can still `connector_execute(action="gmail_read", ...)` the
+original so your draft has the right context (quote sparingly, match the
+thread's subject).
 
 Never invent recipients. If the address is ambiguous, search for the
 person's recent mail to confirm the right one, or ask.
 
-## Triage: labels and trash
+## Triage: labels and trash (v1: writes blocked)
 
-- `gmail_list_labels` first if you need a label's id — labels are
-  referenced by id, not name, in `gmail_modify` / `gmail_batch_modify`.
-- `gmail_modify` changes labels on one message; `gmail_batch_modify`
-  takes a `message_ids` list for bulk relabeling (e.g. "archive all the
-  newsletters" → search, then batch-modify removing `INBOX`).
-- `gmail_trash` is reversible (Trash, not permanent delete) but still a
-  destructive action — confirm the specific message first.
-- `gmail_create_label` when the user asks for a label that doesn't exist
-  yet; confirm the name.
+Reading labels is allowed; changing them is a blocked write in v1.
+
+- `gmail_list_labels` (read) is fine — run it via `connector_execute` if you
+  need to see the mailbox's labels.
+- `gmail_modify` / `gmail_batch_modify` / `gmail_trash` / `gmail_create_label`
+  are confirm-trust writes and are **blocked in v1**. When the user asks to
+  archive, label, trash, or create a label, explain it's not available from
+  chat yet (coming in v2) rather than attempting it.
 
 ## A quick read on the inbox
 
-`gmail_summary` returns unread count and today's count cheaply — use it
-when the user asks "how's my inbox" or "anything new" before doing a
-heavier search.
+`gmail_summary` (read) returns unread count and today's count cheaply — run it
+via `connector_execute(connector_name="gmail", action="gmail_summary")` when
+the user asks "how's my inbox" or "anything new" before a heavier search.
 
 ## Guardrails
 
-- **Confirm every `confirm`-trust action** (send, trash, label changes,
-  create label). Read-only actions (search, read, list labels, summary)
-  need no confirmation.
+- **Writes are blocked in v1.** Read actions (search, read, list labels,
+  summary) run via `connector_execute`. Confirm-trust actions (send, trash,
+  label changes, create label) are refused by the tool with a "needs approval
+  — coming in v2" message — never claim a blocked action succeeded.
 - **Read the message before quoting or replying** — never paraphrase from
   a search snippet alone for anything that matters.
 - **Cap result volume** — `max_results` is capped at 20; for broad
