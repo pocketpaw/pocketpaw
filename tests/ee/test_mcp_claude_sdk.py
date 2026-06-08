@@ -19,6 +19,14 @@ Updated: 2026-05-22 (#1174) — added ``TestMcpToolAllowlist``: the resolved
   in-process MCP tool-id allowlist (``_collect_mcp_tool_ids``) includes the
   cloud ``pocketpaw_pocket`` server's writable ``add_widget`` tool, so the
   home-pocket agent on this backend can pin real widgets.
+Updated: 2026-05-31 (fix/bridge-start-flow-to-chat, RFC 13) — added
+  ``TestStartFlowReachable``: the RFC 13 M3 ``start_flow`` authoring tool must
+  be present in the cloud chat agent's ASSEMBLED tool set (the widgets server
+  is registered AND its ``start_flow`` id is on the in-process allowlist). M3
+  shipped ``start_flow`` only in the runtime builtin registry and its tests
+  imported the tool directly, so the gap — the tool being unreachable from the
+  cloud chat agent — went uncaught. This is the guard that catches it:
+  reachability, not just importability.
 
 All SDK imports are mocked.
 """
@@ -328,6 +336,58 @@ class TestMcpToolAllowlist:
         sdk = self._make_sdk()
         ids = sdk._collect_mcp_tool_ids()
         assert not any(f"__{_PLANNER_MCP_SERVER_NAME}__" in t for t in ids)
+
+
+class TestStartFlowReachable:
+    """GUARD (RFC 13 M3): the ``start_flow`` authoring tool must be reachable
+    from the cloud chat agent's ASSEMBLED tool set — not merely importable.
+
+    M3 (#1318) shipped ``start_flow`` only in the runtime builtin registry and
+    its tests imported ``StartFlowTool`` directly, so nothing caught that the
+    cloud chat agent (claude_agent_sdk backend) had no way to *call* it. The
+    agent then hand-authored a flat ``set``-stepped spec — the anti-pattern
+    start_flow exists to prevent. This test asserts the bridge: the
+    ``pocketpaw_widgets`` server is registered AND ``start_flow``'s tool id is
+    on the in-process allowlist, with no policy opt-in. If the bridge is ever
+    removed, this fails."""
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_start_flow_on_allowlist_by_default(self):
+        """The assembled in-process tool allowlist carries ``start_flow`` with
+        no opt-in — the cloud chat agent calls it via
+        ``mcp__pocketpaw_widgets__start_flow`` and that id must be reachable."""
+        from pocketpaw.agents.sdk_mcp_widgets import START_FLOW_TOOL_ID
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert START_FLOW_TOOL_ID in ids, (
+            "start_flow must be on the assembled allowlist or the cloud chat "
+            "agent cannot call it (the exact RFC 13 M3 reachability gap)"
+        )
+
+    def test_widgets_server_with_start_flow_is_registered(self):
+        """The host server for ``start_flow`` (``pocketpaw_widgets``) must
+        appear in the assembled ``_get_mcp_servers`` set — registration is the
+        other half of reachability."""
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            servers = sdk._get_mcp_servers()
+        assert _WIDGETS_MCP_SERVER_NAME in servers, (
+            "the pocketpaw_widgets server (host of start_flow) must be registered"
+        )
+
+    def test_start_flow_id_matches_widgets_server_namespace(self):
+        """The tool id is namespaced under the registered server, so the SDK
+        routes ``mcp__pocketpaw_widgets__start_flow`` to this server."""
+        from pocketpaw.agents.sdk_mcp_widgets import START_FLOW_TOOL_ID
+
+        assert START_FLOW_TOOL_ID == f"mcp__{_WIDGETS_MCP_SERVER_NAME}__start_flow"
 
 
 class TestMcpProviderLoadFailures:

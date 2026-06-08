@@ -76,6 +76,25 @@ and ``source`` (the SvelteKit source map, or ``None``) on
 dict. Both are single-word snake_case keys (no camelCase split), matching
 the read-back form. Defaults keep legacy callers reading ``engine="ripple"``,
 ``source=None``.
+Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
+chunk ②) — added the optional ``surface_profile`` field (aliased
+``surfaceProfile`` on the wire) on ``CreatePocketRequest`` /
+``PocketResponse`` and threaded it onto the wire dict. Reuses the
+``PocketSurfaceProfile`` sub-model (all sub-fields optional, JSON-friendly
+lists) so the create/read DTOs share one shape with the persisted model.
+Defaults to ``None`` → legacy callers read back ``None`` with no migration.
+Updated: 2026-06-06 (feat/entity-pocket-profile-field) — added the
+``surface_profile`` field (aliased ``surfaceProfile``) to
+``UpdatePocketRequest`` so an existing pocket's override can be SET / CHANGED
+/ CLEARED (the auto-authoring write path). Three-way partial semantics live
+in ``pockets_service.update`` and key off ``model_fields_set``: present +
+non-null sets/replaces, explicit ``null`` clears, absent leaves it unchanged.
+Updated: 2026-06-07 (feat/entity-pocket-profile-field) — import
+``PocketSurfaceProfile`` from ``surface.domain`` (its new home) instead of
+``models.pocket``. The OSS-EE boundary contract forbids ``pockets.dto`` from
+importing ``models.*``; the class is a plain value object, not a Beanie doc,
+so sharing it via the leaf domain module keeps one shape without crossing the
+boundary.
 """
 
 from __future__ import annotations
@@ -84,6 +103,8 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from pocketpaw_ee.cloud.surface.domain import PocketSurfaceProfile
 
 
 class CreatePocketRequest(BaseModel):
@@ -114,6 +135,12 @@ class CreatePocketRequest(BaseModel):
     # defaults (``engine="ripple"``, ``source=None``).
     engine: str = "ripple"
     source: dict[str, str] | None = None
+    # Optional per-entity surface-profile override. Consumed by the
+    # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
+    # surface-kind default. Reuses the persisted ``PocketSurfaceProfile``
+    # sub-model (all fields optional, JSON-friendly lists). Wire alias
+    # ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
 
     model_config = {"populate_by_name": True}
 
@@ -132,6 +159,14 @@ class UpdatePocketRequest(BaseModel):
     # Pass the same slug to force a recompile (template content edited
     # out-of-band). ``None`` (the default) means "leave it alone."
     template_slug: str | None = Field(default=None, alias="templateSlug")
+    # Optional per-entity surface-profile override (the auto-authoring
+    # foundation). Three-way partial semantics, distinguished by
+    # ``model_fields_set`` in the service: present + non-null SETs/REPLACEs,
+    # explicit ``null`` CLEARS (un-profiles the pocket), and absent (not in
+    # the partial update) leaves the existing value untouched. Reuses the
+    # persisted ``PocketSurfaceProfile`` sub-model (all sub-fields optional,
+    # JSON-friendly lists). Wire alias ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
 
     model_config = {"populate_by_name": True}
 
@@ -248,8 +283,14 @@ class PocketResponse(BaseModel):
     # svelte source map (or ``None`` for ripple pockets).
     engine: str = "ripple"
     source: dict[str, str] | None = None
+    # Optional per-entity surface-profile override. Consumed by the
+    # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
+    # surface-kind default. Wire alias ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
     created_at: datetime
     updated_at: datetime
+
+    model_config = {"populate_by_name": True}
 
 
 class HomePocketResponse(BaseModel):
@@ -632,6 +673,11 @@ def pocket_to_wire_dict(p) -> dict:
         # ``source`` to ``None`` for legacy / ripple pockets.
         "engine": getattr(p, "engine", "ripple"),
         "source": getattr(p, "source", None),
+        # Entity-rooms chunk ② — optional per-entity surface-profile override
+        # (JSON dict mirroring the surface-domain ``SurfaceProfile``), or
+        # ``None`` for legacy pockets. Two-word key → camelCase wire form, like
+        # ``templateSlug`` / ``shareLinkToken``.
+        "surfaceProfile": getattr(p, "surface_profile", None),
         "createdAt": iso_utc(p.created_at),
         "updatedAt": iso_utc(p.updated_at),
     }

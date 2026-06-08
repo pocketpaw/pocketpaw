@@ -1,6 +1,12 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) —
+``build_system_prompt`` accepts an optional ``skill_names: frozenset[str]``.
+When non-empty, the "Available Skills" block (#8) advertises ONLY those skills —
+the non-SDK backends' equivalent of the Claude SDK backend's per-run materialized
+skill plugin. ``None`` / empty keeps the legacy all-skills advertisement, so
+every non-entity run is byte-identical.
 Updated: 2026-05-03 - Stage 3.E "Files as Knowledge". Added ``KbContext``
 dataclass + ``_resolve_kb_scopes`` so per-request callers (the cloud chat
 path) can prioritise pocket > agent > workspace ahead of the static
@@ -145,6 +151,7 @@ class AgentContextBuilder:
         budget_chars: int = _DEFAULT_BUDGET_CHARS,
         image_bytes: bytes | None = None,
         kb_ctx: KbContext | None = None,
+        skill_names: frozenset[str] | None = None,
     ) -> str:
         """Build the complete system prompt.
 
@@ -170,6 +177,13 @@ class AgentContextBuilder:
                 "Files as Knowledge". When None, the static settings list
                 is used unchanged — channel and CLI paths keep working
                 without changes.
+            skill_names: Optional per-entity skill subset (entity-rooms A2,
+                resolved from the entity pocket's ``surface_profile.skill_names``).
+                When set to a NON-EMPTY frozenset, the "Available Skills" block
+                advertises ONLY those skills (the non-SDK backends' equivalent of
+                the SDK's per-run materialized plugin). ``None`` / empty keeps the
+                legacy all-skills advertisement — every non-entity run is
+                unchanged.
         """
         blocks: list[tuple[str, _Priority, str]] = []
 
@@ -371,6 +385,12 @@ class AgentContextBuilder:
 
             loader = get_skill_loader()
             skills = loader.get_all()
+            # entity-rooms A2: when the entity pins a non-empty skill subset,
+            # advertise ONLY those skills (the non-SDK equivalent of the SDK's
+            # per-run materialized plugin). Empty / None → legacy all-skills
+            # behavior, so every non-entity run is unchanged.
+            if skill_names:
+                skills = {n: s for n, s in skills.items() if n in skill_names}
             if skills:
                 skill_lines = []
                 for s in skills.values():

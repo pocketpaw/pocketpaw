@@ -1,4 +1,10 @@
-"""Tests for ``execute_run``."""
+"""Tests for ``execute_run``.
+
+Includes the RFC 13 M0 inline-spec contract coverage: ``_extract_ripple_attachment``
+must pull a canonical ``ui-spec`` + ``{version, ui}`` block AND a transitional
+legacy ``json`` + ``{widgets, lifecycle}`` block, both into a ripple attachment and
+the ``ripple`` SSE event, while leaving a truncated / non-spec fence inline.
+"""
 
 from __future__ import annotations
 
@@ -437,6 +443,194 @@ async def test_execute_run_failure_marks_failed_with_error(monkeypatch):
     ]
 
 
+# ---------------------------------------------------------------------------
+# RFC 13 M0 — inline-spec contract unification.
+#
+# The cloud extractor now treats ``ui-spec`` + ``{version, ui}`` as canonical
+# (the prompt's contract, the shape ``MarkdownRenderer`` tokenizes) and keeps a
+# transitional branch for the deprecated ``json`` + ``{widgets, lifecycle}``
+# shape. These tests pin both paths plus the truncated-fence recovery contract.
+# ---------------------------------------------------------------------------
+
+_CANONICAL_UI_SPEC_BLOCK = (
+    "Here are your numbers:\n\n"
+    "```ui-spec\n"
+    '{"version": "1.0", "ui": {"type": "stat", '
+    '"props": {"label": "Revenue", "value": "$42k"}}}\n'
+    "```\n\nLet me know if you want a breakdown."
+)
+
+_LEGACY_JSON_BLOCK = (
+    "Dashboard:\n\n"
+    "```json\n"
+    '{"widgets": [{"type": "metric", "name": "Sales"}], '
+    '"lifecycle": {"type": "persistent", "id": "p1"}}\n'
+    "```"
+)
+
+
+async def test_extract_canonical_ui_spec_block():
+    """Canonical ``ui-spec`` + ``{version, ui}`` extracts, normalizes, strips."""
+    remaining, spec = run_core._extract_ripple_attachment(_CANONICAL_UI_SPEC_BLOCK)
+
+    assert spec is not None
+    # Envelope + tree survive normalization.
+    assert spec["version"] == "1.0"
+    assert spec["ui"]["type"] == "stat"
+    assert spec["ui"]["props"]["label"] == "Revenue"
+    # The fence is stripped out of the message body; the prose stays.
+    assert "```ui-spec" not in remaining
+    assert "Here are your numbers:" in remaining
+    assert "Let me know if you want a breakdown." in remaining
+
+
+async def test_extract_legacy_json_widgets_block_still_works():
+    """Transitional path: deprecated ``json`` + ``{widgets, lifecycle}`` extracts."""
+    remaining, spec = run_core._extract_ripple_attachment(_LEGACY_JSON_BLOCK)
+
+    assert spec is not None
+    # The legacy widgets shape passes through the normalizer's widgets branch.
+    assert "widgets" in spec
+    assert spec["widgets"][0]["name"] == "Sales"
+    assert "```json" not in remaining
+    assert remaining == "Dashboard:"
+
+
+async def test_extract_truncated_ui_spec_leaves_text_inline():
+    """A truncated / unparseable ``ui-spec`` fence returns no attachment and
+    leaves the text untouched, so the frontend's ``ui-spec-error`` path owns it."""
+    truncated = (
+        'Oops:\n\n```ui-spec\n{"version": "1.0", "ui": {"type": "stat", "props": {"label":\n```'
+    )
+    remaining, spec = run_core._extract_ripple_attachment(truncated)
+
+    assert spec is None
+    assert remaining == truncated
+
+
+async def test_extract_non_spec_json_fence_is_not_attached():
+    """A plain ``json`` object that is not a ripple spec must not be extracted."""
+    plain = 'Config:\n\n```json\n{"foo": 1, "bar": 2}\n```'
+    remaining, spec = run_core._extract_ripple_attachment(plain)
+
+    assert spec is None
+    assert remaining == plain
+
+
+async def test_extract_non_spec_ui_spec_fence_does_not_fall_back():
+    """A ``ui-spec`` fence whose body is not a spec is left inline and does NOT
+    silently fall through to the legacy ``json`` path."""
+    nonspec = 'X:\n\n```ui-spec\n{"foo": 1}\n```'
+    remaining, spec = run_core._extract_ripple_attachment(nonspec)
+
+    assert spec is None
+    assert remaining == nonspec
+
+
+async def test_extract_prefers_canonical_over_legacy_when_both_present():
+    """If a reply carries both fences, the canonical ``ui-spec`` wins."""
+    both = _CANONICAL_UI_SPEC_BLOCK + "\n\n" + _LEGACY_JSON_BLOCK
+    remaining, spec = run_core._extract_ripple_attachment(both)
+
+    assert spec is not None
+    # Canonical extracted: it has a ``ui`` tree, not the legacy widgets list.
+    assert spec["ui"]["type"] == "stat"
+    assert "widgets" not in spec
+    # Only the canonical fence is stripped; the legacy block stays in the body.
+    assert "```ui-spec" not in remaining
+    assert "```json" in remaining
+
+
+def _fenced_reply_events(block: str):
+    async def _gen(spec, ctx):
+        yield ("chunk", {"content": block, "type": "text"})
+
+    return _gen
+
+
+async def _run_and_collect_ripple_event(monkeypatch, block: str):
+    """Drive ``execute_run`` with a single chunk carrying ``block`` and return
+    the appended ``ripple`` SSE event payload (or ``None``)."""
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", _fenced_reply_events(block))
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+
+    await run_core.execute_run(_spec())
+
+    events = [e async for e in transport.read_events("r1", after="0", block_ms=10)]
+    ripple = next((e for e in events if e.event == "ripple"), None)
+    return ripple, events
+
+
+async def test_execute_run_emits_ripple_event_for_canonical_block(monkeypatch):
+    """End-to-end: a canonical ``ui-spec`` reply produces a ``ripple`` SSE event
+    carrying the normalized spec, and the fence is gone from the persisted text."""
+    ripple, events = await _run_and_collect_ripple_event(monkeypatch, _CANONICAL_UI_SPEC_BLOCK)
+
+    assert ripple is not None
+    assert ripple.data["spec"]["ui"]["type"] == "stat"
+    assert ripple.data["spec"]["version"] == "1.0"
+    # ``ripple`` fires before the terminal ``stream_end``.
+    assert [e.event for e in events][-1] == "stream_end"
+
+
+async def test_execute_run_emits_ripple_event_for_legacy_block(monkeypatch):
+    """End-to-end (transitional): a legacy ``json`` + ``{widgets}`` reply still
+    produces a ``ripple`` SSE event so in-flight conversations keep rendering."""
+    ripple, events = await _run_and_collect_ripple_event(monkeypatch, _LEGACY_JSON_BLOCK)
+
+    assert ripple is not None
+    assert "widgets" in ripple.data["spec"]
+    assert ripple.data["spec"]["widgets"][0]["name"] == "Sales"
+    assert [e.event for e in events][-1] == "stream_end"
+
+
+async def test_execute_run_no_ripple_event_for_truncated_block(monkeypatch):
+    """A truncated ``ui-spec`` reply emits no ``ripple`` event; the text streams
+    through and the run still completes via ``stream_end``."""
+    truncated = (
+        'Oops:\n\n```ui-spec\n{"version": "1.0", "ui": {"type": "stat", "props": {"label":\n```'
+    )
+    ripple, events = await _run_and_collect_ripple_event(monkeypatch, truncated)
+
+    assert ripple is None
+    assert [e.event for e in events][-1] == "stream_end"
+
+
+# ---------------------------------------------------------------------------
+# RFC 13 M3 — the `start_flow` authoring tool emits a doc that rides this M0
+# contract. A flow scaffolded by the builder, dropped into a ``ui-spec`` fence,
+# must extract through the same canonical path (the whole point of unifying the
+# envelope at M0 before layering flows at M3).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flow_type", ["onboarding_wizard", "due_diligence_intake"])
+async def test_start_flow_doc_extracts_through_canonical_path(flow_type):
+    from pocketpaw.tools.builtin.flow_tool import StartFlowTool
+
+    doc_str = await StartFlowTool().execute(flow_type=flow_type)
+    message = f"Here's your flow:\n\n```ui-spec\n{doc_str}\n```"
+
+    stripped, attachment = run_core._extract_ripple_attachment(message)
+
+    # The flow doc is pulled out as the ripple attachment...
+    assert attachment is not None
+    assert attachment["version"] == "1.0"
+    assert isinstance(attachment["ui"], dict)
+    # ...the nested Chain Flow survives intact (root branches via chain_map)...
+    assert isinstance(attachment["ui"].get("chain_map"), dict)
+    assert attachment["ui"].get("flowId")
+    # ...and the fence is stripped from the persisted message body.
+    assert "ui-spec" not in stripped
+
+
 # --- surface_context survives the RunSpec/executor boundary -----------------
 
 
@@ -498,6 +692,7 @@ async def test_execute_run_threads_surface_meta_into_ctx(monkeypatch):
         # loop. By this point ``execute_run`` must have re-resolved
         # ``surface_context`` from the spec.
         captured["surface_context"] = ctx.surface_context
+        captured["resolved_profile"] = ctx.resolved_profile
         return
         yield  # pragma: no cover - make this an async generator
 
@@ -533,6 +728,13 @@ async def test_execute_run_threads_surface_meta_into_ctx(monkeypatch):
             "mcp__pocketpaw_pocket_specialist__create",
         }
     )
+    # entity-rooms chunk ①: the deny now reaches the loop via the once-per-run
+    # ``ctx.resolved_profile`` (resolved in execute_run). For a no-pocket /sites
+    # svelte-create turn the resolved profile == the surface base, so its deny
+    # matches the surface deny above.
+    resolved = captured.get("resolved_profile")
+    assert resolved is not None, "execute_run must stash ctx.resolved_profile"
+    assert resolved.deny_mcp_tool_ids == deny
 
 
 async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
@@ -543,6 +745,7 @@ async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
 
     async def _capture_ctx(spec, ctx):
         captured["surface_context"] = ctx.surface_context
+        captured["resolved_profile"] = ctx.resolved_profile
         return
         yield  # pragma: no cover - make this an async generator
 
@@ -570,3 +773,8 @@ async def test_execute_run_legacy_path_leaves_surface_context_none(monkeypatch):
     assert surface_context is not None
     deny = resolve_profile(surface_context.kind, surface_context.meta).deny_mcp_tool_ids
     assert deny == frozenset()
+    # entity-rooms chunk ①: the legacy / no-pocket path still resolves a profile
+    # (the GENERIC base) — its deny is empty, so the run is unchanged.
+    resolved = captured.get("resolved_profile")
+    assert resolved is not None
+    assert resolved.deny_mcp_tool_ids == frozenset()

@@ -45,6 +45,15 @@ SEES whether a backend is configured (and its base_url) before authoring a
 ``sources`` block — fixing the smoke-test finding where the agent claimed
 "no integration wired up" despite a configured backend. Non-home scopes
 keep ``backend_summary=None`` and pay no extra read.
+Changes: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①)
+— ``ScopeContext`` carries an optional ``resolved_profile`` (the ENTITY-AWARE
+``SurfaceProfile`` resolved ONCE per run by ``run_core.execute_run``, which
+folds a pocket-entity's ``surface_profile`` override over the surface base).
+``build_behavior_instructions`` now gates the ripple block on
+``ctx.resolved_profile.ripple_mode`` (pre-resolved, stays sync) instead of
+calling ``resolve_profile`` itself — so a pocket bound to a room can flip
+ripple off/on for that room. ``resolved_profile is None`` is the legacy /
+non-entity path → ripple ON, byte-identical to today.
 """
 
 from __future__ import annotations
@@ -65,7 +74,7 @@ from pocketpaw.ripple import (
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
 from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
-from pocketpaw_ee.cloud.surface import SurfaceContext, resolve_profile
+from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +234,18 @@ class ScopeContext:
     # ``build_dynamic_context`` falls back to the legacy three-line
     # shape in that case.
     surface_context: SurfaceContext | None = None
+    # The ENTITY-AWARE ``SurfaceProfile`` resolved ONCE per run (entity-rooms
+    # chunk ①). The run-driver (``run_core.execute_run``) resolves the base
+    # profile from ``surface_context`` (the pure ``resolve_profile`` lookup),
+    # then — when this chat is bound to a pocket-entity (``pocket_id`` set) and
+    # that pocket carries a ``surface_profile`` override — folds the override
+    # OVER the base via ``compose_entity_profile`` and stashes the result here.
+    # BOTH profile consumers read THIS pre-resolved object instead of each
+    # calling ``resolve_profile`` again: ``build_behavior_instructions`` (the
+    # ripple-omit gate, stays sync) and ``run_core`` tool-deny / tool-allow.
+    # ``None`` on the legacy / non-entity path — consumers then fall back to
+    # today's behavior (ripple ON, no deny), byte-identical to before.
+    resolved_profile: SurfaceProfile | None = None
     # The anchored pocket's NON-SECRET backend summary ({base_url,
     # auth_type, configured}) — the same shape ``get_pocket_backend``
     # returns, never the token. Populated by the resolvers ONLY for a
@@ -594,18 +615,24 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
     POCKET_DELEGATION_RULE, and the inline ripple-creation prompt — otherwise
     the "default to ui-spec" LAW biases the agent toward emitting a ripple
     ui-spec instead of Svelte. Every other surface (and the legacy
-    ``surface_context is None`` path) keeps ``ripple_mode="on"`` — unchanged.
+    ``resolved_profile is None`` path) keeps ``ripple_mode="on"`` — unchanged.
     The profile is the single source of truth; we never branch on a bare
     ``kind == SITES`` check here.
+
+    Entity-rooms (chunk ①): we read the PRE-RESOLVED ``ctx.resolved_profile``
+    rather than calling ``resolve_profile`` ourselves. The run-driver resolves
+    it ONCE (entity-aware — a pocket-entity's ``surface_profile.ripple_mode``
+    override composes over the surface base), so a pocket bound to a room can
+    flip ripple off/on for that room and this gate honors it. ``None`` is the
+    legacy path → ripple ON, exactly today's behavior. This stays SYNC — it only
+    reads the already-resolved object.
     """
-    # Resolve the surface policy once. ``surface_context is None`` is the
-    # legacy path — default to ripple ON (do NOT omit) so surface-less clients
-    # keep today's behavior exactly. Only an explicit ``ripple_mode="off"``
-    # profile (the /sites row) suppresses the ripple block.
-    ripple_off = (
-        ctx.surface_context is not None
-        and resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta).ripple_mode == "off"
-    )
+    # Read the once-per-run resolved profile. ``resolved_profile is None`` is
+    # the legacy / non-entity path — default to ripple ON (do NOT omit) so
+    # surface-less clients keep today's behavior exactly. Only an explicit
+    # ``ripple_mode="off"`` profile (the /sites row, OR a pocket-entity that set
+    # ``surface_profile.ripple_mode="off"``) suppresses the ripple block.
+    ripple_off = ctx.resolved_profile is not None and ctx.resolved_profile.ripple_mode == "off"
 
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)

@@ -1,15 +1,48 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
-Changes: 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
-resolves the per-request ``SurfaceProfile`` and threads its
-``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
-``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
-allowlist before launch. This replaces the deleted prompt-sniffing tool gate
-in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
-ripple-create tools via typed policy (resolved from ``meta``) instead of the
-backend string-matching ``engine="svelte"`` in the system prompt. The set is
-empty for every other surface, so the call is a no-op outside /sites
-svelte-create.
+Changes:
+- 2026-05-31 (RFC 13 M0 — inline-spec contract unification). The inline
+  Ripple extractor now treats the ``ui-spec`` fence + ``{version, ui}`` envelope
+  as the canonical path — the same contract the prompt (``pocketpaw.ripple._inline``)
+  tells the agent to emit and the one paw-enterprise ``MarkdownRenderer`` tokenizes
+  as a ``ui-spec`` segment. The legacy ``json`` fence + ``{widgets, lifecycle}``
+  shape is still accepted via a transitional branch so in-flight conversations
+  don't break; that branch is deprecated and slated for removal once no active
+  conversation references the old shape (cutover window is RFC 13 open question #6).
+- 2026-06-05 (feat/sites-svelte-engine) — ``_drive_agent_loop`` now
+  resolves the per-request ``SurfaceProfile`` and threads its
+  ``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) into ``AgentPool.run`` →
+  ``ClaudeSDKBackend.run``, which subtracts the denied ids from the SDK
+  allowlist before launch. This replaces the deleted prompt-sniffing tool gate
+  in ``claude_sdk.py``: the /sites svelte-create surface forbids the two
+  ripple-create tools via typed policy (resolved from ``meta``) instead of the
+  backend string-matching ``engine="svelte"`` in the system prompt. The set is
+  empty for every other surface, so the call is a no-op outside /sites
+  svelte-create.
+- 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
+  the per-run ``SurfaceProfile`` is now ENTITY-AWARE and resolved ONCE per run.
+  ``execute_run`` calls ``_resolve_entity_profile(ctx)`` right after it resolves
+  ``ctx.surface_context``: it takes the pure surface-kind base
+  (``resolve_profile``), and — when the chat is bound to a pocket-entity
+  (``meta.pocket_id`` set) whose pocket carries a ``surface_profile`` override —
+  loads that pocket TENANT-SCOPED (cloud Rule 7) and folds the override OVER the
+  base via ``compose_entity_profile`` (ripple entity-wins-if-set; deny / allow /
+  skill UNION; system-message entity-wins). The result is stashed on
+  ``ctx.resolved_profile``. BOTH profile consumers now read that pre-resolved
+  object instead of each calling ``resolve_profile``: ``build_behavior_instructions``
+  (ripple-omit, stays sync) and ``_drive_agent_loop`` (tool-deny + tool-allow).
+- 2026-06-07 (feat/entity-pocket-profile-field) — ``_drive_agent_loop`` also
+  reads ``ctx.resolved_profile.skill_names`` and ``.system_message_override`` and
+  forwards them as plain data into ``AgentPool.run`` (withhold-when-empty/None):
+  ``skill_names`` drives per-run skill materialization (SDK plugin) +
+  non-SDK skill filtering; ``system_message_override`` swaps the agent's base
+  system message while keeping the instruction / soul-memory / knowledge layers.
+  Net effect: ``ripple_mode``, ``deny_mcp_tool_ids``, ``allowed_sdk_tools``,
+  ``skill_names`` and ``system_message_override`` are all PER-ENTITY immediately.
+  ``meta.pocket_id`` unset OR no ``pocket.surface_profile`` → resolved profile
+  equals the surface base → behavior byte-identical to today (zero regression).
+  ``resolve_profile`` itself stays PURE/no-I/O; all entity I/O lives in the
+  once-per-run async ``_resolve_entity_profile``.
 """
 
 from __future__ import annotations
@@ -46,16 +79,146 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
-from pocketpaw_ee.cloud.surface import resolve_profile, resolve_surface_context
+from pocketpaw_ee.cloud.surface import (
+    SurfaceKind,
+    SurfaceMeta,
+    SurfaceProfile,
+    compose_entity_profile,
+    resolve_profile,
+    resolve_surface_context,
+)
 
 logger = logging.getLogger(__name__)
 
 
+# Canonical inline-spec fence (RFC 13 M0). The prompt mandates a ``ui-spec``
+# fence carrying a ``{version, ui}`` envelope, and paw-enterprise's
+# ``MarkdownRenderer`` tokenizes exactly this fence as a ``ui-spec`` segment.
+# This is the path every new reply takes.
+RIPPLE_UISPEC_RE = re.compile(r"```ui-spec\s*(\{.*?\})\s*```", re.DOTALL)
+
+# DEPRECATED (RFC 13 M0): the legacy fence the cloud extractor used to be the
+# only path it knew. It pairs a ``json`` fence with a ``{widgets, lifecycle}``
+# shape — the contract before unification. Kept ONLY as a transitional accept
+# branch so conversations already holding a legacy block keep rendering. Remove
+# once no active conversation references the old shape; the cutover timeline is
+# RFC 13 open question #6 ("how long do we keep the legacy json accept-branch").
 RIPPLE_JSON_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _looks_like_ripple_spec(candidate: Any) -> bool:
+    """True when ``candidate`` is the canonical inline ``ui-spec`` envelope.
+
+    Recognizes the shapes ``normalize_ripple_spec`` accepts as a UISpec: the
+    canonical ``{version, ui}`` doc, a multi-pane ``{panes}`` doc, a spec whose
+    UI tree hides under a misnamed top-level key (``root`` / ``tree`` / ``view``
+    / ``body`` / ``content``), or a raw root node (``{type, props|children}``).
+    A plain ``json`` object that merely happens to sit in a ``ui-spec`` fence
+    (no ``ui``/``panes``/node shape) is rejected so we don't attach non-specs.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if isinstance(candidate.get("ui"), dict):
+        return True
+    if isinstance(candidate.get("panes"), dict):
+        return True
+    for alias in ("root", "tree", "view", "body", "content"):
+        node = candidate.get(alias)
+        if isinstance(node, dict) and isinstance(node.get("type"), str):
+            return True
+    # Raw root node: ``{type: "flex", props|children, ...}`` with no ``ui`` wrap.
+    if isinstance(candidate.get("type"), str) and ("props" in candidate or "children" in candidate):
+        return True
+    return False
+
+
+def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
+    """True for the DEPRECATED legacy ``{widgets, lifecycle}`` inline shape.
+
+    Transitional gate (RFC 13 M0). Mirrors the original ``_extract_ripple_attachment``
+    check. Slated for removal alongside ``RIPPLE_JSON_RE`` per RFC 13 open
+    question #6.
+    """
+    return isinstance(candidate, dict) and ("lifecycle" in candidate or "widgets" in candidate)
 
 
 def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
+
+
+async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
+    """Tenant-scoped load of a pocket's ``surface_profile`` override, or ``None``.
+
+    Cloud Rule 7: the pocket MUST belong to ``workspace_id`` — a load that
+    crosses the tenant boundary is treated as "no override" (we never read
+    another tenant's profile). Returns the JSON-shaped override dict
+    (``PocketSurfaceProfile`` model-dumped) when the pocket exists, is in this
+    workspace, and carries a ``surface_profile``; otherwise ``None``.
+
+    Any failure (bad id, missing pocket, read error) degrades to ``None`` so a
+    transient hiccup never breaks the run — the resolved profile then equals the
+    surface base (today's behavior).
+    """
+    if not pocket_id or not workspace_id:
+        return None
+    try:
+        from beanie import PydanticObjectId
+
+        from pocketpaw_ee.cloud.models.pocket import Pocket
+
+        pocket = await Pocket.get(PydanticObjectId(pocket_id))
+    except Exception:
+        logger.debug("entity-profile pocket load failed for %s", pocket_id, exc_info=True)
+        return None
+    if pocket is None:
+        return None
+    # Tenant guard (Rule 7): never read a pocket outside the run's workspace.
+    if str(getattr(pocket, "workspace", "")) != str(workspace_id):
+        logger.warning(
+            "entity-profile load crossed tenant boundary (pocket %s not in ws %s) — ignoring",
+            pocket_id,
+            workspace_id,
+        )
+        return None
+    override = getattr(pocket, "surface_profile", None)
+    if override is None:
+        return None
+    # ``surface_profile`` is a ``PocketSurfaceProfile`` Beanie sub-model; dump it
+    # to the plain JSON-ish dict ``compose_entity_profile`` consumes. Keep
+    # ``None`` sub-fields (they mean "no opinion") so compose can fall back to
+    # the base — ``exclude_none`` would drop a deliberate ``ripple_mode=None``,
+    # which is harmless, but keeping them is explicit.
+    try:
+        return override.model_dump()
+    except Exception:
+        # Defensive: a stored dict (model_construct path) is already the shape.
+        return override if isinstance(override, dict) else None
+
+
+async def _resolve_entity_profile(ctx: ScopeContext) -> SurfaceProfile:
+    """Resolve the ENTITY-AWARE ``SurfaceProfile`` for this run (once).
+
+    ``base`` is the pure surface-kind profile (``resolve_profile`` — no I/O).
+    When the chat is bound to a pocket-entity (``surface_context.meta.pocket_id``
+    set) whose pocket carries a ``surface_profile`` override, that override is
+    loaded TENANT-SCOPED and folded OVER the base via ``compose_entity_profile``.
+    Otherwise the base is returned unchanged — the legacy / non-entity path,
+    byte-identical to today's behavior.
+
+    Never raises: ``surface_context is None`` (older clients) → the safe default
+    profile (ripple on, no deny); a missing/foreign pocket → the surface base.
+    """
+    if ctx.surface_context is None:
+        # Legacy path: no resolved surface. Today's behavior is the default
+        # profile (ripple on, no deny) — match it exactly.
+        return resolve_profile(SurfaceKind.GENERIC, SurfaceMeta())
+
+    base = resolve_profile(ctx.surface_context.kind, ctx.surface_context.meta)
+    pocket_id = ctx.surface_context.meta.pocket_id
+    if not pocket_id:
+        return base
+    override = await _load_entity_profile_override(ctx.workspace_id, pocket_id)
+    return compose_entity_profile(base, override)
 
 
 async def _persist_assistant_message(
@@ -325,17 +488,57 @@ def _new_run_id() -> str:
 
 
 def _extract_ripple_attachment(full_text: str) -> tuple[str, dict[str, Any] | None]:
-    """Strip the trailing ripple JSON fence and return ``(remaining_text, spec_or_None)``."""
-    match = RIPPLE_JSON_RE.search(full_text)
-    if not match:
+    """Strip the inline ripple fence and return ``(remaining_text, spec_or_None)``.
+
+    Contract (RFC 13 M0): the canonical fence is ``ui-spec`` carrying a
+    ``{version, ui}`` envelope (the prompt's contract and what ``MarkdownRenderer``
+    tokenizes). We try that first. If no canonical fence is present, we fall back
+    to the DEPRECATED legacy ``json`` fence + ``{widgets, lifecycle}`` shape so
+    in-flight conversations keep rendering — that branch ages out per RFC 13 open
+    question #6. On either path, the spec is normalized through
+    ``normalize_ripple_spec`` and the fence is stripped from the message body.
+    A truncated / unparseable fence leaves the text untouched and returns no
+    attachment (the frontend's ``ui-spec-error`` segment surfaces it).
+    """
+    # Canonical path: ``ui-spec`` fence + {version, ui}.
+    match = RIPPLE_UISPEC_RE.search(full_text)
+    if match is not None:
+        candidate = _parse_fence_json(match.group(1))
+        if _looks_like_ripple_spec(candidate):
+            return _normalize_and_strip(full_text, match, candidate)
+        # A ui-spec fence that doesn't parse / isn't a spec falls through; we do
+        # NOT then try the legacy json fence on the same text — a malformed
+        # canonical block stays inline rather than risk a wrong extraction.
         return full_text, None
+
+    # Transitional path (DEPRECATED): legacy ``json`` fence + {widgets, lifecycle}.
+    match = RIPPLE_JSON_RE.search(full_text)
+    if match is None:
+        return full_text, None
+    candidate = _parse_fence_json(match.group(1))
+    if not _looks_like_legacy_ripple_spec(candidate):
+        return full_text, None
+    return _normalize_and_strip(full_text, match, candidate)
+
+
+def _parse_fence_json(raw: str) -> Any:
+    """Parse a fence body to JSON, returning ``None`` on any failure.
+
+    A truncated or malformed block (the model cut off mid-spec) yields ``None``,
+    which both shape gates reject — so the fence is left inline for the
+    frontend's recovery / ``ui-spec-error`` path rather than half-extracted.
+    """
     try:
-        candidate = json.loads(match.group(1))
+        return json.loads(raw)
     except Exception:
         logger.debug("Ripple parse failed", exc_info=True)
-        return full_text, None
-    if not (isinstance(candidate, dict) and ("lifecycle" in candidate or "widgets" in candidate)):
-        return full_text, None
+        return None
+
+
+def _normalize_and_strip(
+    full_text: str, match: re.Match[str], candidate: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    """Normalize ``candidate`` and remove its fence from ``full_text``."""
     spec: dict[str, Any] = candidate
     try:
         from pocketpaw_ee.cloud.ripple_normalizer import normalize_ripple_spec
@@ -447,25 +650,51 @@ async def _drive_agent_loop(
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
     try:
         session_key = session_key_for(ctx)
-        # Resolve the per-surface tool-deny policy once and thread it to the
-        # backend. Empty for every surface except /sites svelte-create, where it
-        # forbids the two ripple-create tools so the agent cannot fall back to a
-        # rippleSpec landing page (the typed replacement for the deleted
-        # prompt-sniffing gate in claude_sdk.py). ``surface_context is None`` is
-        # the legacy path — no deny.
+        # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
+        # profile (entity-rooms chunk ①). ``ctx.resolved_profile`` was resolved
+        # once in ``execute_run`` — the surface base composed with the
+        # pocket-entity's ``surface_profile`` override (deny UNION, allow UNION).
+        # ``deny_mcp_tool_ids`` (a plain ``frozenset[str]``) is subtracted from
+        # the SDK allowlist downstream; ``allowed_sdk_tools`` is the optional
+        # additive allowlist (entity-rooms STRETCH). Both cross the EE→OSS
+        # boundary as plain frozensets — never as imported EE symbols
+        # (import-linter forbids EE→OSS imports). ``resolved_profile is None``
+        # is the legacy path: empty deny, no allow → unchanged behavior.
         surface_deny: frozenset[str] = frozenset()
-        if ctx.surface_context is not None:
-            surface_deny = resolve_profile(
-                ctx.surface_context.kind, ctx.surface_context.meta
-            ).deny_mcp_tool_ids
-        agent_iter = pool.run(
-            ctx.target_agent_id,
-            user_content,
-            session_key,
+        surface_allow: frozenset[str] = frozenset()
+        # entity-rooms A1/A2: the per-entity system-message override (a base swap)
+        # and the per-entity skill subset. Both READ here and forwarded as plain
+        # data (a ``str`` and a ``frozenset[str]``) — never an EE symbol crossing
+        # into the OSS pool (import-linter forbids EE→OSS imports). Withheld when
+        # None / empty so legacy and non-entity runs are byte-identical.
+        surface_sys_override: str | None = None
+        surface_skills: frozenset[str] = frozenset()
+        if ctx.resolved_profile is not None:
+            surface_deny = ctx.resolved_profile.deny_mcp_tool_ids
+            surface_allow = ctx.resolved_profile.allowed_sdk_tools or frozenset()
+            surface_sys_override = ctx.resolved_profile.system_message_override
+            surface_skills = ctx.resolved_profile.skill_names or frozenset()
+        run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,
             instructions=behavior_instructions,
             deny_mcp_tool_ids=surface_deny,
+            allow_sdk_tools=surface_allow,
+        )
+        # Forward the override only when the entity actually set one — withholding
+        # keeps the prompt assembly untouched on every other run.
+        if surface_sys_override is not None:
+            run_kwargs["system_message_override"] = surface_sys_override
+        # Forward the skill subset only when non-empty — the OSS pool's
+        # withhold-when-empty idiom then keeps the 6 non-Claude backends'
+        # narrower signature safe.
+        if surface_skills:
+            run_kwargs["skill_names"] = surface_skills
+        agent_iter = pool.run(
+            ctx.target_agent_id,
+            user_content,
+            session_key,
+            **run_kwargs,
         ).__aiter__()
 
         async def _next_event() -> Any:
@@ -670,6 +899,16 @@ async def execute_run(spec: RunSpec) -> None:
         ctx.user_id,
         {"surface": spec.surface, "meta": spec.surface_meta},
     )
+
+    # Resolve the ENTITY-AWARE SurfaceProfile ONCE, now that surface_context +
+    # tenancy are in hand (entity-rooms chunk ①). When the chat is bound to a
+    # pocket-entity (meta.pocket_id set) carrying a surface_profile override,
+    # this folds that override (tenant-scoped load) OVER the surface base; else
+    # it returns the base unchanged. Both consumers (build_behavior_instructions
+    # ripple-omit + _drive_agent_loop tool-deny/allow) read ctx.resolved_profile
+    # instead of re-resolving. Never raises — a missing/foreign pocket degrades
+    # to the surface base (today's behavior).
+    ctx.resolved_profile = await _resolve_entity_profile(ctx)
 
     await _mark_running(spec.run_id)
     await _broadcast_agent_typing(ctx, active=True)

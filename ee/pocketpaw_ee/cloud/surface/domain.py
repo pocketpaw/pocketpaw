@@ -35,12 +35,22 @@
 # ``skill_names`` / ``allowed_sdk_tools`` / ``system_message_override`` remain
 # DECLARED-but-inert tested DATA for later passes. The resolver lives in
 # ``service.py`` and is META-AWARE on /sites (three modes).
+# Changes: 2026-06-07 (feat/entity-pocket-profile-field) — relocated
+# ``PocketSurfaceProfile`` here from ``models/pocket.py``. It is the JSON-
+# friendly mirror of ``SurfaceProfile`` embedded on a Pocket; living it in the
+# leaf domain module lets both ``models.pocket`` (the Beanie doc) and
+# ``pockets.dto`` (the wire layer) import it WITHOUT ``pockets.dto`` reaching
+# into ``models.*`` — which the OSS-EE boundary contract forbids. The surface
+# package is models-free at import time, so ``models.pocket`` can import this
+# without a cycle.
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class SurfaceKind(StrEnum):
@@ -174,4 +184,39 @@ class SurfaceProfile:
     system_message_override: str | None = None
 
 
-__all__ = ["SurfaceKind", "SurfaceMeta", "SurfaceContext", "SurfaceProfile"]
+class PocketSurfaceProfile(BaseModel):
+    """Per-entity surface-profile override embedded on a Pocket.
+
+    MIRRORS the surface-domain ``SurfaceProfile`` field-for-field, but with
+    JSON-friendly types — plain ``list``s instead of ``frozenset``s — so it
+    round-trips cleanly through Mongo and the wire. ALL fields are optional: a
+    populated override may set only the dimensions an entity cares about and
+    leave the rest ``None`` / empty.
+
+    The entity-aware ``resolve_profile`` (entity-rooms chunk ①) hydrates a real
+    ``SurfaceProfile`` from this, coercing the lists back to frozensets
+    (roughly ``SurfaceProfile(**pocket.surface_profile)`` with the set fields
+    wrapped). ``ripple_mode=None`` means "no opinion — fall back to the
+    surface-kind default."
+
+    Lives in the leaf domain module (not ``models/pocket.py``) so both the
+    Beanie ``Pocket`` document and ``pockets.dto`` can import it without
+    ``pockets.dto`` reaching into ``models.*`` (OSS-EE boundary contract).
+    """
+
+    ripple_mode: Literal["on", "off", "trim"] | None = None
+    allowed_sdk_tools: list[str] | None = None
+    deny_mcp_tool_ids: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
+    system_message_override: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+__all__ = [
+    "SurfaceKind",
+    "SurfaceMeta",
+    "SurfaceContext",
+    "SurfaceProfile",
+    "PocketSurfaceProfile",
+]

@@ -170,14 +170,27 @@ export POCKETPAW_TOOLS_DENY="group:mcp"
 
 In addition to the SDK's built-in tools, PocketPaw registers its own tools (web_search, image_gen, etc.) as custom tool definitions passed to the SDK.
 
-## Skill Auto-Discovery
+## Skills
 
-The backend passes `setting_sources=["user", "project"]` to the SDK, enabling automatic discovery of SKILL.md files from:
+The backend launches with `setting_sources=[]` for persona isolation, which
+**disables** the SDK's filesystem skill discovery — `~/.claude/skills/` and
+`.claude/skills/` are invisible to it, and the SDK `skills=` option is gated by
+`setting_sources` too. So skills reach this backend through the SDK `plugins=`
+option (a local plugin loads regardless of `setting_sources`):
 
-- `~/.claude/skills/` — User-level skills
-- `.claude/skills/` — Project-level skills
+- **Bundled skills** — PocketPaw's `_bundled/` directory is a Claude Code local
+  plugin, passed via `plugins=` when `POCKETPAW_SDK_LOAD_BUNDLED_SKILLS` is on
+  (default). See [Bundled Skills](../internal/2026-05-bundled-skills.md).
+- **Per-entity skills** — when a pocket-entity's `surface_profile.skill_names` is
+  set, those skills are materialized into a throwaway per-run local plugin and
+  appended to `plugins=`, so the agent sees only the entity's named subset (plus
+  the bundled skills). A skill run bypasses the persistent client to ensure the
+  per-run plugin takes effect. See the entity-rooms section of
+  [Bundled Skills](../internal/2026-05-bundled-skills.md).
 
-This means skills created by the `skill_gen` tool (which writes to `~/.claude/skills/`) are automatically available to the SDK without additional configuration.
+Non-SDK backends (codex_cli, openai_agents, deep_agents, langchain_react) DO see
+`~/.claude/skills/` via PocketPaw's own `SkillLoader`, so `skill_gen`-created
+skills are available to them through the slash-command dispatcher.
 
 ## Response Format
 

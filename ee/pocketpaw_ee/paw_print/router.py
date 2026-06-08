@@ -1,8 +1,15 @@
 # ee/paw_print/router.py — HTTP surface for the Paw Print widget layer.
 # Created: 2026-04-13 (Move 3 PR-B) — Spec serving (public, CORS-gated),
 # widget CRUD (owner-authed via access_token), event ingest (rate-limited,
-# domain-enforced, Guardian-screened, Fabric-mapped). The widget.js bundle
+# domain-enforced, injection-screened, Fabric-mapped). The widget.js bundle
 # built in PR-C consumes these endpoints.
+# Updated: 2026-05-30 — Replaced the always-None Guardian no-op screen
+# (getattr(guardian, "check_input") — GuardianAgent never exposed that
+# method, so the check was a permanent accept-all) with the real
+# InjectionScanner. The stringified event payload is now heuristically
+# screened and dropped on a HIGH-or-higher threat. Renamed the helper to
+# _screen_event_for_injection and the rejection reason to
+# "injection_rejected".
 
 from __future__ import annotations
 
@@ -249,8 +256,9 @@ async def ingest_event(
     2. Origin is on the widget's allowlist.
     3. Payload size is under MAX_PAYLOAD_BYTES.
     4. Rate limits (overall + per customer_ref).
-    5. Guardian screens the payload (input sanitization layer — degrades
-       cleanly when ee/ lacks the guardian backend).
+    5. Injection screening: the stringified payload is run through the
+       heuristic InjectionScanner and dropped on a HIGH-or-higher threat
+       (degrades cleanly to accept when the security stack is absent).
     After that, the event is persisted and — if the widget has a matching
     `event_mapping` — a Fabric object is created.
     """
@@ -282,8 +290,8 @@ async def ingest_event(
     if not ok:
         raise HTTPException(429, "Rate limit exceeded")
 
-    if not await _pass_through_guardian(event):
-        return EventIngestResponse(accepted=False, reason="guardian_rejected")
+    if not await _screen_event_for_injection(event):
+        return EventIngestResponse(accepted=False, reason="injection_rejected")
 
     await store.record_event(event)
     fabric_object_id = await _apply_event_mapping(widget, event)
@@ -300,31 +308,49 @@ async def ingest_event(
 # ---------------------------------------------------------------------------
 
 
-async def _pass_through_guardian(event: PawPrintEvent) -> bool:
-    """Best-effort Guardian screen — tolerant when the security stack is absent."""
-    try:
-        from pocketpaw.security.guardian import GuardianProtocol, get_guardian
-    except Exception:
-        return True
+async def _screen_event_for_injection(event: PawPrintEvent) -> bool:
+    """Screen the stringified event payload for prompt-injection content.
 
+    Runs the heuristic :class:`InjectionScanner` (regex-based, no API key
+    required) over the JSON-serialized payload and returns ``False`` — drop
+    the event — when the scan reports a ``HIGH`` (or higher) threat. The
+    HIGH threshold is deliberate: ``MEDIUM`` covers softer persona/roleplay
+    phrasing that legitimate widget input ("act as my travel guide") could
+    trip, so screening only the unambiguous HIGH patterns (instruction
+    overrides, delimiter attacks, jailbreaks, exfiltration) avoids
+    false-dropping real customer events.
+
+    Degrades cleanly: if the security module can't be imported or the scan
+    raises, the event is accepted (availability over a hard fail on a public
+    ingest endpoint). This replaced the previous ``getattr(guardian,
+    "check_input")`` call, which was a permanent no-op — ``GuardianAgent``
+    only ever exposed ``check_command``, so the attribute was always ``None``
+    and every event was accepted unscreened.
+    """
     try:
-        guardian: GuardianProtocol = get_guardian()
+        from pocketpaw.security.injection_scanner import (
+            ThreatLevel,
+            get_injection_scanner,
+        )
     except Exception:
         return True
 
     payload = json.dumps(event.payload, default=str)
-    check = getattr(guardian, "check_input", None)
-    if check is None:
-        return True
     try:
-        verdict = await check(payload)
+        scan = get_injection_scanner().scan(payload, source=f"paw_print:{event.widget_id}")
     except Exception:
-        logger.debug("Guardian check raised; accepting event by default")
+        logger.debug("Injection scan raised; accepting event by default")
         return True
-    if isinstance(verdict, bool):
-        return verdict
-    # Guardian may return a richer dataclass; accept when no `blocked` attr.
-    return not getattr(verdict, "blocked", False)
+
+    if scan.threat_level == ThreatLevel.HIGH:
+        logger.warning(
+            "Dropping paw-print event for widget %s — injection threat %s (patterns: %s)",
+            event.widget_id,
+            scan.threat_level.value,
+            ", ".join(scan.matched_patterns),
+        )
+        return False
+    return True
 
 
 async def _apply_event_mapping(widget: PawPrintWidget, event: PawPrintEvent) -> str | None:
