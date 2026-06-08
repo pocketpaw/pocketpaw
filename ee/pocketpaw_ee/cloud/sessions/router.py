@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from starlette.responses import Response
 
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.sessions import service as sessions_service
 from pocketpaw_ee.cloud.sessions.dto import (
     CreateSessionRequest,
+    SessionPage,
     Surface,
     UpdateSessionRequest,
     session_to_wire_dict,
@@ -59,6 +60,79 @@ async def list_sessions(
     else:
         items = await sessions_service.list_for_owner(ctx, workspace_id, surface=surface)
     return [session_to_wire_dict(s) for s in items]
+
+
+# ---------------------------------------------------------------------------
+# Per-mode listing — one keyset-paginated endpoint per chat surface. Each
+# mode's rail paginates independently so a workspace with 95 chat threads and
+# 100+ pocket chats never merges them into one list. Surface scoping follows
+# the legacy-null-as-chat rule (handled in the service). These literal routes
+# MUST stay above ``GET /{session_id}`` so they aren't captured as an id.
+# ---------------------------------------------------------------------------
+
+
+async def _mode_page(
+    surface: str,
+    cursor: str | None,
+    limit: int,
+    workspace_id: str,
+    user_id: str,
+) -> SessionPage:
+    ctx = sessions_service.legacy_ctx(user_id, workspace_id)
+    rows, next_cursor = await sessions_service.list_for_owner_page(
+        ctx, workspace_id, surface=surface, cursor=cursor, limit=limit
+    )
+    return SessionPage(
+        sessions=[session_to_wire_dict(s) for s in rows],
+        nextCursor=next_cursor,
+    )
+
+
+@router.get("/chat", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
+async def list_chat_sessions(
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> SessionPage:
+    """Chat-surface sessions (includes legacy ``surface=None`` rows)."""
+    return await _mode_page("chat", cursor, limit, workspace_id, user_id)
+
+
+@router.get("/files", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
+async def list_files_sessions(
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> SessionPage:
+    """Files-surface sessions only."""
+    return await _mode_page("files", cursor, limit, workspace_id, user_id)
+
+
+@router.get("/foresight", dependencies=[Depends(require_action_any_workspace("session.read_own"))])
+async def list_foresight_sessions(
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> SessionPage:
+    """Foresight-surface sessions only."""
+    return await _mode_page("foresight", cursor, limit, workspace_id, user_id)
+
+
+@router.get(
+    "/pocket-creation",
+    dependencies=[Depends(require_action_any_workspace("session.read_own"))],
+)
+async def list_pocket_creation_sessions(
+    cursor: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> SessionPage:
+    """Pocket-creation-surface sessions only."""
+    return await _mode_page("pocket_creation", cursor, limit, workspace_id, user_id)
 
 
 @router.get("/runtime")

@@ -159,6 +159,44 @@ async def test_create_rejects_duplicate_slug(owner) -> None:
         )
 
 
+async def test_create_rejects_reserved_slug(owner) -> None:
+    with pytest.raises(ConflictError) as exc:
+        await workspace_service.create(
+            _ctx(str(owner.id)), CreateWorkspaceRequest(name="Admin", slug="admin")
+        )
+    assert exc.value.code == "workspace.slug_reserved"
+
+
+async def test_slug_reason_available_for_fresh_slug(owner) -> None:
+    assert await workspace_service.slug_reason("brand-new") is None
+
+
+async def test_slug_reason_taken_after_create(owner) -> None:
+    await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="taken-one")
+    )
+    assert await workspace_service.slug_reason("taken-one") == "taken"
+
+
+async def test_slug_reason_reserved() -> None:
+    assert await workspace_service.slug_reason("api") == "reserved"
+
+
+async def test_slug_reason_invalid_format() -> None:
+    assert await workspace_service.slug_reason("Not A Slug") == "invalid"
+
+
+async def test_slug_reason_free_again_after_soft_delete(owner) -> None:
+    # Mirrors create()'s uniqueness query: a soft-deleted workspace must not
+    # keep holding its slug, so the slug reads as available again.
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="recyclable")
+    )
+    assert await workspace_service.slug_reason("recyclable") == "taken"
+    await workspace_service.delete(_ctx(str(owner.id)), ws.id)
+    assert await workspace_service.slug_reason("recyclable") is None
+
+
 async def test_update_emits_workspace_updated(owner, recording_bus) -> None:
     ws = await workspace_service.create(
         _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")

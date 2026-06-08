@@ -95,18 +95,71 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
     }
 )
 
-# The /sites SVELTE-CREATE profile: hand-authored SvelteKit, so ripple OFF, the
-# two ripple-create tools denied, and the create-svelte-site skill surfaced.
-_SITES_SVELTE_CREATE_PROFILE = SurfaceProfile(
-    ripple_mode="off",
-    deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
-    skill_names=frozenset({"create-svelte-site"}),
-)
+# Per-mode MCP-tool allow-lists keep a mode's agent context lean: only the
+# mode's SPECIALIZED tools are named here. The "general everywhere" set — ripple
+# widgets, the pocket lifecycle (read/create/edit/plan), and connectors
+# (composio) — is kept by the OSS backend itself, so a scoped mode still renders
+# UI, makes pockets, and uses connectors. Chat (and any unmapped kind) stays
+# unrestricted (``allow_mcp_tool_ids=None``).
+#
+# Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
+# import could cycle with the agent layer, and ``resolve_profile`` is on the hot
+# path. A failed import degrades to no MCP restriction so tool-scoping can never
+# break chat.
+_PROFILE_CACHE: dict[str, Any] | None = None
 
-# Per-kind static overrides for NON-sites surfaces. Add a row only when a
-# surface needs to deviate from ``_DEFAULT_PROFILE``. /sites is NOT here — it is
-# resolved per-meta in ``resolve_profile``.
-_PROFILES: dict[SurfaceKind, SurfaceProfile] = {}
+
+def _build_profiles() -> dict[str, Any]:
+    loaded = True
+    foresight_allow: frozenset[str] | None
+    sites_allow: frozenset[str] | None
+    try:
+        from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
+
+        foresight_allow = frozenset(FORESIGHT_TOOL_IDS)
+        sites_allow = frozenset(SITES_TOOL_IDS)
+    except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
+        logger.warning(
+            "surface: could not load mcp tool ids; per-mode MCP scoping disabled",
+            exc_info=True,
+        )
+        loaded = False
+        foresight_allow = None
+        sites_allow = None
+
+    return {
+        "by_kind": {
+            # Foresight: its scenario tools + the general-everywhere set.
+            SurfaceKind.FORESIGHT: SurfaceProfile(
+                ripple_mode="on", allow_mcp_tool_ids=foresight_allow
+            ),
+            # Files names no specialized MCP tools — document scaffolding rides
+            # the built-in Read/Write/Edit tools (never filtered). Empty allow =
+            # general-everywhere only; None when the import degraded.
+            SurfaceKind.FILES: SurfaceProfile(
+                ripple_mode="on",
+                allow_mcp_tool_ids=frozenset() if loaded else None,
+            ),
+        },
+        # /sites is meta-aware (below). Both modes scope to the sites authoring
+        # tools + general. svelte-create additionally denies the two ripple-create
+        # tools (deny runs AFTER allow) and drops ripple + surfaces the svelte skill.
+        "sites_default": SurfaceProfile(ripple_mode="on", allow_mcp_tool_ids=sites_allow),
+        "sites_svelte_create": SurfaceProfile(
+            ripple_mode="off",
+            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
+            allow_mcp_tool_ids=sites_allow,
+            skill_names=frozenset({"create-svelte-site"}),
+        ),
+    }
+
+
+def _profiles() -> dict[str, Any]:
+    global _PROFILE_CACHE
+    if _PROFILE_CACHE is None:
+        _PROFILE_CACHE = _build_profiles()
+    return _PROFILE_CACHE
 
 
 def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProfile:
@@ -130,13 +183,14 @@ def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProf
     matches the default) returns ``_DEFAULT_PROFILE`` (``ripple_mode="on"``), so
     the only surface that deviates from today's behavior is /sites svelte-create.
     """
+    profiles = _profiles()
     if surface_kind == SurfaceKind.SITES:
         # refine (pocket_id) edits the existing ripple landing spec → keep ripple.
         # It wins over engine, so check it FIRST.
         if meta.pocket_id is None and meta.engine == "svelte":
-            return _SITES_SVELTE_CREATE_PROFILE
-        return _DEFAULT_PROFILE
-    return _PROFILES.get(surface_kind, _DEFAULT_PROFILE)
+            return profiles["sites_svelte_create"]
+        return profiles["sites_default"]
+    return profiles["by_kind"].get(surface_kind, _DEFAULT_PROFILE)
 
 
 def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None) -> SurfaceProfile:
@@ -185,12 +239,23 @@ def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None
     else:
         allowed = (base.allowed_sdk_tools or frozenset()) | frozenset(entity_allow or ())
 
+    # allow_mcp_tool_ids: same None-aware UNION as allowed_sdk_tools — None on
+    # BOTH sides stays None (no MCP restriction); otherwise the entity's allowed
+    # MCP tools ADD to the mode's set. An empty frozenset would wrongly drop
+    # every non-grant MCP tool, so only build a set when a side contributes.
+    entity_allow_mcp = override.get("allow_mcp_tool_ids")
+    if base.allow_mcp_tool_ids is None and entity_allow_mcp is None:
+        allow_mcp: frozenset[str] | None = None
+    else:
+        allow_mcp = (base.allow_mcp_tool_ids or frozenset()) | frozenset(entity_allow_mcp or ())
+
     # system_message_override: entity wins when set, else base.
     sys_override = override.get("system_message_override") or base.system_message_override
 
     return SurfaceProfile(
         ripple_mode=ripple_mode,
         allowed_sdk_tools=allowed,
+        allow_mcp_tool_ids=allow_mcp,
         deny_mcp_tool_ids=deny,
         skill_names=skills,
         system_message_override=sys_override,

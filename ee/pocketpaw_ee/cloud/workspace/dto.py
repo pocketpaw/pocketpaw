@@ -6,11 +6,14 @@ existing wire shape consumed by paw-enterprise:
 - ``createdAt``, ``expiresAt``, ``joinedAt`` (camelCase) for timestamps
 - ``memberCount``, ``invitedBy`` (camelCase) for derived/foreign refs
 - ``workspace_name``, ``valid`` for the validate-invite response
+
+Changes: added the slug rule single-source-of-truth (``SLUG_RE`` +
+``RESERVED_SLUGS``) and the ``SlugAvailabilityOut`` response so the create
+UI can check a slug live; ``validate_slug`` now reuses ``SLUG_RE``.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -23,6 +26,7 @@ from pocketpaw_ee.cloud.workspace.domain import (
     Workspace,
     WorkspaceMember,
 )
+from pocketpaw_ee.cloud.workspace.slug import SLUG_RE
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -36,7 +40,7 @@ class CreateWorkspaceRequest(BaseModel):
     @field_validator("slug")
     @classmethod
     def validate_slug(cls, v: str) -> str:
-        if not re.match(r"^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$", v):
+        if not SLUG_RE.match(v):
             raise ValueError("Slug must be lowercase alphanumeric with hyphens")
         return v
 
@@ -107,6 +111,19 @@ class WorkspaceOut(BaseModel):
     memberCount: int  # noqa: N815 - camelCase wire key
 
     model_config = {"populate_by_name": True}
+
+
+class SlugAvailabilityOut(BaseModel):
+    """GET /workspaces/slug-available response.
+
+    ``available`` is the headline; ``reason`` names *why* an unavailable slug
+    is unavailable (``invalid`` format, ``reserved`` handle, or already
+    ``taken``) so the create UI can show a precise message live instead of
+    waiting for the POST to 409.
+    """
+
+    available: bool
+    reason: Literal["invalid", "reserved", "taken"] | None = None
 
 
 class MemberOut(BaseModel):
@@ -314,6 +331,7 @@ __all__ = [
     "InviteOut",
     "InvitePreviewResponse",
     "MemberOut",
+    "SlugAvailabilityOut",
     "UpdateDomainRequest",
     "UpdateMemberRoleRequest",
     "UpdateWorkspaceRequest",

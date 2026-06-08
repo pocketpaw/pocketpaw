@@ -16,6 +16,7 @@ import importlib
 import json
 import logging
 import math
+import os
 import re
 import sqlite3
 import uuid
@@ -26,6 +27,10 @@ from pocketpaw._compat import require_extra
 from pocketpaw.memory.protocol import MemoryEntry, MemoryType
 
 logger = logging.getLogger(__name__)
+
+# Set once we've warned about a backend mismatch so the hot path doesn't spam
+# the log. See ``FileMemoryStore.save`` for the rationale.
+_warned_backend_mismatch = False
 
 
 def _ensure_utc(dt: datetime) -> datetime:
@@ -1722,6 +1727,19 @@ class FileMemoryStore:
 
     async def save(self, entry: MemoryEntry) -> str:
         """Save a memory entry."""
+        # Defense-in-depth: if mongodb is the configured backend yet a write is
+        # landing here, a stale FileMemoryStore reference survived the cloud
+        # in-place store swap and chat is about to hit local disk. Warn once
+        # (never raise — OSS core must stay functional and must not import EE).
+        global _warned_backend_mismatch
+        if not _warned_backend_mismatch and os.environ.get("POCKETPAW_MEMORY_BACKEND") == "mongodb":
+            _warned_backend_mismatch = True
+            logger.warning(
+                "FileMemoryStore.save called while POCKETPAW_MEMORY_BACKEND=mongodb "
+                "— a memory write is going to local disk instead of Mongo. A cached "
+                "FileMemoryStore reference likely survived the backend swap."
+            )
+
         if entry.type == MemoryType.SESSION:
             # Session entries use random UUIDs (no collision issue)
             if not entry.id:

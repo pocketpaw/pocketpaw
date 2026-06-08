@@ -179,6 +179,13 @@ class SurfaceProfile:
 
     ripple_mode: Literal["on", "off", "trim"]
     allowed_sdk_tools: frozenset[str] | None = None
+    # Restrictive per-MODE MCP allow-list (distinct from the additive
+    # ``allowed_sdk_tools``). ``None`` = no restriction (keep every MCP tool).
+    # When set, the OSS backend keeps only the MCP tools in this set PLUS the
+    # universal pocket-creation grant + ripple widgets, and anything from an
+    # always-allowed server (connectors / pocket lifecycle) — dropping the rest
+    # so a mode's agent context stays lean. Applied AFTER ``deny_mcp_tool_ids``.
+    allow_mcp_tool_ids: frozenset[str] | None = None
     deny_mcp_tool_ids: frozenset[str] = field(default_factory=frozenset)
     skill_names: frozenset[str] = field(default_factory=frozenset)
     system_message_override: str | None = None
@@ -206,6 +213,7 @@ class PocketSurfaceProfile(BaseModel):
 
     ripple_mode: Literal["on", "off", "trim"] | None = None
     allowed_sdk_tools: list[str] | None = None
+    allow_mcp_tool_ids: list[str] | None = None
     deny_mcp_tool_ids: list[str] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
     system_message_override: str | None = None
