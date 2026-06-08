@@ -1,6 +1,6 @@
 """Domain value objects for the workspace module.
 
-Three frozen dataclasses, no Beanie / Pydantic / FastAPI imports:
+Frozen dataclasses, no Beanie / Pydantic / FastAPI imports:
 
 - ``Workspace`` mirrors the persistence ``Workspace`` document plus a
   derived ``member_count`` that the service computes per request.
@@ -10,6 +10,8 @@ Three frozen dataclasses, no Beanie / Pydantic / FastAPI imports:
 - ``Invite`` mirrors the persistence ``Invite`` document, with
   ``expired`` precomputed at the boundary so the domain entity stays
   pure (no clock dependency baked into a property).
+- ``InviteContext`` mirrors the optional admin onboarding hints embedded
+  on the invite (pp#1365); ``Invite.context`` is None when omitted.
 """
 
 from __future__ import annotations
@@ -59,6 +61,18 @@ class VerifiedDomain:
 
 
 @dataclass(frozen=True)
+class InviteContext:
+    """Optional admin-provided onboarding hints carried on an invite.
+
+    ``focus`` is a one-line description of what the new member will own;
+    ``profile_pic`` is a reference to a suggested avatar. Both optional —
+    the downstream VIP-onboarding flow reads whatever the admin supplied."""
+
+    focus: str | None = None
+    profile_pic: str | None = None
+
+
+@dataclass(frozen=True)
 class Invite:
     """A workspace invite. ``expired`` is computed by the repository at
     read time so the domain doesn't carry a clock dependency."""
@@ -74,6 +88,7 @@ class Invite:
     revoked: bool
     expired: bool
     expires_at: datetime
+    context: InviteContext | None = None  # optional admin onboarding hints (pp#1365)
 
 
-__all__ = ["Invite", "VerifiedDomain", "Workspace", "WorkspaceMember"]
+__all__ = ["Invite", "InviteContext", "VerifiedDomain", "Workspace", "WorkspaceMember"]

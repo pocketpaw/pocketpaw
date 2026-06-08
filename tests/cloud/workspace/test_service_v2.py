@@ -41,7 +41,9 @@ from pocketpaw_ee.cloud.workspace.dto import (
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
+    InviteContextDTO,
     UpdateWorkspaceRequest,
+    invite_to_dto,
 )
 
 pytestmark = pytest.mark.usefixtures("mongo_db")
@@ -605,6 +607,119 @@ async def test_accept_invite_case_insensitive_email(mongo_db: Any, monkeypatch) 
     )
     # Should succeed — email comparison is case-insensitive.
     await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+
+# ---------------------------------------------------------------------------
+# Invite admin context — optional VIP-onboarding payload (pp#1365)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_invite_persists_admin_context(owner, monkeypatch) -> None:
+    """create_invite(...) with a context round-trips: the returned domain
+    object carries it AND the persisted row stores it."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="vip@x.c",
+            context=InviteContextDTO(focus="Owns the Q3 pricing rollout", profile_pic="file_abc"),
+        ),
+    )
+
+    # Returned domain object carries the context.
+    assert invite.context is not None
+    assert invite.context.focus == "Owns the Q3 pricing rollout"
+    assert invite.context.profile_pic == "file_abc"
+
+    # The persisted row stores it too.
+    row = await _InviteDoc.find_one(_InviteDoc.id == PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.context is not None
+    assert row.context.focus == "Owns the Q3 pricing rollout"
+    assert row.context.profile_pic == "file_abc"
+
+
+async def test_create_invite_context_surfaces_on_validate_dto(owner, monkeypatch) -> None:
+    """The context survives the read path: validate_invite -> invite_to_dto
+    returns it on the wire response (the shape paw-enterprise consumes)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="vip2@x.c",
+            context=InviteContextDTO(focus="Leads onboarding"),
+        ),
+    )
+
+    read_invite, _ws_name = await workspace_service.validate_invite(invite.token)
+    dto = invite_to_dto(read_invite)
+    assert dto.context is not None
+    assert dto.context.focus == "Leads onboarding"
+    assert dto.context.profile_pic is None
+
+
+async def test_accept_invite_context_readable(owner, resolver_mock, monkeypatch) -> None:
+    """At accept time the invite's admin context is readable for the
+    downstream VIP-onboarding flow."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    invitee = await _seed_user(email="acceptctx@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="acceptctx@x.c",
+            context=InviteContextDTO(focus="Drives the design system", profile_pic="pic_xyz"),
+        ),
+    )
+
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), invite.token)
+
+    # The accepted row still carries the context — readable in the accept
+    # path / by any downstream onboarding consumer.
+    row = await _InviteDoc.find_one(_InviteDoc.id == PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.accepted is True
+    assert row.context is not None
+    assert row.context.focus == "Drives the design system"
+    assert row.context.profile_pic == "pic_xyz"
+
+
+async def test_create_invite_without_context_is_unchanged(owner, monkeypatch) -> None:
+    """Omitting context behaves exactly as before — no context stored,
+    no context on the returned domain object or DTO."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)), ws.id, CreateInviteRequest(email="plain@x.c")
+    )
+
+    assert invite.context is None
+    assert invite_to_dto(invite).context is None
+
+    row = await _InviteDoc.find_one(_InviteDoc.id == PydanticObjectId(invite.id))
+    assert row is not None
+    assert row.context is None
 
 
 # ---------------------------------------------------------------------------

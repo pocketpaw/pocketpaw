@@ -16,7 +16,13 @@ from typing import Literal
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
-from pocketpaw_ee.cloud.workspace.domain import Invite, VerifiedDomain, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.domain import (
+    Invite,
+    InviteContext,
+    VerifiedDomain,
+    Workspace,
+    WorkspaceMember,
+)
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -40,10 +46,24 @@ class UpdateWorkspaceRequest(BaseModel):
     settings: dict | None = None
 
 
+class InviteContextDTO(BaseModel):
+    """Optional admin-provided onboarding hints carried on an invite (pp#1365).
+
+    The same ``{focus, profile_pic}`` shape on both the create request and the
+    invite response. ``focus`` is a one-line description of what the new member
+    will own; ``profile_pic`` is a reference (e.g. an uploaded file id) to a
+    suggested avatar. Both optional — supply either, both, or neither. Consumed
+    by the downstream VIP-onboarding flow."""
+
+    focus: str | None = Field(default=None, max_length=280)
+    profile_pic: str | None = Field(default=None, max_length=512)
+
+
 class CreateInviteRequest(BaseModel):
     email: str
     role: str = Field(default="member", pattern="^(admin|member)$")
     group_id: str | None = None
+    context: InviteContextDTO | None = None
 
 
 class UpdateMemberRoleRequest(BaseModel):
@@ -114,6 +134,7 @@ class InviteOut(BaseModel):
     revoked: bool
     expired: bool
     expiresAt: str | None  # noqa: N815 - camelCase wire key
+    context: InviteContextDTO | None = None  # optional admin onboarding hints (pp#1365)
 
     model_config = {"populate_by_name": True}
 
@@ -229,6 +250,12 @@ def member_to_dto(m: WorkspaceMember) -> MemberOut:
     )
 
 
+def _context_to_dto(ctx: InviteContext | None) -> InviteContextDTO | None:
+    if ctx is None:
+        return None
+    return InviteContextDTO(focus=ctx.focus, profile_pic=ctx.profile_pic)
+
+
 def invite_to_dto(inv: Invite) -> InviteOut:
     return InviteOut(
         id=inv.id,
@@ -240,6 +267,7 @@ def invite_to_dto(inv: Invite) -> InviteOut:
         revoked=inv.revoked,
         expired=inv.expired,
         expiresAt=iso_utc(inv.expires_at),
+        context=_context_to_dto(inv.context),
     )
 
 
@@ -265,6 +293,7 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
         revoked=inv.revoked,
         expired=inv.expired,
         expiresAt=iso_utc(inv.expires_at),
+        context=_context_to_dto(inv.context),
         valid=not (inv.accepted or inv.revoked or inv.expired),
         workspace_name=workspace_name,
     )
@@ -277,6 +306,7 @@ __all__ = [
     "BulkInviteSkip",
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
+    "InviteContextDTO",
     "InviteOut",
     "InvitePreviewResponse",
     "MemberOut",
