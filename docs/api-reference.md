@@ -324,9 +324,6 @@ per server:
 The namespaced server names appear in the registry entry under
 `mcp_servers` and on the report's `installed_mcp_servers`.
 
-> Scope note: this slice installs **skills and MCP servers**. The
-> list/remove surface ships in a follow-up endpoint.
-
 ### `POST /plugins/install`
 
 Install a plugin's skills and MCP servers from a GitHub source. Requires
@@ -384,6 +381,79 @@ preserved.
 
 Every install is audit-logged with the source, plugin name, version, and
 the installed skill names.
+
+### `GET /plugins`
+
+List every installed plugin from the registry
+(`~/.pocketpaw/plugins.json`). Requires the **admin** scope.
+
+Response `200` — an array of installed plugins:
+
+```json
+[
+  {
+    "name": "my-plugin",
+    "version": "1.2.3",
+    "source": "acme/widgets",
+    "skills": ["alpha", "beta"],
+    "mcp_servers": ["plugin:my-plugin:weather"],
+    "installed_at": "2026-06-08T12:00:00"
+  }
+]
+```
+
+### `POST /plugins/remove`
+
+Uninstall a plugin: delete each skill directory it installed, **stop** each
+of its namespaced MCP servers and remove their configs from the MCP manager,
+reload the skill loader, and drop its registry entry. Stopping the live
+server (not just deleting its config) mirrors install, which both registers
+the config and starts the server — so remove tears down the running
+connection too, rather than leaving it up until the next restart. Requires
+the **admin** scope.
+
+Request body:
+
+```json
+{ "name": "my-plugin" }
+```
+
+Response `200` — a step-by-step remove report (mirrors the install report):
+
+```json
+{
+  "plugin": "my-plugin",
+  "removed_at": "2026-06-08T12:05:00",
+  "steps": [
+    { "name": "skill:alpha", "status": "succeeded" },
+    { "name": "mcp:plugin:my-plugin:weather", "status": "succeeded" },
+    { "name": "reload_loader", "status": "succeeded" },
+    { "name": "drop_registry", "status": "succeeded" }
+  ],
+  "removed_skills": ["alpha", "beta"],
+  "removed_mcp_servers": ["plugin:my-plugin:weather"]
+}
+```
+
+Like install, each component is a step with status `succeeded` / `skipped`
+/ `failed`. A component that's already gone (a missing skill dir, an MCP
+server that's neither running nor registered) is `skipped` — the remove
+still completes and the registry entry is **always** dropped, so a
+half-removed plugin never lingers in the listing. The only up-front error
+is an unknown plugin:
+
+| Status | When |
+|--------|------|
+| `400` | Missing or invalid `name`. |
+| `404` | The named plugin is not installed. |
+
+Every removal is audit-logged (`action="plugin_remove"`) with the plugin
+name and the removed skill / MCP server names.
+
+The registry read-modify-write (shared by install and remove) is
+serialised by a process-level lock and written via a temp file + atomic
+`os.replace`, so concurrent operations can't corrupt `plugins.json` or
+clobber each other's entries.
 
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 

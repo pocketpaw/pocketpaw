@@ -9,6 +9,16 @@
 # namespacing, registered-but-needs-env (succeeded + needs-env detail),
 # a skills+mcp bundle, and the no-.mcp.json skip. The MCP manager is mocked
 # via a fake injected with monkeypatch (no real servers are spawned).
+# Updated: 2026-06-08 (feat/plugin-installer-listremove, #1358) — added the
+# list/remove slice: install-then-list, install-then-remove (deletes exactly
+# this plugin's skill dirs + MCP servers, drops the registry entry, leaves
+# nothing orphaned), unknown-plugin raises 404, degraded remove (a missing
+# component still completes + drops the entry), and the atomic registry write.
+# Updated: 2026-06-08 (review fix) — remove now STOPS the live MCP server
+# (manager.stop_server) as well as removing its config, symmetric with
+# install's register+start. The fake manager tracks running servers + stop
+# calls; tests assert stop was called and cover stop/config-gone + a mid-remove
+# manager raise degrading to a failed step.
 """Unit tests for pocketpaw.plugins (skills + MCP slices)."""
 
 from __future__ import annotations
@@ -314,14 +324,40 @@ class _FakeMCPManager:
     def __init__(self, start_results: dict[str, bool] | None = None):
         self.added: list = []  # MCPServerConfig objects
         self.started: list = []  # MCPServerConfig objects
+        self.removed: list[str] = []  # names passed to remove_server_config
+        self.stopped: list[str] = []  # names passed to stop_server
         self._start_results = start_results or {}
+        # Names with a persisted config so remove_server_config can report
+        # found/not-found. Defaults to whatever was added.
+        self.known: set[str] = set()
+        # Names of *live* (running) servers so stop_server can report
+        # was-running/not. A server that started cleanly is added here.
+        self.running: set[str] = set()
 
     def add_server_config(self, config) -> None:
         self.added.append(config)
+        self.known.add(config.name)
 
     async def start_server(self, config) -> bool:
         self.started.append(config)
-        return self._start_results.get(config.name, True)
+        ok = self._start_results.get(config.name, True)
+        if ok:
+            self.running.add(config.name)
+        return ok
+
+    async def stop_server(self, name) -> bool:
+        self.stopped.append(name)
+        if name in self.running:
+            self.running.discard(name)
+            return True
+        return False
+
+    def remove_server_config(self, name) -> bool:
+        self.removed.append(name)
+        if name in self.known:
+            self.known.discard(name)
+            return True
+        return False
 
 
 def _write_mcp_json(plugin_root: Path, servers: dict) -> None:
@@ -546,3 +582,248 @@ class TestMCPRouting:
         report = await inst.install("acme/widgets")
 
         assert report.installed_mcp_servers == ["plugin:ov:svc"]
+
+
+# --------------------------------------------------------------------------- #
+# List + remove (#1358)                                                       #
+# --------------------------------------------------------------------------- #
+class TestListPlugins:
+    async def test_install_then_list(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="combo", skills=["alpha", "beta"])
+        _write_mcp_json(repo, {"svc": {"command": "uvx", "args": ["svc-mcp"]}})
+
+        inst = _installer(repo, tmp_path)
+        await inst.install("acme/widgets")
+
+        plugins = inst.list_plugins()
+        assert len(plugins) == 1
+        p = plugins[0]
+        assert p.name == "combo"
+        assert p.version == "1.2.3"
+        assert p.source == "acme/widgets"
+        assert sorted(p.skills) == ["alpha", "beta"]
+        assert p.mcp_servers == ["plugin:combo:svc"]
+        assert p.installed_at  # ISO timestamp recorded
+
+    def test_list_empty_when_no_registry(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        assert inst.list_plugins() == []
+
+    def test_list_skips_malformed_entry(self, tmp_path):
+        registry_path = tmp_path / "registry" / "plugins.json"
+        registry_path.parent.mkdir(parents=True)
+        registry_path.write_text(json.dumps({"good": {"version": "1"}, "bad": "not-a-dict"}))
+        inst = _installer(tmp_path, tmp_path)
+        plugins = inst.list_plugins()
+        assert [p.name for p in plugins] == ["good"]
+
+
+class TestRemovePlugin:
+    async def _install_one(self, tmp_path, monkeypatch, *, name="combo", skills, mcp):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+        repo = _write_plugin(tmp_path / "repo", name=name, skills=skills)
+        if mcp:
+            _write_mcp_json(repo, mcp)
+        inst = _installer(repo, tmp_path)
+        await inst.install("acme/widgets")
+        return inst, manager
+
+    async def test_install_then_remove_cleans_everything(self, tmp_path, monkeypatch):
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha", "beta"],
+            mcp={"svc": {"command": "uvx", "args": ["svc-mcp"]}},
+        )
+        install_dir = tmp_path / "skills_install"
+        assert (install_dir / "alpha").is_dir()
+        assert (install_dir / "beta").is_dir()
+
+        report = await inst.remove("combo")
+
+        assert report.succeeded()
+        assert sorted(report.removed_skills) == ["alpha", "beta"]
+        assert report.removed_mcp_servers == ["plugin:combo:svc"]
+        # Skill dirs gone.
+        assert not (install_dir / "alpha").exists()
+        assert not (install_dir / "beta").exists()
+        # MCP manager asked to STOP the live server AND remove its config —
+        # both halves, symmetric with install (register + start).
+        assert manager.stopped == ["plugin:combo:svc"]
+        assert manager.removed == ["plugin:combo:svc"]
+        # The live server is no longer running.
+        assert "plugin:combo:svc" not in manager.running
+        # Registry entry dropped.
+        registry_path = tmp_path / "registry" / "plugins.json"
+        assert "combo" not in json.loads(registry_path.read_text())
+        assert inst.list_plugins() == []
+
+    async def test_remove_leaves_other_plugins_untouched(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+        # Install plugin A.
+        repo_a = _write_plugin(tmp_path / "repo_a", name="aaa", skills=["alpha"])
+        inst = _installer(repo_a, tmp_path)
+        await inst.install("acme/aaa")
+        # Install plugin B sharing the same install_dir + registry.
+        repo_b = _write_plugin(tmp_path / "repo_b", name="bbb", skills=["beta"])
+        inst._clone = _clone_factory(repo_b)
+        await inst.install("acme/bbb")
+
+        await inst.remove("aaa")
+
+        install_dir = tmp_path / "skills_install"
+        assert not (install_dir / "alpha").exists()
+        assert (install_dir / "beta").is_dir()  # B's skill untouched
+        names = [p.name for p in inst.list_plugins()]
+        assert names == ["bbb"]
+
+    async def test_remove_unknown_plugin_raises_404(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        with pytest.raises(PluginInstallError) as exc:
+            await inst.remove("ghost")
+        assert exc.value.status_code == 404
+
+    async def test_remove_invalid_name_raises_400(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        with pytest.raises(PluginInstallError) as exc:
+            await inst.remove("../etc")
+        assert exc.value.status_code == 400
+
+    async def test_remove_with_missing_skill_dir_degrades(self, tmp_path, monkeypatch):
+        # One component already missing → step skipped, remove still completes
+        # and drops the entry.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha", "beta"],
+            mcp=None,
+        )
+        # Manually delete one skill dir before remove.
+        import shutil as _sh
+
+        _sh.rmtree(tmp_path / "skills_install" / "alpha")
+
+        report = await inst.remove("combo")
+
+        alpha_step = next(s for s in report.steps if s.name == "skill:alpha")
+        assert alpha_step.status == "skipped"
+        beta_step = next(s for s in report.steps if s.name == "skill:beta")
+        assert beta_step.status == "succeeded"
+        # alpha was already gone, so it's not in removed_skills.
+        assert report.removed_skills == ["beta"]
+        # Entry still dropped — nothing lingers.
+        assert inst.list_plugins() == []
+
+    async def test_remove_with_gone_mcp_degrades(self, tmp_path, monkeypatch):
+        # MCP server recorded in registry but neither running nor in the
+        # manager's config → skipped, remove still completes.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha"],
+            mcp={"svc": {"command": "uvx", "args": ["svc"]}},
+        )
+        # Drop it from the manager entirely (not running, no config) so both
+        # stop_server and remove_server_config return False.
+        manager.running.discard("plugin:combo:svc")
+        manager.known.discard("plugin:combo:svc")
+
+        report = await inst.remove("combo")
+
+        mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
+        assert mcp_step.status == "skipped"
+        assert report.removed_mcp_servers == []
+        # Both halves were still attempted.
+        assert manager.stopped == ["plugin:combo:svc"]
+        assert manager.removed == ["plugin:combo:svc"]
+        assert inst.list_plugins() == []
+
+    async def test_remove_stops_server_even_if_config_already_gone(self, tmp_path, monkeypatch):
+        # Live server still running but its persisted config was already
+        # removed → stop_server cleans up the live connection, so the server
+        # still counts as removed (succeeded), not skipped.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha"],
+            mcp={"svc": {"command": "uvx", "args": ["svc"]}},
+        )
+        manager.known.discard("plugin:combo:svc")  # config gone; still running
+
+        report = await inst.remove("combo")
+
+        mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
+        assert mcp_step.status == "succeeded"
+        assert report.removed_mcp_servers == ["plugin:combo:svc"]
+        assert manager.stopped == ["plugin:combo:svc"]
+        assert "plugin:combo:svc" not in manager.running
+
+    async def test_remove_mcp_failure_is_failed_step(self, tmp_path, monkeypatch):
+        # A raise from the manager mid-remove degrades to a failed step and
+        # never aborts the remove — the registry entry is still dropped.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha"],
+            mcp={"svc": {"command": "uvx", "args": ["svc"]}},
+        )
+
+        async def _boom(name):
+            raise RuntimeError("teardown blew up")
+
+        manager.stop_server = _boom
+
+        report = await inst.remove("combo")
+
+        mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
+        assert mcp_step.status == "failed"
+        assert "teardown blew up" in mcp_step.detail
+        assert not report.succeeded()
+        # Entry still dropped despite the failure.
+        assert inst.list_plugins() == []
+
+    async def test_remove_audit_logs_plugin_remove(self, tmp_path, monkeypatch):
+        inst, _ = await self._install_one(tmp_path, monkeypatch, skills=["alpha"], mcp=None)
+        logged: list = []
+        monkeypatch.setattr(
+            "pocketpaw.plugins.installer.get_audit_logger",
+            lambda: type("A", (), {"log": lambda self, ev: logged.append(ev)})(),
+        )
+        await inst.remove("combo")
+        assert any(getattr(ev, "action", None) == "plugin_remove" for ev in logged)
+
+
+class TestAtomicRegistryWrite:
+    async def test_sequential_writes_do_not_corrupt(self, tmp_path, monkeypatch):
+        # Install two plugins back-to-back sharing one registry; the
+        # temp-file + os.replace path must leave a valid, complete JSON.
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+        repo_a = _write_plugin(tmp_path / "a", name="aaa", skills=["alpha"])
+        inst = _installer(repo_a, tmp_path)
+        await inst.install("acme/aaa")
+        repo_b = _write_plugin(tmp_path / "b", name="bbb", skills=["beta"])
+        inst._clone = _clone_factory(repo_b)
+        await inst.install("acme/bbb")
+
+        registry_path = tmp_path / "registry" / "plugins.json"
+        data = json.loads(registry_path.read_text())  # parses → not corrupt
+        assert set(data) == {"aaa", "bbb"}
+        # No leftover temp files in the registry dir.
+        leftovers = list(registry_path.parent.glob("*.tmp.*"))
+        assert leftovers == []
+
+    def test_save_registry_replaces_atomically(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        inst._save_registry({"x": {"version": "1"}})
+        registry_path = tmp_path / "registry" / "plugins.json"
+        assert json.loads(registry_path.read_text()) == {"x": {"version": "1"}}
+        # Overwrite with new content; old file must be cleanly replaced.
+        inst._save_registry({"y": {"version": "2"}})
+        assert json.loads(registry_path.read_text()) == {"y": {"version": "2"}}
+        assert list(registry_path.parent.glob("*.tmp.*")) == []
