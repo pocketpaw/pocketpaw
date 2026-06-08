@@ -49,6 +49,14 @@
 #   evaluation). `path` is now optional (required only for http, enforced at
 #   run). `run_sources` gained an optional `workspace_id`, threaded with the
 #   existing `pocket_id`/`user_id` into `_run_one` for sense resolution.
+# Updated: 2026-06-08 (sense-tier robustness fix) — `run_sources`'s
+#   `workspace_id` is now REQUIRED (`str`, no default). All four callers
+#   already pass a real value; omitting it should be a loud TypeError, not a
+#   None that flows into a sense resolve and silently returns "no provider".
+#   DEFENSE: `_run_sense_binding` now rejects a falsy `workspace_id` up front
+#   with a `_SourceError(code="bad_source")` so a missing workspace context
+#   lands in the errors aggregation as a CLEAR error (mirrors the http-no-path
+#   guard), never a silent no-provider.
 
 from __future__ import annotations
 
@@ -264,6 +272,14 @@ async def _run_sense_binding(
 
     ``params`` are STATIC in v1 — passed through as-is (no ``{state.x}``).
     """
+    # DEFENSE: a sense source resolves a provider FOR A WORKSPACE. A falsy
+    # workspace context would flow into the resolver and silently come back as
+    # "no provider"; surface it as a CLEAR per-source error instead (mirrors
+    # the http-no-path guard). ``run_sources`` now requires workspace_id, so
+    # this is a belt-and-braces guard against a future internal caller.
+    if not workspace_id:
+        raise _SourceError("sense source requires a workspace context", code="bad_source")
+
     # Lazy import: avoids a top-level cycle and keeps the SSRF/http core of
     # this module importable without the senses subsystem.
     from pocketpaw_ee.cloud.senses.resolver import execute_sense
@@ -366,7 +382,7 @@ async def run_sources(
     token: str,
     trigger: str | None = None,
     only_source: str | None = None,
-    workspace_id: str | None = None,
+    workspace_id: str,
 ) -> dict:
     """Run the pocket's selected read-only sources and return the results.
 
@@ -381,6 +397,11 @@ async def run_sources(
 
     ``user_id`` keys the rate limiter (per pocket *and* per user) and is the
     actor on the audit-log entry written for every run.
+
+    ``workspace_id`` is REQUIRED — a sense source resolves a provider for a
+    workspace, and a None would silently mis-resolve to "no provider". All
+    callers already pass a real value, so a caller that omits it raises a loud
+    TypeError rather than running a mis-resolved sense.
     """
     # D16 — per-(pocket, user) rate limit. On breach, return a source-level
     # error for every selected source without making any call.

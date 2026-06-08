@@ -308,15 +308,20 @@ async def _list_senses_handler(args: dict) -> dict:  # noqa: ARG001 — no args
         )
 
     from pocketpaw.senses import CORE_SENSES
-    from pocketpaw_ee.cloud.senses.resolver import resolve
+    from pocketpaw_ee.cloud.senses.resolver import resolve_many
+
+    # One enabled-connector read for all CORE_SENSES (was one query per sense).
+    try:
+        resolved_map = await resolve_many(
+            [s.id for s in CORE_SENSES], workspace_id, pocket_id=pocket_id
+        )
+    except Exception as exc:  # noqa: BLE001 — never let one sense break the list
+        logger.warning("list_senses: resolve_many failed", exc_info=True)
+        return _error_response(f"list_senses failed: {exc}")
 
     senses_out: list[dict[str, Any]] = []
     for sense in CORE_SENSES:
-        try:
-            resolved = await resolve(sense.id, workspace_id, pocket_id=pocket_id)
-        except Exception as exc:  # noqa: BLE001 — never let one sense break the list
-            logger.warning("list_senses: resolve(%s) failed", sense.id, exc_info=True)
-            return _error_response(f"list_senses failed: {exc}")
+        resolved = resolved_map.get(sense.id)
         if resolved is None:
             # No enabled connector fills this sense for the workspace — skip it
             # so the agent only sees capabilities it can actually use.

@@ -6,6 +6,10 @@
 # an auto action delegates with the resolved connector. Real connectors from
 # repo /connectors back the registry: gmail (paw.email.v1, single provider),
 # github+gitlab (paw.code.v1, ambiguous).
+# Updated: 2026-06-08 (sense-tier efficiency fix) — coverage for resolve_many:
+# all-resolve, partial-None, ambiguity preserved, and a query-count assertion
+# that the enabled-connector READ runs exactly ONCE for N senses (spying on
+# ConnectorSenseFiller.enabled_connector_names).
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from pocketpaw_ee.cloud.connectors.dto import (
     EnableConnectorRequest,
     ExecuteActionResponse,
 )
+from pocketpaw_ee.cloud.senses import filler as filler_mod
 from pocketpaw_ee.cloud.senses import preference, resolver
 
 from pocketpaw.senses import SenseValidationError
@@ -95,6 +100,81 @@ async def test_resolve_preference_not_a_candidate_falls_back_to_first() -> None:
 async def test_resolve_unknown_paw_sense_raises() -> None:
     with pytest.raises(SenseValidationError):
         await resolver.resolve("paw.telepathy.v1", WS)
+
+
+# ---------------------------------------------------------------------------
+# resolve_many — batch resolution with ONE enabled-connector read
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_many_all_resolve() -> None:
+    await _enable("gmail")
+    await _enable("github")
+    out = await resolver.resolve_many(["paw.email.v1", "paw.code.v1"], WS)
+    assert set(out) == {"paw.email.v1", "paw.code.v1"}
+    assert out["paw.email.v1"].connector_name == "gmail"
+    # github only (gitlab not enabled) -> single, unambiguous.
+    assert out["paw.code.v1"].connector_name == "github"
+    assert out["paw.code.v1"].ambiguous is False
+
+
+async def test_resolve_many_partial_none() -> None:
+    # Only email is wired; payments has no provider for this workspace.
+    await _enable("gmail")
+    out = await resolver.resolve_many(["paw.email.v1", "paw.payments.v1"], WS)
+    assert out["paw.email.v1"] is not None
+    assert out["paw.email.v1"].connector_name == "gmail"
+    assert out["paw.payments.v1"] is None
+
+
+async def test_resolve_many_preserves_ambiguity() -> None:
+    await _enable("github")
+    await _enable("gitlab")
+    out = await resolver.resolve_many(["paw.code.v1"], WS)
+    res = out["paw.code.v1"]
+    assert res is not None
+    assert res.candidates == ["github", "gitlab"]
+    assert res.ambiguous is True
+    assert res.connector_name == "github"  # sorted-first deterministic pick
+
+
+async def test_resolve_many_matches_resolve_per_sense() -> None:
+    """resolve_many produces the SAME result as calling resolve() per id."""
+    await _enable("gmail")
+    await _enable("github")
+    ids = ["paw.email.v1", "paw.code.v1", "paw.payments.v1"]
+    batch = await resolver.resolve_many(ids, WS)
+    for sid in ids:
+        single = await resolver.resolve(sid, WS)
+        assert batch[sid] == single
+
+
+async def test_resolve_many_reads_enabled_connectors_once(monkeypatch) -> None:
+    """The enabled-connector query runs EXACTLY ONCE for N senses — the whole
+    point of the batch path (was one query per sense)."""
+    await _enable("gmail")
+    await _enable("github")
+
+    real = filler_mod.ConnectorSenseFiller.enabled_connector_names
+
+    # Count calls to the enabled-connector read, delegating to the real impl.
+    calls = {"n": 0}
+
+    async def _counting(self, workspace_id, *, pocket_id=None):
+        calls["n"] += 1
+        return await real(self, workspace_id, pocket_id=pocket_id)
+
+    monkeypatch.setattr(filler_mod.ConnectorSenseFiller, "enabled_connector_names", _counting)
+
+    out = await resolver.resolve_many(["paw.email.v1", "paw.code.v1", "paw.payments.v1"], WS)
+    assert set(out) == {"paw.email.v1", "paw.code.v1", "paw.payments.v1"}
+    # ONE read for THREE senses.
+    assert calls["n"] == 1
+
+
+async def test_resolve_many_validates_ids() -> None:
+    with pytest.raises(SenseValidationError):
+        await resolver.resolve_many(["paw.email.v1", "paw.telepathy.v1"], WS)
 
 
 # ---------------------------------------------------------------------------

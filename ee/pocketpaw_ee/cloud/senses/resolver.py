@@ -7,6 +7,13 @@
 # None (caller prompts-to-connect); 1 -> that connector; >1 -> the stored
 # preference if it's among candidates, else the deterministic first with an
 # ``ambiguous`` flag so the caller can ask the user to set a preference.
+# Updated: 2026-06-08 (sense-tier efficiency fix) — extracted the disambiguation
+#   (0/1/>1 + preference) into ``_disambiguate`` so ``resolve`` and the new
+#   ``resolve_many`` share ONE implementation. ``resolve_many(sense_ids, ...)``
+#   fetches the workspace's enabled connectors ONCE (one Beanie query for N
+#   senses) and runs the pure intersection + shared disambiguation per id —
+#   replacing the per-sense ``resolve`` loops in ``_check_template_needs`` and
+#   the list_senses MCP handler. Behaviour is identical, just fewer queries.
 
 from __future__ import annotations
 
@@ -55,24 +62,21 @@ class SenseExecutionResult:
     data: object = None
 
 
-async def resolve(
+async def _disambiguate(
     sense_id: str,
+    candidates: list[str],
     workspace_id: str,
     *,
     pocket_id: str | None = None,
 ) -> ResolvedSense | None:
-    """Bind ``sense_id`` to the connector that fills it for this workspace.
+    """Pick the connector from a sorted candidate set — the ONE rule both
+    ``resolve`` and ``resolve_many`` use.
 
-    Returns ``None`` when no enabled connector can fill the sense (the caller
-    decides what to do — typically prompt-to-connect). Raises
-    ``SenseValidationError`` for an unknown ``paw.*`` id.
+    0 candidates -> ``None`` (caller prompts-to-connect); 1 -> that connector;
+    >1 -> the stored preference if it's among candidates, else the deterministic
+    sorted-first with ``ambiguous=True``. The per-sense preference lookup only
+    runs on the rare >1 branch.
     """
-    validate_sense_id(sense_id)
-
-    registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
-    filler = ConnectorSenseFiller(registry)
-    candidates = await filler.candidates(sense_id, workspace_id, pocket_id=pocket_id)
-
     if not candidates:
         return None
 
@@ -101,6 +105,62 @@ async def resolve(
         ambiguous=True,
         candidates=candidates,
     )
+
+
+async def resolve(
+    sense_id: str,
+    workspace_id: str,
+    *,
+    pocket_id: str | None = None,
+) -> ResolvedSense | None:
+    """Bind ``sense_id`` to the connector that fills it for this workspace.
+
+    Returns ``None`` when no enabled connector can fill the sense (the caller
+    decides what to do — typically prompt-to-connect). Raises
+    ``SenseValidationError`` for an unknown ``paw.*`` id.
+    """
+    validate_sense_id(sense_id)
+
+    registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
+    filler = ConnectorSenseFiller(registry)
+    candidates = await filler.candidates(sense_id, workspace_id, pocket_id=pocket_id)
+    return await _disambiguate(sense_id, candidates, workspace_id, pocket_id=pocket_id)
+
+
+async def resolve_many(
+    sense_ids: list[str],
+    workspace_id: str,
+    *,
+    pocket_id: str | None = None,
+) -> dict[str, ResolvedSense | None]:
+    """Resolve many senses with ONE enabled-connector read.
+
+    Fetches the workspace's enabled connector names a single time, then runs
+    the PURE intersection + the SAME ``_disambiguate`` rule ``resolve`` uses for
+    each id. Equivalent to calling ``resolve`` per id, but it collapses N
+    identical enabled-connector queries into one. Returns a dict mapping every
+    input id to its ``ResolvedSense`` (or ``None`` when no provider fills it).
+
+    Raises ``SenseValidationError`` if any id is not a known ``paw.*`` sense
+    (validated up front, same as ``resolve``). Duplicate ids collapse to one
+    key. The >1-candidate preference lookup still runs per ambiguous id — that
+    branch is rare, so it stays as-is.
+    """
+    for sense_id in sense_ids:
+        validate_sense_id(sense_id)
+
+    registry = connectors_service._get_registry()  # noqa: SLF001 — reuse the EE singleton
+    filler = ConnectorSenseFiller(registry)
+    # The ONE Beanie read shared across every sense in the batch.
+    enabled_names = await filler.enabled_connector_names(workspace_id, pocket_id=pocket_id)
+
+    out: dict[str, ResolvedSense | None] = {}
+    for sense_id in sense_ids:
+        candidates = filler.candidates_from(sense_id, enabled_names)
+        out[sense_id] = await _disambiguate(
+            sense_id, candidates, workspace_id, pocket_id=pocket_id
+        )
+    return out
 
 
 def _trust_for_action(registry, connector_name: str, action: str) -> str | None:
@@ -183,4 +243,4 @@ async def execute_sense(
     )
 
 
-__all__ = ["ResolvedSense", "SenseExecutionResult", "execute_sense", "resolve"]
+__all__ = ["ResolvedSense", "SenseExecutionResult", "execute_sense", "resolve", "resolve_many"]

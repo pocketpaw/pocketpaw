@@ -47,10 +47,13 @@ def _loaded_with_needs(needs: list[str]) -> dict:
 async def test_check_returns_empty_when_all_senses_resolve() -> None:
     """Every declared sense has an enabled provider → no missing ids."""
     loaded = _loaded_with_needs(["paw.email.v1", "paw.payments.v1"])
-    resolved = ResolvedSense(sense_id="x", connector_name="gmail")
+
+    async def _fake_resolve_many(sense_ids, workspace_id, **_kw):
+        return {sid: ResolvedSense(sense_id=sid, connector_name="gmail") for sid in sense_ids}
+
     with patch(
-        "pocketpaw_ee.cloud.senses.resolver.resolve",
-        new=AsyncMock(return_value=resolved),
+        "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+        new=_fake_resolve_many,
     ):
         missing = await pockets_service._check_template_needs(loaded, _WS)
     assert missing == []
@@ -58,16 +61,21 @@ async def test_check_returns_empty_when_all_senses_resolve() -> None:
 
 @pytest.mark.asyncio
 async def test_check_returns_missing_ids_when_some_resolve_none() -> None:
-    """A sense with no enabled provider (resolve → None) is collected."""
+    """A sense with no enabled provider (resolve_many value → None) is collected."""
     loaded = _loaded_with_needs(["paw.email.v1", "paw.payments.v1"])
 
-    async def _fake_resolve(sense_id: str, workspace_id: str, **_kw):
+    async def _fake_resolve_many(sense_ids, workspace_id, **_kw):
         # email is wired, payments is not
-        if sense_id == "paw.email.v1":
-            return ResolvedSense(sense_id=sense_id, connector_name="gmail")
-        return None
+        return {
+            sid: (
+                ResolvedSense(sense_id=sid, connector_name="gmail")
+                if sid == "paw.email.v1"
+                else None
+            )
+            for sid in sense_ids
+        }
 
-    with patch("pocketpaw_ee.cloud.senses.resolver.resolve", new=_fake_resolve):
+    with patch("pocketpaw_ee.cloud.senses.resolver.resolve_many", new=_fake_resolve_many):
         missing = await pockets_service._check_template_needs(loaded, _WS)
     assert missing == ["paw.payments.v1"]
 
@@ -91,7 +99,7 @@ async def test_check_swallows_resolver_error() -> None:
     create() must not blow up on a resolver hiccup."""
     loaded = _loaded_with_needs(["paw.email.v1"])
     with patch(
-        "pocketpaw_ee.cloud.senses.resolver.resolve",
+        "pocketpaw_ee.cloud.senses.resolver.resolve_many",
         new=AsyncMock(side_effect=RuntimeError("registry down")),
     ):
         missing = await pockets_service._check_template_needs(loaded, _WS)
@@ -117,8 +125,8 @@ async def test_create_not_blocked_and_emits_missing_senses(recording_bus) -> Non
         # No compile output → rippleSpec untouched (we only care about needs).
         patch.object(pockets_service, "_compile_template_to_runtime_dict", return_value=None),
         patch(
-            "pocketpaw_ee.cloud.senses.resolver.resolve",
-            new=AsyncMock(return_value=None),
+            "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+            new=AsyncMock(return_value={"paw.payments.v1": None}),
         ),
     ):
         wire = await pockets_service.create(
@@ -146,9 +154,11 @@ async def test_create_omits_missing_senses_when_all_resolve(recording_bus) -> No
         patch("pocketpaw.bundled_templates.load_template", return_value=loaded),
         patch.object(pockets_service, "_compile_template_to_runtime_dict", return_value=None),
         patch(
-            "pocketpaw_ee.cloud.senses.resolver.resolve",
+            "pocketpaw_ee.cloud.senses.resolver.resolve_many",
             new=AsyncMock(
-                return_value=ResolvedSense(sense_id="paw.email.v1", connector_name="gmail")
+                return_value={
+                    "paw.email.v1": ResolvedSense(sense_id="paw.email.v1", connector_name="gmail")
+                }
             ),
         ),
     ):

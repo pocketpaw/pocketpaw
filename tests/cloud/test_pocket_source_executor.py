@@ -92,6 +92,7 @@ async def test_happy_path_returns_parsed_json(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -112,6 +113,7 @@ async def test_bind_without_state_prefix_passes_through(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -132,6 +134,7 @@ async def test_absolute_url_path_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -149,6 +152,7 @@ async def test_dotdot_traversal_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -165,6 +169,7 @@ async def test_encoded_dotdot_traversal_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -182,6 +187,7 @@ async def test_protocol_relative_path_to_other_host_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -199,6 +205,7 @@ async def test_internal_base_url_rejected(monkeypatch):
         await source_executor.run_sources(
             pocket_id="p1",
             user_id="runner-1",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url="http://127.0.0.1",
             auth_type="none",
@@ -220,6 +227,7 @@ async def test_host_resolving_internal_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -247,6 +255,7 @@ async def test_oversize_response_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -282,6 +291,7 @@ async def test_trigger_pocket_open_selects_open_sources(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -298,6 +308,7 @@ async def test_trigger_manual_selects_manual_sources(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -314,6 +325,7 @@ async def test_only_source_runs_just_that_source(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -329,6 +341,7 @@ async def test_no_trigger_runs_all_sources(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -352,6 +365,7 @@ async def test_redirect_becomes_source_error(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -376,6 +390,7 @@ async def test_rate_limit_breach_returns_rate_limited(monkeypatch):
         await source_executor.run_sources(
             pocket_id="p-rl",
             user_id="runner-1",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -386,6 +401,7 @@ async def test_rate_limit_breach_returns_rate_limited(monkeypatch):
     breach = await source_executor.run_sources(
         pocket_id="p-rl",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -403,6 +419,7 @@ async def test_rate_limit_is_per_pocket(monkeypatch):
         await source_executor.run_sources(
             pocket_id="pocket-a",
             user_id="runner-1",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -413,6 +430,7 @@ async def test_rate_limit_is_per_pocket(monkeypatch):
     other = await source_executor.run_sources(
         pocket_id="pocket-b",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -439,6 +457,7 @@ async def test_bearer_auth_header(monkeypatch):
     await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="bearer",
@@ -460,6 +479,7 @@ async def test_api_key_custom_header(monkeypatch):
     await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="api_key",
@@ -484,6 +504,7 @@ async def test_basic_auth_header_is_base64_encoded(monkeypatch):
     await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="basic",
@@ -512,6 +533,7 @@ async def test_rate_limit_is_per_user(monkeypatch):
         await source_executor.run_sources(
             pocket_id="shared-pocket",
             user_id="alice",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -521,6 +543,7 @@ async def test_rate_limit_is_per_user(monkeypatch):
     alice_breach = await source_executor.run_sources(
         pocket_id="shared-pocket",
         user_id="alice",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -533,6 +556,7 @@ async def test_rate_limit_is_per_user(monkeypatch):
     bob = await source_executor.run_sources(
         pocket_id="shared-pocket",
         user_id="bob",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -559,6 +583,7 @@ async def test_rate_limit_async_safe_under_gather(monkeypatch):
             source_executor.run_sources(
                 pocket_id="race-pocket",
                 user_id="racer",
+                workspace_id="ws-test",
                 ripple_spec=spec,
                 base_url=BASE,
                 auth_type="none",
@@ -599,6 +624,7 @@ async def test_run_writes_audit_entry(monkeypatch):
     await source_executor.run_sources(
         pocket_id="audited-pocket",
         user_id="auditor",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE + "/?token=leak",
         auth_type="bearer",
@@ -636,6 +662,7 @@ async def test_rate_limited_run_audits_as_rate_limited(monkeypatch):
         await source_executor.run_sources(
             pocket_id="rl-audit",
             user_id="auditor",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -813,3 +840,67 @@ async def test_failed_sense_does_not_abort_sibling_http_source(monkeypatch):
     assert ran_sources == {"prs"}
     assert err_sources == {"inbox"}
     assert result["ran"][0]["value"] == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# workspace_id robustness (sense-tier robustness fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_sources_requires_workspace_id():
+    """``workspace_id`` is keyword-required — omitting it is a loud TypeError,
+    not a silent None that mis-resolves a sense to "no provider"."""
+    with pytest.raises(TypeError):
+        await source_executor.run_sources(
+            pocket_id="p1",
+            user_id="runner-1",
+            ripple_spec={"sources": {}},
+            base_url=BASE,
+            auth_type="none",
+            auth_header=None,
+            token="",
+        )
+
+
+async def test_sense_source_with_falsy_workspace_is_clear_bad_source(monkeypatch):
+    """DEFENSE: a sense source run with a falsy workspace_id yields a CLEAR
+    bad_source error and NEVER calls the resolver — so it can never come back
+    as a silent no-provider."""
+    called = {"execute_sense": False}
+
+    async def _fake(sense_id, action, params, workspace_id, *, pocket_id=None, user_id=None):
+        called["execute_sense"] = True
+        raise AssertionError("execute_sense must not be called without a workspace")
+
+    _patch_execute_sense(monkeypatch, _fake)
+
+    spec = {
+        "sources": {
+            "inbox": {
+                "type": "sense",
+                "sense_id": "paw.email.v1",
+                "action": "gmail_search",
+                "bind": "state.inbox",
+            }
+        }
+    }
+    # An empty-string workspace is falsy — the guard must catch it before
+    # the resolver runs. (run_sources itself requires the kwarg.)
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="",
+    )
+
+    assert called["execute_sense"] is False
+    assert result["ran"] == []
+    assert len(result["errors"]) == 1
+    err = result["errors"][0]
+    assert err["source"] == "inbox"
+    assert err["code"] == "bad_source"
+    assert "workspace" in err["error"]

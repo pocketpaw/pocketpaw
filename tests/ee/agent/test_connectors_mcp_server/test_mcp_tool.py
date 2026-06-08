@@ -453,15 +453,20 @@ class TestSenseTools:
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
         from pocketpaw_ee.cloud.senses.resolver import ResolvedSense
 
-        async def fake_resolve(sense_id, workspace_id, *, pocket_id=None):
-            if sense_id == "paw.email.v1":
-                return ResolvedSense(
-                    sense_id="paw.email.v1",
-                    connector_name="gmail",
-                    ambiguous=False,
-                    candidates=["gmail"],
+        async def fake_resolve_many(sense_ids, workspace_id, *, pocket_id=None):
+            return {
+                sid: (
+                    ResolvedSense(
+                        sense_id="paw.email.v1",
+                        connector_name="gmail",
+                        ambiguous=False,
+                        candidates=["gmail"],
+                    )
+                    if sid == "paw.email.v1"
+                    else None  # no provider for the rest
                 )
-            return None  # no provider for the rest
+                for sid in sense_ids
+            }
 
         ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", "pk_1")
         with (
@@ -469,8 +474,8 @@ class TestSenseTools:
             user_patch,
             pocket_patch,
             patch(
-                "pocketpaw_ee.cloud.senses.resolver.resolve",
-                new=AsyncMock(side_effect=fake_resolve),
+                "pocketpaw_ee.cloud.senses.resolver.resolve_many",
+                new=AsyncMock(side_effect=fake_resolve_many),
             ),
         ):
             out = await connectors_mcp._list_senses_handler({})

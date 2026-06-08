@@ -895,23 +895,20 @@ async def _check_template_needs(loaded: dict[str, Any] | None, workspace_id: str
         return []
 
     # Lazy import — keep the EE Sense resolver off the eager import path.
-    from pocketpaw_ee.cloud.senses.resolver import resolve
+    from pocketpaw_ee.cloud.senses.resolver import resolve_many
 
-    missing: list[str] = []
-    for sense_id in needs:
-        try:
-            resolved = await resolve(sense_id, workspace_id)
-        except Exception as exc:  # noqa: BLE001 — never block create on a resolver hiccup
-            logger.warning(
-                "template needs: resolve(%r) raised for workspace=%s: %s",
-                sense_id,
-                workspace_id,
-                exc,
-            )
-            continue
-        if resolved is None:
-            missing.append(sense_id)
-    return missing
+    # One enabled-connector read for ALL needs (was one query per need).
+    try:
+        resolved = await resolve_many(list(needs), workspace_id)
+    except Exception as exc:  # noqa: BLE001 — never block create on a resolver hiccup
+        logger.warning(
+            "template needs: resolve_many raised for workspace=%s: %s",
+            workspace_id,
+            exc,
+        )
+        return []
+
+    return [sense_id for sense_id in needs if resolved.get(sense_id) is None]
 
 
 async def resolve_pocket_template(
