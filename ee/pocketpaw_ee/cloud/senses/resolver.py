@@ -157,9 +157,7 @@ async def resolve_many(
     out: dict[str, ResolvedSense | None] = {}
     for sense_id in sense_ids:
         candidates = filler.candidates_from(sense_id, enabled_names)
-        out[sense_id] = await _disambiguate(
-            sense_id, candidates, workspace_id, pocket_id=pocket_id
-        )
+        out[sense_id] = await _disambiguate(sense_id, candidates, workspace_id, pocket_id=pocket_id)
     return out
 
 

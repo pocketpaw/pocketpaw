@@ -303,8 +303,7 @@ async def _list_senses_handler(args: dict) -> dict:  # noqa: ARG001 — no args
     workspace_id, _user_id, pocket_id = _identity()
     if not workspace_id:
         return _error_response(
-            "no active workspace — list_senses can only be called from inside a "
-            "cloud chat stream"
+            "no active workspace — list_senses can only be called from inside a cloud chat stream"
         )
 
     from pocketpaw.senses import CORE_SENSES
@@ -368,8 +367,7 @@ async def _sense_execute_handler(args: dict) -> dict:
     workspace_id, user_id, pocket_id = _identity()
     if not workspace_id:
         return _error_response(
-            "no active workspace — sense_execute can only be called from inside a "
-            "cloud chat stream"
+            "no active workspace — sense_execute can only be called from inside a cloud chat stream"
         )
     if not pocket_id:
         return _error_response(
