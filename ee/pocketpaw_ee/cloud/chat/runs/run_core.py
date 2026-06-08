@@ -669,9 +669,15 @@ async def _drive_agent_loop(
         # None / empty so legacy and non-entity runs are byte-identical.
         surface_sys_override: str | None = None
         surface_skills: frozenset[str] = frozenset()
+        # Per-MODE restrictive MCP allow-list (lean per-mode tool set). ``None``
+        # = no restriction (broad surfaces like /chat keep every tool); a scoped
+        # mode keeps only its own tools plus the universal grant. Forwarded only
+        # when not None so legacy / broad runs are byte-identical.
+        surface_allow_mcp: frozenset[str] | None = None
         if ctx.resolved_profile is not None:
             surface_deny = ctx.resolved_profile.deny_mcp_tool_ids
             surface_allow = ctx.resolved_profile.allowed_sdk_tools or frozenset()
+            surface_allow_mcp = ctx.resolved_profile.allow_mcp_tool_ids
             surface_sys_override = ctx.resolved_profile.system_message_override
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         run_kwargs: dict[str, Any] = dict(
@@ -681,6 +687,8 @@ async def _drive_agent_loop(
             deny_mcp_tool_ids=surface_deny,
             allow_sdk_tools=surface_allow,
         )
+        if surface_allow_mcp is not None:
+            run_kwargs["allow_mcp_tool_ids"] = surface_allow_mcp
         # Forward the override only when the entity actually set one — withholding
         # keeps the prompt assembly untouched on every other run.
         if surface_sys_override is not None:
