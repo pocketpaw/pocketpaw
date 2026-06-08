@@ -251,6 +251,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
+    from pocketpaw_ee.cloud.member_day_digest.router import router as member_day_digest_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
@@ -281,6 +282,12 @@ def mount_cloud(app: FastAPI) -> None:
     # ``resolve_instinct`` returns ``ESCALATE_APPROVAL``; this router
     # exposes the operator-facing read + decision surface.
     app.include_router(instinct_approvals_router, prefix="/api/v1")
+
+    # Member-day digest — VIP Onboarding Phase B chunk 6. Gated GET
+    # /api/v1/member-day-digest returns the AUTHENTICATED caller's OWN
+    # structured "your day" digest (the chunk-5 service) for the intent
+    # board. No member_id param — a caller can only fetch their own.
+    app.include_router(member_day_digest_router, prefix="/api/v1")
 
     # Paw Sites — RFC 12 capture surface. Public POST /sites/{id}/capture
     # (origin-pinned + per-site signed key, no user auth — the edge Queue
