@@ -7,7 +7,7 @@ entities; the router maps to DTOs at the boundary.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from starlette.responses import Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
@@ -36,6 +36,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     InviteOut,
     InvitePreviewResponse,
     MemberOut,
+    SlugAvailabilityOut,
     UpdateDomainRequest,
     UpdateMemberRoleRequest,
     UpdateWorkspaceRequest,
@@ -68,6 +69,23 @@ async def create_workspace(
 ) -> WorkspaceOut:
     ws = await workspace_service.create(ctx, body)
     return workspace_to_dto(ws)
+
+
+@router.get("/slug-available", response_model=SlugAvailabilityOut)
+async def check_slug_available(
+    slug: str = Query(..., min_length=1, max_length=50),
+    user: User = Depends(current_user),  # signed-in users only reach create
+) -> SlugAvailabilityOut:
+    """Is this workspace slug free to claim?
+
+    Declared before ``GET /{workspace_id}`` so the static path wins the
+    route match. Returns ``available`` plus a ``reason`` (``invalid`` |
+    ``reserved`` | ``taken``) so the create UI shows a precise message live
+    instead of waiting for the POST to 409. The POST is still the
+    source of truth — this is an advisory pre-check, racy by nature.
+    """
+    reason = await workspace_service.slug_reason(slug)
+    return SlugAvailabilityOut(available=reason is None, reason=reason)
 
 
 @router.get("", response_model=list[WorkspaceOut])
