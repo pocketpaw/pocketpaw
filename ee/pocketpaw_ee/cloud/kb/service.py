@@ -1,5 +1,15 @@
 # service.py — Workspace-level KB scope listing.
 #
+# Updated: 2026-06-08 (VIP Onboarding Phase B) — added the REST-door scope
+# allowlist validator ``validate_scope_override``. The ``/api/v1/kb/*`` router
+# accepted a free-form client ``scope`` override with no scope-to-caller
+# binding, so any authenticated member could read or poison another member's
+# private ``user:{victim}`` KB. The validator reuses ``_candidate_scopes``
+# (workspace + visible pockets + workspace agents) plus the caller's OWN
+# ``user:{caller}`` entry as the allowlist, mirroring the chat-path gate's
+# boundary — both doors now enforce the SAME set. Any ``user:``-prefixed
+# override that isn't the caller's own is hard-denied as defense-in-depth.
+#
 # Updated: 2026-05-24 — Bounded the probe fan-out via a module-level
 # ``_PROBE_CONCURRENCY=8`` semaphore. The previous unbounded
 # ``asyncio.gather`` could spawn one kb-go subprocess per candidate
@@ -51,6 +61,8 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
+
+from pocketpaw_ee.cloud._core.errors import Forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +139,64 @@ async def list_scopes(
         return_exceptions=False,
     )
     return [scope for scope, has_articles in zip(candidates, results) if has_articles]
+
+
+async def validate_scope_override(
+    workspace_id: str,
+    user_id: str,
+    override: str | None,
+) -> str:
+    """Resolve a client-supplied KB scope override to a scope the caller may use.
+
+    This is the REST-door counterpart to the chat-path gate
+    (``chat.agent_service._member_private_user_scope``). Both bind a scope to
+    the caller; this one validates an *explicit* override against an allowlist
+    instead of synthesizing the scope set from the room.
+
+    Resolution:
+
+    * ``override is None`` → ``workspace:{workspace_id}`` (the caller's active
+      workspace). No allowlist probe — the active workspace is already the
+      caller's by ``current_workspace_id``.
+    * Otherwise the override is accepted ONLY if it is in the allowlist:
+      ``_candidate_scopes(workspace_id, user_id)`` (the workspace, every pocket
+      the caller can SEE via ``pockets_service.list_pockets``, every agent in
+      the workspace) PLUS the single self entry ``user:{user_id}``.
+
+    Defense-in-depth: ANY ``user:``-prefixed override that is not exactly the
+    caller's own ``user:{user_id}`` is hard-denied up front, before the
+    candidate set is even built — the ``user:`` tier is the most sensitive
+    class (a member's private Gmail/calendar KB) and must never be reachable
+    cross-principal even if a future candidate-enumeration bug widened the set.
+
+    Raises
+    ------
+    Forbidden
+        ``kb.scope_forbidden`` when the override is not bound to the caller.
+    """
+    if override is None:
+        return f"workspace:{workspace_id}"
+
+    # Belt 1 — the user: tier is hard-bound to the caller. A foreign user:
+    # override is rejected before any candidate lookup so no enumeration path
+    # can ever widen access to another member's private KB.
+    if override.startswith("user:") and override != f"user:{user_id}":
+        raise Forbidden(
+            "kb.scope_forbidden",
+            "The requested KB scope is not available to you.",
+        )
+
+    # Belt 2 — the override must be in the caller's bound scope set: their own
+    # workspace, a pocket they can see, a workspace agent, or their own user:.
+    allowed = set(await _candidate_scopes(workspace_id, user_id))
+    allowed.add(f"user:{user_id}")
+    if override in allowed:
+        return override
+
+    raise Forbidden(
+        "kb.scope_forbidden",
+        "The requested KB scope is not available to you.",
+    )
 
 
 async def _candidate_scopes(workspace_id: str, user_id: str) -> list[str]:
@@ -208,4 +278,4 @@ def _default_kb_list(scope: str) -> list[Any]:
     return result if isinstance(result, list) else []
 
 
-__all__ = ["list_scopes"]
+__all__ = ["list_scopes", "validate_scope_override"]
