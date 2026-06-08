@@ -40,7 +40,11 @@ class TestAntigravityInfo:
 
     def test_required_keys_and_providers(self):
         info = AntigravityBackend.info()
-        assert "gemini_api_key" in info.required_keys
+        # The advertised key matches the client's "google" provider save field
+        # (google_api_key) and the google_adk sibling, so the key entered for
+        # either Gemini backend is reused. The backend still resolves a dedicated
+        # antigravity_api_key or gemini_api_key first (see TestApiKeyResolution).
+        assert "google_api_key" in info.required_keys
         assert "google" in info.supported_providers
         assert info.beta is True
 

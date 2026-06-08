@@ -67,7 +67,11 @@ class AntigravityBackend(BaseAgentBackend):
                 "edit_file": "filesystem",
                 "run_command": "shell",
             },
-            required_keys=["gemini_api_key"],
+            # google_api_key is the field the desktop client's "google" provider
+            # writes to (and the one google_adk advertises), so the same Gemini
+            # key is reused across both backends. _resolve_api_key still prefers a
+            # dedicated antigravity_api_key, then gemini_api_key, then this.
+            required_keys=["google_api_key"],
             supported_providers=["google"],
             install_hint={
                 "pip_package": "google-antigravity",
