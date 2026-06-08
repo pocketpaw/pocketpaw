@@ -308,9 +308,7 @@ async def list_for_owner_page(
     has_more = len(docs) > limit
     rows = [_to_domain(d) for d in docs[:limit]]
     next_cursor = (
-        _encode_session_cursor(rows[-1].last_activity, rows[-1].id)
-        if has_more and rows
-        else None
+        _encode_session_cursor(rows[-1].last_activity, rows[-1].id) if has_more and rows else None
     )
     return rows, next_cursor
 
