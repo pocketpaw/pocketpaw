@@ -926,6 +926,18 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
             else:
                 state = "ready_wrong_user"
 
+    # Surface the admin onboarding context (pp#1365) so the member-facing
+    # accept UI can carry the invitee's focus + profile_pic into the
+    # downstream VIP-onboarding welcome. None when the invite has no context.
+    context_domain = _context_doc_to_domain(invite_doc.context)
+    context_wire = (
+        InviteContextDTO(
+            focus=context_domain.focus, profile_pic=context_domain.profile_pic
+        ).model_dump()
+        if context_domain is not None
+        else None
+    )
+
     return {
         "state": state,
         "email": invite_doc.email,
@@ -934,6 +946,7 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
         "group": invite_doc.group,
         "group_name": None,
         "viewer_email": viewer_email,
+        "context": context_wire,
     }
 
 

@@ -224,6 +224,10 @@ class InvitePreviewResponse(BaseModel):
     group: str | None = None
     group_name: str | None = None
     viewer_email: str | None = None
+    # Optional admin onboarding hints (pp#1365), surfaced on ready_* previews so
+    # the member-facing accept UI can carry focus + profile_pic into the
+    # downstream VIP-onboarding welcome. None/absent when the invite has none.
+    context: InviteContextDTO | None = None
 
 
 def workspace_to_dto(ws: Workspace) -> WorkspaceOut:
