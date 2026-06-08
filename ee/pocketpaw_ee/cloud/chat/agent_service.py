@@ -62,6 +62,15 @@ gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
 (``mcp_servers/connectors.py``) so its tools scope to the current pocket.
 The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
 unaffected (``pocket_id`` defaults to ``None``).
+Changes: 2026-06-08 (VIP Onboarding Phase B — session-user isolation gate) —
+``_kb_scopes_for_context`` now prepends a member-private ``user:{member_id}``
+KB scope, GATED by the new ``_member_private_user_scope`` helper. The gate
+emits the scope ONLY when ``ctx.members == [ctx.user_id]`` (the member's own
+solo session) and suppresses it in every shared / multi-member room, so one
+member's private Gmail/calendar KB is never injected into another member's
+agent context. ``ctx.user_id`` (an opaque cloud user id) is the scope id —
+no email, so kb-go's on-disk ``:``→``_`` sanitize can't alias two members.
+Mirrors the OSS ``KbContext.user_id`` / ``_resolve_kb_scopes`` priority.
 """
 
 from __future__ import annotations
@@ -935,15 +944,59 @@ def _file_reference_terms(
     return terms
 
 
+def _member_private_user_scope(ctx: ScopeContext) -> str | None:
+    """The session-user isolation gate (VIP Onboarding Phase B).
+
+    Returns the member-private ``user:{member_id}`` KB scope ONLY when this
+    chat is the member's OWN solo context, and ``None`` otherwise. The single
+    airtight rule:
+
+        emit ``user:{ctx.user_id}``  ⟺  ctx.members == [ctx.user_id]
+
+    i.e. exactly one member AND it is the authenticated session principal.
+    This is the tightest possible test and it closes every leak path:
+
+    * a shared / multi-member room (``len(members) > 1``) → ``None``. A
+      member's private Gmail/calendar KB is NEVER injected where another
+      member can see the agent's context.
+    * a room whose sole member is NOT the caller (stale membership, a route
+      that resolved a different principal) → ``None``. We never emit a
+      ``user:`` scope for anyone but the proven-solo authenticated member.
+    * a member's own solo SESSION (``members == [user_id]``, the shape
+      ``_resolve_session`` always builds) or a private solo POCKET/DM →
+      ``user:{user_id}``.
+
+    ``ctx.user_id`` is the authenticated cloud user id (opaque Mongo
+    ObjectId / uuid), so it is safe to use verbatim as a kb-go scope id —
+    kb-go's on-disk ``:``→``_`` sanitize can't alias two opaque ids the way
+    it could alias two emails.
+    """
+    uid = ctx.user_id
+    if not uid:
+        return None
+    if list(ctx.members) != [uid]:
+        return None
+    return f"user:{uid}"
+
+
 def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
     """Return KB scopes to search for cloud-agent prompt context.
 
-    Ordered most-specific-first (pocket > agent > workspace) so that
+    Ordered most-specific-first (user > pocket > agent > workspace) so that
     the limited KB budget is allocated to the most relevant scope first.
+
+    The leading member-private ``user:`` scope is GATED by
+    ``_member_private_user_scope`` — it is present only in a member's own
+    solo session and is suppressed in every shared / multi-member room, so
+    one member's private mail/calendar KB never bleeds into another member's
+    agent context. Mirrors the OSS ``_resolve_kb_scopes`` priority; the gate
+    is the cloud-side decision (the OSS resolver only honors the field it is
+    handed).
     """
     scopes: list[str] = []
     seen: set[str] = set()
     for candidate in (
+        _member_private_user_scope(ctx),
         f"pocket:{ctx.pocket_id}" if ctx.pocket_id else None,
         f"agent:{ctx.target_agent_id}" if ctx.target_agent_id else None,
         f"workspace:{ctx.workspace_id}" if ctx.workspace_id else None,
