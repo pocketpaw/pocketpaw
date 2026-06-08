@@ -245,17 +245,48 @@ def task_to_dto(task: Task) -> TaskResponse:
     )
 
 
+class CreateTaskEventRequest(BaseModel):
+    """Body for ``POST /tasks/{id}/events``."""
+
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class TaskEventResponse(BaseModel):
+    """Wire shape for one task event."""
+
+    id: str
+    task_id: str
+    author_id: str
+    author_name: str
+    body: str
+    created_at: str | None = None
+
+
+def task_event_to_dto(event: Any) -> TaskEventResponse:
+    return TaskEventResponse(
+        id=str(event.id),
+        task_id=event.task_id,
+        author_id=event.author_id,
+        author_name=event.author_name,
+        body=event.body,
+        created_at=iso_utc(event.createdAt) if event.createdAt else None,
+    )
+
+
 __all__ = [
     "AssigneeDTO",
     "BlockTaskRequest",
     "BulkReassignRequest",
     "ClaimTaskRequest",
     "CompleteTaskRequest",
+    "CreateTaskEventRequest",
     "CreateTaskRequest",
     "ListTasksRequest",
     "ReassignTaskRequest",
     "SourceDTO",
+    "TaskEventResponse",
     "TaskResponse",
     "UpdateTaskRequest",
+    "task_event_to_dto",
     "task_to_dto",
 ]

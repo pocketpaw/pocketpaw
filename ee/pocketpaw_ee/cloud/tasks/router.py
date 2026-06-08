@@ -29,9 +29,11 @@ from pocketpaw_ee.cloud.tasks.dto import (
     BlockTaskRequest,
     ClaimTaskRequest,
     CompleteTaskRequest,
+    CreateTaskEventRequest,
     CreateTaskRequest,
     ListTasksRequest,
     ReassignTaskRequest,
+    TaskEventResponse,
     TaskResponse,
     UpdateTaskRequest,
 )
@@ -129,3 +131,23 @@ async def reassign_task(
     ctx: RequestContext = Depends(request_context),
 ) -> TaskResponse:
     return await tasks_service.agent_reassign_task(ctx, task_id, body)
+
+
+@router.post("/{task_id}/events", response_model=TaskEventResponse, status_code=201)
+async def create_task_event(
+    task_id: str,
+    body: CreateTaskEventRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> TaskEventResponse:
+    """Post a comment/activity entry on a task."""
+    return await tasks_service.agent_create_task_event(ctx, task_id, body)
+
+
+@router.get("/{task_id}/events", response_model=list[TaskEventResponse])
+async def list_task_events(
+    task_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+    ctx: RequestContext = Depends(request_context),
+) -> list[TaskEventResponse]:
+    """List comments/activity for a task, newest first."""
+    return await tasks_service.agent_list_task_events(ctx, task_id, limit)

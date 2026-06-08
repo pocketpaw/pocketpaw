@@ -286,6 +286,7 @@ async def _reap_agent_process(
                 summary=payload.get("summary", "Call ended."),
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
                 duration_seconds=payload.get("duration_seconds", 0),
                 workspace_id=workspace_id,
             )
@@ -729,6 +730,7 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
                 summary=payload.get("summary", "Call ended."),
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
                 duration_seconds=payload.get("duration_seconds", 0),
                 workspace_id=workspace_id,
             )
@@ -832,6 +834,7 @@ async def post_meeting_notes_to_group(
     participants: list[str],
     duration_seconds: int,
     workspace_id: str = "",
+    participant_map: list[dict[str, str]] | None = None,
 ) -> None:
     """Post meeting notes to a group after a call ends.
 
@@ -841,15 +844,32 @@ async def post_meeting_notes_to_group(
     a MeetingTranscript record so the meeting detail in /meetings can
     display the transcript.
     """
+    # Resolve participant identities to display names using participant_map
+    # (which maps identity → name as sent by the agent).
+    name_map: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "") or pid
+            if pid:
+                name_map[pid] = pname
+    participant_names = [name_map.get(p, p) for p in participants]
+
     lines = [
         "📋 **Meeting Notes**",
         "",
         f"**Duration:** {_format_duration(duration_seconds)}",
-        f"**Participants:** {', '.join(participants) if participants else 'N/A'}",
+        f"**Participants:** {', '.join(participant_names) if participant_names else 'N/A'}",
         "",
-        "**Summary:**",
-        summary,
     ]
+
+    # If the summary is rich markdown (has its own headings), use it directly.
+    # Otherwise, wrap it in a "**Summary:**" label.
+    if summary.strip().startswith("## "):
+        lines.append(summary)
+    else:
+        lines.append("**Summary:**")
+        lines.append(summary)
 
     if action_items:
         lines.append("")
@@ -988,6 +1008,21 @@ async def post_meeting_notes_to_group(
         except Exception as exc:
             logger.warning("Failed to store transcript: %s", exc)
 
+    # ── Create Mission Control tasks from action items ──
+    # Prefer the structured action_items list (already extracted by the LLM)
+    # over re-parsing the markdown summary.
+    if workspace_id and (action_items or summary):
+        try:
+            await _create_tasks_from_meeting_notes(
+                workspace_id=workspace_id,
+                group_id=group_id,
+                action_items=action_items,
+                summary=summary,
+                participant_map=participant_map,
+            )
+        except Exception as exc:
+            logger.warning("Failed to create tasks from meeting notes: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Private helpers
@@ -1055,3 +1090,151 @@ def _format_joined_at(joined_at: Any) -> str | None:
     if isinstance(joined_at, int | float):
         return datetime.fromtimestamp(joined_at, tz=UTC).isoformat()
     return str(joined_at)
+
+
+# ---------------------------------------------------------------------------
+# Meeting notes → Mission Control tasks
+# ---------------------------------------------------------------------------
+
+
+async def _create_tasks_from_meeting_notes(
+    workspace_id: str,
+    group_id: str,
+    action_items: list[str] | None = None,
+    summary: str = "",
+    participant_map: list[dict[str, str]] | None = None,
+) -> None:
+    """Create Mission Control tasks from meeting notes action items.
+
+    Prefers the structured ``action_items`` list (already extracted by the
+    LLM), falling back to parsing ``## ✅ Action Items`` from the markdown
+    ``summary`` for backwards compatibility.
+    """
+    items: list[str] = []
+    if action_items:
+        items = action_items
+    elif summary:
+        items = _extract_action_items_from_markdown(summary)
+
+    if not items:
+        logger.info("No action items found in meeting notes for group %s", group_id)
+        return
+
+    # Build name→id lookup from participant_map (sent by agent, no DB needed)
+    name_to_id: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "")
+            if pid and pname:
+                name_to_id[pname.lower()] = pid
+                first_word = pname.split(" ", 1)[0].lower()
+                if first_word not in name_to_id:
+                    name_to_id[first_word] = pid
+
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+    ctx = RequestContext(
+        user_id=CALL_BOT_USER_ID,
+        workspace_id=workspace_id,
+        request_id=f"meeting-notes-{group_id}",
+        scope=ScopeKind.NONE,
+        started_at=datetime.now(UTC),
+    )
+
+    created = 0
+    for item in items:
+        try:
+            # Parse @Name prefix from the action item, e.g. "@Admin: do X"
+            assignee_name, description = _parse_action_item_assignee(item)
+
+            # Resolve the @mention name to a user ID using participant_map.
+            q = assignee_name.strip().lower()
+            assignee_id = name_to_id.get(q)
+            if not assignee_id and participant_map:
+                # Check if mention is a substring of a participant name
+                # or if a participant name is a substring of the mention
+                for p in participant_map:
+                    pname = (p.get("name", "") or "").lower()
+                    if q in pname or pname in q:
+                        assignee_id = p.get("identity")
+                        break
+            assignee_id = assignee_id or "__unassigned__"
+
+            await tasks_service.agent_create_task(
+                ctx,
+                CreateTaskRequest(
+                    title=(description or item)[:200],
+                    summary=f"(from meeting notes, group {group_id})",
+                    assignee=AssigneeDTO(
+                        kind="human",
+                        id=assignee_id,
+                        name=assignee_name,
+                    ),
+                    source=SourceDTO(
+                        type="meeting_notes",
+                        ref_id=group_id,
+                        metadata={"group_id": group_id},
+                    ),
+                ),
+            )
+            created += 1
+        except Exception as exc:
+            logger.warning("Failed to create task for action item %r: %s", item, exc)
+
+    logger.info("Created %d tasks from meeting notes for group %s", created, group_id)
+
+
+def _parse_action_item_assignee(item: str) -> tuple[str, str]:
+    """Extract ``@Name`` prefix from an action item, returning (assignee, rest)."""
+    import re
+
+    m = re.match(r"@(\S[\w\s]*?)\s*[:—\-]\s*(.*)", item.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "__unassigned__", item
+
+
+def _extract_action_items_from_markdown(markdown: str) -> list[str]:
+    """Extract bullet-point action items from the ## ✅ Action Items section.
+
+    Looks for a heading matching "Action Items" (with optional emoji prefix)
+    and collects all following list items until the next heading or end of text.
+    """
+    import re
+
+    lines = markdown.split("\n")
+    in_section = False
+    items: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect the start of the Action Items section
+        if (
+            re.match(r"^##\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^##\s*✅\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^##\s*Action\s*Items", stripped, re.IGNORECASE)
+        ):
+            in_section = True
+            continue
+
+        # If we hit another heading, stop
+        if in_section and stripped.startswith("## "):
+            break
+
+        if in_section:
+            # Match bullet points: -, *, or numbered 1.
+            m = re.match(r"\s*[-*]\s+(.*)", stripped)
+            if not m:
+                m = re.match(r"\s*\d+[.)]\s+(.*)", stripped)
+            if m:
+                text = m.group(1).strip()
+                if text and text != "None" and not text.startswith("```"):
+                    items.append(text)
+
+    return items

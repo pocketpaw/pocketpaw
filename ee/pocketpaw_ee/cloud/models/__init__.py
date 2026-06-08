@@ -76,6 +76,7 @@ from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
+from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
@@ -165,6 +166,7 @@ __all__ = [
     "Task",
     "TaskAssignee",
     "TaskSource",
+    "TaskEvent",
     "TemporalSweepStateDoc",
     "User",
     "Widget",
@@ -226,6 +228,7 @@ def get_all_documents():
         AuditWebhook,
         AuthSession,
         APIKey,
+        TaskEvent,
         cal_doc,
         evt_doc,
     ]

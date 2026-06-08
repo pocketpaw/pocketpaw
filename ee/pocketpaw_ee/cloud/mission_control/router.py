@@ -48,6 +48,7 @@ from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.mission_control import service as mc_service
 from pocketpaw_ee.cloud.mission_control.dto import (
     ActivityEventResponse,
+    AnalyticsResponse,
     AttachCycleItemsRequest,
     AttachCycleItemsResponse,
     BulkActionRequest,
@@ -230,6 +231,20 @@ async def attach_cycle_items(
     so a half-stale selection still partially succeeds.
     """
     return await mc_service.agent_attach_cycle_items(ctx, cycle_id, body)
+
+
+@router.get("/analytics", response_model=AnalyticsResponse)
+async def analytics(
+    window: str = Query("7d", pattern=r"^(1h|24h|7d)$"),
+    ctx: RequestContext = Depends(request_context),
+) -> AnalyticsResponse:
+    """Compute analytics snapshot for the operator dashboard.
+
+    Returns shipped counts, approval/revert rates, latency percentiles,
+    daily breakdown, by-agent, and by-pocket aggregations over the
+    requested window (1h | 24h | 7d).
+    """
+    return await mc_service.agent_analytics(ctx, window=window)
 
 
 @router.get("/plan-sessions", response_model=PlanSessionListResponse)

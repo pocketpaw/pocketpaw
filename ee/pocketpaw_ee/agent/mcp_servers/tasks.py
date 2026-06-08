@@ -42,11 +42,13 @@ SERVER_NAME = "pocketpaw_tasks"
 LIST_MY_TASKS_TOOL_ID = f"mcp__{SERVER_NAME}__list_my_tasks"
 CLAIM_TASK_TOOL_ID = f"mcp__{SERVER_NAME}__claim_task"
 COMPLETE_TASK_TOOL_ID = f"mcp__{SERVER_NAME}__complete_task"
+CREATE_TASK_TOOL_ID = f"mcp__{SERVER_NAME}__create_task"
 
 TASK_TOOL_IDS = (
     LIST_MY_TASKS_TOOL_ID,
     CLAIM_TASK_TOOL_ID,
     COMPLETE_TASK_TOOL_ID,
+    CREATE_TASK_TOOL_ID,
 )
 
 
@@ -211,6 +213,71 @@ async def _complete_task_handler(args: dict) -> dict:
     return _success_response({"ok": True, "task": response.model_dump()})
 
 
+async def _create_task_handler(args: dict) -> dict:
+    """Create a new Mission Control Task.
+
+    Accepts:
+      - title (required) — task title, 1-200 chars
+      - summary (optional) — description / details
+      - assignee_kind (default "human") — "human" or "agent"
+      - assignee_id (default "__unassigned__") — user or agent id
+      - assignee_name (default "Unassigned") — display name
+      - priority (default "normal") — low, normal, high, urgent
+      - project_id (optional) — Mission Control project id
+    """
+    workspace_id, agent_id = _identity()
+    if not workspace_id or not agent_id:
+        return _error_response(
+            "no active workspace/agent — create_task can only be called "
+            "from inside a cloud SSE chat stream"
+        )
+
+    title = args.get("title")
+    if not isinstance(title, str) or not title:
+        return _error_response("title is required (string, 1-200 chars)")
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+    assignee_kind = args.get("assignee_kind") or "human"
+    assignee_id = args.get("assignee_id") or "__unassigned__"
+    assignee_name = args.get("assignee_name") or "Unassigned"
+    priority = args.get("priority") or "normal"
+    if priority not in ("low", "normal", "high", "urgent"):
+        priority = "normal"
+    summary = args.get("summary") or ""
+    project_id = args.get("project_id")
+
+    ctx = _build_ctx(workspace_id, agent_id)
+    try:
+        response = await tasks_service.agent_create_task(
+            ctx,
+            CreateTaskRequest(
+                title=title,
+                summary=str(summary),
+                assignee=AssigneeDTO(
+                    kind=assignee_kind,  # type: ignore[arg-type]
+                    id=assignee_id,
+                    name=assignee_name,
+                ),
+                priority=priority,  # type: ignore[arg-type]
+                project_id=project_id or None,
+                source=SourceDTO(
+                    type="mcp",
+                    ref_id=agent_id,
+                ),
+            ),
+        )
+    except CloudError as exc:
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_task failed", exc_info=True)
+        return _error_response(f"create_task failed: {exc}")
+
+    return _success_response({"ok": True, "task": response.model_dump()})
+
+
 # ---------------------------------------------------------------------------
 # Server factory
 # ---------------------------------------------------------------------------
@@ -280,10 +347,34 @@ def build_tasks_context_server() -> tuple[str, Any] | None:
     async def complete_task(args):  # type: ignore[no-untyped-def]
         return await _complete_task_handler(args)
 
+    @tool(
+        "create_task",
+        (
+            "Create a new Mission Control Task. Required: ``title``. "
+            "Optional: ``summary``, ``assignee_kind`` (human|agent, default human), "
+            "``assignee_id`` (default __unassigned__), ``assignee_name`` (default Unassigned), "
+            "``priority`` (low|normal|high|urgent, default normal), "
+            "``project_id`` (Mission Control project id). "
+            "Use this to convert an action item or decision from a conversation "
+            "into a tracked Task in Mission Control."
+        ),
+        {
+            "title": str,
+            "summary": str,
+            "assignee_kind": str,
+            "assignee_id": str,
+            "assignee_name": str,
+            "priority": str,
+            "project_id": str,
+        },
+    )
+    async def create_task(args):  # type: ignore[no-untyped-def]
+        return await _create_task_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[list_my_tasks, claim_task, complete_task],
+        tools=[list_my_tasks, claim_task, complete_task, create_task],
     )
     return SERVER_NAME, server
 
@@ -291,6 +382,7 @@ def build_tasks_context_server() -> tuple[str, Any] | None:
 __all__ = [
     "CLAIM_TASK_TOOL_ID",
     "COMPLETE_TASK_TOOL_ID",
+    "CREATE_TASK_TOOL_ID",
     "LIST_MY_TASKS_TOOL_ID",
     "SERVER_NAME",
     "TASK_TOOL_IDS",

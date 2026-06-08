@@ -79,6 +79,10 @@ from pocketpaw_ee.cloud.mission_control.domain import (
 )
 from pocketpaw_ee.cloud.mission_control.dto import (
     ActivityEventResponse,
+    AnalyticsAgentDTO,
+    AnalyticsDayDTO,
+    AnalyticsPocketDTO,
+    AnalyticsResponse,
     AttachCycleItemsRequest,
     AttachCycleItemsResponse,
     BulkActionRequest,
@@ -983,7 +987,111 @@ async def agent_attach_cycle_items(
     )
 
 
+# ---------------------------------------------------------------------------
+# Analytics
+# ---------------------------------------------------------------------------
+
+
+async def agent_analytics(ctx: RequestContext, window: str = "7d") -> AnalyticsResponse:
+    """Compute the operator analytics dashboard for the given window."""
+    _require_workspace(ctx)
+    from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
+
+    cutoff = datetime.now(tz=UTC) - _window_to_delta(window)
+
+    # Fetch all tasks that were updated within the window
+    docs = (
+        await _TaskDoc.find(
+            {
+                "workspace_id": ctx.workspace_id,
+                "updatedAt": {"$gte": cutoff},
+            }
+        )
+        .sort(-_TaskDoc.updatedAt)
+        .to_list()
+    )
+
+    shipped: list[_TaskDoc] = [d for d in docs if d.status == "done"]
+    reverted: list[_TaskDoc] = [d for d in docs if d.status == "reverted"]
+
+    total_shipped = len(shipped)
+    total_reverted = len(reverted)
+    total_decided = total_shipped + total_reverted
+    approval_rate = round((total_shipped / total_decided * 100) if total_decided > 0 else 100, 1)
+    revert_rate = round((total_reverted / total_decided * 100) if total_decided > 0 else 0, 1)
+
+    # Latency: time from creation to completion for shipped tasks
+    latencies = [
+        (d.updatedAt - d.createdAt).total_seconds()
+        for d in shipped
+        if d.updatedAt and d.createdAt and d.updatedAt > d.createdAt
+    ]
+    latencies.sort()
+    n = len(latencies)
+    latency_p50 = latencies[max(0, min(n - 1, int(n * 0.5)))] if n > 0 else 0.0
+    latency_p90 = latencies[max(0, min(n - 1, int(n * 0.9)))] if n > 0 else 0.0
+
+    # Per-day breakdown
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_map: dict[str, int] = {}
+    for d in shipped:
+        if d.updatedAt:
+            day_name = day_names[d.updatedAt.weekday()]
+            day_map[day_name] = day_map.get(day_name, 0) + 1
+    per_day = [
+        AnalyticsDayDTO(day=name, shipped=day_map.get(name, 0))
+        for name in ["Wed", "Thu", "Fri", "Sat", "Sun", "Mon", "Tue"]
+    ]
+
+    # By agent
+    agent_map: dict[str, dict[str, int]] = {}
+    for d in shipped:
+        name = d.assignee.name or d.assignee.id
+        agent_map.setdefault(name, {"shipped": 0, "reverted": 0})
+        agent_map[name]["shipped"] += 1
+    for d in reverted:
+        name = d.assignee.name or d.assignee.id
+        agent_map.setdefault(name, {"shipped": 0, "reverted": 0})
+        agent_map[name]["reverted"] += 1
+    by_agent = [
+        AnalyticsAgentDTO(agent=name, shipped=v["shipped"], reverted=v["reverted"])
+        for name, v in sorted(agent_map.items(), key=lambda x: -x[1]["shipped"])
+    ]
+
+    # By pocket — resolve pocket names via the pockets service
+    pockets = await pockets_service.list_pockets(ctx.workspace_id, ctx.user_id)
+    pocket_name_map: dict[str, str] = {
+        p["_id"]: p.get("name", p["_id"]) for p in pockets if p.get("_id")
+    }
+
+    pocket_map: dict[str, int] = {}
+    for d in shipped:
+        pid = d.pocket_id or "__unknown__"
+        pocket_map[pid] = pocket_map.get(pid, 0) + 1
+    total_pocket = sum(pocket_map.values())
+    by_pocket = [
+        AnalyticsPocketDTO(
+            pocket=pocket_name_map.get(pid, pid),
+            shipped=count,
+            share=round(count / total_pocket * 100, 1) if total_pocket > 0 else 0,
+        )
+        for pid, count in sorted(pocket_map.items(), key=lambda x: -x[1])
+    ]
+
+    return AnalyticsResponse(
+        shipped=total_shipped,
+        approval_rate=approval_rate,
+        revert_rate=revert_rate,
+        latency_p50_seconds=latency_p50,
+        latency_p90_seconds=latency_p90,
+        per_day=per_day,
+        by_agent=by_agent,
+        by_pocket=by_pocket,
+    )
+
+
 __all__ = [
+    "agent_analytics",
     "agent_attach_cycle_items",
     "agent_bulk_approve",
     "agent_bulk_reassign",

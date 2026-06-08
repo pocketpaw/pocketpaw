@@ -71,16 +71,20 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 from pocketpaw_ee.cloud.models.task import Task as _TaskDoc
 from pocketpaw_ee.cloud.models.task import TaskAssignee as _AssigneeDoc
 from pocketpaw_ee.cloud.models.task import TaskSource as _SourceDoc
+from pocketpaw_ee.cloud.models.task_event import TaskEvent as _TaskEventDoc
 from pocketpaw_ee.cloud.tasks.domain import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.tasks.dto import (
     BlockTaskRequest,
     ClaimTaskRequest,
     CompleteTaskRequest,
+    CreateTaskEventRequest,
     CreateTaskRequest,
     ListTasksRequest,
     ReassignTaskRequest,
+    TaskEventResponse,
     TaskResponse,
     UpdateTaskRequest,
+    task_event_to_dto,
     task_to_dto,
 )
 
@@ -165,6 +169,16 @@ def _event_payload(doc: _TaskDoc, task: Task | None = None) -> dict:
         "workspace_id": task.workspace_id,
         "recipient_ids": recipients,
     }
+
+
+async def _is_workspace_owner(user_id: str, workspace_id: str) -> bool:
+    """Check if the user has the ``owner`` role in the given workspace."""
+    from pocketpaw_ee.cloud.models.user import User
+
+    user = await User.get(user_id)
+    if not user:
+        return False
+    return any(m.workspace == workspace_id and m.role == "owner" for m in user.workspaces)
 
 
 # ---------------------------------------------------------------------------
@@ -283,10 +297,10 @@ async def agent_update_task(
 
     body = UpdateTaskRequest.model_validate(body)
     doc = await _fetch_task(ctx, task_id)
-    if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only creator or assignee can edit. Other workspace members
-        # should escalate through reassignment / approval flows.
-        raise Forbidden("task.edit_denied", "Only the creator or assignee can edit this task")
+    # No creator/assignee guard here — metadata fields (title, summary,
+    # priority, etc.) are safe for any workspace member to edit. Status
+    # transitions are protected by their own dedicated endpoints
+    # (claim/complete/block/reassign) with tighter guards.
 
     if body.title is not None:
         doc.title = body.title
@@ -444,11 +458,12 @@ async def agent_complete_task(
     doc = await _fetch_task(ctx, task_id)
 
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only the creator or the assignee can mark a task complete.
-        # Other workspace members must reassign or escalate.
-        raise Forbidden(
-            "task.complete_denied", "Only the creator or assignee can complete this task"
-        )
+        # Workspace owners can also complete tasks (bulk approve from MC).
+        if not await _is_workspace_owner(ctx.user_id, doc.workspace_id):
+            raise Forbidden(
+                "task.complete_denied",
+                "Only the creator, assignee, or workspace owner can complete this task",
+            )
 
     if doc.status in {"done", "reverted", "failed"}:
         raise ValidationError("task.terminal", f"task is already {doc.status!r}")
@@ -624,12 +639,70 @@ async def unassign_project_on_tasks(workspace_id: str, project_id: str) -> int:
     return getattr(result, "modified_count", 0) or 0
 
 
+# ---------------------------------------------------------------------------
+# Task Event (comments/activity on a task)
+# ---------------------------------------------------------------------------
+
+
+async def agent_create_task_event(
+    ctx: RequestContext, task_id: str, body: CreateTaskEventRequest
+) -> TaskEventResponse:
+    """Post a comment/activity entry on a task."""
+    body = CreateTaskEventRequest.model_validate(body)
+    task_doc = await _fetch_task(ctx, task_id)
+    from pocketpaw_ee.cloud.models.user import User
+
+    user = await User.get(ctx.user_id)
+    author_name = user.full_name if user else ctx.user_id
+    doc = _TaskEventDoc(
+        workspace_id=task_doc.workspace_id,
+        task_id=task_id,
+        author_id=ctx.user_id,
+        author_name=author_name,
+        body=body.body,
+    )
+    await doc.insert()
+    # Emit a bus event so the frontend gets a realtime update
+    event_dto = task_event_to_dto(doc)
+    await emit(
+        TaskUpdated(
+            data={
+                "task_id": task_id,
+                "task": None,
+                "event": event_dto.model_dump(mode="json"),
+                "workspace_id": task_doc.workspace_id,
+                "recipient_ids": [task_doc.creator_id],
+            }
+        )
+    )
+    return event_dto
+
+
+async def agent_list_task_events(
+    ctx: RequestContext, task_id: str, limit: int = 50
+) -> list[TaskEventResponse]:
+    """List events for a task, newest first."""
+    _ = await _fetch_task(ctx, task_id)  # tenant guard
+    docs = (
+        await _TaskEventDoc.find(
+            _TaskEventDoc.task_id == task_id,
+            _TaskEventDoc.workspace_id == ctx.workspace_id,
+        )
+        .sort(-_TaskEventDoc.createdAt)  # type: ignore[operator]
+        .limit(max(1, min(limit, 200)))
+        .to_list()
+    )
+    return [task_event_to_dto(d) for d in docs]
+
+
 __all__ = [
     "agent_block_task",
     "agent_claim_task",
     "agent_complete_task",
     "agent_create_task",
+    "agent_create_task_event",
     "agent_get_task",
+    "agent_list_task_events",
     "agent_list_tasks",
     "agent_reassign_task",
     "agent_reassign_task_cycle",
