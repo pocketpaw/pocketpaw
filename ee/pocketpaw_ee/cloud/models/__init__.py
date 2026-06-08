@@ -71,6 +71,7 @@ from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
+from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
@@ -160,6 +161,7 @@ __all__ = [
     "Site",
     "SiteDomain",
     "SiteRateCounter",
+    "WorkspaceSensePreference",
     "Task",
     "TaskAssignee",
     "TaskSource",
@@ -219,6 +221,7 @@ def get_all_documents():
         Lead,
         Site,
         SiteRateCounter,
+        WorkspaceSensePreference,
         AuditEvent,
         AuditWebhook,
         AuthSession,
