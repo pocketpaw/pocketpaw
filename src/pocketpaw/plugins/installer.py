@@ -14,7 +14,17 @@
 # start for lack of env is reported `succeeded` with a "needs env:" detail).
 # The namespaced names are recorded in the registry entry and on the report's
 # `installed_mcp_servers`. Imports the now-public `ignore_symlinks` and drops
-# the clone-factory `except TypeError` fallback. List/remove ships in #1358.
+# the clone-factory `except TypeError` fallback.
+# Updated: 2026-06-08 (feat/plugin-installer-listremove, #1358) — final slice:
+# `list_plugins()` reads the registry into `InstalledPlugin` views;
+# `remove(name)` deletes the plugin's skill dirs, removes its namespaced MCP
+# servers via `get_mcp_manager().remove_server_config`, reloads the loader,
+# drops the registry entry, and audit-logs (`action="plugin_remove"`) — per
+# component failures degrade to failed/skipped steps; only an unknown plugin
+# raises (404). The registry read-modify-write is now concurrency-safe: a
+# module-level lock guards the r-m-w and the write goes through a temp file +
+# atomic `os.replace`, so install and remove can't corrupt the JSON or clobber
+# each other's entries.
 """Install a ``.claude-plugin``'s skills and MCP servers from a GitHub repo.
 
 Each unit of work is a :class:`PluginInstallStep` that never raises out of
@@ -28,8 +38,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
+import threading
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
@@ -39,9 +51,11 @@ from pocketpaw.mcp.config import MCPServerConfig
 from pocketpaw.mcp.manager import get_mcp_manager
 from pocketpaw.mcp.presets import spec_to_config
 from pocketpaw.plugins.models import (
+    InstalledPlugin,
     PluginInstallReport,
     PluginInstallStep,
     PluginManifest,
+    PluginRemoveReport,
 )
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 from pocketpaw.skills.installer import (
@@ -55,6 +69,17 @@ logger = logging.getLogger(__name__)
 
 # Registry of installed plugins (read-modify-write JSON).
 REGISTRY_PATH = Path.home() / ".pocketpaw" / "plugins.json"
+
+# Guards the registry read-modify-write. Both install and remove read the
+# whole registry, mutate one entry, and write it all back, so two concurrent
+# operations could otherwise lose one entry (last-writer-wins on the file).
+# A threading.Lock (not asyncio.Lock) is correct here: the r-m-w itself is
+# synchronous, fast, and CPU/IO-bound — holding a threading lock across it
+# serialises both the async install path (which only awaits the clone/MCP
+# work *outside* the critical section) and any threaded caller. The paired
+# atomic temp-file + os.replace write means a crash mid-write can't leave a
+# truncated/corrupt registry behind either.
+_REGISTRY_LOCK = threading.Lock()
 
 # GitHub naming rules — reused from skills/installer.py validation regexes.
 _OWNER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")
@@ -494,18 +519,18 @@ class PluginInstaller:
         from datetime import datetime
 
         try:
-            registry = self._load_registry()
-            registry[manifest.name] = {
-                "version": manifest.version,
-                "source": source,
-                "skills": installed,
-                "mcp_servers": mcp_servers or [],
-                "installed_at": datetime.now().isoformat(),
-            }
-            self._registry_path.parent.mkdir(parents=True, exist_ok=True)
-            self._registry_path.write_text(
-                json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8"
-            )
+            # Lock the whole read-modify-write so a concurrent install/remove
+            # can't read a stale copy and clobber this entry on write-back.
+            with _REGISTRY_LOCK:
+                registry = self._load_registry()
+                registry[manifest.name] = {
+                    "version": manifest.version,
+                    "source": source,
+                    "skills": installed,
+                    "mcp_servers": mcp_servers or [],
+                    "installed_at": datetime.now().isoformat(),
+                }
+                self._save_registry(registry)
             return PluginInstallStep(name="record_registry", status="succeeded")
         except OSError as exc:
             logger.warning("Plugin registry write failed: %s", exc)
@@ -521,6 +546,20 @@ class PluginInstaller:
             logger.warning("Plugin registry unreadable; starting fresh")
             return {}
         return data if isinstance(data, dict) else {}
+
+    def _save_registry(self, registry: dict[str, Any]) -> None:
+        """Atomically write the registry: temp file + ``os.replace``.
+
+        Writing to a sibling temp file and renaming it over the target means a
+        crash mid-write can't leave a truncated/corrupt ``plugins.json`` — the
+        old file stays intact until the rename, and the rename is atomic on the
+        same filesystem. Callers must hold ``_REGISTRY_LOCK`` around the
+        surrounding read-modify-write.
+        """
+        self._registry_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._registry_path.with_suffix(self._registry_path.suffix + f".tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, self._registry_path)
 
     def _audit(self, source: str, manifest: PluginManifest, installed: list[str], ok: bool) -> None:
         """Audit-log the install (best-effort; precedent: skills installer)."""
@@ -539,6 +578,177 @@ class PluginInstaller:
             )
         except Exception:  # audit must never break the install
             logger.warning("Plugin install audit log failed", exc_info=True)
+
+    # --------------------------------------------------------------------- #
+    # List                                                                  #
+    # --------------------------------------------------------------------- #
+    def list_plugins(self) -> list[InstalledPlugin]:
+        """Return every installed plugin from the registry.
+
+        Reads ``~/.pocketpaw/plugins.json`` and projects each entry into an
+        :class:`InstalledPlugin`. Malformed or partial entries degrade to
+        defaults (rather than failing the whole listing). Sorted by name for a
+        stable surface.
+        """
+        with _REGISTRY_LOCK:
+            registry = self._load_registry()
+        plugins: list[InstalledPlugin] = []
+        for name, entry in sorted(registry.items()):
+            if not isinstance(entry, dict):
+                continue
+            plugins.append(
+                InstalledPlugin(
+                    name=name,
+                    version=str(entry.get("version", "0.0.0")),
+                    source=str(entry.get("source", "")),
+                    skills=[str(s) for s in entry.get("skills", []) if isinstance(s, str)],
+                    mcp_servers=[
+                        str(s) for s in entry.get("mcp_servers", []) if isinstance(s, str)
+                    ],
+                    installed_at=str(entry.get("installed_at", "")),
+                )
+            )
+        return plugins
+
+    # --------------------------------------------------------------------- #
+    # Remove                                                                #
+    # --------------------------------------------------------------------- #
+    async def remove(self, name: str) -> PluginRemoveReport:
+        """Uninstall a plugin: skills, MCP servers, registry entry.
+
+        Reads the plugin's registry entry, deletes each skill dir it installed,
+        removes each of its namespaced MCP servers via the manager, reloads the
+        skill loader, drops the registry entry, and audit-logs the removal.
+
+        Only an unknown plugin is an up-front error (raises
+        :class:`PluginInstallError` 404). Every per-component failure degrades
+        to a ``failed`` / ``skipped`` step — the same contract as install — so
+        a partial cleanup never raises out mid-remove and the registry entry is
+        still dropped (a half-removed plugin must never linger in the listing).
+
+        Args:
+            name: The installed plugin's name (registry key).
+
+        Returns:
+            A :class:`PluginRemoveReport` describing every step.
+
+        Raises:
+            PluginInstallError: 400 for an invalid name, 404 if the plugin is
+                not installed.
+        """
+        if name in (".", "..") or not _NAME_RE.match(name or ""):
+            raise PluginInstallError("Invalid plugin name", 400)
+
+        with _REGISTRY_LOCK:
+            entry = self._load_registry().get(name)
+        if not isinstance(entry, dict):
+            raise PluginInstallError(f"Plugin '{name}' is not installed", 404)
+
+        report = PluginRemoveReport(plugin=name)
+
+        skills = [s for s in entry.get("skills", []) if isinstance(s, str)]
+        mcp_servers = [s for s in entry.get("mcp_servers", []) if isinstance(s, str)]
+
+        report.removed_skills = self._remove_skills(skills, report)
+        report.removed_mcp_servers = self._remove_mcp_servers(mcp_servers, report)
+        report.steps.append(self._reload_loader())
+        report.steps.append(self._drop_registry_entry(name))
+
+        self._audit_remove(name, report)
+        return report
+
+    def _remove_skills(self, skills: list[str], report: PluginRemoveReport) -> list[str]:
+        """Delete each skill dir this plugin installed. One step per skill.
+
+        A skill whose name is invalid is ``skipped`` (never used to build a
+        path); a dir that's already gone is ``skipped`` (idempotent — nothing
+        orphaned); a delete error is ``failed``. Never raises.
+        """
+        removed: list[str] = []
+        for skill in skills:
+            step_name = f"skill:{skill}"
+            if skill in (".", "..") or not _NAME_RE.match(skill):
+                report.steps.append(
+                    PluginInstallStep(name=step_name, status="skipped", detail="invalid skill name")
+                )
+                continue
+            dest = self._install_dir / skill
+            if not dest.exists():
+                report.steps.append(
+                    PluginInstallStep(name=step_name, status="skipped", detail="already removed")
+                )
+                continue
+            try:
+                shutil.rmtree(dest)
+            except OSError as exc:
+                report.steps.append(
+                    PluginInstallStep(name=step_name, status="failed", detail=str(exc))
+                )
+                continue
+            removed.append(skill)
+            report.steps.append(PluginInstallStep(name=step_name, status="succeeded"))
+        return removed
+
+    def _remove_mcp_servers(self, servers: list[str], report: PluginRemoveReport) -> list[str]:
+        """Remove each namespaced MCP server config. One step per server.
+
+        ``remove_server_config`` returns False when the server isn't in the
+        manager's config — treated as ``skipped`` (already gone, idempotent).
+        A raise from the manager is ``failed``. Never raises out.
+        """
+        if not servers:
+            return []
+        manager = get_mcp_manager()
+        removed: list[str] = []
+        for server in servers:
+            step_name = f"mcp:{server}"
+            try:
+                found = manager.remove_server_config(server)
+            except Exception as exc:  # manager hiccup — don't abort the remove
+                logger.warning("MCP server '%s' removal raised: %s", server, exc)
+                report.steps.append(
+                    PluginInstallStep(name=step_name, status="failed", detail=str(exc))
+                )
+                continue
+            if found:
+                removed.append(server)
+                report.steps.append(PluginInstallStep(name=step_name, status="succeeded"))
+            else:
+                report.steps.append(
+                    PluginInstallStep(name=step_name, status="skipped", detail="not registered")
+                )
+        return removed
+
+    def _drop_registry_entry(self, name: str) -> PluginInstallStep:
+        """Remove the plugin's registry entry (atomic, locked r-m-w)."""
+        try:
+            with _REGISTRY_LOCK:
+                registry = self._load_registry()
+                registry.pop(name, None)
+                self._save_registry(registry)
+            return PluginInstallStep(name="drop_registry", status="succeeded")
+        except OSError as exc:
+            logger.warning("Plugin registry write failed: %s", exc)
+            return PluginInstallStep(name="drop_registry", status="failed", detail=str(exc))
+
+    def _audit_remove(self, name: str, report: PluginRemoveReport) -> None:
+        """Audit-log the removal (best-effort; mirrors ``_audit``)."""
+        ok = report.succeeded()
+        try:
+            get_audit_logger().log(
+                AuditEvent.create(
+                    severity=AuditSeverity.INFO if ok else AuditSeverity.WARNING,
+                    actor=self._actor,
+                    action="plugin_remove",
+                    target=name,
+                    status="success" if ok else "partial",
+                    plugin=name,
+                    removed_skills=report.removed_skills,
+                    removed_mcp_servers=report.removed_mcp_servers,
+                )
+            )
+        except Exception:  # audit must never break the remove
+            logger.warning("Plugin remove audit log failed", exc_info=True)
 
 
 __all__ = [

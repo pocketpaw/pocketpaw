@@ -9,6 +9,11 @@
 # namespacing, registered-but-needs-env (succeeded + needs-env detail),
 # a skills+mcp bundle, and the no-.mcp.json skip. The MCP manager is mocked
 # via a fake injected with monkeypatch (no real servers are spawned).
+# Updated: 2026-06-08 (feat/plugin-installer-listremove, #1358) — added the
+# list/remove slice: install-then-list, install-then-remove (deletes exactly
+# this plugin's skill dirs + MCP servers, drops the registry entry, leaves
+# nothing orphaned), unknown-plugin raises 404, degraded remove (a missing
+# component still completes + drops the entry), and the atomic registry write.
 """Unit tests for pocketpaw.plugins (skills + MCP slices)."""
 
 from __future__ import annotations
@@ -314,14 +319,26 @@ class _FakeMCPManager:
     def __init__(self, start_results: dict[str, bool] | None = None):
         self.added: list = []  # MCPServerConfig objects
         self.started: list = []  # MCPServerConfig objects
+        self.removed: list[str] = []  # names passed to remove_server_config
         self._start_results = start_results or {}
+        # Names the fake "knows about" so remove_server_config can report
+        # found/not-found. Defaults to whatever was added.
+        self.known: set[str] = set()
 
     def add_server_config(self, config) -> None:
         self.added.append(config)
+        self.known.add(config.name)
 
     async def start_server(self, config) -> bool:
         self.started.append(config)
         return self._start_results.get(config.name, True)
+
+    def remove_server_config(self, name) -> bool:
+        self.removed.append(name)
+        if name in self.known:
+            self.known.discard(name)
+            return True
+        return False
 
 
 def _write_mcp_json(plugin_root: Path, servers: dict) -> None:
@@ -546,3 +563,195 @@ class TestMCPRouting:
         report = await inst.install("acme/widgets")
 
         assert report.installed_mcp_servers == ["plugin:ov:svc"]
+
+
+# --------------------------------------------------------------------------- #
+# List + remove (#1358)                                                       #
+# --------------------------------------------------------------------------- #
+class TestListPlugins:
+    async def test_install_then_list(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="combo", skills=["alpha", "beta"])
+        _write_mcp_json(repo, {"svc": {"command": "uvx", "args": ["svc-mcp"]}})
+
+        inst = _installer(repo, tmp_path)
+        await inst.install("acme/widgets")
+
+        plugins = inst.list_plugins()
+        assert len(plugins) == 1
+        p = plugins[0]
+        assert p.name == "combo"
+        assert p.version == "1.2.3"
+        assert p.source == "acme/widgets"
+        assert sorted(p.skills) == ["alpha", "beta"]
+        assert p.mcp_servers == ["plugin:combo:svc"]
+        assert p.installed_at  # ISO timestamp recorded
+
+    def test_list_empty_when_no_registry(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        assert inst.list_plugins() == []
+
+    def test_list_skips_malformed_entry(self, tmp_path):
+        registry_path = tmp_path / "registry" / "plugins.json"
+        registry_path.parent.mkdir(parents=True)
+        registry_path.write_text(json.dumps({"good": {"version": "1"}, "bad": "not-a-dict"}))
+        inst = _installer(tmp_path, tmp_path)
+        plugins = inst.list_plugins()
+        assert [p.name for p in plugins] == ["good"]
+
+
+class TestRemovePlugin:
+    async def _install_one(self, tmp_path, monkeypatch, *, name="combo", skills, mcp):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+        repo = _write_plugin(tmp_path / "repo", name=name, skills=skills)
+        if mcp:
+            _write_mcp_json(repo, mcp)
+        inst = _installer(repo, tmp_path)
+        await inst.install("acme/widgets")
+        return inst, manager
+
+    async def test_install_then_remove_cleans_everything(self, tmp_path, monkeypatch):
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha", "beta"],
+            mcp={"svc": {"command": "uvx", "args": ["svc-mcp"]}},
+        )
+        install_dir = tmp_path / "skills_install"
+        assert (install_dir / "alpha").is_dir()
+        assert (install_dir / "beta").is_dir()
+
+        report = await inst.remove("combo")
+
+        assert report.succeeded()
+        assert sorted(report.removed_skills) == ["alpha", "beta"]
+        assert report.removed_mcp_servers == ["plugin:combo:svc"]
+        # Skill dirs gone.
+        assert not (install_dir / "alpha").exists()
+        assert not (install_dir / "beta").exists()
+        # MCP manager asked to remove the namespaced name.
+        assert manager.removed == ["plugin:combo:svc"]
+        # Registry entry dropped.
+        registry_path = tmp_path / "registry" / "plugins.json"
+        assert "combo" not in json.loads(registry_path.read_text())
+        assert inst.list_plugins() == []
+
+    async def test_remove_leaves_other_plugins_untouched(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+        # Install plugin A.
+        repo_a = _write_plugin(tmp_path / "repo_a", name="aaa", skills=["alpha"])
+        inst = _installer(repo_a, tmp_path)
+        await inst.install("acme/aaa")
+        # Install plugin B sharing the same install_dir + registry.
+        repo_b = _write_plugin(tmp_path / "repo_b", name="bbb", skills=["beta"])
+        inst._clone = _clone_factory(repo_b)
+        await inst.install("acme/bbb")
+
+        await inst.remove("aaa")
+
+        install_dir = tmp_path / "skills_install"
+        assert not (install_dir / "alpha").exists()
+        assert (install_dir / "beta").is_dir()  # B's skill untouched
+        names = [p.name for p in inst.list_plugins()]
+        assert names == ["bbb"]
+
+    async def test_remove_unknown_plugin_raises_404(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        with pytest.raises(PluginInstallError) as exc:
+            await inst.remove("ghost")
+        assert exc.value.status_code == 404
+
+    async def test_remove_invalid_name_raises_400(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        with pytest.raises(PluginInstallError) as exc:
+            await inst.remove("../etc")
+        assert exc.value.status_code == 400
+
+    async def test_remove_with_missing_skill_dir_degrades(self, tmp_path, monkeypatch):
+        # One component already missing → step skipped, remove still completes
+        # and drops the entry.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha", "beta"],
+            mcp=None,
+        )
+        # Manually delete one skill dir before remove.
+        import shutil as _sh
+
+        _sh.rmtree(tmp_path / "skills_install" / "alpha")
+
+        report = await inst.remove("combo")
+
+        alpha_step = next(s for s in report.steps if s.name == "skill:alpha")
+        assert alpha_step.status == "skipped"
+        beta_step = next(s for s in report.steps if s.name == "skill:beta")
+        assert beta_step.status == "succeeded"
+        # alpha was already gone, so it's not in removed_skills.
+        assert report.removed_skills == ["beta"]
+        # Entry still dropped — nothing lingers.
+        assert inst.list_plugins() == []
+
+    async def test_remove_with_unregistered_mcp_degrades(self, tmp_path, monkeypatch):
+        # MCP server recorded in registry but not in the manager → skipped,
+        # remove still completes.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha"],
+            mcp={"svc": {"command": "uvx", "args": ["svc"]}},
+        )
+        # Drop it from the manager so remove_server_config returns False.
+        manager.known.discard("plugin:combo:svc")
+
+        report = await inst.remove("combo")
+
+        mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
+        assert mcp_step.status == "skipped"
+        assert report.removed_mcp_servers == []
+        assert inst.list_plugins() == []
+
+    async def test_remove_audit_logs_plugin_remove(self, tmp_path, monkeypatch):
+        inst, _ = await self._install_one(tmp_path, monkeypatch, skills=["alpha"], mcp=None)
+        logged: list = []
+        monkeypatch.setattr(
+            "pocketpaw.plugins.installer.get_audit_logger",
+            lambda: type("A", (), {"log": lambda self, ev: logged.append(ev)})(),
+        )
+        await inst.remove("combo")
+        assert any(getattr(ev, "action", None) == "plugin_remove" for ev in logged)
+
+
+class TestAtomicRegistryWrite:
+    async def test_sequential_writes_do_not_corrupt(self, tmp_path, monkeypatch):
+        # Install two plugins back-to-back sharing one registry; the
+        # temp-file + os.replace path must leave a valid, complete JSON.
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+        repo_a = _write_plugin(tmp_path / "a", name="aaa", skills=["alpha"])
+        inst = _installer(repo_a, tmp_path)
+        await inst.install("acme/aaa")
+        repo_b = _write_plugin(tmp_path / "b", name="bbb", skills=["beta"])
+        inst._clone = _clone_factory(repo_b)
+        await inst.install("acme/bbb")
+
+        registry_path = tmp_path / "registry" / "plugins.json"
+        data = json.loads(registry_path.read_text())  # parses → not corrupt
+        assert set(data) == {"aaa", "bbb"}
+        # No leftover temp files in the registry dir.
+        leftovers = list(registry_path.parent.glob("*.tmp.*"))
+        assert leftovers == []
+
+    def test_save_registry_replaces_atomically(self, tmp_path):
+        inst = _installer(tmp_path, tmp_path)
+        inst._save_registry({"x": {"version": "1"}})
+        registry_path = tmp_path / "registry" / "plugins.json"
+        assert json.loads(registry_path.read_text()) == {"x": {"version": "1"}}
+        # Overwrite with new content; old file must be cleanly replaced.
+        inst._save_registry({"y": {"version": "2"}})
+        assert json.loads(registry_path.read_text()) == {"y": {"version": "2"}}
+        assert list(registry_path.parent.glob("*.tmp.*")) == []
