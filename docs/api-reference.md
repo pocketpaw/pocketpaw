@@ -372,10 +372,15 @@ bundle declares no MCP servers, a single `mcp` step is recorded as
 
 | Status | When |
 |--------|------|
-| `400` | Missing or malformed `source`, an invalid `plugin.json`, or an invalid `.mcp.json`. |
+| `400` | Missing or malformed `source`, or an invalid `plugin.json`. |
 | `404` | No `.claude-plugin/plugin.json`, or no skills found in the plugin. |
 | `502` | The git clone failed. |
 | `504` | The git clone timed out. |
+
+A malformed `.mcp.json` (parse error, or a wrong `mcpServers` shape) does
+**not** fail the request — it surfaces as a single `failed` `mcp` step in
+the report, so already-installed skills and the registry entry are
+preserved.
 
 Every install is audit-logged with the source, plugin name, version, and
 the installed skill names.

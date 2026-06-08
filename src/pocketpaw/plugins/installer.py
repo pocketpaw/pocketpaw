@@ -77,6 +77,16 @@ class PluginInstallError(Exception):
         self.status_code = status_code
 
 
+class _MCPConfigError(Exception):
+    """Internal: a malformed ``.mcp.json`` (parse error / wrong shape).
+
+    Caught inside the installer and converted into a ``failed`` MCP step so
+    a bad MCP config degrades per-step instead of raising out of the
+    installer (which would orphan already-installed skills and skip the
+    registry write). Never escapes the module.
+    """
+
+
 def parse_source(source: str) -> tuple[str, str, str | None]:
     """Parse a plugin source string into ``(owner, repo, subdir)``.
 
@@ -320,6 +330,12 @@ class PluginInstaller:
         standard shape is ``{"mcpServers": {name: spec}}``. Returns None
         when no config file exists so the caller can skip cleanly; returns
         an empty dict when the file exists but declares no servers.
+
+        Raises:
+            _MCPConfigError: If the file exists but is malformed (JSON parse
+                error, top-level not a dict, ``mcpServers`` not a dict). The
+                caller turns this into a ``failed`` step so the install
+                degrades per-step rather than raising out of the installer.
         """
         if manifest.mcp_servers:
             mcp_path = plugin_root / manifest.mcp_servers
@@ -333,14 +349,14 @@ class PluginInstaller:
             raw = json.loads(mcp_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Plugin MCP config unreadable: %s", exc)
-            raise PluginInstallError("Invalid .mcp.json", 400) from exc
+            raise _MCPConfigError("invalid .mcp.json (parse error)") from exc
 
         if not isinstance(raw, dict):
-            raise PluginInstallError(".mcp.json must be a JSON object", 400)
+            raise _MCPConfigError(".mcp.json must be a JSON object")
 
         servers = raw.get("mcpServers", {})
         if not isinstance(servers, dict):
-            raise PluginInstallError(".mcp.json 'mcpServers' must be an object", 400)
+            raise _MCPConfigError(".mcp.json 'mcpServers' must be an object")
         return servers
 
     async def _install_mcp_servers(
@@ -358,8 +374,15 @@ class PluginInstaller:
         env is reported ``succeeded`` with a ``needs env: KEY`` detail
         (non-fatal); any other start failure is a ``failed`` step. Skips
         cleanly (one ``skipped`` step) when the bundle declares no MCP config.
+        A malformed ``.mcp.json`` becomes a single ``failed`` ``mcp`` step —
+        it never raises out of the installer, so installed skills aren't
+        orphaned and the registry write still happens.
         """
-        servers = self._read_mcp_config(plugin_root, manifest)
+        try:
+            servers = self._read_mcp_config(plugin_root, manifest)
+        except _MCPConfigError as exc:
+            report.steps.append(PluginInstallStep(name="mcp", status="failed", detail=str(exc)))
+            return []
         if servers is None:
             report.steps.append(
                 PluginInstallStep(name="mcp", status="skipped", detail="no .mcp.json")
@@ -429,6 +452,13 @@ class PluginInstaller:
         if ok:
             return PluginInstallStep(name=step_name, status="succeeded")
         if missing:
+            # Heuristic: we can't tell *why* start_server returned False, only
+            # that the spec declared an empty env var. So a server that failed
+            # to start for an unrelated reason while also having an empty env
+            # value is reported "succeeded / needs env" — a deliberate
+            # false-positive trade-off, not a bug. We'd rather nudge the
+            # operator to supply credentials than hard-fail a recoverable
+            # install. (#1358's list/remove surface will let them retry.)
             return PluginInstallStep(
                 name=step_name,
                 status="succeeded",

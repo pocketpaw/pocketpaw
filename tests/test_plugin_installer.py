@@ -484,6 +484,50 @@ class TestMCPRouting:
         step = next(s for s in report.steps if s.name == "mcp")
         assert step.status == "skipped"
 
+    async def test_malformed_mcp_json_does_not_orphan_skills(self, tmp_path, monkeypatch):
+        # A bad .mcp.json must degrade to a failed mcp step — NOT raise — so
+        # the skills stay installed and the registry entry is still written.
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        (repo / ".mcp.json").write_text("{not valid json", encoding="utf-8")
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")  # must not raise
+
+        # Skills installed.
+        assert report.installed_skills == ["alpha"]
+        assert (tmp_path / "skills_install" / "alpha" / "SKILL.md").is_file()
+        # mcp step failed (not skipped), report not fully succeeded.
+        mcp_step = next(s for s in report.steps if s.name == "mcp")
+        assert mcp_step.status == "failed"
+        assert report.installed_mcp_servers == []
+        assert not report.succeeded()
+        # Registry entry still written — skills are NOT orphaned.
+        registry_path = tmp_path / "registry" / "plugins.json"
+        assert registry_path.is_file()
+        entry = json.loads(registry_path.read_text())["p"]
+        assert entry["skills"] == ["alpha"]
+        assert entry["mcp_servers"] == []
+        assert manager.added == []  # nothing registered from a bad config
+
+    async def test_malformed_mcp_servers_shape_is_failed_step(self, tmp_path, monkeypatch):
+        # Top-level dict but mcpServers is a list → failed step, no raise.
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        (repo / ".mcp.json").write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert report.installed_skills == ["alpha"]
+        mcp_step = next(s for s in report.steps if s.name == "mcp")
+        assert mcp_step.status == "failed"
+        assert (tmp_path / "registry" / "plugins.json").is_file()
+
     async def test_manifest_mcp_path_override(self, tmp_path, monkeypatch):
         manager = _FakeMCPManager()
         _patch_loader_and_manager(monkeypatch, manager)
