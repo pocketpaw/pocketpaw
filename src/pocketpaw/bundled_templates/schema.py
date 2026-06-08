@@ -11,6 +11,13 @@
 # (a Paw Site composed by conversion role) validates. The landing-page
 # template uses shape:"custom", which is already exempt from the
 # columns-required and default_view-matrix rules — no shape change needed.
+# Modified: 2026-06-08 (feat/sense-template-needs, Sense tier chunk 6a) —
+# added `needs: list[str]` to PocketTemplate: the Sense ids a vertical
+# template requires (e.g. ["paw.payments.v1"]). Each id is validated at
+# template-load via senses.validate_sense_id (a malformed / unknown paw.*
+# id raises SenseValidationError), mirroring the connector `senses:` field.
+# `needs` is tenant-capability METADATA, not ripple spec — it is read at
+# pocket-create to surface a prompt-to-connect when a provider is missing.
 """Pydantic v2 model for the RFC 03 v2 Pocket Template Schema.
 
 This module is the **schema chokepoint** — every bundled template, every
@@ -376,6 +383,10 @@ class PocketTemplate(BaseModel):
     state: StateBinding
     actions: list[ActionDef] = Field(default_factory=list)
     connectors: list[str] = Field(default_factory=list)
+    needs: list[str] = Field(
+        default_factory=list,
+        description="Sense ids this template requires, e.g. ['paw.email.v1'].",
+    )
     agents: list[AgentDef] = Field(default_factory=list)
     triggers: list[TriggerDef] = Field(default_factory=list)
     outcomes: list[str] = Field(default_factory=list)
@@ -408,6 +419,19 @@ class PocketTemplate(BaseModel):
     def _vertical_is_lower_slug(cls, v: str) -> str:
         if not v or v != v.lower() or any(ch.isspace() for ch in v):
             raise ValueError("vertical must be a lower-case slug")
+        return v
+
+    @field_validator("needs")
+    @classmethod
+    def _needs_are_valid_senses(cls, v: list[str]) -> list[str]:
+        # Validate each declared sense id at template-load — a malformed or
+        # unknown paw.* id raises SenseValidationError, consistent with the
+        # connector ``senses:`` validation. Imported inside the validator to
+        # avoid a top-level import cycle with the senses catalog.
+        from pocketpaw.senses import validate_sense_id
+
+        for sense_id in v:
+            validate_sense_id(sense_id)
         return v
 
     @model_validator(mode="after")

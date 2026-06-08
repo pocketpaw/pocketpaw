@@ -89,6 +89,13 @@ dispatcher + temporal scheduler call to obtain a typed ``PocketTemplate``
 from a pocket. A stale / missing slug never breaks pocket creation: the
 loader's ``strict=False`` mode returns ``None`` and the rippleSpec is
 left unmodified so a later resolver run can retry.
+Changes: 2026-06-08 (feat/sense-template-needs, Sense tier chunk 6a) —
+``create`` now reads the template's ``needs:`` Sense ids and, for each,
+asks the EE Sense resolver whether an enabled connector fills it for the
+tenant (``_check_template_needs``). Senses with no provider are logged as
+a warning AND attached as ``missing_senses`` on the ``pocket.created``
+event so the UX can prompt-to-connect. This NEVER blocks creation —
+``needs`` is template metadata, not rippleSpec, so it is not merged.
 Changes: 2026-05-24 — added ``merge_spec`` (MVP entry point for the
 new ``POST /api/v1/pockets/{id}/spec/merge`` endpoint). Accepts either a
 ``{"replace": <full spec>}`` or a ``{"merge": <partial spec>}`` body,
@@ -471,7 +478,9 @@ async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
     return pocket_to_wire_dict(pocket)
 
 
-async def _pocket_event_payload(doc: _PocketDoc) -> dict:
+async def _pocket_event_payload(
+    doc: _PocketDoc, *, missing_senses: list[str] | None = None
+) -> dict:
     """Build the realtime event payload for a pocket mutation.
 
     Always includes ``recipient_ids`` (owner + shared_with). For
@@ -498,6 +507,12 @@ async def _pocket_event_payload(doc: _PocketDoc) -> dict:
     }
     if doc.visibility == "workspace":
         payload["workspace_id"] = doc.workspace
+    # Sense tier chunk 6a — when a template declared ``needs:`` Senses that no
+    # enabled connector fills for this tenant, surface them so the UX can
+    # prompt-to-connect. Only present on the create path when non-empty; the
+    # absence of the key means "nothing missing".
+    if missing_senses:
+        payload["missing_senses"] = list(missing_senses)
     return payload
 
 
@@ -857,6 +872,48 @@ def _merge_compile_into_ripple_spec(
     return out
 
 
+async def _check_template_needs(loaded: dict[str, Any] | None, workspace_id: str) -> list[str]:
+    """Return the template's declared Sense ids that NO enabled connector fills.
+
+    A vertical template may declare ``needs: ["paw.payments.v1", ...]`` — the
+    provider-agnostic capabilities it expects the tenant to have wired up. For
+    each need, ask the EE Sense resolver whether an enabled connector fills it
+    for ``workspace_id``; ids that resolve to ``None`` are returned as the
+    ``missing`` set so the caller can surface a prompt-to-connect.
+
+    Tolerance: this never raises and never blocks. A ``None`` loaded result, a
+    missing/empty ``needs``, or a resolver error all yield ``[]`` (or skip the
+    offending id) — mirrors the ``strict=False`` posture used elsewhere here.
+    """
+    if not isinstance(loaded, dict):
+        return []
+    meta = loaded.get("meta")
+    if not isinstance(meta, dict):
+        return []
+    needs = meta.get("needs")
+    if not needs:
+        return []
+
+    # Lazy import — keep the EE Sense resolver off the eager import path.
+    from pocketpaw_ee.cloud.senses.resolver import resolve
+
+    missing: list[str] = []
+    for sense_id in needs:
+        try:
+            resolved = await resolve(sense_id, workspace_id)
+        except Exception as exc:  # noqa: BLE001 — never block create on a resolver hiccup
+            logger.warning(
+                "template needs: resolve(%r) raised for workspace=%s: %s",
+                sense_id,
+                workspace_id,
+                exc,
+            )
+            continue
+        if resolved is None:
+            missing.append(sense_id)
+    return missing
+
+
 async def resolve_pocket_template(
     workspace_id: str,
     pocket_id: str,
@@ -944,6 +1001,7 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     # docstring above ``_merge_compile_into_ripple_spec``). A stale /
     # missing slug logs a warning and leaves the rippleSpec unchanged —
     # the pocket still gets created and keeps the slug for retry.
+    loaded: dict[str, Any] | None = None
     if body.template_slug:
         from pocketpaw.bundled_templates import load_template
 
@@ -986,7 +1044,22 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
     if body.session_id:
         await sessions_service.link_pocket(workspace_id, body.session_id, pocket.id)
 
-    await emit(PocketCreated(data=await _pocket_event_payload(doc)))
+    # Sense tier chunk 6a — a template can declare the Senses it needs. For each,
+    # check the tenant has an enabled provider; collect the ids with none. This
+    # NEVER blocks creation (the pocket is already inserted) — it logs a warning
+    # and rides out on the pocket.created event so the UX can prompt-to-connect.
+    missing_senses = await _check_template_needs(loaded, workspace_id)
+    if missing_senses:
+        logger.warning(
+            "template needs: pocket=%s slug=%r workspace=%s has no enabled "
+            "provider for senses %s — pocket created, prompt-to-connect surfaced",
+            str(doc.id),
+            body.template_slug,
+            workspace_id,
+            missing_senses,
+        )
+
+    await emit(PocketCreated(data=await _pocket_event_payload(doc, missing_senses=missing_senses)))
     return await _resolved_wire_dict(doc, user_id)
 
 

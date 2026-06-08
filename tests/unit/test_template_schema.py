@@ -499,3 +499,66 @@ def test_loader_strict_default_is_false_for_back_compat(tmp_path: Path) -> None:
     # No ``strict`` kwarg at all — should NOT raise.
     result = load_template("bad-template", templates_dir=tmp_path)
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Sense tier chunk 6a — PocketTemplate.needs (declared Sense ids)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_defaults_empty() -> None:
+    """A template with no ``needs:`` key reads back an empty list — the
+    field is backwards-compatible with every pre-Sense template."""
+    template = PocketTemplate.model_validate(_minimal_v2_dict())
+    assert template.needs == []
+
+
+def test_needs_with_valid_core_senses_parses() -> None:
+    """A template declaring valid core Sense ids validates and round-trips."""
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["paw.payments.v1", "paw.email.v1"]
+    template = PocketTemplate.model_validate(meta)
+    assert template.needs == ["paw.payments.v1", "paw.email.v1"]
+
+
+def test_needs_with_valid_extension_sense_parses() -> None:
+    """A vendor-namespace (extension) sense id is accepted freely."""
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["acme.crm.v1"]
+    template = PocketTemplate.model_validate(meta)
+    assert template.needs == ["acme.crm.v1"]
+
+
+def test_needs_with_unknown_paw_sense_raises() -> None:
+    """An unknown paw.* id fails validation — the core namespace is closed, so
+    a template can't silently fragment it. The ``needs`` field_validator calls
+    ``validate_sense_id``, which raises ``SenseValidationError``; Pydantic wraps
+    that in a ``ValidationError`` whose underlying cause is the SenseValidationError
+    (a ``ValueError`` subclass)."""
+    from pydantic import ValidationError
+
+    from pocketpaw.senses import SenseValidationError
+
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["paw.telepathy.v1"]
+    with pytest.raises(ValidationError) as exc_info:
+        PocketTemplate.model_validate(meta)
+    underlying = exc_info.value.errors()[0]["ctx"]["error"]
+    assert isinstance(underlying, SenseValidationError)
+    assert "unknown core sense id" in str(underlying)
+
+
+def test_needs_with_malformed_sense_raises() -> None:
+    """A malformed sense id (no version suffix) fails validation — the
+    underlying error is a SenseValidationError raised by validate_sense_id."""
+    from pydantic import ValidationError
+
+    from pocketpaw.senses import SenseValidationError
+
+    meta = _minimal_v2_dict()
+    meta["needs"] = ["paw.email"]
+    with pytest.raises(ValidationError) as exc_info:
+        PocketTemplate.model_validate(meta)
+    underlying = exc_info.value.errors()[0]["ctx"]["error"]
+    assert isinstance(underlying, SenseValidationError)
+    assert "malformed core sense id" in str(underlying)
