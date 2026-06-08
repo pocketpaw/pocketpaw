@@ -1,6 +1,18 @@
 # pocketpaw/ripple/_flows.py — Deterministic Chain Flow builders (RFC 13 §7.1, M3).
 #
 # Created: 2026-05-31 (RFC 13 M3, feat/m3-flow-authoring-tool).
+# Updated: 2026-06-07 (feat/flow-terminal-to-agent):
+#   - Terminal step now loops the collected answers back to the AGENT instead of
+#     firing a dead host event. Both shipped templates' `onComplete` is now
+#     `{kind:"chat", message:<human prompt>}` — the runtime appends the
+#     accumulated payload to the message before sending it to the agent. The
+#     `navigate`/`emit` FlowAction kinds remain available for other flows.
+#   - Each form step now ALSO carries genesis-style structured field DATA
+#     (`form_fields: [{id, label, type, placeholder, required, options?}]`) so
+#     ripple's FormLayout renders a designed form. The hand-built raw `ui` widget
+#     tree stays as the backward-compat fallback (ripple falls back to
+#     NodeRenderer(ui) when no field data is present). The terminal review/confirm
+#     step carries structured `review_rows` for the same designed-render benefit.
 #
 # What this is:
 #   The DETERMINISTIC half of the `start_flow` authoring tool. The LLM emits a
@@ -26,6 +38,13 @@
 #     (`<flowId>_selection` / `<flowId>_formData`);
 #   - the terminal step carries `onComplete` — a FlowAction:
 #       {kind:'emit', event, payload?} | {kind:'navigate', url} | {kind:'chat', message};
+#     the two shipped templates use `chat` so finishing the flow hands the
+#     collected answers back to the agent to act on (the runtime appends the
+#     accumulated payload to `message`); `emit`/`navigate` stay available for
+#     other flows;
+#   - form steps additionally carry `form_fields` (genesis-style structured field
+#     DATA) so ripple's FormLayout renders a designed form; the raw `ui` tree
+#     remains the fallback;
 #   - a later step pre-fills from an earlier pick with
 #     `{state.<flowId>_selection.field}` / `{state.<flowId>_formData.field}`.
 #
@@ -128,6 +147,45 @@ def _submit_button(label: str) -> dict[str, Any]:
     }
 
 
+def _form_field(
+    field_id: str,
+    label: str,
+    placeholder: str = "",
+    field_type: str = "text",
+    required: bool = True,
+    options: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """A genesis-style structured form-field descriptor.
+
+    Carried on a form step's `form_fields` array so ripple's FormLayout →
+    FormSection renders a DESIGNED form (not the raw widget tree). `field_id`
+    matches the step's input `bind` so the entered value lands under the same
+    key the `flow.next` handler forwards. Shape mirrors genesis:
+    `{id, label, type, placeholder, required, options?}`.
+    """
+    field: dict[str, Any] = {
+        "id": field_id,
+        "label": label,
+        "type": field_type,
+        "required": required,
+    }
+    if placeholder:
+        field["placeholder"] = placeholder
+    if options is not None:
+        field["options"] = options
+    return field
+
+
+def _review_row(label: str, value: str) -> dict[str, Any]:
+    """A structured review row for a terminal confirm/summary step.
+
+    Carried on the terminal step's `review_rows` so a designed summary layout
+    can render label/value pairs; `value` keeps the same `{state.x}` pre-fill
+    expression the raw `ui` text uses, so both render paths read identical data.
+    """
+    return {"label": label, "value": value}
+
+
 def _container(children: list[dict[str, Any]], cls: str | None = None) -> dict[str, Any]:
     node: dict[str, Any] = {"type": "container", "children": children}
     if cls:
@@ -141,7 +199,8 @@ def _container(children: list[dict[str, Any]], cls: str | None = None) -> dict[s
 #   Step 1 (root):  pick a goal           — branches via chain_map
 #   Step 2a:        focus → workspace name (form)        ┐
 #   Step 2b:        collaborate → team workspace (form)  ┘ both chain → step 3
-#   Step 3 (term):  confirm — pre-filled from steps 1+2 via {state.x}, emits
+#   Step 3 (term):  confirm — pre-filled from steps 1+2 via {state.x}, loops the
+#                   collected answers back to the agent via onComplete.chat
 #
 # Mirrors the M1 fixture (onboarding-wizard.ts) so the same tree this builder
 # emits is the one M1's ChainExecutor tests already prove walks correctly.
@@ -157,9 +216,15 @@ def build_onboarding_wizard(config: dict[str, Any] | None = None) -> dict[str, A
       - `goals` (list[{id, label}]): override the goal options at step 1.
         Each goal id becomes a `chain_map` branch. A goal whose id is not
         `focus`/`collaborate` falls through to the shared details step.
+      - `complete_message` (str): the human-readable prompt the terminal step
+        hands back to the agent (default: a "set up my workspace" prompt).
     """
     config = config or {}
     product_name = str(config.get("product_name") or "your workspace")
+    complete_message = str(
+        config.get("complete_message")
+        or "I've finished onboarding — here are my choices, please set up my workspace."
+    )
 
     # --- Step 3 (terminal): confirm, pre-filled from the earlier answers -----
     # Cross-step pre-fill: reads back step 1's selection label and step 2's
@@ -171,8 +236,19 @@ def build_onboarding_wizard(config: dict[str, Any] | None = None) -> dict[str, A
         "flowId": "confirm",
         "intent": "confirm",
         "title": "You are all set",
-        # Terminal action: hand the whole accumulated payload back to the host.
-        "onComplete": {"kind": "emit", "event": "onboarding.complete"},
+        # Terminal action: hand the collected answers back to the AGENT to act on.
+        # The runtime appends the accumulated payload to this message before
+        # sending it, so we only supply the human-readable prompt here.
+        "onComplete": {
+            "kind": "chat",
+            "message": complete_message,
+        },
+        # Structured review rows for a designed summary render; the raw `ui` below
+        # stays as the fallback. Both read the same {state.x} pre-fill values.
+        "review_rows": [
+            _review_row("Goal", "{state.pick_goal_selection.label}"),
+            _review_row("Workspace", "{state.enter_details_formData.workspace}"),
+        ],
         "ui": _container(
             [
                 _heading("Review your setup"),
@@ -195,6 +271,11 @@ def build_onboarding_wizard(config: dict[str, Any] | None = None) -> dict[str, A
             "intent": "form",
             "title": "Set up your workspace",
             "chain": confirm_step,
+            # Structured field DATA — ripple's FormLayout renders a designed form
+            # from this. The raw `ui` below stays as the backward-compat fallback.
+            "form_fields": [
+                _form_field("workspace", "Workspace name", placeholder),
+            ],
             "ui": _container(
                 [
                     _heading(heading),
@@ -252,11 +333,12 @@ def build_onboarding_wizard(config: dict[str, Any] | None = None) -> dict[str, A
 #   Step 2b:        growth → revenue + metrics (form)      ┘ both chain → step 3
 #   Step 3:         risk & flags (form)                    → step 4
 #   Step 4 (term):  review — pre-filled from every prior step via {state.x},
-#                   emits `diligence.intake.submit` carrying the full packet.
+#                   loops the full packet back to the agent via onComplete.chat.
 #
 # This is the "vertical workflow → flow template" case from RFC 13 §7.1: a
 # multi-step intake split into digestible steps, branching on the deal stage,
-# accumulating a structured packet the host acts on at the terminal emit.
+# accumulating a structured packet the agent acts on when the terminal step
+# hands the collected answers back via `onComplete.kind = "chat"`.
 # A survey is the same shape with the labels swapped; due-diligence is the
 # richer (4-step, branch + linear) proof.
 # ---------------------------------------------------------------------------
@@ -267,12 +349,18 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
 
     `config` overrides (all optional):
       - `company_name` (str): branded into the intro / review copy.
-      - `submit_event` (str): the terminal `onComplete` event name
-        (default `diligence.intake.submit`).
+      - `complete_message` (str): the human-readable prompt the terminal step
+        hands back to the agent (default: a "summarize and flag risks" prompt).
+        Accepted but ignored: the legacy `submit_event` key — the terminal now
+        loops to the agent via `onComplete.kind = "chat"` instead of firing a
+        host event, so there is no event name to override.
     """
     config = config or {}
     company_name = str(config.get("company_name") or "the company")
-    submit_event = str(config.get("submit_event") or "diligence.intake.submit")
+    complete_message = str(
+        config.get("complete_message")
+        or "Diligence intake complete — here are my inputs, please summarize and flag risks."
+    )
 
     # --- Step 4 (terminal): review the assembled packet, then submit ---------
     # Pre-fills from EVERY prior step (the deal stage, the stage-specific
@@ -283,7 +371,20 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
         "flowId": "review",
         "intent": "confirm",
         "title": "Review the intake",
-        "onComplete": {"kind": "emit", "event": submit_event},
+        # Terminal action: loop the assembled packet back to the AGENT to act on.
+        # The runtime appends the accumulated payload to this message; we supply
+        # only the human-readable prompt.
+        "onComplete": {
+            "kind": "chat",
+            "message": complete_message,
+        },
+        # Structured review rows for a designed summary render; raw `ui` is the
+        # fallback. Both read the same {state.x} pre-fill values.
+        "review_rows": [
+            _review_row("Deal stage", "{state.deal_stage_selection.label}"),
+            _review_row("Headline metric", "{state.financials_formData.headline}"),
+            _review_row("Key risk", "{state.risk_review_formData.key_risk}"),
+        ],
         "ui": _container(
             [
                 _heading("Confirm the diligence packet"),
@@ -304,6 +405,16 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
         "intent": "form",
         "title": "Risk & open flags",
         "chain": review_step,
+        # Structured field DATA for ripple's FormLayout; raw `ui` is the fallback.
+        "form_fields": [
+            _form_field("key_risk", "Biggest open risk", "Customer concentration"),
+            _form_field(
+                "mitigation",
+                "Mitigation (optional)",
+                "Diversifying pipeline",
+                required=False,
+            ),
+        ],
         "ui": _container(
             [
                 _heading("Note the top risk"),
@@ -323,9 +434,11 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
         # is branch-agnostic.
         children: list[dict[str, Any]] = [_heading(heading)]
         binds: list[str] = []
+        form_fields: list[dict[str, Any]] = []
         for bind, label, placeholder in fields:
             children.append(_input(bind, label, placeholder))
             binds.append(bind)
+            form_fields.append(_form_field(bind, label, placeholder))
         children.append(_continue_button("Continue", binds))
         return {
             "version": "2.0",
@@ -334,6 +447,8 @@ def build_due_diligence_intake(config: dict[str, Any] | None = None) -> dict[str
             "intent": "form",
             "title": "Financial snapshot",
             "chain": risk_step,
+            # Structured field DATA for ripple's FormLayout; raw `ui` is the fallback.
+            "form_fields": form_fields,
             "ui": _container(children),
         }
 
