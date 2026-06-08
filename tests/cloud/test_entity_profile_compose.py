@@ -117,3 +117,25 @@ def test_compose_full_entity_over_sites_base():
     assert out.skill_names == frozenset({"create-svelte-site", "github"})  # union
     assert out.allowed_sdk_tools == frozenset({"WebFetch"})
     assert out.system_message_override == "be terse"
+
+
+def test_compose_allow_mcp_union_when_either_side_sets():
+    """allow_mcp_tool_ids folds like allowed_sdk_tools: UNION across sides."""
+    base = SurfaceProfile(ripple_mode="on", allow_mcp_tool_ids=frozenset({"mcp__a__x"}))
+    out = compose_entity_profile(base, {"allow_mcp_tool_ids": ["mcp__b__y"]})
+    assert out.allow_mcp_tool_ids == frozenset({"mcp__a__x", "mcp__b__y"})
+
+
+def test_compose_allow_mcp_none_both_sides_stays_none():
+    """None on both sides stays None — no MCP restriction (an empty frozenset
+    would wrongly drop every non-grant MCP tool)."""
+    base = SurfaceProfile(ripple_mode="on")  # allow_mcp_tool_ids defaults None
+    out = compose_entity_profile(base, {"allow_mcp_tool_ids": None})
+    assert out.allow_mcp_tool_ids is None
+
+
+def test_compose_allow_mcp_entity_only_restricts():
+    """Base unrestricted (None) + entity sets a list → entity restriction wins."""
+    base = SurfaceProfile(ripple_mode="on")
+    out = compose_entity_profile(base, {"allow_mcp_tool_ids": ["mcp__b__y"]})
+    assert out.allow_mcp_tool_ids == frozenset({"mcp__b__y"})

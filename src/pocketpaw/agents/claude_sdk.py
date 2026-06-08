@@ -132,6 +132,40 @@ _DEFAULT_IDENTITY = (
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
 
+# Universal pocket-creation grant. When a surface imposes a restrictive MCP
+# allow-list (``SurfaceProfile.allow_mcp_tool_ids``), these ids are always kept
+# so "create a pocket" works from every chat mode — the core capability. The
+# create-pocket SKILL is plugin-loaded (not an MCP tool), so it stays reachable
+# regardless. Plain ids (no EE import): allow/deny sets cross the OSS boundary
+# as bare ``frozenset[str]``.
+POCKET_CREATION_GRANT: frozenset[str] = frozenset(
+    {
+        "mcp__pocketpaw_pocket_specialist__create",
+        "mcp__pocketpaw_pocket_planner__plan_pocket",
+    }
+)
+
+# MCP servers whose tools survive ANY restrictive allow-list — the "general
+# tools everywhere" set: connectors (composio) + the pocket lifecycle (read /
+# widget edit / create / edit / plan). A mode's allow-list only names its
+# SPECIALIZED tools; these servers stay available so every mode can still use
+# connectors and build/edit pockets. Server is ``<server>`` in
+# ``mcp__<server>__<tool>``.
+ALWAYS_ALLOWED_MCP_SERVERS: frozenset[str] = frozenset(
+    {
+        "composio",
+        "pocketpaw_pocket",
+        "pocketpaw_pocket_specialist",
+        "pocketpaw_pocket_planner",
+    }
+)
+
+
+def _mcp_server_of(tool_id: str) -> str:
+    """Extract ``<server>`` from an ``mcp__<server>__<tool>`` id (else "")."""
+    parts = tool_id.split("__")
+    return parts[1] if len(parts) >= 2 and parts[0] == "mcp" else ""
+
 
 class ClaudeSDKBackend(BaseAgentBackend):
     """Claude Agent SDK backend — the recommended default.
@@ -923,6 +957,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         session_key: str | None = None,
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
@@ -1215,6 +1250,32 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     logger.info(
                         "Surface tool-deny: excluded %s from allowlist",
                         sorted(deny_mcp_tool_ids),
+                    )
+
+            # Per-MODE restrictive MCP allow-list (distinct from the additive
+            # ``allow_sdk_tools`` above). ``None`` keeps every MCP tool (broad
+            # surfaces like /chat). When set, keep only MCP tools that are in the
+            # mode's set, in the pocket-creation grant, a ripple widget tool, OR
+            # from an always-allowed server (connectors + pocket lifecycle).
+            # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
+            # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
+            # Applied AFTER deny so a denied id can't sneak back via the grant.
+            if allow_mcp_tool_ids is not None:
+                from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+
+                grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | frozenset(WIDGET_TOOL_IDS)
+                before_count = len(allowed_tools)
+                allowed_tools = [
+                    t
+                    for t in allowed_tools
+                    if not t.startswith("mcp__")
+                    or t in grant
+                    or _mcp_server_of(t) in ALWAYS_ALLOWED_MCP_SERVERS
+                ]
+                if len(allowed_tools) < before_count:
+                    logger.info(
+                        "Mode MCP-allow: scoped to %s (+ general grant)",
+                        sorted(allow_mcp_tool_ids),
                     )
 
             # Build hooks for security

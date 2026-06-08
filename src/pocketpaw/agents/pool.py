@@ -193,6 +193,7 @@ class AgentPool:
         instructions: str = "",
         deny_mcp_tool_ids: frozenset[str] = frozenset(),
         allow_sdk_tools: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
     ) -> AsyncIterator[Any]:
@@ -344,6 +345,11 @@ class AgentPool:
             # signature, so an entity allowlist is forwarded only when non-empty.
             if allow_sdk_tools:
                 run_kwargs["allow_sdk_tools"] = allow_sdk_tools
+            # Per-MODE restrictive MCP allow-list. Forwarded only when not None
+            # (the Claude SDK backend is the only consumer); None = no
+            # restriction, so broad surfaces / non-Claude backends are untouched.
+            if allow_mcp_tool_ids is not None:
+                run_kwargs["allow_mcp_tool_ids"] = allow_mcp_tool_ids
             # Per-entity skill subset (entity-rooms A2). Same withhold-when-empty
             # rule: only the Claude SDK backend accepts ``skill_names`` (it
             # materializes them into a per-run local plugin); the other backends
