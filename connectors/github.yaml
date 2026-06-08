@@ -1,10 +1,34 @@
 # GitHub connector — repositories, issues, PRs, and code search.
 # Created: 2026-03-30
+# Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) — added the
+#   optional ``surface_profile:`` block. When this connector is bound to a
+#   pocket (scope=pocket), the cloud derivation helper folds it into the
+#   pocket's PocketSurfaceProfile so the entity room auto-loads the bundled
+#   ``github`` skill, which teaches the read-first workflow over the
+#   ``mcp__pocketpaw_connectors__*`` execution tools (list_connector_actions /
+#   connector_execute). The 8 read actions below run via that tool surface;
+#   the one write action (create_issue, trust=confirm) is BLOCKED in v1.
 
 name: github
 display_name: GitHub
 type: developer
 icon: git-branch
+
+# Connector→skill/tool auto-authoring. When GitHub is bound to a pocket, the
+# entity room auto-loads the bundled "github" skill (which teaches the
+# list_connector_actions → connector_execute READ workflow over the actions
+# below).
+#
+# allow_tools is left EMPTY for the same reason Gmail's is: the agent-callable
+# execution tools live on the ambient ``pocketpaw_connectors`` MCP server (NOT
+# opt-in), so the agent can already reach ``connector_execute`` without an
+# additive allowlist entry. An empty allow means "no SDK-tool restriction" (the
+# resolver union only ADDS, never narrows), which is the correct default. The
+# skill is the load-bearing contribution here.
+surface_profile:
+  skill: github
+  allow_tools: []
+  deny_tools: []
 
 auth:
   method: bearer

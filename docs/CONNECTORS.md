@@ -1,5 +1,11 @@
 <!--
   Connectors documentation.
+  Updated: 2026-06-08 (connector-mcp-execution / keystone) — documented the
+  agent-callable connector tool surface (list_connector_actions /
+  connector_execute on the pocketpaw_connectors MCP server), the v1
+  read-first / write-blocked policy, how a connector becomes usable in a room
+  (bind scope=pocket + token in config + the derived skill), and the GitHub +
+  Gmail examples.
   Updated: 2026-06-07 (M3 connector→skill auto-authoring) — documented the
   optional ``surface_profile`` YAML block and the connector→skill/tool
   auto-authoring path (derivation at bind/unbind from the full enabled set, the
@@ -182,6 +188,92 @@ classes (`gmail_search`, `gmail_send`, …) that are not yet wrapped as stable
 `mcp__<server>__<tool>` SDK tool ids. An empty allow means "no SDK-tool
 restriction" (the union only adds to the allowlist, never narrows it), so the
 skill is the load-bearing contribution until those ids exist.
+
+## Calling connectors from chat — the agent tool surface
+
+Loading a skill teaches the cloud chat agent *how* to use a connector; the
+**`pocketpaw_connectors` MCP server** is what lets it actually *call* one. The
+server exposes two tools to the agent, namespaced
+`mcp__pocketpaw_connectors__*`:
+
+| Tool | What it does |
+|------|--------------|
+| `list_connector_actions()` | Lists the connectors bound to the **current pocket** and, per connector, its READ actions (runnable) and WRITE actions (listed, blocked). No arguments — the pocket comes from the active chat. |
+| `connector_execute(connector_name, action, params)` | Runs ONE action. Read (auto-trust) actions execute; write actions are refused (see below). |
+
+The agent reads the pocket it is in from the per-run identity (the same
+mechanism that scopes pocket reads/writes), so the tools always act on the room
+the user is chatting in. Outside a chat stream — or in a chat not anchored to a
+pocket — the tools return a clear message instead of mis-scoping.
+
+### v1 policy: read-first, writes blocked
+
+v1 is deliberately **read-only**:
+
+- **Read actions** (`trust_level: auto`) execute. They run through the existing
+  cloud execution path (`connectors.service.execute`) in-process via the
+  `DirectRESTAdapter` / native adapter, using the connector's stored token.
+- **Write actions** (`trust_level: confirm` or `restricted`) are **listed but
+  blocked**. `connector_execute` refuses them with
+  *"This action modifies &lt;connector&gt; and needs approval (coming in v2).
+  Not executed."* and never calls the API. The agent surfaces that to the user
+  rather than pretending the write happened.
+
+The trust level on each action's YAML (`auto` / `confirm` / `restricted`) is the
+gate — the same trust level documented in [Trust Levels](#trust-levels). Mark
+reads `auto` and writes `confirm` and the tool surface does the rest.
+
+### Making a connector usable in a room
+
+Three things make a connector callable from a pocket's chat:
+
+1. **Bind it at `scope=pocket`** — enable the connector with the pocket's id.
+   The tools are tenant-scoped: a connector bound to pocket A is not reachable
+   from pocket B.
+2. **Put a token in the connector's config** — v1 auth is the PAT / API token
+   already stored in the connector config (no OAuth flow). For GitHub that's a
+   `GITHUB_TOKEN`; for a bearer/`api_key` connector it's the credential named in
+   the YAML's `auth.credentials`. Without it, read actions hit the API
+   unauthenticated and return an honest auth error.
+3. **The derived skill** — binding the connector auto-derives the pocket's
+   `surface_profile`, which loads the connector's bundled skill (see
+   [auto-authoring](#connector--skill--tool-auto-authoring)). The skill tells the
+   agent to call `list_connector_actions` first, then `connector_execute`.
+
+### GitHub example
+
+`connectors/github.yaml` ships a `surface_profile` (`skill: github`) and 9 read
+actions plus one write (`create_issue`, `confirm`). Bind it to a pocket with a
+`GITHUB_TOKEN` and the room can read issues, PRs, repos, releases, CI runs, and
+search code/issues:
+
+```
+list_connector_actions()
+  → github: read [list_issues, list_pull_requests, get_repo, search_code, …],
+    write-blocked [create_issue]
+
+connector_execute("github", "list_issues",
+                  {"owner": "acme", "repo": "api", "state": "open"})
+  → the repo's open issues
+
+connector_execute("github", "create_issue", {...})
+  → blocked: "needs approval (coming in v2). Not executed."
+```
+
+### Gmail example
+
+`connectors/gmail.yaml` ships `skill: gmail`. Bound to a pocket, the room can
+search and read mail; sending / labeling / trashing are confirm-trust writes and
+are blocked in v1:
+
+```
+connector_execute("gmail", "gmail_search",
+                  {"query": "from:acme.com subject:invoice", "max_results": 5})
+  → matching message stubs
+
+connector_execute("gmail", "gmail_send", {...})
+  → blocked: "needs approval (coming in v2). Not executed."
+```
 
 ## Using with Existing Integrations
 

@@ -389,6 +389,26 @@ class CloudTasksMcpProvider:
         return list(TASK_TOOL_IDS)
 
 
+class CloudConnectorsMcpProvider:
+    """`pocketpaw.mcp_servers` — the connector-execution in-process server.
+
+    Exposes ``list_connector_actions`` + ``connector_execute`` so the cloud
+    chat agent can READ from a pocket's bound connectors (GitHub issues/PRs,
+    Gmail search, …). Read-first: write actions are blocked until v2. Ambient
+    (not opt-in) so the M3-derived connector skills can reach it.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.connectors import build_connectors_context_server
+
+        return build_connectors_context_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.connectors import CONNECTOR_TOOL_IDS
+
+        return list(CONNECTOR_TOOL_IDS)
+
+
 class CloudMeetingsMcpProvider:
     """`pocketpaw.mcp_servers` — the meetings in-process server.
 

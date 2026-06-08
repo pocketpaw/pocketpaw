@@ -103,3 +103,13 @@ def test_shipped_gmail_yaml_carries_skill() -> None:
     assert gmail is not None
     assert gmail.surface_profile is not None
     assert gmail.surface_profile.skill == "gmail"
+
+
+def test_shipped_github_yaml_carries_skill() -> None:
+    """The real github.yaml in /connectors maps to the bundled github skill
+    (keystone — connector-mcp-execution)."""
+    reg = ConnectorRegistry()
+    github = reg.get_definition("github")
+    assert github is not None
+    assert github.surface_profile is not None
+    assert github.surface_profile.skill == "github"
