@@ -1,6 +1,10 @@
 # OAuth Manager — Google OAuth 2.0 auth code flow + token refresh.
 # Created: 2026-02-07
 # Part of Phase 2 Integration Ecosystem
+# 2026-06-08: threaded an optional ``user_id`` through exchange_code,
+#   exchange_account_credentials, refresh_token, and get_valid_token so tokens
+#   route to the per-user bucket in TokenStore (VIP Onboarding Phase B). All
+#   user_id params default to None — service-only callers are unchanged.
 
 from __future__ import annotations
 
@@ -105,6 +109,7 @@ class OAuthManager:
         client_secret: str,
         redirect_uri: str,
         scopes: list[str] | None = None,
+        user_id: str | None = None,
     ) -> OAuthTokens:
         """Exchange an authorization code for access + refresh tokens.
 
@@ -116,6 +121,9 @@ class OAuthManager:
             client_secret: OAuth client secret.
             redirect_uri: Same redirect URI used in the auth request.
             scopes: Scopes that were requested (stored with tokens).
+            user_id: When set, tokens are stored in this user's bucket so
+                two members connecting the same service don't collide. None
+                (default) uses the shared single-user bucket.
 
         Returns:
             OAuthTokens with access and refresh tokens.
@@ -146,6 +154,7 @@ class OAuthManager:
             token_type=data.get("token_type", "Bearer"),
             expires_at=time.time() + expires_in,
             scopes=scopes or [],
+            user_id=user_id,
         )
 
         self.store.save(tokens)
@@ -160,6 +169,7 @@ class OAuthManager:
         client_secret: str,
         account_id: str,
         scopes: list[str] | None = None,
+        user_id: str | None = None,
     ) -> OAuthTokens:
         """Server-to-Server OAuth (account_credentials grant).
 
@@ -204,6 +214,7 @@ class OAuthManager:
                 "client_id": client_id,
                 "client_secret": client_secret,
             },
+            user_id=user_id,
         )
 
         self.store.save(tokens)
@@ -216,12 +227,16 @@ class OAuthManager:
         service: str,
         client_id: str,
         client_secret: str,
+        user_id: str | None = None,
     ) -> OAuthTokens | None:
         """Refresh an expired access token.
 
         For standard 3-leg providers uses the stored refresh_token.
         For S2S (account_credentials) providers re-requests via the
         original account_id, which is read from tokens.extra.
+
+        ``user_id`` selects which user's token row to refresh and re-save;
+        None (default) uses the shared single-user bucket.
 
         Returns updated OAuthTokens, or None if refresh fails.
         """
@@ -230,7 +245,7 @@ class OAuthManager:
             return None
 
         if config.get("grant_type") == "account_credentials":
-            tokens = self.store.load(service)
+            tokens = self.store.load(service, user_id=user_id)
             if not tokens:
                 return None
             account_id = tokens.extra.get("account_id")
@@ -239,13 +254,19 @@ class OAuthManager:
                 return None
             try:
                 return await self.exchange_account_credentials(
-                    provider, service, client_id, client_secret, account_id, tokens.scopes
+                    provider,
+                    service,
+                    client_id,
+                    client_secret,
+                    account_id,
+                    tokens.scopes,
+                    user_id=user_id,
                 )
             except Exception as e:
                 logger.warning("S2S token refresh failed for %s: %s", service, e)
                 return None
 
-        tokens = self.store.load(service)
+        tokens = self.store.load(service, user_id=user_id)
         if not tokens or not tokens.refresh_token:
             return None
 
@@ -283,12 +304,16 @@ class OAuthManager:
         client_id: str,
         client_secret: str,
         provider: str = "google",
+        user_id: str | None = None,
     ) -> str | None:
         """Get a valid access token, refreshing if expired.
 
+        ``user_id`` scopes the lookup + refresh to a single user; None
+        (default) uses the shared single-user bucket.
+
         Returns the access token string, or None if unavailable.
         """
-        tokens = self.store.load(service)
+        tokens = self.store.load(service, user_id=user_id)
         if not tokens:
             return None
 
@@ -297,7 +322,9 @@ class OAuthManager:
             return tokens.access_token
 
         # Try to refresh
-        refreshed = await self.refresh_token(provider, service, client_id, client_secret)
+        refreshed = await self.refresh_token(
+            provider, service, client_id, client_secret, user_id=user_id
+        )
         if refreshed:
             return refreshed.access_token
 
