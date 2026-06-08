@@ -70,6 +70,7 @@ from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
+from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
 from pocketpaw_ee.cloud.workspace.domain import (
@@ -1021,6 +1022,33 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             ctx.user_id,
             role=invite.role,
             set_active=True,
+        )
+
+    # Materialize the member as a standalone Fabric ``Person`` — the
+    # identity spine a later VIP-onboarding flow reads (pp#1366). Built
+    # from the member's own profile + the invite's admin context, with
+    # provenance (invited_by + source=admin_context). Idempotent on the
+    # member's user id, so re-accepting updates rather than duplicating.
+    # The journal ``fabric.object.*`` event is the emit-on-write here.
+    # Wrapped defensively: membership is the source of truth, the Person
+    # is a derived projection — a Fabric/journal hiccup must not roll back
+    # an accepted invite.
+    try:
+        await people_service.materialize_person_from_invite(
+            workspace_id=invite.workspace_id,
+            user_id=ctx.user_id,
+            name=viewer.full_name,
+            email=viewer.email or invite.email,
+            avatar=viewer.avatar,
+            invite=invite,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Fabric Person materialization skipped for user=%s workspace=%s — "
+            "invite accept proceeds; the Person can be re-materialized later",
+            ctx.user_id,
+            invite.workspace_id,
+            exc_info=True,
         )
 
     await event_bus.emit(
