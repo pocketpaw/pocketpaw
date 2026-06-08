@@ -520,6 +520,32 @@ class ClaudeSDKBackend:
         except Exception as exc:  # noqa: BLE001
             logger.debug("edit_document MCP server not registered: %s", exc)
 
+        # In-process MCP server: exposes `edit_spreadsheet` so the agent can
+        # manipulate Univer workbook snapshots during spreadsheet editing.
+        # Always registered — returns an error when no editing session is active.
+        try:
+            from pocketpaw.tools.builtin.edit_spreadsheet import build_edit_spreadsheet_mcp_server
+
+            spreadsheet_server = build_edit_spreadsheet_mcp_server()
+            if spreadsheet_server is not None:
+                name, cfg_entry = spreadsheet_server
+                servers[name] = cfg_entry
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("edit_spreadsheet MCP server not registered: %s", exc)
+
+        # In-process MCP server: exposes `edit_slides` so the agent can
+        # manipulate reveal.js slide decks during slides editing.
+        # Always registered -- returns an error when no editing session is active.
+        try:
+            from pocketpaw.tools.builtin.edit_slides import build_edit_slides_mcp_server
+
+            slides_server = build_edit_slides_mcp_server()
+            if slides_server is not None:
+                name, cfg_entry = slides_server
+                servers[name] = cfg_entry
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("edit_slides MCP server not registered: %s", exc)
+
         return servers
 
     async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
