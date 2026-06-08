@@ -229,6 +229,7 @@ async def _run_tier0(
             auth_header=auth_header,
             token=token,
             only_source=classification.op_args.get("source"),
+            workspace_id=workspace_id,
         )
         errors = result.get("errors") or []
         if errors:

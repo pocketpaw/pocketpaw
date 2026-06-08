@@ -36,6 +36,19 @@
 # IMPORT-LINTER: must NOT import `pocketpaw_ee.cloud.models.*`. The executor
 # receives base_url / auth / spec by parameter only — `pockets/service.py`
 # owns all Beanie access.
+#
+# Updated: 2026-06-08 (feat/sense-source, Sense tier chunk 6b) — a source
+#   binding can now be `type: "sense"`: it resolves a provider-agnostic Sense
+#   via `senses.resolver.execute_sense` instead of an HTTP GET, unwraps the
+#   ExecuteActionResponse to its `.data` payload, and binds that into state
+#   with the SAME `{source, bind, value}` row shape the http path returns. A
+#   resolver refusal (ok=False) maps to a per-source `_SourceError` so the
+#   error-aggregation loop treats it exactly like an http failure — siblings
+#   keep running. `SourceBinding` gained `type` (default "http"), optional
+#   `sense_id`/`action`/`params` (params are STATIC in v1 — no `{state.x}`
+#   evaluation). `path` is now optional (required only for http, enforced at
+#   run). `run_sources` gained an optional `workspace_id`, threaded with the
+#   existing `pocket_id`/`user_id` into `_run_one` for sense resolution.
 
 from __future__ import annotations
 
@@ -102,11 +115,20 @@ class SourceBinding(BaseModel):
     honored. ``None`` means "use the floor as the interval".
     """
 
+    type: Literal["http", "sense"] = "http"
     method: Literal["GET"] = "GET"
-    path: str
+    # ``path`` is required for http sources, unused for sense sources. Kept
+    # optional here so a sense entry survives parse; the http path raises a
+    # clean per-source error if a misconfigured http source has no path.
+    path: str | None = None
     bind: str
     refresh: list[RefreshTrigger] = Field(default_factory=lambda: _DEFAULT_REFRESH.copy())
     refresh_interval_seconds: int | None = Field(default=None, ge=1)
+    # Sense-source fields (type == "sense"). ``params`` are STATIC in v1 —
+    # passed through to the Sense resolver as-is (no ``{state.x}`` evaluation).
+    sense_id: str | None = None
+    action: str | None = None
+    params: dict | None = None
 
 
 def _normalize_bind(bind: str) -> str:
@@ -222,6 +244,52 @@ def _parse_bindings(ripple_spec: dict) -> tuple[dict[str, SourceBinding], list[d
     return bindings, errors
 
 
+async def _run_sense_binding(
+    *,
+    key: str,
+    binding: SourceBinding,
+    workspace_id: str | None,
+    pocket_id: str,
+    user_id: str,
+) -> dict:
+    """Resolve a ``type="sense"`` source via the Sense resolver.
+
+    Returns the SAME success row shape the http path returns —
+    ``{"source", "bind", "value"}`` — with ``value`` UNWRAPPED to the
+    underlying ``ExecuteActionResponse.data`` payload (state gets the actual
+    data, not the envelope). On a resolver refusal (``ok=False`` — no
+    provider, or read-first approval gate) it raises ``_SourceError`` with
+    the resolver's stable code/message, so the aggregation loop treats it as
+    a per-source error exactly like an http failure (does NOT abort siblings).
+
+    ``params`` are STATIC in v1 — passed through as-is (no ``{state.x}``).
+    """
+    # Lazy import: avoids a top-level cycle and keeps the SSRF/http core of
+    # this module importable without the senses subsystem.
+    from pocketpaw_ee.cloud.senses.resolver import execute_sense
+
+    result = await execute_sense(
+        binding.sense_id,
+        binding.action,
+        binding.params or {},
+        workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+    )
+    if not result.ok:
+        # Map the resolver refusal onto the same per-source error shape http
+        # failures use, so ``run_sources``'s error aggregation is unchanged.
+        raise _SourceError(
+            result.message or "sense source failed",
+            code=result.error or "sense_error",
+        )
+
+    # result.data is the ExecuteActionResponse; result.data.data is the
+    # payload that should land in pocket state.
+    payload = getattr(result.data, "data", None)
+    return {"source": key, "bind": _normalize_bind(binding.bind), "value": payload}
+
+
 async def _run_one(
     *,
     client: httpx.AsyncClient,
@@ -229,10 +297,30 @@ async def _run_one(
     binding: SourceBinding,
     base_url: str,
     headers: dict[str, str],
+    workspace_id: str | None,
+    pocket_id: str,
+    user_id: str,
 ) -> dict:
     """Fetch a single source. Returns a ``ran`` row; raises ``_GuardError``
     (the shared guard rejections) or its ``_SourceError`` subclass (the
-    read executor's own per-source failures)."""
+    read executor's own per-source failures).
+
+    Branches on ``binding.type``: a ``"sense"`` source resolves via the
+    Sense resolver (``_run_sense_binding``); the default ``"http"`` source
+    runs the SSRF-guarded GET below, unchanged."""
+    if binding.type == "sense":
+        return await _run_sense_binding(
+            key=key,
+            binding=binding,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+        )
+
+    if not binding.path:
+        # An http source with no path is a misconfiguration — surface it as a
+        # clean per-source error rather than crashing _resolve_url.
+        raise _SourceError("http source has no path", code="bad_source")
     url = _resolve_url(base_url, binding.path)
     await _assert_host_external(urllib.parse.urlsplit(url).hostname or "")
 
@@ -278,6 +366,7 @@ async def run_sources(
     token: str,
     trigger: str | None = None,
     only_source: str | None = None,
+    workspace_id: str | None = None,
 ) -> dict:
     """Run the pocket's selected read-only sources and return the results.
 
@@ -363,6 +452,9 @@ async def run_sources(
                         binding=binding,
                         base_url=base_url,
                         headers=headers,
+                        workspace_id=workspace_id,
+                        pocket_id=pocket_id,
+                        user_id=user_id,
                     ),
                     timeout=_PER_SOURCE_TIMEOUT_S,
                 )

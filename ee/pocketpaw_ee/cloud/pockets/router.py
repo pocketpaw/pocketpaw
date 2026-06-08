@@ -697,6 +697,7 @@ async def run_pocket_sources(
         token=token,
         trigger=body.trigger,
         only_source=body.source,
+        workspace_id=workspace_id,
     )
 
 
@@ -782,6 +783,7 @@ async def webhook_refresh_source(
         auth_header=auth_header,
         token=token,
         only_source=source,
+        workspace_id=workspace_id,
     )
 
 
