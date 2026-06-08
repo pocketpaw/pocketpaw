@@ -20,6 +20,13 @@ Pieces
   ``POCKETPAW_CLOUD_SCHEDULER_ENABLED`` and wired into ``mount_cloud``.
 * ``models.member_ingest_state.MemberIngestState`` — per-member sync status
   (last_sync_at, status, backfill_done, per-source cursors).
+* ``purge.purge_member_data`` — the INVERSE of ``ingest_member`` (chunk 7).
+  When a member disconnects their accounts or is offboarded, deletes ALL of
+  their per-user data keyed on the opaque member id: the ``user:{member_id}``
+  KB scope, their per-user OAuth tokens, their per-user WorkspaceConnector
+  rows, and their MemberIngestState. Idempotent + per-member isolated. Wired
+  to (a) connectors.service.disconnect_member (the member self-disconnect
+  endpoint) and (b) workspace.service.remove_member (the offboard cascade).
 
 Follow-ups (v1 deliberately ships a solid-but-bounded slice — see the chunk
 report's CONCERNS):

@@ -27,6 +27,11 @@ slug-available check, and create() now also rejects reserved slugs.
 a ConflictError (409) instead of letting it escape as an unhandled 500 — the
 leftover unique index on the nullable legacy ``token`` column made every
 second invite collide on ``token=null``.
+2026-06-08 (Phase B chunk 7): remove_member now runs a 4th best-effort cascade
+— purge_member_data — so an offboarded member's personal Gmail/calendar (their
+private ``user:{id}`` KB scope), per-user OAuth tokens, connector rows, and
+ingest-state are deleted. The purge counts land in the audit row's cascade
+metadata.
 """
 
 from __future__ import annotations
@@ -613,6 +618,27 @@ async def remove_member(
             exc_info=True,
         )
 
+    # Phase B per-user data purge — an offboarded member's PERSONAL Gmail/
+    # calendar (ingested into their private ``user:{id}`` KB scope), their
+    # per-user OAuth tokens, connector rows, and ingest-state must be deleted:
+    # it's their personal data; leaving the workspace must purge it. Lazy
+    # import keeps the workspace service free of a member_ingest dependency at
+    # module load. Best-effort like the cascades above — purge_member_data is
+    # itself idempotent and isolates per-store failures, so a worst case here
+    # is one logged warning, never a blocked offboard.
+    member_data_purged: dict | None = None
+    try:
+        from pocketpaw_ee.cloud.member_ingest.purge import purge_member_data
+
+        member_data_purged = await purge_member_data(workspace_id, target_user_id)
+    except Exception:
+        logger.warning(
+            "remove_member: member-data purge failed for user=%s ws=%s",
+            target_user_id,
+            workspace_id,
+            exc_info=True,
+        )
+
     await event_bus.emit(
         "member.removed",
         {
@@ -647,6 +673,9 @@ async def remove_member(
                 "api_keys_revoked": api_keys_revoked,
                 "sessions_revoked": sessions_revoked,
                 "invites_revoked": invites_revoked,
+                # Phase B: what the per-user data purge removed (None if the
+                # purge step itself raised — the warning above has the detail).
+                "member_data_purged": member_data_purged,
             },
         },
     )

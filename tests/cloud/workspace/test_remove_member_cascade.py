@@ -6,6 +6,9 @@ Asserts that ``remove_member`` cascades through:
   populated for the per-token denylist)
 - Pending invites the user issued for this workspace
   (``revoked_reason='inviter_removed'``)
+- Phase B per-user data purge (chunk 7): the offboarded member's private
+  ``user:{id}`` KB scope, per-user OAuth tokens, per-user connector rows, and
+  ingest-state are deleted — a SECOND member in the same workspace is untouched
 - An audit-log row with the cascade counts in ``metadata``
 """
 
@@ -184,11 +187,17 @@ async def test_remove_member_audit_counts_zero_when_nothing_to_revoke(fake_redis
     ).to_list()
     assert len(audit_rows) == 1
     cascade = audit_rows[0].metadata.get("cascade") or {}
-    assert cascade == {
-        "api_keys_revoked": 0,
-        "sessions_revoked": 0,
-        "invites_revoked": 0,
-    }
+    # Phase B chunk 7 added the member-data purge as a 4th cascade. With nothing
+    # connected, the purge runs cleanly and reports zero deletes.
+    assert cascade["api_keys_revoked"] == 0
+    assert cascade["sessions_revoked"] == 0
+    assert cascade["invites_revoked"] == 0
+    purged = cascade["member_data_purged"]
+    assert purged is not None
+    assert purged["status"] == "ok"
+    assert purged["tokens_deleted"] == 0
+    assert purged["connectors_deleted"] == 0
+    assert purged["ingest_state_deleted"] is False
 
 
 async def test_remove_member_skips_already_revoked_api_keys(fake_redis) -> None:
@@ -218,3 +227,98 @@ async def test_remove_member_skips_already_revoked_api_keys(fake_redis) -> None:
         AuditEvent.action == "workspace.member_removed",
     ).to_list()
     assert audit_rows[0].metadata["cascade"]["api_keys_revoked"] == 1
+
+
+async def test_remove_member_purges_phase_b_data_and_isolates_other_member(
+    fake_redis, tmp_path, monkeypatch
+) -> None:
+    """Offboarding a member purges their Phase B per-user data; a SECOND member
+    in the same workspace keeps theirs (the isolation invariant at the trigger
+    level, not just inside purge_member_data)."""
+    from pocketpaw.clients.token_store import OAuthTokens, TokenStore
+    from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+    from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
+
+    # Root the token store at a tmp dir + stub kb clear so no kb binary is hit.
+    monkeypatch.setattr("pocketpaw.clients.token_store.get_config_dir", lambda: tmp_path)
+    cleared: list[str] = []
+
+    async def _fake_kb_clear(scope: str) -> dict:
+        cleared.append(scope)
+        return {"cleared": scope}
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.member_ingest.purge._default_kb_clear", _fake_kb_clear)
+
+    owner = await _seed_user(email="owner@x.c")
+    target = await _seed_user(email="target@x.c")
+    bystander = await _seed_user(email="bystander@x.c")
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    await workspace_service._add_member(ws.id, str(target.id), role="member")
+    await workspace_service._add_member(ws.id, str(bystander.id), role="member")
+
+    tid, bid = str(target.id), str(bystander.id)
+    store = TokenStore()
+
+    # Seed Phase B data for BOTH the target and the bystander.
+    for uid in (tid, bid):
+        store.save(OAuthTokens(service="google_gmail", access_token="g"), user_id=uid)
+        store.save(OAuthTokens(service="google_calendar", access_token="c"), user_id=uid)
+        await WorkspaceConnector(workspace=ws.id, name="gmail", scope="user", user_id=uid).insert()
+        await MemberIngestState(
+            workspace=ws.id, member_id=uid, backfill_done=True, status="ok"
+        ).insert()
+
+    # Offboard the target.
+    await workspace_service.remove_member(ws.id, tid, str(owner.id))
+
+    # Target's Phase B data is gone.
+    assert cleared == [f"user:{tid}"]
+    assert store.load("google_gmail", tid) is None
+    assert store.load("google_calendar", tid) is None
+    assert (
+        await WorkspaceConnector.find(
+            WorkspaceConnector.workspace == ws.id,
+            WorkspaceConnector.user_id == tid,
+        ).to_list()
+        == []
+    )
+    assert (
+        await MemberIngestState.find_one(
+            MemberIngestState.workspace == ws.id,
+            MemberIngestState.member_id == tid,
+        )
+        is None
+    )
+
+    # The bystander's Phase B data is fully intact.
+    assert store.load("google_gmail", bid) is not None
+    assert store.load("google_calendar", bid) is not None
+    assert (
+        len(
+            await WorkspaceConnector.find(
+                WorkspaceConnector.workspace == ws.id,
+                WorkspaceConnector.user_id == bid,
+            ).to_list()
+        )
+        == 1
+    )
+    assert (
+        await MemberIngestState.find_one(
+            MemberIngestState.workspace == ws.id,
+            MemberIngestState.member_id == bid,
+        )
+        is not None
+    )
+
+    # Audit row records what the purge removed.
+    audit_rows = await AuditEvent.find(
+        AuditEvent.workspace == ws.id,
+        AuditEvent.action == "workspace.member_removed",
+    ).to_list()
+    purged = audit_rows[0].metadata["cascade"]["member_data_purged"]
+    assert purged["status"] == "ok"
+    assert purged["tokens_deleted"] == 2
+    assert purged["connectors_deleted"] == 1
+    assert purged["ingest_state_deleted"] is True

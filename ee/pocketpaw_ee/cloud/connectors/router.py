@@ -9,6 +9,16 @@
 # to all mutation endpoints. execute → connector.execute (MEMBER); enable /
 # disable / config → connector.manage (ADMIN). Read-only routes (GET list,
 # GET detail, GET widget-recipes) retain require_license only.
+# Updated: 2026-06-08 (Phase B chunk 7) — added the member self-disconnect
+#   endpoint POST /cloud/connectors/me/disconnect. It purges the CALLER's own
+#   per-user Phase B data (KB scope, OAuth tokens, connector rows, ingest
+#   state). Auth note: unlike the ADMIN-gated workspace-management mutations
+#   (enable/disable/config — ``connector.manage``), this acts on the member's
+#   OWN personal data, so it is MEMBER-level and hard-bound to ``current_user_
+#   id``. The self-binding (member_id == caller) IS the protection — it mirrors
+#   the chat-path KB gate's per-user scope binding, the correct sibling for a
+#   per-user data operation. Admin-gating would wrongly block a member from
+#   disconnecting their own accounts.
 
 from __future__ import annotations
 
@@ -18,6 +28,7 @@ from pocketpaw_ee.cloud.connectors import service as connectors_service
 from pocketpaw_ee.cloud.connectors.dto import (
     ConnectorDetailResponse,
     ConnectorResponse,
+    DisconnectMemberResponse,
     EnableConnectorRequest,
     ExecuteActionRequest,
     ExecuteActionResponse,
@@ -134,6 +145,33 @@ async def disable_connector(
 ) -> ConnectorResponse:
     """Soft-disable a connector. Config + history survive."""
     return await connectors_service.disable_connector(workspace_id, name)
+
+
+@router.post("/me/disconnect", response_model=DisconnectMemberResponse)
+async def disconnect_member(
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> DisconnectMemberResponse:
+    """Disconnect the CALLER's own per-user accounts and purge their data.
+
+    A member ending their Phase B connection: deletes their private
+    ``user:{id}`` KB scope (ingested mail/calendar), their per-user OAuth
+    tokens, their per-user connector rows, and their ingest-state. Bound to the
+    authenticated caller (``user_id`` IS the member id) so no member can ever
+    purge another's data. Idempotent — re-disconnecting is a clean no-op.
+
+    MEMBER-level by design (no ``connector.manage`` admin guard): a member must
+    be able to disconnect their own personal accounts. See the module header.
+    """
+    result = await connectors_service.disconnect_member(workspace_id, user_id)
+    return DisconnectMemberResponse(
+        status=result["status"],
+        scope=result["scope"],
+        kb_cleared=result["kb_cleared"],
+        tokens_deleted=result["tokens_deleted"],
+        connectors_deleted=result["connectors_deleted"],
+        ingest_state_deleted=result["ingest_state_deleted"],
+    )
 
 
 @router.patch(
