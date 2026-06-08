@@ -39,6 +39,7 @@ from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.notifications import service as notifications_service
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import (
+    GroupUpdated,
     MessageDeleted,
     MessageEdited,
     MessageNew,
@@ -393,7 +394,10 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         )
 
     if group.archived:
-        raise Forbidden("group.archived", "Cannot send messages to an archived group")
+        # Unarchive the group so the user can resume the conversation
+        # (DM "delete" only hides/archives, not permanently blocks).
+        await group_service._update_group_fields(group_id, archived=False)
+        await emit(GroupUpdated(data={"group_id": group_id, "archived": False}))
 
     domain_msg = await _create_group_message_doc(
         group_id=group_id,
