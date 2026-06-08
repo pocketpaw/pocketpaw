@@ -15,6 +15,16 @@ from ee.cloud.file_versions.dto import (
     UpdateFileContentRequest,
     WriteFileRequest,
 )
+from ee.cloud.file_versions.spreadsheet_dto import (
+    SpreadsheetEditRequest,
+    SpreadsheetEditResponse,
+    SyncSpreadsheetContextRequest,
+)
+from ee.cloud.file_versions.slides_dto import (
+    SlidesEditRequest,
+    SlidesEditResponse,
+    SyncSlidesContextRequest,
+)
 from ee.cloud.license import require_license
 from ee.cloud.shared.deps import current_user_id, current_workspace_id
 
@@ -378,4 +388,353 @@ async def get_editing_context(
     if blocks is None:
         return JSONResponse(status_code=404, content={"detail": "No editing session active."})
     return JSONResponse(status_code=200, content={"blocks": blocks})
+
+
+# ---------------------------------------------------------------------------
+# POST /files/{id}/spreadsheet-edit — AI-assisted spreadsheet editing
+# ---------------------------------------------------------------------------
+
+
+def _build_spreadsheet_system_prompt(
+    snapshot: dict,
+    selected_sheet: str | None,
+    user_prompt: str,
+) -> str:
+    """Build the system prompt for spreadsheet AI editing."""
+    from pocketpaw.tools.builtin.edit_spreadsheet import build_spreadsheet_prompt_context
+
+    ctx = build_spreadsheet_prompt_context(snapshot=snapshot, selected_sheet=selected_sheet)
+    if ctx is None:
+        ctx = (
+            "The workbook is currently empty (no sheets). "
+            "Use the edit_spreadsheet tool to create the first sheet and populate it."
+        )
+    return (
+        f"{ctx}\n\nThe user's request: {user_prompt}\n\n"
+        "After making your edits, briefly tell the user what you changed."
+    )
+
+
+@router.post("/{file_id}/spreadsheet-edit")
+async def spreadsheet_ai_edit(
+    file_id: str,
+    body: SpreadsheetEditRequest,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Run an AI agent to edit spreadsheet content.
+
+    Parses the workbook snapshot JSON, stores it in a per-request ContextVar
+    so the ``edit_spreadsheet`` MCP tool can access it, and runs the
+    workspace's default agent. Returns the final snapshot to the frontend.
+    """
+    body = SpreadsheetEditRequest.model_validate(body)
+
+    import json as _json
+
+    try:
+        snapshot: dict = _json.loads(body.content)
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+    except (_json.JSONDecodeError, TypeError):
+        snapshot = {}
+
+    # Deep-copy so mutations don't touch the parsed JSON
+    snapshot = _json.loads(_json.dumps(snapshot))
+
+    system_prompt = _build_spreadsheet_system_prompt(
+        snapshot=snapshot,
+        selected_sheet=body.selected_sheet,
+        user_prompt=body.prompt,
+    )
+
+    from pocketpaw.tools.builtin.edit_spreadsheet import (
+        clear_edit_session,
+        clear_selected_sheet,
+        set_edit_session,
+        set_selected_sheet,
+        set_spreadsheet_snapshot,
+    )
+
+    set_edit_session(snapshot)
+    set_spreadsheet_snapshot(file_id, snapshot)
+    set_selected_sheet(body.selected_sheet)
+
+    try:
+        from pocketpaw.agents.pool import get_agent_pool
+
+        pool = get_agent_pool()
+
+        from ee.cloud.agents import service as agents_service
+
+        agents = await agents_service.list_agents(workspace_id)
+        agent_id = agents[0].id if agents else None
+
+        if not agent_id:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "spreadsheet_edit.no_agent",
+                    "message": "No agent available in this workspace.",
+                },
+            )
+
+        session_key = f"cloud:spreadsheet-edit:{file_id}:{agent_id}"
+        summary_parts: list[str] = []
+
+        async for event in pool.run(
+            agent_id,
+            body.prompt,
+            session_key,
+            knowledge_context=system_prompt,
+        ):
+            if event.type == "message":
+                summary_parts.append(str(event.content))
+            elif event.type == "error":
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "detail": "spreadsheet_edit.agent_error",
+                        "message": str(event.content),
+                    },
+                )
+            elif event.type == "done":
+                break
+
+        final_snapshot = snapshot
+
+        return JSONResponse(
+            content=SpreadsheetEditResponse(
+                snapshot=final_snapshot,
+                summary="".join(summary_parts).strip() or "Spreadsheet edited.",
+            ).model_dump(by_alias=True)
+        )
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "spreadsheet_edit.failed", "message": str(exc)},
+        )
+    finally:
+        clear_edit_session()
+        clear_selected_sheet()
+
+
+# ---------------------------------------------------------------------------
+# PUT /files/{id}/spreadsheet-context — Sync spreadsheet snapshot before chat
+# ---------------------------------------------------------------------------
+
+
+@router.put("/{file_id}/spreadsheet-context")
+async def sync_spreadsheet_context(
+    file_id: str,
+    body: SyncSpreadsheetContextRequest,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Store the current workbook snapshot so the chat agent's MCP tool can
+    access it during chat-initiated spreadsheet editing."""
+    from pocketpaw.tools.builtin.edit_spreadsheet import (
+        set_selected_sheet,
+        set_spreadsheet_snapshot,
+    )
+
+    set_spreadsheet_snapshot(file_id, body.snapshot)
+    if body.selected_sheet:
+        set_selected_sheet(body.selected_sheet)
+    return JSONResponse(status_code=200, content={"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# GET /files/{id}/spreadsheet-context — Fetch updated snapshot after chat
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{file_id}/spreadsheet-context")
+async def get_spreadsheet_context(
+    file_id: str,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Return the current workbook snapshot for a file (may have been mutated
+    by the edit_spreadsheet MCP tool during a chat session)."""
+    from pocketpaw.tools.builtin.edit_spreadsheet import get_spreadsheet_snapshot
+
+    snapshot = get_spreadsheet_snapshot(file_id)
+    if snapshot is None:
+        return JSONResponse(status_code=404, content={"detail": "No spreadsheet editing session active."})
+    return JSONResponse(status_code=200, content={"snapshot": snapshot})
+
+
+# ---------------------------------------------------------------------------
+# POST /files/{id}/slides-edit -- AI-assisted slides editing
+# ---------------------------------------------------------------------------
+
+
+def _build_slides_system_prompt(
+    deck: dict,
+    selected_slide_id: str | None,
+    user_prompt: str,
+) -> str:
+    """Build the system prompt for slides AI editing."""
+    from pocketpaw.tools.builtin.edit_slides import build_slides_prompt_context
+
+    ctx = build_slides_prompt_context(deck=deck, selected_slide_id=selected_slide_id)
+    if ctx is None:
+        ctx = (
+            "The slide deck is currently empty (no slides). "
+            "Use the edit_slides tool to create slides and populate them."
+        )
+    return (
+        f"{ctx}\n\nThe user's request: {user_prompt}\n\n"
+        "After making your edits, briefly tell the user what you changed."
+    )
+
+
+@router.post("/{file_id}/slides-edit")
+async def slides_ai_edit(
+    file_id: str,
+    body: SlidesEditRequest,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Run an AI agent to edit slides content.
+
+    Parses the slides deck JSON, stores it in a per-request ContextVar
+    so the ``edit_slides`` MCP tool can access it, and runs the
+    workspace's default agent. Returns the final deck to the frontend.
+    """
+    body = SlidesEditRequest.model_validate(body)
+
+    import json as _json
+
+    deck: dict = body.content
+    if not isinstance(deck, dict):
+        deck = {}
+
+    # Deep-copy so mutations don't touch the parsed JSON
+    deck = _json.loads(_json.dumps(deck))
+
+    system_prompt = _build_slides_system_prompt(
+        deck=deck,
+        selected_slide_id=body.selected_slide_id,
+        user_prompt=body.prompt,
+    )
+
+    from pocketpaw.tools.builtin.edit_slides import (
+        clear_edit_session,
+        clear_selected_slide_id,
+        set_edit_session,
+        set_selected_slide_id,
+        set_slides_data,
+    )
+
+    set_edit_session(deck)
+    set_slides_data(file_id, deck)
+    set_selected_slide_id(body.selected_slide_id)
+
+    try:
+        from pocketpaw.agents.pool import get_agent_pool
+
+        pool = get_agent_pool()
+
+        from ee.cloud.agents import service as agents_service
+
+        agents = await agents_service.list_agents(workspace_id)
+        agent_id = agents[0].id if agents else None
+
+        if not agent_id:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "slides_edit.no_agent",
+                    "message": "No agent available in this workspace.",
+                },
+            )
+
+        session_key = f"cloud:slides-edit:{file_id}:{agent_id}"
+        summary_parts: list[str] = []
+
+        async for event in pool.run(
+            agent_id,
+            body.prompt,
+            session_key,
+            knowledge_context=system_prompt,
+        ):
+            if event.type == "message":
+                summary_parts.append(str(event.content))
+            elif event.type == "error":
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "detail": "slides_edit.agent_error",
+                        "message": str(event.content),
+                    },
+                )
+            elif event.type == "done":
+                break
+
+        final_deck = deck
+
+        return JSONResponse(
+            content=SlidesEditResponse(
+                content=final_deck,
+                summary="".join(summary_parts).strip() or "Slides edited.",
+            ).model_dump(by_alias=True)
+        )
+
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "slides_edit.failed", "message": str(exc)},
+        )
+    finally:
+        clear_edit_session()
+        clear_selected_slide_id()
+
+
+# ---------------------------------------------------------------------------
+# PUT /files/{id}/slides-context -- Sync slides deck before chat
+# ---------------------------------------------------------------------------
+
+
+@router.put("/{file_id}/slides-context")
+async def sync_slides_context(
+    file_id: str,
+    body: SyncSlidesContextRequest,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Store the current slides deck so the chat agent's MCP tool can
+    access it during chat-initiated slides editing."""
+    from pocketpaw.tools.builtin.edit_slides import (
+        set_selected_slide_id,
+        set_slides_data,
+    )
+
+    set_slides_data(file_id, body.content)
+    if body.selected_slide_id:
+        set_selected_slide_id(body.selected_slide_id)
+    return JSONResponse(status_code=200, content={"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# GET /files/{id}/slides-context -- Fetch updated deck after chat
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{file_id}/slides-context")
+async def get_slides_context(
+    file_id: str,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> JSONResponse:
+    """Return the current slides deck for a file (may have been mutated
+    by the edit_slides MCP tool during a chat session)."""
+    from pocketpaw.tools.builtin.edit_slides import get_slides_data
+
+    deck = get_slides_data(file_id)
+    if deck is None:
+        return JSONResponse(status_code=404, content={"detail": "No slides editing session active."})
+    return JSONResponse(status_code=200, content={"content": deck})
 
