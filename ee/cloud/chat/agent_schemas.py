@@ -39,6 +39,14 @@ class CloudAgentChatRequest(BaseModel):
     # open file. The agent_router injects them into the system prompt so the
     # agent can call ``edit_document`` to make changes.
     editor_blocks: list[dict[str, Any]] | None = None
+    # Univer workbook snapshot from the spreadsheet editor, if the chat is
+    # scoped to an open spreadsheet file. The agent_router injects it into
+    # the system prompt so the agent can call ``edit_spreadsheet``.
+    spreadsheet_snapshot: dict[str, Any] | None = None
+    # Slides deck JSON from the slides editor, if the chat is scoped to an
+    # open slides file. The agent_router injects it into the system prompt so
+    # the agent can call ``edit_slides`` to make changes.
+    slides_data: dict[str, Any] | None = None
 
 
 class SseEventName(StrEnum):

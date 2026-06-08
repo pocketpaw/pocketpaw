@@ -338,6 +338,34 @@ async def _run_agent_stream(
         if editor_ctx:
             knowledge_context = f"{knowledge_context}\n\n{editor_ctx}"
 
+    from pocketpaw.tools.builtin.edit_spreadsheet import (
+        build_spreadsheet_prompt_context,
+        clear_edit_session as clear_spreadsheet_session,
+        get_edit_session as get_spreadsheet_session,
+        set_edit_session as set_spreadsheet_session,
+    )
+
+    if body.spreadsheet_snapshot:
+        snapshot_copy = json.loads(json.dumps(body.spreadsheet_snapshot))
+        set_spreadsheet_session(snapshot_copy)
+        spreadsheet_ctx = build_spreadsheet_prompt_context(snapshot=snapshot_copy)
+        if spreadsheet_ctx:
+            knowledge_context = f"{knowledge_context}\n\n{spreadsheet_ctx}"
+
+    from pocketpaw.tools.builtin.edit_slides import (
+        build_slides_prompt_context,
+        clear_edit_session as clear_slides_session,
+        get_edit_session as get_slides_session,
+        set_edit_session as set_slides_session,
+    )
+
+    if body.slides_data:
+        slides_copy = json.loads(json.dumps(body.slides_data))
+        set_slides_session(slides_copy)
+        slides_ctx = build_slides_prompt_context(deck=slides_copy)
+        if slides_ctx:
+            knowledge_context = f"{knowledge_context}\n\n{slides_ctx}"
+
     await _broadcast_agent_typing(ctx, active=True)
 
     stream_start_payload: dict[str, Any] = {
@@ -393,6 +421,8 @@ async def _run_agent_stream(
     full_text = ""
     cancelled = False
     _editor_blocks_result: list[dict[str, Any]] | None = None
+    _spreadsheet_snapshot_result: dict[str, Any] | None = None
+    _slides_data_result: dict[str, Any] | None = None
     try:
         async for event in pool.run(
             ctx.target_agent_id,
@@ -442,6 +472,19 @@ async def _run_agent_stream(
         except Exception:
             logger.debug("get_edit_session failed", exc_info=True)
 
+        # Extract spreadsheet snapshot before finally clears the session.
+        try:
+            _spreadsheet_snapshot_result = get_spreadsheet_session()
+        except Exception:
+            logger.debug("get_spreadsheet_session failed", exc_info=True)
+
+        # Extract slides deck before finally clears the session.
+        try:
+            _slides_data_result = get_slides_session()
+        except Exception:
+            logger.debug("get_slides_session failed", exc_info=True)
+            _slides_data_result = None
+
     except Exception as e:
         logger.exception("Cloud agent run failed for agent=%s", ctx.target_agent_id)
         yield ("error", {"code": "agent.run_failed", "message": str(e)})
@@ -458,6 +501,14 @@ async def _run_agent_stream(
             pass
         try:
             clear_edit_session()
+        except Exception:
+            pass
+        try:
+            clear_spreadsheet_session()
+        except Exception:
+            pass
+        try:
+            clear_slides_session()
         except Exception:
             pass
 
@@ -501,6 +552,8 @@ async def _run_agent_stream(
                 "usage": {},
                 "cancelled": cancelled,
                 "editor_blocks": _editor_blocks_result,
+                "spreadsheet_snapshot": _spreadsheet_snapshot_result,
+                "slides_data": _slides_data_result,
             },
         )
         await _broadcast_agent_typing(ctx, active=False)
@@ -531,6 +584,8 @@ async def _run_agent_stream(
             "usage": {},
             "cancelled": False,
             "editor_blocks": _editor_blocks_result,
+            "spreadsheet_snapshot": _spreadsheet_snapshot_result,
+            "slides_data": _slides_data_result,
         },
     )
 
