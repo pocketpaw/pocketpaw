@@ -289,6 +289,64 @@ the 2 MB cap, the document is unparseable, or it carries no `paths`
 object. Every install is audit-logged with the workspace, the actor, and
 the resulting slug — never the spec contents.
 
+## Plugins — Install a `.claude-plugin`'s Skills
+
+PocketPaw adopts the `.claude-plugin` standard so a whole plugin's skills
+install in one step. This endpoint clones a GitHub repo, reads its
+`.claude-plugin/plugin.json`, copies each `skills/<name>/SKILL.md`
+directory into the skill loader path, reloads the loader, and records the
+install in a registry at `~/.pocketpaw/plugins.json`.
+
+> Scope note: this slice installs **skills only**. A plugin's MCP servers
+> and the list/remove surface ship in follow-up endpoints.
+
+### `POST /plugins/install`
+
+Install a plugin's skills from a GitHub source. Requires the **admin**
+scope — installing skills changes workspace-wide agent behaviour.
+
+Request body:
+
+```json
+{ "source": "owner/repo" }
+```
+
+`source` accepts `owner/repo`, `owner/repo/subdir` (when the plugin lives
+in a subdirectory), or a full GitHub URL (a `/tree/<ref>/<subdir>` path is
+honoured). The repo (or subdir) must contain a `.claude-plugin/plugin.json`
+manifest and at least one `skills/<name>/SKILL.md`.
+
+Response `200` — a step-by-step install report:
+
+```json
+{
+  "plugin": "my-plugin",
+  "installed_at": "2026-06-07T12:00:00",
+  "steps": [
+    { "name": "read_manifest", "status": "succeeded", "detail": "my-plugin v1.2.3" },
+    { "name": "skill:alpha", "status": "succeeded", "detail": "" },
+    { "name": "reload_loader", "status": "succeeded", "detail": "" },
+    { "name": "record_registry", "status": "succeeded", "detail": "" }
+  ],
+  "installed_skills": ["alpha"]
+}
+```
+
+Each unit of work is a step with status `succeeded` / `skipped` /
+`failed`, so a per-skill copy failure surfaces in the report rather than
+aborting the whole install. Up-front failures return clear status codes
+instead of `500`:
+
+| Status | When |
+|--------|------|
+| `400` | Missing or malformed `source`, or an invalid `plugin.json`. |
+| `404` | No `.claude-plugin/plugin.json`, or no skills found in the plugin. |
+| `502` | The git clone failed. |
+| `504` | The git clone timed out. |
+
+Every install is audit-logged with the source, plugin name, version, and
+the installed skill names.
+
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 
 Increment 5. The Ripple renderer has a **closed widget registry**: a

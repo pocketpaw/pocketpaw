@@ -10,6 +10,9 @@
 # Updated: 2026-04-16 (feat/widget-journal-projection) — Added the
 #   Widgets router — journal-backed widget graduation + co-occurrence
 #   (supersedes held PRs #941 / #942).
+# Updated: 2026-06-07 (feat/plugin-installer-skills) — Added the Plugins
+#   router (POST /api/v1/plugins/install) for the .claude-plugin installer
+#   (skills slice). Non-critical: mounts best-effort like the rest.
 #
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
@@ -36,6 +39,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.memory", "router", "Memory"),
     ("pocketpaw.api.v1.mcp", "router", "MCP"),
     ("pocketpaw.api.v1.skills", "router", "Skills"),
+    ("pocketpaw.api.v1.plugins", "router", "Plugins"),
     ("pocketpaw.api.v1.webhooks", "router", "Webhooks"),
     ("pocketpaw.api.v1.backends", "router", "Backends"),
     ("pocketpaw.api.v1.api_keys", "router", "API Keys"),
