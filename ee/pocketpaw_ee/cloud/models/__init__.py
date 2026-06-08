@@ -64,6 +64,7 @@ from pocketpaw_ee.cloud.models.meeting import (
     MeetingsSettings,
     MeetingTranscript,
 )
+from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -145,6 +146,7 @@ __all__ = [
     "MeetingProviderCredentials",
     "MeetingsSettings",
     "MeetingTranscript",
+    "MemberIngestState",
     "Mention",
     "Message",
     "Notification",
@@ -206,6 +208,7 @@ def get_all_documents():
         MeetingTranscript,
         MeetingProviderCredentials,
         MeetingsSettings,
+        MemberIngestState,
         # Calendar — sibling enterprise package.
         _CalendarDoc,
         _EventDoc,

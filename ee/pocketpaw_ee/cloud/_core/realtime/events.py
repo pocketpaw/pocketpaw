@@ -740,6 +740,14 @@ class ConnectorSyncRecorded(Event):
     EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
 
 
+# Member ingest — VIP Onboarding Phase B. Fired when the per-user ingest
+# worker finishes a member's Gmail/Calendar → private-KB sync (backfill or
+# incremental). data: workspace_id, member_id, scope, mode, status, documents.
+@dataclass
+class MemberIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.completed"
+
+
 # Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
 # are defined above with the rest of the LiveKit group-call types; this is the
 # post-call notes fan-out, audience = the group's members.

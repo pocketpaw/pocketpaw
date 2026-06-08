@@ -661,6 +661,26 @@ def mount_cloud(app: FastAPI) -> None:
 
             await stop_in_process_scheduler(app)
 
+    # Per-user member-ingest sweep (VIP Onboarding Phase B). Every 5 minutes
+    # (POCKETPAW_MEMBER_INGEST_INTERVAL_SECONDS override) it backfills/
+    # incrementally syncs each consented member's Gmail + Calendar into their
+    # private ``user:{member_id}`` KB scope. Same scheduler gate as the
+    # cycle/decisions loops so pytest runs never spawn a background loop that
+    # outlives the test; production sets POCKETPAW_CLOUD_SCHEDULER_ENABLED=true.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.member_ingest.scheduler import (
+            start_member_ingest,
+            stop_member_ingest,
+        )
+
+        @app.on_event("startup")
+        async def _start_member_ingest() -> None:
+            await start_member_ingest(app)
+
+        @app.on_event("shutdown")
+        async def _stop_member_ingest() -> None:
+            await stop_member_ingest(app)
+
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe
     # AFTER init_realtime installed the singleton bus.
