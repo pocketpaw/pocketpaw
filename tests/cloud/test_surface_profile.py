@@ -147,3 +147,44 @@ def test_resolve_profile_sites_refine_keeps_ripple():
         assert profile.deny_mcp_tool_ids == frozenset(), (
             f"refine meta {meta!r} must deny nothing — it edits an existing ripple spec"
         )
+
+
+# ---------------------------------------------------------------------------
+# Per-mode restrictive MCP allow-list (feat/per-mode-mcp-allowlist). Foresight /
+# Files / Sites carry a lean allow_mcp_tool_ids; Chat stays unrestricted. The
+# "general everywhere" set (widgets, pocket lifecycle, connectors) is enforced
+# by the OSS backend, so these tests only pin the per-mode SPECIALIZED scoping.
+# ---------------------------------------------------------------------------
+
+
+def test_chat_profile_has_no_mcp_restriction():
+    assert resolve_profile(SurfaceKind.CHAT, SurfaceMeta()).allow_mcp_tool_ids is None
+
+
+def test_foresight_profile_scopes_to_foresight_mcp_tools():
+    from pocketpaw_ee.agent.mcp_servers.foresight import RUN_SCENARIO_TOOL_ID
+
+    allow = resolve_profile(SurfaceKind.FORESIGHT, SurfaceMeta()).allow_mcp_tool_ids
+    assert allow is not None
+    assert RUN_SCENARIO_TOOL_ID in allow
+    assert "mcp__pocketpaw_tasks__create_task" not in allow
+
+
+def test_files_profile_is_general_only():
+    # Empty allow-list = general-everywhere only (document scaffolding rides
+    # the built-in tools, which the allow-list never touches).
+    assert resolve_profile(SurfaceKind.FILES, SurfaceMeta()).allow_mcp_tool_ids == frozenset()
+
+
+def test_sites_profiles_scope_to_sites_mcp_tools():
+    from pocketpaw_ee.agent.mcp_servers.sites import CREATE_SVELTE_SITE_TOOL_ID
+
+    ripple_create = resolve_profile(SurfaceKind.SITES, SurfaceMeta())
+    assert ripple_create.allow_mcp_tool_ids is not None
+    assert CREATE_SVELTE_SITE_TOOL_ID in ripple_create.allow_mcp_tool_ids
+
+    svelte_create = resolve_profile(SurfaceKind.SITES, SurfaceMeta(engine="svelte"))
+    assert svelte_create.allow_mcp_tool_ids is not None
+    assert CREATE_SVELTE_SITE_TOOL_ID in svelte_create.allow_mcp_tool_ids
+    # deny still applies on top (runs after allow downstream).
+    assert "mcp__pocketpaw_sites_manager__create_landing_site" in svelte_create.deny_mcp_tool_ids
