@@ -1,4 +1,13 @@
 # router.py — Knowledge base domain router for ee/cloud.
+# Updated: 2026-06-08 (VIP Onboarding Phase B) — bound the client ``scope``
+# override to the caller. The four override-accepting endpoints (search,
+# ingest/text, ingest/url, lint) now resolve ``body.scope`` through
+# ``kb.service.validate_scope_override``, an allowlist (own workspace + visible
+# pockets + workspace agents + the caller's OWN user:) that rejects anything
+# else with Forbidden("kb.scope_forbidden"). This closes the cross-member leak
+# where any authenticated member could read or poison another member's private
+# ``user:{victim}`` KB via the REST door — the same boundary the chat-path gate
+# enforces. Denials are audit-logged at ALERT via ``log_denial``.
 # Updated: 2026-04-07 — Switched from Python knowledge_base package to kb Go binary.
 # All operations delegate to the kb binary via subprocess. Same REST API surface.
 """Knowledge base domain — FastAPI router.
@@ -14,6 +23,7 @@ import logging
 from fastapi import APIRouter, Depends
 
 from pocketpaw_ee.cloud.agents.knowledge import _extract_url, _kb
+from pocketpaw_ee.cloud.kb import service as kb_service
 from pocketpaw_ee.cloud.kb.dto import (
     IngestTextRequest,
     IngestUrlRequest,
@@ -26,7 +36,8 @@ from pocketpaw_ee.cloud.shared.deps import (
     current_workspace_id,
     require_action_any_workspace,
 )
-from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
+from pocketpaw_ee.guards.audit import log_denial
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +45,43 @@ router = APIRouter(prefix="/kb", tags=["Knowledge Base"], dependencies=[Depends(
 
 
 def _scope(workspace_id: str, override: str | None = None) -> str:
+    """Scope for the GET endpoints that accept NO client override.
+
+    These read the caller's active workspace only (``override`` is never
+    threaded from the wire), so the permissive resolve is safe here. The
+    override-accepting POST endpoints use ``_resolve_scope`` instead, which
+    binds the override to the caller via the allowlist validator.
+    """
     return override or f"workspace:{workspace_id}"
+
+
+async def _resolve_scope(
+    workspace_id: str,
+    user_id: str,
+    override: str | None,
+    *,
+    action: str,
+) -> str:
+    """Validate a client-supplied ``scope`` override against the caller's allowlist.
+
+    Delegates to ``kb.service.validate_scope_override`` (own workspace + visible
+    pockets + workspace agents + the caller's OWN ``user:``). On denial, audits
+    the attempt at ALERT before re-raising so a probing member shows up in the
+    RBAC denial log, then re-raises ``Forbidden`` for ``_core.http`` to map to a
+    403 JSON body. Never raises ``HTTPException``.
+    """
+    try:
+        return await kb_service.validate_scope_override(workspace_id, user_id, override)
+    except Forbidden:
+        log_denial(
+            actor=user_id,
+            action=action,
+            code="kb.scope_forbidden",
+            resource_id=override or "",
+            workspace_id=workspace_id,
+            detail="KB scope override not bound to caller",
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +96,7 @@ async def search_kb(
     user_id: str = Depends(current_user_id),
 ) -> dict:
     """Search KB articles — returns metadata + snippet."""
-    scope = _scope(workspace_id, body.scope)
+    scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.read")
     results = _kb("search", body.query, "--scope", scope, "--limit", str(body.limit))
     if not isinstance(results, list):
         results = []
@@ -68,7 +115,7 @@ async def ingest_text(
     user_id: str = Depends(current_user_id),
 ) -> dict:
     """Ingest plain text into the workspace knowledge base."""
-    scope = _scope(workspace_id, body.scope)
+    scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
         return _kb("ingest", "--scope", scope, "--source", body.source, input_text=body.text)
     except Exception as exc:
@@ -83,7 +130,7 @@ async def ingest_url(
     user_id: str = Depends(current_user_id),
 ) -> dict:
     """Fetch and ingest a URL into the workspace knowledge base."""
-    scope = _scope(workspace_id, body.scope)
+    scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.write")
     try:
         text = await _extract_url(body.url)
         return _kb("ingest", "--scope", scope, "--source", body.url, input_text=text)
@@ -104,7 +151,7 @@ async def lint_kb(
     user_id: str = Depends(current_user_id),
 ) -> dict:
     """Run health checks on the knowledge base."""
-    scope = _scope(workspace_id, body.scope)
+    scope = await _resolve_scope(workspace_id, user_id, body.scope, action="kb.read")
     issues = _kb("lint", "--scope", scope)
     if not isinstance(issues, list):
         issues = []
