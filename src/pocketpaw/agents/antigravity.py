@@ -17,6 +17,12 @@ The SDK exposes thoughts/tool-calls as *separate* async iterators on the
 response object, which makes true interleaved streaming awkward; v1 streams the
 assistant text and emits a terminal ``done`` event. Tool-call surfacing in the
 Activity panel is a tracked follow-up.
+
+Updated 2026-06-08: wired ``antigravity_max_turns``. The SDK has no native turn
+cap (the agentic loop runs inside ``Agent.chat()``), so ``_build_hooks`` adds a
+``pre_tool_call_decide`` hook that counts tool calls and denies once the budget
+is spent; ``run`` resets the counter per query and surfaces a notice when the
+cap halts the loop.
 """
 
 from __future__ import annotations
@@ -76,6 +82,8 @@ class AntigravityBackend(BaseAgentBackend):
         self._stop_flag = False
         self._sdk_available = False
         self._custom_tools: list | None = None
+        # Per-run turn-limit bookkeeping, reset at the top of every run().
+        self._turn_state: dict[str, Any] = {"count": 0, "limit_hit": False}
         # session_key -> accumulated history text (the SDK ``Agent`` is created
         # per-run, so multi-turn context is threaded via system instructions).
         self._policy = ToolPolicy(
@@ -190,6 +198,47 @@ class AntigravityBackend(BaseAgentBackend):
         logger.info("Built %d Antigravity MCP servers", len(servers))
         return servers
 
+    def _build_hooks(self) -> list:
+        """Build SDK hooks — currently just the per-query turn cap.
+
+        ``antigravity_max_turns`` bounds how far the agentic loop may run
+        (0 = unlimited). The SDK has no native turn knob: the loop lives inside
+        ``Agent.chat()`` and its only in-loop interception point is the
+        ``pre_tool_call_decide`` hook. So we count tool calls — each one drives
+        another model step — and deny once the budget is spent. A denied call
+        returns a message to the model, which then wraps up with a final answer
+        instead of looping further. The decide hook is ANDed with the config's
+        default policy (``confirm_run_command``): allowing a call here defers to
+        the policy; denying short-circuits it.
+
+        The counter lives on ``self._turn_state`` (reset per run) so ``run()``
+        can surface a notice when the cap is hit.
+        """
+        max_turns = self.settings.antigravity_max_turns
+        if not max_turns or max_turns <= 0:
+            return []
+        try:
+            from google.antigravity.hooks import pre_tool_call_decide
+            from google.antigravity.types import HookResult
+        except ImportError:
+            logger.debug("Antigravity hooks unavailable; turn limit not enforced")
+            return []
+
+        state = self._turn_state
+
+        @pre_tool_call_decide
+        async def _enforce_turn_limit(_tool_call: Any) -> Any:
+            state["count"] += 1
+            if state["count"] > max_turns:
+                state["limit_hit"] = True
+                return HookResult(
+                    allow=False,
+                    message=f"Max turns ({max_turns}) reached — stopping.",
+                )
+            return HookResult(allow=True)
+
+        return [_enforce_turn_limit]
+
     def _build_config(self, instruction: str) -> Any:
         """Construct ``LocalAgentConfig`` defensively.
 
@@ -205,6 +254,9 @@ class AntigravityBackend(BaseAgentBackend):
             "tools": self._build_custom_tools(),
             "mcp_servers": self._build_mcp_servers(),
         }
+        hooks = self._build_hooks()
+        if hooks:
+            candidate["hooks"] = hooks
         api_key = self._resolve_api_key()
         if api_key:
             candidate["api_key"] = api_key
@@ -264,6 +316,7 @@ class AntigravityBackend(BaseAgentBackend):
             return
 
         self._stop_flag = False
+        self._turn_state = {"count": 0, "limit_hit": False}
 
         try:
             from google.antigravity import Agent
@@ -296,6 +349,17 @@ class AntigravityBackend(BaseAgentBackend):
                         "model": self.settings.antigravity_model,
                         "backend": "antigravity",
                     },
+                )
+
+            # Surface a notice if the per-query turn cap halted the agentic loop
+            # (parity with the Google ADK backend's max-turns handling).
+            if self._turn_state.get("limit_hit"):
+                yield AgentEvent(
+                    type="error",
+                    content=(
+                        f"Max turns ({self.settings.antigravity_max_turns}) reached — "
+                        "the response may be incomplete."
+                    ),
                 )
 
             yield AgentEvent(type="done", content="")
