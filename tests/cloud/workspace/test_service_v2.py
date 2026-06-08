@@ -1024,6 +1024,52 @@ async def test_preview_invite_revoked_expired_accepted(
     assert out["email"] == "acc@x.c"
 
 
+async def test_preview_invite_surfaces_admin_context(owner, monkeypatch) -> None:
+    """preview_invite exposes the invite's admin context to the member-facing
+    accept UI so the downstream VIP-onboarding flow can carry the invitee's
+    focus + profile_pic forward (pp#1365)."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="VP", slug="vp")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(
+            email="vippreview@x.c",
+            context=InviteContextDTO(focus="Owns the launch checklist", profile_pic="file_vip"),
+        ),
+    )
+
+    out = await workspace_service.preview_invite(invite.token, viewer_user_id=None)
+    assert out["state"] == "ready_new"
+    assert out["context"] is not None
+    assert out["context"]["focus"] == "Owns the launch checklist"
+    assert out["context"]["profile_pic"] == "file_vip"
+
+
+async def test_preview_invite_no_context_is_absent(owner, monkeypatch) -> None:
+    """An invite minted without admin context previews with context None —
+    no regression to the existing preview shape for the common case."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="VN", slug="vn")
+    )
+    invite = await workspace_service.create_invite(
+        _ctx(str(owner.id)),
+        ws.id,
+        CreateInviteRequest(email="plainpreview@x.c", role="member"),
+    )
+
+    out = await workspace_service.preview_invite(invite.token, viewer_user_id=None)
+    assert out["state"] == "ready_new"
+    assert out["context"] is None
+
+
 async def test_create_invite_cleans_up_expired_rows(owner, monkeypatch) -> None:
     """A previously-expired invite must not block a fresh invite to the same email."""
     monkeypatch.setattr(
