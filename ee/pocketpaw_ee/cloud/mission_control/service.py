@@ -975,7 +975,11 @@ async def agent_attach_cycle_items(
     skipped: list[str] = []
     for task_id in body.item_ids:
         try:
-            await tasks_service.agent_set_task_cycle(ctx, task_id, cycle_id)
+            # The mission-control facade prefixes task IDs with ``task:``
+            # in ``_task_to_work_item`` — strip it before passing to the
+            # tasks service, which expects a raw MongoDB ObjectId hex string.
+            raw_id = task_id.removeprefix("task:")
+            await tasks_service.agent_set_task_cycle(ctx, raw_id, cycle_id)
             attached.append(task_id)
         except NotFound:
             skipped.append(task_id)
