@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+  <head><meta charset="UTF-8"></head>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937;">
+    <div style="max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+      <h2 style="margin-top: 0;">📅 Meeting scheduled</h2>
+      <p style="font-size: 15px; line-height: 1.5;">
+        A meeting has been scheduled in <strong>{group_name}</strong>.
+      </p>
+
+      <table style="width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 14px;">
+        <tr>
+          <td style="padding: 8px 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Title</td>
+          <td style="padding: 8px 12px;"><strong>{title}</strong></td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Scheduled</td>
+          <td style="padding: 8px 12px;">{scheduled_start}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Provider</td>
+          <td style="padding: 8px 12px;">{provider_pretty}</td>
+        </tr>
+        <!-- JOIN_URL_TABLE_ROW -->
+        <tr>
+          <td style="padding: 8px 12px; color: #6b7280; white-space: nowrap; vertical-align: top;">Join</td>
+          <td style="padding: 8px 12px;"><a href="{join_url}" style="color: #2563eb;">{join_url}</a></td>
+        </tr>
+        <!-- END_JOIN_URL_TABLE_ROW -->
+      </table>
+
+      <!-- JOIN_URL_BUTTON -->
+      <div style="margin: 8px 0 28px;">
+        <a href="{join_url}"
+           style="display: inline-block; padding: 12px 28px; background-color: #2563eb;
+                  color: #fff; text-decoration: none; border-radius: 6px;
+                  font-weight: 600; font-size: 15px;">
+           Join Meeting →
+        </a>
+      </div>
+      <!-- END_JOIN_URL_BUTTON -->
+
+      <p style="color: #6b7280; font-size: 13px; margin-top: 28px;">
+        Created by <strong>{creator_name}</strong>.
+      </p>
+    </div>
+  </body>
+</html>

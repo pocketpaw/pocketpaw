@@ -637,6 +637,10 @@ def mount_cloud(app: FastAPI) -> None:
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
 
+    from pocketpaw_ee.cloud.mail.bridge import register_meeting_mail_listeners
+
+    register_meeting_mail_listeners()
+
     # In-process daily-snapshot scheduler — opt-in via env var.
     #
     # Default OFF in tests + dev (each pytest run would otherwise spawn a

@@ -7,13 +7,24 @@ fail because the mail provider is down.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 from pathlib import Path
+
+import mailtrap as mt
 
 logger = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+
+_PROVIDER_NAMES = {
+    "zoom": "Zoom",
+    "google_meet": "Google Meet",
+    "livekit": "pawOS Call",
+    "recall": "Meeting",
+}
 
 # ---------------------------------------------------------------------------
 # Configuration (env vars — no Pydantic Settings dependency needed here)
@@ -50,7 +61,6 @@ def _get_client():
         return _client
     if not _MAILTRAP_API_TOKEN:
         raise RuntimeError("POCKETPAW_MAILTRAP_API_TOKEN is not set")
-    import mailtrap as mt  # noqa: PLC0415 — lazy import
 
     kwargs: dict[str, object] = dict(
         token=_MAILTRAP_API_TOKEN,
@@ -80,7 +90,6 @@ async def send_invite_email(
     Failures are logged at WARNING level — the caller (workspace service)
     must NOT let a mail blip abort the invite creation.
     """
-    import asyncio  # noqa: PLC0415
 
     base_url = os.environ.get("POCKETPAW_CLOUD_BASE_URL").rstrip("/")
     invite_url = f"{base_url}/invite/{invite_token}"
@@ -113,8 +122,6 @@ async def send_invite_email(
         return
 
     try:
-        import mailtrap as mt  # noqa: PLC0415
-
         mail = mt.Mail(
             sender=mt.Address(email=_SENDER_EMAIL, name=_SENDER_NAME),
             to=[mt.Address(email=to_email)],
@@ -129,5 +136,100 @@ async def send_invite_email(
             "Failed to send invite email to %s for workspace %r",
             to_email,
             workspace_name,
+            exc_info=True,
+        )
+
+
+async def send_meeting_scheduled_email(
+    to_email: str,
+    to_name: str,
+    title: str,
+    group_name: str,
+    scheduled_start: str,
+    join_url: str | None = None,
+    provider: str = "meeting",
+    creator_name: str = "Someone",
+) -> None:
+    """Send a meeting-scheduled notification email via Mailtrap.
+
+    Builds a plain-text + HTML email. The ``join_url`` is optional — if
+    provided the join link table row and button render in the HTML template;
+    if omitted those sections are stripped from the template using marker
+    comments so the email focuses on the group + provider info.
+
+    Failures are logged at WARNING level — the caller must NOT let a mail
+    blip abort the meeting creation.
+    """
+
+    provider_pretty = _PROVIDER_NAMES.get(provider, provider)
+    subject = f"📅 Meeting scheduled in {group_name}: {title}"
+
+    text_body = (
+        f"Hi {to_name},\n\n"
+        f"A meeting has been scheduled in {group_name}.\n\n"
+        f"Title:      {title}\n"
+        f"Scheduled:  {scheduled_start}\n"
+        f"Provider:   {provider_pretty}\n"
+    )
+    if join_url:
+        text_body += f"Join:       {join_url}\n"
+    text_body += f"\nCreated by {creator_name}.\n\n— The PocketPaw Team"
+
+    # Load template and conditionally strip join-url blocks
+    try:
+        template = (_TEMPLATES_DIR / "send_meeting_scheduled.html").read_text()
+    except Exception:
+        logger.exception("Failed to read meeting scheduled template — falling back to plain text")
+        html_body = None
+    else:
+        if not join_url:
+            template = re.sub(
+                r"<!-- JOIN_URL_TABLE_ROW -->.*?<!-- END_JOIN_URL_TABLE_ROW -->",
+                "",
+                template,
+                flags=re.DOTALL,
+            )
+            template = re.sub(
+                r"<!-- JOIN_URL_BUTTON -->.*?<!-- END_JOIN_URL_BUTTON -->",
+                "",
+                template,
+                flags=re.DOTALL,
+            )
+        html_body = template.format(
+            title=title,
+            group_name=group_name,
+            scheduled_start=scheduled_start,
+            provider_pretty=provider_pretty,
+            join_url=join_url or "",
+            creator_name=creator_name,
+        )
+
+    try:
+        client = await asyncio.to_thread(_get_client)
+    except RuntimeError:
+        logger.warning("Mailtrap not configured — skipping meeting scheduled email to %s", to_email)
+        return
+    except Exception:
+        logger.warning("Failed to initialise Mailtrap client", exc_info=True)
+        return
+
+    try:
+        mail_kwargs: dict[str, object] = dict(
+            sender=mt.Address(email=_SENDER_EMAIL, name=_SENDER_NAME),
+            to=[mt.Address(email=to_email)],
+            subject=subject,
+            text=text_body,
+        )
+        if html_body:
+            mail_kwargs["html"] = html_body
+
+        mail = mt.Mail(**mail_kwargs)
+        await asyncio.to_thread(client.send, mail)
+        logger.info("Meeting scheduled email sent to %s for %r", to_email, title)
+    except Exception:
+        logger.warning(
+            "Failed to send meeting scheduled email to %s for %r",
+            to_email,
+            title,
             exc_info=True,
         )
