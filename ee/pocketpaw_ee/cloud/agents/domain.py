@@ -25,6 +25,8 @@ class AgentConfigSpec:
     temperature: float = 0.7
     max_tokens: int = 4096
     scopes: tuple[str, ...] = ()
+    skill_refs: tuple[str, ...] = ()
+    plugins: tuple[str, ...] = ()
     soul_enabled: bool = True
     soul_persona: str = ""
     soul_archetype: str = ""

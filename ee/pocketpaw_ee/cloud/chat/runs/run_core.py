@@ -49,6 +49,17 @@ Changes:
   equals the surface base → behavior byte-identical to today (zero regression).
   ``resolve_profile`` itself stays PURE/no-I/O; all entity I/O lives in the
   once-per-run async ``_resolve_entity_profile``.
+- 2026-06-08 (feat/agent-plugin-fields, M2) — the AGENT now carries its own
+  skill set, folded into the per-run skill materialization so it applies on
+  EVERY run the agent does, regardless of surface. ``_agent_skill_set(instance)``
+  reads the agent's ``skill_refs`` (direct) UNION the skills of its enabled
+  ``plugins`` (resolved via the OSS ``PluginInstaller`` registry — plain read,
+  no clone, try/except → empty on failure so a missing registry never breaks a
+  run). ``_drive_agent_loop`` UNIONs that set into ``surface_skills`` BEFORE the
+  withhold-when-empty forward — including on the legacy ``resolved_profile is
+  None`` path — so agent skills materialize even on non-entity / non-profile
+  runs. The union still crosses into ``AgentPool.run`` as a plain
+  ``frozenset[str]`` (no EE symbol crosses into OSS). Per-agent MCP is DEFERRED.
 """
 
 from __future__ import annotations
@@ -588,6 +599,39 @@ async def _persist_and_complete(
     return assistant_id
 
 
+def _agent_skill_set(instance: Any) -> frozenset[str]:
+    """Resolve the agent's own skill set: direct ``skill_refs`` UNION the
+    skills bundled by its enabled ``plugins``.
+
+    ``instance.config`` is the raw config dict. ``plugins`` are resolved to
+    their skills via the OSS ``PluginInstaller`` registry (a plain read, no
+    clone). Unknown plugin names are ignored. The whole plugin resolution is
+    guarded in try/except → empty plugin set on any failure, so a missing /
+    unreadable registry can never break a run. Returns a plain
+    ``frozenset[str]`` — the type that crosses the EE→OSS ``AgentPool.run``
+    boundary (no EE symbol crosses into OSS).
+    """
+    config = getattr(instance, "config", None) or {}
+    direct = frozenset(config.get("skill_refs", []) or [])
+
+    enabled = config.get("plugins", []) or []
+    plugin_skills: frozenset[str] = frozenset()
+    if enabled:
+        try:
+            from pocketpaw.plugins.installer import PluginInstaller
+
+            by_name = {p.name: p for p in PluginInstaller().list_plugins()}
+            plugin_skills = frozenset(s for n in enabled if n in by_name for s in by_name[n].skills)
+        except Exception:
+            logger.warning(
+                "Plugin-skill resolution failed; agent plugin skills skipped this run",
+                exc_info=True,
+            )
+            plugin_skills = frozenset()
+
+    return direct | plugin_skills
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -691,6 +735,12 @@ async def _drive_agent_loop(
             surface_allow_mcp = ctx.resolved_profile.allow_mcp_tool_ids
             surface_sys_override = ctx.resolved_profile.system_message_override
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
+        # M2: fold the AGENT's own skill set (skill_refs + enabled-plugin skills)
+        # into the per-run skill materialization REGARDLESS of the resolved_profile
+        # guard above — so an agent's skills materialize on EVERY run it does,
+        # including the legacy ``resolved_profile is None`` path (no entity / no
+        # profile). Still a plain ``frozenset[str]`` crossing into the OSS pool.
+        surface_skills = surface_skills | _agent_skill_set(instance)
         run_kwargs: dict[str, Any] = dict(
             history=history,
             knowledge_context=knowledge_context,

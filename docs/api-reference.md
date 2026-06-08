@@ -289,6 +289,194 @@ the 2 MB cap, the document is unparseable, or it carries no `paths`
 object. Every install is audit-logged with the workspace, the actor, and
 the resulting slug — never the spec contents.
 
+## Plugins — Install a `.claude-plugin`'s Skills and MCP Servers
+
+PocketPaw adopts the `.claude-plugin` standard so a whole plugin's skills
+and MCP servers install in one step. This endpoint clones a GitHub repo,
+reads its `.claude-plugin/plugin.json`, copies each `skills/<name>/SKILL.md`
+directory into the skill loader path, reloads the loader, registers and
+starts any MCP servers the bundle declares, and records the install in a
+registry at `~/.pocketpaw/plugins.json`.
+
+### MCP servers
+
+After the skills step, the installer reads the bundle's MCP config — a
+`.mcp.json` file at the plugin root in the standard
+`{"mcpServers": {name: spec}}` shape (a manifest `mcp_servers` path
+override is honoured if present). When there is no MCP config the step is
+recorded as `skipped`; it never fails the install.
+
+Each declared server is mapped to a PocketPaw MCP server config:
+`command`, `args`, and `env` carry over directly, and `transport` is
+derived from the spec's `type` (`stdio` is the default; `http`, `sse`, and
+`streamable-http` map through). To avoid cross-plugin collisions the
+registered name is namespaced as `plugin:<plugin_name>:<server_name>`.
+
+Every server is registered and started through the MCP manager — one step
+per server:
+
+- **`succeeded`** — the server started, **or** it registered but couldn't
+  start because it's missing required env. The latter is non-fatal and
+  carries a `needs env: KEY` detail so the operator knows to supply the
+  credential; the server is still recorded as installed.
+- **`failed`** — the server failed to start for any other reason.
+
+The namespaced server names appear in the registry entry under
+`mcp_servers` and on the report's `installed_mcp_servers`.
+
+### `POST /plugins/install`
+
+Install a plugin's skills and MCP servers from a GitHub source. Requires
+the **admin** scope — installing a plugin changes workspace-wide agent
+behaviour.
+
+Request body:
+
+```json
+{ "source": "owner/repo" }
+```
+
+`source` accepts `owner/repo`, `owner/repo/subdir` (when the plugin lives
+in a subdirectory), or a full GitHub URL (a `/tree/<ref>/<subdir>` path is
+honoured). The repo (or subdir) must contain a `.claude-plugin/plugin.json`
+manifest and at least one `skills/<name>/SKILL.md`. An MCP `.mcp.json` is
+optional.
+
+Response `200` — a step-by-step install report:
+
+```json
+{
+  "plugin": "my-plugin",
+  "installed_at": "2026-06-07T12:00:00",
+  "steps": [
+    { "name": "read_manifest", "status": "succeeded", "detail": "my-plugin v1.2.3" },
+    { "name": "skill:alpha", "status": "succeeded", "detail": "" },
+    { "name": "reload_loader", "status": "succeeded", "detail": "" },
+    { "name": "mcp:weather", "status": "succeeded", "detail": "" },
+    { "name": "mcp:db", "status": "succeeded", "detail": "needs env: DB_URL" },
+    { "name": "record_registry", "status": "succeeded", "detail": "" }
+  ],
+  "installed_skills": ["alpha"],
+  "installed_mcp_servers": ["plugin:my-plugin:weather", "plugin:my-plugin:db"]
+}
+```
+
+Each unit of work is a step with status `succeeded` / `skipped` /
+`failed`, so a per-skill copy failure or a single MCP server start failure
+surfaces in the report rather than aborting the whole install. When the
+bundle declares no MCP servers, a single `mcp` step is recorded as
+`skipped`. Up-front failures return clear status codes instead of `500`:
+
+| Status | When |
+|--------|------|
+| `400` | Missing or malformed `source`, or an invalid `plugin.json`. |
+| `404` | No `.claude-plugin/plugin.json`, or no skills found in the plugin. |
+| `502` | The git clone failed. |
+| `504` | The git clone timed out. |
+
+A malformed `.mcp.json` (parse error, or a wrong `mcpServers` shape) does
+**not** fail the request — it surfaces as a single `failed` `mcp` step in
+the report, so already-installed skills and the registry entry are
+preserved.
+
+Every install is audit-logged with the source, plugin name, version, and
+the installed skill names.
+
+### `GET /plugins`
+
+List every installed plugin from the registry
+(`~/.pocketpaw/plugins.json`). Requires the **admin** scope.
+
+Response `200` — an array of installed plugins:
+
+```json
+[
+  {
+    "name": "my-plugin",
+    "version": "1.2.3",
+    "source": "acme/widgets",
+    "skills": ["alpha", "beta"],
+    "mcp_servers": ["plugin:my-plugin:weather"],
+    "installed_at": "2026-06-08T12:00:00"
+  }
+]
+```
+
+### `POST /plugins/remove`
+
+Uninstall a plugin: delete each skill directory it installed, **stop** each
+of its namespaced MCP servers and remove their configs from the MCP manager,
+reload the skill loader, and drop its registry entry. Stopping the live
+server (not just deleting its config) mirrors install, which both registers
+the config and starts the server — so remove tears down the running
+connection too, rather than leaving it up until the next restart. Requires
+the **admin** scope.
+
+Request body:
+
+```json
+{ "name": "my-plugin" }
+```
+
+Response `200` — a step-by-step remove report (mirrors the install report):
+
+```json
+{
+  "plugin": "my-plugin",
+  "removed_at": "2026-06-08T12:05:00",
+  "steps": [
+    { "name": "skill:alpha", "status": "succeeded" },
+    { "name": "mcp:plugin:my-plugin:weather", "status": "succeeded" },
+    { "name": "reload_loader", "status": "succeeded" },
+    { "name": "drop_registry", "status": "succeeded" }
+  ],
+  "removed_skills": ["alpha", "beta"],
+  "removed_mcp_servers": ["plugin:my-plugin:weather"]
+}
+```
+
+Like install, each component is a step with status `succeeded` / `skipped`
+/ `failed`. A component that's already gone (a missing skill dir, an MCP
+server that's neither running nor registered) is `skipped` — the remove
+still completes and the registry entry is **always** dropped, so a
+half-removed plugin never lingers in the listing. The only up-front error
+is an unknown plugin:
+
+| Status | When |
+|--------|------|
+| `400` | Missing or invalid `name`. |
+| `404` | The named plugin is not installed. |
+
+Every removal is audit-logged (`action="plugin_remove"`) with the plugin
+name and the removed skill / MCP server names.
+
+The registry read-modify-write (shared by install and remove) is
+serialised by a process-level lock and written via a temp file + atomic
+`os.replace`, so concurrent operations can't corrupt `plugins.json` or
+clobber each other's entries.
+
+### Per-agent skills (`skill_refs` + `plugins`)
+
+An agent's `config` carries two skill-bearing fields, set on
+`POST /agents` (create) or `PATCH /agents/{id}` (update — via either the
+nested `config` object or the flat top-level fields):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `skill_refs` | `string[]` | Skill names this agent always materializes. |
+| `plugins` | `string[]` | Installed plugin names whose bundled skills this agent always materializes. |
+
+Both default to `[]`. Unlike a surface / entity-room `skill_names` subset
+— which only applies inside that room — an agent's `skill_refs` plus the
+skills of its enabled `plugins` fold into the per-run skill set on **every**
+run the agent does, regardless of surface. At run time the plugin names are
+resolved to their skills via the installed-plugin registry
+(`~/.pocketpaw/plugins.json`); an unknown plugin name is ignored and a
+missing / unreadable registry degrades to no plugin skills (it never fails
+the run). The agent set is UNIONed with any surface/entity skill subset, so
+both apply together. Per-agent MCP servers are **not** part of this — that
+is a separate, deferred slice.
+
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 
 Increment 5. The Ripple renderer has a **closed widget registry**: a
