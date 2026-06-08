@@ -17,11 +17,14 @@
 # the clone-factory `except TypeError` fallback.
 # Updated: 2026-06-08 (feat/plugin-installer-listremove, #1358) — final slice:
 # `list_plugins()` reads the registry into `InstalledPlugin` views;
-# `remove(name)` deletes the plugin's skill dirs, removes its namespaced MCP
-# servers via `get_mcp_manager().remove_server_config`, reloads the loader,
-# drops the registry entry, and audit-logs (`action="plugin_remove"`) — per
-# component failures degrade to failed/skipped steps; only an unknown plugin
-# raises (404). The registry read-modify-write is now concurrency-safe: a
+# `remove(name)` deletes the plugin's skill dirs, stops + deregisters its
+# namespaced MCP servers via `get_mcp_manager().stop_server` +
+# `.remove_server_config` (symmetric with install, which both registers AND
+# starts the server — so remove must tear down the live connection too, not
+# just the persisted config), reloads the loader, drops the registry entry,
+# and audit-logs (`action="plugin_remove"`) — per component failures degrade
+# to failed/skipped steps; only an unknown plugin raises (404). The registry
+# read-modify-write is now concurrency-safe: a
 # module-level lock guards the r-m-w and the write goes through a temp file +
 # atomic `os.replace`, so install and remove can't corrupt the JSON or clobber
 # each other's entries.
@@ -639,6 +642,11 @@ class PluginInstaller:
         if name in (".", "..") or not _NAME_RE.match(name or ""):
             raise PluginInstallError("Invalid plugin name", 400)
 
+        # Known edge: this read and the later _drop_registry_entry write are
+        # two separate locked sections, so a concurrent install+remove of the
+        # SAME plugin name has a TOCTOU window. Accepted — the atomic write
+        # means no corruption, only a last-writer-wins outcome on that one
+        # entry, and same-name concurrent install/remove is very unlikely.
         with _REGISTRY_LOCK:
             entry = self._load_registry().get(name)
         if not isinstance(entry, dict):
@@ -650,7 +658,7 @@ class PluginInstaller:
         mcp_servers = [s for s in entry.get("mcp_servers", []) if isinstance(s, str)]
 
         report.removed_skills = self._remove_skills(skills, report)
-        report.removed_mcp_servers = self._remove_mcp_servers(mcp_servers, report)
+        report.removed_mcp_servers = await self._remove_mcp_servers(mcp_servers, report)
         report.steps.append(self._reload_loader())
         report.steps.append(self._drop_registry_entry(name))
 
@@ -689,12 +697,22 @@ class PluginInstaller:
             report.steps.append(PluginInstallStep(name=step_name, status="succeeded"))
         return removed
 
-    def _remove_mcp_servers(self, servers: list[str], report: PluginRemoveReport) -> list[str]:
-        """Remove each namespaced MCP server config. One step per server.
+    async def _remove_mcp_servers(
+        self, servers: list[str], report: PluginRemoveReport
+    ) -> list[str]:
+        """Stop + deregister each namespaced MCP server. One step per server.
 
-        ``remove_server_config`` returns False when the server isn't in the
-        manager's config — treated as ``skipped`` (already gone, idempotent).
-        A raise from the manager is ``failed``. Never raises out.
+        Install both *registers* the config and *starts* the live server, so
+        remove must undo both halves to be symmetric — otherwise the running
+        server process/connection lingers until the next app restart. For each
+        server we first ``stop_server`` (tears down the live connection, pops
+        it from the manager) then ``remove_server_config`` (drops the persisted
+        config).
+
+        Degradation mirrors the rest of remove: a raise from either manager
+        call is a ``failed`` step; a server that was neither running nor in the
+        config is ``skipped`` (already gone, idempotent); never raises out. The
+        server counts as removed if either half found something to clean up.
         """
         if not servers:
             return []
@@ -703,19 +721,22 @@ class PluginInstaller:
         for server in servers:
             step_name = f"mcp:{server}"
             try:
-                found = manager.remove_server_config(server)
+                stopped = await manager.stop_server(server)
+                deregistered = manager.remove_server_config(server)
             except Exception as exc:  # manager hiccup — don't abort the remove
                 logger.warning("MCP server '%s' removal raised: %s", server, exc)
                 report.steps.append(
                     PluginInstallStep(name=step_name, status="failed", detail=str(exc))
                 )
                 continue
-            if found:
+            if stopped or deregistered:
                 removed.append(server)
                 report.steps.append(PluginInstallStep(name=step_name, status="succeeded"))
             else:
                 report.steps.append(
-                    PluginInstallStep(name=step_name, status="skipped", detail="not registered")
+                    PluginInstallStep(
+                        name=step_name, status="skipped", detail="not running or registered"
+                    )
                 )
         return removed
 

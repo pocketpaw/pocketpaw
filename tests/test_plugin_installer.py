@@ -14,6 +14,11 @@
 # this plugin's skill dirs + MCP servers, drops the registry entry, leaves
 # nothing orphaned), unknown-plugin raises 404, degraded remove (a missing
 # component still completes + drops the entry), and the atomic registry write.
+# Updated: 2026-06-08 (review fix) — remove now STOPS the live MCP server
+# (manager.stop_server) as well as removing its config, symmetric with
+# install's register+start. The fake manager tracks running servers + stop
+# calls; tests assert stop was called and cover stop/config-gone + a mid-remove
+# manager raise degrading to a failed step.
 """Unit tests for pocketpaw.plugins (skills + MCP slices)."""
 
 from __future__ import annotations
@@ -320,10 +325,14 @@ class _FakeMCPManager:
         self.added: list = []  # MCPServerConfig objects
         self.started: list = []  # MCPServerConfig objects
         self.removed: list[str] = []  # names passed to remove_server_config
+        self.stopped: list[str] = []  # names passed to stop_server
         self._start_results = start_results or {}
-        # Names the fake "knows about" so remove_server_config can report
+        # Names with a persisted config so remove_server_config can report
         # found/not-found. Defaults to whatever was added.
         self.known: set[str] = set()
+        # Names of *live* (running) servers so stop_server can report
+        # was-running/not. A server that started cleanly is added here.
+        self.running: set[str] = set()
 
     def add_server_config(self, config) -> None:
         self.added.append(config)
@@ -331,7 +340,17 @@ class _FakeMCPManager:
 
     async def start_server(self, config) -> bool:
         self.started.append(config)
-        return self._start_results.get(config.name, True)
+        ok = self._start_results.get(config.name, True)
+        if ok:
+            self.running.add(config.name)
+        return ok
+
+    async def stop_server(self, name) -> bool:
+        self.stopped.append(name)
+        if name in self.running:
+            self.running.discard(name)
+            return True
+        return False
 
     def remove_server_config(self, name) -> bool:
         self.removed.append(name)
@@ -632,8 +651,12 @@ class TestRemovePlugin:
         # Skill dirs gone.
         assert not (install_dir / "alpha").exists()
         assert not (install_dir / "beta").exists()
-        # MCP manager asked to remove the namespaced name.
+        # MCP manager asked to STOP the live server AND remove its config —
+        # both halves, symmetric with install (register + start).
+        assert manager.stopped == ["plugin:combo:svc"]
         assert manager.removed == ["plugin:combo:svc"]
+        # The live server is no longer running.
+        assert "plugin:combo:svc" not in manager.running
         # Registry entry dropped.
         registry_path = tmp_path / "registry" / "plugins.json"
         assert "combo" not in json.loads(registry_path.read_text())
@@ -696,16 +719,18 @@ class TestRemovePlugin:
         # Entry still dropped — nothing lingers.
         assert inst.list_plugins() == []
 
-    async def test_remove_with_unregistered_mcp_degrades(self, tmp_path, monkeypatch):
-        # MCP server recorded in registry but not in the manager → skipped,
-        # remove still completes.
+    async def test_remove_with_gone_mcp_degrades(self, tmp_path, monkeypatch):
+        # MCP server recorded in registry but neither running nor in the
+        # manager's config → skipped, remove still completes.
         inst, manager = await self._install_one(
             tmp_path,
             monkeypatch,
             skills=["alpha"],
             mcp={"svc": {"command": "uvx", "args": ["svc"]}},
         )
-        # Drop it from the manager so remove_server_config returns False.
+        # Drop it from the manager entirely (not running, no config) so both
+        # stop_server and remove_server_config return False.
+        manager.running.discard("plugin:combo:svc")
         manager.known.discard("plugin:combo:svc")
 
         report = await inst.remove("combo")
@@ -713,6 +738,53 @@ class TestRemovePlugin:
         mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
         assert mcp_step.status == "skipped"
         assert report.removed_mcp_servers == []
+        # Both halves were still attempted.
+        assert manager.stopped == ["plugin:combo:svc"]
+        assert manager.removed == ["plugin:combo:svc"]
+        assert inst.list_plugins() == []
+
+    async def test_remove_stops_server_even_if_config_already_gone(self, tmp_path, monkeypatch):
+        # Live server still running but its persisted config was already
+        # removed → stop_server cleans up the live connection, so the server
+        # still counts as removed (succeeded), not skipped.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha"],
+            mcp={"svc": {"command": "uvx", "args": ["svc"]}},
+        )
+        manager.known.discard("plugin:combo:svc")  # config gone; still running
+
+        report = await inst.remove("combo")
+
+        mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
+        assert mcp_step.status == "succeeded"
+        assert report.removed_mcp_servers == ["plugin:combo:svc"]
+        assert manager.stopped == ["plugin:combo:svc"]
+        assert "plugin:combo:svc" not in manager.running
+
+    async def test_remove_mcp_failure_is_failed_step(self, tmp_path, monkeypatch):
+        # A raise from the manager mid-remove degrades to a failed step and
+        # never aborts the remove — the registry entry is still dropped.
+        inst, manager = await self._install_one(
+            tmp_path,
+            monkeypatch,
+            skills=["alpha"],
+            mcp={"svc": {"command": "uvx", "args": ["svc"]}},
+        )
+
+        async def _boom(name):
+            raise RuntimeError("teardown blew up")
+
+        manager.stop_server = _boom
+
+        report = await inst.remove("combo")
+
+        mcp_step = next(s for s in report.steps if s.name == "mcp:plugin:combo:svc")
+        assert mcp_step.status == "failed"
+        assert "teardown blew up" in mcp_step.detail
+        assert not report.succeeded()
+        # Entry still dropped despite the failure.
         assert inst.list_plugins() == []
 
     async def test_remove_audit_logs_plugin_remove(self, tmp_path, monkeypatch):

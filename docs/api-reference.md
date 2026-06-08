@@ -404,9 +404,13 @@ Response `200` — an array of installed plugins:
 
 ### `POST /plugins/remove`
 
-Uninstall a plugin: delete each skill directory it installed, remove each
-of its namespaced MCP servers from the MCP manager, reload the skill
-loader, and drop its registry entry. Requires the **admin** scope.
+Uninstall a plugin: delete each skill directory it installed, **stop** each
+of its namespaced MCP servers and remove their configs from the MCP manager,
+reload the skill loader, and drop its registry entry. Stopping the live
+server (not just deleting its config) mirrors install, which both registers
+the config and starts the server — so remove tears down the running
+connection too, rather than leaving it up until the next restart. Requires
+the **admin** scope.
 
 Request body:
 
@@ -433,9 +437,10 @@ Response `200` — a step-by-step remove report (mirrors the install report):
 
 Like install, each component is a step with status `succeeded` / `skipped`
 / `failed`. A component that's already gone (a missing skill dir, an MCP
-server no longer registered) is `skipped` — the remove still completes and
-the registry entry is **always** dropped, so a half-removed plugin never
-lingers in the listing. The only up-front error is an unknown plugin:
+server that's neither running nor registered) is `skipped` — the remove
+still completes and the registry entry is **always** dropped, so a
+half-removed plugin never lingers in the listing. The only up-front error
+is an unknown plugin:
 
 | Status | When |
 |--------|------|
