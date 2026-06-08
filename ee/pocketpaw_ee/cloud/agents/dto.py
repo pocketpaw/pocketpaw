@@ -36,6 +36,8 @@ class CreateAgentRequest(BaseModel):
     trust_level: int | None = None
     system_prompt: str = ""
     scopes: list[str] | None = None
+    skill_refs: list[str] | None = None
+    plugins: list[str] | None = None
     soul_enabled: bool = True
     soul_archetype: str = ""
     soul_values: list[str] | None = None
@@ -61,6 +63,8 @@ class UpdateAgentRequest(BaseModel):
     trust_level: int | None = None
     system_prompt: str | None = None
     scopes: list[str] | None = None
+    skill_refs: list[str] | None = None
+    plugins: list[str] | None = None
     soul_enabled: bool | None = None
     soul_archetype: str | None = None
     soul_values: list[str] | None = None
@@ -109,6 +113,8 @@ def _config_to_dict(cfg: AgentConfigSpec) -> dict[str, Any]:
         "temperature": cfg.temperature,
         "max_tokens": cfg.max_tokens,
         "scopes": list(cfg.scopes),
+        "skill_refs": list(cfg.skill_refs),
+        "plugins": list(cfg.plugins),
         "soul_enabled": cfg.soul_enabled,
         "soul_persona": cfg.soul_persona,
         "soul_archetype": cfg.soul_archetype,

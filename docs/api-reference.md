@@ -455,6 +455,28 @@ serialised by a process-level lock and written via a temp file + atomic
 `os.replace`, so concurrent operations can't corrupt `plugins.json` or
 clobber each other's entries.
 
+### Per-agent skills (`skill_refs` + `plugins`)
+
+An agent's `config` carries two skill-bearing fields, set on
+`POST /agents` (create) or `PATCH /agents/{id}` (update — via either the
+nested `config` object or the flat top-level fields):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `skill_refs` | `string[]` | Skill names this agent always materializes. |
+| `plugins` | `string[]` | Installed plugin names whose bundled skills this agent always materializes. |
+
+Both default to `[]`. Unlike a surface / entity-room `skill_names` subset
+— which only applies inside that room — an agent's `skill_refs` plus the
+skills of its enabled `plugins` fold into the per-run skill set on **every**
+run the agent does, regardless of surface. At run time the plugin names are
+resolved to their skills via the installed-plugin registry
+(`~/.pocketpaw/plugins.json`); an unknown plugin name is ignored and a
+missing / unreadable registry degrades to no plugin skills (it never fails
+the run). The agent set is UNIONed with any surface/entity skill subset, so
+both apply together. Per-agent MCP servers are **not** part of this — that
+is a separate, deferred slice.
+
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 
 Increment 5. The Ripple renderer has a **closed widget registry**: a

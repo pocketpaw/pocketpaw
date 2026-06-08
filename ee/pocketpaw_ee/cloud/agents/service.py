@@ -64,6 +64,8 @@ def _config_to_domain(c: _AgentConfigDoc) -> AgentConfigSpec:
         temperature=c.temperature,
         max_tokens=c.max_tokens,
         scopes=tuple(c.scopes),
+        skill_refs=tuple(c.skill_refs),
+        plugins=tuple(c.plugins),
         soul_enabled=c.soul_enabled,
         soul_persona=c.soul_persona,
         soul_archetype=c.soul_archetype,
@@ -82,6 +84,8 @@ def _config_to_doc(c: AgentConfigSpec) -> _AgentConfigDoc:
         temperature=c.temperature,
         max_tokens=c.max_tokens,
         scopes=list(c.scopes),
+        skill_refs=list(c.skill_refs),
+        plugins=list(c.plugins),
         soul_enabled=c.soul_enabled,
         soul_persona=c.soul_persona,
         soul_archetype=c.soul_archetype,
@@ -143,6 +147,10 @@ def _build_create_config(body: CreateAgentRequest) -> AgentConfigSpec:
         overrides["trust_level"] = body.trust_level
     if body.scopes is not None:
         overrides["scopes"] = tuple(body.scopes)
+    if body.skill_refs is not None:
+        overrides["skill_refs"] = tuple(body.skill_refs)
+    if body.plugins is not None:
+        overrides["plugins"] = tuple(body.plugins)
     if body.soul_values is not None:
         overrides["soul_values"] = tuple(body.soul_values)
     if body.soul_ocean is not None:
@@ -163,6 +171,8 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
             temperature=c.get("temperature", current.temperature),
             max_tokens=c.get("max_tokens", current.max_tokens),
             scopes=tuple(c.get("scopes", list(current.scopes))),
+            skill_refs=tuple(c.get("skill_refs", list(current.skill_refs))),
+            plugins=tuple(c.get("plugins", list(current.plugins))),
             soul_enabled=c.get("soul_enabled", current.soul_enabled),
             soul_persona=c.get("soul_persona", current.soul_persona),
             soul_archetype=c.get("soul_archetype", current.soul_archetype),
@@ -191,6 +201,10 @@ def _apply_update(current: AgentConfigSpec, body: UpdateAgentRequest) -> AgentCo
         overrides["tools"] = tuple(body.tools)
     if body.scopes is not None:
         overrides["scopes"] = tuple(body.scopes)
+    if body.skill_refs is not None:
+        overrides["skill_refs"] = tuple(body.skill_refs)
+    if body.plugins is not None:
+        overrides["plugins"] = tuple(body.plugins)
     if body.soul_values is not None:
         overrides["soul_values"] = tuple(body.soul_values)
     if body.soul_ocean is not None:
