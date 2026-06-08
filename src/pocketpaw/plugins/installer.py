@@ -6,8 +6,16 @@
 # .claude-plugin/plugin.json, copies each skills/<name>/SKILL.md into the
 # skill loader path, reloads the loader, records a registry entry under
 # ~/.pocketpaw/plugins.json, and returns a step-by-step PluginInstallReport.
-# Skills-only slice — MCP + list/remove ship separately (#1357, #1358).
-"""Install a ``.claude-plugin``'s skills from a GitHub repo.
+# Updated: 2026-06-08 (feat/plugin-installer-mcp) — also registers + starts
+# the MCP servers a bundle declares in its `.mcp.json` (or a manifest
+# `mcp_servers` path override). Each server maps via presets.spec_to_config,
+# is namespaced `plugin:<plugin>:<server>`, registered + started through the
+# MCP manager (one PluginInstallStep each; a server that registers but can't
+# start for lack of env is reported `succeeded` with a "needs env:" detail).
+# The namespaced names are recorded in the registry entry and on the report's
+# `installed_mcp_servers`. Imports the now-public `ignore_symlinks` and drops
+# the clone-factory `except TypeError` fallback. List/remove ships in #1358.
+"""Install a ``.claude-plugin``'s skills and MCP servers from a GitHub repo.
 
 Each unit of work is a :class:`PluginInstallStep` that never raises out of
 the installer — failures become ``failed``/``skipped`` steps so the caller
@@ -27,6 +35,9 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any
 
+from pocketpaw.mcp.config import MCPServerConfig
+from pocketpaw.mcp.manager import get_mcp_manager
+from pocketpaw.mcp.presets import spec_to_config
 from pocketpaw.plugins.models import (
     PluginInstallReport,
     PluginInstallStep,
@@ -35,8 +46,8 @@ from pocketpaw.plugins.models import (
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
 from pocketpaw.skills.installer import (
     INSTALL_DIR,
-    _ignore_symlinks,
     clone_github_repo,
+    ignore_symlinks,
 )
 from pocketpaw.skills.loader import get_skill_loader
 
@@ -64,6 +75,16 @@ class PluginInstallError(Exception):
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message)
         self.status_code = status_code
+
+
+class _MCPConfigError(Exception):
+    """Internal: a malformed ``.mcp.json`` (parse error / wrong shape).
+
+    Caught inside the installer and converted into a ``failed`` MCP step so
+    a bad MCP config degrades per-step instead of raising out of the
+    installer (which would orphan already-installed skills and skip the
+    registry write). Never escapes the module.
+    """
 
 
 def parse_source(source: str) -> tuple[str, str, str | None]:
@@ -161,15 +182,11 @@ class PluginInstaller:
         """
         owner, repo, subdir = parse_source(source)
 
-        try:
-            clone_cm = self._clone(owner, repo, timeout=timeout)
-        except TypeError:
-            # Test fixtures may inject a clone factory with no timeout kwarg.
-            clone_cm = self._clone(owner, repo)
+        clone_cm = self._clone(owner, repo, timeout=timeout)
 
         try:
             async with clone_cm as repo_root:
-                return self._install_from_tree(
+                return await self._install_from_tree(
                     repo_root=repo_root,
                     subdir=subdir,
                     source=f"{owner}/{repo}",
@@ -180,7 +197,7 @@ class PluginInstaller:
             logger.warning("Plugin clone failed: %s", exc)
             raise PluginInstallError("Plugin clone failed", 502) from exc
 
-    def _install_from_tree(
+    async def _install_from_tree(
         self,
         *,
         repo_root: Path,
@@ -207,8 +224,13 @@ class PluginInstaller:
         installed = self._install_skills(skill_sources, report)
 
         report.steps.append(self._reload_loader())
-        report.steps.append(self._record_registry(manifest, source, installed))
+
+        # Route the bundle's MCP servers (skips cleanly when there are none).
+        mcp_servers = await self._install_mcp_servers(plugin_root, manifest, report)
+
+        report.steps.append(self._record_registry(manifest, source, installed, mcp_servers))
         report.installed_skills = installed
+        report.installed_mcp_servers = mcp_servers
 
         self._audit(source, manifest, installed, report.succeeded())
         return report
@@ -279,7 +301,7 @@ class PluginInstaller:
                 dest = self._install_dir / name
                 if dest.exists():
                     shutil.rmtree(dest)
-                shutil.copytree(src_dir, dest, ignore=_ignore_symlinks)
+                shutil.copytree(src_dir, dest, ignore=ignore_symlinks)
             except OSError as exc:
                 report.steps.append(
                     PluginInstallStep(name=step_name, status="failed", detail=str(exc))
@@ -298,8 +320,175 @@ class PluginInstaller:
             logger.warning("Skill loader reload failed: %s", exc)
             return PluginInstallStep(name="reload_loader", status="failed", detail=str(exc))
 
+    def _read_mcp_config(
+        self, plugin_root: Path, manifest: PluginManifest
+    ) -> dict[str, dict] | None:
+        """Read the bundle's MCP config, returning ``{name: spec}`` or None.
+
+        Looks at the manifest's ``mcp_servers`` path override when set,
+        otherwise the conventional ``.mcp.json`` at the plugin root. The
+        standard shape is ``{"mcpServers": {name: spec}}``. Returns None
+        when no config file exists so the caller can skip cleanly; returns
+        an empty dict when the file exists but declares no servers.
+
+        Raises:
+            _MCPConfigError: If the file exists but is malformed (JSON parse
+                error, top-level not a dict, ``mcpServers`` not a dict). The
+                caller turns this into a ``failed`` step so the install
+                degrades per-step rather than raising out of the installer.
+        """
+        if manifest.mcp_servers:
+            mcp_path = plugin_root / manifest.mcp_servers
+        else:
+            mcp_path = plugin_root / ".mcp.json"
+
+        if not mcp_path.is_file():
+            return None
+
+        try:
+            raw = json.loads(mcp_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Plugin MCP config unreadable: %s", exc)
+            raise _MCPConfigError("invalid .mcp.json (parse error)") from exc
+
+        if not isinstance(raw, dict):
+            raise _MCPConfigError(".mcp.json must be a JSON object")
+
+        servers = raw.get("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise _MCPConfigError(".mcp.json 'mcpServers' must be an object")
+        return servers
+
+    async def _install_mcp_servers(
+        self,
+        plugin_root: Path,
+        manifest: PluginManifest,
+        report: PluginInstallReport,
+    ) -> list[str]:
+        """Register + start the bundle's MCP servers. One step per server.
+
+        Each server is namespaced ``plugin:<plugin>:<server>`` to avoid
+        cross-plugin collisions, mapped to an :class:`MCPServerConfig` via
+        :func:`spec_to_config`, registered with the MCP manager, and started.
+        A server that registers but fails to start because it lacks required
+        env is reported ``succeeded`` with a ``needs env: KEY`` detail
+        (non-fatal); any other start failure is a ``failed`` step. Skips
+        cleanly (one ``skipped`` step) when the bundle declares no MCP config.
+        A malformed ``.mcp.json`` becomes a single ``failed`` ``mcp`` step —
+        it never raises out of the installer, so installed skills aren't
+        orphaned and the registry write still happens.
+        """
+        try:
+            servers = self._read_mcp_config(plugin_root, manifest)
+        except _MCPConfigError as exc:
+            report.steps.append(PluginInstallStep(name="mcp", status="failed", detail=str(exc)))
+            return []
+        if servers is None:
+            report.steps.append(
+                PluginInstallStep(name="mcp", status="skipped", detail="no .mcp.json")
+            )
+            return []
+        if not servers:
+            report.steps.append(
+                PluginInstallStep(name="mcp", status="skipped", detail="no servers declared")
+            )
+            return []
+
+        manager = get_mcp_manager()
+        installed: list[str] = []
+        # Sequential per request — the manager's start_server holds a lock,
+        # so concurrent starts would serialise anyway; keep ordering stable.
+        for server_name in sorted(servers):
+            spec = servers[server_name]
+            step_name = f"mcp:{server_name}"
+            if server_name in (".", "..") or not _NAME_RE.match(server_name):
+                report.steps.append(
+                    PluginInstallStep(
+                        name=step_name, status="skipped", detail="invalid server name"
+                    )
+                )
+                continue
+            if not isinstance(spec, dict):
+                report.steps.append(
+                    PluginInstallStep(name=step_name, status="skipped", detail="invalid spec")
+                )
+                continue
+
+            namespaced = f"plugin:{manifest.name}:{server_name}"
+            cfg = spec_to_config(namespaced, spec)
+
+            step = await self._register_and_start(manager, cfg, spec, step_name)
+            report.steps.append(step)
+            if step.status != "failed":
+                installed.append(namespaced)
+        return installed
+
+    async def _register_and_start(
+        self,
+        manager: Any,
+        cfg: MCPServerConfig,
+        spec: dict,
+        step_name: str,
+    ) -> PluginInstallStep:
+        """Register a server config and start it, returning one step.
+
+        A start failure caused by missing required env is non-fatal: the
+        step is ``succeeded`` with a ``needs env: KEY`` detail so the user
+        knows to supply credentials later. Any other failure is ``failed``.
+        """
+        try:
+            manager.add_server_config(cfg)
+        except Exception as exc:  # registry write hiccup — non-recoverable for this server
+            logger.warning("MCP server '%s' registration failed: %s", cfg.name, exc)
+            return PluginInstallStep(name=step_name, status="failed", detail=str(exc))
+
+        missing = self._missing_env(spec, cfg)
+        try:
+            ok = await manager.start_server(cfg)
+        except Exception as exc:
+            logger.warning("MCP server '%s' start raised: %s", cfg.name, exc)
+            return PluginInstallStep(name=step_name, status="failed", detail=str(exc))
+
+        if ok:
+            return PluginInstallStep(name=step_name, status="succeeded")
+        if missing:
+            # Heuristic: we can't tell *why* start_server returned False, only
+            # that the spec declared an empty env var. So a server that failed
+            # to start for an unrelated reason while also having an empty env
+            # value is reported "succeeded / needs env" — a deliberate
+            # false-positive trade-off, not a bug. We'd rather nudge the
+            # operator to supply credentials than hard-fail a recoverable
+            # install. (#1358's list/remove surface will let them retry.)
+            return PluginInstallStep(
+                name=step_name,
+                status="succeeded",
+                detail=f"needs env: {missing}",
+            )
+        return PluginInstallStep(name=step_name, status="failed", detail="server failed to start")
+
+    @staticmethod
+    def _missing_env(spec: dict, cfg: MCPServerConfig) -> str | None:
+        """Return the first declared env var the spec left unset, else None.
+
+        A bundle can declare required env in the spec's ``env`` block with an
+        empty / placeholder value (e.g. ``{"API_KEY": ""}``). When the value
+        is empty the server will start-fail for lack of credentials; we treat
+        that as a non-fatal "needs env" outcome rather than a hard failure.
+        """
+        raw_env = spec.get("env")
+        if not isinstance(raw_env, dict):
+            return None
+        for key, value in raw_env.items():
+            if not str(value).strip():
+                return str(key)
+        return None
+
     def _record_registry(
-        self, manifest: PluginManifest, source: str, installed: list[str]
+        self,
+        manifest: PluginManifest,
+        source: str,
+        installed: list[str],
+        mcp_servers: list[str] | None = None,
     ) -> PluginInstallStep:
         """Write the plugin entry to the registry (read-modify-write)."""
         from datetime import datetime
@@ -310,6 +499,7 @@ class PluginInstaller:
                 "version": manifest.version,
                 "source": source,
                 "skills": installed,
+                "mcp_servers": mcp_servers or [],
                 "installed_at": datetime.now().isoformat(),
             }
             self._registry_path.parent.mkdir(parents=True, exist_ok=True)

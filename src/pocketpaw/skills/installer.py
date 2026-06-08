@@ -6,6 +6,10 @@ Updated: 2026-06-07 (feat/plugin-installer-skills) — extracted the
 ``clone_github_repo`` async context manager so the plugin installer can
 share the same clone path. ``install_skills_from_github`` now calls it;
 its behavior is unchanged.
+Updated: 2026-06-08 (feat/plugin-installer-mcp) — promoted the private
+``_ignore_symlinks`` copytree filter to a public ``ignore_symlinks``
+(``_ignore_symlinks`` kept as a backwards-compatible alias) so the plugin
+installer imports the public name.
 """
 
 from __future__ import annotations
@@ -28,9 +32,13 @@ logger = logging.getLogger(__name__)
 INSTALL_DIR = Path.home() / ".agents" / "skills"
 
 
-def _ignore_symlinks(src: str, names: list[str]) -> set[str]:
+def ignore_symlinks(src: str, names: list[str]) -> set[str]:
     """Return names that are symlinks so ``shutil.copytree`` skips them."""
     return {n for n in names if os.path.islink(os.path.join(src, n))}
+
+
+# Backwards-compatible alias for the now-public name.
+_ignore_symlinks = ignore_symlinks
 
 
 class SkillInstallError(Exception):
@@ -142,7 +150,7 @@ async def install_skills_from_github(
             dest = INSTALL_DIR / name
             if dest.exists():
                 shutil.rmtree(dest)
-            shutil.copytree(src_dir, dest, ignore=_ignore_symlinks)
+            shutil.copytree(src_dir, dest, ignore=ignore_symlinks)
             installed.append(name)
 
         logger.info("Installed %d skills from %s/%s", len(installed), owner, repo)

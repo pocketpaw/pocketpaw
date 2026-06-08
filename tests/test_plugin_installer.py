@@ -4,7 +4,12 @@
 # source parsing, skills discovery/copy/reload, registry write, and error
 # paths (bad source, missing manifest, no skills). The clone is mocked by
 # injecting a clone factory that yields a local fixture .claude-plugin dir.
-"""Unit tests for pocketpaw.plugins (skills slice)."""
+# Updated: 2026-06-08 (feat/plugin-installer-mcp) — added the MCP-routing
+# slice: .mcp.json -> MCPServerConfig mapping, plugin:<p>:<server>
+# namespacing, registered-but-needs-env (succeeded + needs-env detail),
+# a skills+mcp bundle, and the no-.mcp.json skip. The MCP manager is mocked
+# via a fake injected with monkeypatch (no real servers are spawned).
+"""Unit tests for pocketpaw.plugins (skills + MCP slices)."""
 
 from __future__ import annotations
 
@@ -294,3 +299,250 @@ class TestInstallErrors:
         with pytest.raises(PluginInstallError) as exc:
             await inst.install("acme/widgets")
         assert exc.value.status_code == 504
+
+
+# --------------------------------------------------------------------------- #
+# MCP routing                                                                 #
+# --------------------------------------------------------------------------- #
+class _FakeMCPManager:
+    """Records add_server_config + start_server calls; never spawns servers.
+
+    ``start_results`` maps a (namespaced) server name to the bool returned
+    by ``start_server`` — defaults to True (started cleanly) when unset.
+    """
+
+    def __init__(self, start_results: dict[str, bool] | None = None):
+        self.added: list = []  # MCPServerConfig objects
+        self.started: list = []  # MCPServerConfig objects
+        self._start_results = start_results or {}
+
+    def add_server_config(self, config) -> None:
+        self.added.append(config)
+
+    async def start_server(self, config) -> bool:
+        self.started.append(config)
+        return self._start_results.get(config.name, True)
+
+
+def _write_mcp_json(plugin_root: Path, servers: dict) -> None:
+    (plugin_root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def _patch_loader_and_manager(monkeypatch, manager: _FakeMCPManager) -> None:
+    monkeypatch.setattr(
+        "pocketpaw.plugins.installer.get_skill_loader",
+        lambda: type("L", (), {"reload": lambda self: None})(),
+    )
+    monkeypatch.setattr(
+        "pocketpaw.plugins.installer.get_mcp_manager",
+        lambda: manager,
+    )
+
+
+class TestMCPRouting:
+    async def test_no_mcp_json_skips_cleanly(self, fixture_repo, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        inst = _installer(fixture_repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert report.installed_mcp_servers == []
+        assert report.succeeded()
+        mcp_steps = [s for s in report.steps if s.name == "mcp"]
+        assert mcp_steps and mcp_steps[0].status == "skipped"
+        assert manager.added == []
+
+    async def test_spec_maps_to_config_and_namespaces(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="my-plugin", skills=["alpha"])
+        _write_mcp_json(
+            repo,
+            {
+                "weather": {
+                    "command": "npx",
+                    "args": ["-y", "weather-mcp"],
+                    "env": {"REGION": "us"},
+                }
+            },
+        )
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert report.installed_mcp_servers == ["plugin:my-plugin:weather"]
+        # Config mapped correctly.
+        assert len(manager.added) == 1
+        cfg = manager.added[0]
+        assert cfg.name == "plugin:my-plugin:weather"
+        assert cfg.transport == "stdio"  # default when type unset
+        assert cfg.command == "npx"
+        assert cfg.args == ["-y", "weather-mcp"]
+        assert cfg.env == {"REGION": "us"}
+        # Server was started.
+        assert [c.name for c in manager.started] == ["plugin:my-plugin:weather"]
+        # Step succeeded.
+        step = next(s for s in report.steps if s.name == "mcp:weather")
+        assert step.status == "succeeded"
+
+    async def test_http_transport_from_type(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        _write_mcp_json(
+            repo,
+            {
+                "remote": {"type": "streamable-http", "url": "https://mcp.example.com"},
+            },
+        )
+
+        inst = _installer(repo, tmp_path)
+        await inst.install("acme/widgets")
+
+        cfg = manager.added[0]
+        assert cfg.transport == "streamable-http"
+        assert cfg.url == "https://mcp.example.com"
+        assert cfg.command == ""
+
+    async def test_needs_env_is_non_fatal(self, tmp_path, monkeypatch):
+        # Server registers but start_server returns False; the spec declares
+        # an empty env var, so the step is succeeded with a needs-env detail.
+        ns_name = "plugin:p:db"
+        manager = _FakeMCPManager(start_results={ns_name: False})
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        _write_mcp_json(
+            repo,
+            {"db": {"command": "npx", "args": ["db-mcp"], "env": {"DB_URL": ""}}},
+        )
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        step = next(s for s in report.steps if s.name == "mcp:db")
+        assert step.status == "succeeded"
+        assert "needs env: DB_URL" in step.detail
+        # Still recorded as installed (registered, just not running yet).
+        assert report.installed_mcp_servers == [ns_name]
+        assert report.succeeded()
+
+    async def test_hard_start_failure_is_failed(self, tmp_path, monkeypatch):
+        # start_server returns False AND there is no missing env → failed.
+        ns_name = "plugin:p:broken"
+        manager = _FakeMCPManager(start_results={ns_name: False})
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        _write_mcp_json(
+            repo,
+            {"broken": {"command": "npx", "args": ["broken-mcp"]}},
+        )
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        step = next(s for s in report.steps if s.name == "mcp:broken")
+        assert step.status == "failed"
+        assert ns_name not in report.installed_mcp_servers
+        assert not report.succeeded()
+
+    async def test_skills_and_mcp_together(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="combo", skills=["alpha", "beta"])
+        _write_mcp_json(repo, {"svc": {"command": "uvx", "args": ["svc-mcp"]}})
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert sorted(report.installed_skills) == ["alpha", "beta"]
+        assert report.installed_mcp_servers == ["plugin:combo:svc"]
+        assert report.succeeded()
+
+        # Registry entry records both skills and mcp servers.
+        registry_path = tmp_path / "registry" / "plugins.json"
+        entry = json.loads(registry_path.read_text())["combo"]
+        assert sorted(entry["skills"]) == ["alpha", "beta"]
+        assert entry["mcp_servers"] == ["plugin:combo:svc"]
+
+    async def test_empty_mcp_servers_skips(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        _write_mcp_json(repo, {})  # file exists, no servers
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert report.installed_mcp_servers == []
+        step = next(s for s in report.steps if s.name == "mcp")
+        assert step.status == "skipped"
+
+    async def test_malformed_mcp_json_does_not_orphan_skills(self, tmp_path, monkeypatch):
+        # A bad .mcp.json must degrade to a failed mcp step — NOT raise — so
+        # the skills stay installed and the registry entry is still written.
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        (repo / ".mcp.json").write_text("{not valid json", encoding="utf-8")
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")  # must not raise
+
+        # Skills installed.
+        assert report.installed_skills == ["alpha"]
+        assert (tmp_path / "skills_install" / "alpha" / "SKILL.md").is_file()
+        # mcp step failed (not skipped), report not fully succeeded.
+        mcp_step = next(s for s in report.steps if s.name == "mcp")
+        assert mcp_step.status == "failed"
+        assert report.installed_mcp_servers == []
+        assert not report.succeeded()
+        # Registry entry still written — skills are NOT orphaned.
+        registry_path = tmp_path / "registry" / "plugins.json"
+        assert registry_path.is_file()
+        entry = json.loads(registry_path.read_text())["p"]
+        assert entry["skills"] == ["alpha"]
+        assert entry["mcp_servers"] == []
+        assert manager.added == []  # nothing registered from a bad config
+
+    async def test_malformed_mcp_servers_shape_is_failed_step(self, tmp_path, monkeypatch):
+        # Top-level dict but mcpServers is a list → failed step, no raise.
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="p", skills=["alpha"])
+        (repo / ".mcp.json").write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert report.installed_skills == ["alpha"]
+        mcp_step = next(s for s in report.steps if s.name == "mcp")
+        assert mcp_step.status == "failed"
+        assert (tmp_path / "registry" / "plugins.json").is_file()
+
+    async def test_manifest_mcp_path_override(self, tmp_path, monkeypatch):
+        manager = _FakeMCPManager()
+        _patch_loader_and_manager(monkeypatch, manager)
+
+        repo = _write_plugin(tmp_path / "repo", name="ov", skills=["alpha"])
+        # Point the manifest at a custom MCP config path.
+        manifest = repo / ".claude-plugin" / "plugin.json"
+        manifest.write_text(json.dumps({"name": "ov", "mcp_servers": "config/mcp.json"}))
+        custom = repo / "config"
+        custom.mkdir(parents=True)
+        (custom / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"svc": {"command": "npx", "args": ["svc"]}}})
+        )
+
+        inst = _installer(repo, tmp_path)
+        report = await inst.install("acme/widgets")
+
+        assert report.installed_mcp_servers == ["plugin:ov:svc"]

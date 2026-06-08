@@ -1,10 +1,11 @@
 # src/pocketpaw/api/v1/plugins.py
 # Created: 2026-06-07 (feat/plugin-installer-skills) — Plugins router.
+# Updated: 2026-06-08 (feat/plugin-installer-mcp) — install now also
+# registers + starts a bundle's MCP servers (#1357).
 # POST /api/v1/plugins/install clones a .claude-plugin repo, installs its
-# skills, and returns a step-by-step PluginInstallReport. Admin-scoped,
-# mirroring api/v1/mcp.py. Skills-only slice — MCP + list/remove ship
-# separately (#1357, #1358).
-"""REST surface for the Plugin Installer (skills slice)."""
+# skills and MCP servers, and returns a step-by-step PluginInstallReport.
+# Admin-scoped, mirroring api/v1/mcp.py. List/remove ships separately (#1358).
+"""REST surface for the Plugin Installer (skills + MCP)."""
 
 from __future__ import annotations
 
