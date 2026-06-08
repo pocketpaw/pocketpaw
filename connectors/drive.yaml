@@ -9,6 +9,9 @@ display_name: Google Drive
 type: knowledge
 icon: cloud
 
+senses:
+  - paw.docs.v1
+
 auth:
   method: bearer
   credentials:

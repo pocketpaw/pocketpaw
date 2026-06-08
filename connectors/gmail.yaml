@@ -41,6 +41,9 @@ surface_profile:
   allow_tools: []
   deny_tools: []
 
+senses:
+  - paw.email.v1
+
 auth:
   method: oauth2
   credentials:

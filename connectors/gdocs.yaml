@@ -6,6 +6,9 @@ display_name: Google Docs
 type: knowledge
 icon: file-text
 
+senses:
+  - paw.docs.v1
+
 auth:
   method: oauth2
   credentials:

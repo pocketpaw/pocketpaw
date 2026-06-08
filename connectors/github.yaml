@@ -30,6 +30,9 @@ surface_profile:
   allow_tools: []
   deny_tools: []
 
+senses:
+  - paw.code.v1
+
 auth:
   method: bearer
   headers:
