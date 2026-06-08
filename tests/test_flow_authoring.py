@@ -1,6 +1,14 @@
 # tests/test_flow_authoring.py
 # Created: 2026-05-31 (RFC 13 M3, feat/m3-flow-authoring-tool).
 #
+# Changes:
+#   - 2026-06-07 (polish/rfc13-flow-nav-validation): added (a) Back-navigation
+#     tests asserting both templates' intermediate (non-first, non-terminal)
+#     steps render a `flow.back` button while root/terminal steps do not, and
+#     (b) deep-validation tests asserting validate_against_catalog /
+#     validate_action_verbs now descend chain / chain_map branches — rejecting a
+#     bad widget or verb buried in a later flow step, accepting a clean one.
+#
 # Tests for the `start_flow` Chain Flow authoring tool and its deterministic
 # builders (`pocketpaw.ripple._flows` + `pocketpaw.tools.builtin.flow_tool`).
 #
@@ -334,6 +342,185 @@ def test_every_step_passes_action_verb_validator(builder) -> None:
     for step in _iter_steps(builder()["ui"]):
         issues = validate_action_verbs({"ui": step["ui"]})
         assert issues == [], f"step {step.get('id')!r} has action-verb violations: {issues}"
+
+
+# ---------------------------------------------------------------------------
+# Back navigation (Task 1) — intermediate steps render a flow.back control.
+# ---------------------------------------------------------------------------
+
+
+def _back_targets(step: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node in a step's UI whose on_click emits the `flow.back` verb."""
+    out: list[dict[str, Any]] = []
+    for node in _walk_nodes(step["ui"]):
+        handler = node.get("on_click")
+        if isinstance(handler, dict) and handler.get("target") == "flow.back":
+            out.append(node)
+    return out
+
+
+def _next_targets(step: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for node in _walk_nodes(step["ui"]):
+        handler = node.get("on_click")
+        if isinstance(handler, dict) and handler.get("target") == "flow.next":
+            out.append(node)
+    return out
+
+
+def _is_root(step: dict[str, Any], root: dict[str, Any]) -> bool:
+    return step is root
+
+
+@_BUILDERS
+def test_intermediate_steps_have_a_back_button(builder) -> None:
+    """Every non-first, non-terminal step renders a `flow.back` button — so the
+    runtime's history stack / flow.back verb is finally reachable from the UI.
+
+    A step is intermediate when it is neither the root (first) step nor the
+    terminal (no chain/chain_map) step. The root has nothing to go back to and
+    the terminal carries Submit, so neither gets a Back control.
+    """
+    root = builder()["ui"]
+    steps = _iter_steps(root)
+    intermediate = [s for s in steps if not _is_root(s, root) and not _is_terminal(s)]
+    assert intermediate, "template has no intermediate steps to validate"
+
+    for step in intermediate:
+        backs = _back_targets(step)
+        assert len(backs) == 1, (
+            f"intermediate step {step.get('id')!r} should render exactly one "
+            f"flow.back button (found {len(backs)})"
+        )
+        back = backs[0]
+        # Mirrors the _continue_button / _submit_button emit shape exactly.
+        assert back["type"] == "button"
+        assert back["on_click"]["action"] == "emit"
+        assert back["on_click"]["value"] == {}
+
+
+@_BUILDERS
+def test_root_and_terminal_steps_have_no_back_button(builder) -> None:
+    """The first step (nothing to go back to) and the terminal step (Submit, not
+    Back) must NOT render a flow.back control."""
+    root = builder()["ui"]
+    assert _back_targets(root) == [], "root step should not have a Back button"
+    terminal = next(s for s in _iter_steps(root) if _is_terminal(s))
+    assert _back_targets(terminal) == [], "terminal step should not have a Back button"
+
+
+@_BUILDERS
+def test_back_button_precedes_continue(builder) -> None:
+    """In an intermediate step's button row, Back sits before Continue."""
+    root = builder()["ui"]
+    intermediate = [s for s in _iter_steps(root) if not _is_root(s, root) and not _is_terminal(s)]
+    for step in intermediate:
+        ordered = _walk_nodes(step["ui"])
+        back_idx = next(
+            i
+            for i, n in enumerate(ordered)
+            if isinstance(n.get("on_click"), dict) and n["on_click"].get("target") == "flow.back"
+        )
+        next_idx = next(
+            i
+            for i, n in enumerate(ordered)
+            if isinstance(n.get("on_click"), dict) and n["on_click"].get("target") == "flow.next"
+        )
+        assert back_idx < next_idx, (
+            f"step {step.get('id')!r}: Back should precede Continue in the row"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Deep validation (Task 2) — validators descend chain / chain_map branches.
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_validator_descends_chain_and_chain_map() -> None:
+    """A bad widget buried in a chain / chain_map branch step is caught.
+
+    Two violations are planted: one in a linear `chain` step's UI, one in a
+    `chain_map` branch step's UI. The shallow walker (children-only) would miss
+    both; the deep walker must report exactly these two.
+    """
+    flow = {
+        "version": "1.0",
+        "ui": {
+            "version": "2.0",
+            "id": "root",
+            "flowId": "root",
+            "chain_map": {
+                "a": {
+                    "version": "2.0",
+                    "id": "branch-a",
+                    "flowId": "a",
+                    "chain": {
+                        "version": "2.0",
+                        "id": "deep",
+                        "flowId": "deep",
+                        # buried in a linear chain step's UI
+                        "ui": {"type": "container", "children": [{"type": "bogus-widget"}]},
+                    },
+                    # buried in a chain_map branch step's UI
+                    "ui": {"type": "container", "children": [{"type": "another-bad-one"}]},
+                },
+            },
+            "ui": {"type": "container", "children": [{"type": "heading"}]},
+        },
+    }
+    issues = validate_against_catalog(flow, ALLOWED_TYPES)
+    bad_types = {i["type"] for i in issues}
+    assert bad_types == {"bogus-widget", "another-bad-one"}, (
+        f"deep walker must flag both buried bad widgets, got: {bad_types}"
+    )
+
+
+def test_action_verb_validator_descends_chain_and_chain_map() -> None:
+    """A bad action verb buried in a chain / chain_map branch is caught."""
+    flow = {
+        "version": "1.0",
+        "ui": {
+            "version": "2.0",
+            "id": "root",
+            "flowId": "root",
+            "chain_map": {
+                "a": {
+                    "version": "2.0",
+                    "id": "branch-a",
+                    "flowId": "a",
+                    "chain": {
+                        "version": "2.0",
+                        "id": "deep",
+                        "flowId": "deep",
+                        "ui": {
+                            "type": "button",
+                            "props": {
+                                "label": "Go",
+                                "on_click": {"action": "teleport", "target": "x"},
+                            },
+                        },
+                    },
+                    "ui": {"type": "container", "children": [{"type": "text"}]},
+                },
+            },
+            "ui": {"type": "container", "children": [{"type": "heading"}]},
+        },
+    }
+    issues = validate_action_verbs(flow)
+    bad_verbs = {i["action"] for i in issues}
+    assert "teleport" in bad_verbs, (
+        f"deep walker must flag the buried unknown verb, got: {bad_verbs}"
+    )
+
+
+@_BUILDERS
+def test_full_materialized_flow_passes_deep_validators(builder) -> None:
+    """A clean, fully-materialized flow tree (root + every nested step) passes
+    BOTH deep validators when validated end to end — not just per-step. This is
+    the accept case complementing the reject cases above."""
+    doc = builder()
+    assert validate_against_catalog(doc, ALLOWED_TYPES) == []
+    assert validate_action_verbs(doc) == []
 
 
 # ---------------------------------------------------------------------------
