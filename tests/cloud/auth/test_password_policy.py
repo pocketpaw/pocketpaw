@@ -22,9 +22,17 @@ def hibp_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_too_short(hibp_off: None) -> None:
+    # 5 chars, fully complex (upper/lower/digit/symbol) but one below the
+    # 6-char minimum — length gate must still fire before the other checks.
     with pytest.raises(InvalidPasswordException) as exc:
-        await password_policy.validate_password_async("Aa1!aaaa", email="x@y.z")
+        await password_policy.validate_password_async("Ab1!c", email="x@y.z")
     assert exc.value.reason == "too_short"
+
+
+async def test_min_length_boundary_passes(hibp_off: None) -> None:
+    # Exactly 6 chars, fully complex — clears the length gate and the rest
+    # of the policy (HIBP disabled here), so no exception is raised.
+    await password_policy.validate_password_async("Ab1!cd", email="x@y.z")
 
 
 async def test_missing_uppercase(hibp_off: None) -> None:

@@ -20,7 +20,7 @@ from fastapi_users.exceptions import InvalidPasswordException
 
 logger = logging.getLogger(__name__)
 
-MIN_LENGTH = 12
+MIN_LENGTH = 6
 _HIBP_RANGE_URL = "https://api.pwnedpasswords.com/range/{prefix}"
 _HIBP_TIMEOUT = 3.0
 _CACHE_TTL_SECONDS = 24 * 60 * 60
