@@ -289,21 +289,49 @@ the 2 MB cap, the document is unparseable, or it carries no `paths`
 object. Every install is audit-logged with the workspace, the actor, and
 the resulting slug — never the spec contents.
 
-## Plugins — Install a `.claude-plugin`'s Skills
+## Plugins — Install a `.claude-plugin`'s Skills and MCP Servers
 
 PocketPaw adopts the `.claude-plugin` standard so a whole plugin's skills
-install in one step. This endpoint clones a GitHub repo, reads its
-`.claude-plugin/plugin.json`, copies each `skills/<name>/SKILL.md`
-directory into the skill loader path, reloads the loader, and records the
-install in a registry at `~/.pocketpaw/plugins.json`.
+and MCP servers install in one step. This endpoint clones a GitHub repo,
+reads its `.claude-plugin/plugin.json`, copies each `skills/<name>/SKILL.md`
+directory into the skill loader path, reloads the loader, registers and
+starts any MCP servers the bundle declares, and records the install in a
+registry at `~/.pocketpaw/plugins.json`.
 
-> Scope note: this slice installs **skills only**. A plugin's MCP servers
-> and the list/remove surface ship in follow-up endpoints.
+### MCP servers
+
+After the skills step, the installer reads the bundle's MCP config — a
+`.mcp.json` file at the plugin root in the standard
+`{"mcpServers": {name: spec}}` shape (a manifest `mcp_servers` path
+override is honoured if present). When there is no MCP config the step is
+recorded as `skipped`; it never fails the install.
+
+Each declared server is mapped to a PocketPaw MCP server config:
+`command`, `args`, and `env` carry over directly, and `transport` is
+derived from the spec's `type` (`stdio` is the default; `http`, `sse`, and
+`streamable-http` map through). To avoid cross-plugin collisions the
+registered name is namespaced as `plugin:<plugin_name>:<server_name>`.
+
+Every server is registered and started through the MCP manager — one step
+per server:
+
+- **`succeeded`** — the server started, **or** it registered but couldn't
+  start because it's missing required env. The latter is non-fatal and
+  carries a `needs env: KEY` detail so the operator knows to supply the
+  credential; the server is still recorded as installed.
+- **`failed`** — the server failed to start for any other reason.
+
+The namespaced server names appear in the registry entry under
+`mcp_servers` and on the report's `installed_mcp_servers`.
+
+> Scope note: this slice installs **skills and MCP servers**. The
+> list/remove surface ships in a follow-up endpoint.
 
 ### `POST /plugins/install`
 
-Install a plugin's skills from a GitHub source. Requires the **admin**
-scope — installing skills changes workspace-wide agent behaviour.
+Install a plugin's skills and MCP servers from a GitHub source. Requires
+the **admin** scope — installing a plugin changes workspace-wide agent
+behaviour.
 
 Request body:
 
@@ -314,7 +342,8 @@ Request body:
 `source` accepts `owner/repo`, `owner/repo/subdir` (when the plugin lives
 in a subdirectory), or a full GitHub URL (a `/tree/<ref>/<subdir>` path is
 honoured). The repo (or subdir) must contain a `.claude-plugin/plugin.json`
-manifest and at least one `skills/<name>/SKILL.md`.
+manifest and at least one `skills/<name>/SKILL.md`. An MCP `.mcp.json` is
+optional.
 
 Response `200` — a step-by-step install report:
 
@@ -326,20 +355,24 @@ Response `200` — a step-by-step install report:
     { "name": "read_manifest", "status": "succeeded", "detail": "my-plugin v1.2.3" },
     { "name": "skill:alpha", "status": "succeeded", "detail": "" },
     { "name": "reload_loader", "status": "succeeded", "detail": "" },
+    { "name": "mcp:weather", "status": "succeeded", "detail": "" },
+    { "name": "mcp:db", "status": "succeeded", "detail": "needs env: DB_URL" },
     { "name": "record_registry", "status": "succeeded", "detail": "" }
   ],
-  "installed_skills": ["alpha"]
+  "installed_skills": ["alpha"],
+  "installed_mcp_servers": ["plugin:my-plugin:weather", "plugin:my-plugin:db"]
 }
 ```
 
 Each unit of work is a step with status `succeeded` / `skipped` /
-`failed`, so a per-skill copy failure surfaces in the report rather than
-aborting the whole install. Up-front failures return clear status codes
-instead of `500`:
+`failed`, so a per-skill copy failure or a single MCP server start failure
+surfaces in the report rather than aborting the whole install. When the
+bundle declares no MCP servers, a single `mcp` step is recorded as
+`skipped`. Up-front failures return clear status codes instead of `500`:
 
 | Status | When |
 |--------|------|
-| `400` | Missing or malformed `source`, or an invalid `plugin.json`. |
+| `400` | Missing or malformed `source`, an invalid `plugin.json`, or an invalid `.mcp.json`. |
 | `404` | No `.claude-plugin/plugin.json`, or no skills found in the plugin. |
 | `502` | The git clone failed. |
 | `504` | The git clone timed out. |

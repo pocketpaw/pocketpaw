@@ -5,6 +5,11 @@ from the dashboard with just an API key paste.
 
 Created: 2026-02-09
 Updated: 2026-03-05 — Added google-workspace preset (gws CLI with MCP support).
+Updated: 2026-06-08 (feat/plugin-installer-mcp) — added ``spec_to_config``,
+which maps a standard ``.mcp.json`` server spec (``{command, args, env,
+type, url, ...}``) to an ``MCPServerConfig``. Mirrors ``preset_to_config``'s
+field mapping so the plugin installer and the preset catalog stay in sync
+on transport-name normalisation.
 """
 
 from __future__ import annotations
@@ -961,4 +966,48 @@ def preset_to_config(
         env=resolved_env,
         enabled=True,
         oauth=preset.oauth,
+    )
+
+
+# Map the standard ``.mcp.json`` ``type`` field to our transport names.
+# The standard uses "stdio" | "http" | "sse"; we additionally recognise
+# "streamable-http" (and its common aliases) as a distinct transport.
+_SPEC_TYPE_TO_TRANSPORT: dict[str, str] = {
+    "stdio": "stdio",
+    "http": "http",
+    "sse": "sse",
+    "streamable-http": "streamable-http",
+    "streamable_http": "streamable-http",
+    "streamablehttp": "streamable-http",
+}
+
+
+def spec_to_config(name: str, spec: dict) -> MCPServerConfig:
+    """Map a standard ``.mcp.json`` server spec to an ``MCPServerConfig``.
+
+    The ``.mcp.json`` shape is ``{"mcpServers": {name: spec}}`` where each
+    *spec* carries ``command`` / ``args`` / ``env`` for stdio servers, or a
+    ``url`` for remote ones, plus an optional ``type`` field. Transport is
+    derived from ``type`` (defaulting to ``stdio``); an unknown ``type``
+    falls back to ``stdio``. Mirrors :func:`preset_to_config`'s mapping so
+    the two entry points stay in sync.
+    """
+    spec = spec or {}
+    spec_type = str(spec.get("type") or "stdio").strip().lower()
+    transport = _SPEC_TYPE_TO_TRANSPORT.get(spec_type, "stdio")
+
+    raw_args = spec.get("args") or []
+    args = [str(a) for a in raw_args] if isinstance(raw_args, list) else []
+
+    raw_env = spec.get("env") or {}
+    env = {str(k): str(v) for k, v in raw_env.items()} if isinstance(raw_env, dict) else {}
+
+    return MCPServerConfig(
+        name=name,
+        transport=transport,
+        command=str(spec.get("command") or ""),
+        args=args,
+        url=str(spec.get("url") or ""),
+        env=env,
+        enabled=True,
     )
