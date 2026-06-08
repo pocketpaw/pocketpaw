@@ -71,12 +71,23 @@ member's private Gmail/calendar KB is never injected into another member's
 agent context. ``ctx.user_id`` (an opaque cloud user id) is the scope id —
 no email, so kb-go's on-disk ``:``→``_`` sanitize can't alias two members.
 Mirrors the OSS ``KbContext.user_id`` / ``_resolve_kb_scopes`` priority.
+Changes: 2026-06-08 (VIP Onboarding Phase B chunk 5 — the "your day" briefing)
+— ``_member_briefing_block`` builds a concise, capped (``_BRIEFING_MAX_CHARS``
+≈ 400 tokens) "your day" block from the structured ``MemberDayDigest`` (the
+per-member live mail/calendar pull) and ``build_knowledge_context`` PREPENDS
+it. It is GATED by the SAME ``_member_private_user_scope`` decision as the
+private ``user:`` KB scope — present ONLY in the member's solo session,
+ABSENT (and the digest never even pulled) in every shared / multi-member
+room. Graceful: an empty digest (no connected accounts) or a digest that
+raises → ``""``, so unconnected and non-solo sessions are byte-identical to
+before.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -979,6 +990,117 @@ def _member_private_user_scope(ctx: ScopeContext) -> str | None:
     return f"user:{uid}"
 
 
+# Hard cap on the "your day" briefing block. The block shares the
+# system-prompt budget, so it must never grow unbounded with a busy day.
+# ~400 tokens ≈ 1600 chars (English ≈ 4 chars/token); we cap on chars (a
+# cheap, deterministic proxy — no tokenizer dependency) and truncate with an
+# ellipsis if a rendered block would exceed it.
+_BRIEFING_MAX_CHARS = 1600
+
+
+async def _member_briefing_block(
+    ctx: ScopeContext,
+    *,
+    digest_fn: Callable[[str, str], Awaitable[Any]] | None = None,
+) -> str:
+    """Return the concise, capped "your day" briefing for the member's OWN
+    solo session, or ``""`` when it must be absent.
+
+    GATED EXACTLY like the member-private ``user:`` KB scope: we reuse
+    ``_member_private_user_scope`` as the single source of truth for the
+    "is this the member's solo session?" decision. When it returns ``None``
+    (a shared / multi-member room, or a room whose sole member is not the
+    authenticated principal) we emit NOTHING and never even pull the digest —
+    so one member's mail/calendar is never read or surfaced in a context
+    another member can see. This is the same airtight rule that keeps the
+    private KB scope out of shared rooms.
+
+    The block is built from the structured ``MemberDayDigest`` (the per-member
+    live pull, keyed on ``ctx.user_id`` — the authenticated principal, NEVER a
+    caller-supplied id) and rendered down to a capped string. Graceful: an
+    EMPTY digest (no connected accounts) → ``""`` (the agent behaves as
+    today); a digest that RAISES → ``""`` (a flaky mail/calendar pull never
+    sinks the stream).
+
+    ``digest_fn`` defaults to ``member_day_digest.service.member_day_digest``;
+    tests inject a fake so the suite needs no OAuth/network.
+    """
+    # The gate: identical decision to the private ``user:`` KB scope. A
+    # ``None`` here means "not the member's solo session" → no block, no pull.
+    scope = _member_private_user_scope(ctx)
+    if scope is None:
+        return ""
+    member_id = ctx.user_id  # proven == the sole member by the gate above
+
+    pull: Callable[[str, str], Awaitable[Any]]
+    if digest_fn is not None:
+        pull = digest_fn
+    else:
+        try:
+            from pocketpaw_ee.cloud.member_day_digest.service import member_day_digest
+
+            pull = member_day_digest
+        except Exception:
+            logger.debug("member_day_digest unavailable; skipping briefing", exc_info=True)
+            return ""
+
+    try:
+        digest = await pull(ctx.workspace_id, member_id)
+    except Exception:
+        # A briefing is a nicety — a failed mail/calendar pull must never
+        # break the chat. Degrade silently to no block.
+        logger.debug("member day digest failed; skipping briefing", exc_info=True)
+        return ""
+
+    if digest is None or digest.empty:
+        return ""
+
+    return _render_briefing(digest)
+
+
+def _render_briefing(digest: Any) -> str:
+    """Render a ``MemberDayDigest`` into the capped <your-day> system block.
+
+    Concise by construction: a short heading, the upcoming events, and a mail
+    summary line + top subjects. The whole thing is truncated to
+    ``_BRIEFING_MAX_CHARS`` so it can never eat the prompt budget on a busy
+    day. The framing tells the agent this is proactive context to weave in
+    naturally, not a list to read back verbatim.
+    """
+    lines: list[str] = [
+        "<your-day>",
+        "Proactive briefing for the member you're helping — their day at a "
+        "glance. Use it to be helpful and anticipatory; don't read it back "
+        "verbatim unless asked.",
+    ]
+
+    if digest.events:
+        lines.append("")
+        lines.append("Upcoming (next 7 days):")
+        for ev in digest.events:
+            when = ev.start or "(time TBD)"
+            where = f" @ {ev.location}" if ev.location else ""
+            lines.append(f"- {when}: {ev.summary}{where}")
+
+    if digest.unread_mail_count or digest.top_mail:
+        lines.append("")
+        lines.append(f"Unread mail: {digest.unread_mail_count}")
+        for m in digest.top_mail:
+            sender = f" — from {m.sender}" if m.sender else ""
+            lines.append(f"- {m.subject}{sender}")
+
+    lines.append("</your-day>")
+    block = "\n".join(lines)
+
+    # Hard cap. Truncate mid-block and re-close the tag so the agent never
+    # sees a dangling open tag, and the budget is respected exactly.
+    if len(block) > _BRIEFING_MAX_CHARS:
+        closing = "\n…\n</your-day>"
+        budget = _BRIEFING_MAX_CHARS - len(closing)
+        block = block[:budget].rstrip() + closing
+    return block
+
+
 def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
     """Return KB scopes to search for cloud-agent prompt context.
 
@@ -1036,6 +1158,16 @@ async def build_knowledge_context(
         query = f"{query}\nReferenced uploads: {ref_line}" if query else ref_line
 
     sections: list[str] = []
+
+    # The proactive "your day" briefing — FIRST, so the agent is oriented to
+    # the member's day before any retrieval. GATED to the member's OWN solo
+    # session (the same ``members == [user_id]`` rule as the private ``user:``
+    # KB scope); ``""`` in a shared/multi-member room and when the member has
+    # no connected accounts, so non-solo and unconnected sessions are
+    # byte-identical to before.
+    briefing = await _member_briefing_block(ctx)
+    if briefing:
+        sections.append(briefing)
 
     attachments_block = await _build_attachments_block(ctx, attachments)
     if attachments_block:
