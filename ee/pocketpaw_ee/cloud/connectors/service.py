@@ -6,6 +6,11 @@
 #   and persists it via ``pockets.service.apply_derived_surface_profile`` (the
 #   Beanie-write boundary — this service never imports the Pocket doc). Derivation
 #   itself is the pure ``derivation.derive_surface_profile``.
+# Updated: 2026-06-08 (Phase B chunk 7 — purge path) — added
+#   ``disconnect_member``: the member-facing "disconnect my accounts" path. It
+#   delegates to member_ingest.purge.purge_member_data to delete the caller's
+#   own per-user KB scope, OAuth tokens, connector rows, and ingest-state.
+#   Bound to the authenticated caller at the router (member_id == caller).
 # Updated: 2026-06-08 (connector-mcp-execution / keystone) — added
 #   ``list_pocket_connectors`` so the cloud chat agent's in-process MCP server
 #   (``ee/pocketpaw_ee/agent/mcp_servers/connectors.py``) can enumerate a
@@ -690,8 +695,37 @@ async def execute(
     )
 
 
+async def disconnect_member(workspace_id: str, member_id: str) -> dict:
+    """Disconnect a member's own per-user connectors and purge their data.
+
+    The member-facing "disconnect my accounts" path (Phase B chunk 7). A
+    member connected their PERSONAL Gmail/calendar as a per-user connector and
+    we ingested it into their private ``user:{member_id}`` KB scope; when they
+    disconnect, all of that — KB scope, per-user OAuth tokens, connector rows,
+    ingest-state — must be deleted. It's their personal data.
+
+    ``member_id`` is bound to the authenticated caller at the router (a member
+    only ever disconnects THEIR OWN accounts), so the scope this touches is a
+    pure function of the caller's id — no member can purge another's data.
+
+    Idempotent: ``purge_member_data`` is safe to call when nothing exists, so a
+    double-tap or a re-disconnect is a clean no-op. Returns the purge summary.
+    """
+    # Lazy import — keeps the connectors service free of a member_ingest
+    # dependency at module load (member_ingest already reads WorkspaceConnector
+    # cross-entity, so a top-level import here would risk a cycle).
+    from pocketpaw_ee.cloud.member_ingest.purge import purge_member_data
+
+    # purge_member_data deletes the member's user-scoped connector rows along
+    # with their tokens, KB scope, and ingest-state — so a self-disconnect is
+    # exactly "purge everything keyed on this member". The MemberDataPurged
+    # event it emits is the canonical signal the home surface reacts to.
+    return await purge_member_data(workspace_id, member_id)
+
+
 __all__ = [
     "disable_connector",
+    "disconnect_member",
     "enable_connector",
     "execute",
     "get_action_trust",

@@ -740,6 +740,25 @@ class ConnectorSyncRecorded(Event):
     EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
 
 
+# Member ingest — VIP Onboarding Phase B. Fired when the per-user ingest
+# worker finishes a member's Gmail/Calendar → private-KB sync (backfill or
+# incremental). data: workspace_id, member_id, scope, mode, status, documents.
+@dataclass
+class MemberIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.completed"
+
+
+# member_ingest.purged — fan-out when a member's Phase B per-user data is
+# deleted (member disconnected their accounts, or was offboarded from the
+# workspace). data: workspace_id, member_id, scope, status, and the per-store
+# delete counts (kb_cleared, tokens_deleted, connectors_deleted,
+# ingest_state_deleted). Downstream consumers (soul memory, the member's home
+# surface, search index) react by dropping anything keyed on that scope.
+@dataclass
+class MemberDataPurged(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.purged"
+
+
 # Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
 # are defined above with the rest of the LiveKit group-call types; this is the
 # post-call notes fan-out, audience = the group's members.

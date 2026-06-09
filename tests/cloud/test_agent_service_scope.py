@@ -2,6 +2,14 @@
 
 Uses AsyncMock-substituted Beanie finders so tests stay unit-scoped.
 The real Mongo path is exercised by the router integration tests.
+
+Updated: 2026-06-08 (VIP Onboarding Phase B) — added the session-user
+isolation gate tests for ``_kb_scopes_for_context``. The centerpiece is the
+leak-prevention matrix: member A's private ``user:{A}`` scope must NEVER
+appear in member B's resolved scopes nor in any multi-member room — it is
+emitted ONLY in A's own solo session. These are the RED-before / GREEN-after
+tests for the gate that keeps one member's Gmail/calendar KB out of every
+other member's agent context.
 """
 
 from __future__ import annotations
@@ -12,10 +20,33 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pocketpaw_ee.cloud.chat.agent_service import (
     InvalidScope,
+    ScopeContext,
     ScopeKind,
+    _kb_scopes_for_context,
     resolve_scope_context,
 )
 from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+
+
+def _ctx(
+    *,
+    kind: ScopeKind,
+    user_id: str,
+    members: list[str],
+    workspace_id: str = "w1",
+    pocket_id: str | None = None,
+    target_agent_id: str = "a1",
+) -> ScopeContext:
+    """Minimal ScopeContext for the KB-scope gate matrix."""
+    return ScopeContext(
+        kind=kind,
+        scope_id="scope-1",
+        workspace_id=workspace_id,
+        user_id=user_id,
+        members=list(members),
+        target_agent_id=target_agent_id,
+        pocket_id=pocket_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -433,3 +464,104 @@ async def test_session_scope_no_agent_errors():
                 scope="session", scope_id="s1", user_id="u1", agent_id_hint=None
             )
     assert exc.value.code == "session.no_agent"
+
+
+# ===========================================================================
+# VIP Onboarding Phase B — session-user isolation gate for KB scopes.
+#
+# The gate decides whether ``_kb_scopes_for_context`` emits the member-private
+# ``user:{member_id}`` scope. Rule: emit it ONLY when the room is the member's
+# own solo context (exactly one member == the authenticated principal). NEVER
+# in a multi-member room. This keeps one member's Gmail/calendar KB out of
+# every other member's agent session.
+# ===========================================================================
+
+
+def test_solo_session_emits_member_private_user_scope():
+    """A member's own solo session injects their private ``user:{id}`` scope,
+    at the HEAD of the list (highest priority, ahead of workspace)."""
+    ctx = _ctx(kind=ScopeKind.SESSION, user_id="memberA", members=["memberA"])
+    scopes = _kb_scopes_for_context(ctx)
+    assert scopes[0] == "user:memberA"
+    assert "user:memberA" in scopes
+
+
+def test_leak_prevention_member_A_scope_absent_from_member_B_session():
+    """CENTERPIECE LEAK TEST: member A's private scope must NEVER surface in
+    member B's resolved scopes. B's solo session yields ``user:B`` and never
+    ``user:A``."""
+    ctx_b = _ctx(kind=ScopeKind.SESSION, user_id="memberB", members=["memberB"])
+    scopes_b = _kb_scopes_for_context(ctx_b)
+    assert "user:memberA" not in scopes_b
+    assert "user:memberB" in scopes_b
+
+
+def test_leak_prevention_no_member_private_scope_in_multi_member_room():
+    """CENTERPIECE LEAK TEST: a shared room (>1 member) emits NO member-private
+    ``user:`` scope for ANY participant — not the caller's, not anyone's."""
+    ctx = _ctx(
+        kind=ScopeKind.GROUP,
+        user_id="memberA",
+        members=["memberA", "memberB", "memberC"],
+        workspace_id="w1",
+    )
+    scopes = _kb_scopes_for_context(ctx)
+    assert "user:memberA" not in scopes
+    assert "user:memberB" not in scopes
+    assert "user:memberC" not in scopes
+    assert not any(s.startswith("user:") for s in scopes)
+    # The shared workspace scope is still present — only the private tier is gated.
+    assert "workspace:w1" in scopes
+
+
+def test_leak_prevention_dm_with_peer_has_no_member_private_scope():
+    """A 2-person DM is a shared room: no member-private ``user:`` scope, even
+    though the caller is an authenticated member."""
+    ctx = _ctx(
+        kind=ScopeKind.DM,
+        user_id="memberA",
+        members=["memberA", "memberB"],
+    )
+    scopes = _kb_scopes_for_context(ctx)
+    assert not any(s.startswith("user:") for s in scopes)
+
+
+def test_member_private_scope_gated_off_when_principal_not_sole_member():
+    """Defense-in-depth: even a single-other-member room (principal NOT in the
+    member list, or a stale member set) must not leak a ``user:`` scope. The
+    gate keys on ``members == [user_id]`` exactly."""
+    # Principal is memberA but the sole listed member is someone else.
+    ctx = _ctx(kind=ScopeKind.POCKET, user_id="memberA", members=["memberX"], pocket_id="p1")
+    scopes = _kb_scopes_for_context(ctx)
+    assert "user:memberA" not in scopes
+    assert "user:memberX" not in scopes
+
+
+def test_solo_pocket_owner_session_emits_user_scope_above_pocket():
+    """A private pocket whose only member is the owner is a solo own-context:
+    the user scope is emitted and outranks the pocket scope."""
+    ctx = _ctx(
+        kind=ScopeKind.POCKET,
+        user_id="memberA",
+        members=["memberA"],
+        pocket_id="p1",
+    )
+    scopes = _kb_scopes_for_context(ctx)
+    assert scopes[0] == "user:memberA"
+    assert scopes.index("user:memberA") < scopes.index("pocket:p1")
+
+
+def test_no_user_scope_regression_existing_ordering_preserved():
+    """Regression guard: a multi-member room's NON-user scopes keep their exact
+    pocket > agent > workspace ordering — the gate adds nothing when off."""
+    ctx = ScopeContext(
+        kind=ScopeKind.GROUP,
+        scope_id="g1",
+        workspace_id="w1",
+        user_id="memberA",
+        members=["memberA", "memberB"],
+        target_agent_id="agentZ",
+        pocket_id="p1",
+    )
+    scopes = _kb_scopes_for_context(ctx)
+    assert scopes == ["pocket:p1", "agent:agentZ", "workspace:w1"]
