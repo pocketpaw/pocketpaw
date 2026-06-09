@@ -20,6 +20,7 @@ is a member — fixes joined members being locked out of workspace reads.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -31,6 +32,8 @@ from pocketpaw_ee.cloud.models.user import User
 from pocketpaw_ee.guards.audit import log_denial
 from pocketpaw_ee.guards.deps import check_workspace_action
 from pocketpaw_ee.guards.rbac import Forbidden as GuardForbidden
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Identity / workspace extraction
@@ -54,6 +57,12 @@ async def current_workspace_id(user: User = Depends(current_active_user)) -> str
     that the client UI handles, not a denial) only when the user belongs
     to no workspace at all.
     """
+    logger.info(
+        "[diag current_workspace_id] user=%s active_workspace=%r memberships=%s",
+        user.id,
+        user.active_workspace,
+        [getattr(m, "workspace", "?") for m in (getattr(user, "workspaces", None) or [])],
+    )
     if user.active_workspace:
         return user.active_workspace
     # A user who has joined a workspace (invite accept / verified-domain
