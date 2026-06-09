@@ -3,6 +3,14 @@
 Sole owner of writes to the ``Session`` Beanie document. Module-level
 ``async def`` API, no class wrapper, no Protocol-based repository.
 
+Recent change: ``auto_create_pocket_session`` now stamps the workspace's
+default ``pocketpaw`` agent (and the pocket id when known) onto the
+``Session`` it creates. The OSS chat path (home page + widget "Ask agent")
+persists through this helper; without the agent stamp those sessions had
+``agent=None`` and never surfaced in the PocketPaw DM room (which lists via
+``list_by_agent`` keyed on ``Session.agent``). Agent/pocket resolution
+degrades gracefully to the prior behaviour when no default agent exists.
+
 Public API:
 - ``create(ctx, workspace_id, body)`` — create or upsert a session
 - ``list_for_owner(ctx, workspace_id)``
@@ -732,7 +740,7 @@ async def ensure_for_agent_scope(
 
 
 async def auto_create_pocket_session(
-    session_key: str, *, workspace_id: str | None = None
+    session_key: str, *, workspace_id: str | None = None, pocket_id: str | None = None
 ) -> _SessionDoc | None:
     """Create a pocket ``Session`` doc for ``session_key`` when none exists.
 
@@ -741,6 +749,11 @@ async def auto_create_pocket_session(
     Returns ``None`` if no suitable user exists. Used by the cloud
     memory store so its adapter doesn't have to import ``Session`` /
     ``User`` directly.
+
+    Stamps the workspace's default ``pocketpaw`` agent (and ``pocket_id``
+    when supplied) so OSS-path home/widget chats land in the PocketPaw DM
+    room, which lists by ``Session.agent``. Both degrade to ``None`` when
+    resolution fails — a missing agent must never block a chat save.
     """
     from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
@@ -760,15 +773,39 @@ async def auto_create_pocket_session(
     if not workspace_id:
         return None
 
+    # Resolve the workspace's default ``pocketpaw`` agent so the session
+    # surfaces in the PocketPaw DM room. Lazy import: ``chat.agent_service``
+    # imports from this module, so a top-level import would cycle (same
+    # reason ``User`` is imported function-locally above).
+    agent_id: str | None = None
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import _get_default_workspace_agent_id
+
+        agent_id = await _get_default_workspace_agent_id(workspace_id)
+    except Exception:
+        logger.warning(
+            "auto_create_pocket_session: default agent lookup failed for ws=%s",
+            workspace_id,
+            exc_info=True,
+        )
+
     doc = _SessionDoc(
         sessionId=session_key,
         context_type="pocket",
         workspace=workspace_id,
         owner=str(user.id),
         title="Chat",
+        agent=agent_id,
+        pocket=pocket_id,
     )
     await doc.insert()
-    logger.info("auto-created pocket session: sessionId=%s owner=%s", session_key, user.id)
+    logger.info(
+        "auto-created pocket session: sessionId=%s owner=%s agent=%s pocket=%s",
+        session_key,
+        user.id,
+        agent_id,
+        pocket_id,
+    )
     return doc
 
 
