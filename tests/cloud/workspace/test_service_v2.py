@@ -35,6 +35,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceUpdated,
 )
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.people.domain import PERSON_TYPE_ID, SOURCE_ADMIN_CONTEXT
@@ -490,6 +491,72 @@ async def test_accept_invite_rejects_revoked(owner, monkeypatch) -> None:
     assert exc.value.code == "invite.revoked"
 
 
+async def test_accept_invite_self_heals_missing_membership(owner, monkeypatch) -> None:
+    """An invite stamped accepted=True but with NO membership written (the
+    backend was restarted between the atomic claim and _add_member) must
+    converge on re-accept: the rightful invitee gets the membership instead
+    of an ``invite.already_accepted`` 409 that would lock them out forever.
+    """
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    # Simulate the burned invite: claimed (accepted=True) but the membership
+    # never landed, so the invitee has workspaces=[] and active_workspace=None.
+    invite_doc = _InviteDoc(
+        workspace=ws.id,
+        email="invitee@x.c",
+        role="member",
+        invited_by=str(owner.id),
+        token_hash=hash_token("tok-burned"),
+        accepted=True,
+        accepted_at=datetime.now(UTC),
+    )
+    await invite_doc.insert()
+    invitee = await _seed_user(email="invitee@x.c")
+    assert await workspace_service._get_member_role(ws.id, str(invitee.id)) is None
+
+    # Must NOT raise — it heals the missing membership.
+    await workspace_service.accept_invite(_ctx(str(invitee.id)), "tok-burned")
+
+    assert await workspace_service._get_member_role(ws.id, str(invitee.id)) == "member"
+    refreshed = await _UserDoc.get(invitee.id)
+    assert refreshed is not None
+    assert refreshed.active_workspace == ws.id
+
+
+async def test_accept_invite_genuine_duplicate_still_raises(owner, monkeypatch) -> None:
+    """A user who IS already a member re-accepting an accepted invite still
+    hits ``invite.already_accepted`` — the self-heal only fires when the
+    membership is actually missing, not for real duplicate accepts.
+    """
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
+    )
+    ws = await workspace_service.create(
+        _ctx(str(owner.id)), CreateWorkspaceRequest(name="A", slug="a")
+    )
+    invite_doc = _InviteDoc(
+        workspace=ws.id,
+        email="invitee@x.c",
+        role="member",
+        invited_by=str(owner.id),
+        token_hash=hash_token("tok-dup"),
+        accepted=True,
+        accepted_at=datetime.now(UTC),
+    )
+    await invite_doc.insert()
+    invitee = await _seed_user(email="invitee@x.c")
+    # This user is already a member of the workspace.
+    await workspace_service._add_member(ws.id, str(invitee.id), role="member")
+
+    with pytest.raises(ConflictError) as exc:
+        await workspace_service.accept_invite(_ctx(str(invitee.id)), "tok-dup")
+    assert exc.value.code == "invite.already_accepted"
+
+
 async def test_revoke_invite_emits_invite_revoked(owner, recording_bus, monkeypatch) -> None:
     monkeypatch.setattr(
         "pocketpaw_ee.cloud.workspace.service.notifications_service.create", _async_noop
@@ -552,7 +619,6 @@ async def test_create_invite_hashes_token_at_rest(
 
     # The DB row stores the HASH, not the plaintext.
     from pocketpaw_ee.cloud.models.invite import Invite as _D
-    from pocketpaw_ee.cloud.models.invite import hash_token
 
     row = await _D.find_one(_D.token_hash == hash_token(invite.token))
     assert row is not None
@@ -1426,8 +1492,6 @@ async def test_resend_invite_returns_new_plaintext(owner, monkeypatch) -> None:
     new_plaintext = result["token"]
     assert isinstance(new_plaintext, str) and len(new_plaintext) >= 32
     assert new_plaintext != original.token
-
-    from pocketpaw_ee.cloud.models.invite import hash_token
 
     row = await _InviteDoc.get(PydanticObjectId(original.id))
     assert row is not None

@@ -32,6 +32,13 @@ second invite collide on ``token=null``.
 private ``user:{id}`` KB scope), per-user OAuth tokens, connector rows, and
 ingest-state are deleted. The purge counts land in the audit row's cascade
 metadata.
+2026-06-09: accept_invite is now self-healing. The atomic claim and the
+membership write aren't transactional, so an accept interrupted mid-flight
+(backend restart) could leave an invite accepted=True with no membership,
+locking the invitee out of every workspace read. Both already_accepted
+raise-sites now route through _heal_or_conflict: a rightful invitee missing
+the membership gets it added (idempotent) instead of a 409; a genuine
+duplicate (already a member) still raises invite.already_accepted.
 """
 
 from __future__ import annotations
@@ -1003,7 +1010,42 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
     }
 
 
+async def _heal_or_conflict(ctx: RequestContext, existing: _InviteDoc) -> None:
+    """Self-heal an accepted invite whose membership never landed.
+
+    Reached only after the identity check passed, so ``ctx.user_id`` is the
+    rightful, email-matched invitee. The accept flow is non-atomic: it
+    atomically claims the invite (accepted=True), then several awaits later
+    writes the membership. If the request dies between those steps (backend
+    restart, handler abort), the invite is burned with no membership and the
+    user is locked out of every workspace read with no recovery path.
+
+    Converge instead of raising: if the invitee has no membership, add it
+    (``_add_member`` is idempotent) and treat it as success. Only a genuine
+    duplicate — the invitee is already a member — still raises 409.
+    """
+    workspace_id = existing.workspace
+    already = await _get_member_role(workspace_id, ctx.user_id) is not None
+    if not already:
+        logger.warning(
+            "[diag accept_invite] self-heal: added missing membership user=%s workspace=%s",
+            ctx.user_id,
+            workspace_id,
+        )
+        await _add_member(workspace_id, ctx.user_id, role=existing.role, set_active=True)
+        return
+    raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+
+
 async def accept_invite(ctx: RequestContext, token: str) -> None:
+    """Accept a workspace invite for the logged-in user.
+
+    Self-healing: the claim (accepted=True) and the membership write are not
+    wrapped in a transaction, so a backend restart between them can burn an
+    invite with no membership. Re-accepting by the rightful invitee adds the
+    missing membership instead of raising — see ``_heal_or_conflict``. A
+    genuine duplicate (already a member) still raises ``invite.already_accepted``.
+    """
     th = hash_token(token)
 
     # Identity check: the logged-in user's email must match the invitee's.
@@ -1043,7 +1085,10 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
         if existing is None:
             raise NotFound("invite")
         if existing.accepted:
-            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+            # Already claimed. Either a genuine duplicate accept, or the
+            # claim landed but the membership write never did (non-atomic
+            # accept interrupted mid-flight). Self-heal the latter.
+            return await _heal_or_conflict(ctx, existing)
         if existing.revoked:
             raise Forbidden("invite.revoked", "This invite has been revoked")
         if existing.expired:
@@ -1058,7 +1103,10 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             return_document=False,
         )
         if claimed is None:
-            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+            # Backfilled row was already accepted (duplicate or a burned
+            # accept that never wrote the membership). Self-heal the burn;
+            # ``existing`` carries the stable workspace + role for it.
+            return await _heal_or_conflict(ctx, existing)
 
     # Rebuild the domain object from the BEFORE doc so downstream emit/
     # membership logic has the data it needs.
