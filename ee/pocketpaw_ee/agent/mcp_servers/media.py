@@ -383,9 +383,7 @@ async def _video_generate_handler(args: dict) -> dict:
 
     try:
         async with httpx.AsyncClient() as client:
-            create_resp = await client.post(
-                create_url, headers=headers, json=payload, timeout=30.0
-            )
+            create_resp = await client.post(create_url, headers=headers, json=payload, timeout=30.0)
             create_resp.raise_for_status()
             prediction = create_resp.json()
             get_url = (prediction.get("urls") or {}).get("get")

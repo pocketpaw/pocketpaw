@@ -173,9 +173,7 @@ def _build_profiles() -> dict[str, Any]:
             SurfaceKind.CODE: SurfaceProfile(
                 ripple_mode="off",
                 skill_names=frozenset({"code"}),
-                allowed_sdk_tools=frozenset(
-                    {"Bash", "Read", "Write", "Edit", "Glob", "Grep"}
-                ),
+                allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
             ),
         },
         # /sites is meta-aware (below). Both modes scope to the sites authoring
