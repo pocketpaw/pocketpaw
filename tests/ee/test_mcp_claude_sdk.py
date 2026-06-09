@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-10 (feat/studio-code-migration) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_media`` (the new always-on STUDIO media-generation
+  server: image_generate / video_generate), so the external-config assertions
+  stay focused after the media MCP server became ambient. Same regime as
+  pocketpaw_sites_manager / pocketpaw_connectors.
 Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) —
   ``_strip_builtin_servers`` now also drops ``pocketpaw_connectors`` (the new
   always-on connector-execution server: list_connector_actions /
@@ -42,6 +47,7 @@ from unittest.mock import patch
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
     POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
@@ -87,6 +93,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
     # (gmail/github) call connector_execute without an explicit opt-in.
     out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_media`` is always-on too — the bundled `studio` skill calls
+    # image_generate / video_generate without an explicit opt-in.
+    out.pop(_MEDIA_MCP_SERVER_NAME, None)
     return out
 
 
