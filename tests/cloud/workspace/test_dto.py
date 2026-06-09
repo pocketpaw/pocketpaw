@@ -102,7 +102,10 @@ def test_invite_dto_wire_keys() -> None:
         "revoked",
         "expired",
         "expiresAt",
+        "context",
     }
+    # No admin context on a plain invite — the key is present but null.
+    assert dump["context"] is None
 
 
 def test_invite_dto_values() -> None:

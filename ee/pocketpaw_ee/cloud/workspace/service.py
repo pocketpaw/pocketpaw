@@ -64,6 +64,7 @@ from pocketpaw_ee.cloud.auth import sessions as _sessions_service
 from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.invite import InviteContext as _InviteContextDoc
 from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
@@ -71,13 +72,20 @@ from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
+from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
-from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.domain import (
+    Invite,
+    InviteContext,
+    Workspace,
+    WorkspaceMember,
+)
 from pocketpaw_ee.cloud.workspace.dto import (
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
+    InviteContextDTO,
     UpdateWorkspaceRequest,
 )
 from pocketpaw_ee.cloud.workspace.slug import SlugReason, static_slug_reason
@@ -108,6 +116,12 @@ def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Worksp
     )
 
 
+def _context_doc_to_domain(ctx: _InviteContextDoc | None) -> InviteContext | None:
+    if ctx is None:
+        return None
+    return InviteContext(focus=ctx.focus, profile_pic=ctx.profile_pic)
+
+
 def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) -> Invite:
     return Invite(
         id=str(doc.id),
@@ -121,6 +135,7 @@ def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) ->
         revoked=doc.revoked,
         expired=doc.expired,
         expires_at=doc.expires_at,
+        context=_context_doc_to_domain(doc.context),
     )
 
 
@@ -670,11 +685,15 @@ async def _mint_invite_for_email(
     email: str,
     role: str,
     group_id: str | None,
+    context: InviteContextDTO | None = None,
 ) -> Invite:
     """Pre-clean expired/stale rows, reject duplicate pending, insert the
     hashed invite. Shared between ``create_invite`` (single) and
     ``bulk_create_invites`` (batch) so token hashing + pre-cleanup stay
     in lockstep. Does NOT emit or notify — the caller handles side-effects.
+
+    ``context`` is the optional admin onboarding payload (pp#1365); persisted
+    verbatim on the invite document and None when omitted.
     """
     # Mongo TTL is the long-term GC; this pre-cleanup makes the
     # collision check below honest about what's "still pending."
@@ -715,6 +734,11 @@ async def _mint_invite_for_email(
         token=None,  # plaintext never persisted for new invites
         token_hash=hash_token(plaintext),
         group=group_id,
+        context=(
+            _InviteContextDoc(focus=context.focus, profile_pic=context.profile_pic)
+            if context is not None
+            else None
+        ),
     )
     try:
         await invite_doc.insert()
@@ -751,7 +775,9 @@ async def create_invite(
     if member_count >= doc.seats:
         raise SeatLimitError(doc.seats)
 
-    invite = await _mint_invite_for_email(ctx, workspace_id, body.email, body.role, body.group_id)
+    invite = await _mint_invite_for_email(
+        ctx, workspace_id, body.email, body.role, body.group_id, body.context
+    )
 
     invited_user_id = await _find_user_id_by_email(body.email)
 
@@ -924,6 +950,18 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
             else:
                 state = "ready_wrong_user"
 
+    # Surface the admin onboarding context (pp#1365) so the member-facing
+    # accept UI can carry the invitee's focus + profile_pic into the
+    # downstream VIP-onboarding welcome. None when the invite has no context.
+    context_domain = _context_doc_to_domain(invite_doc.context)
+    context_wire = (
+        InviteContextDTO(
+            focus=context_domain.focus, profile_pic=context_domain.profile_pic
+        ).model_dump()
+        if context_domain is not None
+        else None
+    )
+
     return {
         "state": state,
         "email": invite_doc.email,
@@ -932,6 +970,7 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
         "group": invite_doc.group,
         "group_name": None,
         "viewer_email": viewer_email,
+        "context": context_wire,
     }
 
 
@@ -1019,6 +1058,33 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             ctx.user_id,
             role=invite.role,
             set_active=True,
+        )
+
+    # Materialize the member as a standalone Fabric ``Person`` — the
+    # identity spine a later VIP-onboarding flow reads (pp#1366). Built
+    # from the member's own profile + the invite's admin context, with
+    # provenance (invited_by + source=admin_context). Idempotent on the
+    # member's user id, so re-accepting updates rather than duplicating.
+    # The journal ``fabric.object.*`` event is the emit-on-write here.
+    # Wrapped defensively: membership is the source of truth, the Person
+    # is a derived projection — a Fabric/journal hiccup must not roll back
+    # an accepted invite.
+    try:
+        await people_service.materialize_person_from_invite(
+            workspace_id=invite.workspace_id,
+            user_id=ctx.user_id,
+            name=viewer.full_name,
+            email=viewer.email or invite.email,
+            avatar=viewer.avatar,
+            invite=invite,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Fabric Person materialization skipped for user=%s workspace=%s — "
+            "invite accept proceeds; the Person can be re-materialized later",
+            ctx.user_id,
+            invite.workspace_id,
+            exc_info=True,
         )
 
     await event_bus.emit(

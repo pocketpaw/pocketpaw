@@ -62,6 +62,18 @@ gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
 (``mcp_servers/connectors.py``) so its tools scope to the current pocket.
 The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
 unaffected (``pocket_id`` defaults to ``None``).
+
+Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — ``ScopeContext`` carries
+an optional ``about_member_block``: a concise, token-capped "about this member"
+string (name · role · team · one-line focus) rendered from the member's Fabric
+``Person`` (``people.service.get_person``). The resolvers pre-resolve it (async)
+via ``_resolve_about_member`` and stash it; ``build_behavior_instructions``
+APPENDS it to the base system message (additive — NOT a persona override) so the
+agent greets the member by name from the first turn. A member with no Person
+(pre-existing / non-invited user) → ``None`` → no block, behavior unchanged. The
+render is HARD-capped (``_ABOUT_MEMBER_CHAR_CAP``) to kill the prompt-bloat
+failure mode. Stays sync in ``build_behavior_instructions`` — the async read
+happens once in the resolver, mirroring ``backend_summary``.
 """
 
 from __future__ import annotations
@@ -71,7 +83,14 @@ import logging
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only — the runtime read imports ``get_person`` lazily inside
+    # ``_resolve_about_member`` so importing this module never drags in the
+    # people service (and its journal accessor) for chat paths that never
+    # render an about-block.
+    from pocketpaw_ee.cloud.people.domain import Person
 
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
@@ -281,6 +300,16 @@ class ScopeContext:
     # summary via ``get_pocket_backend``). ``None`` for non-home scopes,
     # which read the summary lazily through ``get_pocket`` when needed.
     backend_summary: dict[str, Any] | None = None
+    # A concise, token-capped "about this member" block (name · role · team ·
+    # one-line focus) rendered from the member's Fabric ``Person``. The
+    # resolvers pre-resolve it (async, via ``_resolve_about_member``) and stash
+    # it here; ``build_behavior_instructions`` APPENDS it to the base system
+    # message (additive — never a persona override) so the agent greets the
+    # member by name from turn one. ``None`` when the member has no Person yet
+    # (a pre-existing / non-invited user, or the people read failed) — the
+    # agent then behaves exactly as before, no block. Stays a pre-rendered
+    # string so the sync ``build_behavior_instructions`` never has to await.
+    about_member_block: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +372,106 @@ async def _home_backend_summary(
         logger.debug("home backend summary fetch failed for pocket %s", pocket_id, exc_info=True)
         return None
     return summary
+
+
+# ---------------------------------------------------------------------------
+# "About this member" block (agent orientation, pp#1367)
+# ---------------------------------------------------------------------------
+
+# HARD character cap on the rendered about-block. The known failure mode is
+# prompt bloat — a free-text focus line (or a degenerate name) ballooning the
+# always-on system prompt toward the ~20K-char tail we've been bitten by. The
+# block is name + role + team + a one-line focus, so it's tiny by design; this
+# is the backstop. ~4 chars/token ⇒ 1500 chars ≈ ~375 tokens, under the
+# ~400-token budget. We truncate the WHOLE rendered block (not just focus) so
+# no combination of fields can exceed it.
+_ABOUT_MEMBER_CHAR_CAP = 1500
+# The focus line is the only unbounded, member/admin-authored field, so it gets
+# its own tighter per-field clamp before assembly — keeps the block readable
+# instead of letting one long sentence eat the whole budget.
+_ABOUT_MEMBER_FOCUS_CHAR_CAP = 280
+
+
+def _render_about_member_block(person: Person) -> str:
+    """Render the concise, token-capped "about this member" block.
+
+    Shape: an ``<about-member>`` tag carrying ``name · role · team`` and an
+    optional one-line ``focus``. Only fields the Person actually has are
+    emitted (no empty ``team:`` / ``focus:`` lines). The whole block is HARD
+    truncated at ``_ABOUT_MEMBER_CHAR_CAP`` so it can never bloat the system
+    prompt, regardless of field contents.
+
+    Returns an empty string when the Person carries no usable identity (no
+    name) — the caller treats that the same as "no Person": no block.
+    """
+
+    name = (person.name or "").strip()
+    if not name:
+        # Nothing to orient the agent with — skip the block entirely rather
+        # than emit a nameless "you are talking to ." line.
+        return ""
+
+    role = (person.role or "").strip()
+    team = (person.group or "").strip()
+    focus = " ".join((person.focus or "").split())  # collapse whitespace/newlines
+    if len(focus) > _ABOUT_MEMBER_FOCUS_CHAR_CAP:
+        focus = focus[:_ABOUT_MEMBER_FOCUS_CHAR_CAP].rstrip() + "…"
+
+    # Identity line: name, then role/team as available, joined with " · ".
+    bits = [name]
+    if role:
+        bits.append(role)
+    if team:
+        bits.append(f"team {team}")
+    identity = " · ".join(bits)
+
+    lines = [
+        "<about-member>",
+        "You are talking to a member of this workspace. Greet them by name and",
+        "tailor your help to their role and focus.",
+        f"  who: {identity}",
+    ]
+    if focus:
+        lines.append(f"  focus: {focus}")
+    lines.append("</about-member>")
+    block = "\n".join(lines)
+
+    if len(block) > _ABOUT_MEMBER_CHAR_CAP:
+        # Backstop hard cap. Keep the closing tag readable by appending it
+        # after the truncation so the block stays well-formed.
+        block = block[:_ABOUT_MEMBER_CHAR_CAP].rstrip() + "…\n</about-member>"
+    return block
+
+
+async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
+    """Fetch the member's Fabric ``Person`` and render the about-block, or ``None``.
+
+    Pre-resolved (async) by every scope resolver and stashed on
+    ``ScopeContext.about_member_block`` so the sync
+    ``build_behavior_instructions`` can append it without awaiting. Returns
+    ``None`` — meaning "no block, behave as today" — when:
+
+    * the member has no materialized Person (a pre-existing / non-invited user);
+    * the Person carries no usable name (render returns "");
+    * the people read raised (degrades gracefully — a Fabric hiccup must never
+      block scope resolution or change the agent's behavior).
+    """
+
+    if not workspace_id or not user_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.people.service import get_person
+
+        person = await get_person(workspace_id, user_id)
+    except Exception:  # noqa: BLE001 — a people-read failure must not block resolution
+        logger.debug(
+            "about-member person read failed for %s/%s", workspace_id, user_id, exc_info=True
+        )
+        return None
+    if person is None:
+        return None
+    block = _render_about_member_block(person)
+    return block or None
 
 
 async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
@@ -423,6 +552,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
                 pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
             )
 
+    workspace_id = str(getattr(session, "workspace", ""))
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
         # Sessions created via ``createPocketSession`` don't yet pin an agent
@@ -430,15 +560,19 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         # rule ``_resolve_pocket`` applies). Keeps cold-start chats in a
         # newly-created pocket session working without the caller having to
         # explicitly pass ``agent_id``.
-        workspace_id = str(getattr(session, "workspace", ""))
         target = await _get_default_workspace_agent_id(workspace_id)
         if not target:
             raise CloudError(400, "session.no_agent", "Session has no agent")
 
+    # Orient the agent to who's chatting (pp#1367) — pre-render the capped
+    # about-block here (async) so the sync system-message assembly can append
+    # it. ``None`` when the member has no Person → no block, behavior unchanged.
+    about_member_block = await _resolve_about_member(workspace_id, user_id)
+
     return ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id=scope_id,
-        workspace_id=str(getattr(session, "workspace", "")),
+        workspace_id=workspace_id,
         user_id=user_id,
         members=[user_id],
         target_agent_id=target,
@@ -447,6 +581,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         pocket_id=str(pocket_id) if pocket_id else None,
         pocket_type=pocket_type,
         backend_summary=backend_summary,
+        about_member_block=about_member_block,
     )
 
 
@@ -477,14 +612,20 @@ async def _resolve_group_like(
 
     target = _pick_target_agent(agent_ids, agent_id_hint)
 
+    workspace_id = str(getattr(group, "workspace", ""))
+    # Orient the agent to the calling member (pp#1367) — pre-rendered capped
+    # block, ``None`` when the member has no Person.
+    about_member_block = await _resolve_about_member(workspace_id, user_id)
+
     return ScopeContext(
         kind=kind,
         scope_id=scope_id,
-        workspace_id=str(getattr(group, "workspace", "")),
+        workspace_id=workspace_id,
         user_id=user_id,
         members=members,
         target_agent_id=target,
         agent_ids_in_scope=agent_ids,
+        about_member_block=about_member_block,
     )
 
 
@@ -541,6 +682,9 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
 
     pocket_type = getattr(pocket, "type", None)
     backend_summary = await _home_backend_summary(pocket_type, workspace_id, scope_id)
+    # Orient the agent to the calling member (pp#1367) — pre-rendered capped
+    # block, ``None`` when the member has no Person.
+    about_member_block = await _resolve_about_member(workspace_id, user_id)
 
     return ScopeContext(
         kind=ScopeKind.POCKET,
@@ -554,6 +698,7 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         pocket_id=scope_id,
         pocket_type=pocket_type,
         backend_summary=backend_summary,
+        about_member_block=about_member_block,
     )
 
 
@@ -728,6 +873,16 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         parts.append(
             fill_current_pocket(HOME_POCKET_PROMPT, ctx.pocket_id or "", ctx.backend_summary)
         )
+    # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
+    # "about this member" block LAST so the agent greets the caller by name and
+    # tailors to their role/focus from turn one. It is pre-resolved on the
+    # ScopeContext (async, in the resolver) and APPENDED here — never injected
+    # via ``system_message_override`` (that field REPLACES the base persona).
+    # ``None`` for a member with no Person (pre-existing / non-invited user) ⇒
+    # nothing appended ⇒ behavior identical to before. The string is already
+    # hard-capped at render time, so this can't bloat the prompt.
+    if ctx.about_member_block:
+        parts.append(ctx.about_member_block)
     return "\n".join(parts)
 
 
