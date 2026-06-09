@@ -81,6 +81,11 @@ giving it real, on-domain words. The shape:
     { "name": "Whitening",        "price": "299",   "period": "one-time", "features": ["In-office session", "Up to 8 shades", "Take-home trays"], "popular": true, "cta_label": "Book" },
     { "name": "Invisalign",       "price": "3,900", "period": "full plan", "features": ["Custom aligners", "All visits", "Retainers included"],   "cta_label": "Free consult" }
   ],
+  "faqs": [
+    { "question": "How long does a first visit take?", "answer": "About 45 minutes — a cleaning, a full check, and a plan you'll actually understand." },
+    { "question": "Do you take my insurance?",         "answer": "We bill all major plans directly and confirm your coverage before the appointment." },
+    { "question": "Can I reschedule online?",          "answer": "Yes — change or cancel from the confirmation email up to 24 hours ahead." }
+  ],
   "cta_band": {
     "headline": "Ready for a healthier smile?",
     "subtext": "Same-week appointments are filling up.",
@@ -101,7 +106,10 @@ giving it real, on-domain words. The shape:
 - **`hero`** — `eyebrow` (short category line), `title` (the headline
   promise), `subtitle` (one sentence on the offer/location/why-easy),
   `cta_label` (the primary button label — the tool wires it to the lead
-  form anchor).
+  form anchor). The tool renders this as a premium **marketing hero**: a
+  bold headline with an asymmetric CSS visual panel and two CTAs (your
+  `cta_label` → the lead form, plus a "see our services" link). The visual
+  is pure CSS, so it looks finished even with JavaScript off.
 - **`services`** — a list of `{title, desc, icon}`. `icon` is a **lucide
   icon name** (e.g. `tooth`, `sparkles`, `shield`, `smile`); omit it and
   the tool picks one. Variable length — give as many as the business has.
@@ -111,6 +119,14 @@ giving it real, on-domain words. The shape:
   popular?, cta_label}`. `price` is a string or number **without** a
   currency symbol (the tool renders `$`); `features` is a list of strings;
   mark the recommended tier `"popular": true`. Variable length.
+- **`faqs`** — *optional* — a list of `{question, answer}` pairs. The tool
+  renders them as a FAQ section (native expand/collapse, no JavaScript
+  needed) placed right after pricing, where it answers objections before
+  the final ask. Omit it entirely and the section simply doesn't appear.
+  Each pair needs both a `question` and an `answer` — entries missing
+  either are dropped. Add a `faq_title` to override the default "Questions,
+  answered" heading. Worth including whenever the business has the obvious
+  "how long / how much / do you take my insurance" questions.
 - **`cta_band`** — the mid-page conversion nudge: `{headline, subtext,
   button_label}`.
 - **`contact`** — `{address, phone, email}`. Feeds the footer and the lead
@@ -164,29 +180,37 @@ maps to the page. The tool emits, top to bottom (the conversion funnel):
 | # | Section | Built from your copy |
 |---|---------|----------------------|
 | 1 | **navbar** (sticky, brand + anchor links + CTA) | `brand`, `hero.cta_label` |
-| 2 | **hero** (eyebrow + title + subtitle) | `hero` |
-| 3 | **feature-grid** under `#services` | `services[]` |
+| 2 | **marketing-hero** (eyebrow pill + headline + subtitle + two CTAs + CSS visual panel) | `hero` |
+| 3 | **feature-grid** (lucide icons) under `#services` | `services[]` |
 | 4 | **testimonial** per quote under `#reviews` | `testimonials[]` |
 | 5 | **pricing-table** (`tiers`) under `#pricing` | `tiers[]` |
-| 6 | **cta** band | `cta_band` |
-| 7 | **flat lead form** in a `#book` card (input/textarea/submit) | `contact`, `cta_band.button_label` |
-| 8 | **footer** (titled columns + copyright) | `contact`, `footer`, `brand` |
+| 6 | **faq** (native `<details>`) under `#faq` — *only if `faqs` supplied* | `faqs[]`, `faq_title` |
+| 7 | **cta** band | `cta_band` |
+| 8 | **flat lead form** in a `#book` card (input/textarea/submit) | `contact`, `cta_band.button_label` |
+| 9 | **footer** (titled columns + copyright) | `contact`, `footer`, `brand` |
 
 The page is **prerendered static HTML** (`csr=false`) — no client JS runs
-for the visitor on first paint. The tool bakes in every SSR rule by
-construction, so you never have to think about them:
+for the visitor on first paint. Everything visible is baked into the
+markup: the hero's CSS visual, every FAQ answer, the full page. Any
+premium polish is CSS-only (gradients, a slow background drift) so it
+paints with JavaScript off; nothing waits for a script. The tool bakes in
+every SSR rule by construction, so you never have to think about them:
 
 - The lead form is **flat** `input` / `textarea` / `button{type:submit}`
   with real `name`s — never a `form`/`newsletter` widget (which would emit
   a nested `<form>` and capture nothing). It rides the page's outer form
   and POSTs natively.
 - Every CTA is an **anchor `href`** (`#book`, `tel:`, `mailto:`), never an
-  `on_click` (a dead button on a static page).
+  `on_click` (a dead button on a static page). The hero's two CTAs are no
+  exception.
 - `pricing-table` uses `tiers` with a `$` currency symbol; the popular
   tier is highlighted.
-- Anchor targets (`#services` / `#reviews` / `#pricing` / `#book`) live on
-  wrapping `section` / `card` nodes, because the marketing widgets carry
-  no `id` of their own.
+- The FAQ (if you give `faqs`) is the **`faq` widget** — native
+  `<details>` disclosures that open with no JavaScript — never an
+  `accordion` (which needs client JS and stays shut on a static page).
+- Anchor targets (`#services` / `#reviews` / `#pricing` / `#faq` /
+  `#book`) live on wrapping `section` / `card` nodes, because the marketing
+  widgets carry no `id` of their own.
 - No dashboard widgets — no KPI `stat` grid, no charts, no `accordion`. A
   marketing page, not an internal tool.
 

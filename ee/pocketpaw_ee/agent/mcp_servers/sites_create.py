@@ -1,6 +1,12 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated 2026-06-09 (feat/landing-assembler-enrich): the create_landing_site
+# tool + content schema now document the OPTIONAL ``faqs`` copy field
+# ([{question, answer}]) the enriched ``assemble_landing_spec`` consumes to emit a
+# native-<details> FAQ section. No handler-logic change — the assembler owns the
+# structure; this just teaches the chat agent the new field exists.
+#
 # Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
 # create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
 # ``create_landing_site`` (same direct ``agent_create`` persistence, same
@@ -290,9 +296,11 @@ def make_create_landing_site_tool(tool: Any) -> Any:
             "'TBD'/'Lorem ipsum'): brand (str); hero {eyebrow, title, subtitle, "
             "cta_label}; services [{title, desc, icon}]; testimonials [{quote, "
             "author, role}]; tiers [{name, price, period, features:[str], "
-            "popular, cta_label}]; cta_band {headline, subtext, button_label}; "
-            "contact {address, phone, email}; footer {copyright}. Variable-length "
-            "services/testimonials/tiers are handled. Returns {ok, pocket_id, "
+            "popular, cta_label}]; faqs [{question, answer}] (OPTIONAL — renders a "
+            "native-<details> FAQ section after pricing; omit it and no FAQ shows); "
+            "cta_band {headline, subtext, button_label}; contact {address, phone, "
+            "email}; footer {copyright}. Variable-length "
+            "services/testimonials/tiers/faqs are handled. Returns {ok, pocket_id, "
             "pocket}; hand `pocket_id` to "
             "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
             "error means relay the reason, do NOT report a created pocket."
@@ -304,8 +312,9 @@ def make_create_landing_site_tool(tool: Any) -> Any:
                     "type": "object",
                     "description": (
                         "The COPY for the landing page — words only, no structure. "
-                        "brand, hero, services, testimonials, tiers, cta_band, "
-                        "contact, footer (see the tool description for the shape)."
+                        "brand, hero, services, testimonials, tiers, faqs "
+                        "(optional), cta_band, contact, footer (see the tool "
+                        "description for the shape)."
                     ),
                     "additionalProperties": True,
                 },
