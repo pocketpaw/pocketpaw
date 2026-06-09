@@ -251,6 +251,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
+    from pocketpaw_ee.cloud.member_day_digest.router import router as member_day_digest_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
@@ -281,6 +282,12 @@ def mount_cloud(app: FastAPI) -> None:
     # ``resolve_instinct`` returns ``ESCALATE_APPROVAL``; this router
     # exposes the operator-facing read + decision surface.
     app.include_router(instinct_approvals_router, prefix="/api/v1")
+
+    # Member-day digest — VIP Onboarding Phase B chunk 6. Gated GET
+    # /api/v1/member-day-digest returns the AUTHENTICATED caller's OWN
+    # structured "your day" digest (the chunk-5 service) for the intent
+    # board. No member_id param — a caller can only fetch their own.
+    app.include_router(member_day_digest_router, prefix="/api/v1")
 
     # Paw Sites — RFC 12 capture surface. Public POST /sites/{id}/capture
     # (origin-pinned + per-site signed key, no user auth — the edge Queue
@@ -660,6 +667,26 @@ def mount_cloud(app: FastAPI) -> None:
             from pocketpaw_ee.cloud.cycles.scheduler import stop_in_process_scheduler
 
             await stop_in_process_scheduler(app)
+
+    # Per-user member-ingest sweep (VIP Onboarding Phase B). Every 5 minutes
+    # (POCKETPAW_MEMBER_INGEST_INTERVAL_SECONDS override) it backfills/
+    # incrementally syncs each consented member's Gmail + Calendar into their
+    # private ``user:{member_id}`` KB scope. Same scheduler gate as the
+    # cycle/decisions loops so pytest runs never spawn a background loop that
+    # outlives the test; production sets POCKETPAW_CLOUD_SCHEDULER_ENABLED=true.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.member_ingest.scheduler import (
+            start_member_ingest,
+            stop_member_ingest,
+        )
+
+        @app.on_event("startup")
+        async def _start_member_ingest() -> None:
+            await start_member_ingest(app)
+
+        @app.on_event("shutdown")
+        async def _stop_member_ingest() -> None:
+            await stop_member_ingest(app)
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

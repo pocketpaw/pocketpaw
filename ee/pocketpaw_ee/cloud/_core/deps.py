@@ -12,7 +12,10 @@ the actual policy lookup. We translate platform ``GuardForbidden``
 exceptions to cloud-native ``Forbidden`` so the standard error envelope
 applies.
 
-Changes: added require_plan_feature dependency for plan-tier feature gating.
+Changes: added require_plan_feature dependency for plan-tier feature gating;
+current_workspace_id now falls back to the user's first membership (and
+persists it) instead of 400-ing when active_workspace is unset but the user
+is a member — fixes joined members being locked out of workspace reads.
 """
 
 from __future__ import annotations
@@ -48,12 +51,22 @@ async def current_workspace_id(user: User = Depends(current_active_user)) -> str
     """Extract active workspace ID from the authenticated user.
 
     Raises HTTP 400 (not a CloudError — this surfaces as a setup error
-    that the client UI handles, not a denial) when the user has no
-    active workspace.
+    that the client UI handles, not a denial) only when the user belongs
+    to no workspace at all.
     """
-    if not user.active_workspace:
-        raise HTTPException(400, "No active workspace. Create or join a workspace first.")
-    return user.active_workspace
+    if user.active_workspace:
+        return user.active_workspace
+    # A user who has joined a workspace (invite accept / verified-domain
+    # auto-join) but whose active_workspace was never set must not be locked
+    # out of every workspace-scoped read. Default to their first membership and
+    # persist it so the choice sticks. Only a user with NO memberships at all
+    # genuinely needs to create/join one.
+    if user.workspaces:
+        wid = user.workspaces[0].workspace
+        user.active_workspace = wid
+        await user.save()
+        return wid
+    raise HTTPException(400, "No active workspace. Create or join a workspace first.")
 
 
 async def optional_workspace_id(

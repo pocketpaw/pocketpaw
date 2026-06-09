@@ -1,6 +1,10 @@
 # OAuth Integration routes — authorize + callback for Google, Spotify, etc.
 # Created: 2026-03-31
 # Extracted from dashboard.py so these work in both dashboard and serve modes.
+# 2026-06-08: authorize accepts an optional user_id and embeds it in the OAuth
+#   ``state`` (provider:service:user_id); the callback parses it back out and
+#   stores tokens in that user's bucket (VIP Onboarding Phase B). Omitting
+#   user_id keeps the shared single-user flow (state stays provider:service).
 
 from __future__ import annotations
 
@@ -33,8 +37,16 @@ OAUTH_SCOPES: dict[str, list[str]] = {
 
 
 @router.get("/oauth/integrations/authorize")
-async def oauth_authorize(service: str = Query("google_gmail")):
-    """Start OAuth flow — redirects user to provider consent screen."""
+async def oauth_authorize(
+    service: str = Query("google_gmail"),
+    user_id: str = Query(""),
+):
+    """Start OAuth flow — redirects user to provider consent screen.
+
+    ``user_id`` (optional) scopes the resulting token to a single member so
+    each person connects their own account (VIP Onboarding Phase B). When
+    omitted, tokens land in the shared single-user bucket.
+    """
     from fastapi.responses import RedirectResponse
 
     from pocketpaw.config import Settings
@@ -66,7 +78,10 @@ async def oauth_authorize(service: str = Query("google_gmail")):
 
     manager = OAuthManager()
     redirect_uri = f"http://localhost:{settings.web_port}/api/v1/oauth/integrations/callback"
-    state = f"{provider}:{service}"
+    # Carry an optional user_id as a third state segment so the callback can
+    # store the token in that member's bucket. Stays provider:service when
+    # no user_id is supplied (back-compat with the single-user flow).
+    state = f"{provider}:{service}:{user_id}" if user_id else f"{provider}:{service}"
 
     auth_url = manager.get_auth_url(
         provider=provider,
@@ -101,9 +116,11 @@ async def oauth_callback(
         settings = Settings.load()
         manager = OAuthManager(TokenStore())
 
-        parts = state.split(":", 1)
+        # state shape: "provider:service" (legacy) or "provider:service:user_id".
+        parts = state.split(":", 2)
         provider = parts[0] if parts else "google"
         service = parts[1] if len(parts) > 1 else "google_gmail"
+        user_id = parts[2] if len(parts) > 2 and parts[2] else None
 
         redirect_uri = f"http://localhost:{settings.web_port}/api/v1/oauth/integrations/callback"
         scopes = OAUTH_SCOPES.get(service, [])
@@ -123,6 +140,7 @@ async def oauth_callback(
             client_secret=client_secret,
             redirect_uri=redirect_uri,
             scopes=scopes,
+            user_id=user_id,
         )
 
         return HTMLResponse(

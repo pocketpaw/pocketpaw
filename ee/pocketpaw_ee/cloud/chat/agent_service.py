@@ -62,16 +62,56 @@ gained a ``pocket_id`` kwarg and ``current_pocket_id()`` was added beside
 (``mcp_servers/connectors.py``) so its tools scope to the current pocket.
 The identity-token tuple grew from 3 to 4 entries; existing 3-arg callers are
 unaffected (``pocket_id`` defaults to ``None``).
+
+Changes: 2026-06-08 (feat/vip-agent-block, pp#1367) — ``ScopeContext`` carries
+an optional ``about_member_block``: a concise, token-capped "about this member"
+string (name · role · team · one-line focus) rendered from the member's Fabric
+``Person`` (``people.service.get_person``). The resolvers pre-resolve it (async)
+via ``_resolve_about_member`` and stash it; ``build_behavior_instructions``
+APPENDS it to the base system message (additive — NOT a persona override) so the
+agent greets the member by name from the first turn. A member with no Person
+(pre-existing / non-invited user) → ``None`` → no block, behavior unchanged. The
+render is HARD-capped (``_ABOUT_MEMBER_CHAR_CAP``) to kill the prompt-bloat
+failure mode. Stays sync in ``build_behavior_instructions`` — the async read
+happens once in the resolver, mirroring ``backend_summary``.
+
+Changes: 2026-06-08 (VIP Onboarding Phase B — session-user isolation gate) —
+``_kb_scopes_for_context`` now prepends a member-private ``user:{member_id}``
+KB scope, GATED by the new ``_member_private_user_scope`` helper. The gate
+emits the scope ONLY when ``ctx.members == [ctx.user_id]`` (the member's own
+solo session) and suppresses it in every shared / multi-member room, so one
+member's private Gmail/calendar KB is never injected into another member's
+agent context. ``ctx.user_id`` (an opaque cloud user id) is the scope id —
+no email, so kb-go's on-disk ``:``→``_`` sanitize can't alias two members.
+Mirrors the OSS ``KbContext.user_id`` / ``_resolve_kb_scopes`` priority.
+Changes: 2026-06-08 (VIP Onboarding Phase B chunk 5 — the "your day" briefing)
+— ``_member_briefing_block`` builds a concise, capped (``_BRIEFING_MAX_CHARS``
+≈ 400 tokens) "your day" block from the structured ``MemberDayDigest`` (the
+per-member live mail/calendar pull) and ``build_knowledge_context`` PREPENDS
+it. It is GATED by the SAME ``_member_private_user_scope`` decision as the
+private ``user:`` KB scope — present ONLY in the member's solo session,
+ABSENT (and the digest never even pulled) in every shared / multi-member
+room. Graceful: an empty digest (no connected accounts) or a digest that
+raises → ``""``, so unconnected and non-solo sessions are byte-identical to
+before.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    # Type-only — the runtime read imports ``get_person`` lazily inside
+    # ``_resolve_about_member`` so importing this module never drags in the
+    # people service (and its journal accessor) for chat paths that never
+    # render an about-block.
+    from pocketpaw_ee.cloud.people.domain import Person
 
 from pocketpaw.ripple import (
     HOME_POCKET_PROMPT,
@@ -281,6 +321,16 @@ class ScopeContext:
     # summary via ``get_pocket_backend``). ``None`` for non-home scopes,
     # which read the summary lazily through ``get_pocket`` when needed.
     backend_summary: dict[str, Any] | None = None
+    # A concise, token-capped "about this member" block (name · role · team ·
+    # one-line focus) rendered from the member's Fabric ``Person``. The
+    # resolvers pre-resolve it (async, via ``_resolve_about_member``) and stash
+    # it here; ``build_behavior_instructions`` APPENDS it to the base system
+    # message (additive — never a persona override) so the agent greets the
+    # member by name from turn one. ``None`` when the member has no Person yet
+    # (a pre-existing / non-invited user, or the people read failed) — the
+    # agent then behaves exactly as before, no block. Stays a pre-rendered
+    # string so the sync ``build_behavior_instructions`` never has to await.
+    about_member_block: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +393,106 @@ async def _home_backend_summary(
         logger.debug("home backend summary fetch failed for pocket %s", pocket_id, exc_info=True)
         return None
     return summary
+
+
+# ---------------------------------------------------------------------------
+# "About this member" block (agent orientation, pp#1367)
+# ---------------------------------------------------------------------------
+
+# HARD character cap on the rendered about-block. The known failure mode is
+# prompt bloat — a free-text focus line (or a degenerate name) ballooning the
+# always-on system prompt toward the ~20K-char tail we've been bitten by. The
+# block is name + role + team + a one-line focus, so it's tiny by design; this
+# is the backstop. ~4 chars/token ⇒ 1500 chars ≈ ~375 tokens, under the
+# ~400-token budget. We truncate the WHOLE rendered block (not just focus) so
+# no combination of fields can exceed it.
+_ABOUT_MEMBER_CHAR_CAP = 1500
+# The focus line is the only unbounded, member/admin-authored field, so it gets
+# its own tighter per-field clamp before assembly — keeps the block readable
+# instead of letting one long sentence eat the whole budget.
+_ABOUT_MEMBER_FOCUS_CHAR_CAP = 280
+
+
+def _render_about_member_block(person: Person) -> str:
+    """Render the concise, token-capped "about this member" block.
+
+    Shape: an ``<about-member>`` tag carrying ``name · role · team`` and an
+    optional one-line ``focus``. Only fields the Person actually has are
+    emitted (no empty ``team:`` / ``focus:`` lines). The whole block is HARD
+    truncated at ``_ABOUT_MEMBER_CHAR_CAP`` so it can never bloat the system
+    prompt, regardless of field contents.
+
+    Returns an empty string when the Person carries no usable identity (no
+    name) — the caller treats that the same as "no Person": no block.
+    """
+
+    name = (person.name or "").strip()
+    if not name:
+        # Nothing to orient the agent with — skip the block entirely rather
+        # than emit a nameless "you are talking to ." line.
+        return ""
+
+    role = (person.role or "").strip()
+    team = (person.group or "").strip()
+    focus = " ".join((person.focus or "").split())  # collapse whitespace/newlines
+    if len(focus) > _ABOUT_MEMBER_FOCUS_CHAR_CAP:
+        focus = focus[:_ABOUT_MEMBER_FOCUS_CHAR_CAP].rstrip() + "…"
+
+    # Identity line: name, then role/team as available, joined with " · ".
+    bits = [name]
+    if role:
+        bits.append(role)
+    if team:
+        bits.append(f"team {team}")
+    identity = " · ".join(bits)
+
+    lines = [
+        "<about-member>",
+        "You are talking to a member of this workspace. Greet them by name and",
+        "tailor your help to their role and focus.",
+        f"  who: {identity}",
+    ]
+    if focus:
+        lines.append(f"  focus: {focus}")
+    lines.append("</about-member>")
+    block = "\n".join(lines)
+
+    if len(block) > _ABOUT_MEMBER_CHAR_CAP:
+        # Backstop hard cap. Keep the closing tag readable by appending it
+        # after the truncation so the block stays well-formed.
+        block = block[:_ABOUT_MEMBER_CHAR_CAP].rstrip() + "…\n</about-member>"
+    return block
+
+
+async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
+    """Fetch the member's Fabric ``Person`` and render the about-block, or ``None``.
+
+    Pre-resolved (async) by every scope resolver and stashed on
+    ``ScopeContext.about_member_block`` so the sync
+    ``build_behavior_instructions`` can append it without awaiting. Returns
+    ``None`` — meaning "no block, behave as today" — when:
+
+    * the member has no materialized Person (a pre-existing / non-invited user);
+    * the Person carries no usable name (render returns "");
+    * the people read raised (degrades gracefully — a Fabric hiccup must never
+      block scope resolution or change the agent's behavior).
+    """
+
+    if not workspace_id or not user_id:
+        return None
+    try:
+        from pocketpaw_ee.cloud.people.service import get_person
+
+        person = await get_person(workspace_id, user_id)
+    except Exception:  # noqa: BLE001 — a people-read failure must not block resolution
+        logger.debug(
+            "about-member person read failed for %s/%s", workspace_id, user_id, exc_info=True
+        )
+        return None
+    if person is None:
+        return None
+    block = _render_about_member_block(person)
+    return block or None
 
 
 async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
@@ -423,6 +573,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
                 pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
             )
 
+    workspace_id = str(getattr(session, "workspace", ""))
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
         # Sessions created via ``createPocketSession`` don't yet pin an agent
@@ -430,15 +581,19 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         # rule ``_resolve_pocket`` applies). Keeps cold-start chats in a
         # newly-created pocket session working without the caller having to
         # explicitly pass ``agent_id``.
-        workspace_id = str(getattr(session, "workspace", ""))
         target = await _get_default_workspace_agent_id(workspace_id)
         if not target:
             raise CloudError(400, "session.no_agent", "Session has no agent")
 
+    # Orient the agent to who's chatting (pp#1367) — pre-render the capped
+    # about-block here (async) so the sync system-message assembly can append
+    # it. ``None`` when the member has no Person → no block, behavior unchanged.
+    about_member_block = await _resolve_about_member(workspace_id, user_id)
+
     return ScopeContext(
         kind=ScopeKind.SESSION,
         scope_id=scope_id,
-        workspace_id=str(getattr(session, "workspace", "")),
+        workspace_id=workspace_id,
         user_id=user_id,
         members=[user_id],
         target_agent_id=target,
@@ -447,6 +602,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         pocket_id=str(pocket_id) if pocket_id else None,
         pocket_type=pocket_type,
         backend_summary=backend_summary,
+        about_member_block=about_member_block,
     )
 
 
@@ -477,14 +633,20 @@ async def _resolve_group_like(
 
     target = _pick_target_agent(agent_ids, agent_id_hint)
 
+    workspace_id = str(getattr(group, "workspace", ""))
+    # Orient the agent to the calling member (pp#1367) — pre-rendered capped
+    # block, ``None`` when the member has no Person.
+    about_member_block = await _resolve_about_member(workspace_id, user_id)
+
     return ScopeContext(
         kind=kind,
         scope_id=scope_id,
-        workspace_id=str(getattr(group, "workspace", "")),
+        workspace_id=workspace_id,
         user_id=user_id,
         members=members,
         target_agent_id=target,
         agent_ids_in_scope=agent_ids,
+        about_member_block=about_member_block,
     )
 
 
@@ -541,6 +703,9 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
 
     pocket_type = getattr(pocket, "type", None)
     backend_summary = await _home_backend_summary(pocket_type, workspace_id, scope_id)
+    # Orient the agent to the calling member (pp#1367) — pre-rendered capped
+    # block, ``None`` when the member has no Person.
+    about_member_block = await _resolve_about_member(workspace_id, user_id)
 
     return ScopeContext(
         kind=ScopeKind.POCKET,
@@ -554,6 +719,7 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         pocket_id=scope_id,
         pocket_type=pocket_type,
         backend_summary=backend_summary,
+        about_member_block=about_member_block,
     )
 
 
@@ -728,6 +894,16 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         parts.append(
             fill_current_pocket(HOME_POCKET_PROMPT, ctx.pocket_id or "", ctx.backend_summary)
         )
+    # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
+    # "about this member" block LAST so the agent greets the caller by name and
+    # tailors to their role/focus from turn one. It is pre-resolved on the
+    # ScopeContext (async, in the resolver) and APPENDED here — never injected
+    # via ``system_message_override`` (that field REPLACES the base persona).
+    # ``None`` for a member with no Person (pre-existing / non-invited user) ⇒
+    # nothing appended ⇒ behavior identical to before. The string is already
+    # hard-capped at render time, so this can't bloat the prompt.
+    if ctx.about_member_block:
+        parts.append(ctx.about_member_block)
     return "\n".join(parts)
 
 
@@ -935,15 +1111,170 @@ def _file_reference_terms(
     return terms
 
 
+def _member_private_user_scope(ctx: ScopeContext) -> str | None:
+    """The session-user isolation gate (VIP Onboarding Phase B).
+
+    Returns the member-private ``user:{member_id}`` KB scope ONLY when this
+    chat is the member's OWN solo context, and ``None`` otherwise. The single
+    airtight rule:
+
+        emit ``user:{ctx.user_id}``  ⟺  ctx.members == [ctx.user_id]
+
+    i.e. exactly one member AND it is the authenticated session principal.
+    This is the tightest possible test and it closes every leak path:
+
+    * a shared / multi-member room (``len(members) > 1``) → ``None``. A
+      member's private Gmail/calendar KB is NEVER injected where another
+      member can see the agent's context.
+    * a room whose sole member is NOT the caller (stale membership, a route
+      that resolved a different principal) → ``None``. We never emit a
+      ``user:`` scope for anyone but the proven-solo authenticated member.
+    * a member's own solo SESSION (``members == [user_id]``, the shape
+      ``_resolve_session`` always builds) or a private solo POCKET/DM →
+      ``user:{user_id}``.
+
+    ``ctx.user_id`` is the authenticated cloud user id (opaque Mongo
+    ObjectId / uuid), so it is safe to use verbatim as a kb-go scope id —
+    kb-go's on-disk ``:``→``_`` sanitize can't alias two opaque ids the way
+    it could alias two emails.
+    """
+    uid = ctx.user_id
+    if not uid:
+        return None
+    if list(ctx.members) != [uid]:
+        return None
+    return f"user:{uid}"
+
+
+# Hard cap on the "your day" briefing block. The block shares the
+# system-prompt budget, so it must never grow unbounded with a busy day.
+# ~400 tokens ≈ 1600 chars (English ≈ 4 chars/token); we cap on chars (a
+# cheap, deterministic proxy — no tokenizer dependency) and truncate with an
+# ellipsis if a rendered block would exceed it.
+_BRIEFING_MAX_CHARS = 1600
+
+
+async def _member_briefing_block(
+    ctx: ScopeContext,
+    *,
+    digest_fn: Callable[[str, str], Awaitable[Any]] | None = None,
+) -> str:
+    """Return the concise, capped "your day" briefing for the member's OWN
+    solo session, or ``""`` when it must be absent.
+
+    GATED EXACTLY like the member-private ``user:`` KB scope: we reuse
+    ``_member_private_user_scope`` as the single source of truth for the
+    "is this the member's solo session?" decision. When it returns ``None``
+    (a shared / multi-member room, or a room whose sole member is not the
+    authenticated principal) we emit NOTHING and never even pull the digest —
+    so one member's mail/calendar is never read or surfaced in a context
+    another member can see. This is the same airtight rule that keeps the
+    private KB scope out of shared rooms.
+
+    The block is built from the structured ``MemberDayDigest`` (the per-member
+    live pull, keyed on ``ctx.user_id`` — the authenticated principal, NEVER a
+    caller-supplied id) and rendered down to a capped string. Graceful: an
+    EMPTY digest (no connected accounts) → ``""`` (the agent behaves as
+    today); a digest that RAISES → ``""`` (a flaky mail/calendar pull never
+    sinks the stream).
+
+    ``digest_fn`` defaults to ``member_day_digest.service.member_day_digest``;
+    tests inject a fake so the suite needs no OAuth/network.
+    """
+    # The gate: identical decision to the private ``user:`` KB scope. A
+    # ``None`` here means "not the member's solo session" → no block, no pull.
+    scope = _member_private_user_scope(ctx)
+    if scope is None:
+        return ""
+    member_id = ctx.user_id  # proven == the sole member by the gate above
+
+    pull: Callable[[str, str], Awaitable[Any]]
+    if digest_fn is not None:
+        pull = digest_fn
+    else:
+        try:
+            from pocketpaw_ee.cloud.member_day_digest.service import member_day_digest
+
+            pull = member_day_digest
+        except Exception:
+            logger.debug("member_day_digest unavailable; skipping briefing", exc_info=True)
+            return ""
+
+    try:
+        digest = await pull(ctx.workspace_id, member_id)
+    except Exception:
+        # A briefing is a nicety — a failed mail/calendar pull must never
+        # break the chat. Degrade silently to no block.
+        logger.debug("member day digest failed; skipping briefing", exc_info=True)
+        return ""
+
+    if digest is None or digest.empty:
+        return ""
+
+    return _render_briefing(digest)
+
+
+def _render_briefing(digest: Any) -> str:
+    """Render a ``MemberDayDigest`` into the capped <your-day> system block.
+
+    Concise by construction: a short heading, the upcoming events, and a mail
+    summary line + top subjects. The whole thing is truncated to
+    ``_BRIEFING_MAX_CHARS`` so it can never eat the prompt budget on a busy
+    day. The framing tells the agent this is proactive context to weave in
+    naturally, not a list to read back verbatim.
+    """
+    lines: list[str] = [
+        "<your-day>",
+        "Proactive briefing for the member you're helping — their day at a "
+        "glance. Use it to be helpful and anticipatory; don't read it back "
+        "verbatim unless asked.",
+    ]
+
+    if digest.events:
+        lines.append("")
+        lines.append("Upcoming (next 7 days):")
+        for ev in digest.events:
+            when = ev.start or "(time TBD)"
+            where = f" @ {ev.location}" if ev.location else ""
+            lines.append(f"- {when}: {ev.summary}{where}")
+
+    if digest.unread_mail_count or digest.top_mail:
+        lines.append("")
+        lines.append(f"Unread mail: {digest.unread_mail_count}")
+        for m in digest.top_mail:
+            sender = f" — from {m.sender}" if m.sender else ""
+            lines.append(f"- {m.subject}{sender}")
+
+    lines.append("</your-day>")
+    block = "\n".join(lines)
+
+    # Hard cap. Truncate mid-block and re-close the tag so the agent never
+    # sees a dangling open tag, and the budget is respected exactly.
+    if len(block) > _BRIEFING_MAX_CHARS:
+        closing = "\n…\n</your-day>"
+        budget = _BRIEFING_MAX_CHARS - len(closing)
+        block = block[:budget].rstrip() + closing
+    return block
+
+
 def _kb_scopes_for_context(ctx: ScopeContext) -> list[str]:
     """Return KB scopes to search for cloud-agent prompt context.
 
-    Ordered most-specific-first (pocket > agent > workspace) so that
+    Ordered most-specific-first (user > pocket > agent > workspace) so that
     the limited KB budget is allocated to the most relevant scope first.
+
+    The leading member-private ``user:`` scope is GATED by
+    ``_member_private_user_scope`` — it is present only in a member's own
+    solo session and is suppressed in every shared / multi-member room, so
+    one member's private mail/calendar KB never bleeds into another member's
+    agent context. Mirrors the OSS ``_resolve_kb_scopes`` priority; the gate
+    is the cloud-side decision (the OSS resolver only honors the field it is
+    handed).
     """
     scopes: list[str] = []
     seen: set[str] = set()
     for candidate in (
+        _member_private_user_scope(ctx),
         f"pocket:{ctx.pocket_id}" if ctx.pocket_id else None,
         f"agent:{ctx.target_agent_id}" if ctx.target_agent_id else None,
         f"workspace:{ctx.workspace_id}" if ctx.workspace_id else None,
@@ -983,6 +1314,16 @@ async def build_knowledge_context(
         query = f"{query}\nReferenced uploads: {ref_line}" if query else ref_line
 
     sections: list[str] = []
+
+    # The proactive "your day" briefing — FIRST, so the agent is oriented to
+    # the member's day before any retrieval. GATED to the member's OWN solo
+    # session (the same ``members == [user_id]`` rule as the private ``user:``
+    # KB scope); ``""`` in a shared/multi-member room and when the member has
+    # no connected accounts, so non-solo and unconnected sessions are
+    # byte-identical to before.
+    briefing = await _member_briefing_block(ctx)
+    if briefing:
+        sections.append(briefing)
 
     attachments_block = await _build_attachments_block(ctx, attachments)
     if attachments_block:
