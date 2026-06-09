@@ -5312,6 +5312,7 @@ dependencies = [
     { name = "motor" },
     { name = "pocketpaw" },
     { name = "pwdlib", extra = ["argon2"] },
+    { name = "py-vapid" },
     { name = "pyotp" },
     { name = "python-socketio" },
     { name = "redis", extra = ["hiredis"] },
@@ -5345,6 +5346,7 @@ requires-dist = [
     { name = "motor", specifier = ">=3.3.0" },
     { name = "pocketpaw", specifier = "~=0.4.16" },
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.2.0" },
+    { name = "py-vapid", specifier = ">=1.9.0" },
     { name = "pyotp", specifier = ">=2.9.0" },
     { name = "pypdf", marker = "extra == 'extraction'" },
     { name = "pytesseract", marker = "extra == 'extraction'", specifier = ">=0.3.10" },
@@ -5572,6 +5574,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/56/7a/a0f6bda783eb4df8e3dfd55973a1ac6d368a89178c300e1b5b91cd181e5e/py_partiql_parser-0.6.3.tar.gz", hash = "sha256:09cecf916ce6e3da2c050f0cb6106166de42c33d34a078ec2eb19377ea70389a", size = 17456, upload-time = "2025-10-18T13:56:13.441Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c9/33/a7cbfccc39056a5cf8126b7aab4c8bafbedd4f0ca68ae40ecb627a2d2cd3/py_partiql_parser-0.6.3-py2.py3-none-any.whl", hash = "sha256:deb0769c3346179d2f590dcbde556f708cdb929059fb654bad75f4cf6e07f582", size = 23752, upload-time = "2025-10-18T13:56:12.256Z" },
+]
+
+[[package]]
+name = "py-vapid"
+version = "1.9.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/ed/c648c8018fab319951764f4babe68ddcbbff7f2bbcd7ff7e531eac1788c8/py_vapid-1.9.4.tar.gz", hash = "sha256:a004023560cbc54e34fc06380a0580f04ffcc788e84fb6d19e9339eeb6551a28", size = 74750, upload-time = "2026-01-05T22:13:25.201Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7f/15/f9d0171e1ad863ca49e826d5afb6b50566f20dc9b4f76965096d3555ce9e/py_vapid-1.9.4-py2.py3-none-any.whl", hash = "sha256:f165a5bf90dcf966b226114f01f178f137579a09784c7f0628fa2f0a299741b6", size = 23912, upload-time = "2026-01-05T20:42:05.455Z" },
 ]
 
 [[package]]
