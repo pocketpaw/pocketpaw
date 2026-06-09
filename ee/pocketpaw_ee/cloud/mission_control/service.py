@@ -278,6 +278,14 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
     section = _task_section(task.status, assignee.kind)
     blocked_by_raw = getattr(task, "blocked_by", None) or ()
     blocked_by = tuple(f"task:{dep_id}" for dep_id in blocked_by_raw)
+    due_at = getattr(task, "due_at", None)
+    # The task may be a domain Task (due_at is datetime | None) or a
+    # TaskResponse DTO (due_at is str | None). Normalise to datetime.
+    if isinstance(due_at, str):
+        try:
+            due_at = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            due_at = None
     return WorkItem(
         id=f"task:{task.id}",
         workspace_id=workspace_id,
@@ -295,6 +303,7 @@ def _task_to_work_item(task: Any, workspace_id: str, pocket_name: str = "") -> W
         source_kind="task",
         source_id=task.id,
         priority=task.priority,
+        due_at=due_at,
         created_at=task.created_at,
         updated_at=task.updated_at,
         fabric_refs=(),
