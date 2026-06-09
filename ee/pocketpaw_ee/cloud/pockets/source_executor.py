@@ -25,6 +25,12 @@
 #   AUTO-refresh: they re-run a source with no human in the loop, so they
 #   are metered by the per-pocket budget in `_refresh_budget.py` —
 #   SEPARATE from the manual per-(pocket, user) `_run_log` limiter here.
+# Updated: 2026-06-08 (fix/pocket-sources-run-400) — added the public
+#   `selected_source_keys()` helper (reuses `_parse_bindings` +
+#   `_select_sources`) so a caller can ask "would this (trigger, only_source)
+#   request run anything?" without a backend call. The `sources/run` route
+#   uses it to turn the implicit on-open run of a blank/starter pocket (no
+#   backend bound, nothing to fetch) into a clean no-op instead of a hard 400.
 #
 # SSRF BOUNDARY. The outbound-HTTP defenses now live in `_http_guard.py` —
 # the ONE canonical guard module both executors import. Every defense from
@@ -228,6 +234,30 @@ def _select_sources(
     if trigger is not None:
         return {k: b for k, b in bindings.items() if trigger in b.refresh}
     return dict(bindings)
+
+
+def selected_source_keys(
+    ripple_spec: dict,
+    *,
+    trigger: str | None = None,
+    only_source: str | None = None,
+) -> list[str]:
+    """Return the source keys a ``(trigger, only_source)`` request would run.
+
+    Reuses the same ``_parse_bindings`` + ``_select_sources`` logic the run
+    path uses, so callers can answer "is there anything to run?" WITHOUT
+    making a backend call or duplicating the selection rules. Malformed
+    entries (which ``_parse_bindings`` turns into parse errors, not bindings)
+    are correctly excluded — they are never runnable.
+
+    Used by the ``sources/run`` route to decide, when no backend is
+    configured, whether the request is a benign no-op (nothing selected →
+    empty result) or a real misconfiguration (a runnable source was authored
+    but the pocket has no backend bound).
+    """
+    bindings, _parse_errors = _parse_bindings(ripple_spec)
+    selected = _select_sources(bindings, trigger=trigger, only_source=only_source)
+    return list(selected.keys())
 
 
 def _parse_bindings(ripple_spec: dict) -> tuple[dict[str, SourceBinding], list[dict]]:
@@ -517,4 +547,4 @@ async def run_sources(
     return {"ran": ran, "errors": errors}
 
 
-__all__ = ["run_sources", "SourceBinding", "RefreshTrigger"]
+__all__ = ["run_sources", "selected_source_keys", "SourceBinding", "RefreshTrigger"]

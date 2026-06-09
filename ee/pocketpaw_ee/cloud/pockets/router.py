@@ -1,5 +1,16 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-08 (fix/pocket-sources-run-400) — ``POST /{id}/sources/run``
+no longer 400s when the pocket has no backend configured. The frontend runs
+declared sources on every ``pocket_open``, so a blank/starter pocket (no
+backend, nothing to fetch) was 400ing on open — surfacing as a noisy
+``pocket_open sources run failed: HttpError: Bad Request``. The route now
+computes the selected sources first (via ``source_executor.selected_source_keys``)
+and returns a clean ``{"ran": [], "errors": []}`` 200 when nothing is
+selected; when a runnable source IS authored but no backend is bound it
+returns per-source ``pocket_backend.not_configured`` errors (200), matching
+the soft/non-fatal handling every other source-run call site already uses.
+
 Updated: 2026-06-03 (Sites fix A) — the desktop ``GET /pockets`` gallery
 route now hides pockets that have been published as Paw Sites (they show
 under ``/sites`` instead). It calls ``sites_service.site_pocket_ids`` (a
@@ -673,18 +684,38 @@ async def run_pocket_sources(
     pocket = await pockets_service.get(pocket_id, user_id)
     ripple_spec = pocket.get("rippleSpec") or {}
 
+    from pocketpaw_ee.cloud.pockets import source_executor
+
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
     if creds is None:
-        raise CloudError(
-            400,
-            "pocket_backend.not_configured",
-            "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
+        # No backend bound. The frontend runs declared sources on EVERY
+        # pocket_open, so a blank/starter pocket (no backend, nothing to
+        # fetch) hits this path on every open. Don't 400 it — that surfaced
+        # as a noisy "pocket_open sources run failed: HttpError: Bad Request"
+        # in the browser. Decide by whether anything would actually run:
+        #   * nothing selected  -> clean no-op (200, empty result)
+        #   * source(s) selected -> a real misconfiguration: a runnable source
+        #     was authored but no backend is bound. Report it as a per-source
+        #     error (200), matching every other source-run call site
+        #     (agent pocket_router, temporal_dispatcher, bulk_dispatch) which
+        #     treat "no backend" as soft/non-fatal — never a hard 400.
+        selected = source_executor.selected_source_keys(
+            ripple_spec, trigger=body.trigger, only_source=body.source
         )
+        return {
+            "ran": [],
+            "errors": [
+                {
+                    "source": key,
+                    "error": "This pocket has no backend configured",
+                    "code": "pocket_backend.not_configured",
+                }
+                for key in selected
+            ],
+        }
     # M2b.1 — the executor-creds tuple gained `allowed_writes` (M2a) and
     # `approval_route` (M2b.1); read-only source runs need neither.
     base_url, auth_type, auth_header, token, _allowed_writes, _approval_route = creds
-
-    from pocketpaw_ee.cloud.pockets import source_executor
 
     # no-event: source hydration is response-body delivery, not persisted
     return await source_executor.run_sources(
