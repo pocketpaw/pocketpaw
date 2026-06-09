@@ -95,9 +95,7 @@ async def purge_member_data(
     # cascade, the disconnect endpoint) get the same blank-id guard an HTTP
     # body would, so a blank member_id can never collapse the scope to a bare
     # ``user:`` and wipe the wrong member.
-    body = PurgeMemberRequest.model_validate(
-        {"workspace_id": workspace_id, "member_id": member_id}
-    )
+    body = PurgeMemberRequest.model_validate({"workspace_id": workspace_id, "member_id": member_id})
     workspace_id, member_id = body.workspace_id, body.member_id
 
     # The scope is a pure function of the opaque member id. Nothing else.
@@ -119,9 +117,7 @@ async def purge_member_data(
         kb_cleared = True
     except Exception as exc:  # noqa: BLE001 — isolate per store so one failing
         # step (e.g. a missing kb binary) never blocks the other three deletes.
-        logger.warning(
-            "purge: kb clear failed for scope=%s ws=%s: %s", scope, workspace_id, exc
-        )
+        logger.warning("purge: kb clear failed for scope=%s ws=%s: %s", scope, workspace_id, exc)
         errors.append(f"kb: {exc}")
 
     # --- 2. Per-user OAuth tokens: Gmail + Calendar buckets for this member. ---
