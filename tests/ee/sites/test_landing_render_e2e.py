@@ -5,6 +5,18 @@
 # SHAPE that renders like the shippable "Option C" page, not the broken
 # "Option A" dashboard render.
 #
+# Updated 2026-06-09 (feat/landing-assembler-enrich): the canonical spec is now
+# the REAL output of ``assemble_landing_spec`` (the deterministic fast-path) on a
+# representative copy object, instead of a hand-maintained dict that drifted from
+# the assembler. So these guardrails track exactly what ships. Two new sections
+# the enriched assembler emits get their own cases:
+#   * the hero is the bespoke ``marketing-hero`` (premium CSS visual, CTAs as
+#     ``ctaHref``/``secondaryCtaHref`` siblings — never the borrowed dashboard
+#     ``hero``);
+#   * an optional ``faq`` section (native <details>, JS-off safe) — present when
+#     the copy carries ``faqs``, omitted when it doesn't, and NEVER an
+#     ``accordion``.
+#
 # This is a STATIC, deterministic guardrail over the spec tree — NOT a generator
 # render. A full @paw/sites-generator build (install + workerd smoke) is the gold
 # proof but is heavy and CI-fragile (Bun, network, a warm ripple tarball), so the
@@ -16,186 +28,93 @@
 #      inside the site template's outer POST form → zero leads captured).
 #   2. pricing-table uses `tiers` (not `plans`/`columns`) → populated pricing.
 #   3. No `accordion` node anywhere (bits-ui client primitive → FAQ won't open
-#      with JS off).
+#      with JS off). FAQ uses the native-<details> `faq` widget instead.
 #   4. Every CTA/button is an anchor href (or a form submit) — no on_click
 #      (dead on a static page).
-#   5. The hero is the marketing `hero` widget, never the dashboard `hero+grid`
-#      KPI layout (no `stat` tiles / charts on a sales page).
+#   5. The hero is the marketing `marketing-hero` widget, never the dashboard
+#      `hero+grid` KPI layout (no `stat` tiles / charts on a sales page).
 
 from __future__ import annotations
 
 from typing import Any
 
 import pytest
+from pocketpaw_ee.sites.landing_assembler import assemble_landing_spec
+
+# A representative copy object — the Bright Smile dentist brief WITH faqs, so the
+# canonical spec exercises every section the assembler can emit (including the
+# optional FAQ). The assembler owns the structure; this is COPY only.
+_CANONICAL_CONTENT: dict[str, Any] = {
+    "brand": "Bright Smile Dental",
+    "hero": {
+        "eyebrow": "Family & cosmetic dentistry",
+        "title": "Care that fits your whole family",
+        "subtitle": "Gentle, modern dentistry in downtown Austin.",
+        "cta_label": "Book a visit",
+    },
+    "services": [
+        {"title": "New Patient Exams", "desc": "Full exam, X-rays, cleaning.", "icon": "tooth"},
+        {"title": "Teeth Whitening", "desc": "Up to 8 shades brighter.", "icon": "sparkles"},
+        {"title": "Invisalign", "desc": "Clear aligners, custom plan.", "icon": "smile"},
+        {"title": "Emergency Care", "desc": "Same-day relief.", "icon": "shield"},
+    ],
+    "testimonials": [
+        {
+            "quote": "Best dental experience I've had.",
+            "author": "Maria G.",
+            "role": "Patient since 2023",
+        },
+        {"quote": "Booking was one tap.", "author": "James T.", "role": "Patient since 2021"},
+    ],
+    "tiers": [
+        {
+            "name": "New Patient Exam",
+            "price": "89",
+            "period": "one-time",
+            "features": ["Full exam", "Digital X-rays", "Cleaning"],
+            "cta_label": "Book",
+        },
+        {
+            "name": "Whitening",
+            "price": "299",
+            "period": "one-time",
+            "popular": True,
+            "features": ["In-office session", "Up to 8 shades", "Take-home trays"],
+            "cta_label": "Book",
+        },
+        {
+            "name": "Invisalign",
+            "price": "3,900",
+            "period": "full plan",
+            "features": ["Custom aligners", "All visits", "Retainers included"],
+            "cta_label": "Free consult",
+        },
+    ],
+    "faqs": [
+        {"question": "How long does a visit take?", "answer": "Most first visits run 45 minutes."},
+        {"question": "Do you take my insurance?", "answer": "We bill all major plans directly."},
+        {"question": "Can I reschedule online?", "answer": "Yes — from the confirmation email."},
+    ],
+    "cta_band": {
+        "headline": "Ready for a healthier smile?",
+        "subtext": "Same-week appointments are filling up.",
+        "button_label": "Request an appointment",
+    },
+    "contact": {
+        "address": "421 Congress Ave, Austin TX",
+        "phone": "(555) 010-1234",
+        "email": "hello@brightsmile.com",
+    },
+    "footer": {"copyright": "© 2026 Bright Smile Dental"},
+}
 
 
 def _canonical_landing_spec() -> dict[str, Any]:
-    """The Bright Smile dentist landing spec — the exact conversion-ordered
-    shape the create-paw-site brain and the landing recipe produce. Kept inline
-    so the test is deterministic and never depends on the live generator."""
-    return {
-        "version": "1.0",
-        "ui": {
-            "type": "flex",
-            "props": {"direction": "column", "gap": "0"},
-            "children": [
-                {
-                    "type": "navbar",
-                    "props": {
-                        "brand": "Bright Smile Dental",
-                        "links": [
-                            {"label": "Services", "href": "#services"},
-                            {"label": "Pricing", "href": "#pricing"},
-                            {"label": "Reviews", "href": "#reviews"},
-                            {"label": "Book", "href": "#book"},
-                        ],
-                        "cta": {"label": "Book a visit", "href": "#book"},
-                    },
-                },
-                {
-                    "type": "hero",
-                    "props": {
-                        "eyebrow": "Family & cosmetic dentistry",
-                        "title": "Care that fits your whole family",
-                        "subtitle": "Gentle, modern dentistry in downtown Austin.",
-                        "cta": {"label": "Book your visit", "href": "#book"},
-                    },
-                },
-                {
-                    "type": "feature-grid",
-                    "props": {
-                        "id": "services",
-                        "title": "What we do",
-                        "features": [
-                            {
-                                "icon": "tooth",
-                                "title": "New Patient Exams",
-                                "description": "Full exam, X-rays, cleaning.",
-                            },
-                            {
-                                "icon": "sparkles",
-                                "title": "Teeth Whitening",
-                                "description": "Up to 8 shades brighter.",
-                            },
-                            {
-                                "icon": "smile",
-                                "title": "Invisalign",
-                                "description": "Clear aligners, custom plan.",
-                            },
-                            {
-                                "icon": "shield",
-                                "title": "Emergency Care",
-                                "description": "Same-day relief.",
-                            },
-                        ],
-                    },
-                },
-                {
-                    "type": "testimonial",
-                    "props": {
-                        "id": "reviews",
-                        "quote": "Best dental experience I've had.",
-                        "author": "Maria G.",
-                        "role": "Patient since 2023",
-                        "rating": 5,
-                    },
-                },
-                {
-                    "type": "pricing-table",
-                    "props": {
-                        "id": "pricing",
-                        "title": "Simple, upfront pricing",
-                        "currency": "USD",
-                        "tiers": [
-                            {
-                                "id": "exam",
-                                "name": "New Patient Exam",
-                                "price": "$89",
-                                "period": "one-time",
-                                "features": ["Full exam", "Digital X-rays", "Cleaning"],
-                                "cta": {"label": "Book", "href": "#book"},
-                            },
-                            {
-                                "id": "white",
-                                "name": "Whitening",
-                                "price": "$299",
-                                "period": "one-time",
-                                "popular": True,
-                                "features": [
-                                    "In-office session",
-                                    "Up to 8 shades",
-                                    "Take-home trays",
-                                ],
-                                "cta": {"label": "Book", "href": "#book"},
-                            },
-                            {
-                                "id": "invis",
-                                "name": "Invisalign",
-                                "price": "$3,900",
-                                "period": "full plan",
-                                "features": ["Custom aligners", "All visits", "Retainers included"],
-                                "cta": {"label": "Free consult", "href": "#book"},
-                            },
-                        ],
-                    },
-                },
-                {
-                    "type": "cta",
-                    "props": {
-                        "title": "Ready for a healthier smile?",
-                        "subtitle": "Same-week appointments are filling up.",
-                        "cta": {"label": "Request an appointment", "href": "#book"},
-                    },
-                },
-                {
-                    "type": "card",
-                    "props": {"id": "book", "title": "Book your visit"},
-                    "children": [
-                        {
-                            "type": "input",
-                            "props": {"name": "name", "label": "Your name", "required": True},
-                        },
-                        {
-                            "type": "input",
-                            "props": {
-                                "name": "email",
-                                "label": "Email",
-                                "type": "email",
-                                "required": True,
-                            },
-                        },
-                        {
-                            "type": "input",
-                            "props": {"name": "phone", "label": "Phone", "type": "tel"},
-                        },
-                        {
-                            "type": "textarea",
-                            "props": {"name": "message", "label": "What do you need?"},
-                        },
-                        {
-                            "type": "button",
-                            "props": {
-                                "label": "Request appointment",
-                                "type": "submit",
-                                "variant": "primary",
-                            },
-                        },
-                    ],
-                },
-                {
-                    "type": "footer",
-                    "props": {
-                        "brand": "Bright Smile Dental",
-                        "tagline": "421 Congress Ave, Austin TX",
-                        "links": [
-                            {"label": "Services", "href": "#services"},
-                            {"label": "Book", "href": "#book"},
-                        ],
-                    },
-                },
-            ],
-        },
-    }
+    """The Bright Smile dentist landing spec — the EXACT output of the
+    deterministic assembler on ``_CANONICAL_CONTENT``. Driving the real assembler
+    (instead of a hand-copied dict) means these guardrails can never silently
+    drift from what the create-paw-site fast-path actually ships."""
+    return assemble_landing_spec(_CANONICAL_CONTENT)
 
 
 # Tier-0 (CSS-only, static-safe) animation widgets. Anything else animated needs
@@ -274,17 +193,105 @@ def test_pricing_table_uses_tiers_not_plans() -> None:
     assert "tiers" in props and isinstance(props["tiers"], list) and props["tiers"]
     assert "plans" not in props
     assert "columns" not in props
-    # Tier objects have the canonical shape and an anchor-href cta.
+    assert props["currency"] == "$"
+    # Tier objects have the canonical shape and a STRING cta label (the
+    # pricing-table renders the button itself; tier cta is never a nested object).
     for tier in props["tiers"]:
         assert {"id", "name", "price"}.issubset(tier.keys())
-        assert "href" in tier["cta"]
+        assert isinstance(tier["cta"], str) and tier["cta"]
 
 
 def test_no_accordion_node_anywhere() -> None:
     """Rule 3 — no `accordion` (bits-ui client primitive; FAQ panels won't open
-    with JS off). FAQ, if present, is flat heading/text."""
+    with JS off). The FAQ section uses the native-<details> `faq` widget, which
+    expands with zero client JS, NOT an `accordion`."""
     spec = _canonical_landing_spec()
     assert "accordion" not in _node_types(spec)
+
+
+# ---------------------------------------------------------------------------
+# Enriched-assembler sections (feat/landing-assembler-enrich, ripple PR #67)
+# ---------------------------------------------------------------------------
+
+
+def test_hero_is_marketing_hero_with_premium_css_visual() -> None:
+    """The page opener is `marketing-hero` with its premium CSS `visual` set and
+    the CTAs wired as `ctaHref`/`secondaryCtaHref` siblings.
+
+    `visual` selects the bespoke CSS panel (dot-grid + glow drift + spec chip),
+    which is pure CSS and so paints fully under csr=false. The CTA destinations
+    are sibling href props (never a nested object, never on_click)."""
+    spec = _canonical_landing_spec()
+    heroes = _find(spec, "marketing-hero")
+    assert len(heroes) == 1, "exactly one marketing-hero, as the page opener"
+    p = heroes[0]["props"]
+
+    # Required headline plus the mapped hero copy.
+    assert p.get("title")
+    assert p.get("eyebrow") == "Family & cosmetic dentistry"
+    assert p.get("subtitle")
+
+    # Premium CSS visual — one of the static-safe panel treatments.
+    assert p.get("visual") in {"grid", "glow", "plain"}
+
+    # Primary CTA: string label + sibling href into the lead form.
+    assert isinstance(p.get("cta"), str) and p["cta"]
+    assert p.get("ctaHref") == "#book"
+
+    # Secondary ghost CTA jumps to services (which always renders).
+    assert p.get("secondaryCtaHref") == "#services"
+
+
+def test_faq_section_is_native_details_when_copy_supplies_faqs() -> None:
+    """When the copy carries `faqs`, the assembler emits a `faq` widget (native
+    <details>, JS-off safe) wrapped in `section#faq`, carrying the Q/A items —
+    and NEVER an `accordion`."""
+    spec = _canonical_landing_spec()
+    faqs = _find(spec, "faq")
+    assert len(faqs) == 1, "one faq widget when faqs are supplied"
+    items = faqs[0]["props"].get("items")
+    assert isinstance(items, list) and len(items) == 3
+    for it in items:
+        assert it.get("question") and it.get("answer")
+    # It is a native-details `faq`, not the JS-only `accordion`.
+    assert "accordion" not in _node_types(spec)
+    # The widget is wrapped in an anchored section (marketing widgets carry no id).
+    faq_sections = [c for c in spec["ui"]["children"] if c.get("props", {}).get("id") == "faq"]
+    assert len(faq_sections) == 1
+    assert faq_sections[0]["children"][0]["type"] == "faq"
+
+
+def test_faq_section_omitted_when_no_faqs_supplied() -> None:
+    """FAQ is OPTIONAL: with no `faqs` in the copy, the assembler emits no `faq`
+    widget and no `section#faq` — the funnel stays lean. Every other section
+    still renders."""
+    content = {k: v for k, v in _CANONICAL_CONTENT.items() if k != "faqs"}
+    spec = assemble_landing_spec(content)
+    assert "faq" not in _node_types(spec)
+    assert not any(c.get("props", {}).get("id") == "faq" for c in spec["ui"]["children"])
+    # The rest of the funnel is intact.
+    assert "marketing-hero" in _node_types(spec)
+    assert "pricing-table" in _node_types(spec)
+
+
+def test_faq_drops_entries_missing_question_or_answer() -> None:
+    """A faq entry with no question OR no answer is dropped (an openable-but-blank
+    disclosure helps no one); if every entry is unusable the whole section is
+    omitted."""
+    content = {
+        **{k: v for k, v in _CANONICAL_CONTENT.items() if k != "faqs"},
+        "faqs": [
+            {"question": "Real question?", "answer": "Real answer."},
+            {"question": "", "answer": "orphan answer"},  # no question → dropped
+            {"question": "orphan question", "answer": ""},  # no answer → dropped
+            "not-a-dict",  # not a dict → skipped
+        ],
+    }
+    spec = assemble_landing_spec(content)
+    faqs = _find(spec, "faq")
+    assert len(faqs) == 1
+    items = faqs[0]["props"]["items"]
+    assert len(items) == 1 and items[0]["question"] == "Real question?"
 
 
 def test_all_ctas_are_anchor_hrefs_not_on_click() -> None:
@@ -307,21 +314,38 @@ def test_all_ctas_are_anchor_hrefs_not_on_click() -> None:
         has_href = "href" in props
         assert is_submit or has_href, "a button must submit or link via href"
 
-    # The nav/hero/cta/footer CTAs all link by href.
-    for cta_host in _find(spec, "navbar") + _find(spec, "hero") + _find(spec, "cta"):
-        cta = cta_host["props"].get("cta")
-        if cta is not None:
-            assert "href" in cta
+    # The navbar + marketing-hero use a STRING `cta` label with the destination in
+    # a SEPARATE sibling prop (`ctaHref`), never a nested `{label, href}` object —
+    # and never an `on_click`. Assert the label/href split, not a nested href.
+    for host in _find(spec, "navbar") + _find(spec, "marketing-hero"):
+        p = host["props"]
+        assert isinstance(p.get("cta"), str) and p["cta"], "cta is a string label"
+        assert p.get("ctaHref", "").startswith("#"), "the destination rides ctaHref"
+
+    # marketing-hero's optional secondary CTA follows the same split.
+    for hero in _find(spec, "marketing-hero"):
+        p = hero["props"]
+        if p.get("secondaryCta"):
+            assert p.get("secondaryCtaHref", "").startswith("#")
+
+    # The cta band carries a string `button` label + a sibling `href`.
+    for band in _find(spec, "cta"):
+        p = band["props"]
+        assert isinstance(p.get("button"), str) and p["button"]
+        assert p.get("href", "").startswith("#")
 
 
 def test_hero_is_marketing_widget_not_dashboard_kpi_layout() -> None:
-    """Rule 5 — the page uses the marketing `hero` widget and carries NO
-    dashboard KPI widgets (`stat` tiles, charts). A KPI grid at the top is the
-    broken `hero+grid` dashboard render, not a landing page."""
+    """Rule 5 — the page uses the bespoke `marketing-hero` widget (NOT the
+    borrowed dashboard `hero`) and carries NO dashboard KPI widgets (`stat`
+    tiles, charts). A KPI grid at the top is the broken `hero+grid` dashboard
+    render, not a landing page."""
     spec = _canonical_landing_spec()
     types = _node_types(spec)
 
-    assert "hero" in types
+    assert "marketing-hero" in types
+    # The borrowed dashboard hero is gone — the page opener is marketing-hero.
+    assert "hero" not in types, "use `marketing-hero`, not the borrowed `hero`"
     # No dashboard/analytics widgets on a sales page.
     for dashboardy in ("stat", "chart", "page-header", "pipeline-dashboard", "analytics-dashboard"):
         assert dashboardy not in types, (
@@ -340,19 +364,33 @@ def test_any_animation_is_tier0_static_safe() -> None:
 
 def test_conversion_order_is_funnel_top_to_bottom() -> None:
     """The page reads as a funnel: nav → hero → services → proof → pricing →
-    CTA → lead form → footer. We assert the relative order of the anchor roles."""
+    FAQ → CTA → lead form → footer. We assert the relative order of the roles.
+
+    Anchored sections wrap their marketing widget in a `section`/`card`, so we
+    index by the wrapper's anchor id (services/pricing/faq/book) rather than the
+    inner widget type."""
     spec = _canonical_landing_spec()
-    # Top-level section order (direct children of the root flex).
     top = [c["type"] for c in spec["ui"]["children"]]
-    assert top.index("navbar") < top.index("hero")
-    assert top.index("hero") < top.index("feature-grid")
-    assert top.index("feature-grid") < top.index("pricing-table")
-    assert top.index("pricing-table") < top.index("footer")
-    # The lead form (the `book` card) comes before the footer.
-    book_idx = next(
-        i for i, c in enumerate(spec["ui"]["children"]) if c.get("props", {}).get("id") == "book"
-    )
-    assert book_idx < top.index("footer")
+
+    def anchor_idx(anchor: str) -> int:
+        return next(
+            i
+            for i, c in enumerate(spec["ui"]["children"])
+            if c.get("props", {}).get("id") == anchor
+        )
+
+    # navbar → marketing-hero → services → pricing → footer (top-level types).
+    assert top.index("navbar") < top.index("marketing-hero")
+    assert top.index("marketing-hero") < anchor_idx("services")
+    assert anchor_idx("services") < anchor_idx("pricing")
+    assert anchor_idx("pricing") < top.index("footer")
+    # FAQ sits between pricing and the closing CTA band (objections answered
+    # right before the final ask).
+    assert anchor_idx("pricing") < anchor_idx("faq")
+    assert anchor_idx("faq") < top.index("cta")
+    # The lead form (the `book` card) comes after the CTA band, before the footer.
+    assert top.index("cta") < anchor_idx("book")
+    assert anchor_idx("book") < top.index("footer")
 
 
 @pytest.mark.parametrize(

@@ -4,14 +4,21 @@
 # persistence end-to-end, the failure the three prior agent-mode fixes never
 # closed.
 #
+# Updated 2026-06-09 (feat/landing-assembler-enrich, ripple PR #67): the page
+# opener is now the bespoke ``marketing-hero`` (was the borrowed dashboard
+# ``hero``), and the sample copy carries ``faqs`` so the optional native-<details>
+# FAQ section is exercised. Widget-set assertions track ``marketing-hero``; new
+# cases pin the marketing-hero CTA split and the FAQ section (present with faqs,
+# omitted without).
+#
 # Two layers:
 #   1. Pure assembler (``assemble_landing_spec``) — given an LLM ``content`` copy
 #      object, CODE emits the fixed marketing-widget structure. Asserts the
-#      widget-type set CONTAINS navbar / hero / feature-grid / testimonial /
-#      pricing-table / cta / footer, a FLAT lead form (input/textarea/button, NO
-#      ``form`` widget), section ``id`` anchors + input ``name`` POST fields, the
-#      ``tiers`` (not ``plans``) pricing shape, and determinism (same content →
-#      identical structure; impossible to downgrade).
+#      widget-type set CONTAINS navbar / marketing-hero / feature-grid /
+#      testimonial / pricing-table / cta / footer, a FLAT lead form
+#      (input/textarea/button, NO ``form`` widget), section ``id`` anchors + input
+#      ``name`` POST fields, the ``tiers`` (not ``plans``) pricing shape, and
+#      determinism (same content → identical structure; impossible to downgrade).
 #   2. End-to-end create tool (``_create_landing_site_handler``) — against a real
 #      (mongomock) Beanie DB it persists the assembled spec via the pockets
 #      service ``agent_create`` path and reads the PERSISTED ``_PocketDoc`` back
@@ -86,6 +93,16 @@ def _sample_content() -> dict[str, Any]:
                 "cta_label": "Book",
             },
         ],
+        "faqs": [
+            {
+                "question": "How long does a first visit take?",
+                "answer": "About 45 minutes — a cleaning, a check, and a plan.",
+            },
+            {
+                "question": "Do you take my insurance?",
+                "answer": "We bill all major plans directly.",
+            },
+        ],
         "cta_band": {
             "headline": "Ready for a healthier smile?",
             "button_label": "Request an appointment",
@@ -147,16 +164,19 @@ class TestAssembleLandingSpec:
         types = _widget_types(spec)
         for kind in (
             "navbar",
-            "hero",
+            "marketing-hero",
             "feature-grid",
             "testimonial",
             "pricing-table",
+            "faq",
             "cta",
             "footer",
         ):
             assert kind in types, (
                 f"marketing widget {kind!r} missing from assembled spec; got {sorted(types)}"
             )
+        # The borrowed dashboard hero is gone — the opener is marketing-hero.
+        assert "hero" not in types, "use `marketing-hero`, not the borrowed `hero`"
 
     def test_lead_form_is_flat_never_a_form_widget(self) -> None:
         from pocketpaw_ee.sites.landing_assembler import assemble_landing_spec
@@ -186,7 +206,7 @@ class TestAssembleLandingSpec:
         # Anchor targets live on wrapping section/card (marketing widgets carry
         # no id of their own). The navbar links to these.
         anchors = _section_ids(spec)
-        for anchor in ("services", "reviews", "pricing", "book"):
+        for anchor in ("services", "reviews", "pricing", "faq", "book"):
             assert anchor in anchors, (
                 f"missing section/card anchor id #{anchor}; got {sorted(anchors)}"
             )
@@ -229,6 +249,48 @@ class TestAssembleLandingSpec:
         ui = spec.get("ui") or spec
         for n in _iter_nodes(ui):
             assert "on_click" not in (n.get("props") or {}), "static site: no on_click CTAs"
+
+    def test_marketing_hero_carries_ctas_and_css_visual(self) -> None:
+        """The opener is `marketing-hero` with the hero copy mapped onto it, a
+        primary CTA wired to the lead form, a secondary CTA to services, and a
+        static-safe CSS `visual`. CTA destinations are sibling href props (never a
+        nested object), so they work as plain anchors under csr=false."""
+        from pocketpaw_ee.sites.landing_assembler import assemble_landing_spec
+
+        spec = assemble_landing_spec(_sample_content())
+        heroes = _nodes_of_type(spec, "marketing-hero")
+        assert len(heroes) == 1
+        p = heroes[0]["props"]
+        assert p.get("eyebrow") == "Family & cosmetic dentistry"
+        assert p.get("title") and p.get("subtitle")
+        # Primary CTA → lead form, as a label + sibling href.
+        assert isinstance(p.get("cta"), str) and p["cta"] == "Book a visit"
+        assert p.get("ctaHref") == "#book"
+        # Secondary ghost CTA → services.
+        assert p.get("secondaryCtaHref") == "#services"
+        # Premium CSS visual treatment, all static-safe.
+        assert p.get("visual") in {"grid", "glow", "plain"}
+
+    def test_faq_section_present_with_faqs_and_omitted_without(self) -> None:
+        """The FAQ is OPTIONAL. With `faqs` in the copy the assembler emits a
+        `faq` widget (native <details>) under `section#faq`; with no `faqs` the
+        section is dropped entirely. Never an `accordion` (JS-only)."""
+        from pocketpaw_ee.sites.landing_assembler import assemble_landing_spec
+
+        spec = assemble_landing_spec(_sample_content())
+        faqs = _nodes_of_type(spec, "faq")
+        assert len(faqs) == 1
+        items = faqs[0]["props"].get("items")
+        assert isinstance(items, list) and len(items) == 2
+        for it in items:
+            assert it.get("question") and it.get("answer")
+        assert "accordion" not in _widget_types(spec)
+
+        # Omitted when the copy has no faqs.
+        no_faq = {k: v for k, v in _sample_content().items() if k != "faqs"}
+        spec2 = assemble_landing_spec(no_faq)
+        assert "faq" not in _widget_types(spec2)
+        assert "faq" not in _section_ids(spec2)
 
     def test_handles_variable_length_collections(self) -> None:
         from pocketpaw_ee.sites.landing_assembler import assemble_landing_spec
@@ -275,9 +337,9 @@ class TestAssembleLandingSpec:
         spec = assemble_landing_spec(_sample_content())
         # brand on navbar
         assert (_nodes_of_type(spec, "navbar")[0]["props"]).get("brand") == "Bright Smile Dental"
-        # hero title
+        # hero title — on the marketing-hero
         assert (
-            (_nodes_of_type(spec, "hero")[0]["props"]).get("title")
+            (_nodes_of_type(spec, "marketing-hero")[0]["props"]).get("title")
             == "Care that fits your whole family"
         )
         # service titles flow into feature-grid features
@@ -377,18 +439,21 @@ class TestCreateLandingSiteEndToEnd:
         persisted_types = _widget_types(doc.rippleSpec)
         for kind in (
             "navbar",
-            "hero",
+            "marketing-hero",
             "feature-grid",
             "testimonial",
             "pricing-table",
+            "faq",
             "cta",
             "footer",
         ):
             assert kind in persisted_types, (
                 f"PERSISTED spec dropped marketing widget {kind!r}; got {sorted(persisted_types)}"
             )
-        # generic-downgrade guard: the page is NOT a hero+grid+card wireframe.
+        # generic-downgrade guard: the page is NOT a hero+grid+card wireframe, and
+        # the borrowed dashboard hero never sneaks back in.
         assert "input" in persisted_types and "form" not in persisted_types
+        assert "hero" not in persisted_types
 
     @pytest.mark.asyncio
     async def test_missing_identity_is_error(self) -> None:

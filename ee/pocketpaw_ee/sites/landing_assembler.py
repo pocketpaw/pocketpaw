@@ -12,26 +12,52 @@
 # ``mcp__pocketpaw_sites_manager__create_landing_site``, which runs this
 # assembler and persists the result directly.
 #
+# Updated 2026-06-09 (feat/landing-assembler-enrich — premium ripple marketing
+# pack, ripple PR #67):
+#   * The hero is now the bespoke ``marketing-hero`` widget (was the borrowed
+#     dashboard ``hero``). marketing-hero bakes in its OWN premium CSS visual — an
+#     asymmetric panel with a dot-grid texture, a slow CSS-@keyframes glow drift,
+#     and a static spec chip — all pure CSS, so it renders fully under csr=false
+#     (the resting state is complete with JS off; the drift is enhancement, not
+#     structure, and reduced-motion disables it). The borrowed ``hero`` dropped
+#     its CTA on the floor; marketing-hero carries a primary CTA (→ #book) plus an
+#     optional secondary "see services" ghost CTA (→ #services).
+#   * NEW optional FAQ section (the ``faq`` widget) between pricing and the CTA
+#     band — native <details>/<summary> disclosures that expand with ZERO client
+#     JS (JS-off safe), fed from a new ``faqs`` copy field. Omitted entirely when
+#     no faqs are supplied (the funnel stays lean).
+#   * csr/motion stance: these sites prerender with ``csr=false`` (verified in the
+#     generator's templates/src/routes/+layout.ts.tmpl). So JS-driven motion
+#     (ripple ``reveal``/``parallax``/``spotlight``) NEVER attaches and is NOT
+#     wired — it would be dead weight. All premium richness here is CSS-only
+#     (baked into marketing-hero) and therefore static-safe. Enabling hydration
+#     (csr=true) is what would unlock scroll-reveal motion; that is out of scope.
+#
 # The emitted structure mirrors the renderer-VALID bundled landing skeleton
 # (``src/pocketpaw/bundled_templates/_bundled/landing-page/ripple_spec.json``)
-# section-for-section — same widget kinds, same SSR-safe props — but every copy
-# value comes from ``content`` and the variable-length collections (services /
-# testimonials / tiers) drive real loops. The fixed conversion order is:
+# section-for-section — same SSR-safe props — but the hero is upgraded to
+# marketing-hero, an optional FAQ is added, every copy value comes from
+# ``content``, and the variable-length collections (services / testimonials /
+# tiers / faqs) drive real loops. The fixed conversion order is:
 #
-#   navbar → hero → section#services[feature-grid] → section#reviews[testimonial*
-#   (+ optional logo-cloud)] → section#pricing[pricing-table.tiers] → cta band →
-#   card#book[flat input/textarea/button lead form] → footer
+#   navbar → marketing-hero → section#services[feature-grid] →
+#   section#reviews[testimonial* (+ optional logo-cloud)] →
+#   section#pricing[pricing-table.tiers] → section#faq[faq] (optional) →
+#   cta band → card#book[flat input/textarea/button lead form] → footer
 #
 # Hard-coded SSR contract (all by construction, never the LLM's choice):
-#   * section/card ``id`` anchors (#services/#reviews/#pricing/#book) — marketing
-#     widgets carry no id of their own, so anchor targets live on the wrappers.
+#   * section/card ``id`` anchors (#services/#reviews/#pricing/#faq/#book) —
+#     marketing widgets carry no id of their own, so anchor targets live on the
+#     wrappers.
 #   * input/textarea ``name`` POST fields so the native outer-form submit maps a
 #     lead (rule 1: FLAT inputs, never a nested ``form``/``newsletter`` widget).
-#   * anchor ``href`` CTAs everywhere (navbar.ctaHref, cta.href, footer/nav link
-#     hrefs) — never ``on_click`` (rule 4: a click handler is dead on a static
-#     page).
+#   * anchor ``href`` CTAs everywhere (navbar.ctaHref, marketing-hero.ctaHref +
+#     secondaryCtaHref, cta.href, footer/nav link hrefs) — never ``on_click``
+#     (rule 4: a click handler is dead on a static page).
 #   * pricing-table uses ``tiers`` (rule 2), currency is the ``$`` symbol, tier
 #     ``cta`` is a string label.
+#   * FAQ uses the ``faq`` widget (native <details>), NEVER ``accordion`` (rule 3:
+#     a bits-ui accordion won't open with JS off).
 
 from __future__ import annotations
 
@@ -42,6 +68,7 @@ from typing import Any
 _ANCHOR_SERVICES = "services"
 _ANCHOR_REVIEWS = "reviews"
 _ANCHOR_PRICING = "pricing"
+_ANCHOR_FAQ = "faq"
 _ANCHOR_BOOK = "book"
 
 # A small default icon rotation for services that omit an ``icon``, so a
@@ -86,18 +113,37 @@ def _navbar(content: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hero(content: dict[str, Any]) -> dict[str, Any]:
+    """The page opener — the bespoke ``marketing-hero`` (NOT the borrowed
+    dashboard ``hero``).
+
+    marketing-hero carries the CTAs the old ``hero`` dropped: a primary CTA wired
+    to the lead-form anchor (``#book``) and an optional secondary "see services"
+    ghost CTA (``#services``). ``visual='grid'`` selects the premium asymmetric
+    panel (CSS dot-grid + a slow CSS-keyframes glow drift + a static spec chip);
+    it is pure CSS, so the panel renders as a finished composition under
+    ``csr=false`` with no client JS. ``align='left'`` keeps the split layout (the
+    widget forces center only when ``visual='plain'``). All four props are SSR-
+    inert — the only motion is the declarative CSS drift, disabled under
+    prefers-reduced-motion.
+    """
     hero = content.get("hero") or {}
-    # ``hero`` has no CTA prop — the call-to-action lives in the navbar + the cta
-    # band, so we don't emit one here (it would silently drop).
-    return {
-        "type": "hero",
-        "props": {
-            "eyebrow": _s(hero.get("eyebrow")),
-            "title": _s(hero.get("title"), "A headline that sells"),
-            "subtitle": _s(hero.get("subtitle")),
-            "align": "center",
-        },
+    cta_label = _s(hero.get("cta_label"), "Get in touch")
+    props: dict[str, Any] = {
+        "eyebrow": _s(hero.get("eyebrow")),
+        "title": _s(hero.get("title"), "A headline that sells"),
+        "subtitle": _s(hero.get("subtitle")),
+        # Primary CTA → the lead form. ``cta`` is a STRING label; the destination
+        # is the SEPARATE ``ctaHref`` (never nested) — same split as the navbar.
+        "cta": cta_label,
+        "ctaHref": f"#{_ANCHOR_BOOK}",
+        # Secondary ghost CTA jumps to the services section, which always renders.
+        "secondaryCta": "See our services",
+        "secondaryCtaHref": f"#{_ANCHOR_SERVICES}",
+        # Premium CSS visual panel; static-safe (no client JS needed to paint it).
+        "visual": "grid",
+        "align": "left",
     }
+    return {"type": "marketing-hero", "props": props}
 
 
 def _services_section(content: dict[str, Any]) -> dict[str, Any]:
@@ -196,6 +242,46 @@ def _pricing_section(content: dict[str, Any]) -> dict[str, Any]:
                 # ``currency`` is the SYMBOL, not a code; the required array prop
                 # is ``tiers`` (never ``plans``/``columns``).
                 "props": {"currency": "$", "tiers": tiers},
+            }
+        ],
+    }
+
+
+def _faq_section(content: dict[str, Any]) -> dict[str, Any] | None:
+    """The optional FAQ section — the ``faq`` widget wrapped in ``section#faq``.
+
+    Built from ``content['faqs']`` (a list of ``{question, answer}``). Returns
+    ``None`` when no usable Q/A pairs are supplied, so the funnel stays lean
+    rather than rendering an empty disclosure list. The ``faq`` widget emits
+    native ``<details>``/``<summary>`` — it expands with ZERO client JS, so the
+    answers live in the markup and a JS-off visitor reads the full section (rule
+    3: never an ``accordion``, which only opens under client JS). Placed between
+    pricing and the CTA band: a visitor weighing the price gets their objections
+    answered immediately before the final ask.
+    """
+    faqs_in = content.get("faqs") or []
+    items: list[dict[str, str]] = []
+    for faq in faqs_in:
+        if not isinstance(faq, dict):
+            continue
+        question = _s(faq.get("question") or faq.get("q"))
+        answer = _s(faq.get("answer") or faq.get("a"))
+        # A disclosure with no question is meaningless; require at least the
+        # question (an empty answer would still render an openable-but-blank row,
+        # so require both for a useful entry).
+        if not question or not answer:
+            continue
+        items.append({"question": question, "answer": answer})
+    if not items:
+        return None
+    title = _s(content.get("faq_title"), "Questions, answered")
+    return {
+        "type": "section",
+        "props": {"id": _ANCHOR_FAQ},
+        "children": [
+            {
+                "type": "faq",
+                "props": {"title": title, "items": items},
             }
         ],
     }
@@ -336,6 +422,9 @@ def assemble_landing_spec(content: dict[str, Any]) -> dict[str, Any]:
           "testimonials": [{"quote", "author", "role"}],     # variable length
           "tiers": [{"name", "price", "period", "features": [str],
                      "popular": bool, "cta_label": str}],     # variable length
+          "faqs": [{"question", "answer"}],                  # optional; section
+                                                             # omitted when empty
+          "faq_title": str,                                  # optional heading
           "cta_band": {"headline", "subtext", "button_label"},
           "contact": {"address", "phone", "email"},
           "footer": {"copyright"},
@@ -348,16 +437,26 @@ def assemble_landing_spec(content: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(content, dict):
         raise TypeError("assemble_landing_spec expects a content dict (copy only)")
 
+    # The fixed conversion funnel. The FAQ section is the one OPTIONAL node — it
+    # sits between pricing and the CTA band, and is dropped entirely when no
+    # usable Q/A pairs were supplied (``_faq_section`` returns None).
     children: list[dict[str, Any]] = [
         _navbar(content),
         _hero(content),
         _services_section(content),
         _reviews_section(content),
         _pricing_section(content),
-        _cta_band(content),
-        _lead_form_card(content),
-        _footer(content),
     ]
+    faq = _faq_section(content)
+    if faq is not None:
+        children.append(faq)
+    children.extend(
+        [
+            _cta_band(content),
+            _lead_form_card(content),
+            _footer(content),
+        ]
+    )
 
     return {
         "version": "1.0",
