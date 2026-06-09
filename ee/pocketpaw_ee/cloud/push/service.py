@@ -8,6 +8,18 @@
 # The cross-workspace collision is caught as a ``DuplicateKeyError`` (the
 # endpoint unique index) and surfaced as a ``ConflictError``, mirroring the
 # keypair race handling.
+# Updated: 2026-06-09 (feat/push-send-prune, pocketpaw#1392) — added the
+# Web Push SEND path: ``send_to_user`` fans a ``PushPayload`` out to every
+# stored subscription for a user, signing+encrypting each with the tenant's
+# VAPID private key (obtained via the existing ``get_decrypted_private_pem``
+# chokepoint — the private key never leaves the backend) and POSTing to the
+# browser vendor endpoint via ``pywebpush``. A 404/410 response means the
+# subscription is dead, so the row is deleted here (this service stays the
+# sole Beanie writer). Any other error is logged and skipped so one bad
+# endpoint can't abort the rest of the fan-out. Pruning a dead subscription
+# is a local cleanup with no downstream consumers, so it carries a
+# ``# no-event``; wiring sends to real product events + WS-vs-push dedupe is
+# the follow-up (#1393), NOT here.
 #
 # Responsibilities:
 #   - ``get_vapid_public_key(workspace_id)`` — return the workspace's VAPID
@@ -18,21 +30,28 @@
 #   - ``unsubscribe(workspace_id, user_id, body)`` — remove a subscription
 #     by endpoint (workspace-scoped).
 #   - ``list_for_user(...)`` — read a user's subscriptions (used by the
-#     send path in #1392).
+#     send path).
+#   - ``send_to_user(workspace_id, user_id, payload)`` — fan a notification
+#     out to the user's live subscriptions, pruning dead (404/410) ones.
 #
 # Tenancy: every read filters on ``workspace`` (ee/cloud rule §7), except the
 # one deliberate global read flagged with ``# global-read:``. The VAPID
 # private key is stored Fernet-encrypted (``_core.crypto``) and only ever
 # decrypted by the send path — it never crosses the wire.
 #
-# No events are emitted here: subscribe/unsubscribe are local persistence
-# with no downstream consumers until the send path lands (#1392). Each
-# mutating function carries an explicit ``# no-event`` per ee/cloud rule §9.
+# No events are emitted here: subscribe/unsubscribe/prune are local
+# persistence with no downstream consumers until event wiring lands (#1393).
+# Each mutating function carries an explicit ``# no-event`` per ee/cloud rule §9.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+
 from py_vapid import Vapid01, b64urlencode  # type: ignore[import-untyped]
 from pymongo.errors import DuplicateKeyError
+from pywebpush import WebPushException, webpush  # type: ignore[import-untyped]
 
 from pocketpaw_ee.cloud._core import crypto
 from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound
@@ -40,7 +59,29 @@ from pocketpaw_ee.cloud.models.push_subscription import PushKeys as _PushKeysDoc
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription as _PushSubscriptionDoc
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair as _VapidKeypairDoc
 from pocketpaw_ee.cloud.push.domain import PushKeys, PushSubscription
-from pocketpaw_ee.cloud.push.dto import SubscribeRequest, UnsubscribeRequest
+from pocketpaw_ee.cloud.push.dto import (
+    PushPayload,
+    SendResult,
+    SubscribeRequest,
+    UnsubscribeRequest,
+)
+
+logger = logging.getLogger(__name__)
+
+# The VAPID ``sub`` claim — a contact (mailto: or https: URL) the push service
+# can reach if our sends misbehave. Operator-configurable via env; the default
+# is a non-personal project address, never a real individual's inbox.
+_PUSH_CONTACT_ENV = "CLOUD_PUSH_CONTACT"
+_DEFAULT_PUSH_CONTACT = "mailto:push@pocketpaw.app"
+
+
+def _vapid_contact() -> str:
+    """Return the VAPID ``sub`` claim (contact mailto:/URL).
+
+    Operator override via ``CLOUD_PUSH_CONTACT``; falls back to a non-personal
+    project default so no individual's address is ever hardcoded.
+    """
+    return os.environ.get(_PUSH_CONTACT_ENV, "").strip() or _DEFAULT_PUSH_CONTACT
 
 # ---------------------------------------------------------------------------
 # Mapping helpers — Beanie doc ↔ domain
@@ -228,10 +269,107 @@ async def get_decrypted_private_pem(workspace_id: str) -> str:
     return crypto.decrypt(doc.private_pem_encrypted)
 
 
+# ---------------------------------------------------------------------------
+# Send — fan a notification out to a user's subscriptions, prune the dead
+# ---------------------------------------------------------------------------
+
+
+async def _delete_by_endpoint(workspace_id: str, endpoint: str) -> None:
+    """Delete a dead subscription row by endpoint, workspace-scoped.
+
+    Called from the send path when the push service reports the endpoint
+    gone (404/410). Kept here so this service stays the sole Beanie writer
+    for the push collection (ee/cloud rule §2 + the import-linter contract).
+    """
+    doc = await _PushSubscriptionDoc.find_one(
+        {"endpoint": endpoint, "workspace": workspace_id}
+    )
+    if doc is not None:
+        await doc.delete()  # no-event: dead-endpoint cleanup, no consumers until #1393
+
+
+def _status_of(exc: WebPushException) -> int | None:
+    """Best-effort HTTP status from a WebPushException's vendor response."""
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) if response is not None else None
+
+
+async def send_to_user(
+    workspace_id: str,
+    user_id: str,
+    payload: PushPayload | dict,
+) -> SendResult:
+    """Send a Web Push notification to every live subscription for a user.
+
+    Fans ``payload`` out to each of the user's stored subscriptions, signing
+    and encrypting per-endpoint with the tenant's VAPID private key (fetched
+    through the ``get_decrypted_private_pem`` chokepoint — the key is read
+    once per fan-out and never leaves this process). ``pywebpush.webpush`` is
+    synchronous (it POSTs via ``requests``), so each call runs in a worker
+    thread to keep the service async and the endpoints concurrent-friendly.
+
+    Dead-endpoint pruning: a ``404`` or ``410`` from the push service means
+    the browser dropped the subscription, so that row is deleted. Any other
+    error is logged and skipped — one unreachable endpoint must not abort the
+    rest of the fan-out. Returns a :class:`SendResult` summarizing the run.
+    """
+    payload = PushPayload.model_validate(payload)
+    subs = await list_for_user(workspace_id, user_id)
+    result = SendResult()
+    if not subs:
+        return result
+
+    # Single chokepoint read of the tenant private key for the whole fan-out.
+    private_pem = await get_decrypted_private_pem(workspace_id)
+    vapid_claims = {"sub": _vapid_contact()}
+    data = payload.model_dump_json(exclude_none=True)
+
+    for sub in subs:
+        subscription_info = {
+            "endpoint": sub.endpoint,
+            "keys": {"p256dh": sub.keys.p256dh, "auth": sub.keys.auth},
+        }
+        try:
+            await asyncio.to_thread(
+                webpush,
+                subscription_info=subscription_info,
+                data=data,
+                vapid_private_key=private_pem,
+                # ``vapid_claims`` is mutated in place by py-vapid (it stamps
+                # ``exp``/``aud``), so hand each call its own copy.
+                vapid_claims=dict(vapid_claims),
+            )
+            result.sent += 1
+        except WebPushException as exc:
+            status = _status_of(exc)
+            if status in (404, 410):
+                await _delete_by_endpoint(workspace_id, sub.endpoint)
+                result.pruned += 1
+            else:
+                result.failed += 1
+                logger.warning(
+                    "web push send failed (status=%s) for workspace=%s user=%s: %s",
+                    status,
+                    workspace_id,
+                    user_id,
+                    exc,
+                )
+        except Exception:  # noqa: BLE001 — never let one endpoint abort the fan-out
+            result.failed += 1
+            logger.exception(
+                "unexpected error sending web push for workspace=%s user=%s",
+                workspace_id,
+                user_id,
+            )
+
+    return result
+
+
 __all__ = [
     "get_decrypted_private_pem",
     "get_vapid_public_key",
     "list_for_user",
+    "send_to_user",
     "subscribe",
     "unsubscribe",
 ]

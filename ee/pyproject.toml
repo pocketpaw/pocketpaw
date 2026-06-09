@@ -150,6 +150,7 @@ dependencies = [
     # py-vapid signs the VAPID JWT for Web Push; ee/pocketpaw_ee/cloud/push/
     # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
     "py-vapid>=1.9.0",
+    "pywebpush>=2.3.0",
 ]
 
 [project.optional-dependencies]
