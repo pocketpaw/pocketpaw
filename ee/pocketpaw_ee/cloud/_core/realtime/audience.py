@@ -71,6 +71,16 @@ class AudienceResolver:
 
         # --- Groups -------------------------------------------------------------
         if t == "group.created":
+            # Public channels and public groups should be visible to every
+            # workspace member so the new channel appears in their channel
+            # browser / sidebar without a manual refresh. Private channels,
+            # private groups, and DMs are restricted to the explicit member
+            # list (the creator + any invited members).
+            gtype = d.get("type", "")
+            vis = d.get("visibility", "public")
+            is_public = gtype == "public" or (gtype == "channel" and vis != "private")
+            if is_public and (wid := d.get("workspace")):
+                return await self._workspace(wid)
             return list(d.get("member_ids", []))
         if t in {
             "group.updated",
