@@ -57,7 +57,7 @@ async def current_workspace_id(user: User = Depends(current_active_user)) -> str
     that the client UI handles, not a denial) only when the user belongs
     to no workspace at all.
     """
-    logger.info(
+    logger.warning(
         "[diag current_workspace_id] user=%s active_workspace=%r memberships=%s",
         user.id,
         user.active_workspace,

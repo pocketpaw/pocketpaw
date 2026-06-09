@@ -1074,7 +1074,7 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
         raise NotFound("workspace", invite.workspace_id)
 
     already_member = await _get_member_role(invite.workspace_id, ctx.user_id) is not None
-    logger.info(
+    logger.warning(
         "[diag accept_invite] user=%s workspace=%s already_member=%s",
         ctx.user_id,
         invite.workspace_id,
@@ -1094,7 +1094,7 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             role=invite.role,
             set_active=True,
         )
-        logger.info(
+        logger.warning(
             "[diag accept_invite] _add_member done (set_active=True) user=%s workspace=%s",
             ctx.user_id,
             invite.workspace_id,
