@@ -1,6 +1,10 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
+    Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
+    repo path must resolve inside one of these roots; empty defaults to the
+    cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -844,6 +848,24 @@ class Settings(BaseSettings):
             "Path to a loom world-model JSON (built via `loom build`). When "
             "unset, the loom MCP server is not registered — orientation is "
             "disabled. The binary is served as `loom mcp -model <this path>`."
+        ),
+    )
+
+    # Belt & Pulley — the develop station's code-change gate. The
+    # ``belt_propose_change`` MCP tool proposes a unified diff through Instinct
+    # (the human approve/reject layer); on approval the executor applies it in a
+    # fresh worktree and opens a PR. ``belt_repo_allowlist`` is the security
+    # boundary: a proposed ``repo`` path must resolve INSIDE one of these roots,
+    # so the agent can never move a diff into an arbitrary filesystem location.
+    # When empty, the allowlist defaults to the current working directory's
+    # parent (the workspace root that holds the project checkouts). Env auto-
+    # derives POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+    belt_repo_allowlist: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowlisted root directories a Belt code-change proposal's repo "
+            "must live under. A repo path resolving outside every root is "
+            "refused. Empty → defaults to the cwd's parent (the workspace root)."
         ),
     )
 
