@@ -16,11 +16,87 @@ from pocketpaw_ee.cloud._core.realtime.events import (
 
 
 @pytest.mark.asyncio
-async def test_group_created_audience_is_member_ids_from_payload():
-    # group.created uses the payload's member_ids so the *newly created* group is
-    # visible to its new members without needing a DB lookup.
+async def test_group_created_public_channel_fans_out_to_workspace():
+    # Public channels are visible to every workspace member so the sidebar
+    # shows the new channel without a manual refresh.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["wm1", "wm2", "wm3"]
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = GroupCreated(
+        data={
+            "group_id": "g1",
+            "workspace": "w1",
+            "type": "channel",
+            "visibility": "public",
+            "member_ids": ["creator"],
+        }
+    )
+    assert set(await r.audience(ev)) == {"wm1", "wm2", "wm3"}
+
+
+@pytest.mark.asyncio
+async def test_group_created_default_visibility_is_public_channel():
+    # A channel without an explicit visibility field defaults to public.
+    async def ws_members(_wid: str) -> list[str]:
+        return ["wm1", "wm2"]
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = GroupCreated(
+        data={
+            "group_id": "g1",
+            "workspace": "w1",
+            "type": "channel",
+            "member_ids": ["creator"],
+        }
+    )
+    assert set(await r.audience(ev)) == {"wm1", "wm2"}
+
+
+@pytest.mark.asyncio
+async def test_group_created_private_channel_restricted_to_members():
+    # Private channels should only reach the explicit member list.
     r = AudienceResolver()
-    ev = GroupCreated(data={"group_id": "g1", "member_ids": ["u1", "u2", "u3"]})
+    ev = GroupCreated(
+        data={
+            "group_id": "g1",
+            "type": "channel",
+            "visibility": "private",
+            "member_ids": ["u1", "u2"],
+        }
+    )
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_group_created_private_group_restricted_to_members():
+    # Private groups and DMs stay scoped to member_ids.
+    r = AudienceResolver()
+    ev = GroupCreated(data={"group_id": "g1", "type": "private", "member_ids": ["u1", "u2"]})
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_group_created_dm_restricted_to_members():
+    r = AudienceResolver()
+    ev = GroupCreated(data={"group_id": "g1", "type": "dm", "member_ids": ["u1", "u2"]})
+    assert set(await r.audience(ev)) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_group_created_public_group_fans_out_to_workspace():
+    async def ws_members(_wid: str) -> list[str]:
+        return ["u1", "u2", "u3"]
+
+    r = AudienceResolver(workspace_members=ws_members)
+    ev = GroupCreated(
+        data={
+            "group_id": "g1",
+            "workspace": "w1",
+            "type": "public",
+            "member_ids": ["creator"],
+        }
+    )
     assert set(await r.audience(ev)) == {"u1", "u2", "u3"}
 
 
