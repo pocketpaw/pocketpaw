@@ -7,15 +7,30 @@ These tests cover the parts that DIFFER:
   * registry entry
   * _initialize bypasses the deepagents import
   * _get_or_create_agent uses langgraph create_react_agent
+
+Change (2026-06-10): added ``TestLangchainReactLocalModelLane`` to prove the
+local / bring-your-own-model (Ollama) lane — the supported path for a
+local-only self-hosted tenant. It asserts the LangChain model build routes to
+``init_chat_model("ollama:<model>", base_url=<local host>)`` (no cloud key,
+request stays on the box) and, when ``langchain-ollama`` is installed, that a
+real ``ChatOllama`` is bound to the operator-set local host. It also pins the
+cloud-egress trap as a regression guard: ``deep_agents_model`` defaults to
+``anthropic:claude-sonnet-4-6`` and that prefix wins over ``llm_provider``, so a
+local-only deployment MUST set ``deep_agents_model=ollama:<model>`` or traffic
+silently goes to the Anthropic cloud (documented in
+docs/deployment/self-hosting.mdx).
 """
 
 from __future__ import annotations
 
+import importlib.util
 from unittest.mock import MagicMock, patch
 
 from pocketpaw.agents.backend import Capability
 from pocketpaw.agents.registry import get_backend_class
 from pocketpaw.config import Settings
+
+_HAS_LANGCHAIN_OLLAMA = importlib.util.find_spec("langchain_ollama") is not None
 
 
 class TestLangchainReactInfo:
@@ -138,3 +153,124 @@ class TestLangchainReactStatus:
         backend = LangchainReactBackend(Settings(deep_agents_model="anthropic:claude-sonnet-4-6"))
         status = await backend.get_status()
         assert status["backend"] == "langchain_react"
+
+
+class TestLangchainReactLocalModelLane:
+    """Prove the local / bring-your-own-model (Ollama) lane end-to-end at the
+    model-build seam.
+
+    The compliance ICP (e.g. a law firm: "local/BYO models only, data never
+    leaves the box") runs ``agent_backend=langchain_react`` against a local
+    Ollama server. The faithful seam is ``DeepAgentsBackend._build_model``,
+    which ``LangchainReactBackend`` inherits: it imports
+    ``langchain.chat_models.init_chat_model`` at call time and, for the Ollama
+    provider, calls it with ``"ollama:<model>"`` and ``base_url=<ollama_host>``.
+    We mock that transport seam and assert the request is wired to the local
+    host in the right format, with NO cloud API key.
+    """
+
+    def _build_backend(self, **settings_kwargs):
+        from pocketpaw.agents.langchain_react import LangchainReactBackend
+
+        return LangchainReactBackend(Settings(agent_backend="langchain_react", **settings_kwargs))
+
+    def test_local_model_routes_to_ollama_host_no_cloud_key(self):
+        """deep_agents_model=ollama:<model> + ollama_host must build
+        init_chat_model("ollama:<model>", base_url=<host>) with no api_key.
+
+        The local host must be the operator-set value (a private GPU box),
+        proving the request targets the local server, not the localhost
+        default — and that no cloud credential is attached, so the request
+        cannot leave the box.
+        """
+        backend = self._build_backend(
+            llm_provider="ollama",
+            deep_agents_model="ollama:llama3.2",
+            ollama_host="http://ollama.internal:11434",
+        )
+        with patch("langchain.chat_models.init_chat_model", return_value=MagicMock()) as mock_init:
+            backend._build_model()
+
+        mock_init.assert_called_once()
+        args, kwargs = mock_init.call_args
+        # Format: provider-prefixed model id pointing at Ollama.
+        assert args[0] == "ollama:llama3.2"
+        # Transport: the operator's local host, NOT the localhost default.
+        assert kwargs.get("base_url") == "http://ollama.internal:11434"
+        # Egress guard: no cloud API key of any kind is passed.
+        assert "api_key" not in kwargs
+        assert "google_api_key" not in kwargs
+
+    def test_local_model_default_host_when_unset(self):
+        """With no ollama_host override the build still targets a local host
+        (the 11434 default), never a cloud endpoint."""
+        backend = self._build_backend(
+            llm_provider="ollama",
+            deep_agents_model="ollama:llama3.2",
+        )
+        with patch("langchain.chat_models.init_chat_model", return_value=MagicMock()) as mock_init:
+            backend._build_model()
+
+        _args, kwargs = mock_init.call_args
+        assert kwargs.get("base_url") == "http://localhost:11434"
+        assert "api_key" not in kwargs
+
+    def test_real_chatollama_bound_to_local_host(self):
+        """When langchain-ollama is installed, the UNMOCKED build must produce
+        a real ChatOllama bound to the operator-set local host.
+
+        This is the part a mock can't fake: it proves init_chat_model actually
+        resolves the ``ollama:`` prefix to langchain_ollama.ChatOllama (the
+        client that speaks Ollama's native /api/chat), and that our host config
+        lands on it. If langchain-ollama is missing the lane is unsupported, so
+        we assert the ImportError surfaces rather than silently passing.
+        """
+        backend = self._build_backend(
+            llm_provider="ollama",
+            deep_agents_model="ollama:llama3.2",
+            ollama_host="http://ollama.internal:11434",
+        )
+
+        if not _HAS_LANGCHAIN_OLLAMA:
+            import pytest
+
+            # No silent green: without the binding the lane must fail loudly.
+            with pytest.raises((ImportError, ValueError)):
+                backend._build_model()
+            return
+
+        model = backend._build_model()
+        from langchain_ollama import ChatOllama
+
+        assert isinstance(model, ChatOllama)
+        # The operator's local host is bound to the real client.
+        assert getattr(model, "base_url", None) == "http://ollama.internal:11434"
+        assert getattr(model, "model", None) == "llama3.2"
+
+    def test_default_model_leaks_to_anthropic_cloud_regression_guard(self):
+        """REGRESSION GUARD for the cloud-egress trap.
+
+        ``deep_agents_model`` defaults to ``anthropic:claude-sonnet-4-6`` and
+        that explicit provider prefix wins over ``llm_provider``. So an operator
+        who sets ONLY ``llm_provider=ollama`` (leaving deep_agents_model at its
+        default) gets routed to the Anthropic CLOUD — the exact data egress a
+        local-only tenant must avoid. The supported config therefore REQUIRES
+        ``deep_agents_model=ollama:<model>`` (see self-hosting docs).
+
+        This test pins that behaviour: if a future change makes llm_provider
+        win, it fails here and forces a deliberate review of the docs + the
+        local-only contract rather than a silent semantics flip.
+        """
+        backend = self._build_backend(
+            llm_provider="ollama",
+            ollama_host="http://localhost:11434",
+            # deep_agents_model intentionally left at its default.
+        )
+        with patch("langchain.chat_models.init_chat_model", return_value=MagicMock()) as mock_init:
+            backend._build_model()
+
+        args, kwargs = mock_init.call_args
+        # Documents the trap: default prefix routes to Anthropic, not Ollama.
+        assert args[0].startswith("anthropic:")
+        # And crucially does NOT point at the local Ollama host.
+        assert kwargs.get("base_url") != "http://localhost:11434"

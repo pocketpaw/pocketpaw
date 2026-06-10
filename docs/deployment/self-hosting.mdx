@@ -7,6 +7,17 @@ keywords: ["self-hosting", "server deployment", "nginx", "ssl", "production", "u
 tags: ["deployment", "self-hosting"]
 ---
 
+{/* Change (2026-06-10): Added the "Local-Only / Bring-Your-Own-Model (BYO)"
+    section — exact config for running PocketPaw against a local Ollama server
+    with no cloud LLM (data never leaves the box). Documents the supported
+    backend (langchain_react / deep_agents → ChatOllama over Ollama's native
+    /api/chat) and why we do NOT route BYO through the claude_agent_sdk harness
+    (Ollama's Anthropic /v1/messages shim degrades under Claude Code's
+    count_tokens/beta calls — ollama/ollama#13949). Flags the cloud-egress trap:
+    deep_agents_model defaults to anthropic:claude-sonnet-4-6 and wins over
+    llm_provider, so a local-only deployment MUST set
+    deep_agents_model=ollama:<model> or traffic silently goes to Anthropic. */}
+
 # Self-Hosting PocketPaw: Server Setup Guide
 
 PocketPaw is designed to be self-hosted. Here's how to deploy it on your own server.
@@ -53,6 +64,107 @@ pocketpaw
 ```
 
 The dashboard starts on `http://0.0.0.0:8000`.
+
+## Local-Only / Bring-Your-Own-Model (BYO) Deployment
+
+For deployments where **data must never leave the box** (e.g. a law firm under
+strict data-residency rules), run PocketPaw against a local Ollama server with
+no cloud LLM. Every inference request stays on the host.
+
+<Callout type="warning">
+  Use the **`langchain_react`** backend (or `deep_agents`) for local models —
+  **not** `claude_agent_sdk`. The `langchain_react` backend builds a
+  `ChatOllama` that talks to Ollama's clean native API (`/api/chat`), which is
+  the reliable local-only path.
+
+  The `claude_agent_sdk` backend drives the Claude Code CLI against Ollama's
+  Anthropic-compatible `/v1/messages` endpoint (Ollama v0.14.0+). That wire
+  format *works*, but the CLI also calls `/v1/messages/count_tokens` and uses
+  beta prompt-caching that Ollama's shim doesn't implement, and Ollama's error
+  handling for those can degrade the server into timeouts
+  ([ollama/ollama#13949](https://github.com/ollama/ollama/issues/13949)). Until
+  that's fixed upstream, treat claude-harness + Ollama as experimental and use
+  `langchain_react` for production local-only deployments.
+</Callout>
+
+### 1. Install the local-model dependency group
+
+The Ollama LangChain binding ships in the `deep-agents` extra:
+
+```bash
+pip install 'pocketpaw[deep-agents]'
+# or, from source:  uv sync --extra deep-agents
+```
+
+This pulls `langchain-ollama`, which the local lane requires. Without it the
+Ollama provider raises `ImportError` at model-build time.
+
+### 2. Run a local Ollama server and pull a model
+
+```bash
+ollama serve                 # starts on http://localhost:11434
+ollama pull llama3.2         # or any model you trust
+```
+
+### 3. Configure PocketPaw for local-only
+
+```json
+{
+  "agent_backend": "langchain_react",
+  "llm_provider": "ollama",
+  "deep_agents_model": "ollama:llama3.2",
+  "ollama_host": "http://localhost:11434"
+}
+```
+
+Or via environment variables:
+
+```bash
+POCKETPAW_AGENT_BACKEND=langchain_react
+POCKETPAW_LLM_PROVIDER=ollama
+POCKETPAW_DEEP_AGENTS_MODEL=ollama:llama3.2
+POCKETPAW_OLLAMA_HOST=http://localhost:11434
+```
+
+<Callout type="danger">
+  **Set `deep_agents_model` to `ollama:<model>` explicitly.** The
+  `langchain_react` / `deep_agents` backend resolves its model from
+  `deep_agents_model` *first*, and that field defaults to
+  `anthropic:claude-sonnet-4-6`. If you set only `llm_provider=ollama` and leave
+  `deep_agents_model` at its default, the backend routes to the **Anthropic
+  cloud**, not your local box — exactly the data-egress you are trying to
+  prevent. Always pin `deep_agents_model=ollama:<model>` for a local-only
+  deployment.
+</Callout>
+
+Notes:
+
+- **No `anthropic_api_key` is needed** in this mode — leave it unset so nothing
+  is configured to reach a cloud API. With `deep_agents_model=ollama:...`, the
+  backend builds a `ChatOllama` and passes no API key.
+- `ollama_host` may point at a separate GPU box on your private network
+  (e.g. `http://ollama.internal:11434`). The request still never leaves your
+  infrastructure.
+- The model name in `deep_agents_model` (the part after `ollama:`) must match a
+  model you have pulled with `ollama pull`.
+
+### 4. Verify the lane
+
+```bash
+# Confirm the server is reachable and the configured model is present
+pocketpaw --check-ollama
+```
+
+`--check-ollama` checks server connectivity and that your model is pulled (both
+required for the local lane). Note its final probe exercises Ollama's
+Anthropic-compat `/v1/messages` endpoint, whereas the supported `langchain_react`
+lane uses Ollama's native `/api/chat` — so connectivity + model checks are the
+parts that matter for this lane.
+
+Then send a message from the dashboard. With `agent_backend=langchain_react`
+and `llm_provider=ollama`, the request is served by your local Ollama instance —
+confirm by watching `ollama serve` logs receive a `POST /api/chat` (the native
+endpoint `ChatOllama` uses). No request goes to any cloud API.
 
 ## Production Deployment
 
