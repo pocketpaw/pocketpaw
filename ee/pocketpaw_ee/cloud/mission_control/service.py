@@ -28,6 +28,21 @@
 # — the single-owner rule (only ``ee.cloud.cycles.service`` may write to
 # the Cycle Beanie doc) is enforced by an import-linter forbidden
 # contract; the MC façade can never bypass it.
+# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — closes the
+# residual cross-tenant read surface W4a left open on the INTERNAL caller side.
+# W4a workspace-scoped the public instinct router endpoints + the store reads,
+# but this façade still called the (shared, global) instinct store WITHOUT a
+# ``workspace_id``, so on shared infra it read every tenant's Nudges/audit
+# before the pocket-visibility filter ran (and ``agent_outcomes_summary`` is
+# NOT pocket-filtered at the store, only in Python). The three instinct reads
+# — ``store.pending`` / ``store.list_actions`` in ``agent_list_work_items`` and
+# ``store.list_actions`` in ``agent_outcomes_summary`` — now thread the caller's
+# ``ctx.workspace_id`` (already resolved by ``_require_workspace``) into the
+# store so the SQL restricts to the tenant's own rows (plus legacy NULL rows)
+# BEFORE the existing pocket filter. ``workspace_id`` crosses to the OSS store
+# as a PLAIN str; this is a read FILTER only and never touches the W2b audit
+# hash chain. The bulk-approve / bulk-reject WRITE paths already gate on
+# ``_visible_pocket_ids`` (pocket-layer tenancy), so they are unchanged.
 # Updated: 2026-06-10 (fix/mc-bulk-approve-strands-writes — W0c) — fixed
 # two defects in ``agent_bulk_approve`` that together stranded every write
 # a manager bulk-approved, undermining the Instinct governance moat:
@@ -64,11 +79,17 @@ Tenancy:
   - Service signature is ``(ctx, body)`` — the workspace lives on
     ``ctx.workspace_id``. We never accept ``workspace_id`` as a
     standalone arg (rule #5).
-  - The instinct store is workspace-agnostic at its schema, but we filter
-    via the pocket layer: a Nudge surfaces in Mission Control only if
-    its pocket is visible to the caller's workspace. The pockets
-    service's ``list_pockets`` already enforces this so we can rely on
-    it as the chokepoint.
+  - Two layers of tenancy, both scoped to ``ctx.workspace_id``:
+      1. Store-level (W4c): every instinct read threads the caller's
+         ``workspace_id`` into the store, so the global shared SQLite DB
+         restricts rows to this tenant (plus legacy NULL rows) in SQL —
+         before anything reaches Python. This closes the cross-tenant
+         leak on shared infra; it is the load-bearing isolation.
+      2. Pocket-level: a Nudge additionally only surfaces if its pocket
+         is visible to the caller's workspace. ``pockets_service.list_pockets``
+         enforces this as the chokepoint. This stays as a second filter
+         (owner / shared_with / visibility within the tenant), layered on
+         top of the store scope, not in place of it.
 
 No Beanie writes here — the façade is read-only against Instinct + the
 activity buffer. Bulk-approve / bulk-reject delegate to
@@ -355,8 +376,14 @@ async def agent_list_work_items(
     # level tenancy and are NOT gated by pocket visibility.
     if visible:
         store = get_instinct_store()
-        pending = await store.pending(pocket_id=body.pocket)
-        resolved = await store.list_actions(pocket_id=body.pocket, limit=200)
+        # W4c — scope the instinct reads to the caller's workspace (plus legacy
+        # NULL rows) at the store/SQL layer so a tenant never reads another
+        # tenant's Nudges off the shared DB. The pocket-visibility filter below
+        # is a second, intra-tenant layer (owner / shared_with / visibility).
+        pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
+        resolved = await store.list_actions(
+            pocket_id=body.pocket, limit=200, workspace_id=workspace_id
+        )
 
         actions: list[Action] = []
         seen: set[str] = set()
@@ -662,14 +689,20 @@ async def agent_outcomes_summary(
     in-process scan well under the 50ms TimingMiddleware budget.
     """
     body = OutcomesQueryRequest.model_validate(body)
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx)
     store = get_instinct_store()
     cutoff = datetime.now() - _window_to_delta(body.window)
 
     # Pull a generous slice and filter in Python. ``list_actions`` does
     # ORDER BY created_at DESC LIMIT, so the slice is the newest N.
-    actions = await store.list_actions(limit=500)
+    # W4c — this read has NO pocket filter at the store, so before W4c the
+    # newest 500 rows on a shared DB could be entirely OTHER tenants' — both a
+    # cross-tenant leak AND a correctness bug (the caller's rows starved out of
+    # the window). Scope to ``workspace_id`` so the slice is this tenant's
+    # newest 500 (plus legacy NULL rows); the ``pocket_id in visible`` filter
+    # below stays as the intra-tenant layer.
+    actions = await store.list_actions(limit=500, workspace_id=workspace_id)
     in_window = [
         a
         for a in actions
