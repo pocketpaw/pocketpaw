@@ -2,6 +2,22 @@
 # code-change gate to the claude_agent_sdk cloud chat backend. Created:
 # 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-06-10 (feat/belt-trace, BS-4 — Decision-Graph chain) —
+#   ``belt_propose_change`` now MINTS a Decision-Graph ``correlation_id``
+#   at propose time and emits the chain-opening ``agent.proposed`` event
+#   through ``journal_writer.record_agent_proposed`` (RFC 09). The
+#   correlation_id is stamped onto the ``_code_change`` blob (schema 2,
+#   mirroring the pocket-write bridge's ``_pocket_write.correlation_id``)
+#   so the Instinct router's approve / reject paths and the executor can
+#   close the SAME chain — one station run = one Decision chain. The
+#   emitted ``agent.proposed`` event id is stashed on the blob as
+#   ``proposed_event_id`` so the eventual ``human.corrected`` event can
+#   cite it as its ``causation_id``. Both the emit and the blob fields are
+#   best-effort: a Decision-Graph wiring failure must never fail the
+#   propose response (the Action is already durable; the Slice 4 reconciler
+#   is the safety net). The blob also carries the workspace/user on the
+#   chain actor + scope so visibility filters narrow correctly.
+#
 # What this file does: clones the media.py shape — a single
 # ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /
 # ``*_TOOL_ID`` allowlist constants, ContextVar-sourced identity (the same
@@ -49,6 +65,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +86,17 @@ CODE_CHANGE_KIND = "code_change"
 # pocket-write bridge's ``_pocket_write`` key. The router + executor dispatch on
 # this key being present.
 CODE_CHANGE_PARAM_KEY = "_code_change"
+
+# Schema version stamped on the ``_code_change`` blob.
+#   * schema 1 (BS-3): repo / base_branch / diff / summary / task + workspace +
+#     requester context, NO Decision-Graph chain.
+#   * schema 2 (BS-4, RFC 09): adds ``correlation_id`` (the chain id minted here
+#     at propose time, when ``agent.proposed`` fires) and ``proposed_event_id``
+#     (the id of that ``agent.proposed`` event, so the eventual
+#     ``human.corrected`` can chain its ``causation_id`` back to it). The
+#     executor's schema-mismatch guard fails a stale schema-1 blob approved
+#     post-deploy loud (same discipline as the pocket-write bridge).
+CODE_CHANGE_SCHEMA = 2
 
 # Diff size cap. A proposal over EITHER bound is refused with a "split the task"
 # error — a diff this large is a sign the station task wasn't decomposed, and a
@@ -207,6 +235,135 @@ def _resolve_repo(repo: str) -> tuple[Path | None, str | None]:
     return candidate, None
 
 
+def _emit_agent_proposed(
+    *,
+    correlation_id: UUID,
+    action_id: str,
+    repo_name: str,
+    base_branch: str,
+    summary: str,
+    task: str,
+    changed_lines: int,
+    workspace_id: str,
+    user_id: str,
+) -> UUID | None:
+    """Emit the chain-opening ``agent.proposed`` event for a Belt code change.
+
+    Mirrors ``action_executor``'s ``agent.proposed`` emit for pocket writes:
+    the develop station is the actor that PROPOSED the change, so the chain
+    actor is ``kind="agent"`` with the requesting user on its id and the
+    workspace on its scope_context. The Belt action isn't bound to a pocket —
+    its tenancy is the workspace — so ``pocket_id`` on the chain carries the
+    workspace id (matching how the Action's ``pocket_id`` field carries the
+    workspace, see ``_propose_change_handler``). The projection's
+    ``_fold_proposed`` reads ``intent`` / ``action`` / ``pocket_id`` /
+    ``inputs`` off the payload.
+
+    Returns the emitted event id (``UUID``) so the caller can persist it on the
+    blob's ``proposed_event_id`` field for the ``human.corrected`` causation
+    chain, or ``None`` when the emit raised — best-effort per RFC 09; the Slice
+    4 reconciler / abandon-sweeper picks up any orphans.
+    """
+    from soul_protocol.spec.journal import Actor
+
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_agent_proposed
+
+    actor = Actor(
+        kind="agent",
+        id=f"user:{user_id or 'unknown'}",
+        scope_context=[f"workspace:{workspace_id}"],
+    )
+    intent = f"code change to {repo_name} ({base_branch}) — {changed_lines} changed lines"
+    payload: dict[str, Any] = {
+        # Fields the projection's ``_fold_proposed`` consumes.
+        "intent": intent,
+        "action": "code_change",
+        "pocket_id": workspace_id,
+        "inputs": [],
+        # Richer fields for the explain narrator / a future swap to
+        # soul-protocol's ``build_proposal_event(AgentProposal(...))``.
+        "proposal_kind": "code_change",
+        "summary": summary,
+        "proposal": {
+            "repo": repo_name,
+            "base_branch": base_branch,
+            "task": task,
+            "changed_lines": changed_lines,
+        },
+        "action_id": action_id,
+    }
+    try:
+        entry = record_agent_proposed(
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=[f"workspace:{workspace_id}"],
+            payload=payload,
+        )
+        return entry.id
+    except Exception:  # noqa: BLE001 — chain emit is best-effort
+        logger.warning(
+            "belt agent.proposed emit failed for correlation_id=%s (action_id=%s) "
+            "— Slice 4 reconciler will catch up",
+            correlation_id,
+            action_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _persist_chain_ids(
+    *,
+    store: Any,
+    action_id: str,
+    correlation_id: str,
+    proposed_event_id: str | None,
+) -> None:
+    """Write ``correlation_id`` + ``proposed_event_id`` onto the persisted
+    Action's ``parameters._code_change`` blob after ``agent.proposed`` fired.
+
+    The blob is built with these fields already set from the in-memory values,
+    so this re-write only matters when the proposed event id was unknown at
+    propose-build time. We mint the correlation_id BEFORE building the blob, so
+    that field is already correct on the stored row; ``proposed_event_id`` is
+    the one this back-write fills in. Direct SQL update — same pattern as the
+    pocket-write bridge's ``_persist_parked_policy_event_id``. Best-effort:
+    failure leaves ``proposed_event_id`` None and the eventual
+    ``human.corrected`` emits without a causation_id (the chain still folds;
+    causation_id is optional on EventEntry).
+    """
+    import json as _json
+
+    import aiosqlite
+
+    try:
+        action = await store.get_action(action_id)
+        if action is None:
+            return
+        params = dict(getattr(action, "parameters", None) or {})
+        blob = params.get(CODE_CHANGE_PARAM_KEY)
+        if not isinstance(blob, dict):
+            return
+        blob = dict(blob)
+        blob["correlation_id"] = correlation_id
+        blob["proposed_event_id"] = proposed_event_id
+        params[CODE_CHANGE_PARAM_KEY] = blob
+
+        async with aiosqlite.connect(store._db_path) as db:
+            await db.execute(
+                "UPDATE instinct_actions SET parameters = ?,"
+                " updated_at = datetime('now') WHERE id = ?",
+                (_json.dumps(params), action_id),
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001 — write-back is best-effort
+        logger.warning(
+            "belt: failed to persist chain ids onto action %s — the chain's "
+            "human.corrected will emit without causation_id",
+            action_id,
+            exc_info=True,
+        )
+
+
 async def _propose_change_handler(args: dict) -> dict:
     """MCP handler for ``belt__belt_propose_change``.
 
@@ -262,12 +419,22 @@ async def _propose_change_handler(args: dict) -> dict:
         orient_ref.strip() if isinstance(orient_ref, str) and orient_ref.strip() else None
     )
 
+    # BS-4 — mint the Decision-Graph chain correlation_id BEFORE building the
+    # blob so the stored Action carries it from the first write. The same id
+    # threads through approve / reject (router) and apply (executor) so the
+    # whole station run folds into ONE Decision chain.
+    correlation_id = uuid4()
+
     # Build the code-change blob. ``kind`` is the discriminator the executor /
     # router dispatch on (the Action model has no literal kind column). The diff
     # rides verbatim — it is DATA, never interpolated into a shell.
+    #
+    # Schema 2 (BS-4, RFC 09) — carries the chain ``correlation_id`` and
+    # ``proposed_event_id`` (the latter back-written after ``agent.proposed``
+    # fires; None here, filled by ``_persist_chain_ids`` below).
     blob: dict[str, Any] = {
         "kind": CODE_CHANGE_KIND,
-        "schema": 1,
+        "schema": CODE_CHANGE_SCHEMA,
         "repo": str(repo_path),
         "base_branch": base_branch.strip(),
         "diff": diff,
@@ -279,6 +446,9 @@ async def _propose_change_handler(args: dict) -> dict:
         # The proposing chat session — lets the executor / audit tie the PR back
         # to the conversation that produced it.
         "session_id": session_mongo_id,
+        # RFC 09 chain-correlation fields (schema 2).
+        "correlation_id": str(correlation_id),
+        "proposed_event_id": None,
     }
 
     from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
@@ -330,12 +500,39 @@ async def _propose_change_handler(args: dict) -> dict:
     if stored is None:
         return _error_response("the change was not stored — please retry.")
 
+    # BS-4 — open the Decision-Graph chain now that the Action is durable.
+    # ``agent.proposed`` is the chain origin; its event id is back-written onto
+    # the blob so the router's ``human.corrected`` can cite it as causation.
+    # Best-effort: a Decision-Graph wiring failure must NOT fail the propose
+    # response — the Action is already stored; the Slice 4 reconciler closes
+    # any chain that never opened.
+    proposed_event_id = _emit_agent_proposed(
+        correlation_id=correlation_id,
+        action_id=action.id,
+        repo_name=repo_name,
+        base_branch=base_branch.strip(),
+        summary=summary.strip(),
+        task=task.strip(),
+        changed_lines=changed_lines,
+        workspace_id=workspace_id,
+        user_id=user_id,
+    )
+    if proposed_event_id is not None:
+        await _persist_chain_ids(
+            store=store,
+            action_id=action.id,
+            correlation_id=str(correlation_id),
+            proposed_event_id=str(proposed_event_id),
+        )
+
     logger.info(
-        "belt: proposed code_change action %s (repo=%s, base=%s, changed_lines=%d)",
+        "belt: proposed code_change action %s (repo=%s, base=%s, changed_lines=%d, "
+        "correlation_id=%s)",
         action.id,
         repo_name,
         base_branch.strip(),
         changed_lines,
+        correlation_id,
     )
 
     return _success_response(
@@ -434,6 +631,7 @@ __all__ = [
     "BELT_TOOL_IDS",
     "CODE_CHANGE_KIND",
     "CODE_CHANGE_PARAM_KEY",
+    "CODE_CHANGE_SCHEMA",
     "PROPOSE_CHANGE_TOOL_ID",
     "SERVER_NAME",
     "build_belt_server",

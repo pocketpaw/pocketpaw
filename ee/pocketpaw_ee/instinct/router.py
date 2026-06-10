@@ -100,8 +100,29 @@
 #   ``_assert_pocket_write_workspace``) binds the Action to the approver's
 #   workspace on approve / reject / bulk paths. The executor applies the diff in
 #   a fresh worktree, commits, pushes, and opens a PR — it NEVER merges (the
-#   captain merges on GitHub; Instinct is the mid gate). The reject path needs
-#   no code-change-specific handling: ``store.reject`` round-trips any kind.
+#   captain merges on GitHub; Instinct is the mid gate).
+#
+# Updated: 2026-06-10 (feat/belt-trace, BS-4 — Belt Decision-Graph chain) —
+#   the Belt code-change path now lands in the Decision Graph as ONE chain per
+#   station run, mirroring the pocket-write chain. The propose path (belt.py)
+#   mints the ``correlation_id`` + emits ``agent.proposed``; this router emits
+#   the human-action + terminal events:
+#     * approve / bulk-approve — emit ``human.corrected(accepted|edited)`` for
+#       the ``_code_change`` blob, threading the ``agent.proposed`` event id
+#       (from the blob's ``proposed_event_id``) as causation, then pass the
+#       emitted ``human.corrected`` id into ``execute_approved_change(...,
+#       human_event_id=...)`` so the executor's terminal ``decision.completed``
+#       chains back to it. The executor owns the CLOSE on the approve path
+#       (success → landed, failure → failed) — the router does NOT emit a
+#       terminal here, so there is no double close.
+#     * reject / bulk-reject — emit ``human.corrected(rejected)`` THEN
+#       ``decision.completed(passed=False, action_outcome="rejected")`` here
+#       (the executor never runs on reject, so the router owns the close), each
+#       chaining causation to the prior event. The reason text rides as the
+#       rejection comment on the terminal payload.
+#   ``_code_change_proposed_event_id`` is the code-change peer of
+#   ``_parked_policy_event_id``. All emits are best-effort (the chain folds via
+#   ``correlation_id`` even if a causation_id is missing).
 #
 # Updated: 2026-05-26 (RFC 09 Slice 4 — approve-side policy.evaluated emit) —
 #   * Captain Decision 12 (chain symmetry) follow-up — ``approve_action``
@@ -309,6 +330,24 @@ def _parked_correlation_id(blob: dict[str, Any]) -> Any:
         return None
 
 
+def _code_change_proposed_event_id(blob: dict[str, Any]) -> Any:
+    """Pull the ``proposed_event_id`` UUID off a schema-2 ``_code_change``
+    blob, or ``None`` if missing / malformed. belt.py writes this back onto
+    the Action after the chain-opening ``agent.proposed`` event fires; using
+    it as the ``causation_id`` on the ``human.corrected`` event gives the
+    Belt chain a clean ``agent.proposed → human.corrected`` cause-arrow. The
+    code-change peer of ``_parked_policy_event_id``."""
+    from uuid import UUID
+
+    raw = blob.get("proposed_event_id")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
 def _emit_human_corrected(
     *,
     blob: dict[str, Any],
@@ -317,6 +356,7 @@ def _emit_human_corrected(
     workspace_id: str,
     disposition: str,
     note: str | None,
+    causation_override: Any | None = None,
 ) -> Any | None:
     """Best-effort ``human.corrected`` emit for an approve / reject /
     bulk-approve / bulk-reject item.
@@ -331,6 +371,13 @@ def _emit_human_corrected(
     a write without minting one). The Slice 4 reconciler / abandon
     sweeper will deal with the orphan.
 
+    ``causation_override`` (BS-4) — when provided, it is used as the
+    ``causation_id`` instead of the parked-policy-event lookup. The Belt
+    code-change path passes the ``agent.proposed`` event id here (a Belt
+    proposal has no parked ``policy.evaluated`` event to chain back to —
+    the proposal IS the chain origin). Pocket-write callers omit it and
+    fall back to ``_parked_policy_event_id``.
+
     Returns the emitted event id (``UUID``) on success, or ``None`` when
     the emit was skipped (missing correlation_id) or raised. Slice 4's
     approve-side ``policy.evaluated`` emit uses this as its
@@ -344,7 +391,11 @@ def _emit_human_corrected(
         return None
 
     pocket_id = str(getattr(action, "pocket_id", "") or "")
-    causation = _parked_policy_event_id(blob)
+    causation = (
+        causation_override
+        if causation_override is not None
+        else _parked_policy_event_id(blob)
+    )
     payload: dict[str, Any] = {
         "disposition": disposition,
         "action_id": str(getattr(action, "id", "") or ""),
@@ -381,6 +432,7 @@ def _emit_decision_completed_rejected(
     user_id: str,
     workspace_id: str,
     reason: str,
+    causation_override: Any | None = None,
 ) -> None:
     """Best-effort ``decision.completed(passed=False, action_outcome=
     "rejected")`` chain-close for a reject / bulk-reject item.
@@ -389,6 +441,12 @@ def _emit_decision_completed_rejected(
     ``_emit_human_corrected``. The reject path owns the close because
     the bridge is never invoked on rejection — for the approve path the
     bridge's ``_emit_bridge_chain_close`` owns the close instead.
+
+    ``causation_override`` (BS-4) — the Belt code-change reject path passes
+    the just-emitted ``human.corrected`` event id so the terminal chains its
+    causation back to the human rejection. Pocket-write callers omit it (their
+    terminal doesn't currently set a causation_id; the chain still folds via
+    ``correlation_id``).
     """
     from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
 
@@ -412,6 +470,7 @@ def _emit_decision_completed_rejected(
             ),
             scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
             payload=payload,
+            causation_id=causation_override,
         )
     except Exception:  # noqa: BLE001 — chain close is best-effort
         logger.warning(
@@ -765,16 +824,31 @@ async def bulk_approve_actions(
     # the bulk bar). The bridge owns the chain close on the approve
     # path so we do NOT emit ``decision.completed`` here.
     for action in approved:
-        # BS-3 — a Belt ``_code_change`` Action fires the apply-on-approve
-        # executor. It carries no parked-write chain (no correlation_id), so
-        # the Decision-Graph emits below are skipped for it; only the executor
-        # runs. Same best-effort shape as the pocket-write hook.
+        # BS-3/BS-4 — a Belt ``_code_change`` Action fires the apply-on-approve
+        # executor. BS-4: it now carries a Decision-Graph chain
+        # (``correlation_id`` minted at propose). Emit the per-item
+        # ``human.corrected(accepted)`` here (bulk-approve has no edit surface,
+        # so disposition is always ``accepted``), thread its event id into the
+        # executor so the terminal ``decision.completed`` chains its causation
+        # back to the human approval, then run the executor (which owns the
+        # chain close). Same best-effort shape as the pocket-write hook.
         code_change_blob = _code_change_blob(action)
         if code_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=code_change_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(code_change_blob),
+            )
             try:
                 from pocketpaw_ee.cloud.belt import executor as belt_executor
 
-                await belt_executor.execute_approved_change(action)
+                await belt_executor.execute_approved_change(
+                    action, human_event_id=human_event_id
+                )
             except Exception:
                 logger.exception(
                     "bulk-approve belt code-change execution failed for %s (non-fatal)",
@@ -862,30 +936,52 @@ async def bulk_reject_actions(
         list(req.ids), reason=req.reason, rejector=rejector_id
     )
 
-    # RFC 09 Slice 3 — per-item ``human.corrected`` + ``decision.
+    # RFC 09 Slice 3 / BS-4 — per-item ``human.corrected`` + ``decision.
     # completed(rejected)`` emit loop. The store's bulk_reject already
     # iterates per item internally for the audit log; this loop adds
-    # the chain emits. Non-pocket-write Actions (no blob) skip both
-    # emits — there's no chain to close.
+    # the chain emits. An item carries EITHER a ``_pocket_write`` blob OR
+    # a ``_code_change`` blob (BS-4) — both close their chain on reject
+    # here (the executor never runs on reject). An Action with neither
+    # blob has no chain to close and is skipped.
     for action in rejected:
         action_blob = _pocket_write_blob(action)
-        if action_blob is None:
+        if action_blob is not None:
+            _emit_human_corrected(
+                blob=action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+            )
+            _emit_decision_completed_rejected(
+                blob=action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+            )
             continue
-        _emit_human_corrected(
-            blob=action_blob,
-            action=action,
-            user_id=rejector_id,
-            workspace_id=workspace_id,
-            disposition="rejected",
-            note=req.reason or None,
-        )
-        _emit_decision_completed_rejected(
-            blob=action_blob,
-            action=action,
-            user_id=rejector_id,
-            workspace_id=workspace_id,
-            reason=req.reason,
-        )
+
+        code_change_blob = _code_change_blob(action)
+        if code_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=code_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(code_change_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=code_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
@@ -1008,12 +1104,35 @@ async def approve_action(
     # hook above; the executor records success / failure on the Action itself.
     # A non-code-change Action skips this. The captain still merges on GitHub —
     # this opens the PR, it does NOT merge.
+    #
+    # BS-4 — this is part of the Belt Decision-Graph chain. Emit the
+    # ``human.corrected`` event for the code-change approval HERE (the router
+    # owns the human-action emit on every approve path), then thread its event
+    # id into the executor so the terminal ``decision.completed`` chains its
+    # causation back to the approval: ``agent.proposed → human.corrected →
+    # decision.completed`` under one correlation_id. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` for code_change, mirroring how the pocket-write
+    # bridge owns the close on its approve path. No double terminal.
     code_change_blob = _code_change_blob(approved)
     if code_change_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=code_change_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(code_change_blob),
+        )
         try:
             from pocketpaw_ee.cloud.belt import executor as belt_executor
 
-            await belt_executor.execute_approved_change(approved)
+            await belt_executor.execute_approved_change(
+                approved, human_event_id=human_event_id
+            )
         except Exception:
             logger.exception("belt code-change execution after approval failed (non-fatal)")
 
@@ -1104,6 +1223,32 @@ async def reject_action(
             user_id=rejector_id,
             workspace_id=workspace_id,
             reason=reason,
+        )
+
+    # BS-4 — a rejected Belt ``_code_change`` Action closes its chain HERE
+    # (the executor never runs on reject). ``human.corrected(rejected)`` cites
+    # the ``agent.proposed`` event as causation; ``decision.completed(rejected,
+    # outcome=reason+comment)`` cites the human event so the chain reads
+    # ``agent.proposed → human.corrected → decision.completed`` cleanly. The
+    # reason text rides as the rejection comment on the terminal payload.
+    code_change_blob = _code_change_blob(action)
+    if code_change_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=code_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(code_change_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=code_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
         )
 
     return action

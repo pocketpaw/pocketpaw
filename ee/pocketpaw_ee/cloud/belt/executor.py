@@ -1,6 +1,28 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-06-10 (feat/belt-trace, BS-4 — Decision-Graph chain close) —
+#   ``execute_approved_change`` now CLOSES the Decision-Graph chain the
+#   propose path opened (RFC 09). It reads the ``correlation_id`` off the
+#   schema-2 ``_code_change`` blob and emits the terminal
+#   ``decision.completed`` event:
+#     * SUCCESS (mark_executed) → ``passed=True, action_outcome="landed"``
+#       with the ``pr_url`` / ``branch`` / ``files_changed`` on the payload.
+#     * FAILURE (any mark_failed branch) → ``passed=False,
+#       action_outcome="failed"`` with the ``error_class`` / ``reason`` so the
+#       explain narrator can say WHY it failed.
+#   The router threads the ``human.corrected`` event id it just emitted into
+#   ``execute_approved_change(..., human_event_id=...)`` so the terminal event
+#   chains its ``causation_id`` back to the human approval — one clean causal
+#   walk ``agent.proposed → human.corrected → decision.completed``. Exactly ONE
+#   terminal fires per run: every error path RETURNS right after its single
+#   ``_emit_chain_close`` + ``mark_failed`` pair, and the success path emits
+#   once at the end — no doubled terminals. The schema literal is bumped 1 → 2
+#   to match belt.py's schema-2 blob (a stale schema-1 blob approved post-deploy
+#   still fails loud on the mismatch guard). Both the emit and the read are
+#   best-effort: a Decision-Graph wiring failure must never break the approve
+#   response (the Slice 4 abandon-sweeper closes any chain left open).
+#
 # What this module does (the apply-on-approve half of the Belt code-change
 # gate): the ``pocketpaw_belt`` MCP server proposes a unified diff THROUGH
 # Instinct (the human approve/reject layer). After a human approves the Action,
@@ -57,7 +79,12 @@ logger = logging.getLogger(__name__)
 # changes so a stale pending Action approved after a deploy fails loud instead
 # of applying a misinterpreted diff (same discipline as the pocket-write
 # bridge's ``_POCKET_WRITE_SCHEMA``).
-_CODE_CHANGE_SCHEMA = 1
+#
+# Schema 2 (BS-4) — the blob carries the Decision-Graph ``correlation_id`` +
+# ``proposed_event_id`` set by belt.py at propose time. Kept in sync with the
+# MCP server's ``CODE_CHANGE_SCHEMA`` literal; duplicated here so the executor
+# has no import dependency on the agent-side MCP module.
+_CODE_CHANGE_SCHEMA = 2
 
 # The parameters key the blob rides under — kept in sync with the MCP server's
 # ``CODE_CHANGE_PARAM_KEY``. Duplicated as a literal here so the executor has no
@@ -187,10 +214,110 @@ def _short_id(action_id: str) -> str:
     return safe[-12:] or "change"
 
 
+def _coerce_uuid(raw: Any) -> Any | None:
+    """Coerce a value to a ``UUID``, or ``None`` if it can't be. Accepts an
+    existing ``UUID`` (returned as-is) or a string; anything else → None."""
+    from uuid import UUID
+
+    if isinstance(raw, UUID):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            return UUID(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _blob_correlation_id(blob: dict[str, Any]) -> Any | None:
+    """Pull the Decision-Graph chain ``correlation_id`` off a schema-2
+    ``_code_change`` blob, or ``None`` if missing / malformed. Without it the
+    chain-close emit no-ops — the Slice 4 abandon-sweeper closes any orphan."""
+    return _coerce_uuid(blob.get("correlation_id"))
+
+
+def _emit_chain_close(
+    *,
+    passed: bool,
+    action_outcome: str,
+    error_class: str | None,
+    reason: str | None,
+    correlation_id: Any | None,
+    workspace_id: str,
+    user_id: str,
+    causation_id: Any | None,
+    pr_url: str | None = None,
+    branch: str | None = None,
+    files_changed: int | None = None,
+) -> None:
+    """Emit the ``decision.completed`` chain-close for a Belt code-change run.
+
+    Mirrors ``instinct_bridge._emit_bridge_chain_close`` — the executor owns
+    the chain close on the apply path, exactly as the pocket-write bridge owns
+    it on its re-entry path. ``correlation_id`` is read off the schema-2 blob;
+    ``causation_id`` is the ``human.corrected`` event the router emitted just
+    before approval so the terminal chains back to the human approval.
+
+    Returns early when ``correlation_id`` is None (a blob with a malformed /
+    missing id, or a schema-1 blob): there is no chain to close. The Slice 4
+    abandon-sweeper will close any chain that accumulates without a terminal.
+
+    Best-effort: a Decision-Graph wiring failure must never break the approve
+    response — the journal write is the source of truth; the Slice 4 reconciler
+    is the safety net.
+    """
+    if correlation_id is None:
+        return
+
+    # Late imports — keep the executor's import surface small and avoid a
+    # circular import with the decisions package.
+    from soul_protocol.spec.journal import Actor
+
+    from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
+
+    actor = Actor(
+        kind="agent",
+        id=f"user:{user_id or 'unknown'}",
+        scope_context=[f"workspace:{workspace_id}"],
+    )
+    payload: dict[str, Any] = {
+        "passed": passed,
+        "action_outcome": action_outcome,
+    }
+    if error_class:
+        payload["error_class"] = error_class
+    if reason:
+        payload["reason"] = reason
+    if pr_url:
+        payload["pr_url"] = pr_url
+    if branch:
+        payload["branch"] = branch
+    if files_changed is not None:
+        payload["files_changed"] = files_changed
+
+    try:
+        record_decision_completed(
+            correlation_id=correlation_id,
+            actor=actor,
+            scope=[f"workspace:{workspace_id}"],
+            payload=payload,
+            causation_id=causation_id,
+        )
+    except Exception:  # noqa: BLE001 — chain close is best-effort
+        logger.warning(
+            "belt decision.completed emit failed for correlation_id=%s "
+            "(action_outcome=%s) — Slice 4 reconciler will catch up",
+            correlation_id,
+            action_outcome,
+            exc_info=True,
+        )
+
+
 async def execute_approved_change(
     action: Any,
     *,
     pr_opener: PrOpener | None = None,
+    human_event_id: Any | None = None,
 ) -> None:
     """Apply the code change carried by a freshly-approved Instinct Action.
 
@@ -199,10 +326,18 @@ async def execute_approved_change(
     uses. ``action`` is the approved Action. ``pr_opener`` lets tests inject a
     fake; production passes ``None`` and gets the ``gh pr create`` opener.
 
+    ``human_event_id`` (BS-4) is the id of the ``human.corrected`` event the
+    router emitted just before calling this — threaded through so the terminal
+    ``decision.completed`` event can chain its ``causation_id`` back to the
+    approval, completing the causal walk ``agent.proposed → human.corrected →
+    decision.completed``. ``None`` is tolerated (the chain still folds via the
+    shared ``correlation_id``).
+
     Never raises — a failure here must not break the approve response. The
     router wraps the call too; this is belt-and-braces. The worktree is ALWAYS
     cleaned up (success or failure); the Action is marked executed on success
-    or failed with a clear outcome on any error.
+    or failed with a clear outcome on any error. BS-4: every terminal path
+    (success or any failure) closes the Decision-Graph chain exactly once.
     """
     from pocketpaw.stores import get_instinct_store
 
@@ -212,13 +347,41 @@ async def execute_approved_change(
     params = getattr(action, "parameters", None) or {}
     blob = params.get(_CODE_CHANGE_PARAM_KEY)
     if not isinstance(blob, dict):
+        # Not a Belt code-change Action at all — no chain was ever opened for
+        # it, so there is nothing to close. Return without a terminal emit.
         logger.warning("approved action %s carries no _code_change blob", action.id)
         return
+
+    # BS-4 — read the chain correlation_id off the schema-2 blob up front so
+    # EVERY terminal path below can close the chain it opened. Defensive: a
+    # malformed / missing id falls through to None and the chain-close helper
+    # no-ops (the Slice 4 abandon-sweeper closes any chain left open).
+    correlation_id = _blob_correlation_id(blob)
+    workspace_id = str(blob.get("workspace_id") or "")
+    requested_by = str(blob.get("requested_by") or "")
+    causation = _coerce_uuid(human_event_id)
+
+    async def _fail(reason: str, *, error_class: str) -> None:
+        """Mark the Action failed AND close the chain with one terminal —
+        the single failure-path chokepoint so a path can never both fail
+        and double-fire the terminal."""
+        await store.mark_failed(action.id, reason)
+        _emit_chain_close(
+            passed=False,
+            action_outcome="failed",
+            error_class=error_class,
+            reason=reason,
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            user_id=requested_by,
+            causation_id=causation,
+        )
+
     if blob.get("schema") != _CODE_CHANGE_SCHEMA:
-        await store.mark_failed(
-            action.id,
+        await _fail(
             "code-change schema mismatch — the change blob is from an "
             "incompatible build and cannot be applied",
+            error_class="SchemaMismatch",
         )
         return
 
@@ -229,13 +392,19 @@ async def execute_approved_change(
     task = str(blob.get("task") or "")
 
     if not base_branch or not isinstance(diff, str) or not diff.strip():
-        await store.mark_failed(action.id, "code-change blob is missing base_branch or diff")
+        await _fail(
+            "code-change blob is missing base_branch or diff",
+            error_class="MalformedBlob",
+        )
         return
 
     # Defense in depth — re-resolve + re-allowlist the repo at execute time.
     repo_path, repo_err = _re_resolve_repo(repo)
     if repo_err is not None or repo_path is None:
-        await store.mark_failed(action.id, f"repo no longer valid at approval time: {repo_err}")
+        await _fail(
+            f"repo no longer valid at approval time: {repo_err}",
+            error_class="RepoInvalid",
+        )
         return
 
     branch = f"feat/belt-{_short_id(str(action.id))}"
@@ -252,8 +421,9 @@ async def execute_approved_change(
         # 1. Fetch the latest base so we branch off the freshest origin tip.
         code, _out, err = await _run(["git", "fetch", "origin", base_branch], cwd=repo_path)
         if code != 0:
-            await store.mark_failed(
-                action.id, f"git fetch origin {base_branch} failed: {err.strip()[:300]}"
+            await _fail(
+                f"git fetch origin {base_branch} failed: {err.strip()[:300]}",
+                error_class="GitFetchFailed",
             )
             return
 
@@ -266,8 +436,9 @@ async def execute_approved_change(
             cwd=repo_path,
         )
         if code != 0:
-            await store.mark_failed(
-                action.id, f"git worktree add failed: {err.strip()[:300]}"
+            await _fail(
+                f"git worktree add failed: {err.strip()[:300]}",
+                error_class="GitWorktreeAddFailed",
             )
             return
         worktree_created = True
@@ -275,8 +446,9 @@ async def execute_approved_change(
         # 3. Branch off the detached worktree head.
         code, _out, err = await _run(["git", "checkout", "-b", branch], cwd=worktree_dir)
         if code != 0:
-            await store.mark_failed(
-                action.id, f"git checkout -b {branch} failed: {err.strip()[:300]}"
+            await _fail(
+                f"git checkout -b {branch} failed: {err.strip()[:300]}",
+                error_class="GitCheckoutFailed",
             )
             return
 
@@ -293,10 +465,10 @@ async def execute_approved_change(
             fd_path.unlink()
             diff_file = None
         if code != 0:
-            await store.mark_failed(
-                action.id,
+            await _fail(
                 "diff did not apply cleanly (conflict or stale base) — "
                 f"re-propose against the current {base_branch}. git apply: {err.strip()[:300]}",
+                error_class="ApplyConflict",
             )
             return
 
@@ -305,13 +477,14 @@ async def execute_approved_change(
         #    NO AI attribution.
         code, _out, err = await _run(["git", "add", "-A"], cwd=worktree_dir)
         if code != 0:
-            await store.mark_failed(action.id, f"git add failed: {err.strip()[:300]}")
+            await _fail(f"git add failed: {err.strip()[:300]}", error_class="GitAddFailed")
             return
 
         files_changed = await _changed_files(worktree_dir)
         if not files_changed:
-            await store.mark_failed(
-                action.id, "diff produced no staged changes — nothing to commit"
+            await _fail(
+                "diff produced no staged changes — nothing to commit",
+                error_class="NothingToCommit",
             )
             return
 
@@ -321,7 +494,7 @@ async def execute_approved_change(
             ["git", "commit", "-m", commit_title, "-m", commit_body], cwd=worktree_dir
         )
         if code != 0:
-            await store.mark_failed(action.id, f"git commit failed: {err.strip()[:300]}")
+            await _fail(f"git commit failed: {err.strip()[:300]}", error_class="GitCommitFailed")
             return
 
         # 6. Push the branch.
@@ -329,7 +502,7 @@ async def execute_approved_change(
             ["git", "push", "-u", "origin", branch], cwd=worktree_dir
         )
         if code != 0:
-            await store.mark_failed(action.id, f"git push failed: {err.strip()[:300]}")
+            await _fail(f"git push failed: {err.strip()[:300]}", error_class="GitPushFailed")
             return
 
         # 7. Open the PR via the injectable opener.
@@ -345,10 +518,10 @@ async def execute_approved_change(
             logger.warning("belt: PR open failed for action %s", action.id, exc_info=True)
             # The branch is pushed but no PR — record the partial so a human can
             # open the PR by hand. This is NOT a clean success.
-            await store.mark_failed(
-                action.id,
+            await _fail(
                 f"branch '{branch}' pushed but PR open failed: {exc}. "
                 "Open the PR manually or re-propose.",
+                error_class="PrOpenFailed",
             )
             return
 
@@ -356,6 +529,24 @@ async def execute_approved_change(
         await store.mark_executed(
             action.id,
             f"PR opened: {pr_url} (branch '{branch}', {len(files_changed)} file(s) changed)",
+        )
+        # BS-4 — close the chain on the SUCCESS path. ``action_outcome="landed"``
+        # + the PR url / branch / file count ride on the payload for the explain
+        # narrator. This is the ONLY terminal on the happy path (every failure
+        # path above closed via ``_fail`` and returned), so exactly one
+        # ``decision.completed`` lands per run.
+        _emit_chain_close(
+            passed=True,
+            action_outcome="landed",
+            error_class=None,
+            reason=None,
+            correlation_id=correlation_id,
+            workspace_id=workspace_id,
+            user_id=requested_by,
+            causation_id=causation,
+            pr_url=pr_url,
+            branch=branch,
+            files_changed=len(files_changed),
         )
         logger.info(
             "belt: applied code_change action %s → branch %s, %d file(s), PR %s",
@@ -369,7 +560,7 @@ async def execute_approved_change(
             "belt: code_change execution crashed for action %s", action.id, exc_info=True
         )
         with _suppress():
-            await store.mark_failed(action.id, "code-change executor crashed — re-propose")
+            await _fail("code-change executor crashed — re-propose", error_class="ExecutorCrash")
     finally:
         # ALWAYS clean up — leave no half-state. Remove the temp diff file (if
         # the apply path bailed before unlinking it) and the worktree.
