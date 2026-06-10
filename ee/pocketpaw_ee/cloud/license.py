@@ -6,6 +6,19 @@ the private key lives only on the license server.
 
 Key format: base64(payload_json + "." + signature_hex)
 Payload: {"org": "acme-inc", "plan": "team", "seats": 10, "exp": "2027-01-01"}
+
+Changes:
+  - 2026-06-10 (sov/w0a-license): Replaced the "Replace with your actual
+    public key" placeholder with a real, baked-in DEV Ed25519 public key
+    (``_DEV_PUBLIC_KEY_HEX``). Verification now resolves the public key in
+    this order: ``POCKETPAW_LICENSE_PUBLIC_KEY`` env (production / operator
+    key) → the baked-in DEV key. The HMAC-SHA256 fallback only fires when
+    *no* Ed25519 public key resolves AND ``POCKETPAW_LICENSE_SECRET`` is
+    set, so a default install now verifies Ed25519-minted keys out of the
+    box. The matching private key for the DEV public key lives in
+    ``ee/pocketpaw_ee/cloud/_dev_license_key.py`` (dev-only, clearly
+    marked); production minting supplies its own operator private key. See
+    ``ee/pocketpaw_ee/cloud/mint.py`` for the minting path.
 """
 
 from __future__ import annotations
@@ -50,32 +63,56 @@ class LicensePayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Ed25519 public key for license verification (hex-encoded).
-# Replace with your actual public key.
-_PUBLIC_KEY_HEX = os.environ.get("POCKETPAW_LICENSE_PUBLIC_KEY", "")
+#
+# DEV key: the matching private seed ships (clearly marked dev-only) in
+# ``ee/pocketpaw_ee/cloud/_dev_license_key.py`` so a fresh checkout can mint
+# and verify licenses with zero setup. PRODUCTION operators MUST override
+# this with their own key by exporting ``POCKETPAW_LICENSE_PUBLIC_KEY`` (the
+# matching private key is supplied to ``mint`` out-of-band and never enters
+# the repo).
+_DEV_PUBLIC_KEY_HEX = "42a718ecd6f1fc3d1b6709ccfc1318d1ca80fe7ce238c737308e761d7263d5c6"
+
+
+def _resolve_public_key_hex() -> str:
+    """Resolve the active Ed25519 verification public key (hex).
+
+    Operator-supplied env var wins over the baked-in DEV key so production
+    deployments verify against their own keypair. Read at call time (not
+    import time) so tests can patch the env between cases.
+    """
+    return os.environ.get("POCKETPAW_LICENSE_PUBLIC_KEY", "").strip() or _DEV_PUBLIC_KEY_HEX
 
 _cached_license: LicensePayload | None = None
 _license_error: str | None = None
 
 
 def _verify_signature(payload_bytes: bytes, signature_hex: str) -> bool:
-    """Verify Ed25519 signature. Returns False if key is missing or invalid."""
-    if not _PUBLIC_KEY_HEX:
-        # No public key configured — accept key based on HMAC-SHA256 with a
-        # shared secret (simpler setup for self-hosted deployments).
-        secret = os.environ.get("POCKETPAW_LICENSE_SECRET", "")
-        if not secret:
-            return False
-        expected = hashlib.sha256(f"{secret}:{payload_bytes.decode()}".encode()).hexdigest()
-        return expected == signature_hex
+    """Verify a license signature. Returns False on any failure.
 
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Tries Ed25519 first against the resolved public key (operator env →
+    baked-in DEV key). If that fails AND a shared ``POCKETPAW_LICENSE_SECRET``
+    is configured, falls back to HMAC-SHA256 (the simpler self-hosted setup
+    the e2e suite and some self-hosters rely on). With neither path available
+    the signature is rejected.
+    """
+    public_key_hex = _resolve_public_key_hex()
+    if public_key_hex:
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(_PUBLIC_KEY_HEX))
-        pub_key.verify(bytes.fromhex(signature_hex), payload_bytes)
-        return True
-    except Exception:
+            pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
+            pub_key.verify(bytes.fromhex(signature_hex), payload_bytes)
+            return True
+        except Exception:
+            # Fall through to the HMAC path below if a shared secret exists.
+            pass
+
+    # HMAC-SHA256 fallback with a shared secret (simpler self-hosted setup).
+    secret = os.environ.get("POCKETPAW_LICENSE_SECRET", "")
+    if not secret:
         return False
+    expected = hashlib.sha256(f"{secret}:{payload_bytes.decode()}".encode()).hexdigest()
+    return expected == signature_hex
 
 
 def validate_license_key(key: str) -> LicensePayload:
