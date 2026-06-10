@@ -1,4 +1,15 @@
 # router.py — The pocket execution router.
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
+#   Tier-0 ``run_action`` path now recognizes the executor's
+#   ``instinct_pending`` sentinel. Under W2a ``ActionBinding.requires_instinct``
+#   defaults True, so an agent-authored write that omits the field PARKS at
+#   the executor gate even though the classifier (which reads the raw spec
+#   dict, not the parsed binding) waved it through as a Tier-0 auto-fire.
+#   The router now reports that as "needs Instinct approval — not
+#   auto-fired" instead of a false fired-success. Routing the parked write
+#   into ``propose_pocket_write`` (or teaching the classifier to escalate an
+#   unset-``requires_instinct`` write to the specialist tier) is a follow-up
+#   — the deny-by-default no-bypass guarantee already holds.
 # Created: 2026-05-22 (Increment 3) — ``classify_and_route`` sits in front
 #   of ``pocket_specialist__edit``. It runs the pure classifier
 #   (classifier.py) and dispatches to the CHEAPEST capable tier:
@@ -265,6 +276,24 @@ async def _run_tier0(
             token=token,
             allowed_writes=allowed_writes,
         )
+        # W2a — DENY-BY-DEFAULT. `ActionBinding.requires_instinct` now
+        # defaults True, so a binding the agent authored WITHOUT setting
+        # the field PARKS at the executor's gate even though the classifier
+        # (which reads the raw dict's `requires_instinct` key, sees it
+        # unset, and so does not escalate to the specialist tier) routed it
+        # here as a Tier-0 auto-fire. The executor returns
+        # `{ok:True, code:"instinct_pending"}` — the write was NOT fired.
+        # Reporting that as a fired success would be a lie, so surface it as
+        # a clean non-fire. NOTE: this path does NOT yet route the parked
+        # write into `instinct_bridge.propose_pocket_write` the way the REST
+        # `/actions/run` route does — wiring the Tier-0 auto-fire path to
+        # raise an approval (or, better, teaching the classifier to escalate
+        # an unset-`requires_instinct` write to the specialist tier so it
+        # never reaches the declarative runner) is a follow-up. For now the
+        # deny-by-default guarantee holds (no bypass), and the agent is told
+        # the write needs approval rather than being told it landed.
+        if result.get("code") == "instinct_pending":
+            return False, "this write requires Instinct approval — not auto-fired"
         if not result.get("ok"):
             return False, result.get("error") or "action run failed"
         return True, None

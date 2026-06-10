@@ -1,5 +1,22 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
+single-action ``POST /{id}/actions/run`` route now THREADS the pocket's
+RFC 03 v2 template into ``action_executor.run_action`` so the template-
+level CEL Instinct rules (gate 1.5) finally evaluate on this path (before
+W2a only the bulk + temporal dispatchers gated; the direct single-action
+run silently skipped CEL). The template is threaded only when it DECLARES
+the action being run — ``resolve_instinct`` 404s on an undeclared action,
+and a ``rippleSpec.actions`` write binding need not be a template action,
+so threading unconditionally would 404 legitimate non-template writes.
+When the template does not cover the action, ``template=None`` and the
+binding-level deny-by-default gate (gate 7, now defaulting on) governs.
+The ``instinct_pending`` handler now distinguishes the two park shapes:
+a template-CEL escalation (carries ``approval_id`` — already persisted)
+surfaces that id directly, while a binding-level park (no ``approval_id``)
+is routed through ``instinct_bridge.propose_pocket_write`` as before. A new
+``instinct_blocked`` branch surfaces a clean blocked response.
+
 Updated: 2026-06-08 (fix/pocket-sources-run-400) — ``POST /{id}/sources/run``
 no longer 400s when the pocket has no backend configured. The frontend runs
 declared sources on every ``pocket_open``, so a blank/starter pocket (no
@@ -986,6 +1003,28 @@ async def run_pocket_action(
 
     from pocketpaw_ee.cloud.pockets import action_executor
 
+    # W2a — thread the pocket's RFC 03 v2 template so the template-level
+    # CEL Instinct rules (gate 1.5) actually FIRE on the single-action run.
+    # Before W2a this path never passed a template, so a pocket's CEL rules
+    # (block / require_approval / notify) silently never evaluated on a
+    # direct `/actions/run` — the bulk + temporal paths gated, this one did
+    # not. `resolve_pocket_template` returns `None` for a pocket with no
+    # `template_slug`, an unknown slug, or an unloadable template (never an
+    # error — same contract bulk/temporal rely on), so a pocket with no
+    # template is byte-identical to the pre-W2a behavior on this line.
+    #
+    # We thread the template ONLY when it actually DECLARES the action being
+    # run. `resolve_instinct` raises (→ 404) on an action absent from the
+    # template's `actions[]`; a `rippleSpec.actions` write binding need not
+    # correspond to a template action, so threading unconditionally would
+    # 404 every legitimate non-template write. When the template does not
+    # cover this action we pass `template=None` and the binding-level
+    # deny-by-default gate (gate 7) governs — which now parks an agent-
+    # authored write rather than firing it.
+    template = await pockets_service.resolve_pocket_template(workspace_id, pocket_id)
+    if template is not None and not any(a.name == body.action for a in template.actions):
+        template = None
+
     # no-event: the write result is response-body delivery, not persisted.
     result = await action_executor.run_action(
         workspace_id=workspace_id,
@@ -1001,13 +1040,47 @@ async def run_pocket_action(
         token=token,
         allowed_writes=allowed_writes,
         idempotency_key=body.idempotency_key,
+        template=template,
     )
 
-    # M2b.1 — a `requires_instinct` write was PARKED, not fired. The
-    # executor validated it (a write the allowlist rejects already came
-    # back `ok:false`); `_park` carries the resolved write. Route it into
-    # an Instinct Action and return the pending response.
+    # W2a — a template-level CEL rule BLOCKED this write (gate 1.5). It
+    # only fires when a template that declares this action is threaded
+    # (see the threading above). The executor returned `ok:false,
+    # code:"instinct_blocked"` and carries a `reason` the wire model does
+    # not declare — surface a clean blocked response without the internal
+    # `reason`/`_park` keys (`RunActionResponse` is `extra="forbid"`).
+    if result.get("code") == "instinct_blocked":
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            code="instinct_blocked",
+            error="action blocked by an Instinct rule",
+        )
+
+    # M2b.1 / W2a — a write was PARKED, not fired. There are TWO park
+    # shapes the executor can return, both `code:"instinct_pending"`:
+    #
+    #   * gate 1.5 (template CEL → ESCALATE_APPROVAL) already PERSISTED an
+    #     `InstinctApproval` row and carries its id on `approval_id`. Do
+    #     NOT re-propose — `propose_pocket_write` would create a SECOND,
+    #     unrelated park in a different store. Surface the existing id.
+    #   * gate 7 (binding-level deny-by-default) parked WITHOUT persisting;
+    #     it carries the resolved write under `_park` and no `approval_id`.
+    #     Route it into an Instinct Action via `propose_pocket_write`.
+    #
+    # The executor validated the write before either park (a write the
+    # allowlist rejects already came back `ok:false`).
     if result.get("code") == "instinct_pending":
+        approval_id = result.get("approval_id")
+        if approval_id is not None:
+            # Template-CEL escalation — the approval row already exists.
+            return RunActionResponse(
+                ok=True,
+                action=body.action,
+                code="instinct_pending",
+                proposed_action_id=approval_id,
+            )
+
         from pocketpaw_ee.cloud.pockets import instinct_bridge
 
         proposed_id = await instinct_bridge.propose_pocket_write(
