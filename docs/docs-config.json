@@ -900,6 +900,11 @@
             "icon": "lucide:container"
           },
           {
+            "label": "Sovereign Tenant (Enterprise)",
+            "href": "/deployment/sovereign-tenant",
+            "icon": "lucide:building-2"
+          },
+          {
             "label": "Discord Docker",
             "href": "/deployment/discord-docker",
             "icon": "lucide:gamepad-2"

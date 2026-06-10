@@ -7,6 +7,12 @@ keywords: ["self-hosting", "server deployment", "nginx", "ssl", "production", "u
 tags: ["deployment", "self-hosting"]
 ---
 
+{/* 2026-06-10 (sov/w1a-deploy): Fixed port drift — the dashboard serves on
+    8888 (POCKETPAW_WEB_PORT), not the stale 8000, and the env vars are
+    POCKETPAW_WEB_HOST / POCKETPAW_WEB_PORT (the POCKETPAW_DASHBOARD_* names
+    never existed in config.py). For a multi-user/enterprise tenant with
+    Mongo + Redis, see deployment/sovereign-tenant. */}
+
 # Self-Hosting PocketPaw: Server Setup Guide
 
 PocketPaw is designed to be self-hosted. Here's how to deploy it on your own server.
@@ -52,7 +58,7 @@ chmod 600 ~/.pocketpaw/config.json
 pocketpaw
 ```
 
-The dashboard starts on `http://0.0.0.0:8000`.
+The dashboard starts on `http://0.0.0.0:8888`.
 
 ## Production Deployment
 
@@ -64,7 +70,7 @@ For production, put PocketPaw behind nginx or Caddy:
 
 ```
 pocketpaw.example.com {
-    reverse_proxy localhost:8000
+    reverse_proxy localhost:8888
 }
 ```
 
@@ -79,7 +85,7 @@ server {
     ssl_certificate_key /etc/ssl/private/pocketpaw.key;
 
     location / {
-        proxy_pass http://localhost:8000;
+        proxy_pass http://localhost:8888;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -100,8 +106,8 @@ Set environment variables in a `.env` file or your system's environment:
 ```bash
 # /etc/pocketpaw/env
 POCKETPAW_ANTHROPIC_API_KEY=sk-ant-...
-POCKETPAW_DASHBOARD_HOST=127.0.0.1
-POCKETPAW_DASHBOARD_PORT=8000
+POCKETPAW_WEB_HOST=127.0.0.1
+POCKETPAW_WEB_PORT=8888
 POCKETPAW_TOOL_PROFILE=coding
 ```
 
