@@ -1,5 +1,24 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: the
+#   ``instinct_audit`` ledger is now a hash chain. Each row carries
+#   ``entry_hash`` = sha256 over the row's canonical content + the previous
+#   row's ``entry_hash`` (``prev_hash``). Any insertion, edit, or deletion
+#   breaks the chain from that point forward, giving an auditor/insurer
+#   verifiable integrity. The canonical serialization lives in
+#   ``_canonical_audit_payload`` + ``compute_audit_hash`` and mirrors the
+#   EE Decision-Graph ``compute_hash_link`` approach (sha256 of stable,
+#   sorted, content-bound fields) so both ledgers hash consistently. The
+#   append is a LOUD chokepoint: if the chain write fails, ``_log`` raises
+#   ``AuditChainError`` — a decision that cannot be audited must not silently
+#   succeed (this is the legal audit trail, distinct from the best-effort
+#   Decision-Graph emits in the router). ``verify_audit_chain()`` walks the
+#   ledger and reports intact / first-broken row. Legacy boundary: rows
+#   written before this change have NULL ``entry_hash``; they are treated as
+#   un-chained "legacy" rows. The genesis of the live chain is the first
+#   hashed row (``prev_hash=""``); verification skips/repos legacy rows and
+#   only enforces the chain over hashed rows. Additive ALTER migration, no
+#   data rewrite.
 # Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
 #   mark_executed() now accepts a structured OutcomeVerdict as well as a
 #   plain string. A verdict is stored as JSON in the existing ``outcome``
@@ -24,6 +43,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -81,6 +101,83 @@ def _parse_iso(value: Any) -> datetime | None:
     return None
 
 
+class AuditChainError(RuntimeError):
+    """Raised when the tamper-evident audit ledger cannot be appended to.
+
+    The Instinct audit log is the legal trail a regulated customer hands to
+    an auditor or insurer. A decision that cannot be recorded in that trail
+    must NOT silently succeed — so a failure to compute or persist the next
+    hash-chain link is surfaced loudly rather than swallowed. This is
+    deliberately distinct from the Decision-Graph chain emits in the router,
+    which are best-effort (the journal is their source of truth, not this
+    ledger).
+    """
+
+
+def _canonical_audit_payload(
+    *,
+    id: str,
+    action_id: str | None,
+    pocket_id: str | None,
+    timestamp: str,
+    actor: str,
+    event: str,
+    category: str,
+    description: str,
+    context: dict[str, Any] | None,
+    ai_recommendation: str | None,
+    outcome: str | None,
+) -> str:
+    """Stable canonical serialization of an audit row's content.
+
+    Determinism is the whole game: the same logical row must serialize
+    byte-for-byte identically on write and on later re-verification, or an
+    honest ledger would read as tampered. We achieve that with
+    ``json.dumps(..., sort_keys=True, separators=(",", ":"))`` over an
+    explicit, ordered field set. ``context`` is itself dumped with sorted
+    keys so dict-ordering never perturbs the hash. ``prev_hash`` is folded
+    in by :func:`compute_audit_hash`, not here, so this payload describes
+    only the row's own content.
+    """
+    return json.dumps(
+        {
+            "id": id,
+            "action_id": action_id,
+            "pocket_id": pocket_id,
+            "timestamp": timestamp,
+            "actor": actor,
+            "event": event,
+            "category": category,
+            "description": description,
+            # Re-serialize context canonically so key ordering is irrelevant.
+            "context": json.dumps(context or {}, sort_keys=True, separators=(",", ":")),
+            "ai_recommendation": ai_recommendation,
+            "outcome": outcome,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def compute_audit_hash(canonical_payload: str, prev_hash: str) -> str:
+    """Compute one audit-ledger hash link.
+
+    ``sha256(canonical_payload || prev_hash)`` — modeled on the EE
+    Decision-Graph ``compute_hash_link`` (``ee.cloud.decisions.domain``):
+    hash the row's stable content, then fold in the previous row's hash so
+    tampering with any one row invalidates every row after it. The genesis
+    row passes ``prev_hash=""`` (nothing folded in). We cannot import the EE
+    helper here — the OSS core must not depend on ``pocketpaw_ee`` — so the
+    composition is reproduced rather than reused.
+    """
+    h = hashlib.sha256()
+    h.update(canonical_payload.encode("utf-8"))
+    if prev_hash:
+        h.update(prev_hash.encode("utf-8"))
+    return h.hexdigest()
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS instinct_actions (
     id TEXT PRIMARY KEY,
@@ -116,7 +213,12 @@ CREATE TABLE IF NOT EXISTS instinct_audit (
     description TEXT NOT NULL,
     context TEXT DEFAULT '{}',
     ai_recommendation TEXT,
-    outcome TEXT
+    outcome TEXT,
+    -- Tamper-evidence (W2b): entry_hash = sha256 over this row's canonical
+    -- content + prev_hash. Nullable so a fresh schema is created with the
+    -- columns and a pre-existing ledger ALTERs in (legacy rows stay NULL).
+    prev_hash TEXT,
+    entry_hash TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instinct_corrections (
@@ -170,6 +272,15 @@ class InstinctStore:
                 await db.execute("ALTER TABLE instinct_actions ADD COLUMN assignee TEXT")
             except aiosqlite.OperationalError:
                 pass
+            # Additive migration (W2b): tamper-evidence columns on a
+            # pre-existing audit ledger. Same swallow-the-duplicate pattern.
+            # Legacy rows keep NULL hashes — see ``verify_audit_chain`` for how
+            # the legacy/genesis boundary is handled.
+            for _col in ("prev_hash", "entry_hash"):
+                try:
+                    await db.execute(f"ALTER TABLE instinct_audit ADD COLUMN {_col} TEXT")
+                except aiosqlite.OperationalError:
+                    pass
             await db.commit()
         self._initialized = True
 
@@ -532,27 +643,75 @@ class InstinctStore:
             outcome=outcome,
         )
         await self._ensure_schema()
-        async with self._conn() as db:
-            await db.execute(
-                "INSERT INTO instinct_audit"
-                " (id, action_id, pocket_id, actor, event,"
-                " category, description, context,"
-                " ai_recommendation, outcome)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    entry.id,
-                    entry.action_id,
-                    entry.pocket_id,
-                    entry.actor,
-                    entry.event,
-                    entry.category.value,
-                    entry.description,
-                    json.dumps(entry.context),
-                    entry.ai_recommendation,
-                    entry.outcome,
-                ),
-            )
-            await db.commit()
+        # The SQLite ``timestamp`` column defaults to ``datetime('now')`` and is
+        # what a reader sees, but the hash must be computed over a value we
+        # control deterministically. We stamp the timestamp ourselves (ISO
+        # form, matching the application-side convention) so the canonical
+        # payload on write equals the canonical payload on re-verification.
+        timestamp = entry.timestamp.isoformat()
+        context_json = json.dumps(entry.context)
+        canonical = _canonical_audit_payload(
+            id=entry.id,
+            action_id=entry.action_id,
+            pocket_id=entry.pocket_id,
+            timestamp=timestamp,
+            actor=entry.actor,
+            event=entry.event,
+            category=entry.category.value,
+            description=entry.description,
+            context=entry.context,
+            ai_recommendation=entry.ai_recommendation,
+            outcome=entry.outcome,
+        )
+        try:
+            async with self._conn() as db:
+                # ``prev_hash`` is the entry_hash of the most-recently inserted
+                # hashed row. ``rowid`` is monotonic with insertion order, so it
+                # gives a stable chain head even across timestamp ties. Legacy
+                # rows with a NULL entry_hash are skipped — the live chain links
+                # only hashed rows (the genesis link uses prev_hash="").
+                async with db.execute(
+                    "SELECT entry_hash FROM instinct_audit"
+                    " WHERE entry_hash IS NOT NULL"
+                    " ORDER BY rowid DESC LIMIT 1"
+                ) as cur:
+                    prev_row = await cur.fetchone()
+                prev_hash = prev_row[0] if prev_row else ""
+                entry_hash = compute_audit_hash(canonical, prev_hash)
+
+                await db.execute(
+                    "INSERT INTO instinct_audit"
+                    " (id, action_id, pocket_id, timestamp, actor, event,"
+                    " category, description, context,"
+                    " ai_recommendation, outcome, prev_hash, entry_hash)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        entry.id,
+                        entry.action_id,
+                        entry.pocket_id,
+                        timestamp,
+                        entry.actor,
+                        entry.event,
+                        entry.category.value,
+                        entry.description,
+                        context_json,
+                        entry.ai_recommendation,
+                        entry.outcome,
+                        prev_hash,
+                        entry_hash,
+                    ),
+                )
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — re-raised loudly below
+            # Failure posture (W2b): a decision that cannot be written into the
+            # tamper-evident ledger must NOT silently succeed. Surface the
+            # failure to the caller instead of swallowing it — the audit trail
+            # is the governance guarantee. (Contrast: the router's
+            # Decision-Graph emits are best-effort.)
+            raise AuditChainError(
+                f"failed to append audit entry {entry.id} ({event}) to the "
+                f"tamper-evident ledger: {exc}"
+            ) from exc
         return entry
 
     async def log(self, *, actor: str, event: str, description: str, **kwargs: Any) -> AuditEntry:
@@ -603,6 +762,104 @@ class InstinctStore:
     async def export_audit(self, pocket_id: str | None = None) -> str:
         entries = await self.query_audit(pocket_id=pocket_id, limit=10000)
         return json.dumps([e.model_dump(mode="json") for e in entries], indent=2)
+
+    async def verify_audit_chain(self) -> dict[str, Any]:
+        """Walk the audit hash chain and report whether it is intact.
+
+        The chain is GLOBAL (each row's ``prev_hash`` links to the previous
+        *hashed* row across the whole ledger, not within a pocket), so
+        verification always runs over the entire table in insertion order
+        (``rowid``). It recomputes each row's ``entry_hash`` from the row's
+        canonical content + the recomputed running ``prev_hash`` and compares
+        against the stored value. The first row that fails to match is the
+        break point — any insertion, edit, or deletion of a hashed row shifts
+        or invalidates every subsequent link.
+
+        Legacy boundary: rows written before W2b have a NULL ``entry_hash``.
+        They are counted as ``legacy_unhashed`` and skipped — the chain is
+        only enforced over hashed rows, whose genesis link uses
+        ``prev_hash=""``. A ledger that is entirely legacy verifies as intact
+        (there is nothing chained to break) but reports ``hashed=0`` so a
+        caller can tell the difference between "proven" and "nothing to
+        prove".
+
+        Returns a dict:
+          - ``intact`` (bool) — True if every hashed row matches.
+          - ``total`` (int) — total rows in the ledger.
+          - ``hashed`` (int) — rows participating in the chain.
+          - ``legacy_unhashed`` (int) — pre-W2b rows skipped.
+          - ``checked`` (int) — hashed rows verified before the first break
+            (== ``hashed`` when intact).
+          - ``broken_at`` (dict | None) — ``{id, rowid, reason}`` for the
+            first failing row, or ``None`` when intact.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT rowid, id, action_id, pocket_id, timestamp, actor,"
+                " event, category, description, context, ai_recommendation,"
+                " outcome, prev_hash, entry_hash"
+                " FROM instinct_audit ORDER BY rowid ASC"
+            ) as cur:
+                rows = await cur.fetchall()
+
+        total = len(rows)
+        hashed = 0
+        legacy = 0
+        checked = 0
+        running_prev = ""  # genesis link for the first hashed row
+        broken_at: dict[str, Any] | None = None
+
+        for row in rows:
+            if row["entry_hash"] is None:
+                # Pre-W2b legacy row — not part of the chain.
+                legacy += 1
+                continue
+            hashed += 1
+            context = json.loads(row["context"]) if row["context"] else {}
+            canonical = _canonical_audit_payload(
+                id=row["id"],
+                action_id=row["action_id"],
+                pocket_id=row["pocket_id"],
+                timestamp=row["timestamp"],
+                actor=row["actor"],
+                event=row["event"],
+                category=row["category"],
+                description=row["description"],
+                context=context,
+                ai_recommendation=row["ai_recommendation"],
+                outcome=row["outcome"],
+            )
+            expected = compute_audit_hash(canonical, running_prev)
+            stored_prev = row["prev_hash"] or ""
+            if stored_prev != running_prev:
+                broken_at = {
+                    "id": row["id"],
+                    "rowid": row["rowid"],
+                    "reason": (
+                        "prev_hash mismatch — a preceding row was inserted, edited, or deleted"
+                    ),
+                }
+                break
+            if row["entry_hash"] != expected:
+                broken_at = {
+                    "id": row["id"],
+                    "rowid": row["rowid"],
+                    "reason": "entry_hash mismatch — this row's content was altered",
+                }
+                break
+            checked += 1
+            running_prev = row["entry_hash"]
+
+        return {
+            "intact": broken_at is None,
+            "total": total,
+            "hashed": hashed,
+            "legacy_unhashed": legacy,
+            "checked": checked,
+            "broken_at": broken_at,
+        }
 
     # --- Corrections ---
 

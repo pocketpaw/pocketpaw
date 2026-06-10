@@ -1,5 +1,16 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
+#   GET /instinct/audit/verify, which walks the audit hash chain (built in
+#   pocketpaw.instinct.store) and reports intact / first-broken row so a
+#   customer or insurer can prove the ledger was not altered. Declared BEFORE
+#   /instinct/audit/{audit_id} to avoid the literal-vs-parameter route
+#   collision. GET /instinct/audit/export now also runs verification and
+#   stamps an ``X-Audit-Chain-Intact: true|false`` response header. The
+#   audit-ledger append in the store is now LOUD (raises AuditChainError on
+#   failure); the Decision-Graph chain emits in this router stay best-effort
+#   and are a separate concern (the journal, not this ledger, is their source
+#   of truth).
 # Updated: 2026-03-30 — Added GET /instinct/actions (list all with status filter),
 #   GET /instinct/audit/export (JSON export), switched to singleton from ee.api.
 # Updated: 2026-04-12 (Move 1 PR-A) — /approve now accepts optional edited fields.
@@ -1165,10 +1176,35 @@ class HydratedAuditEntry(BaseModel):
     )
 
 
-# /instinct/audit/export must be declared BEFORE the parameterised
-# /instinct/audit/{audit_id} below — FastAPI routes match in registration
-# order, and a literal-vs-parameter collision would otherwise route
-# /audit/export to the {audit_id} handler and 404.
+class AuditChainBreak(BaseModel):
+    """The first row where the audit hash chain failed to verify."""
+
+    id: str = Field(description="Audit entry id of the first broken row.")
+    rowid: int = Field(description="SQLite rowid (insertion order) of the broken row.")
+    reason: str = Field(description="Why the row failed: content edit vs. prev-link break.")
+
+
+class AuditVerifyResponse(BaseModel):
+    """Result of walking the tamper-evident audit hash chain.
+
+    ``intact`` is the headline an auditor/insurer reads. ``broken_at`` is
+    present (non-null) only when ``intact`` is False, pointing at the first
+    row that fails to verify. ``legacy_unhashed`` counts pre-W2b rows that
+    predate the chain and are not enforced.
+    """
+
+    intact: bool
+    total: int
+    hashed: int
+    legacy_unhashed: int
+    checked: int
+    broken_at: AuditChainBreak | None = None
+
+
+# /instinct/audit/export and /instinct/audit/verify must be declared BEFORE the
+# parameterised /instinct/audit/{audit_id} below — FastAPI routes match in
+# registration order, and a literal-vs-parameter collision would otherwise
+# route /audit/export (or /audit/verify) to the {audit_id} handler and 404.
 @router.get(
     "/instinct/audit/export",
     dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
@@ -1176,13 +1212,49 @@ class HydratedAuditEntry(BaseModel):
 async def export_audit(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
 ):
-    """Export the full instinct audit log as JSON for compliance."""
-    data = await _store().export_audit(pocket_id=pocket_id)
+    """Export the full instinct audit log as JSON for compliance.
+
+    The response carries an ``X-Audit-Chain-Intact`` header (``true``/
+    ``false``) so a downstream consumer that only handles the file body still
+    learns whether the ledger verified at export time. The chain is global, so
+    the header reflects the WHOLE ledger's integrity even when the export is
+    filtered to a single pocket. Call ``GET /instinct/audit/verify`` for the
+    full break-point detail.
+    """
+    store = _store()
+    data = await store.export_audit(pocket_id=pocket_id)
+    verdict = await store.verify_audit_chain()
     return Response(
         content=data,
         media_type="application/json",
-        headers={"Content-Disposition": 'attachment; filename="instinct_audit.json"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="instinct_audit.json"',
+            "X-Audit-Chain-Intact": "true" if verdict["intact"] else "false",
+        },
     )
+
+
+@router.get(
+    "/instinct/audit/verify",
+    response_model=AuditVerifyResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
+)
+async def verify_audit_chain():
+    """Verify the tamper-evident audit hash chain end to end.
+
+    Walks the entire ``instinct_audit`` ledger in insertion order, recomputes
+    each row's hash from its canonical content + the running previous hash, and
+    reports whether the chain is intact. Any insertion, edit, or deletion of a
+    hashed row surfaces as ``intact=false`` with ``broken_at`` pointing at the
+    first failing row — proof an auditor or insurer can run themselves.
+
+    The chain is global (not pocket-scoped), so this endpoint takes no filter:
+    integrity is a property of the whole ledger. Pre-W2b rows without a hash
+    are counted under ``legacy_unhashed`` and are not enforced — see the store
+    docstring for the genesis/legacy boundary.
+    """
+    verdict = await _store().verify_audit_chain()
+    return AuditVerifyResponse(**verdict)
 
 
 @router.get(
