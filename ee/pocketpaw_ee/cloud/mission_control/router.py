@@ -53,6 +53,7 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
+    BulkRevertRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
     ListActivityRequest,
@@ -150,6 +151,20 @@ async def bulk_snooze(
     ``mission_control.invalid_until_iso``.
     """
     return await mc_service.agent_bulk_snooze(ctx, body)
+
+
+@router.post("/items/bulk-revert")
+async def bulk_revert(
+    body: BulkRevertRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    """Revert N Tasks from a terminal status back to in_progress.
+
+    Flips task status from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress`` so the operator can resume work. Ids that aren't
+    Tasks land in ``skipped``.
+    """
+    return await mc_service.agent_bulk_revert(ctx, body)
 
 
 @router.get("/outcomes", response_model=OutcomeSummaryResponse)

@@ -508,6 +508,34 @@ async def agent_block_task(
     return task_to_dto(task)
 
 
+async def agent_revert_task(ctx: RequestContext, task_id: str) -> TaskResponse:
+    """Revert a task from a terminal status back to in_progress.
+
+    Moves a task from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress`` so work can resume. This is the inverse of
+    ``agent_complete_task`` — it un-marks finished work.
+
+    Raises:
+        ValidationError: If the task is not in a revertable state.
+        NotFound: If the task does not exist in the caller's workspace.
+        Forbidden: If the caller is not authorized.
+    """
+    doc = await _fetch_task(ctx, task_id)
+
+    if doc.status not in ("done", "reverted", "failed"):
+        raise ValidationError(
+            "task.not_revertable",
+            f"Cannot revert task with status {doc.status!r}. "
+            "Only done, reverted, or failed tasks can be reverted.",
+        )
+
+    doc.status = "in_progress"
+    await doc.save()
+    task = _to_domain(doc)
+    await emit(TaskUpdated(data=_event_payload(doc, task)))
+    return task_to_dto(task)
+
+
 async def agent_reassign_task(
     ctx: RequestContext, task_id: str, body: ReassignTaskRequest
 ) -> TaskResponse:
@@ -802,6 +830,7 @@ __all__ = [
     "agent_list_tasks",
     "agent_reassign_task",
     "agent_reassign_task_cycle",
+    "agent_revert_task",
     "agent_set_task_cycle",
     "agent_update_task",
     "list_for_agent_runtime",
