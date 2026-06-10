@@ -17,6 +17,13 @@ only broadcasts presence deltas, not the current set.
 workspace-wide message search that delegates to
 ``message_service.search_workspace_messages`` and inherits its per-group
 scope filter.
+
+2026-06-10 (security W0e): the WS JWT handler now verifies tokens with the
+single resolved signing secret (``auth.core.SECRET``) instead of re-reading
+``AUTH_SECRET`` with the insecure public default. core.SECRET fail-fasts in
+prod and is an ephemeral random value in dev, so re-reading the default here
+would (a) reintroduce the forgeable-token hole and (b) fail to verify
+dev-signed cookies.
 """
 
 from __future__ import annotations
@@ -24,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -553,11 +559,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
         if not jwt_token:
             await websocket.close(code=4001, reason="Missing token")
             return
-        secret = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
+        from pocketpaw_ee.cloud.auth.core import SECRET as _auth_secret
+
         try:
             payload = pyjwt.decode(
                 jwt_token,
-                secret,
+                _auth_secret,
                 algorithms=["HS256"],
                 audience=["fastapi-users:auth"],
             )
