@@ -8,6 +8,15 @@ Key format: base64(payload_json + "." + signature_hex)
 Payload: {"org": "acme-inc", "plan": "team", "seats": 10, "exp": "2027-01-01"}
 
 Changes:
+  - 2026-06-10 (security R2b review — staging-posture blind spot): Added an
+    ``_is_ambiguous_nonprod_label()`` helper (mirroring auth.core's) and a LOUD
+    ``logger.warning`` in ``enforce_license_key_posture()`` for the case that
+    used to pass SILENTLY: a deployment labelled non-dev/non-prod (e.g.
+    ``POCKETPAW_ENV=staging``) that hasn't set an operator
+    ``POCKETPAW_LICENSE_PUBLIC_KEY`` and so is still verifying against the
+    BYPASSABLE committed DEV key. Production posture still hard-RAISES; explicit
+    dev/unset stays a silent no-op. Boot behaviour is unchanged — only the
+    warning signal is added.
   - 2026-06-10 (sov/w1a-deploy): Added a production-posture guard so a
     tenant can't silently run on the BYPASSABLE committed DEV public key.
     ``_using_dev_public_key()`` reports whether the active verifier is the
@@ -129,6 +138,35 @@ def _is_production() -> bool:
         return os.environ.get("POCKETPAW_AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
 
 
+# Local-dev env labels (kept in sync with auth.core._DEV_ENV_LABELS). Any other
+# *set* label is ambiguous: clearly not a dev box, but prod wasn't positively
+# detected, so the bypassable DEV license key would apply silently.
+_DEV_ENV_LABELS = {"dev", "development", "local", "test"}
+
+
+def _is_ambiguous_nonprod_label() -> bool:
+    """True for a non-prod posture wearing a label that isn't obviously dev.
+
+    Reuses auth.core's helper when importable so the two gates agree on the
+    blind-spot definition; falls back to the identical local check otherwise.
+    Returns True only when prod was NOT positively detected, ``POCKETPAW_ENV``
+    is set, and the value isn't one of the known local-dev labels. Unset env and
+    explicit dev labels return False; explicit prod is handled by the hard raise
+    upstream and never reaches the warning path.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.core import (
+            _is_ambiguous_nonprod_label as _auth_ambiguous,
+        )
+
+        return _auth_ambiguous()
+    except Exception:
+        if _is_production():
+            return False
+        env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+        return bool(env) and env not in _DEV_ENV_LABELS
+
+
 def enforce_license_key_posture() -> None:
     """Refuse to run on the bypassable DEV public key in production.
 
@@ -139,8 +177,26 @@ def enforce_license_key_posture() -> None:
 
     Called from ``load_license()`` / ``get_license()`` (the boot + per-load
     paths). Dev/test posture is a no-op so the zero-config DEV loop still
-    works. Raises ``RuntimeError`` under production posture.
+    works, EXCEPT for the staging-posture blind spot: a non-dev/non-prod label
+    (e.g. POCKETPAW_ENV=staging) still on the DEV key gets a LOUD warning so it
+    isn't silently forgeable. Raises ``RuntimeError`` under production posture.
     """
+    if not _is_production() and _is_ambiguous_nonprod_label() and _using_dev_public_key():
+        # Staging-posture blind spot: a labelled-but-not-prod deployment on the
+        # committed DEV key used to pass here SILENTLY. The DEV key is a bypass
+        # (its private seed ships in the open), so warn loudly. Boot is
+        # unchanged — we don't raise (that would break intentional staging runs
+        # and the test suite); we only surface the signal.
+        logger.warning(
+            "POCKETPAW_ENV=%s is a non-dev, non-prod label, but license "
+            "verification is still using the committed DEV public key "
+            "(POCKETPAW_LICENSE_PUBLIC_KEY is unset). That key is a BYPASS: its "
+            "private seed ships in the open, so anyone can mint a license this "
+            "deployment accepts. Generate your own keypair and export "
+            "POCKETPAW_LICENSE_PUBLIC_KEY before treating this as production.",
+            os.environ.get("POCKETPAW_ENV", "").strip(),
+        )
+
     if _is_production() and _using_dev_public_key():
         raise RuntimeError(
             "POCKETPAW_LICENSE_PUBLIC_KEY is unset, so license verification is "

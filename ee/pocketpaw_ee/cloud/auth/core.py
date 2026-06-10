@@ -1,6 +1,30 @@
 """Enterprise auth — fastapi-users with JWT cookie + bearer transport.
 
+Import-time side effect (read this before touching imports or tests):
+    ``SECRET = _resolve_secret()`` runs at MODULE IMPORT time (see below). In a
+    production posture with no real ``AUTH_SECRET``, importing this module
+    therefore raises ``RuntimeError`` during the import chain — the fail-fast is
+    intentional, but it fires at import, not at first use. Two consequences:
+      * Anything that imports ``auth.core`` (directly or transitively) inherits
+        that fail-fast, so the prod posture must have ``AUTH_SECRET`` set before
+        the import happens, not merely before the first auth call.
+      * Tests must set ``AUTH_SECRET`` / the posture env vars (``POCKETPAW_ENV``,
+        ``POCKETPAW_AUTH_COOKIE_SECURE``) BEFORE this module is first imported.
+        After the first import the module is cached, so ``SECRET`` is frozen at
+        the value resolved on that first import — later ``monkeypatch.setenv``
+        only affects functions that re-read the env (``_resolve_secret``,
+        ``_is_production``), not the already-bound module-level ``SECRET``.
+
 Changes:
+    2026-06-10 (security R2b review — staging-posture blind spot) — Added
+        ``_is_ambiguous_nonprod_label()`` and a LOUD ``logger.warning`` on the
+        dev ephemeral-secret path (``_resolve_secret``) for deployments labelled
+        with a non-dev, non-prod ``POCKETPAW_ENV`` (e.g. ``staging``) that did
+        not positively trip the prod detector. Such a deployment used to boot
+        SILENTLY on the ephemeral default secret; it now warns. Dev / unset /
+        explicit prod behaviour is unchanged (prod still hard-fails; dev/unset
+        still warns only with the existing ephemeral message). Also documented
+        the import-time ``SECRET`` resolution side effect in this docstring.
     2026-06-10 (security W0e — insecure-by-default first boot) — Fail-fast on
         the placeholder AUTH_SECRET in production posture, and stop seeding the
         hardcoded ``admin123`` password:
@@ -101,6 +125,34 @@ def _is_production() -> bool:
     return os.environ.get("POCKETPAW_AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
 
 
+# Env labels we treat as unambiguous local development. Anything else that is
+# *set* (e.g. "staging", "qa", "preprod") is an ambiguous non-prod label: it is
+# clearly not a dev box, yet ``_is_production()`` didn't positively detect prod,
+# so the insecure dev defaults would apply silently. We warn loudly in that gap.
+_DEV_ENV_LABELS = {"dev", "development", "local", "test"}
+
+
+def _is_ambiguous_nonprod_label() -> bool:
+    """True for a non-prod posture wearing a label that isn't obviously dev.
+
+    Returns True only when ALL of:
+      * ``_is_production()`` is False (prod was not positively detected), and
+      * ``POCKETPAW_ENV`` is *set* to a non-empty value, and
+      * that value is not one of the known local-dev labels (``dev`` /
+        ``development`` / ``local`` / ``test``).
+
+    The motivating case is ``POCKETPAW_ENV=staging`` with no cookie-secure and
+    no real ``AUTH_SECRET`` / no operator license key: it boots on the insecure
+    defaults with zero signal. Unset env and explicit dev labels return False
+    (their ergonomic silent-dev path is intentional); explicit prod is handled
+    by the hard fail-fast upstream, never reaching here.
+    """
+    if _is_production():
+        return False
+    env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+    return bool(env) and env not in _DEV_ENV_LABELS
+
+
 def _resolve_secret() -> str:
     """Return the JWT signing secret, refusing the insecure default in prod.
 
@@ -125,6 +177,24 @@ def _resolve_secret() -> str:
             "admin sessions. Set AUTH_SECRET to a strong random value, e.g.\n"
             '  AUTH_SECRET="$(python -c \'import secrets; '
             "print(secrets.token_urlsafe(48))')\""
+        )
+
+    if _is_ambiguous_nonprod_label():
+        # Staging-posture blind spot: a labelled-but-not-prod deployment (e.g.
+        # POCKETPAW_ENV=staging) without a real AUTH_SECRET would otherwise boot
+        # SILENTLY on the ephemeral default. Warn loudly so an operator who
+        # meant this to be prod-like notices the insecure secret. We still
+        # substitute the ephemeral secret (boot is unchanged) — only the signal
+        # is added; flipping this to a hard fail would break the test suite and
+        # any intentional staging-on-defaults run.
+        logger.warning(
+            "POCKETPAW_ENV=%s is a non-dev, non-prod label, but no real "
+            "AUTH_SECRET is set and production was not positively detected. "
+            "Falling back to an EPHEMERAL per-process JWT secret — tokens will "
+            "not survive a restart and this deployment is NOT production-secure. "
+            "Set a strong AUTH_SECRET (and POCKETPAW_ENV=production) before "
+            "treating this as production.",
+            os.environ.get("POCKETPAW_ENV", "").strip(),
         )
 
     ephemeral = secrets.token_urlsafe(48)

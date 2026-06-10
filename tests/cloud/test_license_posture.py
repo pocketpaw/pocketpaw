@@ -1,5 +1,10 @@
 # test_license_posture.py — Tests for the production DEV-key bypass gate.
 # Created: 2026-06-10 (sov/w1a-deploy).
+# Updated: 2026-06-10 (security R2b review — staging-posture blind spot):
+#   added TestStagingPostureWarning + _is_ambiguous_nonprod_label() coverage —
+#   a non-dev/non-prod POCKETPAW_ENV label (e.g. staging) still on the DEV key
+#   now emits a LOUD warning (no raise); dev/unset stays silent; prod still
+#   raises.
 #
 # W0a baked a committed DEV Ed25519 public key into license verification so a
 # fresh checkout can mint + verify with zero setup. That key is a license
@@ -9,12 +14,15 @@
 #   * production posture + DEV key in use  -> RuntimeError (refuse to run);
 #   * production posture + operator key set -> no raise (escaped the bypass);
 #   * dev/test posture + DEV key in use     -> no raise (zero-config loop OK);
+#   * staging-label posture + DEV key       -> LOUD warning, no raise (R2b);
 #   * _using_dev_public_key() reports the DEV-vs-operator state correctly;
 #   * the gate fires from load_license() at boot, even with no license key set.
 #
 # Hermetic — exercises license.py directly (env + module cache only, no Mongo).
 
 from __future__ import annotations
+
+import logging
 
 import pytest
 
@@ -186,3 +194,81 @@ class TestHmacFallbackHardening:
         monkeypatch.setenv("POCKETPAW_LICENSE_PUBLIC_KEY", pub)
         sig = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(priv)).sign(self._PAYLOAD).hex()
         assert lic_mod._verify_signature(self._PAYLOAD, sig) is True
+
+
+# ---------------------------------------------------------------------------
+# Staging-posture blind spot — ambiguous label warns on the dev-key path
+# (R2b review fix). The autouse _clean_license_env fixture clears env + cache.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("label", ["staging", "qa", "preprod", "uat"])
+def test_is_ambiguous_nonprod_label_true_for_unknown_labels(monkeypatch, label):
+    monkeypatch.setenv("POCKETPAW_ENV", label)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    assert lic_mod._is_ambiguous_nonprod_label() is True
+
+
+@pytest.mark.parametrize("label", ["", "dev", "development", "local", "test"])
+def test_is_ambiguous_nonprod_label_false_for_dev_or_unset(monkeypatch, label):
+    if label == "":
+        monkeypatch.delenv("POCKETPAW_ENV", raising=False)
+    else:
+        monkeypatch.setenv("POCKETPAW_ENV", label)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    assert lic_mod._is_ambiguous_nonprod_label() is False
+
+
+@pytest.mark.parametrize("label", ["production", "prod"])
+def test_is_ambiguous_nonprod_label_false_for_prod(monkeypatch, label):
+    monkeypatch.setenv("POCKETPAW_ENV", label)
+    assert lic_mod._is_ambiguous_nonprod_label() is False
+
+
+class TestStagingPostureWarning:
+    """A non-dev/non-prod label (e.g. staging) still on the bypassable DEV
+    license key must WARN loudly without raising — boot is unchanged, only the
+    signal is added. Production still raises; explicit dev/unset stays silent."""
+
+    def test_staging_with_dev_key_warns_no_raise(self, monkeypatch, caplog):
+        monkeypatch.setenv("POCKETPAW_ENV", "staging")
+        monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+        monkeypatch.delenv("POCKETPAW_LICENSE_PUBLIC_KEY", raising=False)  # dev key
+        with caplog.at_level(logging.WARNING, logger=lic_mod.logger.name):
+            # Must NOT raise — staging is not prod.
+            lic_mod.enforce_license_key_posture()
+        assert any(
+            "non-dev, non-prod label" in r.getMessage()
+            and "staging" in r.getMessage()
+            and "BYPASS" in r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+        )
+
+    @pytest.mark.parametrize("label", ["", "dev", "development", "local", "test"])
+    def test_dev_or_unset_with_dev_key_does_not_warn(self, monkeypatch, caplog, label):
+        if label == "":
+            monkeypatch.delenv("POCKETPAW_ENV", raising=False)
+        else:
+            monkeypatch.setenv("POCKETPAW_ENV", label)
+        monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+        monkeypatch.delenv("POCKETPAW_LICENSE_PUBLIC_KEY", raising=False)
+        with caplog.at_level(logging.WARNING, logger=lic_mod.logger.name):
+            lic_mod.enforce_license_key_posture()
+        assert not any("non-dev, non-prod label" in r.getMessage() for r in caplog.records)
+
+    def test_staging_with_operator_key_does_not_warn(self, monkeypatch, caplog):
+        """An escaped-the-bypass staging deployment (operator key set) is fine."""
+        monkeypatch.setenv("POCKETPAW_ENV", "staging")
+        _priv, pub = mint.generate_keypair()
+        monkeypatch.setenv("POCKETPAW_LICENSE_PUBLIC_KEY", pub)
+        with caplog.at_level(logging.WARNING, logger=lic_mod.logger.name):
+            lic_mod.enforce_license_key_posture()
+        assert not any("non-dev, non-prod label" in r.getMessage() for r in caplog.records)
+
+    def test_prod_with_dev_key_still_raises_not_warns(self, monkeypatch):
+        """Explicit prod must still hard-fail, never fall to the warn-only path."""
+        monkeypatch.setenv("POCKETPAW_ENV", "production")
+        monkeypatch.delenv("POCKETPAW_LICENSE_PUBLIC_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="BYPASS"):
+            lic_mod.enforce_license_key_posture()
