@@ -145,20 +145,31 @@ def _build_gallery_spec(media: list[dict[str, Any]]) -> dict[str, Any]:
                 ],
             }
         )
+    # version + a non-dashboard intent make pocketsStore.toRippleEnvelope pass
+    # the spec through untouched, and Ripple render it in NODE mode (a bare
+    # {"ui": [...]} got intent="dashboard" stamped on, which makes Ripple read
+    # `widgets` — always empty here — and render "No widgets yet"). `ui` must
+    # be a single root node, not a list: NodeRenderer takes one node.
     return {
-        "ui": [
-            {
-                "id": "studio-title",
-                "type": "text",
-                "props": {"text": "Generated media"},
-            },
-            {
-                "id": "studio-grid",
-                "type": "grid",
-                "props": {"columns": 3, "gap": "1rem"},
-                "children": tiles,
-            },
-        ]
+        "version": "2.0",
+        "intent": "gallery",
+        "ui": {
+            "id": "studio-root",
+            "type": "container",
+            "children": [
+                {
+                    "id": "studio-title",
+                    "type": "text",
+                    "props": {"text": "Generated media"},
+                },
+                {
+                    "id": "studio-grid",
+                    "type": "grid",
+                    "props": {"columns": 3, "gap": "1rem"},
+                    "children": tiles,
+                },
+            ],
+        },
     }
 
 

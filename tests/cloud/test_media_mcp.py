@@ -164,22 +164,30 @@ async def test_video_generate_error_when_no_identity() -> None:
 
 
 def test_gallery_spec_uses_only_existing_widget_types() -> None:
-    """The assembled gallery spec uses ONLY grid / card / image / video-player /
-    text so it renders today."""
+    """The assembled gallery spec uses ONLY container / grid / card / image /
+    video-player / text so it renders today, and carries version + a
+    non-dashboard intent so toRippleEnvelope passes it through untouched and
+    Ripple renders it in node mode (2026-06-10 — a bare {ui: [...]} got
+    intent=dashboard stamped on and rendered "No widgets yet")."""
     spec = media._build_gallery_spec(
         [
             {"kind": "image", "src": "/tmp/a.png", "prompt": "a"},
             {"kind": "video", "src": "https://x/v.mp4", "prompt": "b"},
         ]
     )
-    allowed = {"grid", "card", "image", "video-player", "text"}
+    assert spec["version"] == "2.0"
+    assert spec["intent"] != "dashboard"
+    allowed = {"container", "grid", "card", "image", "video-player", "text"}
 
     def _walk(nodes):
         for n in nodes:
             assert n["type"] in allowed, f"unexpected widget type {n['type']!r}"
             _walk(n.get("children", []))
 
-    _walk(spec["ui"])
+    # `ui` is a single root node — NodeRenderer takes one node, not a list.
+    root = spec["ui"]
+    assert isinstance(root, dict)
+    _walk([root])
     # The grid holds one tile per media item.
-    grid = next(n for n in spec["ui"] if n["type"] == "grid")
+    grid = next(n for n in root["children"] if n["type"] == "grid")
     assert len(grid["children"]) == 2
