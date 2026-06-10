@@ -632,31 +632,55 @@ class InstinctStore:
         params.append(action_id)
 
         await self._ensure_schema()
-        workspace_id: str | None = None
-        async with self._conn() as db:
-            await db.execute(f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?", params)
-            await db.commit()
-            # W4a — read back the action's owning workspace so the lifecycle
-            # audit row (approve / reject / execute / fail) is stamped with the
-            # same tenant the action belongs to. Done with a tiny direct read
-            # rather than widening the Action model.
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT workspace_id FROM instinct_actions WHERE id = ?", (action_id,)
-            ) as cur:
-                ws_row = await cur.fetchone()
-                if ws_row is not None and "workspace_id" in ws_row.keys():
-                    workspace_id = ws_row["workspace_id"]
-
-        await self._log(
+        # FIX 2 — the status UPDATE and the lifecycle audit row must land
+        # ATOMICALLY: previously the UPDATE committed on its own connection and a
+        # SEPARATE ``_log`` call wrote the audit row afterward; if that audit
+        # append raised ``AuditChainError`` the action was already flipped
+        # (approved / rejected / executed) with NO audit row. We now run the
+        # UPDATE + the audit read-head + insert inside ONE transaction on ONE
+        # connection (explicit BEGIN, single commit), so either both persist or
+        # neither does. The per-instance ``self._log_lock`` (REVIEW-1) is held
+        # across the chain read-head + insert exactly as in ``_log``.
+        entry = AuditEntry(
             action_id=action_id,
             pocket_id=action.pocket_id,
             actor=actor,
             event=event,
+            category=AuditCategory.DECISION,
             description=f"{event.replace('_', ' ').title()}: {action.title}{extra_desc}",
-            context=audit_context,
-            workspace_id=workspace_id,
+            context=audit_context or {},
         )
+        try:
+            async with self._log_lock, self._conn() as db:
+                await db.execute("BEGIN")
+                await db.execute(
+                    f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?", params
+                )
+                # W4a — read back the action's owning workspace so the lifecycle
+                # audit row (approve / reject / execute / fail) is stamped with
+                # the same tenant the action belongs to. Done with a tiny direct
+                # read rather than widening the Action model.
+                workspace_id: str | None = None
+                db.row_factory = aiosqlite.Row
+                async with db.execute(
+                    "SELECT workspace_id FROM instinct_actions WHERE id = ?", (action_id,)
+                ) as cur:
+                    ws_row = await cur.fetchone()
+                    if ws_row is not None and "workspace_id" in ws_row.keys():
+                        workspace_id = ws_row["workspace_id"]
+                # Same connection, same transaction — the audit append shares the
+                # UPDATE's BEGIN, so a chain failure rolls the status flip back.
+                await self._append_audit_locked(db, entry, workspace_id=workspace_id)
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — re-raised loudly below
+            # Mirror ``_log``'s loud posture: a lifecycle decision that cannot be
+            # written into the tamper-evident ledger must NOT silently succeed.
+            # The transaction has already rolled back (the UPDATE did not land),
+            # so the action status is unchanged.
+            raise AuditChainError(
+                f"failed to append audit entry {entry.id} ({event}) to the "
+                f"tamper-evident ledger: {exc}"
+            ) from exc
         return await self.get_action(action_id)
 
     async def get_action(self, action_id: str) -> Action | None:
@@ -783,6 +807,48 @@ class InstinctStore:
             outcome=outcome,
         )
         await self._ensure_schema()
+        try:
+            # Hold the per-instance lock across the read-head + insert so the
+            # chain stays linear under concurrent _log calls (REVIEW-1). The
+            # standalone audit write owns its own connection + commit.
+            async with self._log_lock, self._conn() as db:
+                await self._append_audit_locked(db, entry, workspace_id=workspace_id)
+                await db.commit()
+        except Exception as exc:  # noqa: BLE001 — re-raised loudly below
+            # Failure posture (W2b): a decision that cannot be written into the
+            # tamper-evident ledger must NOT silently succeed. Surface the
+            # failure to the caller instead of swallowing it — the audit trail
+            # is the governance guarantee. (Contrast: the router's
+            # Decision-Graph emits are best-effort.)
+            raise AuditChainError(
+                f"failed to append audit entry {entry.id} ({event}) to the "
+                f"tamper-evident ledger: {exc}"
+            ) from exc
+        return entry
+
+    async def _append_audit_locked(
+        self,
+        db: aiosqlite.Connection,
+        entry: AuditEntry,
+        *,
+        workspace_id: str | None,
+    ) -> None:
+        """Compute one chain link and INSERT the audit row on ``db``.
+
+        Does the W2b read-head + hash + insert but NOT the commit — the caller
+        owns transaction boundaries. Two callers share it:
+
+        - :meth:`_log` — opens its own connection, commits immediately.
+        - :meth:`_update_status` — runs this inside the SAME transaction as the
+          status UPDATE, so the action flip and its audit row land atomically
+          (FIX 2). A failure here propagates and rolls back the UPDATE.
+
+        CONTRACT: the caller MUST already hold ``self._log_lock`` so the chain
+        read-head + insert stays serialized (REVIEW-1). The W2b canonical hash
+        is computed identically on both paths — ``workspace_id`` is appended as
+        a plain column ONLY and is deliberately absent from the canonical
+        payload and the hash (the chain is GLOBAL; tenancy is a read filter).
+        """
         # The SQLite ``timestamp`` column defaults to ``datetime('now')`` and is
         # what a reader sees, but the hash must be computed over a value we
         # control deterministically. We stamp the timestamp ourselves (ISO
@@ -803,65 +869,49 @@ class InstinctStore:
             ai_recommendation=entry.ai_recommendation,
             outcome=entry.outcome,
         )
-        try:
-            # Hold the per-instance lock across the read-head + insert so the
-            # chain stays linear under concurrent _log calls (REVIEW-1).
-            async with self._log_lock, self._conn() as db:
-                # ``prev_hash`` is the entry_hash of the most-recently inserted
-                # hashed row. ``rowid`` is monotonic with insertion order, so it
-                # gives a stable chain head even across timestamp ties. Legacy
-                # rows with a NULL entry_hash are skipped — the live chain links
-                # only hashed rows (the genesis link uses prev_hash="").
-                async with db.execute(
-                    "SELECT entry_hash FROM instinct_audit"
-                    " WHERE entry_hash IS NOT NULL"
-                    " ORDER BY rowid DESC LIMIT 1"
-                ) as cur:
-                    prev_row = await cur.fetchone()
-                prev_hash = prev_row[0] if prev_row else ""
-                entry_hash = compute_audit_hash(canonical, prev_hash)
+        # ``prev_hash`` is the entry_hash of the most-recently inserted hashed
+        # row. ``rowid`` is monotonic with insertion order, so it gives a stable
+        # chain head even across timestamp ties. Legacy rows with a NULL
+        # entry_hash are skipped — the live chain links only hashed rows (the
+        # genesis link uses prev_hash="").
+        async with db.execute(
+            "SELECT entry_hash FROM instinct_audit"
+            " WHERE entry_hash IS NOT NULL"
+            " ORDER BY rowid DESC LIMIT 1"
+        ) as cur:
+            prev_row = await cur.fetchone()
+        prev_hash = prev_row[0] if prev_row else ""
+        entry_hash = compute_audit_hash(canonical, prev_hash)
 
-                # ``workspace_id`` (W4a) is appended as a plain column ONLY. It
-                # is deliberately absent from ``canonical`` above and from
-                # ``compute_audit_hash`` — the W2b chain is GLOBAL and must hash
-                # identically on re-verification regardless of tenancy. Tenancy
-                # is a read filter, not chain content.
-                await db.execute(
-                    "INSERT INTO instinct_audit"
-                    " (id, action_id, pocket_id, timestamp, actor, event,"
-                    " category, description, context,"
-                    " ai_recommendation, outcome, prev_hash, entry_hash,"
-                    " workspace_id)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        entry.id,
-                        entry.action_id,
-                        entry.pocket_id,
-                        timestamp,
-                        entry.actor,
-                        entry.event,
-                        entry.category.value,
-                        entry.description,
-                        context_json,
-                        entry.ai_recommendation,
-                        entry.outcome,
-                        prev_hash,
-                        entry_hash,
-                        workspace_id,
-                    ),
-                )
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001 — re-raised loudly below
-            # Failure posture (W2b): a decision that cannot be written into the
-            # tamper-evident ledger must NOT silently succeed. Surface the
-            # failure to the caller instead of swallowing it — the audit trail
-            # is the governance guarantee. (Contrast: the router's
-            # Decision-Graph emits are best-effort.)
-            raise AuditChainError(
-                f"failed to append audit entry {entry.id} ({event}) to the "
-                f"tamper-evident ledger: {exc}"
-            ) from exc
-        return entry
+        # ``workspace_id`` (W4a) is appended as a plain column ONLY. It is
+        # deliberately absent from ``canonical`` above and from
+        # ``compute_audit_hash`` — the W2b chain is GLOBAL and must hash
+        # identically on re-verification regardless of tenancy. Tenancy is a
+        # read filter, not chain content.
+        await db.execute(
+            "INSERT INTO instinct_audit"
+            " (id, action_id, pocket_id, timestamp, actor, event,"
+            " category, description, context,"
+            " ai_recommendation, outcome, prev_hash, entry_hash,"
+            " workspace_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                entry.id,
+                entry.action_id,
+                entry.pocket_id,
+                timestamp,
+                entry.actor,
+                entry.event,
+                entry.category.value,
+                entry.description,
+                context_json,
+                entry.ai_recommendation,
+                entry.outcome,
+                prev_hash,
+                entry_hash,
+                workspace_id,
+            ),
+        )
 
     async def log(self, *, actor: str, event: str, description: str, **kwargs: Any) -> AuditEntry:
         """Public audit log method for non-action events."""
