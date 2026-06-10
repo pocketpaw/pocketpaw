@@ -68,6 +68,12 @@
 #       one item with per-item error isolation; the response carries an
 #       ``executed`` list of per-item outcomes so one failing write can't
 #       silently drop the rest.
+# Updated: 2026-06-10 (sov/r2a FIX 3) — ``_execute_bulk_approved_nudge`` now
+# imports the chain-emit helpers (``_emit_human_corrected`` /
+# ``_emit_policy_evaluated_approved`` / ``_pocket_write_blob``) from the new
+# shared ``ee.instinct.chain_emitters`` module instead of reaching into the
+# Instinct router's private internals. Behavior is identical (same helpers,
+# same call order) — the façade no longer couples to the router.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -447,8 +453,10 @@ async def _execute_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> d
     emit ``human.corrected(accepted)`` + ``policy.evaluated(passed=True)``,
     then fire ``execute_approved_write`` so the parked write actually
     lands and the bridge closes the Decision-Graph chain. We reuse the
-    router's helpers (lazy import — no module-top instinct→mission_control
-    coupling) so the chain logic is shared, not forked.
+    shared chain-emit helpers from ``ee.instinct.chain_emitters`` (lazy
+    import — no module-top instinct→mission_control coupling) so the chain
+    logic is shared, not forked, and the façade no longer reaches into the
+    router's internals.
 
     Returns a per-item outcome dict ``{"id", "executed", "error"}``:
       - non-pocket-write Actions report ``executed=False`` with no error
@@ -461,7 +469,7 @@ async def _execute_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> d
     body so one item's unexpected crash can't strand the rest of the batch.
     """
     from pocketpaw_ee.cloud.pockets import instinct_bridge
-    from pocketpaw_ee.instinct.router import (
+    from pocketpaw_ee.instinct.chain_emitters import (
         _emit_human_corrected,
         _emit_policy_evaluated_approved,
         _pocket_write_blob,

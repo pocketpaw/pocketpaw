@@ -26,6 +26,11 @@
 # one item whose write raises is reported failed while the rest still land.
 # Added ``_pocket_write_params`` matching the schema-2 blob shape the
 # Instinct bridge stores.
+# Updated: 2026-06-10 (sov/r2a FIX 3) — the chain-emit helpers moved out of
+# ``ee.instinct.router`` into the shared ``ee.instinct.chain_emitters`` module
+# (decoupling the façade from the router). The bulk-approve chain-emit spy test
+# now monkeypatches ``ee.instinct.chain_emitters._emit_*`` (where the service
+# imports them from) instead of the old router path.
 
 from __future__ import annotations
 
@@ -398,9 +403,11 @@ class TestBulkApproveExecutesWrites:
             return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
 
         self._wire_bridge(monkeypatch, store, _run_action)
-        monkeypatch.setattr("pocketpaw_ee.instinct.router._emit_human_corrected", _spy_human)
         monkeypatch.setattr(
-            "pocketpaw_ee.instinct.router._emit_policy_evaluated_approved", _spy_policy
+            "pocketpaw_ee.instinct.chain_emitters._emit_human_corrected", _spy_human
+        )
+        monkeypatch.setattr(
+            "pocketpaw_ee.instinct.chain_emitters._emit_policy_evaluated_approved", _spy_policy
         )
 
         a = await store.propose(
