@@ -1,5 +1,10 @@
 # Tests for ee/fabric — ontology store (SQLite).
 # Created: 2026-03-28
+# Updated: 2026-06-10 (W0d) — Added TestQueryFilters covering FabricQuery.filters:
+#   numeric comparison (the "rent > X" case), string equality, operator aliases,
+#   combined type+property filters, and the property-name / operator validation
+#   guards. These would all have silently passed (returning every object) before
+#   store.query() learned to honor filters.
 
 from __future__ import annotations
 
@@ -172,3 +177,102 @@ class TestQuery:
         await store.link(a.id, b.id, "r")
         s = await store.stats()
         assert s == {"types": 1, "objects": 2, "links": 1}
+
+
+class TestQueryFilters:
+    """FabricQuery.filters must actually narrow results (W0d regression guard)."""
+
+    async def _seed_leases(self, store: FabricStore) -> str:
+        """Three leases with varied rent + status; returns the type id."""
+        t = await store.define_type(
+            name="Lease",
+            properties=[
+                PropertyDef(name="tenant", type="string"),
+                PropertyDef(name="rent", type="number"),
+                PropertyDef(name="status", type="string"),
+            ],
+        )
+        await store.create_object(t.id, {"tenant": "Acme", "rent": 500, "status": "active"})
+        await store.create_object(t.id, {"tenant": "Globex", "rent": 1500, "status": "active"})
+        await store.create_object(t.id, {"tenant": "Initech", "rent": 3000, "status": "expired"})
+        return t.id
+
+    @pytest.mark.asyncio
+    async def test_numeric_comparison_gt(self, store: FabricStore) -> None:
+        # The "rent > X" case — the exact bug this task fixes.
+        await self._seed_leases(store)
+        result = await store.query(FabricQuery(type_name="Lease", filters={"rent": {">": 1000}}))
+        assert result.total == 2
+        tenants = {o.properties["tenant"] for o in result.objects}
+        assert tenants == {"Globex", "Initech"}
+
+    @pytest.mark.asyncio
+    async def test_numeric_comparison_gte_and_lte(self, store: FabricStore) -> None:
+        await self._seed_leases(store)
+        gte = await store.query(FabricQuery(type_name="Lease", filters={"rent": {">=": 1500}}))
+        assert {o.properties["tenant"] for o in gte.objects} == {"Globex", "Initech"}
+
+        lte = await store.query(FabricQuery(type_name="Lease", filters={"rent": {"<=": 1500}}))
+        assert {o.properties["tenant"] for o in lte.objects} == {"Acme", "Globex"}
+
+    @pytest.mark.asyncio
+    async def test_string_equality_scalar(self, store: FabricStore) -> None:
+        await self._seed_leases(store)
+        result = await store.query(FabricQuery(type_name="Lease", filters={"status": "active"}))
+        assert result.total == 2
+        assert all(o.properties["status"] == "active" for o in result.objects)
+
+    @pytest.mark.asyncio
+    async def test_operator_word_aliases(self, store: FabricStore) -> None:
+        # Word aliases (gt/lte/...) must behave identically to their symbols.
+        await self._seed_leases(store)
+        gt = await store.query(FabricQuery(type_name="Lease", filters={"rent": {"gt": 1000}}))
+        assert gt.total == 2
+
+    @pytest.mark.asyncio
+    async def test_not_equal(self, store: FabricStore) -> None:
+        await self._seed_leases(store)
+        result = await store.query(
+            FabricQuery(type_name="Lease", filters={"status": {"!=": "active"}})
+        )
+        assert result.total == 1
+        assert result.objects[0].properties["tenant"] == "Initech"
+
+    @pytest.mark.asyncio
+    async def test_combined_type_and_property_filter(self, store: FabricStore) -> None:
+        # type filter AND property filters are AND-ed; a different type with a
+        # matching rent must not leak in.
+        await self._seed_leases(store)
+        other = await store.define_type(name="Invoice", properties=[])
+        await store.create_object(other.id, {"rent": 9999, "status": "active"})
+
+        result = await store.query(
+            FabricQuery(
+                type_name="Lease",
+                filters={"status": "active", "rent": {">": 1000}},
+            )
+        )
+        assert result.total == 1
+        assert result.objects[0].properties["tenant"] == "Globex"
+
+    @pytest.mark.asyncio
+    async def test_missing_property_excluded_from_comparison(self, store: FabricStore) -> None:
+        # An object lacking the filtered property must not match a comparison.
+        t = await store.define_type(name="Lease", properties=[])
+        await store.create_object(t.id, {"tenant": "HasRent", "rent": 2000})
+        await store.create_object(t.id, {"tenant": "NoRent"})
+        result = await store.query(FabricQuery(type_name="Lease", filters={"rent": {">": 1000}}))
+        assert result.total == 1
+        assert result.objects[0].properties["tenant"] == "HasRent"
+
+    @pytest.mark.asyncio
+    async def test_invalid_property_name_rejected(self, store: FabricStore) -> None:
+        await self._seed_leases(store)
+        with pytest.raises(ValueError):
+            await store.query(FabricQuery(type_name="Lease", filters={"rent') OR 1=1 --": 1}))
+
+    @pytest.mark.asyncio
+    async def test_unsupported_operator_rejected(self, store: FabricStore) -> None:
+        await self._seed_leases(store)
+        with pytest.raises(ValueError):
+            await store.query(FabricQuery(type_name="Lease", filters={"rent": {"LIKE": 1}}))

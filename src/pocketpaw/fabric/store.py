@@ -3,6 +3,15 @@
 # Updated: 2026-04-19 (Cluster C / PR3) — Added list_links() for the new
 #   GET /api/v1/fabric/links endpoint that the Links sub-tab in
 #   PocketDataPanel now consumes instead of its hardcoded placeholder.
+# Updated: 2026-06-10 (W0d) — query() now honors FabricQuery.filters. Property
+#   filters were previously parsed into the model but silently dropped, so
+#   "leases where rent > X" returned ALL objects of the type. Filters are
+#   applied against the JSON properties bag via json_extract with whitelisted
+#   operators; property names go through a fixed validation gate and values are
+#   always bound parameters (no value interpolation). Comparison operators use
+#   CAST(... AS REAL) so numeric comparisons stay numeric regardless of param
+#   type. New helper _build_filter_conditions() keeps the change localized to
+#   the filter logic so a later workspace_id-scoping change merges cleanly.
 
 from __future__ import annotations
 
@@ -59,6 +68,82 @@ CREATE INDEX IF NOT EXISTS idx_links_from ON fabric_links(from_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_to ON fabric_links(to_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_type ON fabric_links(link_type);
 """
+
+# Whitelist of filter operators -> SQL operator. User input never reaches the
+# SQL string except through this fixed mapping; an unknown operator raises
+# rather than being interpolated. Both symbolic and word aliases are accepted
+# so callers (agent tool, REST body) can use whichever reads cleaner.
+_FILTER_OPS: dict[str, str] = {
+    "=": "=",
+    "==": "=",
+    "eq": "=",
+    "!=": "!=",
+    "ne": "!=",
+    ">": ">",
+    "gt": ">",
+    ">=": ">=",
+    "gte": ">=",
+    "<": "<",
+    "lt": "<",
+    "<=": "<=",
+    "lte": "<=",
+}
+
+# Operators whose comparison must be numeric. For these we CAST both the stored
+# JSON value and the bound parameter to REAL so that "rent > 1000" compares as
+# numbers, never as the text affinity SQLite would otherwise pick when one side
+# is TEXT. Equality / inequality stay un-CAST so string eq ("status" = "active")
+# and numeric eq both behave naturally.
+_NUMERIC_OPS: frozenset[str] = frozenset({">", ">=", "<", "<="})
+
+
+def _is_number(value: Any) -> bool:
+    """True for ints/floats but not bools (bool is an int subclass in Python)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _build_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[Any]]:
+    """Translate FabricQuery.filters into SQL WHERE fragments + bound params.
+
+    Two value forms are supported per property key, matching the existing
+    ``dict[str, Any]`` shape rather than inventing a new one:
+
+    - scalar      -> equality, e.g. ``{"status": "active"}``
+    - operator map -> comparison, e.g. ``{"rent": {">": 1000}}`` or
+      ``{"rent": {"gte": 1000}}`` (multiple ops on one key are AND-ed).
+
+    Property names are validated against a conservative identifier charset
+    before being placed into the ``$.<name>`` JSON path (SQLite cannot bind a
+    JSON path as a parameter). Operator symbols are mapped through the
+    ``_FILTER_OPS`` whitelist. Filter VALUES are always emitted as ``?``
+    placeholders — never interpolated — so there is no value-side injection
+    surface.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    for raw_key, raw_val in filters.items():
+        key = str(raw_key)
+        # Restrict property names to a safe identifier set. Anything else (a
+        # quote, a dot, a bracket) is rejected so it can never break out of the
+        # JSON path literal.
+        if not key or not all(c.isalnum() or c in "_-" for c in key):
+            raise ValueError(f"Invalid filter property name: {raw_key!r}")
+        path = f"$.{key}"
+
+        # An operator map => one condition per operator; a scalar => equality.
+        op_map = raw_val if isinstance(raw_val, dict) else {"=": raw_val}
+        for op_token, value in op_map.items():
+            sql_op = _FILTER_OPS.get(str(op_token).lower())
+            if sql_op is None:
+                raise ValueError(f"Unsupported filter operator: {op_token!r}")
+            if sql_op in _NUMERIC_OPS and _is_number(value):
+                # Numeric comparison: force REAL affinity on both sides.
+                conditions.append(f"CAST(json_extract(o.properties, ?) AS REAL) {sql_op} ?")
+                params.extend([path, float(value)])
+            else:
+                conditions.append(f"json_extract(o.properties, ?) {sql_op} ?")
+                params.extend([path, value])
+    return conditions, params
 
 
 class FabricStore:
@@ -373,6 +458,14 @@ class FabricStore:
                 )
                 conditions.append(link_cond)
                 params.extend([q.linked_to, q.linked_to])
+
+        # Property filters against the JSON properties bag. Kept as a localized
+        # block (see _build_filter_conditions) so concurrent work on this method
+        # — e.g. workspace_id scoping — merges without touching this logic.
+        if q.filters:
+            filter_conditions, filter_params = _build_filter_conditions(q.filters)
+            conditions.extend(filter_conditions)
+            params.extend(filter_params)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
