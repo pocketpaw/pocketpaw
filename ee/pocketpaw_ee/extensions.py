@@ -24,6 +24,11 @@ also starts the RFC 03 v2 temporal trigger sweep scheduler in
 ``POCKETPAW_TEMPORAL_SWEEP_ENABLED`` (default OFF) so pytest runs and
 multi-replica deployments don't double-fire. Cadence is configurable via
 ``POCKETPAW_TEMPORAL_SWEEP_INTERVAL_SECONDS`` (default 3600, floor 60).
+
+Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvider``
+(``pocketpaw.mcp_servers`` entry ``media``) exposing the STUDIO image +
+video generation in-process server (``pocketpaw_media``) to the
+claude_agent_sdk cloud chat backend, mirroring ``CloudSitesMcpProvider``.
 """
 
 from __future__ import annotations
@@ -577,6 +582,34 @@ class CloudSitesMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
 
         return list(SITES_TOOL_IDS)
+
+
+class CloudMediaMcpProvider:
+    """`pocketpaw.mcp_servers` — the STUDIO media-generation in-process server
+    (``pocketpaw_media``). Hosts ``image_generate`` + ``video_generate``.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled ``studio`` skill can
+    call it on any cloud chat agent that hits a "generate an image / make a
+    video" request without an explicit opt-in — the same regime the sites
+    manager + pocket specialist use. The cloud chat agent runs on the
+    claude_agent_sdk backend, which only sees in-process MCP servers (a plain
+    BaseTool is invisible to it), so media generation MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.media import build_media_server
+
+            return build_media_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the media server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
+
+        return list(MEDIA_TOOL_IDS)
 
 
 class CloudAgentExtension:

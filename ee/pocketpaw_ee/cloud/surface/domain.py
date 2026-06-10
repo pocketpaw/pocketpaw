@@ -43,6 +43,11 @@
 # into ``models.*`` — which the OSS-EE boundary contract forbids. The surface
 # package is models-free at import time, so ``models.pocket`` can import this
 # without a cycle.
+# Changes: 2026-06-10 (feat/studio-code-migration) — added two new chat-bearing
+# surfaces to ``SurfaceKind``: ``STUDIO`` (/studio — describe→generate media,
+# image + video) and ``CODE`` (/code — the agent edits + runs code). Both get
+# ``ripple_mode="off"`` profiles in ``service.py`` so the agent generates media /
+# edits code instead of defaulting to a ripple ui-spec dashboard.
 
 from __future__ import annotations
 
@@ -80,6 +85,8 @@ class SurfaceKind(StrEnum):
     SIDEPANEL = "sidepanel"
     FORESIGHT = "foresight"  # /foresight + /foresight/scenarios/* routes
     SITES = "sites"  # /sites — describe-to-create + manage published Paw Sites
+    STUDIO = "studio"  # /studio — describe→generate media (image + video)
+    CODE = "code"  # /code — agent edits + runs code in the workspace
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 

@@ -798,7 +798,26 @@ class Settings(BaseSettings):
     # Image Generation
     google_api_key: str | None = Field(default=None, description="Google API key (for Gemini)")
     image_model: str = Field(
-        default="gemini-2.0-flash-exp", description="Google image generation model"
+        default="gemini-2.5-flash-image",
+        description=(
+            "Google image generation model. Gemini image models "
+            "(gemini-*-image) run via generateContent and work on free-tier "
+            "keys; imagen-* models run via the predict endpoint, which "
+            "Google restricts to paid-tier keys."
+        ),
+    )
+    # Video Generation (Replicate HTTP API — used by the /studio surface's
+    # media MCP server). Env auto-derives POCKETPAW_REPLICATE_API_TOKEN /
+    # POCKETPAW_FAL_API_KEY / POCKETPAW_VIDEO_MODEL.
+    replicate_api_token: str | None = Field(
+        default=None, description="Replicate API token (for video generation via the HTTP API)"
+    )
+    fal_api_key: str | None = Field(
+        default=None, description="fal.ai API key (alternate media-generation provider)"
+    )
+    video_model: str = Field(
+        default="kwaivgi/kling-v2.0",
+        description="Replicate video-generation model (owner/name slug)",
     )
 
     # Security
