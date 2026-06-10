@@ -12,6 +12,26 @@
 #   CAST(... AS REAL) so numeric comparisons stay numeric regardless of param
 #   type. New helper _build_filter_conditions() keeps the change localized to
 #   the filter logic so a later workspace_id-scoping change merges cleanly.
+# Updated: 2026-06-10 (W4a — workspace-scope fabric store) — closes a
+#   cross-tenant data leak on shared deployments (the micro tier / an agency
+#   running multiple client tenants share one ``fabric.db``). Objects and links
+#   now carry a ``workspace_id`` column. Writes (``create_object`` / ``link``)
+#   stamp the caller's workspace; reads (``query`` / ``list_links`` /
+#   ``get_object`` / ``get_linked_objects``) take an optional ``workspace_id``
+#   and, when supplied, restrict results to that tenant. The scoping is an
+#   ADDITIONAL WHERE condition layered ALONGSIDE W0d's property filters in
+#   ``query()`` — the filter logic is untouched. ``workspace_id`` crosses from
+#   the EE router as a PLAIN str (the OSS store never imports pocketpaw_ee).
+#   Legacy/NULL treatment: rows written before this change (or by a non-cloud
+#   OSS caller that passes no workspace) have NULL ``workspace_id``. A scoped
+#   read matches ``workspace_id = ? OR workspace_id IS NULL`` so legacy/global
+#   data predating tenancy stays visible to every tenant (it cannot be safely
+#   attributed to one workspace after the fact, and single-tenant deployments
+#   must keep working). New writes always stamp a workspace when one is given,
+#   so going-forward data is cleanly isolated. A read with ``workspace_id=None``
+#   applies no scoping at all (full backward-compat for OSS / agent-tool
+#   callers). Additive ALTER migration mirrors the W2b assignee/hash-chain
+#   pattern — no crash on a pre-existing DB.
 
 from __future__ import annotations
 
@@ -49,6 +69,9 @@ CREATE TABLE IF NOT EXISTS fabric_objects (
     properties TEXT NOT NULL DEFAULT '{}',
     source_connector TEXT,
     source_id TEXT,
+    -- Tenancy (W4a): the owning workspace. NULL = legacy/global row written
+    -- before tenancy or by a non-cloud OSS caller; a scoped read still sees it.
+    workspace_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -59,14 +82,19 @@ CREATE TABLE IF NOT EXISTS fabric_links (
     to_object_id TEXT NOT NULL REFERENCES fabric_objects(id),
     link_type TEXT NOT NULL,
     properties TEXT DEFAULT '{}',
+    -- Tenancy (W4a): same workspace semantics as fabric_objects. A link is
+    -- scoped to the workspace of the caller that created it.
+    workspace_id TEXT,
     created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_objects_type ON fabric_objects(type_id);
 CREATE INDEX IF NOT EXISTS idx_objects_source ON fabric_objects(source_connector, source_id);
+CREATE INDEX IF NOT EXISTS idx_objects_workspace ON fabric_objects(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_links_from ON fabric_links(from_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_to ON fabric_links(to_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_type ON fabric_links(link_type);
+CREATE INDEX IF NOT EXISTS idx_links_workspace ON fabric_links(workspace_id);
 """
 
 # Whitelist of filter operators -> SQL operator. User input never reaches the
@@ -100,6 +128,26 @@ _NUMERIC_OPS: frozenset[str] = frozenset({">", ">=", "<", "<="})
 def _is_number(value: Any) -> bool:
     """True for ints/floats but not bools (bool is an int subclass in Python)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _workspace_scope(
+    workspace_id: str | None, *, column: str = "workspace_id"
+) -> tuple[str | None, list[Any]]:
+    """Build the tenancy WHERE fragment + bound params for a scoped read (W4a).
+
+    Returns ``(condition, params)``:
+
+    - ``workspace_id is None`` -> ``(None, [])`` — no scoping. OSS / agent-tool
+      callers that don't carry a workspace see everything, exactly as before.
+    - a concrete workspace -> ``("(<col> = ? OR <col> IS NULL)", [workspace_id])``
+      — the caller's own rows PLUS legacy/global NULL-workspace rows that predate
+      tenancy (see the module-header note on the legacy boundary). The value is
+      always a bound parameter; ``column`` is a fixed caller-supplied literal
+      (``"workspace_id"`` or ``"o.workspace_id"``), never user input.
+    """
+    if workspace_id is None:
+        return None, []
+    return f"({column} = ? OR {column} IS NULL)", [workspace_id]
 
 
 def _build_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[Any]]:
@@ -158,6 +206,17 @@ class FabricStore:
             return
         async with aiosqlite.connect(self._db_path) as db:
             await db.executescript(SCHEMA_SQL)
+            # Additive migration (W4a): tenancy columns on a pre-existing DB.
+            # CREATE TABLE IF NOT EXISTS won't add a column to a table that
+            # already exists, so ALTER and swallow the duplicate-column error
+            # that fires on every subsequent boot — same pattern as the W2b
+            # instinct hash-chain / assignee migrations. Pre-existing rows keep
+            # NULL workspace_id (legacy/global; see the module header).
+            for _tbl in ("fabric_objects", "fabric_links"):
+                try:
+                    await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
+                except aiosqlite.OperationalError:
+                    pass
             await db.commit()
         self._initialized = True
 
@@ -255,6 +314,7 @@ class FabricStore:
         properties: dict[str, Any],
         source_connector: str | None = None,
         source_id: str | None = None,
+        workspace_id: str | None = None,
     ) -> FabricObject:
         obj_type = await self.get_type(type_id)
         obj = FabricObject(
@@ -269,8 +329,8 @@ class FabricStore:
             await db.execute(
                 "INSERT INTO fabric_objects"
                 " (id, type_id, type_name, properties,"
-                " source_connector, source_id)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                " source_connector, source_id, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     obj.id,
                     obj.type_id,
@@ -278,16 +338,29 @@ class FabricStore:
                     json.dumps(properties),
                     source_connector,
                     source_id,
+                    workspace_id,
                 ),
             )
             await db.commit()
         return obj
 
-    async def get_object(self, obj_id: str) -> FabricObject | None:
+    async def get_object(self, obj_id: str, workspace_id: str | None = None) -> FabricObject | None:
+        """Fetch one object by id, optionally scoped to ``workspace_id`` (W4a).
+
+        When ``workspace_id`` is supplied, a row belonging to another tenant
+        returns ``None`` (a 404 to the caller) — the cross-tenant read leak this
+        task closes. A legacy NULL-workspace row stays visible.
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_objects WHERE id = ?"
+        params: list[Any] = [obj_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM fabric_objects WHERE id = ?", (obj_id,)) as cur:
+            async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
                 if not row:
                     return None
@@ -322,7 +395,12 @@ class FabricStore:
     # --- Links ---
 
     async def link(
-        self, from_id: str, to_id: str, link_type: str, properties: dict[str, Any] | None = None
+        self,
+        from_id: str,
+        to_id: str,
+        link_type: str,
+        properties: dict[str, Any] | None = None,
+        workspace_id: str | None = None,
     ) -> FabricLink:
         lnk = FabricLink(
             from_object_id=from_id,
@@ -335,14 +413,15 @@ class FabricStore:
             await db.execute(
                 "INSERT INTO fabric_links"
                 " (id, from_object_id, to_object_id,"
-                " link_type, properties)"
-                " VALUES (?, ?, ?, ?, ?)",
+                " link_type, properties, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     lnk.id,
                     lnk.from_object_id,
                     lnk.to_object_id,
                     lnk.link_type,
                     json.dumps(lnk.properties),
+                    workspace_id,
                 ),
             )
             await db.commit()
@@ -355,12 +434,17 @@ class FabricStore:
         link_type: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        workspace_id: str | None = None,
     ) -> tuple[list[FabricLink], int]:
         """List links with optional filters on endpoints and link_type.
 
         Returns ``(links, total)`` where ``total`` is the unpaginated count.
         All filter arguments are bound parameters — no query-string
         concatenation, so SQL injection through link_type is not possible.
+
+        ``workspace_id`` (W4a) restricts both the count and the page to the
+        caller's tenant (plus legacy NULL-workspace links); ``None`` leaves the
+        listing unscoped for OSS callers.
         """
         conditions: list[str] = []
         params: list[Any] = []
@@ -373,6 +457,10 @@ class FabricStore:
         if link_type:
             conditions.append("link_type = ?")
             params.append(link_type)
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         await self._ensure_schema()
@@ -399,8 +487,18 @@ class FabricStore:
             await db.commit()
 
     async def get_linked_objects(
-        self, obj_id: str, link_type: str | None = None
+        self, obj_id: str, link_type: str | None = None, workspace_id: str | None = None
     ) -> list[FabricObject]:
+        """Traverse links from ``obj_id`` to the objects on the other end.
+
+        ``workspace_id`` (W4a) scopes the RETURNED objects to the caller's tenant
+        (plus legacy NULL-workspace objects) so a traversal can't surface another
+        workspace's objects even if a link somehow spanned the boundary.
+        """
+        # Scope on the returned object's workspace (alias ``o``) — that is the
+        # row the caller reads back. Layered as an extra AND on the existing
+        # join filter; the link-traversal logic itself is unchanged.
+        ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
@@ -411,20 +509,34 @@ class FabricStore:
                     "OR (o.id = l.from_object_id AND l.to_object_id = ?) "
                     "WHERE l.link_type = ?"
                 )
-                params = (obj_id, obj_id, link_type)
+                params: list[Any] = [obj_id, obj_id, link_type]
             else:
                 query = (
                     "SELECT o.* FROM fabric_objects o JOIN fabric_links l "
                     "ON (o.id = l.to_object_id AND l.from_object_id = ?) "
                     "OR (o.id = l.from_object_id AND l.to_object_id = ?)"
                 )
-                params = (obj_id, obj_id)
+                params = [obj_id, obj_id]
+            if ws_cond:
+                # Append to the WHERE: a link_type query already has WHERE; the
+                # no-link_type branch has none yet, so add one.
+                query += (" AND " if link_type else " WHERE ") + ws_cond
+                params.extend(ws_params)
             async with db.execute(query, params) as cur:
                 return [self._row_to_object(row) async for row in cur]
 
     # --- Query ---
 
-    async def query(self, q: FabricQuery) -> FabricQueryResult:
+    async def query(self, q: FabricQuery, workspace_id: str | None = None) -> FabricQueryResult:
+        """Run a FabricQuery, optionally scoped to a tenant (W4a).
+
+        ``workspace_id`` is a separate method argument rather than a
+        ``FabricQuery`` field: tenancy is a server-side authorization concern
+        threaded from the request's workspace context, never something a client
+        sets on the query body. When supplied, results are restricted to that
+        workspace (plus legacy NULL-workspace rows). When ``None``, the query is
+        unscoped, exactly as before W4a (OSS / agent-tool callers).
+        """
         conditions: list[str] = []
         params: list[Any] = []
 
@@ -466,6 +578,14 @@ class FabricStore:
             filter_conditions, filter_params = _build_filter_conditions(q.filters)
             conditions.extend(filter_conditions)
             params.extend(filter_params)
+
+        # Tenancy scope (W4a) — an ADDITIONAL condition ANDed alongside the W0d
+        # property filters above, never a replacement for them. Restricts the
+        # result set to the caller's workspace plus legacy NULL-workspace rows.
+        ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
