@@ -32,6 +32,12 @@
 #   applies no scoping at all (full backward-compat for OSS / agent-tool
 #   callers). Additive ALTER migration mirrors the W2b assignee/hash-chain
 #   pattern — no crash on a pre-existing DB.
+# Updated: 2026-06-10 (FIX 3 — hardening) — tightened the filter property-name
+#   validator in _build_filter_conditions() from ``c.isalnum() or c in "_-"`` to
+#   ``c.isalnum() or c == "_"``. Hyphens were not a vulnerability (json_extract
+#   reads ``$.a-b`` as a literal key) but were unnecessarily permissive and made
+#   ``$.a-b`` ambiguous in a SQL trace. No object type uses hyphenated property
+#   names, so this loses nothing. W0d filter tests unchanged and still pass.
 
 from __future__ import annotations
 
@@ -180,10 +186,17 @@ def _build_filter_conditions(filters: dict[str, Any]) -> tuple[list[str], list[A
     params: list[Any] = []
     for raw_key, raw_val in filters.items():
         key = str(raw_key)
-        # Restrict property names to a safe identifier set. Anything else (a
-        # quote, a dot, a bracket) is rejected so it can never break out of the
-        # JSON path literal.
-        if not key or not all(c.isalnum() or c in "_-" for c in key):
+        # Restrict property names to a safe identifier set: alphanumerics plus
+        # underscore. Anything else (a quote, a dot, a bracket, a hyphen) is
+        # rejected so it can never break out of the JSON path literal.
+        #
+        # FIX 3 (2026-06-10): tightened from ``c in "_-"`` to ``c == "_"``.
+        # Hyphens were never a vulnerability — json_extract treats ``$.a-b`` as
+        # a literal key, not an expression — but they are unnecessarily
+        # permissive and ``$.a-b`` reads ambiguously in a SQL trace (subtraction
+        # vs. a literal key). No object type in the codebase uses hyphenated
+        # property names, so the underscore-only identifier rule loses nothing.
+        if not key or not all(c.isalnum() or c == "_" for c in key):
             raise ValueError(f"Invalid filter property name: {raw_key!r}")
         path = f"$.{key}"
 
