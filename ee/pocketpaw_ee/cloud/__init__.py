@@ -375,7 +375,8 @@ def mount_cloud(app: FastAPI) -> None:
 
     @_files_v2.get("/browse")
     async def _files_get_browse(
-        mount: str = _Query(...),
+        mount: str | None = _Query(None),
+        path: str | None = _Query(None),
         cursor: str | None = _Query(None),
         limit: int = _Query(50, ge=1, le=500),
         workspace_id: str | None = _Query(None),
@@ -384,6 +385,16 @@ def mount_cloud(app: FastAPI) -> None:
         ctx = _files_ctx_from_user(user)
         if workspace_id is not None and workspace_id != ctx.workspace_id:
             raise _HTTPException(status_code=403, detail="files.workspace_mismatch")
+        # OSS path-shape fallback (2026-06-10). This route shadows the OSS
+        # GET /files/browse?path=…, which the localFs web bridge — and through
+        # it the /code IDE file tree — depends on. When no mount is given,
+        # delegate to the OSS handler so both call shapes serve from one path.
+        # The caller is already authenticated via current_active_user above.
+        if mount is None:
+            from pocketpaw.api.v1.files import browse_files as _oss_browse_files
+
+            oss_resp = await _oss_browse_files(path=path if path is not None else "~")
+            return oss_resp.model_dump()
         variables = {"workspace_id": ctx.workspace_id or ""}
         try:
             page = await _browse_mount(
