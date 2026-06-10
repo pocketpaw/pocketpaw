@@ -9,6 +9,15 @@
 # ok. Without this preamble the surface falls back to GENERIC and the agent
 # builds a dashboard pocket instead of running the station loop.
 #
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — ``build_preamble`` now
+# consumes ``meta.repo`` + ``meta.base_branch`` (the repo + branch the /belt page
+# bound for this run). When BOTH are present it injects a "Your repo / base
+# branch" line and instructs the agent NOT to re-ask for the repo, and to pass
+# exactly those values into ``belt_propose_change``. When either is absent the
+# preamble keeps today's ask-first behavior (the agent must confirm the repo +
+# base branch with the user before proposing). This is the fix for the first
+# live runs where the agent had no repo and asked for it every time.
+#
 # Mirrors handlers/code.py: an async ``build_preamble`` returning an XML-ish
 # ``<surface>`` + ``<orientation>`` + ``<procedure>`` block. The procedure
 # enforces the three-stage station loop:
@@ -31,11 +40,54 @@ from __future__ import annotations
 from pocketpaw_ee.cloud.surface.domain import SurfaceMeta
 
 
+def _repo_binding(meta: SurfaceMeta) -> tuple[str, str]:
+    """Resolve the repo-binding block + the propose-call instruction from meta.
+
+    Returns ``(binding_block, propose_instruction)``:
+      * When BOTH ``meta.repo`` and ``meta.base_branch`` are present, the page
+        has bound a repo for this run — the binding block states them and the
+        propose instruction tells the agent to reuse them verbatim and NOT ask.
+      * Otherwise (the ask-first path), the binding block is empty and the
+        propose instruction tells the agent to confirm the repo + base branch
+        with the user before proposing.
+    """
+    repo = (meta.repo or "").strip()
+    base_branch = (meta.base_branch or "").strip()
+    if repo and base_branch:
+        binding = (
+            f"<belt-repo>\n"
+            f"Your repo: {repo} · base branch: {base_branch}\n"
+            "This run is already bound to that repo and base branch — do NOT ask "
+            "the user which repo to work on. Orient and develop against this repo, "
+            "and when you propose, pass EXACTLY this repo path and base branch "
+            "into `belt_propose_change` (repo=the path above, base_branch=the "
+            "branch above). If the user explicitly names a different repo in their "
+            "message, follow the message; otherwise this binding is the repo.\n"
+            "</belt-repo>\n"
+        )
+        propose = (
+            f"call `mcp__pocketpaw_belt__belt_propose_change` with `{{repo: "
+            f'"{repo}", base_branch: "{base_branch}", diff, summary, task}}` — '
+            "reuse the bound repo + base branch above verbatim. "
+        )
+        return binding, propose
+    # Ask-first path — no repo bound for this run.
+    propose = (
+        "first CONFIRM which repo and base branch to target (ask the user if you "
+        "don't already know it from the conversation), then call "
+        "`mcp__pocketpaw_belt__belt_propose_change` with `{repo, base_branch, "
+        "diff, summary, task}`. "
+    )
+    return "", propose
+
+
 async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> str:
     """Render the /belt surface preamble — the develop station loop."""
     route = meta.route_path or "/belt"
+    repo_binding, propose_instruction = _repo_binding(meta)
     return (
         f'<surface kind="belt" route="{route}" />\n'
+        f"{repo_binding}"
         "<belt-orientation>\n"
         "The user is on the BELT surface, the develop station of the Belt & "
         "Pulley assembly line. You take a coding task, GROUND yourself in the "
@@ -65,8 +117,7 @@ async def build_preamble(workspace_id: str, user_id: str, meta: SurfaceMeta) -> 
         "one change. If the task genuinely needs a large change, tell the user to "
         "split it into smaller tasks rather than proposing a sprawling diff.\n"
         "3. PROPOSE VIA THE GATE. Produce a clean unified diff of your change and "
-        "call `mcp__pocketpaw_belt__belt_propose_change` with `{repo, "
-        "base_branch, diff, summary, task}`. This is the ONLY way a change leaves "
+        f"{propose_instruction}This is the ONLY way a change leaves "
         "the station. NEVER apply your change to the user's branches directly, "
         "NEVER `git push`, NEVER `git merge`. If the gate tool is unavailable or "
         "returns an error, say so PLAINLY — do NOT claim the change was proposed "

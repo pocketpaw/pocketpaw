@@ -294,6 +294,16 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
+        # --- Belt & Pulley station runs (develop-station lifecycle) -------------
+        # Workspace-scoped: the /belt console is a per-workspace view, and a run
+        # status change (propose / approve / reject / landed / failed) fires
+        # asynchronously relative to the chat turn, so it must fan out to every
+        # workspace member with the page open — not just the proposing session.
+        if t == "belt_run_updated":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Composio (per-user OAuth identity probes) --------------------------
         if t in {"composio.connection.verified", "composio.connection.mismatch"}:
             if uid := d.get("user_id"):

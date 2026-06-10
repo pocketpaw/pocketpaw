@@ -18,6 +18,13 @@
 #   is the safety net). The blob also carries the workspace/user on the
 #   chain actor + scope so visibility filters narrow correctly.
 #
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-2) — after the Action is
+#   durably stored, ``belt_propose_change`` publishes ``belt_run_updated``
+#   (status=proposed, stage=gate) via ``ee.cloud.belt.service.emit_belt_run_updated``,
+#   whose PRIMARY path is the workspace realtime bus (so a teammate with the /belt
+#   console open sees the new Tray run too), plus an in-turn per-session SSE push.
+#   Best-effort — an emit failure never breaks the propose response.
+#
 # What this file does: clones the media.py shape — a single
 # ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /
 # ``*_TOOL_ID`` allowlist constants, ContextVar-sourced identity (the same
@@ -524,6 +531,21 @@ async def _propose_change_handler(args: dict) -> dict:
             correlation_id=str(correlation_id),
             proposed_event_id=str(proposed_event_id),
         )
+
+    # SC-2 — publish ``belt_run_updated`` (status=proposed, stage=gate) so the
+    # /belt page shows the new run land in the Tray live. Routes through the
+    # belt service: PRIMARY path is the workspace realtime bus (so a teammate
+    # with the console open sees it too), with an additional in-turn SSE push
+    # (this runs inside the agent chat stream, so that sink is in scope).
+    # Best-effort — never fails the propose response.
+    try:
+        from pocketpaw_ee.cloud.belt.service import emit_belt_run_updated
+
+        await emit_belt_run_updated(
+            workspace_id=workspace_id, action_id=action.id, status="proposed", stage="gate"
+        )
+    except Exception:  # noqa: BLE001 — emit must never break the propose response
+        logger.debug("belt: belt_run_updated propose emit failed (non-fatal)", exc_info=True)
 
     logger.info(
         "belt: proposed code_change action %s (repo=%s, base=%s, changed_lines=%d, "

@@ -25,6 +25,11 @@ Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 follow-up item 3) — added
 ``SiteRateCounter`` (the atomic per-minute capture rate-limit counter) to the
 imports, ``__all__``, and ``get_all_documents()`` so the counter collection is
 wired into ``init_beanie``.
+Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added
+``BeltWorkspaceConfig`` (the per-workspace Belt console allowlist-extension doc)
+to the imports, ``__all__``, and ``get_all_documents()`` so the console's
+add-repo route persistence is wired into ``init_beanie``. Only
+``ee.cloud.belt.service`` imports the doc class directly.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
+from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
@@ -123,6 +129,7 @@ __all__ = [
     "AuditEvent",
     "AuditWebhook",
     "AuthSession",
+    "BeltWorkspaceConfig",
     "ChatRunDoc",
     "Comment",
     "CommentAuthor",
@@ -234,6 +241,7 @@ def get_all_documents():
         AuditWebhook,
         AuthSession,
         APIKey,
+        BeltWorkspaceConfig,
         TaskEvent,
         cal_doc,
         evt_doc,
