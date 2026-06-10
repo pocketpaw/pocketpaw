@@ -150,3 +150,39 @@ def test_load_license_ok_in_prod_with_operator_key(monkeypatch):
     assert payload is not None
     assert payload.org == "acme"
     assert payload.plan == "enterprise"
+
+
+class TestHmacFallbackHardening:
+    """An operator-configured Ed25519 key must HARD-reject a bad signature —
+    never silently fall through to the weaker HMAC path (which would let a
+    forged HMAC-signed key pass on any deployment that also set
+    POCKETPAW_LICENSE_SECRET). The dev-key legacy HMAC path stays intact.
+    Regression for the review finding on license.py:_verify_signature."""
+
+    _PAYLOAD = b'{"org":"X","plan":"enterprise","seats":5,"exp":"2027-01-01"}'
+
+    def _hmac_sig(self, secret: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(f"{secret}:{self._PAYLOAD.decode()}".encode()).hexdigest()
+
+    def test_operator_key_hard_rejects_forged_hmac(self, monkeypatch):
+        _priv, pub = mint.generate_keypair()
+        monkeypatch.setenv("POCKETPAW_LICENSE_PUBLIC_KEY", pub)
+        monkeypatch.setenv("POCKETPAW_LICENSE_SECRET", "legacy-secret")
+        # Ed25519 rejects (sig is an HMAC digest) AND an operator key is set →
+        # must NOT fall through to HMAC.
+        assert lic_mod._verify_signature(self._PAYLOAD, self._hmac_sig("legacy-secret")) is False
+
+    def test_dev_key_still_allows_legacy_hmac(self, monkeypatch):
+        monkeypatch.delenv("POCKETPAW_LICENSE_PUBLIC_KEY", raising=False)  # dev key
+        monkeypatch.setenv("POCKETPAW_LICENSE_SECRET", "legacy-secret")
+        assert lic_mod._verify_signature(self._PAYLOAD, self._hmac_sig("legacy-secret")) is True
+
+    def test_operator_key_accepts_valid_ed25519(self, monkeypatch):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        priv, pub = mint.generate_keypair()
+        monkeypatch.setenv("POCKETPAW_LICENSE_PUBLIC_KEY", pub)
+        sig = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(priv)).sign(self._PAYLOAD).hex()
+        assert lic_mod._verify_signature(self._PAYLOAD, sig) is True

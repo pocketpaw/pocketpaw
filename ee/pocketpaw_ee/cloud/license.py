@@ -178,8 +178,16 @@ def _verify_signature(payload_bytes: bytes, signature_hex: str) -> bool:
             pub_key.verify(bytes.fromhex(signature_hex), payload_bytes)
             return True
         except Exception:
-            # Fall through to the HMAC path below if a shared secret exists.
-            pass
+            # An OPERATOR-configured Ed25519 key that rejects the signature is a
+            # HARD reject — do NOT fall through to the weaker HMAC path. Without
+            # this, any deployment that also set POCKETPAW_LICENSE_SECRET could
+            # verify a forged HMAC-signed key even though the real Ed25519 key
+            # rejected it, defeating the whole minting/posture scheme. Only the
+            # baked-in DEV key (dev/legacy posture — production boot is already
+            # blocked by enforce_license_key_posture() when the dev key is in
+            # use) may fall back to HMAC, for the e2e suite / legacy self-hosters.
+            if not _using_dev_public_key():
+                return False
 
     # HMAC-SHA256 fallback with a shared secret (simpler self-hosted setup).
     secret = os.environ.get("POCKETPAW_LICENSE_SECRET", "")
