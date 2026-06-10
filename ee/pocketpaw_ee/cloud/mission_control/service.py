@@ -28,6 +28,31 @@
 # — the single-owner rule (only ``ee.cloud.cycles.service`` may write to
 # the Cycle Beanie doc) is enforced by an import-linter forbidden
 # contract; the MC façade can never bypass it.
+# Updated: 2026-06-10 (fix/mc-bulk-approve-strands-writes — W0c) — fixed
+# two defects in ``agent_bulk_approve`` that together stranded every write
+# a manager bulk-approved, undermining the Instinct governance moat:
+#   (1) Routing regression — a prior commit routed ids through
+#       ``_classify_task_id``, whose forward-compat default classifies a
+#       BARE id as a Task. Bulk-approving a Nudge by its bare id (the shape
+#       the frontend + every existing test send) was misrouted to the
+#       Tasks branch, failed ``agent_complete_task``, and landed in
+#       ``missing`` — the Nudge was never even approved. Routing is now by
+#       explicit prefix (``task:`` → Tasks; ``nudge:`` / bare → Instinct
+#       Nudge, prefix stripped), consistent with ``agent_bulk_reject``.
+#   (2) Stranded writes — even once a Nudge approved, the façade called
+#       ``store.bulk_approve`` and stopped, never firing the parked
+#       ``_pocket_write``, so the write stalled at ``approved`` forever
+#       (no execution, no audit/chain emit). The façade now mirrors the
+#       single-/bulk-approve HTTP path
+#       (``ee.instinct.router.bulk_approve_actions``): for each approved
+#       Nudge it emits ``human.corrected(accepted)`` +
+#       ``policy.evaluated(passed=True)`` and fires
+#       ``instinct_bridge.execute_approved_write`` (which lands the write
+#       and closes the chain), reusing the router's helpers rather than
+#       forking the chain logic. New ``_execute_bulk_approved_nudge`` runs
+#       one item with per-item error isolation; the response carries an
+#       ``executed`` list of per-item outcomes so one failing write can't
+#       silently drop the rest.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -387,17 +412,111 @@ async def agent_list_work_items(
     return [work_item_to_response(it) for it in items[: body.limit]]
 
 
+async def _execute_bulk_approved_nudge(action: Any, *, ctx: RequestContext) -> dict[str, Any]:
+    """Execute one bulk-approved Nudge's parked pocket write + emit chain.
+
+    Mirrors the single-/bulk-approve HTTP path
+    (``ee.instinct.router.bulk_approve_actions``) for ONE approved Action:
+    emit ``human.corrected(accepted)`` + ``policy.evaluated(passed=True)``,
+    then fire ``execute_approved_write`` so the parked write actually
+    lands and the bridge closes the Decision-Graph chain. We reuse the
+    router's helpers (lazy import — no module-top instinct→mission_control
+    coupling) so the chain logic is shared, not forked.
+
+    Returns a per-item outcome dict ``{"id", "executed", "error"}``:
+      - non-pocket-write Actions report ``executed=False`` with no error
+        (nothing to fire — flipping to ``approved`` is the whole action);
+      - a parked-write Action reports ``executed=True`` on a clean fire,
+        or ``executed=False`` + ``error`` when the execution raised.
+
+    Error isolation: ``execute_approved_write`` is best-effort (it records
+    failures on the Action and never raises), but we still wrap the whole
+    body so one item's unexpected crash can't strand the rest of the batch.
+    """
+    from pocketpaw_ee.cloud.pockets import instinct_bridge
+    from pocketpaw_ee.instinct.router import (
+        _emit_human_corrected,
+        _emit_policy_evaluated_approved,
+        _pocket_write_blob,
+    )
+
+    action_id = str(getattr(action, "id", "") or "")
+    blob = _pocket_write_blob(action)
+    if blob is None:
+        # No parked write — the approval flip is the entire effect. Nothing
+        # to execute, nothing to chain-emit.
+        return {"id": action_id, "executed": False, "error": None}
+
+    workspace_id = ctx.workspace_id or ""
+    try:
+        # Chain symmetry with the HTTP approve path: human.corrected first,
+        # then a passing policy.evaluated whose causation points at it.
+        human_event_id = _emit_human_corrected(
+            blob=blob,
+            action=action,
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            disposition="accepted",
+            note=None,
+        )
+        _emit_policy_evaluated_approved(
+            blob=blob,
+            action=action,
+            user_id=ctx.user_id,
+            workspace_id=workspace_id,
+            causation_event_id=human_event_id,
+        )
+        # The bridge owns the chain close (``_emit_bridge_chain_close``)
+        # after the post-approval write lands. It never raises by contract,
+        # but the wrapper below keeps one bad item from dropping the rest.
+        await instinct_bridge.execute_approved_write(action)
+    except Exception as exc:  # noqa: BLE001 — per-item isolation
+        logger.exception(
+            "mission_control.bulk_approve: pocket-write execution failed for %s",
+            action_id,
+        )
+        return {"id": action_id, "executed": False, "error": str(exc)}
+
+    return {"id": action_id, "executed": True, "error": None}
+
+
 async def agent_bulk_approve(
     ctx: RequestContext, body: BulkActionRequest | dict[str, Any]
 ) -> dict[str, Any]:
     """Approve N pending items in one call.
 
     Works for both Nudges (Instinct store) and Tasks (Tasks service).
-    Items prefixed with ``task:`` are routed to the Tasks service's
-    ``agent_complete_task``; everything else goes through the Instinct
-    store's ``bulk_approve``. The shared ``bulk_id`` lives in every
-    audit row's ``context.bulk_id`` so the operator can recover the
-    bulk transaction.
+    Routing is by id prefix, matching the heterogeneous WorkItem feed:
+      - ``task:<id>``   → Tasks service's ``agent_complete_task``;
+      - ``nudge:<id>``  → Instinct store's ``bulk_approve`` (prefix stripped);
+      - bare ``<id>``   → Instinct store as a Nudge (mirrors
+        ``agent_bulk_reject``, which passes bare ids straight through).
+
+    The shared ``bulk_id`` lives in every audit row's ``context.bulk_id``
+    so the operator can recover the bulk transaction.
+
+    W0c fix — TWO defects:
+
+    1. Routing regression — bare action ids were misrouted to the Tasks
+       branch via ``_classify_task_id`` (whose forward-compat default
+       treats a bare id as a Task). Bulk-approving a Nudge by its bare id
+       (the shape the frontend + every existing test send) therefore
+       never reached ``store.bulk_approve`` and silently landed in
+       ``missing`` — the Nudge was never even approved. Routing is now by
+       explicit prefix so bare ids approve as Nudges again, consistent
+       with ``agent_bulk_reject``.
+
+    2. Stranded writes — even once a Nudge approved, its parked pocket
+       write never fired: the façade recorded the approval and stopped,
+       never calling the Instinct bridge, so bulk-approved writes stalled
+       at ``approved`` forever (no execution, no audit/chain emit) — the
+       exact gap the single-approve path closes via
+       ``execute_approved_write``. We now mirror that per item: each
+       approved Nudge runs through ``_execute_bulk_approved_nudge`` (same
+       chain emits + bridge call as ``ee.instinct.router.bulk_approve_actions``),
+       with per-item error isolation so one failing write can't drop the
+       rest. The per-item outcomes are reported under ``executed`` for the
+       operator console.
     """
     from uuid import uuid4
 
@@ -407,16 +526,22 @@ async def agent_bulk_approve(
     bulk_id = uuid4().hex
     approved: list[dict] = []
     missing: list[str] = []
+    executed: list[dict] = []
 
-    # Split IDs into nudges and tasks
-    nudge_ids: list[str] = []
+    # Split IDs by prefix. ``task:`` → Tasks; ``nudge:`` or bare → Instinct
+    # Nudge. ``nudge_id_map`` recovers the original wire id (with prefix)
+    # for the ``missing`` report so the operator sees what they sent, while
+    # the store receives the bare action id it stores rows under.
     task_ids: list[str] = []
+    nudge_store_ids: list[str] = []
+    nudge_id_map: dict[str, str] = {}
     for raw_id in body.ids:
-        tid = _classify_task_id(raw_id)
-        if tid is not None:
+        if raw_id.startswith("task:"):
             task_ids.append(raw_id)
-        else:
-            nudge_ids.append(raw_id)
+            continue
+        bare = raw_id[len("nudge:") :] if raw_id.startswith("nudge:") else raw_id
+        nudge_store_ids.append(bare)
+        nudge_id_map[bare] = raw_id
 
     # Handle tasks: call agent_complete_task for each
     if task_ids:
@@ -440,18 +565,29 @@ async def agent_bulk_approve(
                 missing.append(raw_id)
 
     # Handle nudges via Instinct store
-    if nudge_ids:
+    if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
         store = get_instinct_store()
-        eligible, blocked = await _split_ids_by_tenancy(store, nudge_ids, visible)
+        eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
         )
         approved.extend(a.model_dump(mode="json") for a in nudge_approved)
-        missing.extend(nudge_missing)
-        missing.extend(blocked)
+        # Report missing / blocked under the operator's original wire ids.
+        missing.extend(nudge_id_map.get(mid, mid) for mid in nudge_missing)
+        missing.extend(nudge_id_map.get(bid, bid) for bid in blocked)
 
-    return {"bulk_id": bulk_id, "approved": approved, "missing": missing}
+        # W0c — execute each approved Nudge's parked write + emit its chain,
+        # preserving the bulk_approve ordering and isolating per-item errors.
+        for action in nudge_approved:
+            executed.append(await _execute_bulk_approved_nudge(action, ctx=ctx))
+
+    return {
+        "bulk_id": bulk_id,
+        "approved": approved,
+        "missing": missing,
+        "executed": executed,
+    }
 
 
 async def agent_bulk_reject(

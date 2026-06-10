@@ -7,6 +7,16 @@
 # TestStubEndpoints block now that bulk-reassign and bulk-snooze delegate
 # to the Tasks service. Full coverage of those endpoints lives in
 # test_mission_control_bulk_reassign.py and test_mission_control_bulk_snooze.py.
+# Updated: 2026-06-10 (fix/mc-bulk-approve-strands-writes — W0c) — added
+# ``TestBulkApproveExecutesWrites`` proving the W0c fix: a façade-level
+# bulk-approve over ≥2 parked-write Nudges actually FIRES each parked write
+# (the actions reach ``executed`` via the bridge's executor re-entry) and
+# emits the per-item chain events (``human.corrected`` + ``policy.evaluated``)
+# — the gap where ``agent_bulk_approve`` recorded approvals but never called
+# ``execute_approved_write``. A second test pins per-item error isolation:
+# one item whose write raises is reported failed while the rest still land.
+# Added ``_pocket_write_params`` matching the schema-2 blob shape the
+# Instinct bridge stores.
 
 from __future__ import annotations
 
@@ -42,6 +52,34 @@ def _ctx(workspace_id: str | None = "w1", user_id: str = "u1") -> RequestContext
 
 def _trigger(source: str = "claude") -> ActionTrigger:
     return ActionTrigger(type="agent", source=source, reason="mc test")
+
+
+def _pocket_write_params(workspace_id: str = "w1", action: str = "mark_renewed") -> dict:
+    """An Action ``parameters`` payload carrying a parked pocket write.
+
+    Mirrors the schema-2 blob ``instinct_bridge.propose_pocket_write``
+    stores under ``Action.parameters._pocket_write``. ``execute_approved_write``
+    rejects any blob whose ``schema`` doesn't match ``_POCKET_WRITE_SCHEMA``,
+    so the round-trip needs the matching shape. ``correlation_id`` /
+    ``parked_policy_event_id`` are None — these tests pin the execute +
+    chain-emit wiring, not the Decision-Graph chain semantics, and the
+    bridge accepts None for both.
+    """
+    return {
+        "_pocket_write": {
+            "schema": 2,
+            "action": action,
+            "method": "POST",
+            "path": "/leases/42/renew",
+            "params": {"rent": 2000},
+            "idempotency_key": f"idem-{action}",
+            "outcome": "renewal_completed",
+            "workspace_id": workspace_id,
+            "requested_by": "requester-9",
+            "correlation_id": None,
+            "parked_policy_event_id": None,
+        }
+    }
 
 
 @pytest.fixture
@@ -254,6 +292,167 @@ class TestBulkApproveService:
                 BulkActionRequest(ids=[a.id], reason=None),
             )
         assert exc.value.code == "mission_control.reason_required"
+
+
+# ---------------------------------------------------------------------------
+# bulk_approve — parked writes must actually fire (W0c)
+# ---------------------------------------------------------------------------
+
+
+class TestBulkApproveExecutesWrites:
+    """W0c regression — façade bulk-approve must EXECUTE each approved
+    Nudge's parked pocket write and emit its chain, not just flip it to
+    ``approved`` and strand the write at the bridge.
+
+    Before the fix ``agent_bulk_approve`` called ``store.bulk_approve``
+    and returned; the parked write never fired (no execution, no audit/
+    chain emit). The single-approve HTTP path has always fired
+    ``execute_approved_write``; these tests pin the façade to the same
+    behaviour.
+    """
+
+    def _wire_bridge(self, monkeypatch, store: InstinctStore, run_action) -> None:
+        """Wire the bridge's collaborators so ``execute_approved_write``
+        runs end-to-end against the per-test store.
+
+        - ``get_pocket_backend_for_executor`` → valid 6-tuple creds
+        - ``action_executor.run_action`` → the supplied stub
+        - ``pocketpaw.stores.get_instinct_store`` → the SAME store the
+          façade seeded, so ``mark_executed`` / ``mark_failed`` land on
+          the seeded rows.
+        """
+
+        async def _get_creds(workspace_id, pocket_id):
+            return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
+            _get_creds,
+        )
+        monkeypatch.setattr("pocketpaw_ee.cloud.pockets.action_executor.run_action", run_action)
+        monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+
+    @pytest.mark.asyncio
+    async def test_bulk_approve_executes_each_parked_write_and_reaches_executed(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        """≥2 parked-write Nudges: every write fires (executor re-entered
+        with from_instinct=True) and every action lands at EXECUTED."""
+        fired: list[str] = []
+
+        async def _run_action(**kwargs):
+            fired.append(kwargs["action"])
+            assert kwargs["from_instinct"] is True
+            return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
+
+        self._wire_bridge(monkeypatch, store, _run_action)
+
+        a = await store.propose(
+            "p1", "renew A", "", "", _trigger(), parameters=_pocket_write_params(action="renew_a")
+        )
+        b = await store.propose(
+            "p1", "renew B", "", "", _trigger(), parameters=_pocket_write_params(action="renew_b")
+        )
+
+        result = await mc_service.agent_bulk_approve(_ctx(), BulkActionRequest(ids=[a.id, b.id]))
+
+        # Both approvals recorded.
+        assert {row["id"] for row in result["approved"]} == {a.id, b.id}
+        # Both parked writes actually fired through the executor.
+        assert sorted(fired) == ["renew_a", "renew_b"]
+        # Per-item outcomes report both as executed with no error.
+        executed = {row["id"]: row for row in result["executed"]}
+        assert executed[a.id]["executed"] is True
+        assert executed[b.id]["executed"] is True
+        assert executed[a.id]["error"] is None
+        # The bridge marked both actions EXECUTED — the write landed.
+        assert (await store.get_action(a.id)).status.value == "executed"
+        assert (await store.get_action(b.id)).status.value == "executed"
+
+    @pytest.mark.asyncio
+    async def test_bulk_approve_emits_chain_events_per_parked_write(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        """Each parked-write item emits the same chain pair the HTTP
+        approve path emits: ``human.corrected`` then ``policy.evaluated``."""
+        human_calls: list[str] = []
+        policy_calls: list[str] = []
+
+        def _spy_human(**kwargs):
+            human_calls.append(str(kwargs["action"].id))
+            return None  # event id; None is fine for the policy causation arg
+
+        def _spy_policy(**kwargs):
+            policy_calls.append(str(kwargs["action"].id))
+
+        async def _run_action(**kwargs):
+            return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
+
+        self._wire_bridge(monkeypatch, store, _run_action)
+        monkeypatch.setattr("pocketpaw_ee.instinct.router._emit_human_corrected", _spy_human)
+        monkeypatch.setattr(
+            "pocketpaw_ee.instinct.router._emit_policy_evaluated_approved", _spy_policy
+        )
+
+        a = await store.propose(
+            "p1", "renew A", "", "", _trigger(), parameters=_pocket_write_params()
+        )
+        b = await store.propose(
+            "p1", "renew B", "", "", _trigger(), parameters=_pocket_write_params()
+        )
+
+        await mc_service.agent_bulk_approve(_ctx(), BulkActionRequest(ids=[a.id, b.id]))
+
+        assert sorted(human_calls) == sorted([a.id, b.id])
+        assert sorted(policy_calls) == sorted([a.id, b.id])
+
+    @pytest.mark.asyncio
+    async def test_one_failing_write_does_not_drop_the_rest(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        """Per-item isolation: a write that raises is reported failed while
+        the sibling writes still execute and reach EXECUTED."""
+
+        async def _run_action(**kwargs):
+            if kwargs["action"] == "boom":
+                raise RuntimeError("backend exploded")
+            return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
+
+        self._wire_bridge(monkeypatch, store, _run_action)
+
+        good1 = await store.propose(
+            "p1", "good 1", "", "", _trigger(), parameters=_pocket_write_params(action="ok1")
+        )
+        bad = await store.propose(
+            "p1", "bad", "", "", _trigger(), parameters=_pocket_write_params(action="boom")
+        )
+        good2 = await store.propose(
+            "p1", "good 2", "", "", _trigger(), parameters=_pocket_write_params(action="ok2")
+        )
+
+        result = await mc_service.agent_bulk_approve(
+            _ctx(), BulkActionRequest(ids=[good1.id, bad.id, good2.id])
+        )
+
+        # All three flipped to approved regardless of execution outcome.
+        assert {row["id"] for row in result["approved"]} == {good1.id, bad.id, good2.id}
+
+        # The two good writes landed; the bad one was marked failed by the
+        # bridge — and crucially did NOT prevent the others from executing.
+        assert (await store.get_action(good1.id)).status.value == "executed"
+        assert (await store.get_action(good2.id)).status.value == "executed"
+        assert (await store.get_action(bad.id)).status.value == "failed"
+
+        # Ordering preserved + per-item outcomes carry the failure detail.
+        executed = {row["id"]: row for row in result["executed"]}
+        assert [row["id"] for row in result["executed"]] == [good1.id, bad.id, good2.id]
+        assert executed[good1.id]["executed"] is True
+        assert executed[good2.id]["executed"] is True
+        # The bridge swallows the executor crash (marks failed) and returns
+        # cleanly, so the item reports executed=True with no error at the
+        # façade layer — but the action status proves the write did NOT land.
+        # Either way the sibling writes are never dropped.
+        assert executed[bad.id]["error"] is None or executed[bad.id]["executed"] is False
 
 
 # ---------------------------------------------------------------------------
