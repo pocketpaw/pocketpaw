@@ -19,6 +19,13 @@ cloud-egress trap as a regression guard: ``deep_agents_model`` defaults to
 local-only deployment MUST set ``deep_agents_model=ollama:<model>`` or traffic
 silently goes to the Anthropic cloud (documented in
 docs/deployment/self-hosting.mdx).
+
+Change (2026-06-10, FIX 1): added ``TestLangchainReactCloudEgressGuard`` to
+cover the runtime startup guard. ``_initialize`` now fires a loud
+``logger.warning`` when a local-only ``llm_provider`` is paired with a
+``deep_agents_model`` that resolves to an ``anthropic:`` cloud model, so a
+self-hosting compliance operator is told their config still hits the cloud. The
+warning must NOT fire when ``deep_agents_model`` is ollama-prefixed.
 """
 
 from __future__ import annotations
@@ -274,3 +281,66 @@ class TestLangchainReactLocalModelLane:
         assert args[0].startswith("anthropic:")
         # And crucially does NOT point at the local Ollama host.
         assert kwargs.get("base_url") != "http://localhost:11434"
+
+
+class TestLangchainReactCloudEgressGuard:
+    """Cover the runtime startup guard for the cloud-egress trap (FIX 1).
+
+    The model-build seam test above pins the *behaviour* (default prefix wins,
+    traffic goes to the cloud). This covers the *operator-facing signal*: at
+    backend init, a local-only ``llm_provider`` paired with an ``anthropic:``
+    model must emit a loud warning naming the override, and that warning must
+    stay silent when the model is already ollama-prefixed.
+    """
+
+    def _build_backend(self, **settings_kwargs):
+        from pocketpaw.agents.langchain_react import LangchainReactBackend
+
+        return LangchainReactBackend(Settings(agent_backend="langchain_react", **settings_kwargs))
+
+    def test_warns_when_local_provider_but_anthropic_model(self, caplog):
+        """llm_provider=ollama + default anthropic model -> loud warning that
+        names the required deep_agents_model override."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.agents.langchain_react"):
+            self._build_backend(
+                llm_provider="ollama",
+                ollama_host="http://localhost:11434",
+                # deep_agents_model intentionally left at its anthropic: default.
+            )
+
+        egress = [r for r in caplog.records if "CLOUD EGRESS" in r.getMessage()]
+        assert egress, "expected a cloud-egress warning for ollama + anthropic model"
+        msg = egress[0].getMessage()
+        # Names the override so the operator knows the fix.
+        assert "deep_agents_model=ollama:<model>" in msg
+
+    def test_no_warn_when_model_is_ollama_prefixed(self, caplog):
+        """llm_provider=ollama + deep_agents_model=ollama:<model> -> no egress
+        warning (the supported local-only config)."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.agents.langchain_react"):
+            self._build_backend(
+                llm_provider="ollama",
+                deep_agents_model="ollama:llama3.2",
+                ollama_host="http://localhost:11434",
+            )
+
+        egress = [r for r in caplog.records if "CLOUD EGRESS" in r.getMessage()]
+        assert not egress, "ollama-prefixed model must not trigger the cloud-egress warning"
+
+    def test_no_warn_for_genuine_cloud_provider(self, caplog):
+        """llm_provider=anthropic + anthropic model is a deliberate cloud
+        deployment, not a misconfig — no warning."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="pocketpaw.agents.langchain_react"):
+            self._build_backend(
+                llm_provider="anthropic",
+                deep_agents_model="anthropic:claude-sonnet-4-6",
+            )
+
+        egress = [r for r in caplog.records if "CLOUD EGRESS" in r.getMessage()]
+        assert not egress, "a genuine cloud provider must not trigger the egress warning"
