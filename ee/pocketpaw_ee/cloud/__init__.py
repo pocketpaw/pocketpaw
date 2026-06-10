@@ -1,5 +1,9 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-10 (W4b — privilege-escalation fix) — Updated the inline
+    note on the EEAuthBridge middleware: the bridge now grants OSS
+    ``full_access`` only to genuine platform admins (``is_superuser``), not
+    to every workspace owner/admin. See ``_core/ee_auth_bridge.py``.
 Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
     Mounts the Foresight router at ``/api/v1/foresight/*`` alongside the
     other domain routers. Routes delegate to ``ee.cloud.foresight.service``
@@ -136,9 +140,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
     #   CSRF → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
-    # The bridge marks admin/owner cloud users as ``full_access`` before
-    # the OSS AuthMiddleware reads it, so OSS routes (settings/channels/...)
-    # accept EE JWT auth without 403'ing on missing scopes.
+    # The bridge marks genuine *platform admins* (``is_superuser``) as
+    # ``full_access`` before the OSS AuthMiddleware reads it, so platform
+    # admins reach OSS routes (settings/channels/...) without 403'ing on
+    # missing scopes. Workspace owners/admins are NOT granted full_access —
+    # they stay subject to OSS require_scope (W4b escalation fix).
     # A CSRF 403 short-circuits before Timing observes the request, so perf
     # data won't include rejected POSTs. That's a deliberate tradeoff: the
     # CSRF gate exists to be fast and predictable, not measured. Reorder
