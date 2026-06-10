@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-10 (integration/belt-thin-slice) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_belt`` (the always-on Belt gate server:
+  belt_propose_change — the bundled `belt` skill calls it without an explicit
+  opt-in) and, defensively, ``loom`` (settings-gated, but a developer's
+  POCKETPAW_LOOM_MODEL_PATH env would leak into Settings and register it).
 Updated: 2026-06-10 (feat/studio-code-migration) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_media`` (the new always-on STUDIO media-generation
   server: image_generate / video_generate), so the external-config assertions
@@ -44,9 +49,11 @@ All SDK imports are mocked.
 import logging
 from unittest.mock import patch
 
+from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
@@ -96,6 +103,13 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_media`` is always-on too — the bundled `studio` skill calls
     # image_generate / video_generate without an explicit opt-in.
     out.pop(_MEDIA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
+    # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
+    # (loom_model_path unset -> not registered) but stripped defensively: a
+    # developer's POCKETPAW_LOOM_MODEL_PATH env leaks into Settings() and would
+    # otherwise register it in these tests.
+    out.pop(_BELT_MCP_SERVER_NAME, None)
+    out.pop(_LOOM_MCP_SERVER_NAME, None)
     return out
 
 
