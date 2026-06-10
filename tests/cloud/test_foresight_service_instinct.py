@@ -8,6 +8,16 @@
 # ``get_instinct_store`` singleton for a fresh ``InstinctStore`` rooted
 # at a per-test temp path so the rows don't leak across tests or
 # accumulate in the developer's ``~/.pocketpaw/instinct.db``.
+#
+# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — added
+# ``TestW4cWorkspaceScoping`` proving the fan-out now STAMPS the run's
+# ``workspace_id`` on the spawned instinct row (so the store can isolate it)
+# and that two tenants' foresight rows in the same synthetic
+# ``foresight:run:<id>`` pocket namespace are isolated by a workspace-scoped
+# store read — the residual cross-tenant surface W4a left open on the
+# foresight caller path. The store carries the ``workspace_id`` column (W4a);
+# W4c threads the caller's workspace from this service into the propose + the
+# dedupe / listing reads.
 """Tests for the Foresight → Instinct approval-loop integration."""
 
 from __future__ import annotations
@@ -408,3 +418,110 @@ async def test_emit_projected_decision_defaults_precedent_to_none() -> None:
         sub_type="decision_forecast",
     )
     assert response.forward_precedent_decision_id is None
+
+
+# ---------------------------------------------------------------------------
+# W4c — the fan-out stamps the run's workspace on the spawned instinct row,
+# and a workspace-scoped store read isolates two tenants' foresight rows that
+# share the same synthetic ``foresight:run:<id>`` pocket namespace. This is
+# the residual cross-tenant surface W4a left open on the foresight caller path.
+# ---------------------------------------------------------------------------
+
+
+class TestW4cWorkspaceScoping:
+    async def test_fan_out_stamps_workspace_on_spawned_row(self, isolated_instinct_store) -> None:
+        """Every instinct row the fan-out spawns carries the run's
+        ``workspace_id`` so a scoped store read can isolate it."""
+        ctx = _ctx(workspace="w1")
+        run = await foresight_service.create_scenario_run(
+            ctx, _body(name="w4c-stamp", n_ticks=2, route_to_instinct=True)
+        )
+
+        # The spawned rows are visible to a w1-scoped store read...
+        w1_rows = await isolated_instinct_store.list_actions(
+            pocket_id=f"foresight:run:{run.id}", workspace_id="w1"
+        )
+        assert len(w1_rows) == 2
+        # ...and invisible to an unrelated tenant's scoped read.
+        w2_rows = await isolated_instinct_store.list_actions(
+            pocket_id=f"foresight:run:{run.id}", workspace_id="w2"
+        )
+        assert w2_rows == []
+
+    async def test_two_tenants_same_pocket_namespace_are_isolated(
+        self, isolated_instinct_store
+    ) -> None:
+        """Two tenants whose runs collide in the synthetic pocket namespace
+        (same ``foresight:run:<id>``) only see their own rows on a scoped read.
+
+        We force the collision directly via the store: the fan-out keys rows by
+        ``foresight:run:<run_id>``, so identical run-id strings under two
+        workspaces share a pocket. The W4a ``workspace_id`` column + the W4c
+        threading keep them apart.
+        """
+        from pocketpaw.instinct.models import ActionTrigger
+
+        shared_pocket = "foresight:run:collide"
+        trig = ActionTrigger(type="agent", source="foresight", reason="w4c test")
+        await isolated_instinct_store.propose(
+            pocket_id=shared_pocket,
+            title="w1-row",
+            description="",
+            recommendation="",
+            trigger=trig,
+            workspace_id="w1",
+        )
+        await isolated_instinct_store.propose(
+            pocket_id=shared_pocket,
+            title="w2-row",
+            description="",
+            recommendation="",
+            trigger=trig,
+            workspace_id="w2",
+        )
+
+        w1 = await isolated_instinct_store.list_actions(pocket_id=shared_pocket, workspace_id="w1")
+        assert {a.title for a in w1} == {"w1-row"}
+        w2 = await isolated_instinct_store.list_actions(pocket_id=shared_pocket, workspace_id="w2")
+        assert {a.title for a in w2} == {"w2-row"}
+
+    async def test_listing_returns_only_callers_workspace_rows(
+        self, isolated_instinct_store
+    ) -> None:
+        """``list_instinct_proposals_for_run`` returns the caller's tenant rows
+        only — even if a foreign tenant's row sits in the same run pocket.
+
+        The run-level ``_fetch_in_workspace`` guard already 404s a foreign
+        run-id; this pins the SECOND layer (the store read is workspace-scoped),
+        so a foreign row that somehow shares the pocket namespace never leaks
+        into the caller's listing.
+        """
+        from pocketpaw.instinct.models import ActionTrigger
+
+        ctx = _ctx(workspace="w1")
+        run = await foresight_service.create_scenario_run(
+            ctx, _body(name="w4c-listing", n_ticks=1, route_to_instinct=True)
+        )
+        listing_before = await foresight_service.list_instinct_proposals_for_run(ctx, run.id)
+        own_count = listing_before.total
+        assert own_count >= 1
+
+        # Inject a foreign-tenant row into the SAME run pocket with matching
+        # provenance so only the workspace scope (not the provenance filter)
+        # can keep it out of w1's listing.
+        trig = ActionTrigger(type="agent", source="foresight", reason="w4c foreign")
+        await isolated_instinct_store.propose(
+            pocket_id=f"foresight:run:{run.id}",
+            title="foreign",
+            description="",
+            recommendation="",
+            trigger=trig,
+            parameters={"_foresight": {"run_id": run.id, "dedupe_key": "foreign-key"}},
+            workspace_id="w2",
+        )
+
+        listing_after = await foresight_service.list_instinct_proposals_for_run(ctx, run.id)
+        # The foreign row is filtered out by the workspace scope — w1's listing
+        # total is unchanged.
+        assert listing_after.total == own_count
+        assert "foreign" not in {item.title for item in listing_after.items}

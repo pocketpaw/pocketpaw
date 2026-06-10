@@ -7,6 +7,15 @@
 # TestStubEndpoints block now that bulk-reassign and bulk-snooze delegate
 # to the Tasks service. Full coverage of those endpoints lives in
 # test_mission_control_bulk_reassign.py and test_mission_control_bulk_snooze.py.
+# Updated: 2026-06-10 (W4c — scope instinct reads to workspace) — added
+# ``TestWorkspaceScopedReads`` proving the W4c fix: the façade now threads
+# ``ctx.workspace_id`` into ``store.pending`` / ``store.list_actions`` so
+# ``agent_list_work_items`` and ``agent_outcomes_summary`` only surface the
+# caller's tenant rows (plus legacy NULL) — NOT another workspace's — even when
+# pocket visibility would otherwise admit them. These tests deliberately keep
+# the autouse ``list_pockets`` mock workspace-blind so the isolation they assert
+# can ONLY come from the store-level scope (the residual leak W4a left open on
+# the internal caller side).
 # Updated: 2026-06-10 (fix/mc-bulk-approve-strands-writes — W0c) — added
 # ``TestBulkApproveExecutesWrites`` proving the W0c fix: a façade-level
 # bulk-approve over ≥2 parked-write Nudges actually FIRES each parked write
@@ -501,6 +510,66 @@ class TestOutcomesSummary:
         )
         # Only the "recent" row falls in the 24h window.
         assert summary.total == 1
+
+
+# ---------------------------------------------------------------------------
+# W4c — store-level workspace scoping on the instinct reads
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceScopedReads:
+    """W4c — the façade threads ``ctx.workspace_id`` into the instinct store
+    reads so a tenant only sees its own Nudges / outcomes, never another
+    workspace's, on the shared global instinct DB.
+
+    The autouse ``list_pockets`` mock is workspace-BLIND (returns p1/p2 for
+    every caller), so pocket visibility can't be what isolates these rows —
+    the isolation can only come from the store-level ``workspace_id`` filter
+    W4c adds. That is exactly the residual leak W4a left open on the internal
+    caller path: before W4c, ``store.pending`` / ``store.list_actions`` were
+    called with no workspace and returned every tenant's rows.
+    """
+
+    @pytest.mark.asyncio
+    async def test_list_work_items_excludes_other_workspace(self, store: InstinctStore) -> None:
+        # Two tenants' Nudges land in the same visible pocket on the shared DB.
+        await store.propose("p1", "mine", "", "", _trigger(), workspace_id="w1")
+        await store.propose("p1", "theirs", "", "", _trigger(), workspace_id="w2")
+
+        out = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        titles = {it.title for it in out}
+        assert titles == {"mine"}
+        assert "theirs" not in titles
+
+    @pytest.mark.asyncio
+    async def test_list_work_items_includes_legacy_null_workspace(
+        self, store: InstinctStore
+    ) -> None:
+        # A pre-tenancy Nudge (no workspace_id) must stay visible to a scoped
+        # read so legacy rows don't vanish from The Tray after W4c.
+        await store.propose("p1", "legacy", "", "", _trigger())  # workspace_id=None
+        await store.propose("p1", "theirs", "", "", _trigger(), workspace_id="w2")
+
+        out = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert {it.title for it in out} == {"legacy"}
+
+    @pytest.mark.asyncio
+    async def test_outcomes_summary_excludes_other_workspace(self, store: InstinctStore) -> None:
+        # ``agent_outcomes_summary`` has NO pocket filter at the store, so this
+        # is the highest-risk read: pre-W4c the newest 500 rows could be all
+        # another tenant's. Scope it and a foreign tenant's rows never count.
+        mine = await store.propose("p1", "mine-A", "", "", _trigger(), workspace_id="w1")
+        await store.approve(mine.id)
+        for _ in range(3):
+            await store.propose("p1", "theirs", "", "", _trigger(), workspace_id="w2")
+
+        summary = await mc_service.agent_outcomes_summary(
+            _ctx(workspace_id="w1"), OutcomesQueryRequest(window="24h")
+        )
+        # Only w1's single (approved) row is counted; w2's 3 pending are not.
+        assert summary.total == 1
+        assert summary.approved == 1
+        assert summary.pending == 0
 
 
 # ---------------------------------------------------------------------------
