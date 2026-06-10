@@ -12,10 +12,11 @@
 # Claude Code allowlist machinery matches them.
 #
 # Two SDK @tool defs:
-#   * image_generate — reuses the Gemini logic from
-#     src/pocketpaw/tools/builtin/image_gen.py (google genai client,
-#     settings.google_api_key, settings.image_model, saves to
-#     get_config_dir()/generated/<uuid>.png). Missing key → clear error.
+#   * image_generate — delegates to generate_image_file() in
+#     src/pocketpaw/tools/builtin/image_gen.py (2026-06-10: shared helper that
+#     routes gemini-*-image models via generateContent and imagen-* via the
+#     paid-tier predict endpoint), saves to get_config_dir()/generated/<uuid>.png.
+#     Missing key → clear error.
 #   * video_generate — calls the Replicate HTTP API with httpx (an EXISTING
 #     dep — the replicate package is NOT added). Reads settings.replicate_api_token
 #     + settings.video_model, POSTs a prediction, polls the GET until terminal
@@ -276,21 +277,14 @@ async def _image_generate_handler(args: dict) -> dict:
             "google-genai package not installed. Install with: pip install 'pocketpaw[image]'."
         )
 
+    from pocketpaw.tools.builtin.image_gen import generate_image_file
+
     try:
         client = genai.Client(api_key=settings.google_api_key)
-        response = client.models.generate_images(
-            model=settings.image_model,
-            prompt=prompt,
-            config=genai.types.GenerateImagesConfig(
-                number_of_images=1,
-                aspect_ratio=aspect_ratio,
-            ),
-        )
-        if not response.generated_images:
-            return _error_response("No image was generated. Try a different prompt.")
-        image = response.generated_images[0].image
         out_path = _generated_dir() / f"{uuid.uuid4()}.png"
-        image.save(out_path)
+        err = generate_image_file(client, settings.image_model, prompt, aspect_ratio, out_path)
+        if err:
+            return _error_response(err)
         logger.info("media: generated image %s", out_path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("media: image generation failed", exc_info=True)

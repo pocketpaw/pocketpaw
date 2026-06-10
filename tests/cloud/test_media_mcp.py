@@ -7,6 +7,9 @@
 #   * image_generate — happy path (mock the google genai client + agent_create →
 #     asserts the asset lands in a trusted-create gallery and the success body
 #     carries the pocket_id) and the error path when no google key is set.
+#     2026-06-10: happy path mocks generate_content (the gemini-2.5-flash-image
+#     default route in generate_image_file); the imagen/generate_images route is
+#     covered in tests/test_image_gen.py.
 #   * video_generate — the error path when no Replicate token is set (mock the
 #     settings; httpx must not even be reached). The happy path needs a live
 #     Replicate poll, so it is covered structurally by the no-token guard + the
@@ -71,18 +74,16 @@ async def test_image_generate_happy_path_lands_in_gallery(tmp_path, monkeypatch)
     # Fresh per-session state so the gallery count is deterministic.
     monkeypatch.setattr(media, "_GALLERY_STATE", {})
 
-    # Mock the google genai module (`from google import genai`).
-    saved = {}
-
-    def _save(path):
-        saved["path"] = str(path)
-
-    mock_image = MagicMock()
-    mock_image.save.side_effect = _save
-    mock_generated = MagicMock(image=mock_image)
-    mock_response = MagicMock(generated_images=[mock_generated])
+    # Mock the google genai module (`from google import genai`). The default
+    # image model is now gemini-2.5-flash-image, which routes through
+    # generate_content (free-tier path) — see generate_image_file().
+    mock_part = MagicMock()
+    mock_part.inline_data = MagicMock(mime_type="image/png", data=b"png-bytes")
+    mock_candidate = MagicMock()
+    mock_candidate.content.parts = [mock_part]
+    mock_response = MagicMock(candidates=[mock_candidate])
     mock_client = MagicMock()
-    mock_client.models.generate_images.return_value = mock_response
+    mock_client.models.generate_content.return_value = mock_response
     mock_genai = MagicMock()
     mock_genai.Client.return_value = mock_client
 
@@ -94,7 +95,7 @@ async def test_image_generate_happy_path_lands_in_gallery(tmp_path, monkeypatch)
         patch.object(media, "_identity", return_value=("ws-1", "u-1")),
         patch(
             "pocketpaw.config.get_settings",
-            return_value=MagicMock(google_api_key="k", image_model="gemini-2.0-flash-exp"),
+            return_value=MagicMock(google_api_key="k", image_model="gemini-2.5-flash-image"),
         ),
         patch.object(media, "_generated_dir", return_value=tmp_path),
         patch.dict(
@@ -120,8 +121,10 @@ async def test_image_generate_happy_path_lands_in_gallery(tmp_path, monkeypatch)
     assert body["kind"] == "image"
     assert body["pocket_id"] == "pkt-gallery-1"
     assert body["gallery_count"] == 1
-    # The PNG was saved under the generated dir.
-    assert saved["path"].startswith(str(tmp_path))
+    # The PNG was written under the generated dir with the inline image bytes.
+    pngs = list(tmp_path.glob("*.png"))
+    assert len(pngs) == 1
+    assert pngs[0].read_bytes() == b"png-bytes"
     # agent_create was called with the trusted-create STUDIO gallery contract.
     _, kwargs = agent_create.call_args
     assert kwargs["type_"] == "studio"
