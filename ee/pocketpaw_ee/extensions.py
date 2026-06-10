@@ -29,6 +29,25 @@ Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvid
 (``pocketpaw.mcp_servers`` entry ``media``) exposing the STUDIO image +
 video generation in-process server (``pocketpaw_media``) to the
 claude_agent_sdk cloud chat backend, mirroring ``CloudSitesMcpProvider``.
+
+Updated: 2026-06-10 (feat/belt-loom-mcp, BS-1) — added ``CloudLoomMcpProvider``
+(``pocketpaw.mcp_servers`` entry ``loom``) registering the external loom
+codebase-orientation binary as a STDIO MCP server (server name ``loom``;
+5 read tools: orient / locate / why / what_depends_on / boundaries) on the
+claude_agent_sdk cloud chat backend. Unlike the sibling providers this one
+returns a stdio config DICT (Path A), not an in-process SDK server object —
+the registration loop passes it through untouched. Ambient (not opt-in); the
+/belt surface scopes access via its profile allowlist. Returns None — and the
+loop skips it — when ``loom_model_path`` is unset or the binary is missing,
+so chat never breaks.
+
+Updated: 2026-06-10 (feat/belt-gate, BS-3) — added ``CloudBeltMcpProvider``
+(``pocketpaw.mcp_servers`` entry ``belt``) exposing the Belt & Pulley
+code-change gate in-process server (``pocketpaw_belt``; one tool
+``belt_propose_change``) to the claude_agent_sdk cloud chat backend, mirroring
+``CloudMediaMcpProvider``. The develop station proposes a diff through Instinct;
+the ee instinct router fires ``ee.cloud.belt.executor.execute_approved_change``
+on approval. Ambient (not opt-in).
 """
 
 from __future__ import annotations
@@ -610,6 +629,67 @@ class CloudMediaMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
 
         return list(MEDIA_TOOL_IDS)
+
+
+class CloudLoomMcpProvider:
+    """`pocketpaw.mcp_servers` — the loom codebase-orientation MCP server.
+
+    Registers the external loom binary (``loom mcp -model <worldmodel.json>``)
+    as a STDIO MCP server — server name ``loom``, 5 read tools (orient /
+    locate / why / what_depends_on / boundaries). Unlike the sibling
+    providers, ``build_server`` returns a stdio CONFIG DICT, not an
+    in-process SDK server object (Path A): the claude_agent_sdk's
+    ``mcp_servers`` option accepts stdio configs natively and the pocketpaw
+    registration loop passes the dict through untouched.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — the /belt surface scopes
+    access via its profile allowlist; surfaces whose allowlists don't name
+    the loom tool ids simply never see them. ``build_loom_server`` returns
+    None (loop skips it) when ``loom_model_path`` is unset or the binary is
+    missing, so chat keeps working with orientation simply absent.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        from pocketpaw_ee.agent.mcp_servers.loom import build_loom_server
+
+        return build_loom_server()
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
+
+        return list(LOOM_TOOL_IDS)
+
+
+class CloudBeltMcpProvider:
+    """`pocketpaw.mcp_servers` — the Belt & Pulley code-change gate in-process
+    server (``pocketpaw_belt``). Hosts ``belt_propose_change`` only.
+
+    The develop station agent on the /belt surface produces a unified diff and
+    proposes it THROUGH Instinct (the human approve/reject layer) via this tool.
+    On approval the ee instinct router fires
+    ``ee.cloud.belt.executor.execute_approved_change`` to apply the diff in a
+    fresh worktree and open a PR — the captain still merges on GitHub.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — the /belt surface scopes access
+    via its profile allowlist, the same regime the sibling loom / media / sites
+    servers use. ``build_belt_server`` returns None — and the loop skips it —
+    when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.belt import build_belt_server
+
+            return build_belt_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the belt server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.belt import BELT_TOOL_IDS
+
+        return list(BELT_TOOL_IDS)
 
 
 class CloudAgentExtension:
