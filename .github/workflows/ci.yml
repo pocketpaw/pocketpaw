@@ -10,6 +10,12 @@
 # Updated: 2026-05-25 — Triggers added for feat/*-integration branches so
 # sub-PRs in a multi-PR RFC rollout get full CI coverage during integration.
 # Stale `ee` branch reference dropped (the ee branch was deprecated 2026-05-21).
+# Updated: 2026-06-10 — deploy-coolify job: pushes to dev that pass every CI
+# job now fire the Coolify deploy hook for the cloud backend stack (defined
+# in qbtrix/paw-workspace deploy/coolify/, which clones this repo's dev at
+# image-build time). Lives in this workflow (not workflow_run) because the
+# repo's default branch is main — workflow_run triggers only fire from the
+# default branch's file, and main lags dev.
 name: CI
 
 on:
@@ -209,3 +215,36 @@ jobs:
       # repo root (where import-linter is installed) against the EE config.
       - name: import-linter (enterprise)
         run: uv run lint-imports --config ee/pyproject.toml
+
+  deploy-coolify:
+    # Auto-deploy the cloud backend after a green dev push. The Coolify app
+    # (qbtrix/paw-workspace deploy/coolify/) clones this repo's dev branch at
+    # image-build time, and its Dockerfile cache-busts on the dev tip — so a
+    # plain (cached) deploy rebuilds exactly the commit this run validated.
+    # Requires two repo secrets:
+    #   COOLIFY_DEPLOY_HOOK — the app's deploy-hook URL (Coolify → Webhooks)
+    #   COOLIFY_API_TOKEN   — a Coolify API token with deploy permission
+    # While the secrets are unset the job warns and exits green, so dev CI
+    # doesn't go red before the one-time Coolify setup is done.
+    name: Deploy to Coolify
+    runs-on: ubuntu-latest
+    needs: [lint, build, test-oss, test, import-linter]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    steps:
+      - name: Fire Coolify deploy hook
+        env:
+          HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
+          TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+        run: |
+          if [ -z "$HOOK" ] || [ -z "$TOKEN" ]; then
+            echo "::warning::COOLIFY_DEPLOY_HOOK / COOLIFY_API_TOKEN secrets not set — skipping backend deploy."
+            exit 0
+          fi
+          code=$(curl -sS -o resp.json -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" "$HOOK")
+          cat resp.json; echo
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Coolify deploy hook returned HTTP $code"
+            exit 1
+          fi
+          echo "Coolify deploy queued for \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
