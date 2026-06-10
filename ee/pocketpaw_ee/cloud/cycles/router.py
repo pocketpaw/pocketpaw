@@ -66,6 +66,20 @@ async def close_cycle(
     return await cycles_service.agent_close_cycle(ctx, cycle_id)
 
 
+@router.delete("/{cycle_id}")
+async def delete_cycle(
+    cycle_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> dict[str, str]:
+    """Delete a completed cycle permanently.
+
+    Only completed cycles can be deleted. The cycle document is removed
+    from the database and any remaining task references to this cycle are
+    detached.
+    """
+    return await cycles_service.agent_delete_cycle(ctx, cycle_id)
+
+
 @router.get("/{cycle_id}/items")
 async def list_cycle_items(
     cycle_id: str,
