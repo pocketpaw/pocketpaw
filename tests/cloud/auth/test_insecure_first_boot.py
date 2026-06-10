@@ -1,5 +1,11 @@
 # tests/cloud/auth/test_insecure_first_boot.py
 # Created: 2026-06-10 (security W0e — insecure-by-default first boot).
+# Updated: 2026-06-10 (security R2b review — staging-posture blind spot):
+#   added test_resolve_secret_warns_on_ambiguous_label /
+#   test_resolve_secret_no_extra_warning_for_dev_or_unset /
+#   test_prod_still_raises_not_warns + _is_ambiguous_nonprod_label() coverage
+#   for the new LOUD warning on the dev ephemeral-secret path under a non-dev,
+#   non-prod POCKETPAW_ENV label (e.g. staging).
 #
 # Verifies the two hardening guarantees added to ee/cloud/auth/core.py:
 #   1. Production posture refuses to boot when AUTH_SECRET is unset or still
@@ -8,6 +14,9 @@
 #   2. seed_admin() never seeds the hardcoded "admin123", never logs the
 #      password, prefers an operator-supplied ADMIN_PASSWORD, rejects the
 #      legacy default, and discloses a generated password only on stdout.
+#   3. An ambiguous non-prod label (e.g. POCKETPAW_ENV=staging) without a real
+#      AUTH_SECRET emits a LOUD warning on the dev ephemeral-secret path; dev /
+#      unset stays quiet (apart from the existing ephemeral note); prod raises.
 
 from __future__ import annotations
 
@@ -113,6 +122,80 @@ def test_dev_boot_with_default_secret_substitutes(monkeypatch):
     monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
     monkeypatch.setenv("AUTH_SECRET", _DEFAULT)
     assert core._resolve_secret() != _DEFAULT
+
+
+# ---------------------------------------------------------------------------
+# Staging-posture blind spot — ambiguous label warns, dev/unset doesn't,
+# prod still raises (R2b review fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("label", ["staging", "qa", "preprod", "uat"])
+def test_is_ambiguous_nonprod_label_true_for_unknown_labels(monkeypatch, label):
+    monkeypatch.setenv("POCKETPAW_ENV", label)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    assert core._is_ambiguous_nonprod_label() is True
+
+
+@pytest.mark.parametrize("label", ["", "dev", "development", "local", "test"])
+def test_is_ambiguous_nonprod_label_false_for_dev_or_unset(monkeypatch, label):
+    if label == "":
+        monkeypatch.delenv("POCKETPAW_ENV", raising=False)
+    else:
+        monkeypatch.setenv("POCKETPAW_ENV", label)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    assert core._is_ambiguous_nonprod_label() is False
+
+
+@pytest.mark.parametrize("label", ["production", "prod"])
+def test_is_ambiguous_nonprod_label_false_for_prod(monkeypatch, label):
+    monkeypatch.setenv("POCKETPAW_ENV", label)
+    assert core._is_ambiguous_nonprod_label() is False
+
+
+def test_resolve_secret_warns_on_ambiguous_label(monkeypatch, caplog):
+    """A staging-labelled deployment without AUTH_SECRET still boots on an
+    ephemeral secret, but now emits a LOUD warning naming the label."""
+    monkeypatch.setenv("POCKETPAW_ENV", "staging")
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("AUTH_SECRET", raising=False)
+    with caplog.at_level(logging.WARNING, logger=core.logger.name):
+        secret = core._resolve_secret()
+    # Boot is unchanged — still an ephemeral non-default secret.
+    assert secret != _DEFAULT
+    assert len(secret) >= 32
+    # The new staging warning fired and named the label.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "non-dev, non-prod label" in r.getMessage() and "staging" in r.getMessage()
+        for r in warnings
+    )
+
+
+@pytest.mark.parametrize("label", ["", "dev", "development", "local", "test"])
+def test_resolve_secret_no_ambiguous_warning_for_dev_or_unset(monkeypatch, caplog, label):
+    """Explicit dev labels / unset env must NOT trigger the new staging warning
+    (the pre-existing ephemeral note may still fire — we assert only that the
+    ambiguous-label message is absent)."""
+    if label == "":
+        monkeypatch.delenv("POCKETPAW_ENV", raising=False)
+    else:
+        monkeypatch.setenv("POCKETPAW_ENV", label)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("AUTH_SECRET", raising=False)
+    with caplog.at_level(logging.WARNING, logger=core.logger.name):
+        core._resolve_secret()
+    assert not any("non-dev, non-prod label" in r.getMessage() for r in caplog.records)
+
+
+def test_prod_still_raises_not_warns_for_ambiguous_path(monkeypatch):
+    """Explicit production still hard-fails — it must never fall to the warn
+    path (which would mean booting on an insecure secret)."""
+    monkeypatch.setenv("POCKETPAW_ENV", "production")
+    monkeypatch.delenv("AUTH_SECRET", raising=False)
+    monkeypatch.delenv("POCKETPAW_AUTH_COOKIE_SECURE", raising=False)
+    with pytest.raises(RuntimeError):
+        core._resolve_secret()
 
 
 # ---------------------------------------------------------------------------
