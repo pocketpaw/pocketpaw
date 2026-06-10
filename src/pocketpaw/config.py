@@ -1,6 +1,11 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
+    orientation (loom) MCP server settings. ``loom_model_path`` defaults
+    to None, which disables the loom MCP server; set it to a built
+    world-model JSON to enable orient / locate / why / what_depends_on /
+    boundaries for the cloud chat agent (BS-1, Belt & Pulley stations).
   - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
     ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
     still auto-installs; this flag toggles the chat-surface affordance
@@ -818,6 +823,28 @@ class Settings(BaseSettings):
     video_model: str = Field(
         default="kwaivgi/kling-v2.0",
         description="Replicate video-generation model (owner/name slug)",
+    )
+
+    # Codebase orientation (loom) — the loom binary serves an MCP server over
+    # stdio that orients the cloud chat agent to a codebase (orient / locate /
+    # why / what_depends_on / boundaries). Wired into the claude_agent_sdk
+    # backend via CloudLoomMcpProvider. Env auto-derives POCKETPAW_LOOM_BIN /
+    # POCKETPAW_LOOM_MODEL_PATH.
+    loom_bin: str = Field(
+        default="loom",
+        description=(
+            "Path to the loom binary. Resolved as: this explicit setting → "
+            "PATH lookup → ~/go/bin/loom fallback. The default 'loom' relies on "
+            "PATH; set an absolute path to pin a specific build."
+        ),
+    )
+    loom_model_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a loom world-model JSON (built via `loom build`). When "
+            "unset, the loom MCP server is not registered — orientation is "
+            "disabled. The binary is served as `loom mcp -model <this path>`."
+        ),
     )
 
     # Security
