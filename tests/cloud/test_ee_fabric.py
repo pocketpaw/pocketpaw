@@ -1,5 +1,14 @@
 # Tests for ee/fabric — ontology store (SQLite).
 # Created: 2026-03-28
+# Updated: 2026-06-10 (W4a — workspace-scope fabric store) — Added
+#   TestWorkspaceScoping: proves the cross-tenant read leak is closed. Workspace
+#   A cannot read workspace B's objects via query()/get_object(), cannot
+#   enumerate B's links via list_links(), and cannot traverse into B's objects
+#   via get_linked_objects(). Also covers the legacy/NULL-workspace boundary
+#   (rows written without a workspace stay visible to every scoped reader) and
+#   the unscoped (workspace_id=None) backward-compat path. The W0d filter tests
+#   below are the regression proof that workspace scoping layered on top of the
+#   property filters without disturbing them.
 # Updated: 2026-06-10 (W0d) — Added TestQueryFilters covering FabricQuery.filters:
 #   numeric comparison (the "rent > X" case), string equality, operator aliases,
 #   combined type+property filters, and the property-name / operator validation
@@ -276,3 +285,100 @@ class TestQueryFilters:
         await self._seed_leases(store)
         with pytest.raises(ValueError):
             await store.query(FabricQuery(type_name="Lease", filters={"rent": {"LIKE": 1}}))
+
+
+class TestWorkspaceScoping:
+    """W4a — the cross-tenant data leak is closed.
+
+    On a shared deployment (the micro tier / an agency running multiple client
+    tenants) the Fabric store is one global ``fabric.db``. Before W4a, every
+    read returned every tenant's rows. These tests prove a scoped read sees only
+    the caller's workspace (plus legacy NULL-workspace rows) across all four
+    read paths: ``query()``, ``get_object()``, ``list_links()``, and
+    ``get_linked_objects()``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_query_isolates_objects_by_workspace(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Customer", properties=[])
+        await store.create_object(t.id, {"name": "A-owned"}, workspace_id="ws-a")
+        await store.create_object(t.id, {"name": "B-owned"}, workspace_id="ws-b")
+
+        # Workspace A sees only A's object — NOT B's.
+        a_result = await store.query(FabricQuery(type_name="Customer"), workspace_id="ws-a")
+        assert a_result.total == 1
+        assert a_result.objects[0].properties["name"] == "A-owned"
+
+        # Workspace B sees only B's object — NOT A's.
+        b_result = await store.query(FabricQuery(type_name="Customer"), workspace_id="ws-b")
+        assert b_result.total == 1
+        assert b_result.objects[0].properties["name"] == "B-owned"
+
+    @pytest.mark.asyncio
+    async def test_get_object_returns_none_cross_tenant(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Secret", properties=[])
+        b_obj = await store.create_object(t.id, {"name": "B-secret"}, workspace_id="ws-b")
+
+        # Workspace A asking for B's object id by direct lookup gets nothing
+        # (the router turns this into a 404 — never leaks existence).
+        assert await store.get_object(b_obj.id, workspace_id="ws-a") is None
+        # B itself can still read it.
+        assert (await store.get_object(b_obj.id, workspace_id="ws-b")) is not None
+
+    @pytest.mark.asyncio
+    async def test_list_links_isolated_by_workspace(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Node", properties=[])
+        a1 = await store.create_object(t.id, {"n": 1}, workspace_id="ws-a")
+        a2 = await store.create_object(t.id, {"n": 2}, workspace_id="ws-a")
+        b1 = await store.create_object(t.id, {"n": 3}, workspace_id="ws-b")
+        b2 = await store.create_object(t.id, {"n": 4}, workspace_id="ws-b")
+        await store.link(a1.id, a2.id, "rel", workspace_id="ws-a")
+        await store.link(b1.id, b2.id, "rel", workspace_id="ws-b")
+
+        a_links, a_total = await store.list_links(workspace_id="ws-a")
+        assert a_total == 1
+        assert a_links[0].from_object_id == a1.id
+
+        b_links, b_total = await store.list_links(workspace_id="ws-b")
+        assert b_total == 1
+        assert b_links[0].from_object_id == b1.id
+
+    @pytest.mark.asyncio
+    async def test_get_linked_objects_isolated(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Node", properties=[])
+        hub = await store.create_object(t.id, {"role": "hub"}, workspace_id="ws-a")
+        a_leaf = await store.create_object(t.id, {"role": "a-leaf"}, workspace_id="ws-a")
+        b_leaf = await store.create_object(t.id, {"role": "b-leaf"}, workspace_id="ws-b")
+        # A link that (incorrectly) spans the tenant boundary must still not
+        # surface B's object to an A-scoped traversal.
+        await store.link(hub.id, a_leaf.id, "rel", workspace_id="ws-a")
+        await store.link(hub.id, b_leaf.id, "rel", workspace_id="ws-a")
+
+        linked = await store.get_linked_objects(hub.id, "rel", workspace_id="ws-a")
+        roles = {o.properties["role"] for o in linked}
+        assert roles == {"a-leaf"}  # b-leaf is excluded — it belongs to ws-b
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_workspace_visible_to_all(self, store: FabricStore) -> None:
+        # A row written before tenancy (no workspace_id) cannot be attributed to
+        # one tenant after the fact, so a scoped read still sees it. This keeps
+        # single-tenant deployments and pre-migration data working.
+        t = await store.define_type(name="Legacy", properties=[])
+        await store.create_object(t.id, {"name": "pre-tenancy"})  # NULL workspace
+
+        a_result = await store.query(FabricQuery(type_name="Legacy"), workspace_id="ws-a")
+        b_result = await store.query(FabricQuery(type_name="Legacy"), workspace_id="ws-b")
+        assert a_result.total == 1
+        assert b_result.total == 1
+
+    @pytest.mark.asyncio
+    async def test_unscoped_read_sees_everything(self, store: FabricStore) -> None:
+        # workspace_id=None (OSS / agent-tool caller) is fully backward
+        # compatible — no scoping at all.
+        t = await store.define_type(name="Item", properties=[])
+        await store.create_object(t.id, {"n": 1}, workspace_id="ws-a")
+        await store.create_object(t.id, {"n": 2}, workspace_id="ws-b")
+        await store.create_object(t.id, {"n": 3})  # NULL
+
+        result = await store.query(FabricQuery(type_name="Item"))
+        assert result.total == 3

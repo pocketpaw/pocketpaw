@@ -1,5 +1,15 @@
 # tests/test_ee_instinct.py — Comprehensive tests for ee/instinct (store + router).
 # Created: 2026-03-28 — Initial store tests.
+# Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — added
+#   TestWorkspaceScoping (store) and TestWorkspaceScopingRoutes (router) proving
+#   the cross-tenant decision leak is closed: workspace A's pending/list/audit
+#   reads exclude workspace B's actions and audit rows, while legacy
+#   NULL-workspace rows stay visible and unscoped (workspace_id=None) reads keep
+#   full backward-compat. Critically, TestWorkspaceScoping also re-asserts that
+#   ``verify_audit_chain`` stays intact after mixed-workspace appends — the
+#   tenancy column is a READ FILTER and is NOT folded into the W2b hash, so the
+#   global chain linkage is unchanged. The existing TestAuditHashChain class is
+#   the W2b regression proof.
 # Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
 #   TestAuditHashChain (store) and TestAuditVerifyEndpoint (router) covering
 #   the audit hash chain — appends build a valid chain; verify detects an
@@ -1544,3 +1554,287 @@ class TestOutcomeVerificationE2E:
         assert "action_proposed" in events
         assert "action_approved" in events
         assert "action_executed" in events
+
+
+# ---------------------------------------------------------------------------
+# W4a — workspace tenancy: cross-tenant decision-leak closure
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceScoping:
+    """W4a — workspace A cannot read workspace B's actions or audit rows.
+
+    The instinct store is a single global DB on a shared deployment. Before
+    W4a, list/pending/audit reads passed no workspace, so any tenant saw every
+    tenant's decisions. These tests pin the closure at the store layer (the
+    router tests below pin it at the API layer).
+    """
+
+    @pytest.mark.asyncio
+    async def test_pending_isolated_by_workspace(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+
+        a_pending = await store.pending(workspace_id="ws-a")
+        assert {a.title for a in a_pending} == {"A-task"}
+
+        b_pending = await store.pending(workspace_id="ws-b")
+        assert {a.title for a in b_pending} == {"B-task"}
+
+    @pytest.mark.asyncio
+    async def test_pending_count_isolated(self, store: InstinctStore) -> None:
+        for _ in range(2):
+            await store.propose(
+                pocket_id="p",
+                title="A",
+                description="",
+                recommendation="",
+                trigger=make_trigger(),
+                workspace_id="ws-a",
+            )
+        await store.propose(
+            pocket_id="p",
+            title="B",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        assert await store.pending_count(workspace_id="ws-a") == 2
+        assert await store.pending_count(workspace_id="ws-b") == 1
+
+    @pytest.mark.asyncio
+    async def test_list_actions_isolated(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        a_list = await store.list_actions(workspace_id="ws-a")
+        assert {a.title for a in a_list} == {"A"}
+
+    @pytest.mark.asyncio
+    async def test_query_audit_isolated(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        a_audit = await store.query_audit(workspace_id="ws-a")
+        a_descriptions = {e.description for e in a_audit}
+        assert "Proposed: A-task" in a_descriptions
+        assert "Proposed: B-task" not in a_descriptions
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_workspace_visible(self, store: InstinctStore) -> None:
+        # A pre-tenancy action (no workspace_id) stays visible to a scoped read.
+        await store.propose(
+            pocket_id="p",
+            title="legacy",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+        )
+        a_pending = await store.pending(workspace_id="ws-a")
+        assert {a.title for a in a_pending} == {"legacy"}
+
+    @pytest.mark.asyncio
+    async def test_unscoped_read_sees_all(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        all_pending = await store.pending()  # workspace_id=None
+        assert {a.title for a in all_pending} == {"A", "B"}
+
+    @pytest.mark.asyncio
+    async def test_audit_chain_intact_across_workspaces(self, store: InstinctStore) -> None:
+        # CRITICAL W2b regression: the tenancy column is a read filter only and
+        # is NOT part of the canonical hash, so a ledger built from interleaved
+        # workspaces must still verify as one intact global chain.
+        for i in range(3):
+            ws = "ws-a" if i % 2 == 0 else "ws-b"
+            action = await store.propose(
+                pocket_id="p",
+                title=f"t{i}",
+                description="",
+                recommendation="",
+                trigger=make_trigger(),
+                workspace_id=ws,
+            )
+            await store.approve(action.id)
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["hashed"] == verdict["checked"]
+        assert verdict["hashed"] > 0
+        assert verdict["broken_at"] is None
+
+
+class TestWorkspaceScopingRoutes:
+    """W4a — the instinct API endpoints scope reads to the caller's workspace.
+
+    Uses a mutable ``active_ws`` holder so a single TestClient can act as
+    different tenants across requests (the ``current_workspace_id`` /
+    ``current_active_user`` overrides read the live holder value).
+    """
+
+    @pytest.fixture
+    def tenant_client(self, tmp_path: Path, monkeypatch):
+        from pocketpaw_ee.cloud.auth import current_active_user
+
+        router_store = InstinctStore(tmp_path / "tenancy_router.db")
+        # Mutable holder — flip ``["ws"]`` between requests to switch tenants.
+        active = {"ws": "ws-a"}
+
+        class _SwitchUser:
+            def __init__(self, holder: dict) -> None:
+                self._holder = holder
+                self.id = "user-switch"
+
+            @property
+            def active_workspace(self) -> str:
+                return self._holder["ws"]
+
+            @property
+            def workspaces(self):
+                return [_FakeMembership(workspace=self._holder["ws"], role="admin")]
+
+        import pocketpaw_ee.cloud.workspace.service as ws_svc
+
+        monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_license] = lambda: None
+        app.dependency_overrides[current_active_user] = lambda: _SwitchUser(active)
+        app.dependency_overrides[current_workspace_id] = lambda: active["ws"]
+
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            yield TestClient(app), active
+
+    def test_pending_excludes_other_tenant(self, tenant_client) -> None:
+        client, active = tenant_client
+        trigger = make_trigger().model_dump(mode="json")
+
+        active["ws"] = "ws-a"
+        r = client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "A-task", "trigger": trigger},
+        )
+        assert r.status_code == 201
+
+        active["ws"] = "ws-b"
+        r = client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "B-task", "trigger": trigger},
+        )
+        assert r.status_code == 201
+
+        # Workspace A's pending list excludes B's decision.
+        active["ws"] = "ws-a"
+        r = client.get("/instinct/actions/pending")
+        assert r.status_code == 200
+        titles = {a["title"] for a in r.json()}
+        assert titles == {"A-task"}
+
+        # And B's excludes A's.
+        active["ws"] = "ws-b"
+        r = client.get("/instinct/actions/pending")
+        assert {a["title"] for a in r.json()} == {"B-task"}
+
+    def test_list_and_audit_exclude_other_tenant(self, tenant_client) -> None:
+        client, active = tenant_client
+        trigger = make_trigger().model_dump(mode="json")
+
+        active["ws"] = "ws-a"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "A-only", "trigger": trigger},
+        )
+        active["ws"] = "ws-b"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "B-only", "trigger": trigger},
+        )
+
+        active["ws"] = "ws-a"
+        r = client.get("/instinct/actions")
+        assert {a["title"] for a in r.json()["actions"]} == {"A-only"}
+
+        # Audit (ADMIN-tier) — A's trail excludes B's proposal.
+        r = client.get("/instinct/audit")
+        assert r.status_code == 200
+        descriptions = {e["description"] for e in r.json()["entries"]}
+        assert "Proposed: A-only" in descriptions
+        assert "Proposed: B-only" not in descriptions
+
+    def test_audit_verify_stays_global(self, tenant_client) -> None:
+        # verify is whole-ledger — tenancy must NOT scope it (chain integrity is
+        # a property of the complete trail, not one tenant's slice).
+        client, active = tenant_client
+        trigger = make_trigger().model_dump(mode="json")
+        active["ws"] = "ws-a"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "A", "trigger": trigger},
+        )
+        active["ws"] = "ws-b"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "B", "trigger": trigger},
+        )
+        r = client.get("/instinct/audit/verify")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["intact"] is True
+        # Two proposals across two tenants — the global chain counts BOTH.
+        assert body["hashed"] == 2

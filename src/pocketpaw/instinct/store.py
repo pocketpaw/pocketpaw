@@ -1,5 +1,22 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — closes a
+#   cross-tenant decision leak on shared deployments. ``instinct_actions`` and
+#   ``instinct_audit`` now carry a ``workspace_id`` column. Writes (``propose``,
+#   ``_log``) stamp the caller's workspace; the per-tenant READS — ``pending``,
+#   ``pending_count``, ``_query_actions`` (so ``list_actions`` / ``for_pocket``
+#   inherit it) and ``query_audit`` — take an optional ``workspace_id`` and,
+#   when supplied, restrict rows to ``workspace_id = ? OR workspace_id IS NULL``
+#   (legacy/global rows predating tenancy stay visible; a None argument leaves
+#   the read unscoped for OSS callers). ``workspace_id`` crosses from the EE
+#   router as a PLAIN str — the OSS store never imports pocketpaw_ee. Additive
+#   ALTER migration mirrors the assignee / hash-chain ones below.
+#   AUDIT-CHAIN INVARIANT (do not break): ``workspace_id`` is deliberately NOT
+#   part of ``_canonical_audit_payload`` and NOT folded into the hash. The
+#   tamper-evident chain (W2b) is GLOBAL per store by design — it spans the
+#   whole ledger so linkage and ``verify_audit_chain`` are byte-for-byte
+#   unchanged. Tenancy here is purely a READ FILTER on which rows a tenant sees;
+#   it does not touch the genesis/prev/entry hashes or the chain walk.
 # Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: the
 #   ``instinct_audit`` ledger is now a hash chain. Each row carries
 #   ``entry_hash`` = sha256 over the row's canonical content + the previous
@@ -178,6 +195,28 @@ def compute_audit_hash(canonical_payload: str, prev_hash: str) -> str:
     return h.hexdigest()
 
 
+def _workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
+    """Build the tenancy WHERE fragment + bound params for a scoped read (W4a).
+
+    Returns ``(condition, params)``:
+
+    - ``workspace_id is None`` -> ``(None, [])`` — no scoping. OSS / agent-tool
+      callers that don't carry a workspace see everything, exactly as before
+      W4a.
+    - a concrete workspace -> ``("(workspace_id = ? OR workspace_id IS NULL)",
+      [workspace_id])`` — the caller's own rows PLUS legacy/global
+      NULL-workspace rows that predate tenancy (see the module header). The
+      value is always a bound parameter; the column name is a fixed literal,
+      never user input.
+
+    This is a READ FILTER only. It is never folded into the W2b audit hash —
+    the global chain linkage and ``verify_audit_chain`` are untouched.
+    """
+    if workspace_id is None:
+        return None, []
+    return "(workspace_id = ? OR workspace_id IS NULL)", [workspace_id]
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS instinct_actions (
     id TEXT PRIMARY KEY,
@@ -197,6 +236,9 @@ CREATE TABLE IF NOT EXISTS instinct_actions (
     approved_at TEXT,
     rejected_reason TEXT,
     assignee TEXT,
+    -- Tenancy (W4a): the owning workspace. NULL = legacy/global row written
+    -- before tenancy or by a non-cloud OSS caller; a scoped read still sees it.
+    workspace_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now')),
     executed_at TEXT
@@ -218,7 +260,11 @@ CREATE TABLE IF NOT EXISTS instinct_audit (
     -- content + prev_hash. Nullable so a fresh schema is created with the
     -- columns and a pre-existing ledger ALTERs in (legacy rows stay NULL).
     prev_hash TEXT,
-    entry_hash TEXT
+    entry_hash TEXT,
+    -- Tenancy (W4a): owning workspace. This is a READ-FILTER column only — it
+    -- is intentionally NOT part of the canonical hash payload, so the global
+    -- W2b chain linkage and verify are unaffected. NULL = legacy/global.
+    workspace_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS instinct_corrections (
@@ -243,8 +289,10 @@ CREATE TABLE IF NOT EXISTS instinct_fabric_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_actions_pocket ON instinct_actions(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_actions_status ON instinct_actions(status);
+CREATE INDEX IF NOT EXISTS idx_actions_workspace ON instinct_actions(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_audit_pocket ON instinct_audit(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON instinct_audit(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_workspace ON instinct_audit(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_corrections_pocket ON instinct_corrections(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_corrections_action ON instinct_corrections(action_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_audit ON instinct_fabric_snapshots(audit_id);
@@ -281,6 +329,17 @@ class InstinctStore:
                     await db.execute(f"ALTER TABLE instinct_audit ADD COLUMN {_col} TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Additive migration (W4a): tenancy column on both the actions and
+            # the audit ledger of a pre-existing DB. Same swallow-the-duplicate
+            # pattern as above. Pre-existing rows keep NULL workspace_id
+            # (legacy/global; a scoped read still sees them — see the header).
+            # The audit ALTER is a READ-FILTER column ONLY: workspace_id is not
+            # part of the canonical hash payload, so the W2b chain is untouched.
+            for _tbl in ("instinct_actions", "instinct_audit"):
+                try:
+                    await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
+                except aiosqlite.OperationalError:
+                    pass
             await db.commit()
         self._initialized = True
 
@@ -304,6 +363,7 @@ class InstinctStore:
         reasoning_trace: ReasoningTrace | None = None,
         fabric_snapshots: list[FabricObjectSnapshot] | None = None,
         assignee: str | None = None,
+        workspace_id: str | None = None,
     ) -> Action:
         action = Action(
             pocket_id=pocket_id,
@@ -323,8 +383,8 @@ class InstinctStore:
                 "INSERT INTO instinct_actions"
                 " (id, pocket_id, title, description,"
                 " category, status, priority, trigger,"
-                " recommendation, parameters, context, assignee)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " recommendation, parameters, context, assignee, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     action.id,
                     pocket_id,
@@ -338,6 +398,7 @@ class InstinctStore:
                     json.dumps(parameters or {}),
                     action.context.model_dump_json(),
                     assignee,
+                    workspace_id,
                 ),
             )
             await db.commit()
@@ -354,6 +415,7 @@ class InstinctStore:
             description=f"Proposed: {title}",
             ai_recommendation=recommendation,
             context=audit_context,
+            workspace_id=workspace_id,
         )
 
         if fabric_snapshots:
@@ -531,9 +593,21 @@ class InstinctStore:
         params.append(action_id)
 
         await self._ensure_schema()
+        workspace_id: str | None = None
         async with self._conn() as db:
             await db.execute(f"UPDATE instinct_actions SET {', '.join(sets)} WHERE id = ?", params)
             await db.commit()
+            # W4a — read back the action's owning workspace so the lifecycle
+            # audit row (approve / reject / execute / fail) is stamped with the
+            # same tenant the action belongs to. Done with a tiny direct read
+            # rather than widening the Action model.
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT workspace_id FROM instinct_actions WHERE id = ?", (action_id,)
+            ) as cur:
+                ws_row = await cur.fetchone()
+                if ws_row is not None and "workspace_id" in ws_row.keys():
+                    workspace_id = ws_row["workspace_id"]
 
         await self._log(
             action_id=action_id,
@@ -542,6 +616,7 @@ class InstinctStore:
             event=event,
             description=f"{event.replace('_', ' ').title()}: {action.title}{extra_desc}",
             context=audit_context,
+            workspace_id=workspace_id,
         )
         return await self.get_action(action_id)
 
@@ -556,35 +631,52 @@ class InstinctStore:
                 return self._row_to_action(row) if row else None
 
     async def pending(
-        self, pocket_id: str | None = None, assignee: str | None = None
+        self,
+        pocket_id: str | None = None,
+        assignee: str | None = None,
+        workspace_id: str | None = None,
     ) -> list[Action]:
         return await self._query_actions(
-            status=ActionStatus.PENDING, pocket_id=pocket_id, assignee=assignee
+            status=ActionStatus.PENDING,
+            pocket_id=pocket_id,
+            assignee=assignee,
+            workspace_id=workspace_id,
         )
 
-    async def pending_count(self, pocket_id: str | None = None) -> int:
+    async def pending_count(
+        self, pocket_id: str | None = None, workspace_id: str | None = None
+    ) -> int:
         cond = "WHERE status = 'pending'"
         params: list[Any] = []
         if pocket_id:
             cond += " AND pocket_id = ?"
             params.append(pocket_id)
+        # W4a — scope the count to the caller's workspace (plus legacy NULL rows)
+        # so a tenant's pending badge never includes another tenant's items.
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            cond += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
             async with db.execute(f"SELECT COUNT(*) FROM instinct_actions {cond}", params) as cur:
                 row = await cur.fetchone()
                 return row[0] if row else 0
 
-    async def for_pocket(self, pocket_id: str) -> list[Action]:
-        return await self._query_actions(pocket_id=pocket_id)
+    async def for_pocket(self, pocket_id: str, workspace_id: str | None = None) -> list[Action]:
+        return await self._query_actions(pocket_id=pocket_id, workspace_id=workspace_id)
 
     async def list_actions(
         self,
         pocket_id: str | None = None,
         status: ActionStatus | None = None,
         limit: int = 50,
+        workspace_id: str | None = None,
     ) -> list[Action]:
         """Public method — list actions with optional filters and limit."""
-        return await self._query_actions(status=status, pocket_id=pocket_id, limit=limit)
+        return await self._query_actions(
+            status=status, pocket_id=pocket_id, limit=limit, workspace_id=workspace_id
+        )
 
     async def _query_actions(
         self,
@@ -592,6 +684,7 @@ class InstinctStore:
         pocket_id: str | None = None,
         limit: int = 500,
         assignee: str | None = None,
+        workspace_id: str | None = None,
     ) -> list[Action]:
         conditions: list[str] = []
         params: list[Any] = []
@@ -604,6 +697,13 @@ class InstinctStore:
         if assignee:
             conditions.append("assignee = ?")
             params.append(assignee)
+        # W4a — tenancy scope as an ADDITIONAL condition (caller's workspace plus
+        # legacy NULL-workspace rows). ``None`` leaves the listing unscoped for
+        # OSS callers.
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
@@ -630,6 +730,7 @@ class InstinctStore:
         context: dict[str, Any] | None = None,
         ai_recommendation: str | None = None,
         outcome: str | None = None,
+        workspace_id: str | None = None,
     ) -> AuditEntry:
         entry = AuditEntry(
             action_id=action_id,
@@ -679,12 +780,18 @@ class InstinctStore:
                 prev_hash = prev_row[0] if prev_row else ""
                 entry_hash = compute_audit_hash(canonical, prev_hash)
 
+                # ``workspace_id`` (W4a) is appended as a plain column ONLY. It
+                # is deliberately absent from ``canonical`` above and from
+                # ``compute_audit_hash`` — the W2b chain is GLOBAL and must hash
+                # identically on re-verification regardless of tenancy. Tenancy
+                # is a read filter, not chain content.
                 await db.execute(
                     "INSERT INTO instinct_audit"
                     " (id, action_id, pocket_id, timestamp, actor, event,"
                     " category, description, context,"
-                    " ai_recommendation, outcome, prev_hash, entry_hash)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " ai_recommendation, outcome, prev_hash, entry_hash,"
+                    " workspace_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         entry.id,
                         entry.action_id,
@@ -699,6 +806,7 @@ class InstinctStore:
                         entry.outcome,
                         prev_hash,
                         entry_hash,
+                        workspace_id,
                     ),
                 )
                 await db.commit()
@@ -725,6 +833,7 @@ class InstinctStore:
         event: str | None = None,
         actor: str | None = None,
         limit: int = 100,
+        workspace_id: str | None = None,
     ) -> list[AuditEntry]:
         """Query audit entries with optional filters.
 
@@ -733,6 +842,13 @@ class InstinctStore:
         is an exact match, not a LIKE — callers who need prefix matching
         should filter in Python on the returned list. Added 2026-04-19
         for the AgentReasoningTab's per-agent view.
+
+        ``workspace_id`` (W4a) is a READ FILTER: when supplied, only the
+        caller's tenant's rows (plus legacy NULL-workspace rows) are returned,
+        so an auditor for workspace A never sees workspace B's decision trail.
+        This filters the returned ROWS only — it does NOT touch the global W2b
+        hash chain or ``verify_audit_chain``, which always run over the whole
+        ledger so chain integrity stays a property of the complete trail.
         """
         conditions: list[str] = []
         params: list[Any] = []
@@ -748,6 +864,10 @@ class InstinctStore:
         if actor:
             conditions.append("actor = ?")
             params.append(actor)
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
 
@@ -759,8 +879,12 @@ class InstinctStore:
             ) as cur:
                 return [self._row_to_audit(row) async for row in cur]
 
-    async def export_audit(self, pocket_id: str | None = None) -> str:
-        entries = await self.query_audit(pocket_id=pocket_id, limit=10000)
+    async def export_audit(
+        self, pocket_id: str | None = None, workspace_id: str | None = None
+    ) -> str:
+        entries = await self.query_audit(
+            pocket_id=pocket_id, limit=10000, workspace_id=workspace_id
+        )
         return json.dumps([e.model_dump(mode="json") for e in entries], indent=2)
 
     async def verify_audit_chain(self) -> dict[str, Any]:

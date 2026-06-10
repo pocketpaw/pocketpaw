@@ -1,5 +1,20 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — closes a
+#   cross-tenant decision leak on shared deployments. The instinct store is
+#   GLOBAL (one shared DB) and list/pending/audit reads previously passed no
+#   workspace, so a workspace-A operator could read workspace-B's pending
+#   actions and audit trail. Now ``propose_action`` stamps the caller's active
+#   ``current_workspace_id`` on the new action (and its audit rows), and every
+#   per-tenant READ — ``pending_actions`` / ``list_actions`` / ``query_audit`` /
+#   ``export_audit`` / ``get_audit_entry`` — threads ``current_workspace_id``
+#   into the store so results are restricted to that tenant (plus legacy
+#   NULL-workspace rows). ``workspace_id`` crosses to the OSS store as a PLAIN
+#   str. ``/instinct/audit/verify`` stays GLOBAL on purpose — chain integrity is
+#   a property of the whole W2b ledger, and tenancy here is a read filter that
+#   never touches the hash chain. The pre-existing approve/reject/bulk
+#   ``_assert_pocket_write_workspace`` guard (PR #1183 / RFC 09 Slice 3) already
+#   bound the WRITE/escalation paths to the workspace; W4a closes the READ side.
 # Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
 #   GET /instinct/audit/verify, which walks the audit hash chain (built in
 #   pocketpaw.instinct.store) and reports intact / first-broken row so a
@@ -591,12 +606,20 @@ class BulkActionResponse(BaseModel):
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("instinct.propose"))],
 )
-async def propose_action(req: ProposeRequest):
+async def propose_action(
+    req: ProposeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
     """Propose a new action for human approval.
 
     Optional `reasoning_trace` and `fabric_snapshots` let callers attach the
     agent's decision inputs at propose time. They are persisted into the
     resulting audit row for later hydration via `/audit/{id}?hydrate=1`.
+
+    W4a — the proposed action (and its audit rows) are stamped with the
+    caller's active workspace so the cross-tenant decision leak is closed at
+    the write side: later list/pending/audit reads scoped to a tenant only
+    surface that tenant's actions.
     """
     return await _store().propose(
         pocket_id=req.pocket_id,
@@ -609,6 +632,7 @@ async def propose_action(req: ProposeRequest):
         parameters=req.parameters,
         reasoning_trace=req.reasoning_trace,
         fabric_snapshots=list(req.fabric_snapshots) if req.fabric_snapshots else None,
+        workspace_id=workspace_id,
     )
 
 
@@ -628,9 +652,16 @@ async def pending_actions(
             "unchanged from before — every pending item is returned."
         ),
     ),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List actions waiting for human approval."""
-    return await _store().pending(pocket_id=pocket_id, assignee=assignee)
+    """List actions waiting for human approval.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so The Tray for tenant A never surfaces tenant B's pending decisions.
+    """
+    return await _store().pending(
+        pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id
+    )
 
 
 @router.get(
@@ -644,14 +675,20 @@ async def list_actions(
         None, description="Filter by status: pending|approved|rejected|executed|failed"
     ),
     limit: int = Query(50, ge=1, le=500, description="Max actions to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List all actions with optional status and pocket filters."""
+    """List all actions with optional status and pocket filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so a tenant can't enumerate another tenant's actions.
+    """
     store = _store()
     status_enum = ActionStatus(status) if status else None
     actions = await store.list_actions(
         pocket_id=pocket_id,
         status=status_enum,
         limit=limit,
+        workspace_id=workspace_id,
     )
     return ActionsListResponse(actions=actions, total=len(actions))
 
@@ -1142,8 +1179,14 @@ async def query_audit(
         ),
     ),
     limit: int = Query(100, ge=1, le=1000, description="Max entries to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Query instinct audit log entries with optional filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so a tenant's auditor only reads that tenant's decision trail. The
+    scope is a READ FILTER on which rows come back; ``/instinct/audit/verify``
+    stays global because chain integrity is a property of the whole ledger.
 
     DEPRECATED: Cluster C / PR4 made ``/api/v1/runtime/audit`` the canonical
     audit surface with workspace rollup + FTS. This endpoint stays as the
@@ -1160,6 +1203,7 @@ async def query_audit(
         event=event,
         actor=actor,
         limit=limit,
+        workspace_id=workspace_id,
     )
     return AuditListResponse(entries=entries, total=len(entries))
 
@@ -1211,18 +1255,20 @@ class AuditVerifyResponse(BaseModel):
 )
 async def export_audit(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """Export the full instinct audit log as JSON for compliance.
+    """Export the instinct audit log as JSON for compliance.
 
-    The response carries an ``X-Audit-Chain-Intact`` header (``true``/
-    ``false``) so a downstream consumer that only handles the file body still
-    learns whether the ledger verified at export time. The chain is global, so
-    the header reflects the WHOLE ledger's integrity even when the export is
-    filtered to a single pocket. Call ``GET /instinct/audit/verify`` for the
-    full break-point detail.
+    W4a — the exported BODY is scoped to the caller's active workspace (plus
+    legacy NULL-workspace rows) so a tenant's compliance export never carries
+    another tenant's decision trail. The ``X-Audit-Chain-Intact`` header still
+    reflects the WHOLE ledger's integrity (the chain is global by design), so a
+    downstream consumer that only handles the file body still learns whether
+    the ledger verified at export time. Call ``GET /instinct/audit/verify`` for
+    the full break-point detail.
     """
     store = _store()
-    data = await store.export_audit(pocket_id=pocket_id)
+    data = await store.export_audit(pocket_id=pocket_id, workspace_id=workspace_id)
     verdict = await store.verify_audit_chain()
     return Response(
         content=data,
@@ -1265,6 +1311,7 @@ async def verify_audit_chain():
 async def get_audit_entry(
     audit_id: str,
     hydrate: int = Query(0, description="Pass 1 to expand referenced IDs"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Fetch a single audit entry, optionally hydrated with referenced content.
 
@@ -1273,9 +1320,13 @@ async def get_audit_entry(
     - `fabric_snapshots` — immutable snapshots captured at decision time
     - `fabric_current` — live state of the referenced objects (so a reviewer
       can compare what the agent saw against what the object is now)
+
+    W4a — the lookup is scoped to the caller's active workspace, so requesting
+    another tenant's audit id returns 404 (never leaking its existence or
+    content) rather than the row.
     """
     store = _store()
-    entries = await store.query_audit(limit=1000)
+    entries = await store.query_audit(limit=1000, workspace_id=workspace_id)
     entry = next((e for e in entries if e.id == audit_id), None)
     if entry is None:
         raise HTTPException(404, "Audit entry not found")
