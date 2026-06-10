@@ -1,5 +1,12 @@
 # tests/test_ee_instinct.py — Comprehensive tests for ee/instinct (store + router).
 # Created: 2026-03-28 — Initial store tests.
+# Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
+#   TestAuditHashChain (store) and TestAuditVerifyEndpoint (router) covering
+#   the audit hash chain — appends build a valid chain; verify detects an
+#   edited row (entry_hash mismatch) and a deleted row (prev_hash break); the
+#   legacy/genesis boundary (pre-W2b NULL-hash rows) verifies intact; the
+#   export endpoint stamps X-Audit-Chain-Intact. Added ``import sqlite3`` for
+#   the direct-tamper writes that bypass the store's loud append path.
 # Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
 #   added the outcome-verification e2e — an Action runs, the deterministic
 #   verifier checks the result against captured success_criteria, and the
@@ -13,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -792,6 +800,150 @@ class TestExportAudit:
         assert all(e["pocket_id"] == "pocket-A" for e in parsed)
 
 
+class TestAuditHashChain:
+    """test_audit_hash_chain — the tamper-evident audit ledger (W2b).
+
+    Covers: appends build a valid chain; verify detects an edited row and a
+    deleted row; the legacy/genesis boundary verifies intact; the chain spans
+    the real lifecycle (propose → approve → reject) writes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_appends_build_valid_chain(self, store: InstinctStore) -> None:
+        for i in range(5):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="chain-p")
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["hashed"] == 5
+        assert verdict["checked"] == 5
+        assert verdict["legacy_unhashed"] == 0
+        assert verdict["broken_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_each_row_links_to_previous(self, store: InstinctStore) -> None:
+        await store.log(actor="system", event="first", description="d", pocket_id="p")
+        await store.log(actor="system", event="second", description="d", pocket_id="p")
+
+        # Inspect the raw rows: row 2's prev_hash must equal row 1's entry_hash,
+        # and the genesis row's prev_hash is empty.
+        await store._ensure_schema()
+        con = sqlite3.connect(store._db_path)
+        rows = con.execute(
+            "SELECT event, prev_hash, entry_hash FROM instinct_audit ORDER BY rowid ASC"
+        ).fetchall()
+        con.close()
+        assert rows[0][1] == ""  # genesis prev_hash
+        assert rows[0][2]  # genesis has an entry_hash
+        assert rows[1][1] == rows[0][2]  # row 2 links to row 1
+
+    @pytest.mark.asyncio
+    async def test_empty_ledger_is_intact(self, store: InstinctStore) -> None:
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["total"] == 0
+        assert verdict["hashed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_edited_row_is_detected(self, store: InstinctStore) -> None:
+        for i in range(4):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="p")
+
+        # Tamper directly via raw SQLite, bypassing the store's loud append.
+        con = sqlite3.connect(store._db_path)
+        con.execute("UPDATE instinct_audit SET description = 'FORGED' WHERE event = 'e1'")
+        con.commit()
+        con.close()
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is False
+        assert verdict["broken_at"] is not None
+        assert "entry_hash mismatch" in verdict["broken_at"]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_deleted_row_is_detected(self, store: InstinctStore) -> None:
+        for i in range(4):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="p")
+
+        con = sqlite3.connect(store._db_path)
+        con.execute("DELETE FROM instinct_audit WHERE event = 'e1'")
+        con.commit()
+        con.close()
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is False
+        assert verdict["broken_at"] is not None
+        # Deleting a row breaks the running prev-link of the row that followed it.
+        assert "prev_hash mismatch" in verdict["broken_at"]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_inserted_row_is_detected(self, store: InstinctStore) -> None:
+        for i in range(3):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="p")
+
+        # Forge a row with a plausible-but-unchained entry_hash spliced in.
+        con = sqlite3.connect(store._db_path)
+        con.execute(
+            "INSERT INTO instinct_audit"
+            " (id, actor, event, category, description, context, prev_hash, entry_hash)"
+            " VALUES ('aud-forged', 'attacker', 'forged', 'decision', 'sneaky',"
+            " '{}', 'deadbeef', 'cafebabe')"
+        )
+        con.commit()
+        con.close()
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is False
+        assert verdict["broken_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_legacy_unhashed_rows_verify_intact(self, store: InstinctStore) -> None:
+        # Simulate a pre-W2b ledger: a row with NULL hashes inserted directly,
+        # then new hashed appends through the store.
+        await store._ensure_schema()
+        con = sqlite3.connect(store._db_path)
+        con.execute(
+            "INSERT INTO instinct_audit (id, actor, event, description)"
+            " VALUES ('aud-legacy-1', 'system', 'legacy', 'pre-W2b row')"
+        )
+        con.commit()
+        con.close()
+
+        await store.log(actor="system", event="new-1", description="d", pocket_id="p")
+        await store.log(actor="system", event="new-2", description="d", pocket_id="p")
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["legacy_unhashed"] == 1
+        assert verdict["hashed"] == 2
+        assert verdict["total"] == 3
+
+    @pytest.mark.asyncio
+    async def test_full_lifecycle_chain_verifies(self, store: InstinctStore) -> None:
+        # The chain must hold across the real write paths, not just store.log.
+        a = await store.propose(
+            pocket_id="lc",
+            title="Action",
+            description="d",
+            recommendation="r",
+            trigger=make_trigger(),
+        )
+        await store.approve(a.id, approver="user:test")
+        b = await store.propose(
+            pocket_id="lc",
+            title="Action 2",
+            description="d",
+            recommendation="r",
+            trigger=make_trigger(),
+        )
+        await store.reject(b.id, reason="no", rejector="user:test")
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        # propose, approve, propose, reject == 4 hashed audit rows.
+        assert verdict["hashed"] == 4
+
+
 # ---------------------------------------------------------------------------
 # Integration Tests: Router (FastAPI endpoints)
 # ---------------------------------------------------------------------------
@@ -1076,6 +1228,93 @@ class TestAuditExportEndpoint:
         resp = client.get("/instinct/audit/export?pocket_id=export-A")
         parsed = resp.json()
         assert all(e["pocket_id"] == "export-A" for e in parsed)
+
+    def test_export_stamps_chain_intact_header(self, client: TestClient) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+
+        resp = client.get("/instinct/audit/export")
+        assert resp.status_code == 200
+        assert resp.headers["x-audit-chain-intact"] == "true"
+
+    def test_export_header_false_after_tamper(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+
+        con = sqlite3.connect(router_store._db_path)
+        con.execute("UPDATE instinct_audit SET description = 'FORGED'")
+        con.commit()
+        con.close()
+
+        resp = client.get("/instinct/audit/export")
+        assert resp.status_code == 200
+        assert resp.headers["x-audit-chain-intact"] == "false"
+
+
+class TestAuditVerifyEndpoint:
+    """test_audit_verify_endpoint — GET /instinct/audit/verify (W2b)."""
+
+    def test_verify_intact_on_clean_ledger(self, client: TestClient) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Second"})
+
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is True
+        assert data["hashed"] == 2
+        assert data["broken_at"] is None
+
+    def test_verify_empty_ledger_is_intact(self, client: TestClient) -> None:
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is True
+        assert data["total"] == 0
+
+    def test_verify_detects_edited_row(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Second"})
+
+        # Tamper with the first row's content via raw SQLite.
+        con = sqlite3.connect(router_store._db_path)
+        con.execute(
+            "UPDATE instinct_audit SET description = 'TAMPERED'"
+            " WHERE rowid = (SELECT MIN(rowid) FROM instinct_audit)"
+        )
+        con.commit()
+        con.close()
+
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is False
+        assert data["broken_at"] is not None
+        assert "entry_hash mismatch" in data["broken_at"]["reason"]
+
+    def test_verify_detects_deleted_row(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Second"})
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Third"})
+
+        # Delete a middle row.
+        con = sqlite3.connect(router_store._db_path)
+        con.execute(
+            "DELETE FROM instinct_audit WHERE rowid ="
+            " (SELECT rowid FROM instinct_audit ORDER BY rowid ASC LIMIT 1 OFFSET 1)"
+        )
+        con.commit()
+        con.close()
+
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is False
+        assert data["broken_at"] is not None
 
 
 class TestApproveNonexistentEndpoint:
