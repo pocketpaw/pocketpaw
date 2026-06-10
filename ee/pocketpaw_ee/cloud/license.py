@@ -8,6 +8,17 @@ Key format: base64(payload_json + "." + signature_hex)
 Payload: {"org": "acme-inc", "plan": "team", "seats": 10, "exp": "2027-01-01"}
 
 Changes:
+  - 2026-06-10 (sov/w1a-deploy): Added a production-posture guard so a
+    tenant can't silently run on the BYPASSABLE committed DEV public key.
+    ``_using_dev_public_key()`` reports whether the active verifier is the
+    baked-in DEV key (i.e. no operator ``POCKETPAW_LICENSE_PUBLIC_KEY`` is
+    set). ``enforce_license_key_posture()`` (mirrors W0e's AUTH_SECRET gate
+    in ``ee/cloud/auth/core.py`` and reuses its ``_is_production()`` helper
+    when importable, with a local fallback) RAISES under production posture
+    if the DEV key is in use, and is invoked from ``load_license()`` /
+    ``get_license()`` so the EE gate refuses to validate a license against a
+    public key anyone in the repo can forge against. Dev/test posture is
+    unchanged (warns only).
   - 2026-06-10 (sov/w0a-license): Replaced the "Replace with your actual
     public key" placeholder with a real, baked-in DEV Ed25519 public key
     (``_DEV_PUBLIC_KEY_HEX``). Verification now resolves the public key in
@@ -81,6 +92,69 @@ def _resolve_public_key_hex() -> str:
     import time) so tests can patch the env between cases.
     """
     return os.environ.get("POCKETPAW_LICENSE_PUBLIC_KEY", "").strip() or _DEV_PUBLIC_KEY_HEX
+
+
+def _using_dev_public_key() -> bool:
+    """True when license verification is still using the committed DEV key.
+
+    The DEV key is a license BYPASS: its matching private seed is committed
+    in the open (``_dev_license_key.DEV_PRIVATE_KEY_HEX``), so anyone can
+    mint a key the DEV public key accepts. An operator escapes the bypass by
+    exporting their own ``POCKETPAW_LICENSE_PUBLIC_KEY``; until they do, the
+    resolver falls back to ``_DEV_PUBLIC_KEY_HEX`` and we report True here.
+    """
+    return _resolve_public_key_hex() == _DEV_PUBLIC_KEY_HEX
+
+
+def _is_production() -> bool:
+    """Production-posture detector, reusing W0e's auth gate when importable.
+
+    Mirrors the AUTH_SECRET fail-fast in ``ee/cloud/auth/core.py`` so the two
+    "don't boot insecurely" gates agree on what "production" means. We import
+    that helper lazily (top-level import of ``auth.core`` runs its own
+    ``SECRET = _resolve_secret()`` at module load, which is itself a prod
+    gate — importing it eagerly here would couple license loading to
+    AUTH_SECRET being set first). If the auth layer isn't importable we fall
+    back to the identical two-signal check: POCKETPAW_ENV in {production,
+    prod} OR POCKETPAW_AUTH_COOKIE_SECURE=true.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.core import _is_production as _auth_is_production
+
+        return _auth_is_production()
+    except Exception:
+        env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+        if env in {"production", "prod"}:
+            return True
+        return os.environ.get("POCKETPAW_AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
+
+
+def enforce_license_key_posture() -> None:
+    """Refuse to run on the bypassable DEV public key in production.
+
+    A production tenant that verifies licenses against the committed DEV key
+    is not actually licensed — anyone can forge a key for it. We treat that
+    exactly like W0e treats the placeholder AUTH_SECRET: fail fast with an
+    actionable error instead of silently running ownable.
+
+    Called from ``load_license()`` / ``get_license()`` (the boot + per-load
+    paths). Dev/test posture is a no-op so the zero-config DEV loop still
+    works. Raises ``RuntimeError`` under production posture.
+    """
+    if _is_production() and _using_dev_public_key():
+        raise RuntimeError(
+            "POCKETPAW_LICENSE_PUBLIC_KEY is unset, so license verification is "
+            "using the committed DEV public key. That key is a BYPASS: its "
+            "private seed ships in the open (ee/cloud/_dev_license_key.py), so "
+            "anyone can mint a license this tenant accepts. Refusing to run in "
+            "production on a forgeable license key. Generate your own keypair "
+            "and export the public key, e.g.\n"
+            "  python -m pocketpaw_ee.cloud.mint generate-keypair\n"
+            '  export POCKETPAW_LICENSE_PUBLIC_KEY="<public-hex>"\n'
+            "then mint the tenant license with the matching private key "
+            "(--private-key-file or POCKETPAW_LICENSE_PRIVATE_KEY)."
+        )
+
 
 _cached_license: LicensePayload | None = None
 _license_error: str | None = None
@@ -156,6 +230,13 @@ def load_license() -> LicensePayload | None:
         load_dotenv()
     except ImportError:
         pass
+
+    # Production posture must not verify against the bypassable DEV public key
+    # (mirrors W0e's AUTH_SECRET gate). Checked before the no-key short-circuit
+    # so a prod tenant that hasn't set an operator key fails loudly at boot
+    # rather than appearing "unlicensed but harmless" — it is actually
+    # forgeable. Raises RuntimeError under production posture.
+    enforce_license_key_posture()
 
     key = os.environ.get("POCKETPAW_LICENSE_KEY", "").strip()
     if not key:
