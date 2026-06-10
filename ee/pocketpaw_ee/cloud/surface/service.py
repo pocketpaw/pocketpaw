@@ -122,9 +122,7 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
 # branch's ``ee/pocketpaw_ee/agent/mcp_servers/belt.py`` — not importable on this
 # base. When both PRs land, swap this literal for the imported constant (same
 # None-degrade path as the loom/media imports below). Do NOT drift the id.
-_BELT_GATE_TOOL_IDS: frozenset[str] = frozenset(
-    {"mcp__pocketpaw_belt__belt_propose_change"}
-)
+_BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
 
 # Per-mode MCP-tool allow-lists keep a mode's agent context lean: only the
 # mode's SPECIALIZED tools are named here. The "general everywhere" set — ripple

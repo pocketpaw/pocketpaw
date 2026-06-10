@@ -498,9 +498,7 @@ async def execute_approved_change(
             return
 
         # 6. Push the branch.
-        code, _out, err = await _run(
-            ["git", "push", "-u", "origin", branch], cwd=worktree_dir
-        )
+        code, _out, err = await _run(["git", "push", "-u", "origin", branch], cwd=worktree_dir)
         if code != 0:
             await _fail(f"git push failed: {err.strip()[:300]}", error_class="GitPushFailed")
             return
@@ -575,9 +573,7 @@ async def _changed_files(worktree_dir: Path) -> list[str]:
     """Return the staged file paths in the worktree (``git diff --cached
     --name-only``). Empty list on any error — the caller treats empty as
     'nothing to commit'."""
-    code, out, _err = await _run(
-        ["git", "diff", "--cached", "--name-only"], cwd=worktree_dir
-    )
+    code, out, _err = await _run(["git", "diff", "--cached", "--name-only"], cwd=worktree_dir)
     if code != 0:
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]
@@ -587,9 +583,7 @@ async def _force_remove_worktree(repo_path: Path, worktree_dir: Path) -> None:
     """Remove a worktree and prune the registration — best-effort, never
     raises. Falls back to an ``rmtree`` if ``git worktree remove`` refuses."""
     with _suppress():
-        await _run(
-            ["git", "worktree", "remove", "--force", str(worktree_dir)], cwd=repo_path
-        )
+        await _run(["git", "worktree", "remove", "--force", str(worktree_dir)], cwd=repo_path)
     with _suppress():
         await _run(["git", "worktree", "prune"], cwd=repo_path)
     # If git left the directory behind (e.g. the add half-failed), nuke it.

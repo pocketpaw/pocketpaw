@@ -108,16 +108,13 @@ def build_loom_server() -> tuple[str, Any] | None:
 
     model_file = Path(model_path).expanduser()
     if not model_file.is_file():
-        logger.warning(
-            "loom MCP server not registered — world-model not found at %s", model_file
-        )
+        logger.warning("loom MCP server not registered — world-model not found at %s", model_file)
         return None
 
     loom_bin = _resolve_loom_bin(settings.loom_bin)
     if loom_bin is None:
         logger.warning(
-            "loom MCP server not registered — loom binary %r not found on PATH "
-            "or at ~/go/bin/loom",
+            "loom MCP server not registered — loom binary %r not found on PATH or at ~/go/bin/loom",
             settings.loom_bin,
         )
         return None

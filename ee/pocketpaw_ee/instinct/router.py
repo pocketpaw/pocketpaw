@@ -392,9 +392,7 @@ def _emit_human_corrected(
 
     pocket_id = str(getattr(action, "pocket_id", "") or "")
     causation = (
-        causation_override
-        if causation_override is not None
-        else _parked_policy_event_id(blob)
+        causation_override if causation_override is not None else _parked_policy_event_id(blob)
     )
     payload: dict[str, Any] = {
         "disposition": disposition,
@@ -846,9 +844,7 @@ async def bulk_approve_actions(
             try:
                 from pocketpaw_ee.cloud.belt import executor as belt_executor
 
-                await belt_executor.execute_approved_change(
-                    action, human_event_id=human_event_id
-                )
+                await belt_executor.execute_approved_change(action, human_event_id=human_event_id)
             except Exception:
                 logger.exception(
                     "bulk-approve belt code-change execution failed for %s (non-fatal)",
@@ -1130,9 +1126,7 @@ async def approve_action(
         try:
             from pocketpaw_ee.cloud.belt import executor as belt_executor
 
-            await belt_executor.execute_approved_change(
-                approved, human_event_id=human_event_id
-            )
+            await belt_executor.execute_approved_change(approved, human_event_id=human_event_id)
         except Exception:
             logger.exception("belt code-change execution after approval failed (non-fatal)")
 
