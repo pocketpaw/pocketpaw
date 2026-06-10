@@ -60,6 +60,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import datetime
@@ -314,6 +315,13 @@ class InstinctStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
+        # Serializes the audit-chain read-head + insert in _log (REVIEW-1):
+        # each _log opens its own connection, so without this lock two
+        # concurrent _log calls could both read the same prev_hash before
+        # either inserts, forking the chain and producing false-positive
+        # tamper reports in verify_audit_chain. Per-instance (not module-level)
+        # so separate tenants/stores don't contend.
+        self._log_lock = asyncio.Lock()
 
     async def _ensure_schema(self) -> None:
         if self._initialized:
@@ -778,7 +786,9 @@ class InstinctStore:
             outcome=entry.outcome,
         )
         try:
-            async with self._conn() as db:
+            # Hold the per-instance lock across the read-head + insert so the
+            # chain stays linear under concurrent _log calls (REVIEW-1).
+            async with self._log_lock, self._conn() as db:
                 # ``prev_hash`` is the entry_hash of the most-recently inserted
                 # hashed row. ``rowid`` is monotonic with insertion order, so it
                 # gives a stable chain head even across timestamp ties. Legacy

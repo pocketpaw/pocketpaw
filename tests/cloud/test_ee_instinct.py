@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -1838,3 +1839,21 @@ class TestWorkspaceScopingRoutes:
         assert body["intact"] is True
         # Two proposals across two tenants — the global chain counts BOTH.
         assert body["hashed"] == 2
+
+
+class TestAuditChainConcurrency:
+    """REVIEW-1: concurrent _log calls on one store must keep the chain linear.
+    Without the per-instance lock, two coroutines can read the same prev_hash
+    before either inserts, forking the chain and breaking verify_audit_chain."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_log_keeps_chain_linear(self, tmp_path):
+        store = InstinctStore(tmp_path / "instinct.db")
+        n = 30
+        await asyncio.gather(
+            *(store._log(actor="sys", event=f"e{i}", description=f"d{i}") for i in range(n))
+        )
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["hashed"] == n
+        assert verdict["broken_at"] is None
