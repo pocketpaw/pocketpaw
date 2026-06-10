@@ -90,12 +90,21 @@ CREATE TABLE IF NOT EXISTS fabric_links (
 
 CREATE INDEX IF NOT EXISTS idx_objects_type ON fabric_objects(type_id);
 CREATE INDEX IF NOT EXISTS idx_objects_source ON fabric_objects(source_connector, source_id);
-CREATE INDEX IF NOT EXISTS idx_objects_workspace ON fabric_objects(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_links_from ON fabric_links(from_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_to ON fabric_links(to_object_id);
 CREATE INDEX IF NOT EXISTS idx_links_type ON fabric_links(link_type);
-CREATE INDEX IF NOT EXISTS idx_links_workspace ON fabric_links(workspace_id);
 """
+
+# Tenancy indexes are created AFTER the ALTER migration (see _ensure_schema),
+# NOT in SCHEMA_SQL above. On a pre-W4a DB the table already exists, so
+# CREATE TABLE IF NOT EXISTS is a no-op and the workspace_id column is added by
+# ALTER — a CREATE INDEX on workspace_id inside the same executescript would
+# run before that ALTER and fail with "no such column". (Bug found by live
+# smoke 2026-06-10; see tests/cloud/test_w4a_migration.py.)
+_WORKSPACE_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_objects_workspace ON fabric_objects(workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_links_workspace ON fabric_links(workspace_id)",
+)
 
 # Whitelist of filter operators -> SQL operator. User input never reaches the
 # SQL string except through this fixed mapping; an unknown operator raises
@@ -217,6 +226,11 @@ class FabricStore:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Create the tenancy indexes only after the column is guaranteed to
+            # exist (fresh DB via CREATE TABLE, or pre-existing DB via the ALTER
+            # above). Doing this inside SCHEMA_SQL would fail on a pre-W4a DB.
+            for _idx in _WORKSPACE_INDEX_SQL:
+                await db.execute(_idx)
             await db.commit()
         self._initialized = True
 

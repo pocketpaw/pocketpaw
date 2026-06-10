@@ -289,15 +289,23 @@ CREATE TABLE IF NOT EXISTS instinct_fabric_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_actions_pocket ON instinct_actions(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_actions_status ON instinct_actions(status);
-CREATE INDEX IF NOT EXISTS idx_actions_workspace ON instinct_actions(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_audit_pocket ON instinct_audit(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON instinct_audit(timestamp);
-CREATE INDEX IF NOT EXISTS idx_audit_workspace ON instinct_audit(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_corrections_pocket ON instinct_corrections(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_corrections_action ON instinct_corrections(action_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_audit ON instinct_fabric_snapshots(audit_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_object ON instinct_fabric_snapshots(object_id);
 """
+
+# Tenancy indexes are created AFTER the ALTER migration (see _ensure_schema),
+# NOT in SCHEMA_SQL above — on a pre-W4a DB the workspace_id column is added by
+# ALTER, and a CREATE INDEX on it inside the same executescript would run first
+# and fail with "no such column". (Bug found by live smoke 2026-06-10;
+# see tests/cloud/test_w4a_migration.py.)
+_WORKSPACE_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_actions_workspace ON instinct_actions(workspace_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_workspace ON instinct_audit(workspace_id)",
+)
 
 
 class InstinctStore:
@@ -340,6 +348,11 @@ class InstinctStore:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Tenancy indexes created only after the column is guaranteed to
+            # exist — see _WORKSPACE_INDEX_SQL note above. Inside SCHEMA_SQL this
+            # would fail on a pre-W4a DB.
+            for _idx in _WORKSPACE_INDEX_SQL:
+                await db.execute(_idx)
             await db.commit()
         self._initialized = True
 
