@@ -1,5 +1,10 @@
 # _dev_license_key.py — DEV-ONLY Ed25519 license signing key.
 # Created: 2026-06-10 (sov/w0a-license).
+# Change (2026-06-10, FIX 2): added inline secret-scanner suppressions (a ruff
+#   noqa for S105 / hardcoded-password plus a gitleaks-allow marker) to the
+#   DEV_PRIVATE_KEY_HEX value so the deliberately-committed dev seed stops
+#   tripping ruff and truffleHog/Gitleaks/GitHub secret scanning on every push.
+#   No behavior change.
 #
 # WHY THIS EXISTS: so a fresh checkout / CI run can MINT a signed license
 # (``pocketpaw_ee.cloud.mint``) and have it VERIFY (``...cloud.license``)
@@ -22,4 +27,4 @@ from __future__ import annotations
 
 # Raw 32-byte Ed25519 private seed, hex-encoded. Pairs with
 # ``license._DEV_PUBLIC_KEY_HEX``.
-DEV_PRIVATE_KEY_HEX = "3a8241e44ce06ac23faba38e6193a55c5a6a6c72678e48e717b5815905d60ed7"
+DEV_PRIVATE_KEY_HEX = "3a8241e44ce06ac23faba38e6193a55c5a6a6c72678e48e717b5815905d60ed7"  # noqa: S105  # gitleaks:allow
