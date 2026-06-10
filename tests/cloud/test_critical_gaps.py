@@ -1,5 +1,8 @@
 # Tests for critical gaps — real HTTP in connectors + agent tools for Fabric/Instinct.
 # Created: 2026-03-28
+# Updated: 2026-06-10 (W0d) — Added test_fabric_query_forwards_filters: the
+#   FabricQueryTool must forward its `filters` arg into FabricQuery so chat-driven
+#   property filters ("rent > X") narrow results instead of returning all objects.
 
 from __future__ import annotations
 
@@ -157,6 +160,27 @@ class TestFabricTools:
         assert "Found 2" in result
         assert "Acme" in result
         assert "Beta Corp" in result
+
+    @pytest.mark.asyncio
+    async def test_fabric_query_forwards_filters(self, tmp_path):
+        # W0d: the agent tool must pass `filters` through to FabricQuery so
+        # chat-driven "rent > X" queries actually narrow. Use a real store so
+        # the whole tool -> FabricQuery -> store.query path is exercised.
+        from pocketpaw.fabric.store import FabricStore
+        from pocketpaw.tools.builtin.fabric_tools import FabricQueryTool
+
+        store = FabricStore(tmp_path / "fabric.db")
+        t = await store.define_type(name="Lease", properties=[])
+        await store.create_object(t.id, {"tenant": "Acme", "rent": 500})
+        await store.create_object(t.id, {"tenant": "Globex", "rent": 2000})
+
+        tool = FabricQueryTool()
+        with patch("pocketpaw.tools.builtin.fabric_tools._get_fabric_store", return_value=store):
+            result = await tool.execute(type_name="Lease", filters={"rent": {">": 1000}})
+
+        assert "Found 1" in result
+        assert "Globex" in result
+        assert "Acme" not in result
 
     @pytest.mark.asyncio
     async def test_fabric_create_object(self):
