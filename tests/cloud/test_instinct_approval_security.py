@@ -28,6 +28,15 @@
 #   403 with the same ``instinct.cross_workspace_approval`` code, and
 #   (b) same-workspace reject still succeeds + the rejected Action
 #   transitions to ``rejected``.
+#
+# Updated: 2026-06-10 (feat/belt-gate, BS-3) — added
+#   ``TestBeltCodeChangeCrossWorkspace``: the code-change peer of the
+#   pocket-write tenancy gate. ``_assert_code_change_workspace`` refuses a
+#   ``_code_change`` Action whose blob ``workspace_id`` differs from the
+#   approver's active workspace with the same 403 +
+#   ``instinct.cross_workspace_approval`` code on the approve / bulk-approve /
+#   reject paths, and a same-tenant approval passes the gate and dispatches the
+#   (here patched-off) Belt executor.
 
 from __future__ import annotations
 
@@ -106,6 +115,28 @@ def _pocket_write_params(workspace_id: str, outcome: str | None = "renewal_compl
             # ``parked_policy_event_id`` is populated by Slice 3.
             "correlation_id": None,
             "parked_policy_event_id": None,
+        }
+    }
+
+
+def _code_change_params(workspace_id: str) -> dict:
+    """An Action ``parameters`` payload carrying a Belt ``_code_change`` blob —
+    the shape ``belt._propose_change_handler`` stores. A code change carries no
+    pocket the way a parked write does, so its tenancy lives entirely on the
+    blob's ``workspace_id`` (BS-3). The schema/diff/branch are minimal — these
+    tests pin the cross-workspace gate, not the apply (covered in
+    test_belt_gate.py)."""
+    return {
+        "_code_change": {
+            "kind": "code_change",
+            "schema": 1,
+            "repo": "/tmp/belt-repo",
+            "base_branch": "main",
+            "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+            "summary": "tenancy-gate fixture",
+            "task": "tenancy-gate fixture",
+            "workspace_id": workspace_id,
+            "requested_by": "requester-9",
         }
     }
 
@@ -499,3 +530,106 @@ async def test_count_outcomes_skips_foreign_workspace_rows(tmp_path: Path) -> No
         assert "leaked" not in counts.by_outcome
     finally:
         outcomes_service.set_ledger_dir("~/.pocketpaw/outcomes")
+
+
+# ---------------------------------------------------------------------------
+# BS-3 — Belt code-change cross-workspace tenancy gate
+# ---------------------------------------------------------------------------
+
+
+class TestBeltCodeChangeCrossWorkspace:
+    """``_assert_code_change_workspace`` is the code-change peer of
+    ``_assert_pocket_write_workspace``: a ``_code_change`` blob whose
+    ``workspace_id`` differs from the approver's active workspace must be
+    refused with the same 403 + ``instinct.cross_workspace_approval`` code on
+    the approve, bulk-approve, and reject paths. A code change carries no
+    pocket, so without this gate a ws-A admin could approve (and APPLY) a ws-B
+    diff. The executor is patched off so a same-tenant approval doesn't try to
+    drive real git."""
+
+    def test_single_approve_of_foreign_workspace_code_change_is_403(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="pocket-B",
+                title="ws-B code change",
+                parameters=_code_change_params(workspace_id="ws-B"),
+            )
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+            assert resp.status_code == 403
+            assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
+            assert _status_of(client, action_id) == "pending"
+
+    def test_bulk_approve_of_foreign_workspace_code_change_is_403(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            own = _propose(
+                client,
+                pocket_id="pocket-A",
+                title="ws-A code change",
+                parameters=_code_change_params(workspace_id="ws-A"),
+            )
+            foreign = _propose(
+                client,
+                pocket_id="pocket-B",
+                title="ws-B code change",
+                parameters=_code_change_params(workspace_id="ws-B"),
+            )
+            resp = client.post(
+                "/instinct/actions/bulk-approve",
+                json={"ids": [own, foreign]},
+            )
+            assert resp.status_code == 403
+            assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
+            # The whole batch is rejected — nothing flipped.
+            assert _status_of(client, own) == "pending"
+            assert _status_of(client, foreign) == "pending"
+
+    def test_single_reject_of_foreign_workspace_code_change_is_403(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="pocket-B",
+                title="ws-B code change",
+                parameters=_code_change_params(workspace_id="ws-B"),
+            )
+            resp = client.post(
+                f"/instinct/actions/{action_id}/reject",
+                json={"reason": "nope"},
+            )
+            assert resp.status_code == 403
+            assert resp.json()["error"]["code"] == "instinct.cross_workspace_approval"
+            assert _status_of(client, action_id) == "pending"
+
+    def test_single_approve_of_own_workspace_code_change_dispatches(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """A same-tenant approval passes the gate and reaches the executor
+        (patched off here — the real apply is covered in test_belt_gate.py)."""
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+
+        async def _noop_execute(_action):
+            return None
+
+        monkeypatch.setattr(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            _noop_execute,
+        )
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="pocket-A",
+                title="ws-A code change",
+                parameters=_code_change_params(workspace_id="ws-A"),
+            )
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["action"]["status"] == "approved"
