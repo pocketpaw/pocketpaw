@@ -1324,10 +1324,14 @@ async def get_audit_entry(
     W4a — the lookup is scoped to the caller's active workspace, so requesting
     another tenant's audit id returns 404 (never leaking its existence or
     content) rather than the row.
+
+    The lookup is a direct single-row fetch by id (``store.get_audit_entry``),
+    so an entry older than the audit query page size is still retrievable —
+    the prior path paged the most-recent rows and matched in Python, 404-ing on
+    valid ids past that window for a tenant with a large ledger.
     """
     store = _store()
-    entries = await store.query_audit(limit=1000, workspace_id=workspace_id)
-    entry = next((e for e in entries if e.id == audit_id), None)
+    entry = await store.get_audit_entry(audit_id, workspace_id=workspace_id)
     if entry is None:
         raise HTTPException(404, "Audit entry not found")
 

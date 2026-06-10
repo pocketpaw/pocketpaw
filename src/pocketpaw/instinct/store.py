@@ -1,5 +1,23 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-10 (sov/r2a review fixes) — two store-level fixes:
+#   FIX 1 — added ``get_audit_entry(audit_id, workspace_id=None)``: a direct
+#     single-row SELECT by id with the same ``workspace_id = ? OR workspace_id
+#     IS NULL`` scope as ``query_audit``. The EE router previously paged the
+#     most-recent 1000 audit rows and matched the id in Python, so a tenant with
+#     >1000 audit rows got a 404 on a valid OLDER id. The single-row lookup
+#     removes the window. Cross-workspace ids return None under a scoped read.
+#   FIX 2 — ``_update_status`` is now ATOMIC with its audit write. Previously the
+#     status UPDATE committed, THEN ``_log`` ran on a SECOND connection and could
+#     raise ``AuditChainError`` — leaving the action flipped (approved / rejected
+#     / executed) with NO audit row. The UPDATE + the audit-row read-head + insert
+#     now share ONE connection inside a single transaction (explicit BEGIN, one
+#     commit), so either both land or neither does. The per-instance
+#     ``self._log_lock`` (REVIEW-1) is still held across the chain read-head +
+#     insert. The append is factored into ``_append_audit_locked`` (used by both
+#     the standalone ``_log`` and the in-transaction ``_update_status`` path) so
+#     the W2b canonical hash and chain linkage are byte-for-byte identical on
+#     both paths — workspace_id stays OUT of the hash.
 # Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — closes a
 #   cross-tenant decision leak on shared deployments. ``instinct_actions`` and
 #   ``instinct_audit`` now carry a ``workspace_id`` column. Writes (``propose``,
@@ -901,6 +919,40 @@ class InstinctStore:
                 f"SELECT * FROM instinct_audit {where} ORDER BY timestamp DESC LIMIT ?", params
             ) as cur:
                 return [self._row_to_audit(row) async for row in cur]
+
+    async def get_audit_entry(
+        self, audit_id: str, workspace_id: str | None = None
+    ) -> AuditEntry | None:
+        """Fetch a single audit row by id, scoped to a workspace (W4a).
+
+        A direct single-row lookup, so a tenant with more than the
+        ``query_audit`` page size of audit rows can still retrieve a valid
+        OLDER entry by id (the previous router path paged the most recent N
+        rows and matched in Python, 404-ing on anything past the window).
+
+        ``workspace_id`` applies the same ``workspace_id = ? OR workspace_id
+        IS NULL`` scope as :meth:`query_audit`: a concrete workspace sees its
+        own rows plus legacy/global NULL-workspace rows; ``None`` leaves the
+        lookup unscoped for OSS callers. Requesting another tenant's id under a
+        scoped read returns ``None`` (never leaking its existence). This is a
+        READ FILTER only — it never touches the W2b hash chain.
+        """
+        conditions = ["id = ?"]
+        params: list[Any] = [audit_id]
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        if ws_cond:
+            conditions.append(ws_cond)
+            params.extend(ws_params)
+        where = " AND ".join(conditions)
+
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                f"SELECT * FROM instinct_audit WHERE {where} LIMIT 1", params
+            ) as cur:
+                row = await cur.fetchone()
+                return self._row_to_audit(row) if row else None
 
     async def export_audit(
         self, pocket_id: str | None = None, workspace_id: str | None = None
