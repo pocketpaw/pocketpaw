@@ -9,6 +9,15 @@
 # Updated: 2026-06-08 — Added `senses: list[str]` to ConnectorDef + parse-time
 #   validation via senses.validate_sense_id (Sense tier chunk 1). Unknown paw.*
 #   ids fail loudly; missing `senses:` key is backward compatible ([]).
+# Updated: 2026-06-11 — Cookie/session auth + a persistent HTTP client.
+#   _build_auth_headers gains two additive methods: `cookie` (emits a Cookie:
+#   header from a declared credential, name set via auth.credential) and
+#   `header` (emits an arbitrary header named by auth.header from a credential —
+#   the escape hatch for APIs whose key is not a Bearer token, fixing the
+#   api_key-always-Bearer trap without touching api_key). execute() now reuses a
+#   lazily-built httpx.AsyncClient per adapter instance (connection pooling +
+#   cookie jar) instead of opening a fresh client per call; disconnect() closes
+#   it. Existing auth methods, timeouts, and error mapping are unchanged.
 
 from __future__ import annotations
 
@@ -137,6 +146,19 @@ class DirectRESTAdapter:
         self._def = definition
         self._credentials: dict[str, str] = {}
         self._connected = False
+        # Persistent HTTP client — built lazily on first execute() and reused
+        # across calls so connections pool and any Set-Cookie response is kept
+        # in the client's cookie jar for the next request. ``Any`` avoids a
+        # module-level httpx import (it stays inside execute()/_get_client).
+        self._client: Any | None = None
+
+    async def _get_client(self) -> Any:
+        """Return the per-adapter httpx.AsyncClient, building it on first use."""
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
 
     @property
     def name(self) -> str:
@@ -177,6 +199,10 @@ class DirectRESTAdapter:
     async def disconnect(self, pocket_id: str) -> bool:
         self._credentials.clear()
         self._connected = False
+        # Close the pooled HTTP client (and drop the cookie jar) on disconnect.
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
         return True
 
     async def actions(self) -> list[ActionSchema]:
@@ -285,57 +311,59 @@ class DirectRESTAdapter:
             content_type = act_def.get("content_type", "")
             use_form = content_type == "form" or "stripe.com" in url
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                if method == "GET":
-                    resp = await client.get(url, params=query_params, headers=headers)
-                elif method == "POST":
-                    if use_form:
-                        resp = await client.post(
-                            url, data=body_data, params=query_params, headers=headers
-                        )
-                    else:
-                        resp = await client.post(
-                            url, json=body_data, params=query_params, headers=headers
-                        )
-                elif method == "PUT":
-                    if use_form:
-                        resp = await client.put(
-                            url, data=body_data, params=query_params, headers=headers
-                        )
-                    else:
-                        resp = await client.put(
-                            url, json=body_data, params=query_params, headers=headers
-                        )
-                elif method == "PATCH":
-                    if use_form:
-                        resp = await client.patch(
-                            url, data=body_data, params=query_params, headers=headers
-                        )
-                    else:
-                        resp = await client.patch(
-                            url, json=body_data, params=query_params, headers=headers
-                        )
-                elif method == "DELETE":
-                    resp = await client.delete(url, params=query_params, headers=headers)
+            # Reuse the per-adapter client: pooled connections + persistent
+            # cookie jar across calls. Closed in disconnect().
+            client = await self._get_client()
+            if method == "GET":
+                resp = await client.get(url, params=query_params, headers=headers)
+            elif method == "POST":
+                if use_form:
+                    resp = await client.post(
+                        url, data=body_data, params=query_params, headers=headers
+                    )
                 else:
-                    return ActionResult(success=False, error=f"Unsupported method: {method}")
-
-                resp.raise_for_status()
-                data = (
-                    resp.json()
-                    if resp.headers.get("content-type", "").startswith("application/json")
-                    else resp.text
-                )
-
-                # Count records — handle wrapped responses (Stripe: {data: [...]})
-                if isinstance(data, list):
-                    records = len(data)
-                elif isinstance(data, dict) and isinstance(data.get("data"), list):
-                    records = len(data["data"])
+                    resp = await client.post(
+                        url, json=body_data, params=query_params, headers=headers
+                    )
+            elif method == "PUT":
+                if use_form:
+                    resp = await client.put(
+                        url, data=body_data, params=query_params, headers=headers
+                    )
                 else:
-                    records = 1
+                    resp = await client.put(
+                        url, json=body_data, params=query_params, headers=headers
+                    )
+            elif method == "PATCH":
+                if use_form:
+                    resp = await client.patch(
+                        url, data=body_data, params=query_params, headers=headers
+                    )
+                else:
+                    resp = await client.patch(
+                        url, json=body_data, params=query_params, headers=headers
+                    )
+            elif method == "DELETE":
+                resp = await client.delete(url, params=query_params, headers=headers)
+            else:
+                return ActionResult(success=False, error=f"Unsupported method: {method}")
 
-                return ActionResult(success=True, data=data, records_affected=records)
+            resp.raise_for_status()
+            data = (
+                resp.json()
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else resp.text
+            )
+
+            # Count records — handle wrapped responses (Stripe: {data: [...]})
+            if isinstance(data, list):
+                records = len(data)
+            elif isinstance(data, dict) and isinstance(data.get("data"), list):
+                records = len(data["data"])
+            else:
+                records = 1
+
+            return ActionResult(success=True, data=data, records_affected=records)
 
         except httpx.HTTPStatusError as e:
             return ActionResult(
@@ -373,6 +401,33 @@ class DirectRESTAdapter:
             password = self._credentials.get("password", "")
             encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
+        elif auth_method == "cookie":
+            # Session/cookie auth — emit a `Cookie:` header from a declared
+            # credential. The credential name comes from `auth.credential`,
+            # falling back to the first declared credential. The stored value
+            # is sent verbatim (e.g. "sessionid=abc" or a raw token).
+            cred_name = self._def.auth.get("credential")
+            if not cred_name:
+                creds = self._def.auth.get("credentials", [])
+                cred_name = creds[0]["name"] if creds else None
+            if cred_name:
+                value = self._credentials.get(cred_name, "")
+                if value:
+                    headers["Cookie"] = value
+        elif auth_method == "header":
+            # Custom-header auth — emit an arbitrary header (name from
+            # `auth.header`, value from the declared credential). This is the
+            # escape hatch for APIs whose key is NOT a Bearer token, so it
+            # avoids the api_key-always-Bearer trap without changing api_key.
+            header_name = self._def.auth.get("header")
+            cred_name = self._def.auth.get("credential")
+            if not cred_name:
+                creds = self._def.auth.get("credentials", [])
+                cred_name = creds[0]["name"] if creds else None
+            if header_name and cred_name:
+                value = self._credentials.get(cred_name, "")
+                if value:
+                    headers[header_name] = value
 
         return headers
 

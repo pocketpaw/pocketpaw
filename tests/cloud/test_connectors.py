@@ -1,5 +1,9 @@
 # Tests for ConnectorProtocol — YAML parsing, registry, adapter lifecycle.
 # Created: 2026-03-27
+# Updated: 2026-06-11 — Added TestDirectRESTAuthAndClient: covers the new
+#   `cookie` and `header` auth methods, the persistent per-adapter
+#   httpx.AsyncClient (reused across execute calls, closed on disconnect),
+#   and pins that the existing api_key/bearer/basic methods are unchanged.
 
 from __future__ import annotations
 
@@ -9,7 +13,11 @@ import pytest
 
 from pocketpaw.connectors.protocol import ConnectorStatus, TrustLevel
 from pocketpaw.connectors.registry import ConnectorRegistry
-from pocketpaw.connectors.yaml_engine import DirectRESTAdapter, parse_connector_yaml
+from pocketpaw.connectors.yaml_engine import (
+    ConnectorDef,
+    DirectRESTAdapter,
+    parse_connector_yaml,
+)
 
 CONNECTORS_DIR = Path(__file__).parent.parent.parent / "connectors"
 
@@ -136,6 +144,168 @@ class TestDirectRESTAdapter:
         schema = await stripe_adapter.schema()
         assert schema["table"] == "stripe_invoices"
         assert schema["schedule"] == "every_15m"
+
+
+def _adapter_with_auth(auth: dict) -> DirectRESTAdapter:
+    """Build a DirectRESTAdapter over a minimal in-memory ConnectorDef.
+
+    Gives one GET action at a fixed URL so the auth-header and client tests
+    don't depend on any shipped YAML's exact shape.
+    """
+    defn = ConnectorDef(
+        name="probe",
+        display_name="Probe",
+        auth=auth,
+        actions=[
+            {
+                "name": "ping",
+                "method": "GET",
+                "url": "https://api.example.com/ping",
+            }
+        ],
+    )
+    return DirectRESTAdapter(defn)
+
+
+class TestDirectRESTAuthAndClient:
+    """Cookie/header auth methods + the persistent per-adapter HTTP client."""
+
+    @pytest.mark.asyncio
+    async def test_cookie_auth_emits_cookie_header(self) -> None:
+        """`method: cookie` sends the credential value as a Cookie: header."""
+        adapter = _adapter_with_auth(
+            {
+                "method": "cookie",
+                "credential": "SESSION_COOKIE",
+                "credentials": [{"name": "SESSION_COOKIE", "required": True}],
+            }
+        )
+        await adapter.connect("pocket-1", {"SESSION_COOKIE": "sessionid=abc123"})
+        headers = adapter._build_auth_headers()
+        assert headers["Cookie"] == "sessionid=abc123"
+        assert "Authorization" not in headers
+
+    @pytest.mark.asyncio
+    async def test_cookie_auth_falls_back_to_first_credential(self) -> None:
+        """With no explicit `credential`, cookie auth uses the first one."""
+        adapter = _adapter_with_auth(
+            {
+                "method": "cookie",
+                "credentials": [{"name": "SID", "required": True}],
+            }
+        )
+        await adapter.connect("pocket-1", {"SID": "sid=xyz"})
+        assert adapter._build_auth_headers()["Cookie"] == "sid=xyz"
+
+    @pytest.mark.asyncio
+    async def test_header_auth_emits_named_custom_header(self) -> None:
+        """`method: header` emits an arbitrary header — not a Bearer token."""
+        adapter = _adapter_with_auth(
+            {
+                "method": "header",
+                "header": "X-API-Key",
+                "credential": "SERVICE_KEY",
+                "credentials": [{"name": "SERVICE_KEY", "required": True}],
+            }
+        )
+        await adapter.connect("pocket-1", {"SERVICE_KEY": "raw-key-value"})
+        headers = adapter._build_auth_headers()
+        assert headers["X-API-Key"] == "raw-key-value"
+        # The custom-header method must NOT add a Bearer Authorization header.
+        assert "Authorization" not in headers
+
+    @pytest.mark.asyncio
+    async def test_api_key_still_emits_bearer(self) -> None:
+        """Existing api_key behavior is unchanged — still a Bearer token."""
+        adapter = _adapter_with_auth(
+            {
+                "method": "api_key",
+                "credentials": [{"name": "MY_API_KEY", "required": True}],
+            }
+        )
+        await adapter.connect("pocket-1", {"MY_API_KEY": "sk_test_1"})
+        assert adapter._build_auth_headers()["Authorization"] == "Bearer sk_test_1"
+
+    @pytest.mark.asyncio
+    async def test_bearer_and_basic_unchanged(self) -> None:
+        """bearer + basic still produce the same Authorization headers."""
+        import base64
+
+        bearer = _adapter_with_auth(
+            {
+                "method": "bearer",
+                "credentials": [{"name": "API_TOKEN", "required": True}],
+            }
+        )
+        await bearer.connect("pocket-1", {"API_TOKEN": "tok_1"})
+        assert bearer._build_auth_headers()["Authorization"] == "Bearer tok_1"
+
+        basic = _adapter_with_auth(
+            {
+                "method": "basic",
+                "credentials": [
+                    {"name": "username", "required": True},
+                    {"name": "password", "required": True},
+                ],
+            }
+        )
+        await basic.connect("pocket-1", {"username": "u", "password": "p"})
+        expected = "Basic " + base64.b64encode(b"u:p").decode()
+        assert basic._build_auth_headers()["Authorization"] == expected
+
+    @pytest.mark.asyncio
+    async def test_client_reused_across_two_executes(self) -> None:
+        """Two execute() calls share one httpx.AsyncClient instance."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        adapter = _adapter_with_auth({"method": "none"})
+        await adapter.connect("pocket-1", {})
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {"ok": True}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client) as factory:
+            await adapter.execute("ping", {})
+            first = adapter._client
+            await adapter.execute("ping", {})
+            second = adapter._client
+
+        # Same instance both calls, and the factory was only built once.
+        assert first is second
+        assert factory.call_count == 1
+        assert mock_client.get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_client_closed_on_disconnect(self) -> None:
+        """disconnect() closes the pooled client and clears the reference."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        adapter = _adapter_with_auth({"method": "none"})
+        await adapter.connect("pocket-1", {})
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {"ok": True}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.aclose = AsyncMock()
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await adapter.execute("ping", {})
+
+        assert adapter._client is mock_client
+        await adapter.disconnect("pocket-1")
+        mock_client.aclose.assert_awaited_once()
+        assert adapter._client is None
 
 
 class TestConnectorRegistry:
