@@ -13,6 +13,9 @@
 # manual-shift trigger.
 # Updated: 2026-06-11 (slice 5 — pawprints) — added PawprintResponse /
 # PawprintsListResponse for the past-tense event feed.
+# Updated: 2026-06-11 (feat/belt-autopilot) — added AutopilotRequest (the
+# start/stop body) + AutopilotState (the persisted on/users wire object) and
+# wired ``autopilot`` onto the detail + summary responses.
 
 from __future__ import annotations
 
@@ -73,6 +76,27 @@ class CreateMandateRequest(BaseModel):
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
 
 
+class AutopilotState(BaseModel):
+    """The persisted autopilot state on a mandate — Foresight-seeded sim users.
+
+    ``on`` is whether the background autopilot cycle is running; ``users`` is the
+    persona count per cycle (1-10). Rides on the mandate detail + list + the
+    autopilot endpoint's response so the console can render the toggle."""
+
+    on: bool = False
+    users: int = Field(default=3, ge=1, le=10)
+
+
+class AutopilotRequest(BaseModel):
+    """Body for ``POST /belt/mandates/{id}/autopilot``.
+
+    ``action`` starts or stops the background autopilot cycle. ``users`` (start
+    only; clamped 1-10, default 3) is the persona count per cycle."""
+
+    action: str = Field(pattern="^(start|stop)$")
+    users: int = Field(default=3, ge=1, le=10)
+
+
 class MandateHealth(BaseModel):
     """The health summary on the list view — last shift state, open gate count,
     sighting count."""
@@ -91,6 +115,7 @@ class MandateSummaryResponse(BaseModel):
     repo_id: str
     cadence: Cadence
     health: MandateHealth
+    autopilot: AutopilotState = Field(default_factory=AutopilotState)
     created_at: datetime
 
 
@@ -118,6 +143,7 @@ class MandateDetailResponse(BaseModel):
     charter: CharterRequest
     soul_path: str | None = None
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
+    autopilot: AutopilotState = Field(default_factory=AutopilotState)
     recent_shifts: list[ShiftSummaryResponse] = Field(default_factory=list)
     sightings_by_patrol: dict[str, int] = Field(default_factory=dict)
     created_at: datetime
@@ -248,6 +274,8 @@ class PawprintsListResponse(BaseModel):
 
 
 __all__ = [
+    "AutopilotRequest",
+    "AutopilotState",
     "BudgetRequest",
     "CharterRequest",
     "CreateMandateRequest",

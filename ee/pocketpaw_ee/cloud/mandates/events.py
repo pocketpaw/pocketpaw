@@ -35,6 +35,15 @@ class MandateShiftUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "mandate.shift_updated"
 
 
+# Fired when autopilot is started / stopped on a mandate (feat/belt-autopilot).
+# Payload: {workspace_id, mandate_id, on, users}. ``workspace_id`` drives the
+# audience resolver's workspace fan-out so a teammate with the mandate console
+# open sees the autopilot toggle flip live.
+@dataclass
+class MandateAutopilotChanged(Event):
+    EVENT_TYPE: ClassVar[str] = "mandate.autopilot_changed"
+
+
 # UI contract — fired when a shift's PlanProposal lands as a pending Instinct
 # ``belt_plan`` Action. Payload: {workspace_id, mandate_id, proposal} —
 # ``workspace_id`` drives the audience resolver's workspace fan-out (the same
@@ -47,6 +56,7 @@ class BeltPlanProposed(Event):
 
 __all__ = [
     "BeltPlanProposed",
+    "MandateAutopilotChanged",
     "MandateCreated",
     "MandateShiftStarted",
     "MandateShiftUpdated",

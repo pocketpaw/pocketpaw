@@ -14,6 +14,8 @@
 # sightings read.
 # Updated: 2026-06-11 (slice 4 — plan gate) — added POST .../shift.
 # Updated: 2026-06-11 (slice 5 — pawprints) — added GET .../pawprints.
+# Updated: 2026-06-11 (feat/belt-autopilot) — added POST .../autopilot
+# (start/stop Foresight-seeded simulated users; admin-gated).
 # Updated: 2026-06-11 (UI contract sync 2) — added POST .../plan/resolve (the
 # console's per-task gate action, mapped onto the real instinct approve-with-
 # edits / reject paths) and the `patrols` senses toggles on create.
@@ -178,6 +180,25 @@ async def resolve_plan(
         )
 
     return {"shift": await mandate_service.shift_wire(workspace_id, orders["shift_id"])}
+
+
+@router.post("/{mandate_id}/autopilot")
+async def set_autopilot(
+    mandate_id: str,
+    body: dict[str, Any],
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """Start or stop AUTOPILOT — Foresight-seeded simulated users that exercise
+    the mandate's surface and feed the feedback patrol (admin-gated).
+
+    Body: ``{action: "start"|"stop", users?: int (default 3, max 10)}``. START
+    persists ``autopilot={on, users}``, runs ONE cycle immediately (so the
+    response already reflects its sightings), and spawns the background cycle.
+    STOP cancels the background task and persists the off state. Returns
+    ``{"mandate": <detail>}`` (UI contract envelope)."""
+    return await mandate_service.set_autopilot(workspace_id, user_id, mandate_id, body)
 
 
 @router.get("/{mandate_id}/pawprints")
