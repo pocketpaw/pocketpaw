@@ -1,5 +1,11 @@
 # tests/test_ee_instinct.py — Comprehensive tests for ee/instinct (store + router).
 # Created: 2026-03-28 — Initial store tests.
+# Updated: 2026-06-11 (merge origin/dev — Belt code-change union) — kept BOTH
+#   the sovereignty governance suites (workspace-scope + audit-chain) and dev's
+#   Belt router-seam suite; the chain-emit helpers now live in
+#   ``ee.instinct.chain_emitters`` (imported by the router) but the router's
+#   ``ee.instinct.router._emit_*`` / ``_pocket_write_blob`` names still resolve
+#   (re-imported), so the existing monkeypatch call sites are unchanged.
 # Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — added
 #   TestWorkspaceScoping (store) and TestWorkspaceScopingRoutes (router) proving
 #   the cross-tenant decision leak is closed: workspace A's pending/list/audit
@@ -17,6 +23,16 @@
 #   legacy/genesis boundary (pre-W2b NULL-hash rows) verifies intact; the
 #   export endpoint stamps X-Audit-Chain-Intact. Added ``import sqlite3`` for
 #   the direct-tamper writes that bypass the store's loud append path.
+# Updated: 2026-06-10 (feat/belt-gate, BS-3) — added TestBeltCodeChangeRouterSeam:
+#   proves the approve/bulk-approve/reject routes dispatch the Belt
+#   apply-on-approve executor ONLY for a ``_code_change`` Action and NEVER for a
+#   plain (non-code-change) one — the kind-gated dispatch seam the spec security
+#   checklist requires ("the executor cannot be reached for non-code_change
+#   kinds"). The executor itself is patched (its real git behaviour is covered
+#   in test_belt_gate.py); these tests pin the router's routing decision, not
+#   the apply. The cross-workspace code-change 403 lives in
+#   test_instinct_approval_security.py beside its pocket-write peer (that app
+#   registers the CloudError → 403 handler).
 # Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
 #   added the outcome-verification e2e — an Action runs, the deterministic
 #   verifier checks the result against captured success_criteria, and the
@@ -1857,3 +1873,104 @@ class TestAuditChainConcurrency:
         assert verdict["intact"] is True
         assert verdict["hashed"] == n
         assert verdict["broken_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# BS-3 — Belt code-change router dispatch seam
+# ---------------------------------------------------------------------------
+
+
+class TestBeltCodeChangeRouterSeam:
+    """The approve / reject routes must dispatch the Belt apply-on-approve
+    executor ONLY when the Action carries a ``_code_change`` blob — and never
+    for a plain Action. This pins the kind-gated seam the spec's security
+    checklist requires; the executor's real git work is covered end-to-end in
+    test_belt_gate.py, so here it is patched to a recorder."""
+
+    async def _seed(self, store: InstinctStore, *, parameters: dict) -> str:
+        action = await store.propose(
+            pocket_id="ws-test",  # the approver's active workspace (see _FakeUser)
+            title="seam test",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            parameters=parameters,
+        )
+        return action.id
+
+    @pytest.mark.asyncio
+    async def test_approve_code_change_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """Approving a ``_code_change`` Action through the route fires
+        ``execute_approved_change`` exactly once with the approved Action."""
+        blob = {"kind": "code_change", "schema": 1, "workspace_id": "ws-test", "diff": "x"}
+        action_id = await self._seed(router_store, parameters={"_code_change": blob})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+
+        assert resp.status_code == 200
+        assert mock_exec.await_count == 1
+        dispatched = mock_exec.await_args.args[0]
+        assert dispatched.id == action_id
+        assert dispatched.status == ActionStatus.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_approve_plain_action_never_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """A plain (non-code-change) Action must NEVER reach the Belt executor."""
+        action_id = await self._seed(router_store, parameters={"note": "ordinary action"})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+
+        assert resp.status_code == 200
+        mock_exec.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bulk_approve_code_change_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """Bulk-approve mirrors the single-approve seam: a ``_code_change`` item
+        fires the executor; a plain item in the same batch does not."""
+        blob = {"kind": "code_change", "schema": 1, "workspace_id": "ws-test", "diff": "x"}
+        code_id = await self._seed(router_store, parameters={"_code_change": blob})
+        plain_id = await self._seed(router_store, parameters={"note": "ordinary"})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post("/instinct/actions/bulk-approve", json={"ids": [code_id, plain_id]})
+
+        assert resp.status_code == 200
+        # Exactly one dispatch — the code-change item, not the plain one.
+        assert mock_exec.await_count == 1
+        assert mock_exec.await_args.args[0].id == code_id
+
+    @pytest.mark.asyncio
+    async def test_reject_code_change_never_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """Rejecting a ``_code_change`` Action round-trips to REJECTED without
+        ever reaching the executor — the reject path applies nothing."""
+        blob = {"kind": "code_change", "schema": 1, "workspace_id": "ws-test", "diff": "x"}
+        action_id = await self._seed(router_store, parameters={"_code_change": blob})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "not now"})
+
+        assert resp.status_code == 200
+        mock_exec.assert_not_awaited()
+        assert resp.json()["status"] == ActionStatus.REJECTED.value

@@ -45,6 +45,27 @@
 # no-pocket / legacy path. ``resolve_profile`` stays PURE/no-I/O (the hot lookup);
 # the actual once-per-run async pocket load that supplies the override dict lives
 # tenant-scoped in ``run_core.execute_run`` (entity I/O never enters this module).
+# Changes: 2026-06-10 (feat/studio-code-migration) — registered the STUDIO and
+# CODE surfaces: their handlers (``studio.build_preamble`` / ``code.build_preamble``)
+# join ``_load_handlers``, and ``_build_profiles`` gives both a ripple-OFF
+# ``SurfaceProfile`` so the agent generates media / edits code instead of
+# defaulting to a ripple ui-spec dashboard. STUDIO scopes ``allow_mcp_tool_ids``
+# to the media tools (``MEDIA_TOOL_IDS`` loaded as a plain frozenset[str] inside
+# the existing try/except — no EE symbol crosses into OSS) and surfaces the
+# ``studio`` skill; CODE sets an ``allowed_sdk_tools`` allowlist (Bash/Read/Write/
+# Edit/Glob/Grep) and surfaces the ``code`` skill. Both are plain ``by_kind``
+# entries (not meta-aware like /sites).
+# Changes: 2026-06-10 (feat/belt-surface, BS-2 Belt & Pulley stations thin
+# slice) — registered the BELT surface (the develop station). Its handler
+# (``belt.build_preamble``) joins ``_load_handlers``, and ``_build_profiles``
+# gives it a ripple-OFF ``SurfaceProfile`` so the agent runs the station loop
+# instead of building a dashboard: ``allowed_sdk_tools`` = the coding built-ins
+# (Bash/Read/Write/Edit/Glob/Grep), ``skill_names`` = {"belt"}, and
+# ``allow_mcp_tool_ids`` = the loom orientation tools (``LOOM_TOOL_IDS``, loaded
+# in the existing try/except as a plain frozenset[str]) UNION the Instinct gate
+# tool (``_BELT_GATE_TOOL_IDS``). The gate tool id is a literal here because its
+# constant lives in a SIBLING branch's ``agent/mcp_servers/belt.py`` — the
+# import reconciles when both PRs land.
 
 from __future__ import annotations
 
@@ -95,6 +116,14 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
     }
 )
 
+# The Instinct gate tool the /belt develop station proposes its diff through.
+# Spelled as a LITERAL because its canonical constant
+# (``BELT_PROPOSE_CHANGE_TOOL_ID`` / ``BELT_TOOL_IDS``) lives in a SIBLING
+# branch's ``ee/pocketpaw_ee/agent/mcp_servers/belt.py`` — not importable on this
+# base. When both PRs land, swap this literal for the imported constant (same
+# None-degrade path as the loom/media imports below). Do NOT drift the id.
+_BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
+
 # Per-mode MCP-tool allow-lists keep a mode's agent context lean: only the
 # mode's SPECIALIZED tools are named here. The "general everywhere" set — ripple
 # widgets, the pocket lifecycle (read/create/edit/plan), and connectors
@@ -113,12 +142,26 @@ def _build_profiles() -> dict[str, Any]:
     loaded = True
     foresight_allow: frozenset[str] | None
     sites_allow: frozenset[str] | None
+    studio_allow: frozenset[str] | None
+    belt_allow: frozenset[str] | None
     try:
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
 
         foresight_allow = frozenset(FORESIGHT_TOOL_IDS)
         sites_allow = frozenset(SITES_TOOL_IDS)
+        # /studio scopes to the media-generation tools (image + video). Crossed
+        # over from the EE mcp-server module as a plain frozenset[str] — never an
+        # imported pocketpaw_ee symbol leaks into the OSS surface service.
+        studio_allow = frozenset(MEDIA_TOOL_IDS)
+        # /belt (the develop station) scopes to the loom orientation tools (so
+        # the agent grounds itself before coding) UNION the Instinct gate tool
+        # (so it proposes the diff through the gate). LOOM_TOOL_IDS is importable
+        # on this base; the gate tool id is the literal _BELT_GATE_TOOL_IDS until
+        # its sibling-branch constant lands.
+        belt_allow = frozenset(LOOM_TOOL_IDS) | _BELT_GATE_TOOL_IDS
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
             "surface: could not load mcp tool ids; per-mode MCP scoping disabled",
@@ -127,6 +170,8 @@ def _build_profiles() -> dict[str, Any]:
         loaded = False
         foresight_allow = None
         sites_allow = None
+        studio_allow = None
+        belt_allow = None
 
     return {
         "by_kind": {
@@ -140,6 +185,35 @@ def _build_profiles() -> dict[str, Any]:
             SurfaceKind.FILES: SurfaceProfile(
                 ripple_mode="on",
                 allow_mcp_tool_ids=frozenset() if loaded else None,
+            ),
+            # Studio: media generation (image + video). Ripple OFF so the agent
+            # generates media instead of defaulting to a ripple ui-spec dashboard;
+            # scoped to the media MCP tools (+ general-everywhere); the `studio`
+            # skill carries the generate→gallery flow.
+            SurfaceKind.STUDIO: SurfaceProfile(
+                ripple_mode="off",
+                allow_mcp_tool_ids=studio_allow,
+                skill_names=frozenset({"studio"}),
+            ),
+            # Code: edit + run code. Ripple OFF so the agent edits code instead of
+            # building a dashboard; the SDK-tool allowlist scopes it to the coding
+            # built-ins; the `code` skill carries the edit→run→verify loop.
+            SurfaceKind.CODE: SurfaceProfile(
+                ripple_mode="off",
+                skill_names=frozenset({"code"}),
+                allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
+            ),
+            # Belt: the develop station (orient→develop→propose via gate). Ripple
+            # OFF so the agent runs the station loop instead of building a
+            # dashboard. SDK-tool allowlist scopes it to the coding built-ins; the
+            # `belt` skill carries the station playbook; the MCP allow-list is the
+            # loom orientation tools (ground first) UNION the Instinct gate tool
+            # (propose the diff). belt_allow is None when the import degraded.
+            SurfaceKind.BELT: SurfaceProfile(
+                ripple_mode="off",
+                skill_names=frozenset({"belt"}),
+                allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
+                allow_mcp_tool_ids=belt_allow,
             ),
         },
         # /sites is meta-aware (below). Both modes scope to the sites authoring
@@ -279,7 +353,9 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
     from pocketpaw_ee.cloud.surface.handlers import (
         activity,
         audit,
+        belt,
         calendar,
+        code,
         files,
         generic,
         home,
@@ -292,6 +368,7 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
         settings,
         sidepanel,
         sites,
+        studio,
     )
     from pocketpaw_ee.cloud.surface.handlers import (
         agent as agent_handler,
@@ -325,6 +402,9 @@ def _load_handlers() -> dict[SurfaceKind, Any]:
         SurfaceKind.SIDEPANEL: sidepanel.build_preamble,
         SurfaceKind.FORESIGHT: foresight_handler.build_preamble,
         SurfaceKind.SITES: sites.build_preamble,
+        SurfaceKind.STUDIO: studio.build_preamble,
+        SurfaceKind.CODE: code.build_preamble,
+        SurfaceKind.BELT: belt.build_preamble,
         SurfaceKind.GENERIC: generic.build_preamble,
     }
 

@@ -1,6 +1,15 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
+    Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
+    repo path must resolve inside one of these roots; empty defaults to the
+    cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
+    orientation (loom) MCP server settings. ``loom_model_path`` defaults
+    to None, which disables the loom MCP server; set it to a built
+    world-model JSON to enable orient / locate / why / what_depends_on /
+    boundaries for the cloud chat agent (BS-1, Belt & Pulley stations).
   - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
     ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
     still auto-installs; this flag toggles the chat-surface affordance
@@ -798,7 +807,66 @@ class Settings(BaseSettings):
     # Image Generation
     google_api_key: str | None = Field(default=None, description="Google API key (for Gemini)")
     image_model: str = Field(
-        default="gemini-2.0-flash-exp", description="Google image generation model"
+        default="gemini-2.5-flash-image",
+        description=(
+            "Google image generation model. Gemini image models "
+            "(gemini-*-image) run via generateContent and work on free-tier "
+            "keys; imagen-* models run via the predict endpoint, which "
+            "Google restricts to paid-tier keys."
+        ),
+    )
+    # Video Generation (Replicate HTTP API — used by the /studio surface's
+    # media MCP server). Env auto-derives POCKETPAW_REPLICATE_API_TOKEN /
+    # POCKETPAW_FAL_API_KEY / POCKETPAW_VIDEO_MODEL.
+    replicate_api_token: str | None = Field(
+        default=None, description="Replicate API token (for video generation via the HTTP API)"
+    )
+    fal_api_key: str | None = Field(
+        default=None, description="fal.ai API key (alternate media-generation provider)"
+    )
+    video_model: str = Field(
+        default="kwaivgi/kling-v2.0",
+        description="Replicate video-generation model (owner/name slug)",
+    )
+
+    # Codebase orientation (loom) — the loom binary serves an MCP server over
+    # stdio that orients the cloud chat agent to a codebase (orient / locate /
+    # why / what_depends_on / boundaries). Wired into the claude_agent_sdk
+    # backend via CloudLoomMcpProvider. Env auto-derives POCKETPAW_LOOM_BIN /
+    # POCKETPAW_LOOM_MODEL_PATH.
+    loom_bin: str = Field(
+        default="loom",
+        description=(
+            "Path to the loom binary. Resolved as: this explicit setting → "
+            "PATH lookup → ~/go/bin/loom fallback. The default 'loom' relies on "
+            "PATH; set an absolute path to pin a specific build."
+        ),
+    )
+    loom_model_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a loom world-model JSON (built via `loom build`). When "
+            "unset, the loom MCP server is not registered — orientation is "
+            "disabled. The binary is served as `loom mcp -model <this path>`."
+        ),
+    )
+
+    # Belt & Pulley — the develop station's code-change gate. The
+    # ``belt_propose_change`` MCP tool proposes a unified diff through Instinct
+    # (the human approve/reject layer); on approval the executor applies it in a
+    # fresh worktree and opens a PR. ``belt_repo_allowlist`` is the security
+    # boundary: a proposed ``repo`` path must resolve INSIDE one of these roots,
+    # so the agent can never move a diff into an arbitrary filesystem location.
+    # When empty, the allowlist defaults to the current working directory's
+    # parent (the workspace root that holds the project checkouts). Env auto-
+    # derives POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+    belt_repo_allowlist: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowlisted root directories a Belt code-change proposal's repo "
+            "must live under. A repo path resolving outside every root is "
+            "refused. Empty → defaults to the cwd's parent (the workspace root)."
+        ),
     )
 
     # Security

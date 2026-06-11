@@ -43,6 +43,17 @@
 # into ``models.*`` — which the OSS-EE boundary contract forbids. The surface
 # package is models-free at import time, so ``models.pocket`` can import this
 # without a cycle.
+# Changes: 2026-06-10 (feat/studio-code-migration) — added two new chat-bearing
+# surfaces to ``SurfaceKind``: ``STUDIO`` (/studio — describe→generate media,
+# image + video) and ``CODE`` (/code — the agent edits + runs code). Both get
+# ``ripple_mode="off"`` profiles in ``service.py`` so the agent generates media /
+# edits code instead of defaulting to a ripple ui-spec dashboard.
+# Changes: 2026-06-10 (feat/belt-surface, BS-2 Belt & Pulley stations thin
+# slice) — added the ``BELT`` surface (/belt — the develop station). Its
+# ``ripple_mode="off"`` profile in ``service.py`` scopes the agent to the loom
+# orientation tools + the Instinct gate tool so it orients first, develops in a
+# station worktree, and proposes the diff through the gate — never applying to the
+# user's branches directly.
 
 from __future__ import annotations
 
@@ -80,6 +91,9 @@ class SurfaceKind(StrEnum):
     SIDEPANEL = "sidepanel"
     FORESIGHT = "foresight"  # /foresight + /foresight/scenarios/* routes
     SITES = "sites"  # /sites — describe-to-create + manage published Paw Sites
+    STUDIO = "studio"  # /studio — describe→generate media (image + video)
+    CODE = "code"  # /code — agent edits + runs code in the workspace
+    BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 

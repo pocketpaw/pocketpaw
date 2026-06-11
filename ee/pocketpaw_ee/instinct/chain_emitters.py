@@ -8,6 +8,9 @@
 #     - ``_chain_actor_human`` — build the human Actor for an emit;
 #     - ``_parked_policy_event_id`` / ``_parked_correlation_id`` — pull the
 #       schema-2 chain ids off the blob;
+#     - ``_code_change_proposed_event_id`` — pull the Belt ``proposed_event_id``
+#       off a ``_code_change`` blob (code-change peer of
+#       ``_parked_policy_event_id``);
 #     - ``_emit_human_corrected`` — best-effort ``human.corrected`` emit;
 #     - ``_emit_decision_completed_rejected`` — best-effort reject-path close;
 #     - ``_emit_policy_evaluated_approved`` — best-effort approve-side
@@ -19,6 +22,16 @@
 #   unchanged — a Decision-Graph wiring failure must never break an approval or
 #   rejection (the journal write is the source of truth; the Slice 4 reconciler
 #   is the safety net).
+# Updated: 2026-06-11 (merge origin/dev — Belt code-change union) — folded in
+#   dev's Belt feature so this module stays the single source of truth for the
+#   chain-emit helpers after the sovereignty extraction. Added
+#   ``_code_change_proposed_event_id`` (Belt's ``agent.proposed`` causation
+#   lookup) and the ``causation_override`` parameter on ``_emit_human_corrected``
+#   and ``_emit_decision_completed_rejected`` so the Belt code-change path can
+#   thread the ``agent.proposed`` event id (approve) / the just-emitted
+#   ``human.corrected`` id (reject-terminal) as causation. Pocket-write callers
+#   omit ``causation_override`` and keep the original parked-policy-event /
+#   correlation-only behavior unchanged.
 
 from __future__ import annotations
 
@@ -107,6 +120,24 @@ def _parked_correlation_id(blob: dict[str, Any]) -> Any:
         return None
 
 
+def _code_change_proposed_event_id(blob: dict[str, Any]) -> Any:
+    """Pull the ``proposed_event_id`` UUID off a schema-2 ``_code_change``
+    blob, or ``None`` if missing / malformed. belt.py writes this back onto
+    the Action after the chain-opening ``agent.proposed`` event fires; using
+    it as the ``causation_id`` on the ``human.corrected`` event gives the
+    Belt chain a clean ``agent.proposed → human.corrected`` cause-arrow. The
+    code-change peer of ``_parked_policy_event_id``."""
+    from uuid import UUID
+
+    raw = blob.get("proposed_event_id")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
+
+
 def _emit_human_corrected(
     *,
     blob: dict[str, Any],
@@ -115,6 +146,7 @@ def _emit_human_corrected(
     workspace_id: str,
     disposition: str,
     note: str | None,
+    causation_override: Any | None = None,
 ) -> Any | None:
     """Best-effort ``human.corrected`` emit for an approve / reject /
     bulk-approve / bulk-reject item.
@@ -129,6 +161,13 @@ def _emit_human_corrected(
     a write without minting one). The Slice 4 reconciler / abandon
     sweeper will deal with the orphan.
 
+    ``causation_override`` (BS-4) — when provided, it is used as the
+    ``causation_id`` instead of the parked-policy-event lookup. The Belt
+    code-change path passes the ``agent.proposed`` event id here (a Belt
+    proposal has no parked ``policy.evaluated`` event to chain back to —
+    the proposal IS the chain origin). Pocket-write callers omit it and
+    fall back to ``_parked_policy_event_id``.
+
     Returns the emitted event id (``UUID``) on success, or ``None`` when
     the emit was skipped (missing correlation_id) or raised. Slice 4's
     approve-side ``policy.evaluated`` emit uses this as its
@@ -142,7 +181,9 @@ def _emit_human_corrected(
         return None
 
     pocket_id = str(getattr(action, "pocket_id", "") or "")
-    causation = _parked_policy_event_id(blob)
+    causation = (
+        causation_override if causation_override is not None else _parked_policy_event_id(blob)
+    )
     payload: dict[str, Any] = {
         "disposition": disposition,
         "action_id": str(getattr(action, "id", "") or ""),
@@ -179,6 +220,7 @@ def _emit_decision_completed_rejected(
     user_id: str,
     workspace_id: str,
     reason: str,
+    causation_override: Any | None = None,
 ) -> None:
     """Best-effort ``decision.completed(passed=False, action_outcome=
     "rejected")`` chain-close for a reject / bulk-reject item.
@@ -187,6 +229,12 @@ def _emit_decision_completed_rejected(
     ``_emit_human_corrected``. The reject path owns the close because
     the bridge is never invoked on rejection — for the approve path the
     bridge's ``_emit_bridge_chain_close`` owns the close instead.
+
+    ``causation_override`` (BS-4) — the Belt code-change reject path passes
+    the just-emitted ``human.corrected`` event id so the terminal chains its
+    causation back to the human rejection. Pocket-write callers omit it (their
+    terminal doesn't currently set a causation_id; the chain still folds via
+    ``correlation_id``).
     """
     from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
 
@@ -210,6 +258,7 @@ def _emit_decision_completed_rejected(
             ),
             scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
             payload=payload,
+            causation_id=causation_override,
         )
     except Exception:  # noqa: BLE001 — chain close is best-effort
         logger.warning(
