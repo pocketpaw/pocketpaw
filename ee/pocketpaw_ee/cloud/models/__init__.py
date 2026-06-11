@@ -104,6 +104,13 @@ FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
 _CalendarDoc: type = None  # type: ignore[assignment]
 _EventDoc: type = None  # type: ignore[assignment]
+# The Belt MANDATE docs live in ee.cloud.mandates.domain (4-file entity, sole
+# importer = its own service). Lazy-loaded here so init_beanie registers them
+# without ee.cloud.models taking a hard import on the mandates package (same
+# out-of-models discipline the calendar docs use).
+_MandateDoc: type = None  # type: ignore[assignment]
+_ShiftDoc: type = None  # type: ignore[assignment]
+_SightingDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
@@ -129,6 +136,22 @@ def _ensure_calendar_docs():
         _CalendarDoc = _CD
         _EventDoc = _ED
     return _CalendarDoc, _EventDoc
+
+
+def _ensure_mandate_docs():
+    # Why: the mandates package's __init__ imports its router (→ deps → auth),
+    # so registering the docs via the package would pull the auth chain in
+    # during cloud.models init. Import the doc module directly + deferred.
+    global _MandateDoc, _ShiftDoc, _SightingDoc
+    if _MandateDoc is None:
+        from pocketpaw_ee.cloud.mandates.domain import MandateDoc as _MD
+        from pocketpaw_ee.cloud.mandates.domain import ShiftDoc as _SD
+        from pocketpaw_ee.cloud.mandates.domain import SightingDoc as _SG
+
+        _MandateDoc = _MD
+        _ShiftDoc = _SD
+        _SightingDoc = _SG
+    return _MandateDoc, _ShiftDoc, _SightingDoc
 
 
 __all__ = [
@@ -205,6 +228,7 @@ def get_all_documents():
     """Get all Beanie documents, with lazy FileUpload loading."""
     _ensure_file_upload()
     cal_doc, evt_doc = _ensure_calendar_docs()
+    mandate_doc, shift_doc, sighting_doc = _ensure_mandate_docs()
     return [
         User,
         Agent,
@@ -259,6 +283,9 @@ def get_all_documents():
         TaskEvent,
         cal_doc,
         evt_doc,
+        mandate_doc,
+        shift_doc,
+        sighting_doc,
     ]
 
 

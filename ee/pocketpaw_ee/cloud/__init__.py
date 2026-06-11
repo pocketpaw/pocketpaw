@@ -324,6 +324,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(belt_console_router, prefix="/api/v1")
 
+    # Belt MANDATES — the standing-JOB primitive (feat/belt-mandates). The
+    # /belt/mandates surface: charter CRUD, patrol intake (feedback), sightings
+    # read, manual shift trigger (foreman → plan gate), and the pawprints feed.
+    # The plan-gate apply-on-approve executor lives in ee.cloud.mandates.executor
+    # and is fired from the Instinct router's approve path on a ``belt_plan`` blob.
+    from pocketpaw_ee.cloud.mandates.router import router as belt_mandates_router
+
+    app.include_router(belt_mandates_router, prefix="/api/v1")
+
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
     # use the canonical `Depends(current_active_user)` auth chain without
