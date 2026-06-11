@@ -956,6 +956,23 @@ async def approve_action(
         except Exception:
             logger.exception("belt code-change execution after approval failed (non-fatal)")
 
+    # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
+    # paw-print customer event awaiting a decision), deliver the owner's reply
+    # back to the customer surface. Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the hooks above. The operator's
+    # (possibly edited) recommendation is the wording the customer reads, so the
+    # edit path above feeds straight into the delivery.
+    try:
+        from pocketpaw_ee.paw_print.decision_loop import (
+            customer_reply_blob,
+            deliver_customer_decision,
+        )
+
+        if customer_reply_blob(approved) is not None:
+            await deliver_customer_decision(approved, declined=False)
+    except Exception:
+        logger.exception("customer-decision delivery after approval failed (non-fatal)")
+
     return ApproveResponse(action=approved, correction=correction)
 
 
@@ -1077,6 +1094,21 @@ async def reject_action(
         await _emit_belt_run_updated_safe(
             workspace_id=workspace_id, action_id=str(action.id), status="rejected", stage="done"
         )
+
+    # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
+    # (carrying the rejection reason) back to the customer surface. Same
+    # best-effort, lazy-import shape as the approve hook. The loop closes either
+    # way: the customer always gets an answer, approve or reject.
+    try:
+        from pocketpaw_ee.paw_print.decision_loop import (
+            customer_reply_blob,
+            deliver_customer_decision,
+        )
+
+        if customer_reply_blob(action) is not None:
+            await deliver_customer_decision(action, declined=True)
+    except Exception:
+        logger.exception("customer-decision delivery after rejection failed (non-fatal)")
 
     return action
 

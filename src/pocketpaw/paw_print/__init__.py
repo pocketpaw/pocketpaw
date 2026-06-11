@@ -5,8 +5,13 @@
 # back to the widget. This module is the backend side of that loop.
 # Updated: 2026-06-10 (W0b security fix) — Export PawPrintWidgetPublic, the
 # token-free response projection used by the list/read endpoints.
+# Updated: 2026-06-11 (gap2 — close the customer decision loop) — Export
+# DecisionStatus + DecisionState, the deliverable that carries the owner's
+# decision back out to the customer surface (the back-half of the loop).
 
 from pocketpaw.paw_print.models import (
+    DecisionState,
+    DecisionStatus,
     PawPrintBlock,
     PawPrintEvent,
     PawPrintEventMapping,
@@ -17,6 +22,8 @@ from pocketpaw.paw_print.models import (
 from pocketpaw.paw_print.store import PawPrintStore
 
 __all__ = [
+    "DecisionState",
+    "DecisionStatus",
     "PawPrintBlock",
     "PawPrintEvent",
     "PawPrintEventMapping",
