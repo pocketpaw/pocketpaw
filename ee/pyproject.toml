@@ -199,6 +199,8 @@ media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
+fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
+instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
 
 [project.entry-points."pocketpaw.agent_extensions"]
 cloud = "pocketpaw_ee.extensions:CloudAgentExtension"

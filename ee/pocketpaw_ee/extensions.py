@@ -58,6 +58,17 @@ agent proposes a connector call through Instinct; the ee instinct router fires
 ``ee.cloud.external_actions.executor.execute_approved_external_action`` on
 approval. Propose-only — the tool never fires the connector itself. Ambient
 (not opt-in).
+
+Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added
+``CloudFabricMcpProvider`` (entry ``fabric``; server ``pocketpaw_fabric``,
+tools ``fabric_query`` / ``fabric_stats``) and ``CloudInstinctMcpProvider``
+(entry ``instinct``; server ``pocketpaw_instinct``, tools ``instinct_pending``
+/ ``instinct_audit``), both mirroring ``CloudExternalActionsMcpProvider``. On
+the claude_agent_sdk backend, registry tools (BaseTool) never reach the agent —
+only MCP servers do — so without these the cloud chat agent had no path to the
+Fabric ontology or Instinct gate visibility. Both are READ-ONLY and
+workspace-scoped via the chat ContextVars. Gated proposing stays on
+``pocketpaw_external_actions``. Ambient (not opt-in).
 """
 
 from __future__ import annotations
@@ -738,6 +749,72 @@ class CloudExternalActionsMcpProvider:
         )
 
         return list(EXTERNAL_ACTIONS_TOOL_IDS)
+
+
+class CloudFabricMcpProvider:
+    """`pocketpaw.mcp_servers` — read-only Fabric ontology access in-process
+    server (``pocketpaw_fabric``). Hosts ``fabric_query`` + ``fabric_stats``.
+
+    On the claude_agent_sdk backend, registry tools (BaseTool) never reach the
+    agent — only MCP servers do — so this server is the cloud chat agent's only
+    path to the Fabric ontology. Both tools are READ-ONLY and workspace-scoped
+    via the chat ContextVars; ontology writes from this backend should arrive
+    as gated proposals, never ambient writes.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / external-actions /
+    media servers use. ``build_fabric_server`` returns None — and the loop
+    skips it — when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.fabric import build_fabric_server
+
+            return build_fabric_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the server is unavailable, same as
+            # the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.fabric import FABRIC_TOOL_IDS
+
+        return list(FABRIC_TOOL_IDS)
+
+
+class CloudInstinctMcpProvider:
+    """`pocketpaw.mcp_servers` — read-only Instinct gate visibility in-process
+    server (``pocketpaw_instinct``). Hosts ``instinct_pending`` +
+    ``instinct_audit``.
+
+    On the claude_agent_sdk backend, registry tools (BaseTool) never reach the
+    agent — only MCP servers do — so this server is the cloud chat agent's only
+    view into the Instinct gate (pending approvals + the decision audit log).
+    READ-ONLY: it never approves, rejects, executes, or proposes. Gated
+    proposing on this backend goes through ``pocketpaw_external_actions``
+    (``propose_external_action``), not a wrapped InstinctProposeTool.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / external-actions /
+    media servers use. ``build_instinct_server`` returns None — and the loop
+    skips it — when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.instinct import build_instinct_server
+
+            return build_instinct_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the server is unavailable, same as
+            # the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.instinct import INSTINCT_TOOL_IDS
+
+        return list(INSTINCT_TOOL_IDS)
 
 
 class CloudAgentExtension:
