@@ -13,6 +13,12 @@
 #   `_apply_outcome_attached` handler mutates the Decision in place.
 #   Optional — pre-Slice-2 writers pass None and the back-reference is
 #   simply absent from the ledger row.
+# Updated: 2026-06-11 (gap-3 outcome VALUE metering) — `outcome_value` /
+#   `outcome_unit` are no longer the always-`None` reserved slots. They
+#   now carry the binding's author-time billable value/unit, persisted on
+#   the ledger row so `meter_outcomes` can sum value by unit per workspace.
+#   The fields and their defaults are unchanged; only the meaning is — a
+#   pre-gap-3 ledger row (both `None`) reads back as a count-only outcome.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,8 +30,10 @@ class OutcomeRecord:
 
     Built from a ``PocketOutcomeEvent`` and appended verbatim to the
     workspace JSONL ledger. ``outcome_value`` / ``outcome_unit`` are the
-    Layer-4 billing slots — always ``None`` in this build, kept on the
-    record so the ledger format is forward-stable when pricing lands.
+    billable-value pair (gap-3): a real figure when the binding declared
+    one, ``None``/``None`` for a count-only outcome. They are always a WHOLE
+    pair or both ``None`` — ``record_outcome`` drops a torn half-pair to
+    count-only so the aggregation can sum value strictly by unit.
     ``decision_id`` is the optional back-reference to the Decision in
     the RFC 07 decision graph that this outcome resolved — None for
     outcomes emitted by writers that don't know their Decision.
