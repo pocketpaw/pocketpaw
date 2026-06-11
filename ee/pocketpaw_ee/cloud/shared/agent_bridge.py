@@ -18,6 +18,13 @@ User-message attachments ride the ``message.sent`` payload so channel
 agents see the same filename/mime/size context DM agents already get —
 appended to the user prompt as an ``Attached files:`` block before
 ``pool.run`` (matching ``src/pocketpaw/agents/loop.py``'s DM shape).
+
+Updated 2026-06-12: ``_run_agent_response`` now binds the agent's
+workspace/user identity (``attach_agent_identity``) around ``pool.run`` so
+in-process MCP tools that resolve scope from ContextVars (fabric, instinct,
+decisions, connectors) work on the group/DM bridge path. The SSE chat path
+already did this in ``run_core``; the bridge path skipped it, so every
+scoped tool returned "requires workspace context".
 """
 
 from __future__ import annotations
@@ -407,6 +414,10 @@ async def _run_agent_response(
     """
     from pocketpaw.agents.pool import get_agent_pool
     from pocketpaw_ee.cloud.chat import message_service
+    from pocketpaw_ee.cloud.chat.agent_service import (
+        attach_agent_identity,
+        detach_agent_identity,
+    )
 
     pool = get_agent_pool()
     session_key = f"cloud:{group_id}:{agent_id}"
@@ -470,6 +481,15 @@ async def _run_agent_response(
     error_summary = ""
     last_emit_ts = 0.0
     STREAM_CHUNK_THROTTLE_S = 0.2
+    # Bind the agent's workspace/user identity for the duration of the run so
+    # in-process MCP tools that resolve scope from ContextVars (fabric,
+    # instinct, decisions, connectors, …) can reach the store. The SSE chat
+    # path does this in ``run_core.attach_agent_identity``; the group/DM bridge
+    # path (this function) calls ``pool.run`` directly and previously skipped
+    # it, so every ContextVar-scoped tool returned "requires workspace context
+    # (call from a cloud chat session)". ``user_id`` is the agent itself — it is
+    # the actor on this path, matching the cloud MCP tests' setup.
+    identity_tokens = attach_agent_identity(workspace_id=workspace_id, user_id=agent_id)
     try:
         async for event in pool.run(
             agent_id, user_message, session_key, history, knowledge_context=knowledge_context
@@ -526,6 +546,8 @@ async def _run_agent_response(
     except Exception:
         logger.exception("Agent %s response failed in group %s", agent_id, group_id)
         full_text = full_text or "[Agent response failed]"
+    finally:
+        detach_agent_identity(identity_tokens)
 
     if saw_error_event and not full_text.strip():
         details = f": {error_summary}" if error_summary else ""
