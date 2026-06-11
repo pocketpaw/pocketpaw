@@ -1,9 +1,21 @@
 # src/pocketpaw/bundled_templates/_bundled/applications-triage/template.pocket.yaml
 # Created: 2026-06-11 (feat/triage-member-templates) — RFC 03 v2 Pocket
 # Template Schema metadata for the generic application/queue triage
-# pocket. ``shape: custom`` because the canvas is a master-detail (queue
-# list + selected-application detail) plus a burndown stat row and an
-# action row — RFC 03's shape enum has no ``master-detail`` value, so the
+# pocket.
+# Modified 2026-06-11 (feat/triage-redesign): DEMO-GRADE redesign of the
+# ripple_spec. The canvas is now a decisions console — a color-banded
+# burndown strip (per-status count cards + queue-total + oldest-waiting),
+# a scannable score-banded queue (name, one-line summary, status pill,
+# score badge + color progress, waiting-days, no name truncation), and a
+# loud detail panel (header + status/recommendation pills + a score RING,
+# the agent's recommendation reasoning in a colored callout, a risk-flag
+# chip row, the FULL question-and-answer set, then the gated action row).
+# The detail panel binds to a denormalized flat ``state.selected`` object
+# kept in sync by the queue cards' on_click, fixing the empty-detail bug
+# (the old spec bound through an unsupported method-chain-then-property
+# expression — see the ripple_spec _placeholder_note BINDING CONTRACT).
+# ``shape: custom`` because the canvas is a composite (queue + detail +
+# burndown + action row) — RFC 03's shape enum has no value for it, so the
 # pattern is recorded in the sibling index.json (``pattern: app``) and the
 # shape stays ``custom`` (the same choice crm-record-list made).
 # ``needs: [paw.db.v1]`` declares the generic data-source capability a
@@ -21,16 +33,20 @@ vertical: operations
 display_name: Applications Triage
 shape: custom
 description: |
-  A review queue for incoming applications. A scannable list on the left —
-  status, a one-line applicant summary, an optional score or recommendation,
-  and how long the item has waited — with the full application detail of the
-  selected row on the right, rendered as plain question-and-answer pairs. A
-  burndown strip across the top counts the queue by status so a reviewer
-  can see the backlog at a glance. The approve / reject / needs-review row
-  surfaces each decision as a pending proposal for a human to confirm rather
-  than acting on its own. Ships a placeholder live-data source so a connected
-  backend hydrates the queue from a real applications endpoint; with no
-  backend it renders the seeded sample applications.
+  A decisions console for incoming applications. A color-banded burndown
+  strip across the top counts the queue by status and adds the headline
+  stats — how many are waiting and how long the oldest has sat. A scannable
+  queue on the left shows each applicant's name, a one-line summary, a
+  status pill, the agent's score as a color-banded badge and bar, and how
+  long the item has waited. Selecting a row opens a detail panel where the
+  agent's work is the loudest thing on the canvas: the score as a ring, the
+  recommendation — approve, reject, or interview — with the reasoning behind
+  it, a row of risk-check chips, and the applicant's full question-and-answer
+  set. The approve / reject / interview row surfaces each decision as a
+  pending proposal for a human to confirm rather than acting on its own.
+  Ships a placeholder live-data source so a connected backend hydrates the
+  queue from a real applications endpoint; with no backend it renders the
+  seeded sample applications.
 icon: inbox
 color: "#5b7c99"
 state:
