@@ -144,6 +144,18 @@ stamps both onto the persisted ``Pocket``. The marketing-site brain
 ``type_="custom"`` and never carried ``pattern``, so site intent was
 dropped (pockets persisted as type="custom", pattern=None). Both keep
 today's defaults when unset — additive, no Mongo migration.
+Changes: 2026-06-11 (fix/template-ui-compile) — the template merge now
+carries the template's authored canvas through. Found on a live deploy:
+pockets created via ``create(template_slug=...)`` rendered an empty
+canvas because the compile pass translates YAML metadata only and the
+merge treated ``ui`` as user-authored-only, so a fresh create never
+adopted the template's ``ui`` tree. ``_merge_compile_into_ripple_spec``
+gains a ``template_ripple_spec`` kwarg and an ownership rule: an
+empty/absent existing ``ui`` is template-owned (adopt the template's
+``ui`` + merge its seed ``state`` / placeholder ``sources`` under the
+compiled values); a non-empty ``ui`` is user-owned (machinery-only
+merge, exactly the prior recompile semantics). Both ``create`` and
+``update`` pass the loader's ``ripple_spec`` sibling through.
 """
 
 from __future__ import annotations
@@ -802,10 +814,21 @@ async def _gate_widget_spec_for_agent(
 # template off disk, the OSS compile pass translates it into a runtime-
 # shaped dict, and the EE service MERGES that dict into the pocket's
 # ``rippleSpec`` (option B — keep user-customized fields, replace the
-# compile-output keys). The merge strategy is intentional: a user can
-# tweak ``rippleSpec.ui`` after instantiation and a subsequent
-# template-recompile (template upgraded out-of-band) won't blow those
-# tweaks away — only the fields the compile pass produced get replaced.
+# compile-output keys).
+#
+# Canvas ownership rule (extends option B; fix for the empty-canvas bug
+# found when templates were deployed to a live instance): the compile
+# pass translates the template's YAML metadata only — the render tree
+# lives in the hand-authored sibling ``ripple_spec.json``. The merge
+# decides who owns the canvas by looking at the pocket's EXISTING ``ui``:
+#
+#   * empty/absent ``ui``  → template-owned. The template's ``ui`` is
+#     adopted, and its seed ``state`` / placeholder ``sources`` merge
+#     UNDER the compiled values so the canvas renders non-empty.
+#   * non-empty ``ui``     → user-owned. A recompile (template upgraded
+#     out-of-band) refreshes the machinery only and never touches the
+#     canvas — a user can tweak ``rippleSpec.ui`` after instantiation
+#     and a re-apply won't blow those tweaks away.
 #
 # Tolerance posture: ``load_template(slug, strict=False)`` never raises;
 # a stale / missing / malformed template returns ``None``. The pocket
@@ -847,28 +870,78 @@ def _compile_template_to_runtime_dict(loaded: dict[str, Any] | None) -> dict[str
         return None
 
 
+def _ui_is_empty(ui: Any) -> bool:
+    """True when a rippleSpec ``ui`` value counts as "no authored canvas".
+
+    Absent, ``None``, a non-dict, or an empty dict are all empty. A dict
+    with ANY content (even just ``{"type": "stack"}``) is a real canvas —
+    we never second-guess a node the user (or an agent) authored.
+    """
+    return not isinstance(ui, dict) or not ui
+
+
 def _merge_compile_into_ripple_spec(
     existing: dict[str, Any] | None,
     compiled: dict[str, Any],
+    *,
+    template_ripple_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge a ``compile_template`` result into an existing rippleSpec.
 
     Merge strategy (option B in the Wave 3e brief): keys produced by
     the compile pass (``sources``, ``state``, ``actions``, ``agents``,
     ``triggers``, ``outcomes``, etc.) REPLACE matching keys in the
-    existing spec. Keys the compile pass does NOT produce
-    (e.g. ``ui`` — a user-authored render tree) survive unchanged.
-    The result is a NEW dict; neither input is mutated.
+    existing spec. The result is a NEW dict; no input is mutated.
 
-    Rationale: a pocket created from a template carries the template's
-    sources / state / actions verbatim, but the user may have edited
-    ``rippleSpec.ui`` to rearrange the canvas. A subsequent template
-    re-apply (template upgraded out-of-band) should refresh the
-    machinery without nuking the user's layout.
+    The ``ui`` tree follows an ownership rule keyed on the EXISTING
+    spec's canvas (fix for the empty-canvas bug found on a live deploy —
+    pockets created from a template rendered ``ui.children: 0``):
+
+    * **Existing ``ui`` empty/absent → template-owned.** The pocket has
+      no authored canvas, so the template's hand-authored sibling
+      ``ripple_spec.json`` supplies it: its ``ui`` tree is adopted, and
+      its seed ``state`` / placeholder ``sources`` are merged UNDER the
+      compiled values (compiled wins per key) so the adopted canvas has
+      the bindings it references and renders non-empty on first install.
+    * **Existing ``ui`` non-empty → user-owned.** A re-apply (template
+      upgraded out-of-band, recompile-on-update) refreshes the machinery
+      without touching the canvas — exactly the pre-fix behaviour.
+
+    ``template_ripple_spec`` is the loader's ``loaded["ripple_spec"]``
+    sibling dict; pass ``None`` to skip canvas adoption entirely (the
+    pre-fix machinery-only merge). The authoring-only
+    ``_placeholder_note`` key is never copied — only ``ui`` / ``state``
+    / ``sources`` participate in adoption. Adopted blocks are
+    deep-copied so the merged spec never aliases the loader's dicts.
     """
     out: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    canvas_is_template_owned = _ui_is_empty(out.get("ui"))
+
     for key, value in compiled.items():
         out[key] = value
+
+    if canvas_is_template_owned and isinstance(template_ripple_spec, dict):
+        template_ui = template_ripple_spec.get("ui")
+        if isinstance(template_ui, dict) and template_ui:
+            out["ui"] = copy.deepcopy(template_ui)
+            # The adopted canvas binds against the template's seed state
+            # ({state.records}, {state.draft}, ...) and its placeholder
+            # sources. Merge them under the compiled values: compiled
+            # keys (the validated schema output) win every collision.
+            template_state = template_ripple_spec.get("state")
+            if isinstance(template_state, dict):
+                compiled_state = out.get("state")
+                out["state"] = {
+                    **copy.deepcopy(template_state),
+                    **(compiled_state if isinstance(compiled_state, dict) else {}),
+                }
+            template_sources = template_ripple_spec.get("sources")
+            if isinstance(template_sources, dict):
+                compiled_sources = out.get("sources")
+                out["sources"] = {
+                    **copy.deepcopy(template_sources),
+                    **(compiled_sources if isinstance(compiled_sources, dict) else {}),
+                }
     return out
 
 
@@ -1005,7 +1078,11 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         loaded = load_template(body.template_slug, strict=False)
         compiled = _compile_template_to_runtime_dict(loaded)
         if compiled is not None:
-            normalized_spec = _merge_compile_into_ripple_spec(normalized_spec, compiled)
+            normalized_spec = _merge_compile_into_ripple_spec(
+                normalized_spec,
+                compiled,
+                template_ripple_spec=loaded.get("ripple_spec") if loaded else None,
+            )
 
     if normalized_spec:
         validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
@@ -1233,7 +1310,11 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         compiled = _compile_template_to_runtime_dict(loaded)
         if compiled is not None:
             merge_base = normalized_spec if normalized_spec is not None else doc.rippleSpec
-            normalized_spec = _merge_compile_into_ripple_spec(merge_base, compiled)
+            normalized_spec = _merge_compile_into_ripple_spec(
+                merge_base,
+                compiled,
+                template_ripple_spec=loaded.get("ripple_spec") if loaded else None,
+            )
 
     if normalized_spec:
         validate_ripple_spec_logged(
