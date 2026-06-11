@@ -243,6 +243,20 @@ class AgentPool:
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
 
+        # An agent's OWN declared skills (config.skill_refs) must materialize on
+        # EVERY run path, not only entity-room runs that thread skill_names in.
+        # The SSE chat path resolves this upstream and passes skill_names; the
+        # group/DM bridge (agent_bridge) calls run() without it, so a deployment
+        # agent with skill_refs got none of its skills. Union the agent's own
+        # skill_refs here so run() is the single source of truth for them; the
+        # passed-in skill_names stays an additive per-entity subset.
+        cfg = getattr(instance, "config", None) or {}
+        own_skills = (
+            frozenset(cfg.get("skill_refs", []) or []) if isinstance(cfg, dict) else frozenset()
+        )
+        if own_skills:
+            skill_names = skill_names | own_skills
+
         # Build system prompt via soul bootstrap if available
         system_prompt = None
         if instance.soul_manager and instance.soul_manager.bootstrap_provider:
