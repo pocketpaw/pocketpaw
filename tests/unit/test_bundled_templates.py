@@ -78,6 +78,10 @@ _SEED_SLUGS = {
 _VERTICAL_SLUGS = {
     "applications-triage",
     "member-360",
+    "events-board",
+    "renewals-radar",
+    "orders-fulfillment",
+    "revenue-pulse",
 }
 
 # Every bundled template the installer ships and index.json registers.

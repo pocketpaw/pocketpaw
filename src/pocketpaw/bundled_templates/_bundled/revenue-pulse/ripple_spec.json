@@ -1,0 +1,159 @@
+{
+  "_placeholder_note": "Built-in pocket template (revenue-pulse), DEMO-GRADE 2026-06-11 (feat/demo-template-suite). The six months of revenue, the category split, and the approval funnel below are real sample copy — no placeholder brackets — so a pocket created straight from this template renders as a finished executive dashboard. The create specialist still rewrites the sample numbers to the user's real domain. BINDING CONTRACT (same as the other vertical templates): every binding is a FLAT `{state.<key>}` dot-path — the chart `data`, the data-grid `rows`, and the stat each-loop all read seeded top-level lists, with no method-chain-then-property access and no bracket indexing in `each` items (the two forms that render empty). This is the ONLY dashboard in the suite, so it uses the hero+grid layout the create-pocket guidance reserves for dashboards (stat row -> full-width trend chart -> by-category split -> approval strip); the three sibling pockets are app/queue layouts so they never look alike. ENUM NOTE: stat `direction` is {up-good, down-good, up-bad, down-bad, flat}; chart `type` is one of {area, bar, line}. The trend chart reads `{label, value}` rows and the by-category bar chart reads `{label, value}` rows. READ-ONLY: no buttons, no on_click, no mutation. The `sources` block is a PLACEHOLDER live-data binding: with a backend keep it so GET /reports/revenue hydrates state.trend; with NO backend remove it and keep the seeded numbers. Keep the stat row, the trend area chart, the by-category bar chart + breakdown grid, and the approval-rate strip intact; reshape every list for the user's real reporting.",
+  "sources": {
+    "revenue": {
+      "method": "GET",
+      "path": "/reports/revenue?window=6m",
+      "bind": "state.trend",
+      "refresh": ["pocket_open", "manual"]
+    }
+  },
+  "state": {
+    "period_label": "Last 6 months · through June 2026",
+    "kpis": [
+      { "id": "k1", "label": "Recurring revenue", "value": "$48,200 / mo", "delta": "+9%", "direction": "up-good" },
+      { "id": "k2", "label": "Events revenue", "value": "$115,400", "delta": "+22%", "direction": "up-good" },
+      { "id": "k3", "label": "Store revenue", "value": "$19,860", "delta": "+6%", "direction": "up-good" },
+      { "id": "k4", "label": "Active memberships", "value": "412", "delta": "+14", "direction": "up-good" }
+    ],
+    "trend": [
+      { "label": "Jan", "value": 142000 },
+      { "label": "Feb", "value": 138500 },
+      { "label": "Mar", "value": 161200 },
+      { "label": "Apr", "value": 158900 },
+      { "label": "May", "value": 184600 },
+      { "label": "Jun", "value": 203400 }
+    ],
+    "category_chart": [
+      { "label": "Memberships", "value": 289200 },
+      { "label": "Events", "value": 115400 },
+      { "label": "Store", "value": 19860 },
+      { "label": "Comps / other", "value": 4140 }
+    ],
+    "categories": [
+      { "id": "c1", "category": "Memberships", "revenue": "$289,200", "share": "67%", "change_pct": 9 },
+      { "id": "c2", "category": "Events", "revenue": "$115,400", "share": "27%", "change_pct": 22 },
+      { "id": "c3", "category": "Store", "revenue": "$19,860", "share": "5%", "change_pct": 6 },
+      { "id": "c4", "category": "Comps / other", "revenue": "$4,140", "share": "1%", "change_pct": -3 }
+    ],
+    "approvals": [
+      { "id": "a1", "label": "Applications submitted", "value": "184", "sublabel": "last 6 months", "direction": "flat" },
+      { "id": "a2", "label": "Approved", "value": "121", "sublabel": "66% of submitted", "direction": "up-good" },
+      { "id": "a3", "label": "Approval rate", "value": "66%", "delta": "+4%", "direction": "up-good" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "20px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "Revenue Pulse",
+          "subtitle": "{state.period_label}",
+          "eyebrow": "Executive dashboard"
+        }
+      },
+      {
+        "type": "grid",
+        "props": { "columns": "repeat(4, minmax(0, 1fr))", "gap": "16px" },
+        "children": [
+          {
+            "type": "each",
+            "items": "{state.kpis}",
+            "item_as": "kpi",
+            "children": [
+              {
+                "type": "stat",
+                "props": {
+                  "label": "{kpi.label}",
+                  "value": "{kpi.value}",
+                  "delta": "{kpi.delta}",
+                  "direction": "{kpi.direction}"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "chart",
+        "props": {
+          "type": "area",
+          "title": "Total revenue — last 6 months",
+          "data": "{state.trend}",
+          "height": 300
+        }
+      },
+      {
+        "type": "grid",
+        "props": { "columns": "minmax(0, 1fr) minmax(0, 1.2fr)", "gap": "20px" },
+        "children": [
+          {
+            "type": "section",
+            "props": { "title": "Revenue by category" },
+            "children": [
+              {
+                "type": "chart",
+                "props": {
+                  "type": "bar",
+                  "title": "This period",
+                  "data": "{state.category_chart}",
+                  "height": 260
+                }
+              }
+            ]
+          },
+          {
+            "type": "section",
+            "props": { "title": "Breakdown" },
+            "children": [
+              {
+                "type": "data-grid",
+                "props": {
+                  "columns": [
+                    { "key": "category", "label": "Category", "sortable": true, "align": "left" },
+                    { "key": "revenue", "label": "Revenue", "sortable": true, "align": "right", "width": "130px" },
+                    { "key": "share", "label": "Share", "sortable": true, "align": "right", "width": "90px" },
+                    { "key": "change_pct", "label": "Change %", "sortable": true, "align": "right", "width": "110px" }
+                  ],
+                  "rows": "{state.categories}",
+                  "defaultSort": "revenue:desc",
+                  "dense": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Application funnel" },
+        "children": [
+          {
+            "type": "grid",
+            "props": { "columns": "repeat(3, minmax(0, 1fr))", "gap": "16px" },
+            "children": [
+              {
+                "type": "each",
+                "items": "{state.approvals}",
+                "item_as": "ap",
+                "children": [
+                  {
+                    "type": "stat",
+                    "props": {
+                      "label": "{ap.label}",
+                      "value": "{ap.value}",
+                      "delta": "{ap.delta}",
+                      "direction": "{ap.direction}"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
