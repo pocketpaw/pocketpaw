@@ -512,6 +512,8 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
     except Exception as exc:  # noqa: BLE001 — surface a clean upstream failure
         from pocketpaw_ee.cloud._core.errors import CloudError
 
+        # Failure path keeps the state UNCHANGED ("planning") and only records
+        # the failure on ``outcome`` — the shift never advances on a bad call.
         await mark_shift(
             workspace_id=workspace_id,
             shift_id=str(shift.id),
@@ -992,7 +994,14 @@ async def prepare_plan_resolution(
 
 
 async def shift_wire(workspace_id: str, shift_id: str) -> dict[str, Any]:
-    """Refresh one shift's wire dict (the resolve response's ``shift``)."""
+    """Refresh one shift's wire dict (the resolve response's ``shift``).
+
+    Shape-matched to ``trigger_shift``'s ``shift`` payload (shift_id, no,
+    state, plan_action_id, task_count, no_action_reason) so POST /shift and
+    POST /plan/resolve return the same shape; ``outcome`` rides along as a
+    resolve-path extra (the dispatch/rejection text the console can show).
+    ``task_count`` reads the plan Action's CURRENT task list, so a resolve
+    that dropped tasks reports the kept count."""
     # no-event: read-only path; emit only on writes.
     try:
         doc = await ShiftDoc.find_one(
@@ -1002,11 +1011,31 @@ async def shift_wire(workspace_id: str, shift_id: str) -> dict[str, Any]:
         doc = None
     if doc is None:
         raise NotFound("shift", shift_id)
+
+    task_count = 0
+    if doc.plan_action_id:
+        from pocketpaw.stores import get_instinct_store
+        from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
+
+        try:
+            action = await get_instinct_store().get_action(doc.plan_action_id)
+            blob = (getattr(action, "parameters", None) or {}).get(BELT_PLAN_PARAM_KEY)
+            if isinstance(blob, dict):
+                task_count = len((blob.get("plan") or {}).get("tasks") or [])
+        except Exception:  # noqa: BLE001 — count degrades to 0, never breaks the read
+            logger.debug("mandate: shift_wire task count read failed", exc_info=True)
+
+    no_action_reason = None
+    if doc.state == "stood_down" and doc.outcome:
+        no_action_reason = doc.outcome.removeprefix("stood down: ")
+
     return {
         "shift_id": str(doc.id),
         "no": doc.no,
         "state": doc.state,
         "plan_action_id": doc.plan_action_id,
+        "task_count": task_count,
+        "no_action_reason": no_action_reason,
         "outcome": doc.outcome,
     }
 

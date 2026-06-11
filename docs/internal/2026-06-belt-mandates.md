@@ -111,6 +111,13 @@ still closes exactly once.
 proposal}`), mirroring `belt_run_updated`'s audience fan-out; the mandates page
 subscribes to that topic.
 
+## Plan-feature gating posture
+
+The mandates router intentionally matches the belt console's posture: routes
+are gated by license + RBAC (`belt.read` / `belt.manage`) but carry **no**
+`require_plan_feature` tier gate at demo bar (the belt console router doesn't
+either). Tighten both surfaces together before GA.
+
 ## Storage
 
 4-file entity at `ee/pocketpaw_ee/cloud/mandates/` (+ `patrols.py`,

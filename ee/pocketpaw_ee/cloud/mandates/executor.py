@@ -27,6 +27,12 @@
 #      failure path returns right after its single ``_fail`` emit; the success
 #      path emits once at the end.
 #
+# Vocabulary pin (review M1): the chain's SUCCESS terminal is
+# ``action_outcome="dispatched"`` — everywhere. The strings "executed" /
+# ``mark_executed`` / ``ActionStatus.EXECUTED`` that appear nearby are the
+# Instinct STORE's status vocabulary for the Action row, not the chain
+# outcome; do not conflate the two.
+#
 # Reject path: the instinct router owns the chain close on reject (mirroring
 # code_change); it calls ``mark_plan_rejected`` here best-effort so the shift
 # record reflects the rejection.
