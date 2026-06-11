@@ -1,5 +1,10 @@
 <!--
   Connectors documentation.
+  Updated: 2026-06-11 (connector cookie/session auth) — documented two new
+  auth methods on the DirectREST engine: `cookie` (emits a Cookie: header from
+  a declared credential, name set via auth.credential) and `header` (emits an
+  arbitrary header named by auth.header — the escape hatch for keys that are
+  not Bearer tokens). Both are additive; api_key/bearer/basic are unchanged.
   Updated: 2026-06-08 (sense-mcp / Sense tier chunk 4) — added the Senses
   section: the "Sense" glossary entry, the sense-vs-connector distinction, and
   the two new agent tools (list_senses / sense_execute on the same
@@ -61,7 +66,7 @@ type: payment                     # category for grouping
 icon: credit-card                 # lucide icon name
 
 auth:
-  method: api_key                 # api_key | oauth | basic | bearer | none
+  method: api_key                 # api_key | bearer | basic | header | cookie | oauth | none
   credentials:
     - name: MY_API_KEY
       description: API key from My Service dashboard
@@ -108,11 +113,55 @@ exactly as before. See [Connector → Skill / Tool auto-authoring](#connector--s
 
 | Method | When to Use | Example |
 |--------|-------------|---------|
-| `api_key` | Service provides a static API key | Stripe, Tavily |
+| `api_key` | Service provides a static API key sent as `Authorization: Bearer …` | Stripe, Tavily |
 | `oauth` | Service uses OAuth 2.0 flow | Google, Spotify |
-| `bearer` | Token-based auth (API key in Authorization header) | Generic REST APIs |
+| `bearer` | Token-based auth (token in the `Authorization` header) | Generic REST APIs |
 | `basic` | Username + password auth | Legacy APIs |
+| `header` | Key goes in a custom header (not a Bearer token) | APIs using `X-API-Key`, `Api-Token`, … |
+| `cookie` | Session/cookie auth — a stored value sent as the `Cookie` header | Login-session APIs, internal tools |
 | `none` | Public API, no auth needed | Reddit (read-only) |
+
+### `header` — custom-header auth
+
+Use when the credential is sent in a named header that is **not** an
+`Authorization: Bearer` token. Set `header` to the header name and `credential`
+to the credential the value comes from. The value is sent verbatim — no `Bearer`
+prefix — so this is the escape hatch for the `api_key` method's
+always-`Bearer` behavior.
+
+```yaml
+auth:
+  method: header
+  header: X-API-Key             # the header to emit
+  credential: SERVICE_KEY       # which credential holds the value
+  credentials:
+    - name: SERVICE_KEY
+      description: API key sent in the X-API-Key header
+      required: true
+```
+
+### `cookie` — session / cookie auth
+
+Use for services authenticated by a session cookie (or any value that belongs in
+the `Cookie` header). `credential` names the credential whose value is emitted
+as the `Cookie` header; it defaults to the first declared credential when
+omitted. The value is sent as-is (e.g. `sessionid=abc123` or a raw token), so
+store the full cookie string in the credential.
+
+```yaml
+auth:
+  method: cookie
+  credential: SESSION_COOKIE    # which credential holds the cookie value
+  credentials:
+    - name: SESSION_COOKIE
+      description: Session cookie string, e.g. "sessionid=abc123"
+      required: true
+```
+
+The DirectREST engine keeps one HTTP client per connected adapter, so any
+`Set-Cookie` the service returns is retained in the client's cookie jar and sent
+on the next call within the same connection — and connections are pooled across
+actions.
 
 ## Trust Levels
 
