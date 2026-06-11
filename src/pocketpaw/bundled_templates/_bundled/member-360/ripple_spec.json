@@ -1,0 +1,182 @@
+{
+  "_placeholder_note": "Built-in pocket template (member-360). The member, profile fields, lists, and stats below carry [bracketed] placeholders — the create specialist rewrites them to the user's real member record and domain. The `sources` block is a PLACEHOLDER live-data binding: if a backend is configured, keep it so GET /members/current hydrates state.member; with NO backend, REMOVE the `sources` block and keep the seeded member as the working data. This view is READ-ONLY — no buttons, no on_click, no mutation. Keep the stat strip, the key-value profile cards, the membership panel, and the three record lists intact; reshape the list rows for the user's real tickets / orders / notes.",
+  "sources": {
+    "member": {
+      "method": "GET",
+      "path": "/members/current",
+      "bind": "state.member",
+      "refresh": ["pocket_open", "manual"]
+    }
+  },
+  "state": {
+    "member": {
+      "id": "m1",
+      "name": "[Amara Okafor]",
+      "tier": "[Gold]",
+      "status": "Active"
+    },
+    "stats": [
+      { "id": "st1", "label": "Sessions attended", "value": "[42]" },
+      { "id": "st2", "label": "Total spend", "value": "[$3,180]" }
+    ],
+    "profile": [
+      { "id": "p1", "label": "Email", "value": "[amara@example.com]" },
+      { "id": "p2", "label": "Phone", "value": "[+1 555 0142]" },
+      { "id": "p3", "label": "Member since", "value": "[March 2023]" },
+      { "id": "p4", "label": "Location", "value": "[Lagos]" }
+    ],
+    "membership": [
+      { "id": "mb1", "label": "Package", "value": "[Annual — Gold]" },
+      { "id": "mb2", "label": "Renewal date", "value": "[2027-03-01]" },
+      { "id": "mb3", "label": "Standing", "value": "[Paid in full]" }
+    ],
+    "tickets": [
+      { "id": "t1", "title": "[Locker access not working]", "status": "Open", "date": "2026-06-05" },
+      { "id": "t2", "title": "[Question about guest passes]", "status": "Resolved", "date": "2026-05-21" }
+    ],
+    "orders": [
+      { "id": "o1", "title": "[Event ticket — Summer Mixer]", "amount": "[$45]", "date": "2026-05-30" },
+      { "id": "o2", "title": "[Merch — branded tote]", "amount": "[$25]", "date": "2026-05-12" }
+    ],
+    "notes": [
+      { "id": "n1", "title": "[Prefers email over phone]", "date": "2026-04-18" },
+      { "id": "n2", "title": "[Interested in the mentorship track]", "date": "2026-03-22" }
+    ]
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "16px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "{state.member.name}",
+          "subtitle": "{state.member.tier} member · {state.member.status}"
+        }
+      },
+      {
+        "type": "grid",
+        "props": { "columns": 2, "gap": "12px" },
+        "children": [
+          {
+            "type": "each",
+            "items": "{state.stats}",
+            "item_as": "metric",
+            "children": [
+              {
+                "type": "stat",
+                "props": {
+                  "label": "{metric.label}",
+                  "value": "{metric.value}"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Profile" },
+        "children": [
+          {
+            "type": "grid",
+            "props": { "columns": 2, "gap": "12px" },
+            "children": [
+              {
+                "type": "each",
+                "items": "{state.profile}",
+                "item_as": "field",
+                "children": [
+                  {
+                    "type": "card",
+                    "props": {
+                      "title": "{field.label}",
+                      "description": "{field.value}"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Membership" },
+        "children": [
+          {
+            "type": "grid",
+            "props": { "columns": 3, "gap": "12px" },
+            "children": [
+              {
+                "type": "each",
+                "items": "{state.membership}",
+                "item_as": "field",
+                "children": [
+                  {
+                    "type": "card",
+                    "props": {
+                      "title": "{field.label}",
+                      "description": "{field.value}"
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Tickets" },
+        "children": [
+          {
+            "type": "data-grid",
+            "props": {
+              "columns": [
+                { "key": "title", "label": "Ticket", "sortable": true, "align": "left" },
+                { "key": "status", "label": "Status", "sortable": true, "align": "left", "width": "120px" },
+                { "key": "date", "label": "Date", "sortable": true, "align": "left", "width": "130px" }
+              ],
+              "rows": "{state.tickets}",
+              "defaultSort": "date:desc",
+              "dense": true
+            }
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Orders" },
+        "children": [
+          {
+            "type": "data-grid",
+            "props": {
+              "columns": [
+                { "key": "title", "label": "Order", "sortable": true, "align": "left" },
+                { "key": "amount", "label": "Amount", "sortable": true, "align": "right", "width": "120px" },
+                { "key": "date", "label": "Date", "sortable": true, "align": "left", "width": "130px" }
+              ],
+              "rows": "{state.orders}",
+              "defaultSort": "date:desc",
+              "dense": true
+            }
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "props": { "title": "Notes" },
+        "children": [
+          {
+            "type": "timeline",
+            "props": {
+              "events": "{state.notes.sortBy('date', 'desc')}",
+              "density": "compact"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

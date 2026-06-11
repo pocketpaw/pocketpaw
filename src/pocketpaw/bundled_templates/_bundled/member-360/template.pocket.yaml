@@ -1,0 +1,49 @@
+# src/pocketpaw/bundled_templates/_bundled/member-360/template.pocket.yaml
+# Created: 2026-06-11 (feat/triage-member-templates) — RFC 03 v2 Pocket
+# Template Schema metadata for the generic member-360 view. ``shape:
+# custom`` because the canvas composes a header, a key-value profile
+# section, a membership panel, three simple record lists (tickets /
+# orders / notes), and an attendance/spend stat row — RFC 03's shape enum
+# has no single value for that composite, so the pattern is recorded in
+# the sibling index.json (``pattern: viewer``) and the shape stays
+# ``custom``. The view is READ-ONLY: no actions, no mutation. ``needs:
+# [paw.db.v1]`` declares the generic data-source capability a tenant wires
+# so the profile hydrates from a real member record; without one the
+# seeded sample member renders.
+schema_version: "2"
+name: member-360
+version: 1.0.0
+pattern: viewer
+vertical: operations
+display_name: Member 360
+shape: custom
+description: |
+  A single-pane view of one member. A header with the member's name, tier,
+  and status; a key-value profile block; a membership panel showing the
+  package, renewal date, and standing; and three plain lists for recent
+  tickets, orders, and notes. A stat strip across the top carries the
+  headline counts — sessions attended and total spend. Read-only by design:
+  it shows the full picture of a member without offering any action. Ships a
+  placeholder live-data source so a connected backend hydrates the record
+  from a real member endpoint; with no backend it renders the seeded sample
+  member.
+icon: user
+color: "#6b8e6b"
+state:
+  entity_type: Member
+  id_field: id
+  columns:
+    - { field: name, label: Name, widget: text }
+    - { field: tier, label: Tier, widget: badge }
+    - { field: status, label: Status, widget: badge }
+data_sources:
+  - name: member
+    method: GET
+    path: /members/current
+    bind: state.member
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions: []
+connectors: []
+skill_refs: []

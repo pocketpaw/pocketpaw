@@ -2,6 +2,10 @@
 src/pocketpaw/bundled_templates/_bundled/README.md
 Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — explains the
 two-file sibling convention each template directory follows.
+Modified: 2026-06-11 (feat/triage-member-templates) — documented the two
+generic vertical templates (applications-triage, member-360) that carry
+the richer v2 surface (needs / actions / outcomes / data_sources) the
+seed templates omit, and the gated-action binding point.
 -->
 # Bundled pocket templates
 
@@ -44,6 +48,41 @@ Outcomes are not wired yet, and a dead action declaration is worse than
 none. `outcomes`, `instinct_rules`, `triggers`, and `agents` are omitted
 entirely for the same reason. Increment 2b adds per-backend API skills;
 later increments populate `actions` once Instinct lands.
+
+## Vertical templates (applications-triage, member-360)
+
+Two generic, install-ready templates carry the full v2 surface the seed
+templates leave empty:
+
+| Template | What it is | v2 surface it uses |
+|----------|-----------|--------------------|
+| `applications-triage` | A review queue: status/summary/score/age list, a Q&A detail panel for the selected item, a backlog burndown stat row, and an approve / reject / needs-review action row. | `needs: [paw.db.v1]`, `data_sources`, three gated `actions` (`instinct_policy: require_approval`), `outcomes`. |
+| `member-360` | A single-pane, read-only view of one member: header, key-value profile, membership panel, ticket/order/note lists, attendance/spend stats. | `needs: [paw.db.v1]`, `data_sources`. No actions. |
+
+Both are fully generic — no client names, no domain-specific fields
+beyond what any application-triage or member-view needs. They declare
+`needs: [paw.db.v1]` (the generic database Sense) so a deployment is
+prompted to connect a data source; with none, the seeded sample rows
+render. Their seed-only field-set assertions are intentionally excluded
+in `tests/unit/test_bundled_templates.py`; their richer shape, compile,
+and service-create round-trip are covered by
+`tests/unit/test_vertical_templates.py` and
+`tests/cloud/pockets/test_vertical_template_create.py`.
+
+### Action-row binding point (applications-triage)
+
+The approve / reject / needs-review buttons do **not** execute. Each
+button sets `state.pending_proposal` to a generic proposal shape
+`{action, application_id, summary}`. That is the seam a deployment wires
+to the Instinct gate so a human confirms in The Tray: read
+`state.pending_proposal` and call
+`pocketpaw_ee.cloud.external_actions.propose.propose_external_action(...)`
+with the bound connector name + action + params, which files an Instinct
+`Action` (`kind="external_action"`) and opens the `agent.proposed`
+decision chain. The executor performs the connector call only on human
+approval. Nothing approves inline — the button only proposes. For a
+Fabric write instead of a connector call, the pocket-write proposal
+bridge is the parallel seam.
 
 ## Adding a template
 
