@@ -1,0 +1,528 @@
+{
+  "_placeholder_note": "Built-in pocket template (renewals-radar), DEMO-GRADE 2026-06-11 (feat/demo-template-suite). The members, renewal dates, risk scores, and history below are real sample copy — no placeholder brackets — so a pocket created straight from this template renders as a finished renewal-risk console. The create specialist still rewrites the sample members to the user's real domain. BINDING CONTRACT (same as applications-triage): the Ripple expression engine resolves a method chain ONLY when the chain ENDS in `)`; a method call FOLLOWED BY a property access resolves to undefined, and `each` `items` resolves a FLAT dot-path from state ONLY. So the detail panel binds to a denormalized FLAT `state.selected` object — every detail binding is a plain `{state.selected.X}` path and the facts / history loops read `{state.selected.facts}` / `{state.selected.history}`. Clicking a queue card keeps `state.selected` in sync via an on_click chain whose `set` value is `{state.members.where('id', mem.id).first()}` — a chain that ENDS in `)`, so it resolves at dispatch time. `state.selected` is also SEEDED to the first member so the panel renders before any click. ENUM NOTE: badge variants are {default,secondary,destructive,outline,success,warning}; chip variants are {default,primary,success,warning,destructive}; callout variants are {info,success,warning,insight}. RISK COLOR BANDS: red (#dc2626) high risk, amber (#d97706) medium, green (#059669) safe. The risk RING value is the churn-risk score (higher = more at risk), so the ring color tracks the band. The `sources` block is a PLACEHOLDER live-data binding: with a backend keep it so GET /memberships hydrates state.members; with NO backend remove it and keep the seeded members. ACTION-ROW BINDING POINT: the renew / remind buttons set state.pending_proposal to a generic {action, membership_id, summary} proposal — they do NOT execute. A deployment wires this state event to the Instinct gate so a human confirms in The Tray. Keep the risk strip, the queue each-loop ordered by risk, the selected-sync on_click, the risk ring, the grace-deadline callout, the facts kv-table, the history timeline, and the action row intact.",
+  "sources": {
+    "memberships": {
+      "method": "GET",
+      "path": "/memberships?expiring=true",
+      "bind": "state.members",
+      "refresh": ["pocket_open", "manual"]
+    }
+  },
+  "state": {
+    "selected_id": "m1",
+    "pending_proposal": null,
+    "risk_counts": [
+      { "id": "rc1", "label": "High risk", "value": 3, "color": "#dc2626", "dot": "offline" },
+      { "id": "rc2", "label": "Medium", "value": 3, "color": "#d97706", "dot": "away" },
+      { "id": "rc3", "label": "Safe", "value": 2, "color": "#059669", "dot": "online" }
+    ],
+    "expiring_count": 8,
+    "revenue_at_risk": "$18,640",
+    "auto_renew_share": "50%",
+    "members": [
+      {
+        "id": "m1",
+        "member": "Jordan Avery",
+        "tier": "Platinum",
+        "status": "Lapsed",
+        "status_variant": "destructive",
+        "initials": "JA",
+        "risk_score": 92,
+        "risk_color": "#dc2626",
+        "risk_band": "High risk",
+        "days_left": -6,
+        "days_label": "6 days past due",
+        "auto_renew": "Off",
+        "auto_renew_variant": "destructive",
+        "value": "$4,200",
+        "grace_deadline": "Grace period ends in 4 days — June 15",
+        "summary": "Lapsed six days ago but a long-standing member — auto-renew failed, card on file expired. Recoverable with a quick call.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Platinum" },
+          { "key": "Renewal due", "value": "June 5, 2026" },
+          { "key": "Grace deadline", "value": "June 15, 2026" },
+          { "key": "Auto-renew", "value": "Off (card expired)" },
+          { "key": "Lifetime value", "value": "$12,600 over 3 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2026-06-05", "title": "Auto-renew failed", "detail": "Card on file declined — expired" },
+          { "id": "h2", "date": "2025-06-05", "title": "Renewed — Platinum", "detail": "On time, paid in full" },
+          { "id": "h3", "date": "2024-06-05", "title": "Renewed — Gold → Platinum", "detail": "Upgraded tier" }
+        ]
+      },
+      {
+        "id": "m2",
+        "member": "Priya Sharma",
+        "tier": "Gold",
+        "status": "Expiring",
+        "status_variant": "warning",
+        "initials": "PS",
+        "risk_score": 78,
+        "risk_color": "#dc2626",
+        "risk_band": "High risk",
+        "days_left": 3,
+        "days_label": "3 days left",
+        "auto_renew": "Off",
+        "auto_renew_variant": "destructive",
+        "value": "$2,400",
+        "grace_deadline": "Renewal due in 3 days — June 14",
+        "summary": "Renewal due in three days with auto-renew off and no response to the last two reminders. Needs a personal nudge.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Gold" },
+          { "key": "Renewal due", "value": "June 14, 2026" },
+          { "key": "Auto-renew", "value": "Off" },
+          { "key": "Reminders sent", "value": "2 (no response)" },
+          { "key": "Lifetime value", "value": "$4,800 over 2 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2026-06-01", "title": "Second reminder sent", "detail": "Email — not opened" },
+          { "id": "h2", "date": "2026-05-25", "title": "First reminder sent", "detail": "Email — opened, no action" },
+          { "id": "h3", "date": "2025-06-14", "title": "Renewed — Gold", "detail": "Manual, late by 2 days" }
+        ]
+      },
+      {
+        "id": "m3",
+        "member": "Marcus Lindqvist",
+        "tier": "Gold",
+        "status": "Expiring",
+        "status_variant": "warning",
+        "initials": "ML",
+        "risk_score": 71,
+        "risk_color": "#dc2626",
+        "risk_band": "High risk",
+        "days_left": 8,
+        "days_label": "8 days left",
+        "auto_renew": "Off",
+        "auto_renew_variant": "destructive",
+        "value": "$2,400",
+        "grace_deadline": "Renewal due in 8 days — June 19",
+        "summary": "Attendance dropped to one event this quarter and auto-renew is off. Engagement signal is weak — worth a check-in.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Gold" },
+          { "key": "Renewal due", "value": "June 19, 2026" },
+          { "key": "Auto-renew", "value": "Off" },
+          { "key": "Events this quarter", "value": "1 (down from 6)" },
+          { "key": "Lifetime value", "value": "$7,200 over 3 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2026-04-10", "title": "Last event attended", "detail": "Spring Mixer" },
+          { "id": "h2", "date": "2025-06-19", "title": "Renewed — Gold", "detail": "On time" },
+          { "id": "h3", "date": "2024-06-19", "title": "Renewed — Gold", "detail": "On time" }
+        ]
+      },
+      {
+        "id": "m4",
+        "member": "Aisha Bello",
+        "tier": "Silver",
+        "status": "Expiring",
+        "status_variant": "warning",
+        "initials": "AB",
+        "risk_score": 54,
+        "risk_color": "#d97706",
+        "risk_band": "Medium",
+        "days_left": 12,
+        "days_label": "12 days left",
+        "auto_renew": "Off",
+        "auto_renew_variant": "destructive",
+        "value": "$1,200",
+        "grace_deadline": "Renewal due in 12 days — June 23",
+        "summary": "Steady attendance but auto-renew is off, so the renewal is manual. Likely to renew with a single reminder.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Silver" },
+          { "key": "Renewal due", "value": "June 23, 2026" },
+          { "key": "Auto-renew", "value": "Off" },
+          { "key": "Events this quarter", "value": "4" },
+          { "key": "Lifetime value", "value": "$2,400 over 2 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2026-05-30", "title": "Attended — Negotiation Workshop", "detail": "Checked in" },
+          { "id": "h2", "date": "2025-06-23", "title": "Renewed — Silver", "detail": "After one reminder" }
+        ]
+      },
+      {
+        "id": "m5",
+        "member": "Daniel Okonkwo",
+        "tier": "Gold",
+        "status": "Expiring",
+        "status_variant": "warning",
+        "initials": "DO",
+        "risk_score": 47,
+        "risk_color": "#d97706",
+        "risk_band": "Medium",
+        "days_left": 16,
+        "days_label": "16 days left",
+        "auto_renew": "On",
+        "auto_renew_variant": "success",
+        "value": "$2,400",
+        "grace_deadline": "Auto-renews in 16 days — June 27",
+        "summary": "Auto-renew is on and the card is valid, but spend dipped this quarter. Low effort — monitor, no action needed yet.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Gold" },
+          { "key": "Renewal due", "value": "June 27, 2026" },
+          { "key": "Auto-renew", "value": "On (card valid)" },
+          { "key": "Spend this quarter", "value": "$180 (down 20%)" },
+          { "key": "Lifetime value", "value": "$7,200 over 3 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2025-06-27", "title": "Auto-renewed — Gold", "detail": "Charged on file" },
+          { "id": "h2", "date": "2024-06-27", "title": "Auto-renewed — Gold", "detail": "Charged on file" }
+        ]
+      },
+      {
+        "id": "m6",
+        "member": "Elena Rossi",
+        "tier": "Silver",
+        "status": "Expiring",
+        "status_variant": "warning",
+        "initials": "ER",
+        "risk_score": 41,
+        "risk_color": "#d97706",
+        "risk_band": "Medium",
+        "days_left": 21,
+        "days_label": "21 days left",
+        "auto_renew": "On",
+        "auto_renew_variant": "success",
+        "value": "$1,200",
+        "grace_deadline": "Auto-renews in 21 days — July 2",
+        "summary": "Auto-renew on, engaged, but expressed interest in pausing over the summer. Watch for a cancel request.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Silver" },
+          { "key": "Renewal due", "value": "July 2, 2026" },
+          { "key": "Auto-renew", "value": "On" },
+          { "key": "Note", "value": "Asked about summer pause" },
+          { "key": "Lifetime value", "value": "$2,400 over 2 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2026-05-18", "title": "Asked about pausing", "detail": "Over the summer months" },
+          { "id": "h2", "date": "2025-07-02", "title": "Auto-renewed — Silver", "detail": "Charged on file" }
+        ]
+      },
+      {
+        "id": "m7",
+        "member": "Thomas Chen",
+        "tier": "Platinum",
+        "status": "Active",
+        "status_variant": "success",
+        "initials": "TC",
+        "risk_score": 18,
+        "risk_color": "#059669",
+        "risk_band": "Safe",
+        "days_left": 28,
+        "days_label": "28 days left",
+        "auto_renew": "On",
+        "auto_renew_variant": "success",
+        "value": "$4,200",
+        "grace_deadline": "Auto-renews in 28 days — July 9",
+        "summary": "High engagement, auto-renew on, paid in full every year. No action needed — a model member.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Platinum" },
+          { "key": "Renewal due", "value": "July 9, 2026" },
+          { "key": "Auto-renew", "value": "On (card valid)" },
+          { "key": "Events this quarter", "value": "9" },
+          { "key": "Lifetime value", "value": "$16,800 over 4 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2025-07-09", "title": "Auto-renewed — Platinum", "detail": "Charged on file" },
+          { "id": "h2", "date": "2024-07-09", "title": "Auto-renewed — Platinum", "detail": "Charged on file" }
+        ]
+      },
+      {
+        "id": "m8",
+        "member": "Sofia Reyes",
+        "tier": "Gold",
+        "status": "Active",
+        "status_variant": "success",
+        "initials": "SR",
+        "risk_score": 12,
+        "risk_color": "#059669",
+        "risk_band": "Safe",
+        "days_left": 34,
+        "days_label": "34 days left",
+        "auto_renew": "On",
+        "auto_renew_variant": "success",
+        "value": "$2,400",
+        "grace_deadline": "Auto-renews in 34 days — July 15",
+        "summary": "Auto-renew on, attends regularly, recently referred two new members. Lowest-risk renewal in the queue.",
+        "facts": [
+          { "key": "Package", "value": "Annual — Gold" },
+          { "key": "Renewal due", "value": "July 15, 2026" },
+          { "key": "Auto-renew", "value": "On" },
+          { "key": "Referrals", "value": "2 new members this year" },
+          { "key": "Lifetime value", "value": "$7,200 over 3 years" }
+        ],
+        "history": [
+          { "id": "h1", "date": "2026-04-22", "title": "Referred a new member", "detail": "Joined on Silver" },
+          { "id": "h2", "date": "2025-07-15", "title": "Auto-renewed — Gold", "detail": "Charged on file" }
+        ]
+      }
+    ],
+    "selected": {
+      "id": "m1",
+      "member": "Jordan Avery",
+      "tier": "Platinum",
+      "status": "Lapsed",
+      "status_variant": "destructive",
+      "initials": "JA",
+      "risk_score": 92,
+      "risk_color": "#dc2626",
+      "risk_band": "High risk",
+      "days_left": -6,
+      "days_label": "6 days past due",
+      "auto_renew": "Off",
+      "auto_renew_variant": "destructive",
+      "value": "$4,200",
+      "grace_deadline": "Grace period ends in 4 days — June 15",
+      "summary": "Lapsed six days ago but a long-standing member — auto-renew failed, card on file expired. Recoverable with a quick call.",
+      "facts": [
+        { "key": "Package", "value": "Annual — Platinum" },
+        { "key": "Renewal due", "value": "June 5, 2026" },
+        { "key": "Grace deadline", "value": "June 15, 2026" },
+        { "key": "Auto-renew", "value": "Off (card expired)" },
+        { "key": "Lifetime value", "value": "$12,600 over 3 years" }
+      ],
+      "history": [
+        { "id": "h1", "date": "2026-06-05", "title": "Auto-renew failed", "detail": "Card on file declined — expired" },
+        { "id": "h2", "date": "2025-06-05", "title": "Renewed — Platinum", "detail": "On time, paid in full" },
+        { "id": "h3", "date": "2024-06-05", "title": "Renewed — Gold → Platinum", "detail": "Upgraded tier" }
+      ]
+    }
+  },
+  "ui": {
+    "type": "flex",
+    "props": { "direction": "column", "gap": "20px" },
+    "children": [
+      {
+        "type": "page-header",
+        "props": {
+          "title": "Renewals",
+          "subtitle": "Work the radar top to bottom — highest churn risk first, save the revenue before it lapses",
+          "eyebrow": "Renewal risk"
+        }
+      },
+      {
+        "type": "grid",
+        "props": { "columns": "repeat(6, minmax(0, 1fr))", "gap": "12px" },
+        "children": [
+          {
+            "type": "each",
+            "items": "{state.risk_counts}",
+            "item_as": "bucket",
+            "children": [
+              {
+                "type": "card",
+                "props": { "variant": "outlined", "density": "compact" },
+                "children": [
+                  {
+                    "type": "flex",
+                    "props": { "direction": "column", "gap": "6px" },
+                    "children": [
+                      { "type": "status-dot", "props": { "variant": "{bucket.dot}", "label": "{bucket.label}", "size": 8 } },
+                      { "type": "text", "props": { "text": "{bucket.value}", "size": "2xl", "weight": "bold", "color": "{bucket.color}" } }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "muted", "density": "compact" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "6px" },
+                "children": [
+                  { "type": "text", "props": { "text": "Expiring soon", "size": "xs", "weight": "medium", "color": "#64748b" } },
+                  { "type": "text", "props": { "text": "{state.expiring_count}", "size": "2xl", "weight": "bold" } }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "muted", "density": "compact" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "6px" },
+                "children": [
+                  { "type": "text", "props": { "text": "Revenue at risk", "size": "xs", "weight": "medium", "color": "#64748b" } },
+                  { "type": "text", "props": { "text": "{state.revenue_at_risk}", "size": "2xl", "weight": "bold", "color": "#dc2626" } }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "type": "grid",
+        "props": { "columns": "minmax(300px, 360px) minmax(0, 1fr)", "gap": "20px" },
+        "children": [
+          {
+            "type": "flex",
+            "props": { "direction": "column", "gap": "10px" },
+            "children": [
+              { "type": "text", "props": { "text": "BY RISK", "size": "xs", "weight": "semibold", "color": "#64748b" } },
+              {
+                "type": "each",
+                "items": "{state.members}",
+                "item_as": "mem",
+                "children": [
+                  {
+                    "type": "card",
+                    "props": {
+                      "variant": "{mem.id == state.selected_id ? 'selected' : 'outlined'}",
+                      "density": "compact",
+                      "interactive": true
+                    },
+                    "on_click": [
+                      { "action": "set", "target": "selected_id", "value": "{mem.id}" },
+                      { "action": "set", "target": "selected", "value": "{state.members.where('id', mem.id).first()}" }
+                    ],
+                    "children": [
+                      {
+                        "type": "flex",
+                        "props": { "direction": "column", "gap": "8px" },
+                        "children": [
+                          {
+                            "type": "flex",
+                            "props": { "direction": "row", "justify": "between", "align": "center", "gap": "8px" },
+                            "children": [
+                              { "type": "text", "props": { "text": "{mem.member}", "weight": "semibold", "size": "base" } },
+                              { "type": "chip", "props": { "label": "{mem.days_label}", "variant": "{mem.days_left <= 7 ? 'destructive' : 'default'}" } }
+                            ]
+                          },
+                          { "type": "progress", "props": { "value": "{mem.risk_score}", "max": 100, "color": "{mem.risk_color}", "variant": "thin" } },
+                          {
+                            "type": "flex",
+                            "props": { "direction": "row", "justify": "between", "align": "center", "gap": "8px" },
+                            "children": [
+                              { "type": "badge", "props": { "text": "{mem.tier}", "variant": "outline" } },
+                              { "type": "badge", "props": { "text": "Auto-renew {mem.auto_renew}", "variant": "{mem.auto_renew_variant}" } }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "card",
+            "props": { "variant": "default" },
+            "children": [
+              {
+                "type": "flex",
+                "props": { "direction": "column", "gap": "18px" },
+                "children": [
+                  {
+                    "type": "flex",
+                    "props": { "direction": "row", "justify": "between", "align": "start", "gap": "16px", "wrap": "wrap" },
+                    "children": [
+                      {
+                        "type": "flex",
+                        "props": { "direction": "column", "gap": "8px" },
+                        "children": [
+                          { "type": "text", "props": { "text": "MEMBER", "size": "xs", "weight": "semibold", "color": "#94a3b8" } },
+                          { "type": "heading", "props": { "text": "{state.selected.member}", "level": 2 } },
+                          { "type": "text", "props": { "text": "{state.selected.tier} · {state.selected.value} at stake", "size": "sm", "color": "#64748b" } },
+                          {
+                            "type": "flex",
+                            "props": { "direction": "row", "gap": "8px", "align": "center", "wrap": "wrap" },
+                            "children": [
+                              { "type": "badge", "props": { "text": "{state.selected.status}", "variant": "{state.selected.status_variant}" } },
+                              { "type": "badge", "props": { "text": "Auto-renew {state.selected.auto_renew}", "variant": "{state.selected.auto_renew_variant}" } }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "type": "flex",
+                        "props": { "direction": "column", "gap": "4px", "align": "center" },
+                        "children": [
+                          {
+                            "type": "progress-ring",
+                            "props": {
+                              "value": "{state.selected.risk_score}",
+                              "max": 100,
+                              "size": 96,
+                              "thickness": 9,
+                              "color": "{state.selected.risk_color}",
+                              "label": "{state.selected.risk_score}"
+                            }
+                          },
+                          { "type": "text", "props": { "text": "{state.selected.risk_band}", "size": "xs", "weight": "medium", "color": "{state.selected.risk_color}" } }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "callout",
+                    "props": {
+                      "title": "{state.selected.grace_deadline}",
+                      "text": "{state.selected.summary}",
+                      "variant": "warning"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "props": { "title": "Renewal details" },
+                    "children": [
+                      { "type": "kv-table", "props": { "rows": "{state.selected.facts}", "striped": true } }
+                    ]
+                  },
+                  {
+                    "type": "section",
+                    "props": { "title": "Renewal history" },
+                    "children": [
+                      { "type": "timeline", "props": { "events": "{state.selected.history}", "density": "compact" } }
+                    ]
+                  },
+                  { "type": "separator", "props": { "orientation": "horizontal" } },
+                  {
+                    "type": "flex",
+                    "props": { "direction": "row", "gap": "8px", "wrap": "wrap" },
+                    "children": [
+                      {
+                        "type": "button",
+                        "props": { "label": "Renew now", "variant": "primary" },
+                        "on_click": [
+                          {
+                            "action": "set",
+                            "target": "pending_proposal",
+                            "value": {
+                              "action": "renew_membership",
+                              "membership_id": "{state.selected_id}",
+                              "summary": "Renew {state.selected.member}"
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "type": "button",
+                        "props": { "label": "Send reminder", "variant": "secondary" },
+                        "on_click": [
+                          {
+                            "action": "set",
+                            "target": "pending_proposal",
+                            "value": {
+                              "action": "send_renewal_reminder",
+                              "membership_id": "{state.selected_id}",
+                              "summary": "Remind {state.selected.member} to renew"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

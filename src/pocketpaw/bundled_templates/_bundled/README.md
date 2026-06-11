@@ -2,6 +2,9 @@
 src/pocketpaw/bundled_templates/_bundled/README.md
 Created: 2026-05-22 (feat/bundled-templates, Increment 2a) — explains the
 two-file sibling convention each template directory follows.
+Modified: 2026-06-11 (feat/demo-template-suite) — documented the four
+demo-suite vertical templates (events-board, renewals-radar,
+orders-fulfillment, revenue-pulse) that join the original two.
 Modified: 2026-06-11 (feat/triage-member-templates) — documented the two
 generic vertical templates (applications-triage, member-360) that carry
 the richer v2 surface (needs / actions / outcomes / data_sources) the
@@ -83,6 +86,28 @@ decision chain. The executor performs the connector call only on human
 approval. Nothing approves inline — the button only proposes. For a
 Fabric write instead of a connector call, the pocket-write proposal
 bridge is the parallel seam.
+
+## Demo-suite templates (events-board, renewals-radar, orders-fulfillment, revenue-pulse)
+
+Four more generic, install-ready templates carry the full v2 surface and
+match the demo-grade visual bar set by the triage redesign — color-banded
+strips, score/risk rings, status pills, and dense-but-scannable detail
+panels, all populated with story-grade seed data:
+
+| Template | What it is | v2 surface it uses |
+|----------|-----------|--------------------|
+| `events-board` | A sell-through console: a color-banded status strip, an events queue with sell-through bars, and a detail panel with a sell-through ring, a revenue/attendee/check-in stat row, the ticket-tier grid, and a run-of-show timeline. | `shape: custom`, `needs: [paw.db.v1]`, `data_sources`, one gated `promote_event` action, `outcomes`. |
+| `renewals-radar` | A renewal-risk console: a revenue-at-risk strip, a member queue ordered by churn risk with days-left chips and risk bars, and a detail panel with a churn-risk ring, a grace-deadline callout, renewal facts, and renewal history. | `shape: custom`, `needs: [paw.db.v1]`, `data_sources`, two gated actions (`renew_membership`, `send_renewal_reminder`), `outcomes`. |
+| `orders-fulfillment` | A fulfillment console: a per-stage count strip, a `kanban` stage board over the order list, plus a queue + detail pair with the line-items grid, shipping facts, and a fulfillment timeline. | `shape: kanban`, `needs: [paw.db.v1]`, `data_sources`, two gated actions (`mark_shipped`, `process_refund`), `outcomes`. |
+| `revenue-pulse` | A read-only executive dashboard: a KPI stat row, a six-month revenue-trend `area` chart, a by-category `bar` chart beside a breakdown grid, and an approval-funnel strip. | `shape: chart`, `needs: [paw.db.v1]`, `data_sources`. No actions (read-only). |
+
+All four are fully generic — no client names. The three with action rows
+follow the same propose-not-execute binding seam documented above for
+`applications-triage`: each button sets `state.pending_proposal` to a
+generic `{action, <entity>_id, summary}` shape, wired to the Instinct gate
+by a deployment. `revenue-pulse` is read-only by design. Their shape,
+compile, render-populated, and gated-action contracts are covered in
+`tests/unit/test_vertical_templates.py` alongside the original two.
 
 ## Adding a template
 

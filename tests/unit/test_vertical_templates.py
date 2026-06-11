@@ -19,7 +19,19 @@
 # state shape that was never seeded (the old "empty Answers / no values"
 # failure). It also flags the unsupported method-chain-then-property
 # pattern ({...first().field}) that resolved to undefined at render time.
-"""Tests for the bundled vertical templates (applications-triage, member-360).
+# Modified 2026-06-11 (feat/demo-template-suite): extended _VERTICAL_SLUGS to
+# the four new demo-suite templates — events-board, renewals-radar,
+# orders-fulfillment, revenue-pulse — so the generic binding-guard /
+# well-formed / data-sense / compile / installer / loader parametrizations
+# cover them too. The pydantic shape assertion is now per-slug
+# (_VERTICAL_SHAPES) because orders-fulfillment is `kanban` and revenue-pulse
+# is `chart`, not `custom`. Added a demo-suite block: a render-populated guard
+# (ui.children non-empty + the focal seed list carries rows), a
+# compile-round-trip that asserts the same on the loaded spec, the gated
+# action-row contract for the three action templates, and per-template story
+# checks (events sell-through + run-of-show, renewals risk bands + lapsed
+# member, orders stage board, revenue read-only charts).
+"""Tests for the bundled vertical templates (triage, member-360, demo suite).
 
 The seed-template field-set assertions in test_bundled_templates.py
 intentionally exclude these two slugs — they carry the full v2 surface
@@ -51,7 +63,27 @@ from pocketpaw.bundled_templates import PocketTemplate, compile_template
 from pocketpaw.bundled_templates.installer import install_bundled_templates
 from pocketpaw.bundled_templates.loader import load_template
 
-_VERTICAL_SLUGS = ("applications-triage", "member-360")
+_VERTICAL_SLUGS = (
+    "applications-triage",
+    "member-360",
+    "events-board",
+    "renewals-radar",
+    "orders-fulfillment",
+    "revenue-pulse",
+)
+
+# The RFC 03 v2 shape each vertical template declares. Most are ``custom``
+# composite canvases, but the focal-widget-driven ones pin their organising
+# shape: orders-fulfillment is a kanban stage board, revenue-pulse a chart
+# dashboard. The shape assertion is per-slug, not a blanket ``custom``.
+_VERTICAL_SHAPES = {
+    "applications-triage": "custom",
+    "member-360": "custom",
+    "events-board": "custom",
+    "renewals-radar": "custom",
+    "orders-fulfillment": "kanban",
+    "revenue-pulse": "chart",
+}
 
 _BUNDLED_DIR = (
     Path(__file__).resolve().parents[2] / "src" / "pocketpaw" / "bundled_templates" / "_bundled"
@@ -183,7 +215,7 @@ def test_vertical_template_passes_pydantic_validation(slug: str) -> None:
     template = PocketTemplate.model_validate(_read_meta(slug))
     assert template.name == slug
     assert template.schema_version == "2"
-    assert template.shape == "custom"
+    assert template.shape == _VERTICAL_SHAPES[slug]
 
 
 @pytest.mark.parametrize("slug", _VERTICAL_SLUGS)
@@ -342,7 +374,181 @@ def test_member_360_has_profile_membership_and_lists() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Installer — both vertical templates mirror like every other template
+# Demo-suite templates — events-board / renewals-radar / orders-fulfillment /
+# revenue-pulse. The render-surface guard (ui.children non-empty + the focal
+# seeded list carries rows) and the gated-action / read-only posture checks
+# that mirror the triage + member-360 contracts for the four new templates.
+# ---------------------------------------------------------------------------
+
+# The four demo-suite templates and the focal seeded state list whose rows
+# the rendered canvas iterates — the list that MUST carry seed rows so a
+# pocket created from the template renders populated, never an empty shell.
+_DEMO_SUITE = {
+    "events-board": "events",
+    "renewals-radar": "members",
+    "orders-fulfillment": "orders",
+    "revenue-pulse": "trend",
+}
+
+# The three demo-suite templates that ship gated action rows, mapped to the
+# proposal-payload entity-id key each button carries. revenue-pulse is a
+# read-only dashboard and is excluded.
+_DEMO_GATED = {
+    "events-board": "event_id",
+    "renewals-radar": "membership_id",
+    "orders-fulfillment": "order_id",
+}
+
+
+@pytest.mark.parametrize("slug", sorted(_DEMO_SUITE))
+def test_demo_template_renders_populated(slug: str) -> None:
+    """Each demo-suite template renders a populated canvas: the ui tree has
+    top-level children (so a pocket created from it is never an empty shell —
+    the #1431 empty-canvas class of bug) and the focal seeded list carries
+    rows. Asserts the user-visible surface, not just the compiled machinery."""
+    spec = _read_spec(slug)
+    children = spec["ui"].get("children")
+    assert children, f"{slug}: ui tree has no top-level children — empty canvas"
+
+    focal_key = _DEMO_SUITE[slug]
+    rows = spec["state"].get(focal_key)
+    assert isinstance(rows, list) and rows, (
+        f"{slug}: focal seed list state.{focal_key} is empty — nothing to render"
+    )
+
+
+@pytest.mark.parametrize("slug", sorted(_DEMO_SUITE))
+def test_demo_template_compile_round_trips_with_ui_and_seed(tmp_path: Path, slug: str) -> None:
+    """``load_template`` round-trips each demo-suite template back to a spec
+    whose ui carries children and whose focal seed list carries rows — the
+    install-time compile-on-create seam preserves the rendered surface, not
+    just the sources/state-binding machinery."""
+    install_bundled_templates(destination_root=tmp_path)
+    loaded = load_template(slug, templates_dir=tmp_path)
+    assert loaded is not None
+    spec = loaded["ripple_spec"]
+    assert spec["ui"].get("children"), f"{slug}: round-tripped ui has no children"
+    focal_key = _DEMO_SUITE[slug]
+    assert spec["state"].get(focal_key), f"{slug}: round-tripped seed list empty"
+
+
+@pytest.mark.parametrize("slug", sorted(_DEMO_GATED))
+def test_demo_template_actions_are_all_gated_require_approval(slug: str) -> None:
+    """Every action on a gated demo-suite template declares
+    ``instinct_policy: require_approval`` so it surfaces as a PENDING proposal
+    in The Tray, never auto-runs — the same contract triage clears."""
+    template = PocketTemplate.model_validate(_read_meta(slug))
+    assert template.actions, f"{slug}: expected gated actions"
+    for action in template.actions:
+        assert action.instinct_policy == "require_approval", action.name
+
+
+@pytest.mark.parametrize("slug", sorted(_DEMO_GATED))
+def test_demo_template_action_outcomes_are_declared_in_catalog(slug: str) -> None:
+    """Each gated action's outcomes_emitted is declared in the top-level
+    outcomes[] catalog — the RFC 03 v2 subset rule."""
+    template = PocketTemplate.model_validate(_read_meta(slug))
+    catalog = set(template.outcomes)
+    for action in template.actions:
+        for outcome in action.outcomes_emitted:
+            assert outcome in catalog, f"{slug}: {action.name} emits undeclared {outcome}"
+
+
+@pytest.mark.parametrize("slug", sorted(_DEMO_GATED))
+def test_demo_template_action_row_proposes_not_executes(slug: str) -> None:
+    """The ripple_spec action buttons set ``state.pending_proposal`` (a
+    generic {action, <entity>_id, summary} proposal) instead of executing —
+    the binding seam a deployment wires to external_actions.propose. The
+    state seeds an empty proposal slot."""
+    spec = _read_spec(slug)
+    id_key = _DEMO_GATED[slug]
+    buttons = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "button"]
+    assert buttons, f"{slug}: no action buttons"
+    for button in buttons:
+        actions = button.get("on_click")
+        assert actions, f"{slug}: button {button['props']['label']} has no on_click"
+        targets = {a.get("target") for a in actions}
+        assert targets == {"pending_proposal"}, button["props"]["label"]
+        value = actions[0]["value"]
+        assert set(value.keys()) == {"action", id_key, "summary"}, button["props"]["label"]
+    assert spec["state"].get("pending_proposal") is None
+
+
+def test_events_board_has_sell_through_and_run_of_show() -> None:
+    """events-board seeds the sell-through strip (status counts + headline
+    stats), the events queue, and per-event ticket tiers + run-of-show, and
+    renders a sell-through ring + progress bars."""
+    spec = _read_spec("events-board")
+    state = spec["state"]
+    for key in ("status_counts", "total_sold", "total_revenue", "events", "selected"):
+        assert key in state, f"events-board state missing {key}"
+    # Every event carries the story fields the canvas reads.
+    for ev in state["events"]:
+        assert ev.get("sold_pct") is not None and ev.get("pct_color"), ev.get("name")
+        assert ev.get("tiers") and ev.get("run_of_show"), ev.get("name")
+    # The redesign tells a story: one nearly sold out, one needing a push, one past.
+    pcts = {ev["sold_pct"] for ev in state["events"]}
+    assert max(pcts) >= 90, "no nearly-sold-out event"
+    assert any(p < 30 for p in pcts), "no slow event needing a push"
+    rings = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "progress-ring"]
+    assert rings, "events-board should render a sell-through ring"
+
+
+def test_renewals_radar_bands_by_risk_with_lapsed_recoverable() -> None:
+    """renewals-radar seeds members across high/medium/safe risk bands with a
+    revenue-at-risk strip, a churn-risk ring, and at least one lapsed member
+    (negative days_left) that is recoverable within grace."""
+    spec = _read_spec("renewals-radar")
+    state = spec["state"]
+    for key in ("risk_counts", "revenue_at_risk", "members", "selected"):
+        assert key in state, f"renewals-radar state missing {key}"
+    bands = {m["risk_band"] for m in state["members"]}
+    assert {"High risk", "Medium", "Safe"} <= bands, f"missing a risk band: {bands}"
+    assert any(m["days_left"] < 0 for m in state["members"]), "no lapsed member"
+    rings = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "progress-ring"]
+    assert rings, "renewals-radar should render a churn-risk ring"
+
+
+def test_orders_fulfillment_has_stage_board_and_detail() -> None:
+    """orders-fulfillment seeds orders across the four stages, drives a kanban
+    stage board bound to the order list, and seeds per-order items + shipping
+    + timeline for the detail panel."""
+    spec = _read_spec("orders-fulfillment")
+    state = spec["state"]
+    for key in ("stage_counts", "stage_columns", "orders", "selected"):
+        assert key in state, f"orders-fulfillment state missing {key}"
+    stages = {o["stage_id"] for o in state["orders"]}
+    assert {"to_ship", "shipped", "delivered", "refund_requested"} <= stages, stages
+    for o in state["orders"]:
+        assert o.get("items") and o.get("shipping") and o.get("timeline"), o.get("ref")
+    kanbans = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "kanban"]
+    assert len(kanbans) == 1, "orders-fulfillment should drive one kanban stage board"
+    assert kanbans[0].get("bind") == "orders", "kanban must bind the order list"
+    assert kanbans[0]["props"].get("columnKey") == "stage_id"
+
+
+def test_revenue_pulse_is_read_only_dashboard_with_charts() -> None:
+    """revenue-pulse is a read-only executive dashboard: zero actions, no
+    on_click anywhere, a six-month trend series, a by-category split, and the
+    approval funnel — rendered through stat tiles + chart widgets."""
+    template = PocketTemplate.model_validate(_read_meta("revenue-pulse"))
+    assert template.actions == []
+
+    spec = _read_spec("revenue-pulse")
+    for widget in _iter_widgets(spec["ui"]):
+        assert "on_click" not in widget, f"dashboard has an on_click: {widget.get('type')}"
+    state = spec["state"]
+    for key in ("kpis", "trend", "category_chart", "categories", "approvals"):
+        assert key in state, f"revenue-pulse state missing {key}"
+    assert len(state["trend"]) == 6, "expected six months of trend data"
+    charts = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "chart"]
+    assert len(charts) >= 2, "revenue-pulse should render trend + category charts"
+    chart_types = {c["props"].get("type") for c in charts}
+    assert chart_types <= {"area", "bar", "line"}, f"non-catalog chart type: {chart_types}"
+
+
+# ---------------------------------------------------------------------------
+# Installer — every vertical template mirrors like every other template
 # ---------------------------------------------------------------------------
 
 
