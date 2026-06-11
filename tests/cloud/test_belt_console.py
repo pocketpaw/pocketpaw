@@ -293,7 +293,7 @@ async def _propose_run(
 
 
 async def test_list_runs_shape_and_status_derivation(store):
-    proposed = await _propose_run(store, task="t-proposed")
+    await _propose_run(store, task="t-proposed")
     rejected = await _propose_run(store, task="t-rejected")
     await store.reject(rejected.id, reason="no thanks")
     landed = await _propose_run(store, task="t-landed")
