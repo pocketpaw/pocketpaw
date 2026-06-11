@@ -14,6 +14,19 @@
 #   business-tier (or higher) plans. Closes the plan-tier bypass where a
 #   team-plan member who passed the workspace RBAC check still hit Fabric for
 #   free.
+# Updated: 2026-06-10 (W4a — workspace-scope fabric) — closes a cross-tenant
+#   read leak. The store is GLOBAL (one shared ``~/.pocketpaw/fabric.db``), and
+#   ``require_action_any_workspace`` only proves the caller holds the action in
+#   SOME workspace — it does NOT bind the request to one. So on a shared
+#   deployment (micro tier / an agency running multiple client tenants) a
+#   workspace-A member could read and link workspace-B's objects. Every read
+#   and write endpoint now takes the caller's active workspace via
+#   ``current_workspace_id`` and threads it into the store as a PLAIN str: reads
+#   (``list_objects`` / ``list_links`` / ``query_fabric`` / ``get_object``) are
+#   scoped to that tenant; writes (``create_object`` / ``create_link``) stamp
+#   it. Legacy NULL-workspace rows stay visible to all tenants (see the store
+#   header). ``list_types`` / ``stats`` remain global — object-type definitions
+#   and bare counts are not tenant data; the leak is in object/link CONTENT.
 
 from __future__ import annotations
 
@@ -33,7 +46,7 @@ from pocketpaw.fabric.models import (
     PropertyDef,
 )
 from pocketpaw.fabric.store import FabricStore
-from pocketpaw_ee.cloud._core.deps import require_plan_feature
+from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_plan_feature
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
 
@@ -130,16 +143,18 @@ async def list_objects(
     ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> ObjectsListResponse:
     """List objects with optional type filter.
 
     Wraps ``FabricStore.query()`` so we inherit its parameter binding. The
     ``type_id`` / ``type_name`` filters go through ``FabricQuery``, which
     concatenates only whitelisted column names — user input flows exclusively
-    through bound parameters.
+    through bound parameters. W4a — results are scoped to the caller's active
+    workspace so a tenant never sees another tenant's objects.
     """
     q = FabricQuery(type_id=type_id, type_name=type_name, limit=limit, offset=offset)
-    result = await _store().query(q)
+    result = await _store().query(q, workspace_id=workspace_id)
     return ObjectsListResponse(objects=result.objects, total=result.total)
 
 
@@ -154,14 +169,20 @@ async def list_links(
     link_type: str | None = Query(None, description="Filter by link type"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> LinksListResponse:
-    """List links between objects with optional endpoint + type filters."""
+    """List links between objects with optional endpoint + type filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    links) so a tenant cannot enumerate another tenant's relationships.
+    """
     links, total = await _store().list_links(
         from_id=from_id,
         to_id=to_id,
         link_type=link_type,
         limit=limit,
         offset=offset,
+        workspace_id=workspace_id,
     )
     return LinksListResponse(links=links, total=total)
 
@@ -172,12 +193,17 @@ async def list_links(
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("fabric.write"))],
 )
-async def create_object(req: CreateObjectRequest):
+async def create_object(
+    req: CreateObjectRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Create an object stamped with the caller's active workspace (W4a)."""
     return await _store().create_object(
         type_id=req.type_id,
         properties=req.properties,
         source_connector=req.source_connector,
         source_id=req.source_id,
+        workspace_id=workspace_id,
     )
 
 
@@ -186,8 +212,16 @@ async def create_object(req: CreateObjectRequest):
     response_model=FabricObject,
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def get_object(obj_id: str):
-    obj = await _store().get_object(obj_id)
+async def get_object(
+    obj_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Fetch one object, scoped to the caller's workspace (W4a).
+
+    A 404 — not a 403 — is returned for another tenant's object so the
+    endpoint never leaks the existence of cross-workspace ids.
+    """
+    obj = await _store().get_object(obj_id, workspace_id=workspace_id)
     if not obj:
         raise HTTPException(404, "Object not found")
     return obj
@@ -198,8 +232,12 @@ async def get_object(obj_id: str):
     response_model=FabricQueryResult,
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def query_fabric(q: FabricQuery):
-    return await _store().query(q)
+async def query_fabric(
+    q: FabricQuery,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a)."""
+    return await _store().query(q, workspace_id=workspace_id)
 
 
 @router.post(
@@ -207,12 +245,17 @@ async def query_fabric(q: FabricQuery):
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("fabric.write"))],
 )
-async def create_link(req: LinkRequest):
+async def create_link(
+    req: LinkRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Create a link stamped with the caller's active workspace (W4a)."""
     return await _store().link(
         from_id=req.from_id,
         to_id=req.to_id,
         link_type=req.link_type,
         properties=req.properties,
+        workspace_id=workspace_id,
     )
 
 

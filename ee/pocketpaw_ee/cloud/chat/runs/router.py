@@ -1,4 +1,11 @@
-"""Run streaming + control endpoints."""
+"""Run streaming + control endpoints.
+
+Changes:
+- 2026-06-10 (sov/w3a-igw — per-run token metering) — the history-replay
+  ``stream_end`` frame (served when a terminal run's live stream has expired) now
+  carries the persisted ``doc.usage`` so a reconnecting client still gets the
+  run's real token counts. Live frames already carry usage from ``run_core``.
+"""
 
 from __future__ import annotations
 
@@ -59,6 +66,10 @@ async def get_run_stream(
                 {
                     "assistant_message_id": doc.assistant_message_id,
                     "cancelled": doc.status in ("cancelled", "interrupted"),
+                    # Per-run token metering (W3a): replay the persisted usage so a
+                    # client reconnecting after the live stream expired still gets
+                    # the run's real token counts, not an empty dict.
+                    "usage": getattr(doc, "usage", {}) or {},
                     "from_history": True,
                 },
             )

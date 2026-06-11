@@ -5,6 +5,11 @@
 # specialist). It is a thin wheel that contains only `pocketpaw_ee/` and
 # depends on the OSS core package `pocketpaw`.
 #
+# Changes:
+#   - 2026-06-10 (sov/w0a-license): added the `pocketpaw-ee-license`
+#     console script (operator license MINTING / keypair / verify) — see
+#     `[project.scripts]` and `pocketpaw_ee/cloud/mint.py`.
+#
 # Versioning: `pocketpaw-ee` tracks `pocketpaw` within the same minor series.
 # The `pocketpaw~=` pin below is a compatible-release constraint — it accepts
 # any `pocketpaw` patch (0.4.x) without a hand-edit, but blocks a minor bump
@@ -122,6 +127,12 @@ extraction = [
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
 ]
+
+[project.scripts]
+# Operator tool — mint / inspect enterprise license keys. Lives in EE
+# because it imports `cryptography` (Ed25519) and signs with the operator's
+# private key; the OSS core only ever VERIFIES. See pocketpaw_ee/cloud/mint.py.
+pocketpaw-ee-license = "pocketpaw_ee.cloud.mint:main"
 
 [project.urls]
 Homepage = "https://pocketpaw.xyz"

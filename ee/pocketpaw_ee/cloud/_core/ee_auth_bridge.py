@@ -1,4 +1,12 @@
-"""Bridge EE JWT auth → OSS ``request.state.full_access`` for admin/owner.
+"""Bridge EE JWT auth → OSS ``request.state.full_access`` for PLATFORM admins.
+
+Change (2026-06-10, W4b — privilege-escalation fix): the bridge now grants
+``full_access`` only to genuine *platform* administrators (``User.is_superuser``),
+NOT to every owner/admin of their own workspace. ``full_access`` is the OSS
+superuser bypass — it skips ALL ``require_scope`` checks. Handing it to any
+self-service workspace owner let a tenant on shared infra (e.g. the cloud
+micro tier) escalate to platform-wide settings/channels/budget. A workspace
+owner is the owner of *their* workspace, not a superuser over the OSS guards.
 
 OSS routes under ``src/pocketpaw/api/v1/`` (settings, channels, budget, soul,
 ...) gate access with ``require_scope(...)`` from ``pocketpaw.api.deps``. That
@@ -11,18 +19,21 @@ dependency accepts:
 
 The EE cloud uses fastapi-users JWT (cookie ``paw_auth`` or Bearer) at the
 route level. The OSS ``AuthMiddleware`` doesn't know about EE auth, so a
-fully-authenticated cloud admin hitting ``/api/v1/settings`` would 403 with
-``Missing required scope: settings:read or settings:write`` because nothing
-sets ``full_access``.
+platform admin hitting ``/api/v1/settings`` would 403 with ``Missing required
+scope: settings:read or settings:write`` because nothing sets ``full_access``.
 
-This middleware closes that gap. On every request:
+This middleware closes that gap for platform admins only. On every request:
 
   1. Decode the JWT from ``paw_auth`` cookie or ``Authorization: Bearer``.
-  2. Resolve the User and their active workspace role.
-  3. If owner or admin, set ``request.state.full_access = True``.
+  2. Resolve the User.
+  3. If the user is a platform admin (``is_superuser``), set
+     ``request.state.full_access = True``.
 
-Members + viewers stay locked out — settings + channels are platform-grade
-config that shouldn't be writable by every workspace member.
+Everyone else — workspace owners, admins, members, viewers — stays subject to
+OSS ``require_scope``. ``full_access`` is a platform-operator capability; it is
+deliberately NOT derived from a workspace role. ``is_superuser`` is set only
+for the seeded operator who boots the tenant (see ``auth/core.py``); a
+self-service signup never receives it.
 
 Performance: the JWT decode is local (HMAC); the User lookup is one Beanie
 ``get()`` per request. We skip entirely for paths that already exempt from
@@ -58,7 +69,7 @@ _EXEMPT_PREFIXES = (
 
 
 class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
-    """Mark EE-authenticated admin/owner requests as ``full_access`` for OSS."""
+    """Mark EE-authenticated *platform admin* requests as ``full_access`` for OSS."""
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
@@ -89,8 +100,12 @@ class EEAuthBridgeMiddleware(BaseHTTPMiddleware):
         if user is None:
             return await call_next(request)
 
-        role = _active_workspace_role(user)
-        if role in ("owner", "admin"):
+        # full_access is the OSS superuser bypass — reserve it for genuine
+        # platform administrators. A workspace owner/admin is NOT a superuser
+        # over the OSS guards (settings/channels/budget); granting it here let
+        # a self-service tenant on shared infra escalate platform-wide. They
+        # remain subject to OSS require_scope like everyone else.
+        if getattr(user, "is_superuser", False):
             request.state.full_access = True
 
         return await call_next(request)
@@ -130,14 +145,3 @@ async def _resolve_user(token: str):  # noqa: ANN202 — Beanie Document, avoid 
         # caller doesn't get full_access; the route's own auth still runs.
         logger.debug("EE auth bridge failed to resolve user", exc_info=True)
         return None
-
-
-def _active_workspace_role(user) -> str | None:  # noqa: ANN001 — User Document
-    """Return the user's role string on their currently-active workspace, or None."""
-    active = getattr(user, "active_workspace", None)
-    if not active:
-        return None
-    for membership in getattr(user, "workspaces", []) or []:
-        if getattr(membership, "workspace", None) == active:
-            return getattr(membership, "role", None)
-    return None

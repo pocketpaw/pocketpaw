@@ -1,4 +1,8 @@
-# Updated: 2026-04-29 — Release 0.4.18: dev → main sync (PR #1015) — file jail OCR/STT, scope enforcement + fail-closed require_scope, SSRF guard scaffolding, PII tightening, rate-limiter race fix + ReDoS bounds, audit-log scrubbing, dynamic cookie Secure flag, nonce-based CSP, plus bus mutation leakage and token-usage propagation fixes.
+# Updated: 2026-06-10 — Add langchain-ollama to the deep-agents dependency block (and its
+# mirrored bundle/dev copies) so the local / bring-your-own-model (Ollama) lane works:
+# DeepAgentsBackend/LangchainReactBackend build a ChatOllama via init_chat_model("ollama:..."),
+# which needs this binding. Fixes the self-hosted local-only path for the compliance ICP.
+# Prior: 2026-04-29 — Release 0.4.18: dev → main sync (PR #1015) — file jail OCR/STT, scope enforcement + fail-closed require_scope, SSRF guard scaffolding, PII tightening, rate-limiter race fix + ReDoS bounds, audit-log scrubbing, dynamic cookie Secure flag, nonce-based CSP, plus bus mutation leakage and token-usage propagation fixes.
 [project]
 name = "pocketpaw"
 version = "0.4.18"
@@ -134,6 +138,14 @@ deep-agents = [
     # litellm>=1.83.14 which pins openai==2.24.0 and conflicts with
     # langchain-openai>=1.2.0 (which needs openai>=2.26.0).
     "langchain-litellm>=0.6.4,<0.6.5",
+    # Required for the local / bring-your-own-model (Ollama) provider path.
+    # init_chat_model("ollama:<model>") in agents/deep_agents.py builds a
+    # ChatOllama, which speaks Ollama's NATIVE API (data never leaves the
+    # box) — the supported self-hosted local-only lane. deepagents does not
+    # pull this binding, so without it the Ollama provider raises ImportError
+    # at model-build time. The base `ollama` SDK dep alone is NOT enough;
+    # LangChain needs this adapter package. 1.x line matches langchain-core 1.x.
+    "langchain-ollama>=1.0,<2.0",
 ]
 litellm = [
     "litellm>=1.40.0",
@@ -306,6 +318,8 @@ all = [
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
     "langchain-litellm>=0.6.4,<0.6.5",
+    # Local / bring-your-own-model (Ollama) provider path — see deep-agents extra.
+    "langchain-ollama>=1.0,<2.0",
 ]
 dev = [
     # all deps (flattened from [all])
@@ -339,6 +353,8 @@ dev = [
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
     "langchain-litellm>=0.6.4,<0.6.5",
+    # Local / bring-your-own-model (Ollama) provider path — see deep-agents extra.
+    "langchain-ollama>=1.0,<2.0",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated
@@ -449,6 +465,8 @@ dev = [
     # langchain-google-genai, so this fills the gap.
     "langchain-openai>=1.2.0,<2.0.0",
     "langchain-litellm>=0.6.4,<0.6.5",
+    # Local / bring-your-own-model (Ollama) provider path — see deep-agents extra.
+    "langchain-ollama>=1.0,<2.0",
     # dev tools
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0,<1.0.0",  # pinned: incompatible with pytest-asyncio 1.x until asyncio.run() call sites are migrated

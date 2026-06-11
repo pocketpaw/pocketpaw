@@ -6,6 +6,39 @@ the private key lives only on the license server.
 
 Key format: base64(payload_json + "." + signature_hex)
 Payload: {"org": "acme-inc", "plan": "team", "seats": 10, "exp": "2027-01-01"}
+
+Changes:
+  - 2026-06-10 (security R2b review — staging-posture blind spot): Added an
+    ``_is_ambiguous_nonprod_label()`` helper (mirroring auth.core's) and a LOUD
+    ``logger.warning`` in ``enforce_license_key_posture()`` for the case that
+    used to pass SILENTLY: a deployment labelled non-dev/non-prod (e.g.
+    ``POCKETPAW_ENV=staging``) that hasn't set an operator
+    ``POCKETPAW_LICENSE_PUBLIC_KEY`` and so is still verifying against the
+    BYPASSABLE committed DEV key. Production posture still hard-RAISES; explicit
+    dev/unset stays a silent no-op. Boot behaviour is unchanged — only the
+    warning signal is added.
+  - 2026-06-10 (sov/w1a-deploy): Added a production-posture guard so a
+    tenant can't silently run on the BYPASSABLE committed DEV public key.
+    ``_using_dev_public_key()`` reports whether the active verifier is the
+    baked-in DEV key (i.e. no operator ``POCKETPAW_LICENSE_PUBLIC_KEY`` is
+    set). ``enforce_license_key_posture()`` (mirrors W0e's AUTH_SECRET gate
+    in ``ee/cloud/auth/core.py`` and reuses its ``_is_production()`` helper
+    when importable, with a local fallback) RAISES under production posture
+    if the DEV key is in use, and is invoked from ``load_license()`` /
+    ``get_license()`` so the EE gate refuses to validate a license against a
+    public key anyone in the repo can forge against. Dev/test posture is
+    unchanged (warns only).
+  - 2026-06-10 (sov/w0a-license): Replaced the "Replace with your actual
+    public key" placeholder with a real, baked-in DEV Ed25519 public key
+    (``_DEV_PUBLIC_KEY_HEX``). Verification now resolves the public key in
+    this order: ``POCKETPAW_LICENSE_PUBLIC_KEY`` env (production / operator
+    key) → the baked-in DEV key. The HMAC-SHA256 fallback only fires when
+    *no* Ed25519 public key resolves AND ``POCKETPAW_LICENSE_SECRET`` is
+    set, so a default install now verifies Ed25519-minted keys out of the
+    box. The matching private key for the DEV public key lives in
+    ``ee/pocketpaw_ee/cloud/_dev_license_key.py`` (dev-only, clearly
+    marked); production minting supplies its own operator private key. See
+    ``ee/pocketpaw_ee/cloud/mint.py`` for the minting path.
 """
 
 from __future__ import annotations
@@ -50,32 +83,174 @@ class LicensePayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Ed25519 public key for license verification (hex-encoded).
-# Replace with your actual public key.
-_PUBLIC_KEY_HEX = os.environ.get("POCKETPAW_LICENSE_PUBLIC_KEY", "")
+#
+# DEV key: the matching private seed ships (clearly marked dev-only) in
+# ``ee/pocketpaw_ee/cloud/_dev_license_key.py`` so a fresh checkout can mint
+# and verify licenses with zero setup. PRODUCTION operators MUST override
+# this with their own key by exporting ``POCKETPAW_LICENSE_PUBLIC_KEY`` (the
+# matching private key is supplied to ``mint`` out-of-band and never enters
+# the repo).
+_DEV_PUBLIC_KEY_HEX = "42a718ecd6f1fc3d1b6709ccfc1318d1ca80fe7ce238c737308e761d7263d5c6"
+
+
+def _resolve_public_key_hex() -> str:
+    """Resolve the active Ed25519 verification public key (hex).
+
+    Operator-supplied env var wins over the baked-in DEV key so production
+    deployments verify against their own keypair. Read at call time (not
+    import time) so tests can patch the env between cases.
+    """
+    return os.environ.get("POCKETPAW_LICENSE_PUBLIC_KEY", "").strip() or _DEV_PUBLIC_KEY_HEX
+
+
+def _using_dev_public_key() -> bool:
+    """True when license verification is still using the committed DEV key.
+
+    The DEV key is a license BYPASS: its matching private seed is committed
+    in the open (``_dev_license_key.DEV_PRIVATE_KEY_HEX``), so anyone can
+    mint a key the DEV public key accepts. An operator escapes the bypass by
+    exporting their own ``POCKETPAW_LICENSE_PUBLIC_KEY``; until they do, the
+    resolver falls back to ``_DEV_PUBLIC_KEY_HEX`` and we report True here.
+    """
+    return _resolve_public_key_hex() == _DEV_PUBLIC_KEY_HEX
+
+
+def _is_production() -> bool:
+    """Production-posture detector, reusing W0e's auth gate when importable.
+
+    Mirrors the AUTH_SECRET fail-fast in ``ee/cloud/auth/core.py`` so the two
+    "don't boot insecurely" gates agree on what "production" means. We import
+    that helper lazily (top-level import of ``auth.core`` runs its own
+    ``SECRET = _resolve_secret()`` at module load, which is itself a prod
+    gate — importing it eagerly here would couple license loading to
+    AUTH_SECRET being set first). If the auth layer isn't importable we fall
+    back to the identical two-signal check: POCKETPAW_ENV in {production,
+    prod} OR POCKETPAW_AUTH_COOKIE_SECURE=true.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.core import _is_production as _auth_is_production
+
+        return _auth_is_production()
+    except Exception:
+        env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+        if env in {"production", "prod"}:
+            return True
+        return os.environ.get("POCKETPAW_AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
+
+
+# Local-dev env labels (kept in sync with auth.core._DEV_ENV_LABELS). Any other
+# *set* label is ambiguous: clearly not a dev box, but prod wasn't positively
+# detected, so the bypassable DEV license key would apply silently.
+_DEV_ENV_LABELS = {"dev", "development", "local", "test"}
+
+
+def _is_ambiguous_nonprod_label() -> bool:
+    """True for a non-prod posture wearing a label that isn't obviously dev.
+
+    Reuses auth.core's helper when importable so the two gates agree on the
+    blind-spot definition; falls back to the identical local check otherwise.
+    Returns True only when prod was NOT positively detected, ``POCKETPAW_ENV``
+    is set, and the value isn't one of the known local-dev labels. Unset env and
+    explicit dev labels return False; explicit prod is handled by the hard raise
+    upstream and never reaches the warning path.
+    """
+    try:
+        from pocketpaw_ee.cloud.auth.core import (
+            _is_ambiguous_nonprod_label as _auth_ambiguous,
+        )
+
+        return _auth_ambiguous()
+    except Exception:
+        if _is_production():
+            return False
+        env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+        return bool(env) and env not in _DEV_ENV_LABELS
+
+
+def enforce_license_key_posture() -> None:
+    """Refuse to run on the bypassable DEV public key in production.
+
+    A production tenant that verifies licenses against the committed DEV key
+    is not actually licensed — anyone can forge a key for it. We treat that
+    exactly like W0e treats the placeholder AUTH_SECRET: fail fast with an
+    actionable error instead of silently running ownable.
+
+    Called from ``load_license()`` / ``get_license()`` (the boot + per-load
+    paths). Dev/test posture is a no-op so the zero-config DEV loop still
+    works, EXCEPT for the staging-posture blind spot: a non-dev/non-prod label
+    (e.g. POCKETPAW_ENV=staging) still on the DEV key gets a LOUD warning so it
+    isn't silently forgeable. Raises ``RuntimeError`` under production posture.
+    """
+    if not _is_production() and _is_ambiguous_nonprod_label() and _using_dev_public_key():
+        # Staging-posture blind spot: a labelled-but-not-prod deployment on the
+        # committed DEV key used to pass here SILENTLY. The DEV key is a bypass
+        # (its private seed ships in the open), so warn loudly. Boot is
+        # unchanged — we don't raise (that would break intentional staging runs
+        # and the test suite); we only surface the signal.
+        logger.warning(
+            "POCKETPAW_ENV=%s is a non-dev, non-prod label, but license "
+            "verification is still using the committed DEV public key "
+            "(POCKETPAW_LICENSE_PUBLIC_KEY is unset). That key is a BYPASS: its "
+            "private seed ships in the open, so anyone can mint a license this "
+            "deployment accepts. Generate your own keypair and export "
+            "POCKETPAW_LICENSE_PUBLIC_KEY before treating this as production.",
+            os.environ.get("POCKETPAW_ENV", "").strip(),
+        )
+
+    if _is_production() and _using_dev_public_key():
+        raise RuntimeError(
+            "POCKETPAW_LICENSE_PUBLIC_KEY is unset, so license verification is "
+            "using the committed DEV public key. That key is a BYPASS: its "
+            "private seed ships in the open (ee/cloud/_dev_license_key.py), so "
+            "anyone can mint a license this tenant accepts. Refusing to run in "
+            "production on a forgeable license key. Generate your own keypair "
+            "and export the public key, e.g.\n"
+            "  python -m pocketpaw_ee.cloud.mint generate-keypair\n"
+            '  export POCKETPAW_LICENSE_PUBLIC_KEY="<public-hex>"\n'
+            "then mint the tenant license with the matching private key "
+            "(--private-key-file or POCKETPAW_LICENSE_PRIVATE_KEY)."
+        )
+
 
 _cached_license: LicensePayload | None = None
 _license_error: str | None = None
 
 
 def _verify_signature(payload_bytes: bytes, signature_hex: str) -> bool:
-    """Verify Ed25519 signature. Returns False if key is missing or invalid."""
-    if not _PUBLIC_KEY_HEX:
-        # No public key configured — accept key based on HMAC-SHA256 with a
-        # shared secret (simpler setup for self-hosted deployments).
-        secret = os.environ.get("POCKETPAW_LICENSE_SECRET", "")
-        if not secret:
-            return False
-        expected = hashlib.sha256(f"{secret}:{payload_bytes.decode()}".encode()).hexdigest()
-        return expected == signature_hex
+    """Verify a license signature. Returns False on any failure.
 
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    Tries Ed25519 first against the resolved public key (operator env →
+    baked-in DEV key). If that fails AND a shared ``POCKETPAW_LICENSE_SECRET``
+    is configured, falls back to HMAC-SHA256 (the simpler self-hosted setup
+    the e2e suite and some self-hosters rely on). With neither path available
+    the signature is rejected.
+    """
+    public_key_hex = _resolve_public_key_hex()
+    if public_key_hex:
+        try:
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-        pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(_PUBLIC_KEY_HEX))
-        pub_key.verify(bytes.fromhex(signature_hex), payload_bytes)
-        return True
-    except Exception:
+            pub_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
+            pub_key.verify(bytes.fromhex(signature_hex), payload_bytes)
+            return True
+        except Exception:
+            # An OPERATOR-configured Ed25519 key that rejects the signature is a
+            # HARD reject — do NOT fall through to the weaker HMAC path. Without
+            # this, any deployment that also set POCKETPAW_LICENSE_SECRET could
+            # verify a forged HMAC-signed key even though the real Ed25519 key
+            # rejected it, defeating the whole minting/posture scheme. Only the
+            # baked-in DEV key (dev/legacy posture — production boot is already
+            # blocked by enforce_license_key_posture() when the dev key is in
+            # use) may fall back to HMAC, for the e2e suite / legacy self-hosters.
+            if not _using_dev_public_key():
+                return False
+
+    # HMAC-SHA256 fallback with a shared secret (simpler self-hosted setup).
+    secret = os.environ.get("POCKETPAW_LICENSE_SECRET", "")
+    if not secret:
         return False
+    expected = hashlib.sha256(f"{secret}:{payload_bytes.decode()}".encode()).hexdigest()
+    return expected == signature_hex
 
 
 def validate_license_key(key: str) -> LicensePayload:
@@ -119,6 +294,13 @@ def load_license() -> LicensePayload | None:
         load_dotenv()
     except ImportError:
         pass
+
+    # Production posture must not verify against the bypassable DEV public key
+    # (mirrors W0e's AUTH_SECRET gate). Checked before the no-key short-circuit
+    # so a prod tenant that hasn't set an operator key fails loudly at boot
+    # rather than appearing "unlicensed but harmless" — it is actually
+    # forgeable. Raises RuntimeError under production posture.
+    enforce_license_key_posture()
 
     key = os.environ.get("POCKETPAW_LICENSE_KEY", "").strip()
     if not key:

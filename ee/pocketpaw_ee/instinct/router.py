@@ -1,5 +1,43 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-11 (merge origin/dev into integration/sovereignty-waves —
+#   Belt code-change union) — reconciled the sovereignty extraction with dev's
+#   Belt feature. The chain-emit helpers (``_emit_human_corrected`` /
+#   ``_emit_decision_completed_rejected`` / ``_emit_policy_evaluated_approved``)
+#   plus ``_chain_actor_human`` / ``_parked_*`` / ``_pocket_write_blob`` /
+#   ``_code_change_proposed_event_id`` now live ONLY in
+#   ``ee.instinct.chain_emitters`` (single source of truth) and are imported
+#   here; their dev-side Belt logic (the ``causation_override`` param +
+#   ``_code_change_proposed_event_id``) was folded into that module. The
+#   ``_code_change_blob`` / ``_assert_code_change_workspace`` Belt blob helpers
+#   stay router-local (peers of ``_pocket_write_blob`` /
+#   ``_assert_pocket_write_workspace``).
+# Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — closes a
+#   cross-tenant decision leak on shared deployments. The instinct store is
+#   GLOBAL (one shared DB) and list/pending/audit reads previously passed no
+#   workspace, so a workspace-A operator could read workspace-B's pending
+#   actions and audit trail. Now ``propose_action`` stamps the caller's active
+#   ``current_workspace_id`` on the new action (and its audit rows), and every
+#   per-tenant READ — ``pending_actions`` / ``list_actions`` / ``query_audit`` /
+#   ``export_audit`` / ``get_audit_entry`` — threads ``current_workspace_id``
+#   into the store so results are restricted to that tenant (plus legacy
+#   NULL-workspace rows). ``workspace_id`` crosses to the OSS store as a PLAIN
+#   str. ``/instinct/audit/verify`` stays GLOBAL on purpose — chain integrity is
+#   a property of the whole W2b ledger, and tenancy here is a read filter that
+#   never touches the hash chain. The pre-existing approve/reject/bulk
+#   ``_assert_pocket_write_workspace`` guard (PR #1183 / RFC 09 Slice 3) already
+#   bound the WRITE/escalation paths to the workspace; W4a closes the READ side.
+# Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
+#   GET /instinct/audit/verify, which walks the audit hash chain (built in
+#   pocketpaw.instinct.store) and reports intact / first-broken row so a
+#   customer or insurer can prove the ledger was not altered. Declared BEFORE
+#   /instinct/audit/{audit_id} to avoid the literal-vs-parameter route
+#   collision. GET /instinct/audit/export now also runs verification and
+#   stamps an ``X-Audit-Chain-Intact: true|false`` response header. The
+#   audit-ledger append in the store is now LOUD (raises AuditChainError on
+#   failure); the Decision-Graph chain emits in this router stay best-effort
+#   and are a separate concern (the journal, not this ledger, is their source
+#   of truth).
 # Updated: 2026-03-30 — Added GET /instinct/actions (list all with status filter),
 #   GET /instinct/audit/export (JSON export), switched to singleton from ee.api.
 # Updated: 2026-04-12 (Move 1 PR-A) — /approve now accepts optional edited fields.
@@ -178,22 +216,20 @@ from pocketpaw_ee.cloud._core.errors import Forbidden
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
 
+# Shared Decision-Graph chain-emit helpers — extracted here so the Mission
+# Control service can import the same primitives without coupling to this
+# router (sov/r2a FIX 3). Re-imported under their original names so the
+# router's call sites and the existing test monkeypatches that target
+# ``ee.instinct.router._emit_*`` keep working unchanged.
+from pocketpaw_ee.instinct.chain_emitters import (
+    _code_change_proposed_event_id,
+    _emit_decision_completed_rejected,
+    _emit_human_corrected,
+    _emit_policy_evaluated_approved,
+    _pocket_write_blob,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _pocket_write_blob(action: Any) -> dict[str, Any] | None:
-    """Return the ``_pocket_write`` blob on an Action, or ``None``.
-
-    The blob is the parked-write payload ``instinct_bridge`` stores under
-    ``Action.parameters._pocket_write`` (method/path/params/idempotency/
-    outcome + the originating ``workspace_id``). Anything that is not a
-    dict-of-dict shape is treated as "no parked write".
-    """
-    params = getattr(action, "parameters", None)
-    if not isinstance(params, dict):
-        return None
-    blob = params.get("_pocket_write")
-    return blob if isinstance(blob, dict) else None
 
 
 def _code_change_blob(action: Any) -> dict[str, Any] | None:
@@ -263,281 +299,6 @@ def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This action's pocket write belongs to a different workspace",
-        )
-
-
-# ---------------------------------------------------------------------------
-# RFC 09 Slice 3 — Decision-Graph chain emit helpers
-# ---------------------------------------------------------------------------
-# The approve / reject endpoints emit ``human.corrected`` per item; the
-# reject endpoints additionally emit ``decision.completed(rejected)`` to
-# close the chain. The bridge owns the chain close on the approve path
-# (``instinct_bridge._emit_bridge_chain_close`` fires from
-# ``execute_approved_write`` after the post-approval HTTP call). Both
-# helpers below are best-effort — a Decision-Graph wiring failure must
-# never break an approval or rejection (the journal write is the source
-# of truth; the Slice 4 reconciler is the safety net).
-#
-# ``_chain_actor_human`` shape: ``kind="user"`` (this is the human
-# approver acting, not the agent that proposed). ``id`` is the
-# authenticated user id with a ``user:`` prefix so the projection's
-# ``_fold_corrected`` can attribute the ApproverRef to the human.
-# ``scope_context`` carries the approver's active workspace + the
-# action's pocket so visibility filters narrow correctly.
-
-
-def _chain_actor_human(*, user_id: str, workspace_id: str, pocket_id: str) -> Any:
-    """Build the Actor recorded on a ``human.corrected`` / reject-path
-    ``decision.completed`` chain event."""
-    from soul_protocol.spec.journal import Actor
-
-    return Actor(
-        kind="user",
-        id=f"user:{user_id or 'unknown'}",
-        scope_context=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-    )
-
-
-def _parked_policy_event_id(blob: dict[str, Any]) -> Any:
-    """Pull the ``parked_policy_event_id`` UUID off a schema-2 blob, or
-    ``None`` if missing / malformed. The Slice 3 bridge writes this back
-    onto the Action after ``store.propose`` succeeds; using it as the
-    ``causation_id`` on the next ``human.corrected`` event gives the
-    chain a clean policy → human cause-arrow."""
-    from uuid import UUID
-
-    raw = blob.get("parked_policy_event_id")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        return None
-
-
-def _parked_correlation_id(blob: dict[str, Any]) -> Any:
-    """Pull the chain ``correlation_id`` off a schema-2 blob, or
-    ``None`` if missing / malformed. Without a correlation_id the emit
-    is skipped — there's no chain to fold into."""
-    from uuid import UUID
-
-    raw = blob.get("correlation_id")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        return None
-
-
-def _code_change_proposed_event_id(blob: dict[str, Any]) -> Any:
-    """Pull the ``proposed_event_id`` UUID off a schema-2 ``_code_change``
-    blob, or ``None`` if missing / malformed. belt.py writes this back onto
-    the Action after the chain-opening ``agent.proposed`` event fires; using
-    it as the ``causation_id`` on the ``human.corrected`` event gives the
-    Belt chain a clean ``agent.proposed → human.corrected`` cause-arrow. The
-    code-change peer of ``_parked_policy_event_id``."""
-    from uuid import UUID
-
-    raw = blob.get("proposed_event_id")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return UUID(raw)
-    except ValueError:
-        return None
-
-
-def _emit_human_corrected(
-    *,
-    blob: dict[str, Any],
-    action: Any,
-    user_id: str,
-    workspace_id: str,
-    disposition: str,
-    note: str | None,
-    causation_override: Any | None = None,
-) -> Any | None:
-    """Best-effort ``human.corrected`` emit for an approve / reject /
-    bulk-approve / bulk-reject item.
-
-    ``disposition`` is one of ``accepted`` / ``edited`` / ``rejected``.
-    ``note`` is the operator-supplied reason text (reject path) or
-    correction note (edit path); ``None`` for a plain approve.
-
-    Skipped silently when the blob carries no ``correlation_id`` — a
-    blob-without-chain-id is a defensive guard (Slice 2 always populates
-    it from the executor's mint; a None means a future code path parked
-    a write without minting one). The Slice 4 reconciler / abandon
-    sweeper will deal with the orphan.
-
-    ``causation_override`` (BS-4) — when provided, it is used as the
-    ``causation_id`` instead of the parked-policy-event lookup. The Belt
-    code-change path passes the ``agent.proposed`` event id here (a Belt
-    proposal has no parked ``policy.evaluated`` event to chain back to —
-    the proposal IS the chain origin). Pocket-write callers omit it and
-    fall back to ``_parked_policy_event_id``.
-
-    Returns the emitted event id (``UUID``) on success, or ``None`` when
-    the emit was skipped (missing correlation_id) or raised. Slice 4's
-    approve-side ``policy.evaluated`` emit uses this as its
-    ``causation_id`` so the chain ``policy(fail) → human → policy(pass)
-    → completed`` walks a clean causal arrow.
-    """
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_human_corrected
-
-    correlation_id = _parked_correlation_id(blob)
-    if correlation_id is None:
-        return None
-
-    pocket_id = str(getattr(action, "pocket_id", "") or "")
-    causation = (
-        causation_override if causation_override is not None else _parked_policy_event_id(blob)
-    )
-    payload: dict[str, Any] = {
-        "disposition": disposition,
-        "action_id": str(getattr(action, "id", "") or ""),
-    }
-    if note:
-        payload["note"] = note
-
-    try:
-        entry = record_human_corrected(
-            correlation_id=correlation_id,
-            actor=_chain_actor_human(
-                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
-            ),
-            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-            payload=payload,
-            causation_id=causation,
-        )
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "instinct human.corrected emit failed for correlation_id=%s "
-            "(disposition=%s) — Slice 4 reconciler will catch up",
-            correlation_id,
-            disposition,
-            exc_info=True,
-        )
-        return None
-    return entry.id
-
-
-def _emit_decision_completed_rejected(
-    *,
-    blob: dict[str, Any],
-    action: Any,
-    user_id: str,
-    workspace_id: str,
-    reason: str,
-    causation_override: Any | None = None,
-) -> None:
-    """Best-effort ``decision.completed(passed=False, action_outcome=
-    "rejected")`` chain-close for a reject / bulk-reject item.
-
-    Same skip-on-missing-correlation-id semantics as
-    ``_emit_human_corrected``. The reject path owns the close because
-    the bridge is never invoked on rejection — for the approve path the
-    bridge's ``_emit_bridge_chain_close`` owns the close instead.
-
-    ``causation_override`` (BS-4) — the Belt code-change reject path passes
-    the just-emitted ``human.corrected`` event id so the terminal chains its
-    causation back to the human rejection. Pocket-write callers omit it (their
-    terminal doesn't currently set a causation_id; the chain still folds via
-    ``correlation_id``).
-    """
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_decision_completed
-
-    correlation_id = _parked_correlation_id(blob)
-    if correlation_id is None:
-        return
-
-    pocket_id = str(getattr(action, "pocket_id", "") or "")
-    payload: dict[str, Any] = {
-        "passed": False,
-        "action_outcome": "rejected",
-    }
-    if reason:
-        payload["reason"] = reason
-
-    try:
-        record_decision_completed(
-            correlation_id=correlation_id,
-            actor=_chain_actor_human(
-                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
-            ),
-            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-            payload=payload,
-            causation_id=causation_override,
-        )
-    except Exception:  # noqa: BLE001 — chain close is best-effort
-        logger.warning(
-            "instinct decision.completed(rejected) emit failed for "
-            "correlation_id=%s — Slice 4 reconciler will catch up",
-            correlation_id,
-            exc_info=True,
-        )
-
-
-def _emit_policy_evaluated_approved(
-    *,
-    blob: dict[str, Any],
-    action: Any,
-    user_id: str,
-    workspace_id: str,
-    causation_event_id: Any | None,
-) -> None:
-    """Best-effort ``policy.evaluated(passed=True, policy="approve_per_row")``
-    emit after a human approval lands (Slice 4 — Captain Decision 12 follow-up).
-
-    The projection's ``_fold_policy`` keeps the LAST observed
-    ``policy.evaluated`` event for the chain. Without this emit, an
-    approved chain still reads ``Decision.instinct_policy_passed=False``
-    because the only policy event seen is the parked ``passed=False``
-    from ``instinct_bridge.propose_pocket_write``. Firing this AFTER the
-    ``human.corrected`` event and BEFORE the bridge's chain close gives
-    the projection a fresh policy-evaluated to fold into the closed
-    Decision row — chain symmetry with auto-approve chains, which carry
-    ``policy="auto", passed=True`` from the direct-success path in
-    ``action_executor``.
-
-    Causation: the natural cause is the ``human.corrected`` event that
-    just landed. The caller threads its emitted event id through
-    ``causation_event_id`` so the projection's edge graph can chain
-    policy → human → policy as a single causal sequence.
-
-    Same skip-on-missing-correlation-id semantics as the sibling helpers.
-    """
-    from pocketpaw_ee.cloud.decisions.journal_writer import record_policy_evaluated
-
-    correlation_id = _parked_correlation_id(blob)
-    if correlation_id is None:
-        return
-
-    pocket_id = str(getattr(action, "pocket_id", "") or "")
-    payload: dict[str, Any] = {
-        "policy": "approve_per_row",
-        "passed": True,
-        "reason": f"approved by user:{user_id or 'unknown'}",
-        "action_id": str(getattr(action, "id", "") or ""),
-        "evaluator": "instinct",
-    }
-    try:
-        record_policy_evaluated(
-            correlation_id=correlation_id,
-            actor=_chain_actor_human(
-                user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id
-            ),
-            scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
-            payload=payload,
-            causation_id=causation_event_id,
-        )
-    except Exception:  # noqa: BLE001 — chain emit is best-effort
-        logger.warning(
-            "instinct policy.evaluated(passed=True) emit failed for "
-            "correlation_id=%s — Slice 4 reconciler will catch up",
-            correlation_id,
-            exc_info=True,
         )
 
 
@@ -692,12 +453,20 @@ class BulkActionResponse(BaseModel):
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("instinct.propose"))],
 )
-async def propose_action(req: ProposeRequest):
+async def propose_action(
+    req: ProposeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
     """Propose a new action for human approval.
 
     Optional `reasoning_trace` and `fabric_snapshots` let callers attach the
     agent's decision inputs at propose time. They are persisted into the
     resulting audit row for later hydration via `/audit/{id}?hydrate=1`.
+
+    W4a — the proposed action (and its audit rows) are stamped with the
+    caller's active workspace so the cross-tenant decision leak is closed at
+    the write side: later list/pending/audit reads scoped to a tenant only
+    surface that tenant's actions.
     """
     return await _store().propose(
         pocket_id=req.pocket_id,
@@ -710,6 +479,7 @@ async def propose_action(req: ProposeRequest):
         parameters=req.parameters,
         reasoning_trace=req.reasoning_trace,
         fabric_snapshots=list(req.fabric_snapshots) if req.fabric_snapshots else None,
+        workspace_id=workspace_id,
     )
 
 
@@ -729,9 +499,16 @@ async def pending_actions(
             "unchanged from before — every pending item is returned."
         ),
     ),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List actions waiting for human approval."""
-    return await _store().pending(pocket_id=pocket_id, assignee=assignee)
+    """List actions waiting for human approval.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so The Tray for tenant A never surfaces tenant B's pending decisions.
+    """
+    return await _store().pending(
+        pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id
+    )
 
 
 @router.get(
@@ -745,14 +522,20 @@ async def list_actions(
         None, description="Filter by status: pending|approved|rejected|executed|failed"
     ),
     limit: int = Query(50, ge=1, le=500, description="Max actions to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List all actions with optional status and pocket filters."""
+    """List all actions with optional status and pocket filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so a tenant can't enumerate another tenant's actions.
+    """
     store = _store()
     status_enum = ActionStatus(status) if status else None
     actions = await store.list_actions(
         pocket_id=pocket_id,
         status=status_enum,
         limit=limit,
+        workspace_id=workspace_id,
     )
     return ActionsListResponse(actions=actions, total=len(actions))
 
@@ -1363,8 +1146,14 @@ async def query_audit(
         ),
     ),
     limit: int = Query(100, ge=1, le=1000, description="Max entries to return"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Query instinct audit log entries with optional filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    rows) so a tenant's auditor only reads that tenant's decision trail. The
+    scope is a READ FILTER on which rows come back; ``/instinct/audit/verify``
+    stays global because chain integrity is a property of the whole ledger.
 
     DEPRECATED: Cluster C / PR4 made ``/api/v1/runtime/audit`` the canonical
     audit surface with workspace rollup + FTS. This endpoint stays as the
@@ -1381,6 +1170,7 @@ async def query_audit(
         event=event,
         actor=actor,
         limit=limit,
+        workspace_id=workspace_id,
     )
     return AuditListResponse(entries=entries, total=len(entries))
 
@@ -1397,24 +1187,87 @@ class HydratedAuditEntry(BaseModel):
     )
 
 
-# /instinct/audit/export must be declared BEFORE the parameterised
-# /instinct/audit/{audit_id} below — FastAPI routes match in registration
-# order, and a literal-vs-parameter collision would otherwise route
-# /audit/export to the {audit_id} handler and 404.
+class AuditChainBreak(BaseModel):
+    """The first row where the audit hash chain failed to verify."""
+
+    id: str = Field(description="Audit entry id of the first broken row.")
+    rowid: int = Field(description="SQLite rowid (insertion order) of the broken row.")
+    reason: str = Field(description="Why the row failed: content edit vs. prev-link break.")
+
+
+class AuditVerifyResponse(BaseModel):
+    """Result of walking the tamper-evident audit hash chain.
+
+    ``intact`` is the headline an auditor/insurer reads. ``broken_at`` is
+    present (non-null) only when ``intact`` is False, pointing at the first
+    row that fails to verify. ``legacy_unhashed`` counts pre-W2b rows that
+    predate the chain and are not enforced.
+    """
+
+    intact: bool
+    total: int
+    hashed: int
+    legacy_unhashed: int
+    checked: int
+    broken_at: AuditChainBreak | None = None
+
+
+# /instinct/audit/export and /instinct/audit/verify must be declared BEFORE the
+# parameterised /instinct/audit/{audit_id} below — FastAPI routes match in
+# registration order, and a literal-vs-parameter collision would otherwise
+# route /audit/export (or /audit/verify) to the {audit_id} handler and 404.
 @router.get(
     "/instinct/audit/export",
     dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
 )
 async def export_audit(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """Export the full instinct audit log as JSON for compliance."""
-    data = await _store().export_audit(pocket_id=pocket_id)
+    """Export the instinct audit log as JSON for compliance.
+
+    W4a — the exported BODY is scoped to the caller's active workspace (plus
+    legacy NULL-workspace rows) so a tenant's compliance export never carries
+    another tenant's decision trail. The ``X-Audit-Chain-Intact`` header still
+    reflects the WHOLE ledger's integrity (the chain is global by design), so a
+    downstream consumer that only handles the file body still learns whether
+    the ledger verified at export time. Call ``GET /instinct/audit/verify`` for
+    the full break-point detail.
+    """
+    store = _store()
+    data = await store.export_audit(pocket_id=pocket_id, workspace_id=workspace_id)
+    verdict = await store.verify_audit_chain()
     return Response(
         content=data,
         media_type="application/json",
-        headers={"Content-Disposition": 'attachment; filename="instinct_audit.json"'},
+        headers={
+            "Content-Disposition": 'attachment; filename="instinct_audit.json"',
+            "X-Audit-Chain-Intact": "true" if verdict["intact"] else "false",
+        },
     )
+
+
+@router.get(
+    "/instinct/audit/verify",
+    response_model=AuditVerifyResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
+)
+async def verify_audit_chain():
+    """Verify the tamper-evident audit hash chain end to end.
+
+    Walks the entire ``instinct_audit`` ledger in insertion order, recomputes
+    each row's hash from its canonical content + the running previous hash, and
+    reports whether the chain is intact. Any insertion, edit, or deletion of a
+    hashed row surfaces as ``intact=false`` with ``broken_at`` pointing at the
+    first failing row — proof an auditor or insurer can run themselves.
+
+    The chain is global (not pocket-scoped), so this endpoint takes no filter:
+    integrity is a property of the whole ledger. Pre-W2b rows without a hash
+    are counted under ``legacy_unhashed`` and are not enforced — see the store
+    docstring for the genesis/legacy boundary.
+    """
+    verdict = await _store().verify_audit_chain()
+    return AuditVerifyResponse(**verdict)
 
 
 @router.get(
@@ -1425,6 +1278,7 @@ async def export_audit(
 async def get_audit_entry(
     audit_id: str,
     hydrate: int = Query(0, description="Pass 1 to expand referenced IDs"),
+    workspace_id: str = Depends(current_workspace_id),
 ):
     """Fetch a single audit entry, optionally hydrated with referenced content.
 
@@ -1433,10 +1287,18 @@ async def get_audit_entry(
     - `fabric_snapshots` — immutable snapshots captured at decision time
     - `fabric_current` — live state of the referenced objects (so a reviewer
       can compare what the agent saw against what the object is now)
+
+    W4a — the lookup is scoped to the caller's active workspace, so requesting
+    another tenant's audit id returns 404 (never leaking its existence or
+    content) rather than the row.
+
+    The lookup is a direct single-row fetch by id (``store.get_audit_entry``),
+    so an entry older than the audit query page size is still retrievable —
+    the prior path paged the most-recent rows and matched in Python, 404-ing on
+    valid ids past that window for a tenant with a large ledger.
     """
     store = _store()
-    entries = await store.query_audit(limit=1000)
-    entry = next((e for e in entries if e.id == audit_id), None)
+    entry = await store.get_audit_entry(audit_id, workspace_id=workspace_id)
     if entry is None:
         raise HTTPException(404, "Audit entry not found")
 

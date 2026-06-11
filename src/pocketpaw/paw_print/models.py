@@ -3,6 +3,11 @@
 # (text / image / list / button / form / divider). No raw HTML, no script
 # injection paths. The widget.js bundle consumes PawPrintSpec; the backend
 # consumes PawPrintEvent on the ingest side.
+# Updated: 2026-06-10 (W0b security fix) — Added PawPrintWidgetPublic, a
+# token-free projection of PawPrintWidget used as the response model for
+# list/read endpoints so the per-widget access_token never leaves the server
+# in those payloads. The token is now only returned by the explicit,
+# authenticated create + rotate-token paths.
 
 from __future__ import annotations
 
@@ -157,6 +162,38 @@ class PawPrintWidget(BaseModel):
         if value < 1:
             raise ValueError("rate limits must be >= 1")
         return value
+
+
+class PawPrintWidgetPublic(BaseModel):
+    """Token-free projection of :class:`PawPrintWidget`.
+
+    Used as the response model for list/read endpoints. It carries every
+    widget field EXCEPT ``access_token`` — the per-widget owner credential
+    that authorizes mutating + event-read operations. That secret must never
+    leave the server in a list/read payload; it is returned only by the
+    explicit, authenticated create and rotate-token paths.
+
+    Build one with :meth:`from_widget` so the projection stays in lockstep
+    with the source model.
+    """
+
+    id: str
+    pocket_id: str
+    owner: str
+    name: str = ""
+    spec: PawPrintSpec
+    allowed_domains: list[str] = Field(default_factory=list)
+    rate_limit_per_min: int
+    per_customer_limit_per_min: int
+    event_mapping: dict[str, PawPrintEventMapping] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_widget(cls, widget: PawPrintWidget) -> PawPrintWidgetPublic:
+        data = widget.model_dump()
+        data.pop("access_token", None)
+        return cls(**data)
 
 
 class PawPrintEvent(BaseModel):

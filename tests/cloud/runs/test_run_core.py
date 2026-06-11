@@ -44,7 +44,7 @@ async def _noop(*a, **k):
     return None
 
 
-async def _persist_stub(spec, ctx, full_text, attachments):
+async def _persist_stub(spec, ctx, full_text, attachments, usage=None):
     return "assistant-msg-1"
 
 
@@ -136,7 +136,7 @@ async def test_execute_run_empty_text_marks_completed(monkeypatch):
         persisted.append("called")
         return "should-not-happen"
 
-    async def _track_completed(run_id, *, assistant_message_id, partial_text):
+    async def _track_completed(run_id, *, assistant_message_id, partial_text, **k):
         mark_calls.append(
             {
                 "fn": "mark_completed",

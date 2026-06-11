@@ -3,6 +3,14 @@
 Orchestrates backend selection, tool wiring, event emission, and result
 assembly. Always persists a pocket - see feedback_pocket_always_ships.md.
 
+Changes: 2026-06-10 (W2c — surface Tier-0 agent-parked writes for approval)
+— ``PocketSpecialistEditOutput.action`` gains the ``instinct_pending``
+literal. The pocket router uses it when a Tier-0 declarative write parks
+at the deny-by-default Instinct gate and is proposed for human approval:
+``ok=False`` (nothing landed) but NOT a failure — the write awaits a human
+in the Tray. The MCP handler's ``is_error`` check flags only ``failed``,
+so a pending write reaches the chat agent intact (do not retry / claim
+success), exactly like the ``draft_kit`` protocol state.
 Changes: 2026-05-21 (#1163) — the edit-specialist stream loop now inspects
 ``event.type == "error"`` (the deep_agents backend yields error events
 instead of raising), so a backend failure surfaces as ``ok=False`` with a
@@ -863,14 +871,20 @@ class PocketSpecialistEditOutput(BaseModel):
     ops: list[dict[str, Any]] = Field(default_factory=list)
     duration_ms: int
     backend_used: str
-    action: Literal["applied", "failed", "draft_kit", "skill_kit"] = Field(
+    action: Literal["applied", "failed", "draft_kit", "skill_kit", "instinct_pending"] = Field(
         default="applied",
         description=(
             "What the run did. ``applied`` — ops ran (subagent mode, or "
             "agent-mode second call). ``failed`` — the run errored. "
             "``draft_kit`` — agent-mode first call: no ops were supplied, "
             "so the response carries a ``draft_kit`` telling the chat agent "
-            "how to compute ops and call back with ``ops=<list>``."
+            "how to compute ops and call back with ``ops=<list>``. "
+            "``instinct_pending`` (W2c) — a Tier-0 declarative write was "
+            "PARKED at the deny-by-default Instinct gate and proposed for "
+            "human approval, not auto-fired. ``ok`` is False (nothing landed) "
+            "but this is NOT a failure: the write awaits a human in the Tray. "
+            "Like ``draft_kit`` it is a legitimate ``ok=False`` protocol state "
+            "the chat agent MUST surface (do not retry, do not claim success)."
         ),
     )
     error: str | None = Field(

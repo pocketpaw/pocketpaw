@@ -1,5 +1,10 @@
 # Fabric tools — agent tools for querying and managing the ontology.
 # Created: 2026-03-28 — Lets the agent create objects, query links, reason across data.
+# Updated: 2026-06-10 (W0d) — FabricQueryTool now exposes a `filters` parameter
+#   and passes it through to FabricQuery, so chat-driven queries like
+#   "leases where rent > X" actually filter. Previously the tool advertised
+#   property filtering but never accepted or forwarded filters, so the store
+#   (which also ignored them) returned every object of the type.
 
 import logging
 from typing import Any
@@ -75,6 +80,17 @@ class FabricQueryTool(BaseTool):
                     "type": "string",
                     "description": "Filter links by type (e.g., 'has_order', 'belongs_to')",
                 },
+                "filters": {
+                    "type": "object",
+                    "description": (
+                        "Filter objects by property values. Each key is a property name. "
+                        'Use a scalar for equality (e.g. {"status": "active"}) or an '
+                        'operator map for comparisons (e.g. {"rent": {">": 1000}}). '
+                        "Supported operators: =, !=, >, >=, <, <= (word aliases eq, ne, "
+                        "gt, gte, lt, lte also work). Numeric comparisons require the "
+                        "stored property to be a number."
+                    ),
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max results (default: 20)",
@@ -88,6 +104,7 @@ class FabricQueryTool(BaseTool):
         type_name: str | None = None,
         linked_to: str | None = None,
         link_type: str | None = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 20,
     ) -> str:
         store = _get_fabric_store()
@@ -102,6 +119,7 @@ class FabricQueryTool(BaseTool):
                     type_name=type_name,
                     linked_to=linked_to,
                     link_type=link_type,
+                    filters=filters or {},
                     limit=min(limit, 50),
                 )
             )

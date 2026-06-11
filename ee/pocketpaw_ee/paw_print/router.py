@@ -10,6 +10,18 @@
 # screened and dropped on a HIGH-or-higher threat. Renamed the helper to
 # _screen_event_for_injection and the rejection reason to
 # "injection_rejected".
+# Updated: 2026-06-10 (W0b security fix) — Closed an unauthenticated
+# access-token leak on the widget-management surface. (1) Widget CRUD
+# (create / list / update-spec / delete) now requires a fully-authenticated
+# dashboard caller via Depends(require_scope("admin")); previously these
+# routes had NO route-level auth, and the /api/v1/* mount is auth-OPTIONAL at
+# the middleware level, so an unauthenticated caller could reach them. (2) The
+# list and read responses now serialize PawPrintWidgetPublic, which omits
+# access_token — the per-widget owner credential no longer leaves the server
+# in a list/read payload. The token is still returned by the explicit,
+# authenticated create + rotate-token paths so an owner can capture it once.
+# The public spec-serving and event-ingest endpoints stay unauthenticated by
+# design (origin/CORS-gated for the embedded widget bundle).
 
 from __future__ import annotations
 
@@ -18,16 +30,18 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_print.models import (
     MAX_PAYLOAD_BYTES,
     PawPrintEvent,
     PawPrintEventMapping,
     PawPrintSpec,
     PawPrintWidget,
+    PawPrintWidgetPublic,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +98,9 @@ class CreateWidgetRequest(BaseModel):
 
 
 class WidgetListResponse(BaseModel):
-    widgets: list[PawPrintWidget]
+    # PawPrintWidgetPublic (not PawPrintWidget) — list payloads must never
+    # carry access_token (W0b).
+    widgets: list[PawPrintWidgetPublic]
     total: int
 
 
@@ -101,11 +117,26 @@ class EventsListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Owner-authed CRUD
+# Widget management (CRUD)
+#
+# Auth model (W0b): these routes are mounted under /api/v1, which the
+# dashboard AuthMiddleware treats as auth-OPTIONAL — it populates request.state
+# but does NOT 401. So management routes MUST gate themselves at the route
+# level. require_scope("admin") is fail-closed: it accepts a full-access
+# dashboard session (master/session-cookie/localhost) or an admin-scoped
+# API-key / OAuth token, and 403s everyone else (including unauthenticated
+# callers). The per-widget access_token (X-Paw-Print-Token) is a SECOND factor
+# on read/mutate of a specific widget — it is not a substitute for being a
+# signed-in dashboard user, which is why create/list need this guard.
 # ---------------------------------------------------------------------------
 
 
-@router.post("/paw-print/widgets", response_model=PawPrintWidget, status_code=201)
+@router.post(
+    "/paw-print/widgets",
+    response_model=PawPrintWidget,
+    status_code=201,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def create_widget(req: CreateWidgetRequest) -> PawPrintWidget:
     widget = PawPrintWidget(
         pocket_id=req.pocket_id,
@@ -120,34 +151,48 @@ async def create_widget(req: CreateWidgetRequest) -> PawPrintWidget:
     return await _store().create_widget(widget)
 
 
-@router.get("/paw-print/widgets", response_model=WidgetListResponse)
+@router.get(
+    "/paw-print/widgets",
+    response_model=WidgetListResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def list_widgets(
     pocket_id: str | None = Query(None),
     owner: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ) -> WidgetListResponse:
     widgets = await _store().list_widgets(pocket_id=pocket_id, owner=owner, limit=limit)
-    return WidgetListResponse(widgets=widgets, total=len(widgets))
+    # Project to the token-free model — a list payload must never carry the
+    # per-widget access_token (W0b).
+    public = [PawPrintWidgetPublic.from_widget(w) for w in widgets]
+    return WidgetListResponse(widgets=public, total=len(public))
 
 
-@router.get("/paw-print/widgets/{widget_id}", response_model=PawPrintWidget)
+@router.get("/paw-print/widgets/{widget_id}", response_model=PawPrintWidgetPublic)
 async def get_widget(
     widget_id: str,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidget:
+) -> PawPrintWidgetPublic:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_print_token)
-    return widget
+    # Read responses omit access_token — the caller already holds it (they had
+    # to present it to pass _require_owner_token), so echoing it back only
+    # widens the blast radius if a read response is logged/cached (W0b).
+    return PawPrintWidgetPublic.from_widget(widget)
 
 
-@router.patch("/paw-print/widgets/{widget_id}/spec", response_model=PawPrintWidget)
+@router.patch(
+    "/paw-print/widgets/{widget_id}/spec",
+    response_model=PawPrintWidgetPublic,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def update_spec(
     widget_id: str,
     spec: PawPrintSpec,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidget:
+) -> PawPrintWidgetPublic:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
@@ -155,14 +200,22 @@ async def update_spec(
     updated = await _store().update_spec(widget_id, spec)
     if updated is None:
         raise HTTPException(404, "Widget not found")
-    return updated
+    return PawPrintWidgetPublic.from_widget(updated)
 
 
-@router.post("/paw-print/widgets/{widget_id}/rotate-token", response_model=PawPrintWidget)
+@router.post(
+    "/paw-print/widgets/{widget_id}/rotate-token",
+    response_model=PawPrintWidget,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def rotate_token(
     widget_id: str,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
 ) -> PawPrintWidget:
+    # Returns the FULL widget (with the new access_token) on purpose: this is
+    # the explicit, authenticated reveal path so the owner can capture the
+    # rotated secret. Still requires the old token AND an admin dashboard
+    # session (W0b).
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
@@ -173,7 +226,11 @@ async def rotate_token(
     return rotated
 
 
-@router.delete("/paw-print/widgets/{widget_id}", status_code=204)
+@router.delete(
+    "/paw-print/widgets/{widget_id}",
+    status_code=204,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def delete_widget(
     widget_id: str,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
