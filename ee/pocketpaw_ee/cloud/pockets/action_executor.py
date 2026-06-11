@@ -1,4 +1,19 @@
 # action_executor.py — Server-side executor for pocket WRITE actions.
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) —
+#   `ActionBinding.requires_instinct` now DEFAULTS to True. Every write
+#   binding routes through the Instinct approval gate (parks at gate 7)
+#   unless EXPLICITLY exempted via the new `instinct_exempt` field or the
+#   call is an already-gated re-entry (`from_instinct=True` — post-approval
+#   replay + planner-approved bulk/temporal rows). Previously the default
+#   was False, so an agent-authored binding (which never sets the field)
+#   bypassed the gate — the moat's "every agent action routes through an
+#   audited approval gate" claim was opt-in. The exemption is declarative
+#   and auditable (a persisted spec field), not a silent code-path bypass;
+#   a `model_validator` rejects `instinct_exempt` set alongside an active
+#   `instinct_policy`. The RFC 09 direct-path decision-chain emits (gate-8
+#   success + failure close) are re-guarded on `not from_instinct` instead
+#   of `not binding.requires_instinct` so an exempt direct-fire still emits
+#   its own auto-approve close while the bridge re-entry stays suppressed.
 # Created: 2026-05-22 (RFC 05 M2a) — the write half of the pocket data
 #   layer. RFC 04's `source_executor.py` runs GET read bindings; this
 #   module runs POST/PUT/PATCH/DELETE write bindings declared in a pocket's
@@ -196,17 +211,37 @@ class ActionBinding(BaseModel):
     M2b.1 promotes the three governance fields to REAL declared fields:
 
     * ``requires_instinct`` — when true the write is routed through the
-      Instinct approval surface instead of firing directly.
+      Instinct approval surface instead of firing directly. W2a flips the
+      DEFAULT to ``True`` (deny-by-default governance — see below).
     * ``instinct_policy`` — how Instinct batches the write
       (``approve_per_row`` is the only policy this build executes;
       ``approve_batch`` is reserved for M2b.3 and not yet implemented).
     * ``outcome`` — the named outcome a successful run emits as a
       ``pocket.outcome`` event (M2b.2). ``None`` means no emit.
+    * ``instinct_exempt`` — W2a's explicit, AUDITABLE exemption. When
+      ``True`` the binding declares (in the persisted spec) that it is
+      deliberately allowed to fire WITHOUT routing through the approval
+      gate. This is the only way to opt a binding out of the gate at
+      author time — there is no silent code-path bypass.
+
+    W2a — DENY-BY-DEFAULT. ``requires_instinct`` now defaults to ``True``:
+    every write binding routes through the Instinct approval gate unless it
+    is EXPLICITLY exempted (``instinct_exempt=True``) or the call is an
+    already-gated re-entry (``from_instinct=True`` — the post-approval
+    replay and the bulk/planner-approved paths). The moat claim is "every
+    agent action routes through an audited approval gate"; an agent-authored
+    binding never sets ``requires_instinct``, so under the old ``False``
+    default it bypassed the gate. Flipping the default closes that bypass at
+    the single chokepoint every author and the executor validate through.
 
     A ``model_validator`` rejects an ``instinct_policy`` set WITHOUT
     ``requires_instinct`` — a policy with no gate to apply to is a
     misconfiguration, and silently ignoring it would hide the author's
-    intent.
+    intent. A second ``model_validator`` rejects ``instinct_exempt`` set
+    together with ``requires_instinct`` explicitly true / a policy — the two
+    are contradictory (exempt means "no gate", a policy means "gate this
+    way"), so the contradiction is caught at parse time rather than letting
+    one silently win.
     """
 
     model_config = {"extra": "ignore"}
@@ -219,9 +254,15 @@ class ActionBinding(BaseModel):
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
     # --- M2b governance / metering fields (RFC 05 M2b.1) ----------------
-    requires_instinct: bool = False
+    # W2a: deny-by-default. A binding routes through the Instinct approval
+    # gate unless explicitly exempted (`instinct_exempt`) or the call is an
+    # already-gated re-entry (`from_instinct=True`).
+    requires_instinct: bool = True
     instinct_policy: Literal["approve_per_row", "approve_batch"] | None = None
     outcome: str | None = None
+    # W2a: explicit, auditable exemption. A binding the author deliberately
+    # allows to fire WITHOUT the gate sets this True in the persisted spec.
+    instinct_exempt: bool = False
 
     @model_validator(mode="after")
     def _policy_needs_gate(self) -> ActionBinding:
@@ -236,6 +277,25 @@ class ActionBinding(BaseModel):
             raise ValueError(
                 "instinct_policy is set but requires_instinct is false — "
                 "a policy needs the instinct gate enabled"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _exempt_is_consistent(self) -> ActionBinding:
+        """W2a — ``instinct_exempt`` cannot coexist with an active gate.
+
+        An exempt binding says "fire me without approval"; an
+        ``instinct_policy`` says "gate me this way". The two contradict, so
+        a binding that sets both is a misconfiguration — reject it at parse
+        time rather than letting one silently override the other and hide
+        the author's intent. ``requires_instinct`` defaults to ``True``, so
+        an exempt binding must turn it off explicitly: the canonical exempt
+        shape is ``{instinct_exempt: True, requires_instinct: False}``.
+        """
+        if self.instinct_exempt and self.instinct_policy is not None:
+            raise ValueError(
+                "instinct_exempt is true but instinct_policy is set — an "
+                "exempt binding has no gate for a policy to apply to"
             )
         return self
 
@@ -568,6 +628,23 @@ async def run_action(
     on_error = binding.on_error
     method = binding.method
 
+    # W2a — set True only when the template-level CEL gate (1.5) ran AND
+    # returned `proceed` (verdict EXECUTE / NOTIFY_AND_EXECUTE). That
+    # verdict is an EXPLICIT, AUDITABLE adjudication of this exact write by
+    # the template's Instinct rules — the same approval surface gate 7
+    # enforces, just evaluated one layer up. So a write the template gate
+    # cleared must NOT be re-parked at gate 7 (which, under deny-by-default,
+    # would now park every binding that doesn't set `requires_instinct`).
+    # Double-gating the template path would silently park the temporal
+    # sweeper's already-planner-cleared rows and the bulk-dispatch fan-out.
+    # This is NOT a bypass: the gate ran, recorded its verdict, and said
+    # proceed. A template that is BOUND but DECLARES no rule for this action
+    # yields EXECUTE (resolve_instinct's default), so a template-bound
+    # pocket with no rule for the action still rides the template-gate path
+    # — which is the correct read of "this template governs this action and
+    # imposed no constraint", not "no governance".
+    template_gate_cleared = False
+
     # ── 1.5. RFC 03 v2 template-level Instinct gate ─────────────────────
     # When a template is threaded through (and we're not re-entering
     # post-approval), evaluate `resolve_instinct` via the dispatch
@@ -640,6 +717,12 @@ async def run_action(
         # gate.next_step == "proceed" — fall through into the existing
         # gate stack. Notify rules are dropped on the floor here; Wave
         # 3c wires the side-effect dispatcher.
+        #
+        # W2a — the template gate EXPLICITLY adjudicated this write and said
+        # proceed. Mark it so gate 7's deny-by-default park does not double-
+        # gate it (see the `template_gate_cleared` definition above and the
+        # gate-7 condition below).
+        template_gate_cleared = True
 
     # ── 2. write rate limit ─────────────────────────────────────────────
     if await _action_rate_limited(pocket_id, user_id):
@@ -782,15 +865,41 @@ async def run_action(
         return _error(action, exc.message, exc.code, on_error)
 
     # ── 7. instinct park ────────────────────────────────────────────────
-    # A binding that requires instinct, on a direct (not post-approval)
-    # run, is PARKED — not fired. Gates 2-6 already ran as VALIDATION, so a
-    # write the allowlist would reject was rejected above, NOT parked: an
-    # off-policy write must never reach the approval surface looking
-    # legitimate. The executor stays pure — it just returns the resolved
-    # write under `_park` and signals `instinct_pending`. The router hands
-    # `_park` to `instinct_bridge.propose_pocket_write`, which builds the
-    # Instinct Action. NO HTTP call is made here.
-    if binding.requires_instinct and not from_instinct:
+    # W2a — DENY-BY-DEFAULT. `binding.requires_instinct` now defaults True
+    # (see ActionBinding), so EVERY write parks here unless one of THREE
+    # explicit, auditable conditions holds:
+    #   * `binding.instinct_exempt` — the author declared (in the persisted
+    #     spec) that this binding is deliberately allowed to fire without
+    #     approval. The only author-time opt-out; there is no silent bypass.
+    #   * `from_instinct` — an already-gated re-entry: the post-approval
+    #     replay from `instinct_bridge.execute_approved_write`. Re-parking
+    #     it would loop / double-gate the write a human already approved.
+    #   * `template_gate_cleared` — the template-level CEL gate (1.5) ran
+    #     and returned `proceed` (verdict EXECUTE / NOTIFY_AND_EXECUTE).
+    #     That verdict IS an explicit, auditable adjudication of this write
+    #     by the template's Instinct rules — the same approval surface this
+    #     gate enforces, one layer up. Re-parking here would double-gate the
+    #     temporal sweeper's planner-cleared rows and the bulk fan-out (both
+    #     thread `template` with `from_instinct=False`), silently parking
+    #     writes the template already cleared. The template gate is the
+    #     governance for template-bound pockets; the binding-level gate is
+    #     the deny-by-default backstop for everything else.
+    #
+    # A binding that requires instinct, on a direct (not post-approval, not
+    # exempt, not template-cleared) run, is PARKED — not fired. Gates 2-6
+    # already ran as VALIDATION, so a write the allowlist would reject was
+    # rejected above, NOT parked: an off-policy write must never reach the
+    # approval surface looking legitimate. The executor stays pure — it just
+    # returns the resolved write under `_park` and signals
+    # `instinct_pending`. The router hands `_park` to
+    # `instinct_bridge.propose_pocket_write`, which builds the Instinct
+    # Action. NO HTTP call is made here.
+    if (
+        binding.requires_instinct
+        and not binding.instinct_exempt
+        and not from_instinct
+        and not template_gate_cleared
+    ):
         _audit_action_run(
             actor=user_id,
             workspace_id=workspace_id,
@@ -966,14 +1075,23 @@ async def run_action(
     # RFC 09 Slice 2 — direct-path (non-Instinct) close: emit the
     # auto-approve `policy.evaluated(passed=True)` for chain symmetry
     # with the parked-then-approved path, then the `decision.completed`
-    # terminal. Guarded by `not binding.requires_instinct` so the
-    # Instinct re-entry path (where `from_instinct=True` AND
-    # `binding.requires_instinct=True`) does NOT double-emit with the
-    # bridge at `instinct_bridge.execute_approved_write` site (b). The
-    # captain's brief: "if there's a path that doesn't go through
-    # Instinct's human approval flow, emit policy.evaluated(passed=True)
-    # AND decision.completed(landed) in sequence."
-    if not binding.requires_instinct:
+    # terminal. The captain's brief: "if there's a path that doesn't go
+    # through Instinct's human approval flow, emit
+    # policy.evaluated(passed=True) AND decision.completed(landed) in
+    # sequence."
+    #
+    # W2a — the guard is now `not from_instinct` (was `not
+    # binding.requires_instinct`). Reaching gate 8 with `from_instinct`
+    # False means gate 7 did NOT park, which (under deny-by-default) can
+    # only happen when the gate was inapplicable — an `instinct_exempt`
+    # binding or an explicitly `requires_instinct=False` binding fired
+    # DIRECTLY, so it owns its own auto-approve close. When `from_instinct`
+    # is True this is the Instinct re-entry; the bridge at
+    # `instinct_bridge.execute_approved_write` site (b) owns the close, so
+    # we suppress here to avoid a doubled chain terminal. The old
+    # `not binding.requires_instinct` guard silently dropped the close for
+    # exempt direct-fires once the default flipped to True.
+    if not from_instinct:
         actor = _chain_actor(user_id=user_id, workspace_id=workspace_id, pocket_id=pocket_id)
         scope = _chain_scope(workspace_id=workspace_id, pocket_id=pocket_id)
         policy_event_id = _safe_record(
@@ -1026,14 +1144,21 @@ def _emit_direct_path_failure(
 ) -> None:
     """Emit ``decision.completed(failed)`` for the direct (non-Instinct) path.
 
-    Same guard as the success emit: only fires when the binding is NOT
-    Instinct-gated. The Instinct re-entry failure path closes the chain
-    from ``instinct_bridge.execute_approved_write`` site (d) instead, so
-    we'd double-emit if we fired here too. ``error_class`` is the Python
+    Same guard as the success emit: only fires when this is a DIRECT
+    (not re-entry) call. The Instinct re-entry failure path closes the
+    chain from ``instinct_bridge.execute_approved_write`` site (d) instead,
+    so we'd double-emit if we fired here too. ``error_class`` is the Python
     exception type name (TimeoutError / BackendHTTPError / GuardError /
     type(exc).__name__) for the narrator's "why did this fail" story.
+
+    W2a — the guard is ``from_instinct`` (was ``binding.requires_instinct``)
+    to match the success-path close: under deny-by-default a binding that
+    reaches the HTTP call on a direct run is an exempt / auto-fire write
+    that owns its own chain close, so suppressing it on
+    ``binding.requires_instinct`` (now default True) would silently drop
+    the failure terminal for every exempt direct-fire.
     """
-    if binding.requires_instinct:
+    if from_instinct:
         return
     _safe_record(
         record_decision_completed,

@@ -1,5 +1,14 @@
 # test_router.py — Tests for the pocket execution router's dispatch +
 #   observability (Increment 3).
+# Updated: 2026-06-10 (W2c — surface Tier-0 agent-parked writes for
+#   approval) — adds the deny-by-default park-routing tests at the bottom:
+#   a Tier-0 write whose binding OMITS ``requires_instinct`` (the agent
+#   default) now PARKS at the executor's gate and the router routes it into
+#   the Instinct approval queue, so ``store.pending()`` shows a real PENDING
+#   Action a human can see — not just a "needs approval" string. An
+#   explicitly-exempt action still fires through Tier-0. These drive the
+#   REAL ``action_executor.run_action`` end-to-end against an isolated
+#   InstinctStore.
 # Created: 2026-05-22 — pins the router contract: a Tier-0 verdict invokes
 #   the EXISTING executor (it does not reimplement it) and emits a
 #   ``pocket_execution`` SSE frame with ``tokens:{0,0}`` and the layout /
@@ -417,3 +426,206 @@ async def test_tier1_applies_one_op_end_to_end(beanie_test_db, recording_bus):
     stages = {s["stage"]: s for s in frame["stages"]}
     assert stages["layout_build"]["ran"] is False
     assert stages["widget_render"]["ran"] is False
+
+
+# ---------------------------------------------------------------------------
+# W2c — Tier-0 deny-by-default: a parked agent write reaches the approval queue
+# ---------------------------------------------------------------------------
+#
+# A pocket whose write binding OMITS `requires_instinct` is the agent's
+# default authoring shape. The classifier reads the RAW dict, sees no
+# `requires_instinct` key, and routes it Tier-0 (auto-fire). Under W2a
+# deny-by-default the executor PARKS it (the binding defaults
+# requires_instinct=True). W2c routes that park into the Instinct approval
+# queue, so a human sees a PENDING Action. An explicitly-exempt binding
+# (`instinct_exempt=True, requires_instinct=False`) still fires.
+
+# A write action with NO `requires_instinct` key — the classifier waves it
+# through Tier-0 (it reads the raw dict), the executor parks it (deny-by-
+# default). `save_lease` + intent "save lease" matches the action verb +
+# key; static params resolve.
+_SPEC_DENY_BY_DEFAULT_ACTION = {
+    "version": "1.0",
+    "actions": {
+        "save_lease": {
+            "kind": "write_binding",
+            "method": "POST",
+            "path": "/leases/42/renew",
+            "params": {"rent": 2000},
+        }
+    },
+    "state": {},
+    "ui": {"id": "n_root0000", "type": "flex", "props": {}, "children": []},
+}
+
+# Same shape, but the binding is EXPLICITLY exempt — it should fire through
+# Tier-0 (no park) exactly like the legacy opt-in path.
+_SPEC_EXEMPT_ACTION = {
+    "version": "1.0",
+    "actions": {
+        "save_lease": {
+            "kind": "write_binding",
+            "method": "POST",
+            "path": "/leases/42/renew",
+            "params": {"rent": 2000},
+            "instinct_exempt": True,
+            "requires_instinct": False,
+        }
+    },
+    "state": {},
+    "ui": {"id": "n_root0000", "type": "flex", "props": {}, "children": []},
+}
+
+_ALLOWLIST = [{"method": "POST", "path_pattern": "/leases/*/renew"}]
+
+
+def _public_dns(monkeypatch) -> None:
+    """Make every hostname resolve to a public IP so the executor's DNS
+    pre-resolve guard (gate 6) passes — it runs BEFORE the gate-7 park."""
+
+    def _fake_getaddrinfo(host, *_a, **_k):  # noqa: ANN001, ANN002, ANN003
+        return [(2, 1, 6, "", ("8.8.8.8", 0))]
+
+    monkeypatch.setattr("socket.getaddrinfo", _fake_getaddrinfo)
+
+
+def _isolated_instinct_store(monkeypatch, tmp_path):
+    """Wire an isolated ``InstinctStore`` into the bridge.
+
+    ``instinct_bridge.propose_pocket_write`` lazy-imports
+    ``get_instinct_store`` from ``pocketpaw.stores`` — patch it there so the
+    proposed Action lands in a temp-backed store this test can query and
+    never touches ``~/.pocketpaw/instinct.db``."""
+    from pocketpaw.instinct.store import InstinctStore
+
+    st = InstinctStore(tmp_path / "w2c_router_instinct.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    return st
+
+
+@pytest.mark.asyncio
+async def test_tier0_deny_by_default_write_lands_in_instinct_pending(monkeypatch, tmp_path):
+    """W2c — a Tier-0 agent write whose binding OMITS `requires_instinct`
+    is PARKED by the executor (deny-by-default) and the router routes it
+    into the Instinct approval queue. The proposal is visible via
+    `store.pending()` — a REAL PENDING Action, not just a 'needs approval'
+    string. The router reports it as handled-but-pending (no auto-fire, no
+    escalation to the specialist)."""
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    from pocketpaw.instinct.models import ActionStatus
+
+    _public_dns(monkeypatch)
+    action_executor._action_log.clear()
+    store = _isolated_instinct_store(monkeypatch, tmp_path)
+
+    # No HTTP must be attempted — the write parks before gate 8.
+    http_hit = {"called": False}
+
+    def _no_http(*_a, **_k):  # noqa: ANN002, ANN003
+        http_hit["called"] = True
+        raise AssertionError("a parked write must NOT make an HTTP call")
+
+    monkeypatch.setattr(action_executor, "_do_request", _no_http)
+
+    pocket_wire = {
+        "_id": "507f1f77bcf86cd799439011",
+        "workspace": "w1",
+        "name": "Leases",
+        "owner": "u1",
+    }
+
+    with (
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
+            new=AsyncMock(
+                return_value=("https://api.example.com", "none", None, "", _ALLOWLIST, None)
+            ),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.has_action_run_access",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.get",
+            new=AsyncMock(return_value=pocket_wire),
+        ),
+    ):
+        handled, output = await classify_and_route(
+            _EditInput("save lease", pocket={"rippleSpec": _SPEC_DENY_BY_DEFAULT_ACTION}),
+            workspace_id="w1",
+            user_id="u1",
+            settings=_Settings(),
+        )
+
+    # Handled (no escalation to the specialist) but NOT applied — the write
+    # is pending approval, not fired.
+    assert handled is True
+    assert output is not None
+    assert output.ok is False
+    assert output.action == "instinct_pending"
+    assert output.ops == []
+    assert http_hit["called"] is False
+
+    # The PROOF: a real PENDING Instinct Action now exists for this pocket.
+    pending = await store.pending(pocket_id="507f1f77bcf86cd799439011")
+    assert len(pending) == 1, f"expected one pending proposal, got {pending}"
+    action = pending[0]
+    assert action.status == ActionStatus.PENDING
+    blob = action.parameters["_pocket_write"]
+    assert blob["action"] == "save_lease"
+    assert blob["method"] == "POST"
+    assert blob["path"] == "/leases/42/renew"
+    assert blob["params"] == {"rent": 2000}
+    # The pending id round-trips on the output so the agent can deep-link it.
+    assert action.id in output.backend_used
+
+
+@pytest.mark.asyncio
+async def test_tier0_explicitly_exempt_write_still_fires(monkeypatch, tmp_path):
+    """W2c — an explicitly-exempt binding
+    (`instinct_exempt=True, requires_instinct=False`) is NOT parked: it
+    fires through Tier-0 and the router returns an applied output. No
+    Instinct proposal is created."""
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    _public_dns(monkeypatch)
+    action_executor._action_log.clear()
+    store = _isolated_instinct_store(monkeypatch, tmp_path)
+
+    http_hit = {"called": False}
+
+    def _ok_http(*_a, **_k):  # noqa: ANN002, ANN003
+        http_hit["called"] = True
+        return {"status": 200, "response": {}}
+
+    monkeypatch.setattr(action_executor, "_do_request", AsyncMock(side_effect=_ok_http))
+
+    with (
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
+            new=AsyncMock(
+                return_value=("https://api.example.com", "none", None, "", _ALLOWLIST, None)
+            ),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.has_action_run_access",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        handled, output = await classify_and_route(
+            _EditInput("save lease", pocket={"rippleSpec": _SPEC_EXEMPT_ACTION}),
+            workspace_id="w1",
+            user_id="u1",
+            settings=_Settings(),
+        )
+
+    assert handled is True
+    assert output is not None
+    assert output.ok is True
+    assert output.action == "applied"
+    assert http_hit["called"] is True
+
+    # An exempt fire creates NO pending proposal.
+    pending = await store.pending(pocket_id="507f1f77bcf86cd799439011")
+    assert pending == [], f"an exempt write must not create a proposal: {pending}"

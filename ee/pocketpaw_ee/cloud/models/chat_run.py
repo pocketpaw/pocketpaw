@@ -1,9 +1,20 @@
-"""Beanie document for one assistant chat turn."""
+"""Beanie document for one assistant chat turn.
+
+Changes:
+- 2026-06-10 (sov/w3a-igw — per-run token metering) — added the ``usage`` field
+  so each run records the actual prompt / completion / cached token counts (and
+  cost / model / backend) the backend reports, instead of the counts being
+  dropped. ``run_core`` captures the backend's ``token_usage`` event and persists
+  the assembled dict here via ``mark_completed`` / ``mark_terminal``. ``{}`` when
+  the backend reported no usage (legacy / empty-text / pre-metering runs), so the
+  field is a precondition for outcome-based (token-metered) pricing without
+  changing any existing run lifecycle.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from beanie import Document
 from pydantic import Field
@@ -31,6 +42,12 @@ class ChatRunDoc(Document):
     status: RunStatus = "queued"
     partial_text: str = ""
     error: str | None = None
+    # Per-run token usage assembled from the backend's ``token_usage`` event
+    # (input / output / cached_input token counts + total_cost_usd + model +
+    # backend). ``{}`` when the backend reported nothing — keeps legacy /
+    # empty-text runs unchanged. This is the durable metering sink that
+    # outcome-based pricing reads off.
+    usage: dict[str, Any] = Field(default_factory=dict)
     createdAt: datetime = Field(default_factory=_utcnow)
     started_at: datetime | None = None
     ended_at: datetime | None = None

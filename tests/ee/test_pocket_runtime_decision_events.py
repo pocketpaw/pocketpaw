@@ -24,6 +24,14 @@
 # unit-tested here via direct ``run_action(..., from_instinct=True,
 # correlation_id=<parked>)`` calls, which is the same code path the
 # bridge takes.
+#
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
+# local `_write_action()` helper now marks its binding EXPLICITLY EXEMPT
+# by default (`instinct_exempt=True, requires_instinct=False`) because
+# `ActionBinding.requires_instinct` flipped to default-True; without the
+# exemption a plain binding would PARK at gate 7 and the direct-path emit
+# these tests assert on would never fire. The park / `from_instinct`
+# re-entry tests pass `exempt=False` to build a governed binding.
 
 from __future__ import annotations
 
@@ -111,8 +119,24 @@ def _mock_client_patch(monkeypatch, handler):
     monkeypatch.setattr(action_executor.httpx, "AsyncClient", _factory)
 
 
-def _write_action(method: str = "POST", path: str = "/leases/42/renew") -> dict:
-    return {"kind": "write_binding", "method": method, "path": path, "params": {}}
+def _write_action(
+    method: str = "POST", path: str = "/leases/42/renew", *, exempt: bool = True
+) -> dict:
+    """A minimal raw action dict.
+
+    W2a — deny-by-default: `ActionBinding.requires_instinct` defaults True,
+    so a plain binding now PARKS instead of firing the direct path these
+    chain-emit tests assert on. The helper marks the binding EXPLICITLY
+    EXEMPT by default (`instinct_exempt=True, requires_instinct=False`) so
+    the direct-path emit (`policy.evaluated` + `decision.completed`) still
+    fires. The park / `from_instinct` re-entry tests pass `exempt=False`
+    and set `requires_instinct=True` to build a governed binding.
+    """
+    raw: dict = {"kind": "write_binding", "method": method, "path": path, "params": {}}
+    if exempt:
+        raw["instinct_exempt"] = True
+        raw["requires_instinct"] = False
+    return raw
 
 
 def _allow(method: str = "POST", pattern: str = "/leases/*/renew") -> list[dict]:
@@ -196,7 +220,7 @@ async def test_from_instinct_reentry_does_not_re_emit_agent_proposed(
         pocket_id="p1",
         user_id="u_alice",
         action="mark_renewed",
-        raw_action={**_write_action(), "requires_instinct": True},
+        raw_action={**_write_action(exempt=False), "requires_instinct": True},
         path="/leases/42/renew",
         params={},
         base_url=BASE,
@@ -218,7 +242,7 @@ async def test_from_instinct_reentry_does_not_re_emit_agent_proposed(
         pocket_id="p1",
         user_id="u_alice",
         action="mark_renewed",
-        raw_action={**_write_action(), "requires_instinct": True},
+        raw_action={**_write_action(exempt=False), "requires_instinct": True},
         path="/leases/42/renew",
         params={},
         base_url=BASE,
@@ -499,7 +523,7 @@ async def test_instinct_reentry_success_does_not_double_emit_completed(
         pocket_id="p1",
         user_id="u_alice",
         action="mark_renewed",
-        raw_action={**_write_action(), "requires_instinct": True},
+        raw_action={**_write_action(exempt=False), "requires_instinct": True},
         path="/leases/42/renew",
         params={},
         base_url=BASE,
@@ -532,7 +556,7 @@ async def test_instinct_reentry_failure_does_not_emit_completed(
         pocket_id="p1",
         user_id="u_alice",
         action="mark_renewed",
-        raw_action={**_write_action(), "requires_instinct": True},
+        raw_action={**_write_action(exempt=False), "requires_instinct": True},
         path="/leases/42/renew",
         params={},
         base_url=BASE,
@@ -569,7 +593,7 @@ async def test_parked_blob_carries_correlation_id_and_event_id_placeholder(
         pocket_id="p1",
         user_id="u_alice",
         action="mark_renewed",
-        raw_action={**_write_action(), "requires_instinct": True},
+        raw_action={**_write_action(exempt=False), "requires_instinct": True},
         path="/leases/42/renew",
         params={"rent": 2000},
         base_url=BASE,

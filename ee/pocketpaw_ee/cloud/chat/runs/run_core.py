@@ -1,6 +1,18 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-10 (sov/w3a-igw — per-run token metering) — real token usage is now
+  threaded through the run instead of being dropped. Every backend emits a
+  ``token_usage`` ``AgentEvent`` (input / output / cached token counts +
+  total_cost_usd + model + backend), but ``_drive_agent_loop`` had no handler for
+  it, so it was silently discarded and the ``stream_end`` frame's ``usage`` was a
+  hardcoded ``{}``. ``_drive_agent_loop`` now surfaces ``token_usage`` as a
+  ``("token_usage", {...})`` tuple; ``execute_run`` keeps the LATEST one, writes it
+  to the stream, folds it into BOTH ``stream_end`` frames (success + cancelled /
+  empty-text), and persists it onto ``ChatRunDoc.usage`` via
+  ``mark_completed`` / ``mark_terminal`` (the durable metering sink for
+  outcome-based pricing). Empty for backends / runs that report nothing, so
+  existing runs are unchanged.
 - 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
   identity binding now also passes ``pocket_id=ctx.pocket_id`` into
   ``attach_agent_identity``, publishing the room's ``Pocket._id`` on the new
@@ -574,14 +586,22 @@ async def _persist_and_complete(
     ctx: ScopeContext,
     full_text: str,
     attachments: list[dict[str, Any]],
+    usage: dict[str, Any] | None = None,
 ) -> str:
-    """Persist the assistant message, mark the run completed, broadcast."""
+    """Persist the assistant message, mark the run completed, broadcast.
+
+    ``usage`` (W3a) is the per-run token-metering dict assembled from the
+    backend's ``token_usage`` event; it is persisted onto the run doc so each
+    completed run carries its real prompt / completion / cached token counts.
+    ``None`` / empty leaves the stored usage untouched (legacy / no-usage runs).
+    """
     msg = await _persist_assistant_message(ctx, full_text, attachments)
     assistant_id = str(msg.id)
     await run_service.mark_completed(
         spec.run_id,
         assistant_message_id=assistant_id,
         partial_text=full_text,
+        usage=usage or None,
     )
     await _broadcast_message_new(
         ctx, assistant_id, full_text, attachments, created_at=msg.createdAt
@@ -837,6 +857,19 @@ async def _drive_agent_loop(
                     handled_pocket_ids=handled_pocket_ids,
                 )
                 yield ("tool_result", {"tool": name, "output": output})
+            elif etype == "token_usage":
+                # Real per-run token metering (W3a). The backend (claude_sdk and
+                # every other backend) emits a ``token_usage`` AgentEvent whose
+                # ``metadata`` carries input / output / cached token counts +
+                # total_cost_usd + model + backend. This branch used to be
+                # missing, so the whole event was silently dropped and the run's
+                # ``usage`` stayed ``{}`` (tokens were not metered). Surface the
+                # metadata as a plain dict; ``execute_run`` keeps the latest one
+                # and folds it into the ``stream_end`` frame + the persisted run
+                # doc. Mirrors the native ``agents/loop.py`` token_usage handler.
+                meta = getattr(event, "metadata", None) or {}
+                usage_payload = dict(meta) if isinstance(meta, dict) else {}
+                yield ("token_usage", usage_payload)
             elif etype == "error":
                 # Surface backend-yielded errors instead of silently dropping
                 # them — a misconfigured backend (codex_cli without
@@ -986,6 +1019,13 @@ async def execute_run(spec: RunSpec) -> None:
     cancelled = False
     error: Exception | None = None
     backend_error_message: str | None = None
+    # Per-run token metering (W3a). The backend yields a ``token_usage`` event
+    # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
+    # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
+    # multi-turn agent loop can report usage more than once) so the final
+    # ``stream_end`` frame and the persisted run doc carry actual counts instead
+    # of the old hardcoded ``{}``.
+    usage: dict[str, Any] = {}
     try:
         async for event_name, event_data in _iter_agent_events(spec, ctx):
             if await transport.is_cancelled(spec.run_id):
@@ -995,6 +1035,9 @@ async def execute_run(spec: RunSpec) -> None:
                 content = event_data.get("content", "")
                 if isinstance(content, str):
                     full_text += content
+            elif event_name == "token_usage":
+                if isinstance(event_data, dict) and event_data:
+                    usage = event_data
             await transport.append_event(spec.run_id, event_name, event_data)
             if event_name == "error":
                 # ``_drive_agent_loop`` already broke out after yielding this.
@@ -1064,12 +1107,14 @@ async def execute_run(spec: RunSpec) -> None:
                     spec.run_id,
                     status="cancelled",
                     partial_text=full_text,
+                    usage=usage or None,
                 )
             else:
                 await run_service.mark_completed(
                     spec.run_id,
                     assistant_message_id=None,
                     partial_text=full_text,
+                    usage=usage or None,
                 )
         except Exception:
             logger.exception(
@@ -1080,7 +1125,7 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.append_event(
             spec.run_id,
             "stream_end",
-            {"assistant_message_id": None, "usage": {}, "cancelled": cancelled},
+            {"assistant_message_id": None, "usage": usage, "cancelled": cancelled},
         )
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
@@ -1092,10 +1137,10 @@ async def execute_run(spec: RunSpec) -> None:
         full_text = remaining_text
         await transport.append_event(spec.run_id, "ripple", {"spec": ripple_spec})
 
-    assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments)
+    assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments, usage=usage)
     await transport.append_event(
         spec.run_id,
         "stream_end",
-        {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
+        {"assistant_message_id": assistant_id, "usage": usage, "cancelled": False},
     )
     await transport.set_ttl(spec.run_id, _stream_ttl())

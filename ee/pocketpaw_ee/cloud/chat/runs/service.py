@@ -2,12 +2,21 @@
 
 Internal seam (not an HTTP-exposed CRUD entity): the public functions take a
 ``RunSpec`` value object rather than the standard ``(workspace_id, user_id, body)``.
+
+Changes:
+- 2026-06-10 (sov/w3a-igw — per-run token metering) — ``mark_completed`` and
+  ``mark_terminal`` now accept an optional ``usage: dict[str, Any] | None`` and
+  persist it onto ``ChatRunDoc.usage`` when provided. ``run_core`` passes the
+  token-usage dict it assembles from the backend's ``token_usage`` event, so
+  each finished run carries its real prompt / completion / cached token counts.
+  ``None`` leaves the stored usage untouched (legacy callers / no-usage runs).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from typing import Any
 
 from pymongo.errors import DuplicateKeyError
 
@@ -73,11 +82,16 @@ async def mark_completed(
     *,
     assistant_message_id: str | None,
     partial_text: str,
+    usage: dict[str, Any] | None = None,
 ) -> None:
     doc = await get_run(run_id)
     doc.status = "completed"
     doc.assistant_message_id = assistant_message_id
     doc.partial_text = partial_text
+    # Per-run token metering: persist the usage the backend reported (None =
+    # nothing to record, leave the stored value as-is).
+    if usage:
+        doc.usage = usage
     doc.ended_at = _utcnow()
     await doc.save()
 
@@ -89,6 +103,7 @@ async def mark_terminal(
     partial_text: str = "",
     error: str | None = None,
     assistant_message_id: str | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> None:
     """Set a non-completed terminal status (``interrupted`` | ``failed`` | ``cancelled``)."""
     doc = await get_run(run_id)
@@ -96,6 +111,10 @@ async def mark_terminal(
     doc.partial_text = partial_text or doc.partial_text
     doc.error = error
     doc.assistant_message_id = assistant_message_id or doc.assistant_message_id
+    # A cancelled / interrupted run may still have consumed tokens before it
+    # stopped — record whatever the backend reported.
+    if usage:
+        doc.usage = usage
     doc.ended_at = _utcnow()
     await doc.save()
 

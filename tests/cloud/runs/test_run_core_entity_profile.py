@@ -253,7 +253,7 @@ async def _noop(*a, **k):
     return None
 
 
-async def _persist_stub(spec, ctx, full_text, attachments):
+async def _persist_stub(spec, ctx, full_text, attachments, usage=None):
     return "assistant-msg-1"
 
 

@@ -99,6 +99,13 @@ ENV POCKETPAW_WEB_PORT=8888
 # arrive from 172.x.x.x, not 127.0.0.1, so the bypass would never trigger.
 # Users authenticate with the access token instead.
 ENV POCKETPAW_LOCALHOST_AUTH_BYPASS=false
+# Production posture (security W0e): the shipped image is prod by default so a
+# non-expert operator can't boot an ownable tenant. With this set, the cloud
+# auth boot REFUSES to start unless AUTH_SECRET is a real (non-placeholder)
+# value, and the initial admin password is generated/operator-supplied — never
+# the old "admin123". Set AUTH_SECRET (and optionally ADMIN_PASSWORD) when you
+# run the container.
+ENV POCKETPAW_ENV=production
 # Agent-created files land here — bind-mount to access them on the host
 ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
 
