@@ -288,6 +288,65 @@ async def list_sightings(workspace_id: str, user_id: str, mandate_id: str) -> di
     return {"sightings": [_sighting_to_wire(s) for s in docs]}
 
 
+async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[str, Any]:
+    """Run every registered patrol over the mandate's surface and persist the
+    resulting Sightings.
+
+    Dedup: a draft whose ``evidence.package`` already has a sighting from the
+    same patrol on this mandate is skipped — repeated shift triggers must not
+    spam the foreman with identical signals. Returns the NEW sightings only."""
+    from pocketpaw_ee.cloud.mandates.patrols import PATROLS
+
+    doc = await _fetch_mandate(workspace_id, mandate_id)
+
+    existing = await SightingDoc.find(
+        SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
+    ).to_list()
+    seen_keys = {
+        (s.patrol, str((s.evidence or {}).get("package") or s.summary)) for s in existing
+    }
+
+    created: list[SightingDoc] = []
+    for patrol_name, patrol in PATROLS.items():
+        try:
+            drafts = await patrol(doc.surface.repo_id)
+        except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
+            logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
+            continue
+        for draft in drafts:
+            key = (
+                str(draft.get("patrol") or patrol_name),
+                str((draft.get("evidence") or {}).get("package") or draft.get("summary") or ""),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            sighting = SightingDoc(
+                workspace=workspace_id,
+                mandate_id=mandate_id,
+                patrol=str(draft.get("patrol") or patrol_name),
+                severity=int(draft.get("severity") or 3),
+                summary=str(draft.get("summary") or "")[:280],
+                evidence=dict(draft.get("evidence") or {}),
+            )
+            await sighting.insert()
+            created.append(sighting)
+
+    for sighting in created:
+        await emit(
+            mandate_events.MandateSightingAdded(
+                data={
+                    "workspace_id": workspace_id,
+                    "mandate_id": mandate_id,
+                    "sighting_id": str(sighting.id),
+                    "patrol": sighting.patrol,
+                    "severity": sighting.severity,
+                }
+            )
+        )
+    return {"sightings": [_sighting_to_wire(s) for s in created]}
+
+
 def _sighting_to_wire(s: SightingDoc) -> dict[str, Any]:
     return {
         "id": str(s.id),
@@ -310,4 +369,5 @@ __all__ = [
     "get_mandate",
     "list_mandates",
     "list_sightings",
+    "run_patrols",
 ]
