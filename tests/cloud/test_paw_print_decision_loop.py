@@ -320,3 +320,106 @@ class TestRobustness:
         approved = await instinct_store.approve(action.id, approver="u")
         # No create_decision was called → set_decision returns None → no raise.
         await deliver_customer_decision(approved, declined=False)
+
+
+# ---------------------------------------------------------------------------
+# Tenancy: an owner-less widget must NOT raise an all-tenant-visible proposal
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerlessWidgetGuard:
+    async def test_ownerless_widget_does_not_propose(self, stores) -> None:
+        """A widget with no owner resolves to an EMPTY workspace. Raising a
+        proposal there would NULL-scope it into every tenant's pending list, so
+        the loop is skipped entirely — no proposal, no parked row."""
+        pp_store, instinct_store = stores
+        widget = PawPrintWidget(
+            pocket_id="pocket-1",
+            owner="",  # no owner → empty workspace
+            name="W",
+            spec=_spec(),
+            event_mapping={},
+        )
+        event = PawPrintEvent(
+            widget_id=widget.id,
+            type="appointment_request",
+            payload={"when": "Tuesday 3pm"},
+            customer_ref="patient_42",
+        )
+
+        action_id = await propose_customer_decision(
+            widget=widget, event=event, paw_print_store=pp_store
+        )
+        assert action_id is None, "an owner-less widget must not open the loop"
+
+        # No proposal landed in ANY workspace — not even the unscoped global list.
+        assert await instinct_store.pending(workspace_id="ws:bright-smile") == []
+        assert await instinct_store.pending() == []
+        # No parked decision row either.
+        assert await pp_store.get_latest_decision(widget.id, "patient_42") is None
+
+
+# ---------------------------------------------------------------------------
+# Decision store — get_decision_by_action / set_decision are workspace-scoped
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionLookupScope:
+    async def test_get_decision_by_action_is_scoped(self, stores) -> None:
+        from pocketpaw.paw_print.models import DecisionState, DecisionStatus
+
+        pp_store, _ = stores
+        await pp_store.create_decision(
+            DecisionStatus(
+                widget_id="pp_a",
+                customer_ref="c1",
+                instinct_action_id="act-1",
+                workspace_id="ws-a",
+                state=DecisionState.PENDING,
+            )
+        )
+
+        # The owning tenant resolves the row; another tenant gets None.
+        assert await pp_store.get_decision_by_action("act-1", workspace_id="ws-a") is not None
+        assert await pp_store.get_decision_by_action("act-1", workspace_id="ws-b") is None
+        # Unscoped lookup still finds it (backward-compatible).
+        assert await pp_store.get_decision_by_action("act-1") is not None
+
+    async def test_set_decision_is_scoped(self, stores) -> None:
+        from pocketpaw.paw_print.models import DecisionState, DecisionStatus
+
+        pp_store, _ = stores
+        await pp_store.create_decision(
+            DecisionStatus(
+                widget_id="pp_a",
+                customer_ref="c1",
+                instinct_action_id="act-2",
+                workspace_id="ws-a",
+                state=DecisionState.PENDING,
+            )
+        )
+
+        # A cross-tenant flip changes nothing and returns None.
+        cross = await pp_store.set_decision(
+            "act-2",
+            state=DecisionState.DELIVERED,
+            reply="nope",
+            decided_by="attacker",
+            workspace_id="ws-b",
+        )
+        assert cross is None
+        still_pending = await pp_store.get_decision_by_action("act-2", workspace_id="ws-a")
+        assert still_pending is not None
+        assert still_pending.state == DecisionState.PENDING
+
+        # The owning tenant flips it.
+        ok = await pp_store.set_decision(
+            "act-2",
+            state=DecisionState.DELIVERED,
+            reply="confirmed",
+            decided_by="user:owner",
+            workspace_id="ws-a",
+        )
+        assert ok is not None
+        assert ok.state == DecisionState.DELIVERED
+        assert ok.reply == "confirmed"
