@@ -47,10 +47,27 @@
 #   always created a second object (documented in
 #   tests/cloud/test_e2e_connector_to_fabric.py::test_fabric_source_deduplication).
 #   Read-only and additive; honors the W4a workspace scope like get_object().
+# Updated: 2026-06-11 (gap-housekeeping) — three small hardening fixes:
+#   (1) fabric_object_types.name gets a UNIQUE index so a concurrent ensure_type
+#       race can't define the same type twice with different ids. Created AFTER
+#       SCHEMA_SQL (mirrors the _WORKSPACE_INDEX_SQL pattern), NOT inside the
+#       executescript — a pre-W4a / pre-this-change DB may already hold duplicate
+#       name rows, so _ensure_schema de-dups defensively first (keeps the lowest
+#       rowid per case-folded name, re-points objects of the losing types at the
+#       survivor, then drops the loser rows) and wraps the index creation in
+#       try/except so a residual dup can never crash _ensure_schema — it logs a
+#       warning and leaves the unique index uncreated instead.
+#   (2) update_object() now threads an optional workspace_id and applies the same
+#       `workspace_id = ? OR workspace_id IS NULL` scope as get_object /
+#       get_object_by_source, so the write has its OWN tenancy guard rather than
+#       trusting the caller to have scoped the prior read. connectors.fabric_ingest
+#       passes workspace_id through.
+
 
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +81,8 @@ from pocketpaw.fabric.models import (
     ObjectType,
     PropertyDef,
 )
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS fabric_object_types (
@@ -119,6 +138,19 @@ CREATE INDEX IF NOT EXISTS idx_links_type ON fabric_links(link_type);
 _WORKSPACE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_objects_workspace ON fabric_objects(workspace_id)",
     "CREATE INDEX IF NOT EXISTS idx_links_workspace ON fabric_links(workspace_id)",
+)
+
+# A UNIQUE index on the (case-folded) type name closes a concurrent
+# ``ensure_type`` race: two callers both miss ``get_type_by_name`` and both run
+# ``define_type``, leaving two type rows with the SAME name but different ids —
+# objects of "the same logical type" then split across two ``type_id``s. Created
+# AFTER SCHEMA_SQL (same reason as _WORKSPACE_INDEX_SQL): a pre-existing DB may
+# already hold duplicate-name rows, so _ensure_schema de-dups defensively before
+# creating the index. ``get_type_by_name`` matches case-insensitively, so the
+# uniqueness key is LOWER(name) to match.
+_TYPE_NAME_UNIQUE_INDEX_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_object_types_name_unique"
+    " ON fabric_object_types(LOWER(name))"
 )
 
 # Whitelist of filter operators -> SQL operator. User input never reaches the
@@ -253,8 +285,74 @@ class FabricStore:
             # above). Doing this inside SCHEMA_SQL would fail on a pre-W4a DB.
             for _idx in _WORKSPACE_INDEX_SQL:
                 await db.execute(_idx)
+            # Unique-name index on fabric_object_types. A pre-existing DB may
+            # already hold duplicate-name rows (the ensure_type race this index
+            # prevents could have fired before this code shipped), so de-dup
+            # FIRST, then create the index. Both steps are wrapped so a residual
+            # duplicate can never crash _ensure_schema — a metering/ontology
+            # nicety must not take the store down on boot.
+            await self._dedup_object_types(db)
+            try:
+                await db.execute(_TYPE_NAME_UNIQUE_INDEX_SQL)
+            except aiosqlite.OperationalError:
+                # The only realistic cause is a residual duplicate the de-dup
+                # pass could not resolve (e.g. an exotic collation). Log and
+                # carry on uncreated rather than crashing the boot — the index
+                # is a race guard, not a correctness invariant the store needs
+                # to function.
+                logger.warning(
+                    "could not create unique index on fabric_object_types(name) — "
+                    "duplicate type names may remain; ensure_type race guard is off",
+                    exc_info=True,
+                )
             await db.commit()
         self._initialized = True
+
+    @staticmethod
+    async def _dedup_object_types(db: aiosqlite.Connection) -> None:
+        """Collapse duplicate-name object types before the UNIQUE index is built.
+
+        Two type rows can share a name (case-insensitively) only on a DB that
+        predates the unique index — the concurrent ``ensure_type`` race. Keep the
+        LOWEST rowid per case-folded name (the first-defined survivor), re-point
+        any objects bound to a losing type id at the survivor's id so no object is
+        orphaned, then delete the loser type rows. Best-effort: a failure here is
+        swallowed (logged) so it can never crash ``_ensure_schema``; the index
+        creation that follows is itself try/except-guarded as the final backstop.
+        """
+        try:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT rowid, id, name FROM fabric_object_types ORDER BY rowid ASC"
+            ) as cur:
+                rows = await cur.fetchall()
+            survivor_by_name: dict[str, str] = {}
+            for row in rows:
+                key = (row["name"] or "").strip().lower()
+                survivor_id = survivor_by_name.get(key)
+                if survivor_id is None:
+                    survivor_by_name[key] = row["id"]
+                    continue
+                loser_id = row["id"]
+                if loser_id == survivor_id:
+                    continue
+                # Re-home objects from the loser type onto the survivor, then
+                # drop the duplicate type row.
+                await db.execute(
+                    "UPDATE fabric_objects SET type_id = ? WHERE type_id = ?",
+                    (survivor_id, loser_id),
+                )
+                await db.execute(
+                    "DELETE FROM fabric_object_types WHERE id = ?",
+                    (loser_id,),
+                )
+        except aiosqlite.Error:
+            logger.warning(
+                "fabric_object_types de-dup pass failed — leaving rows as-is",
+                exc_info=True,
+            )
+        finally:
+            db.row_factory = None
 
     def _conn(self) -> aiosqlite.Connection:
         """Return a new connection context manager. Use with `async with`."""
@@ -438,21 +536,37 @@ class FabricStore:
                     return None
                 return self._row_to_object(row)
 
-    async def update_object(self, obj_id: str, properties: dict[str, Any]) -> FabricObject | None:
-        existing = await self.get_object(obj_id)
+    async def update_object(
+        self,
+        obj_id: str,
+        properties: dict[str, Any],
+        workspace_id: str | None = None,
+    ) -> FabricObject | None:
+        """Merge-update one object's properties, optionally scoped to a tenant (W4a).
+
+        ``workspace_id`` gives the WRITE its own tenancy guard rather than relying
+        on the caller to have scoped the prior read: the same
+        ``workspace_id = ? OR workspace_id IS NULL`` scope as :meth:`get_object`
+        and :meth:`get_object_by_source` is applied to BOTH the read-before-merge
+        and the UPDATE. A cross-tenant ``obj_id`` returns ``None`` and writes
+        nothing. ``None`` leaves the update unscoped (OSS / agent-tool callers),
+        exactly as before.
+        """
+        existing = await self.get_object(obj_id, workspace_id=workspace_id)
         if not existing:
             return None
         merged = {**existing.properties, **properties}
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "UPDATE fabric_objects SET properties = ?, updated_at = datetime('now') WHERE id = ?"
+        params: list[Any] = [json.dumps(merged), obj_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
-            await db.execute(
-                "UPDATE fabric_objects"
-                " SET properties = ?, updated_at = datetime('now')"
-                " WHERE id = ?",
-                (json.dumps(merged), obj_id),
-            )
+            await db.execute(sql, params)
             await db.commit()
-        return await self.get_object(obj_id)
+        return await self.get_object(obj_id, workspace_id=workspace_id)
 
     async def remove_object(self, obj_id: str) -> None:
         await self._ensure_schema()

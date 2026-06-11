@@ -19,6 +19,11 @@
 #   sync() still returns records_synced=0 (it has no FabricStore handle in the
 #   adapter contract); ingest_to_fabric() is the real path a caller with a store
 #   drives. Migrating the sync()/EE service wiring is deferred (see slice notes).
+# Updated: 2026-06-11 (gap-housekeeping) — the `attendees` PropertyDef in
+#   CALENDAR_EVENT_MAPPING now declares type="array" (was "string"); the field
+#   projects a list (the raw attendee-email list), so "string" mislabelled the
+#   property's true type. "array" matches the calendar_create action schema's
+#   `attendees` param, which already uses type="array".
 
 from __future__ import annotations
 
@@ -63,7 +68,7 @@ CALENDAR_EVENT_MAPPING = FabricMapping(
         PropertyDef(name="end", type="date", description="End time (RFC 3339 or date)"),
         PropertyDef(name="location", type="string", description="Event location"),
         PropertyDef(name="description", type="string", description="Event description"),
-        PropertyDef(name="attendees", type="string", description="Attendee emails (list)"),
+        PropertyDef(name="attendees", type="array", description="Attendee emails (list)"),
         PropertyDef(name="attendee_count", type="number", description="Number of attendees"),
         PropertyDef(name="html_link", type="string", description="Link to the event"),
     ],

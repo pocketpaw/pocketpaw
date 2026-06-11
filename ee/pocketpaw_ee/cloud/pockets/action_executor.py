@@ -1,4 +1,11 @@
 # action_executor.py — Server-side executor for pocket WRITE actions.
+# Updated: 2026-06-11 (gap-housekeeping) — the
+#   `_outcome_value_pairs_with_unit` model_validator now also rejects a
+#   NEGATIVE `outcome_value`. The aggregation sums value by unit into a
+#   billable total, so a negative figure would silently subtract from a
+#   tenant's metered total (a credit/clawback the pricing layer owns, not an
+#   author-time binding). Zero is still allowed (a free but named+metered
+#   outcome). Caught at parse time so the ledger never sees it.
 # Updated: 2026-06-11 (gap-3 outcome VALUE metering) — `ActionBinding` now
 #   declares `outcome_value: float | None` and `outcome_unit: str | None`,
 #   the author-time billable-value pair that turns the count-only outcome
@@ -349,6 +356,19 @@ class ActionBinding(BaseModel):
             raise ValueError(
                 "outcome_value is set but no `outcome` name is declared — "
                 "a billable value needs a named outcome to attach to"
+            )
+        # gap-housekeeping — a billable figure cannot be negative. The
+        # aggregation SUMS outcome_value by unit into a "pay for governed
+        # outcomes" total; a negative value would silently subtract from a
+        # tenant's billable figure (a credit/clawback the pricing layer owns,
+        # not an author-time binding). Reject it at parse time so a negative
+        # value never reaches the ledger. Zero is allowed (a free, but still
+        # named+metered, outcome).
+        if has_value and self.outcome_value < 0:
+            raise ValueError(
+                "outcome_value must not be negative — a billable figure cannot "
+                "be negative (credits/clawbacks are a pricing-layer concern, not "
+                "an action binding)"
             )
         return self
 

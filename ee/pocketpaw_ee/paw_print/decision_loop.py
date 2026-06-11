@@ -33,6 +33,15 @@
 #   delivery hook re-resolves the parked row by Instinct action id (the stable
 #   join key) so a tampered blob cannot redirect a decision to another
 #   customer's row.
+#
+# Updated: 2026-06-11 (gap-housekeeping) — propose_customer_decision now SKIPS
+#   the loop when the widget resolves to an EMPTY workspace (owner unset). A
+#   NULL-scoped Instinct proposal would surface in every tenant's pending list,
+#   so an owner-less widget logs a warning and raises NO proposal rather than an
+#   all-tenant-visible one. The event + Fabric object still persist; the loop
+#   simply doesn't open until the owner is set. Chose the guard over a hard
+#   PawPrintWidget.owner field-validator because the owner may legitimately be
+#   assigned after the widget is created.
 
 from __future__ import annotations
 
@@ -131,6 +140,25 @@ async def propose_customer_decision(
         widget_id = str(getattr(widget, "id", "") or "")
         pocket_id = str(getattr(widget, "pocket_id", "") or "")
         workspace_id = resolve_workspace_id(widget)
+        # Tenancy guard: an owner-less widget resolves to an EMPTY workspace. A
+        # proposal raised with no workspace scope is NULL-scoped in Instinct, so
+        # it would appear in EVERY tenant's pending list / The Tray — a
+        # cross-tenant leak that also lets any operator approve another's
+        # customer request. Skip the loop entirely rather than open it
+        # mis-scoped: log a warning and leave the event + Fabric object (already
+        # persisted) as the only record. The owner can be set later and a re-sent
+        # event will then open the loop correctly. This is deliberately the
+        # less-invasive of the two options in the review note — a hard
+        # field-validator on PawPrintWidget.owner would reject a widget whose
+        # owner is legitimately assigned after creation.
+        if not workspace_id.strip():
+            logger.warning(
+                "paw-print widget %s has no owner/workspace — SKIPPING the "
+                "decision proposal so it is not raised NULL-scoped and visible "
+                "to every tenant. Set the widget owner to open the loop.",
+                widget_id or "<unknown>",
+            )
+            return None
         customer_ref = str(getattr(event, "customer_ref", "") or "")
         event_type = str(getattr(event, "type", "") or "")
         payload = getattr(event, "payload", None) or {}
@@ -279,12 +307,18 @@ async def deliver_customer_decision(action: Any, *, declined: bool = False) -> N
                 blob.get("default_reply") or ""
             )
 
+        # The blob carries the owning workspace; thread it so set_decision flips
+        # only a row inside that tenant. An empty blob workspace passes None
+        # (unscoped) — matching how the proposal would have been raised.
+        blob_workspace = str(blob.get("workspace_id") or "") or None
+
         store = get_paw_print_store()
         updated = await store.set_decision(
             action_id,
             state=state,
             reply=reply,
             decided_by=decided_by,
+            workspace_id=blob_workspace,
         )
         if updated is None:
             logger.info(

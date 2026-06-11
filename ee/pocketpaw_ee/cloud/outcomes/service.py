@@ -42,6 +42,13 @@
 #   scoped with the same defense-in-depth tenant filter as `count_outcomes`.
 #   Deferred (NOT here): invoicing, payment, currency, pricing-rules engine,
 #   disputes/clawback (outcome-spec.md Decisions 4/5/7).
+# Updated: 2026-06-11 (gap-housekeeping) — `meter_outcomes` no longer compares
+#   the period window lexicographically on raw ISO strings. The new `_parse_ts`
+#   helper normalizes the stored `occurred_at` AND the since/until bounds to
+#   UTC-aware datetimes before comparing, so the same instant written as `...Z`,
+#   `...+00:00`, or an offset (`...-04:00`) sorts correctly into the window. The
+#   since-inclusive / until-exclusive contract is unchanged; a torn/unparseable
+#   timestamp falls back to the old byte-wise compare rather than crashing.
 from __future__ import annotations
 
 import json
@@ -73,6 +80,40 @@ def set_ledger_dir(path: str | Path) -> None:
     """Override the outcomes ledger directory (test seam)."""
     global _LEDGER_DIR
     _LEDGER_DIR = Path(path)
+
+
+def _parse_ts(raw: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp to a timezone-aware UTC ``datetime``.
+
+    The stored ``occurred_at`` and the ``since`` / ``until`` bounds can each
+    arrive in a DIFFERENT textual form for the SAME instant — ``...Z``,
+    ``...+00:00``, or an offset like ``...-04:00``. A lexicographic string
+    compare sorts those wrong (``"...Z" > "...+00:00"`` byte-wise even though
+    they are equal instants, and an offset timestamp sorts on its local digits,
+    not its UTC instant). Parsing to a UTC-normalized ``datetime`` makes the
+    window comparison correct regardless of representation.
+
+    ``Z`` is rewritten to ``+00:00`` for ``fromisoformat`` (Python < 3.11 does
+    not accept ``Z``). A naive timestamp (no offset) is assumed UTC — the
+    producer stamps ``datetime.now(UTC)``, so a stored value is always
+    UTC-aware, and a hand-edited naive value is most safely read as UTC.
+    Returns ``None`` when the value is empty or unparseable, so the caller can
+    fall back to the byte-wise compare rather than crash on a torn row.
+    """
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
 def _coerce_value(raw: object) -> float | None:
@@ -414,6 +455,13 @@ async def meter_outcomes(
     # Accumulate (count, summed_value) per unit before building the DTOs.
     unit_count: dict[str, int] = {}
     unit_value: dict[str, float] = {}
+    # Parse the window bounds ONCE to UTC-normalized datetimes so the per-row
+    # comparison is on instants, not raw ISO strings — a `Z`-vs-`+00:00`-vs-
+    # offset representation of the same instant compares correctly. When a bound
+    # is present but unparseable we keep its raw string for a defensive
+    # lexicographic fallback rather than dropping the bound entirely.
+    since_dt = _parse_ts(body.since) if body.since is not None else None
+    until_dt = _parse_ts(body.until) if body.until is not None else None
     try:
         with path.open("r", encoding="utf-8") as fh:
             for line in fh:
@@ -432,12 +480,28 @@ async def meter_outcomes(
                 if body.pocket_id is not None and row.get("pocket_id") != body.pocket_id:
                     continue
                 occurred = str(row.get("occurred_at") or "")
-                if body.since is not None and occurred < body.since:
-                    continue
-                # `until` is an EXCLUSIVE upper bound so back-to-back
-                # periods never double-count a boundary outcome.
-                if body.until is not None and occurred >= body.until:
-                    continue
+                occurred_dt = _parse_ts(occurred)
+                # `since` is INCLUSIVE, `until` EXCLUSIVE so back-to-back periods
+                # never double-count a boundary outcome. Compare as datetimes
+                # when BOTH sides parsed; otherwise fall back to the byte-wise
+                # string compare (a torn/hand-edited timestamp) so the row is
+                # still filtered rather than crashing the meter.
+                if body.since is not None:
+                    in_window = (
+                        occurred_dt >= since_dt
+                        if (occurred_dt is not None and since_dt is not None)
+                        else occurred >= body.since
+                    )
+                    if not in_window:
+                        continue
+                if body.until is not None:
+                    before_until = (
+                        occurred_dt < until_dt
+                        if (occurred_dt is not None and until_dt is not None)
+                        else occurred < body.until
+                    )
+                    if not before_until:
+                        continue
 
                 total_outcomes += 1
 

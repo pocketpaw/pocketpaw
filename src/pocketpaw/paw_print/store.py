@@ -9,6 +9,14 @@
 # here; on human approval/rejection the EE approve hook flips it to
 # delivered/declined; the customer surface polls get_latest_decision by
 # (widget_id, customer_ref). Pure SQLite — no EE import, OSS-boundary clean.
+# Updated: 2026-06-11 (gap-housekeeping) — get_decision_by_action /
+# set_decision now take an optional workspace_id and scope the lookup +
+# UPDATE to that tenant (via the new _decision_workspace_scope helper, which
+# also matches the empty-string/NULL legacy rows). The EE delivery hook threads
+# the workspace off the approved Action's blob so a cross-tenant action id flips
+# nothing. The hot-lookup indexes the decision-loop needs already ship in
+# SCHEMA_SQL: idx_pp_decisions_action covers the instinct_action_id lookup and
+# idx_pp_decisions_customer covers the (widget_id, customer_ref) poll.
 
 from __future__ import annotations
 
@@ -81,6 +89,20 @@ CREATE INDEX IF NOT EXISTS idx_pp_decisions_customer
 CREATE INDEX IF NOT EXISTS idx_pp_decisions_action
     ON paw_print_decisions(instinct_action_id);
 """
+
+
+def _decision_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
+    """Build the tenancy WHERE fragment + bound params for a scoped decision read.
+
+    Mirrors the Fabric store's ``_workspace_scope`` helper, but decision rows
+    store ``workspace_id`` as an EMPTY STRING (the model default) rather than
+    SQL NULL when no workspace was set, so a legacy/global row is matched on
+    ``= ''`` as well as ``IS NULL``. Returns ``(None, [])`` when ``workspace_id``
+    is ``None`` — no scoping, fully backward-compatible.
+    """
+    if workspace_id is None:
+        return None, []
+    return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
 
 
 class PawPrintStore:
@@ -311,20 +333,34 @@ class PawPrintStore:
             await db.commit()
         return decision
 
-    async def get_decision_by_action(self, instinct_action_id: str) -> DecisionStatus | None:
+    async def get_decision_by_action(
+        self, instinct_action_id: str, workspace_id: str | None = None
+    ) -> DecisionStatus | None:
         """Fetch the decision row tied to an Instinct action id.
 
         The approve/reject delivery hook resolves the parked row this way: the
         Instinct Action's ``_customer_reply`` blob carries no DB handle, only the
         action id, which is the stable join key back to the parked row.
+
+        ``workspace_id`` gives the lookup its own tenancy guard: when supplied,
+        only a row in that workspace (or a legacy NULL/empty-workspace row that
+        predates per-row tenancy) resolves — a row owned by another tenant
+        returns ``None``. The decision row stores ``workspace_id`` as an empty
+        string for rows created without one, so the scope matches
+        ``workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL``.
+        ``None`` leaves the lookup unscoped (backward-compatible).
         """
+        ws_cond, ws_params = _decision_workspace_scope(workspace_id)
+        sql = "SELECT * FROM paw_print_decisions WHERE instinct_action_id = ?"
+        params: list[Any] = [instinct_action_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        sql += " LIMIT 1"
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM paw_print_decisions WHERE instinct_action_id = ? LIMIT 1",
-                (instinct_action_id,),
-            ) as cur:
+            async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
                 return self._row_to_decision(row) if row else None
 
@@ -335,6 +371,7 @@ class PawPrintStore:
         state: DecisionState,
         reply: str,
         decided_by: str,
+        workspace_id: str | None = None,
     ) -> DecisionStatus | None:
         """Flip a parked decision to delivered/declined and record the answer.
 
@@ -342,26 +379,35 @@ class PawPrintStore:
         parked row matches (e.g. the proposal was raised before this slice
         shipped, or the row was never created — the approve hook degrades
         cleanly in that case).
+
+        ``workspace_id``, when supplied, scopes BOTH the resolve and the UPDATE
+        to the caller's tenant so a cross-tenant action id flips nothing — the
+        delivery hook threads the workspace off the approved Action's blob.
         """
-        existing = await self.get_decision_by_action(instinct_action_id)
+        existing = await self.get_decision_by_action(instinct_action_id, workspace_id=workspace_id)
         if existing is None:
             return None
+        ws_cond, ws_params = _decision_workspace_scope(workspace_id)
+        sql = (
+            "UPDATE paw_print_decisions"
+            " SET state = ?, reply = ?, decided_by = ?, updated_at = ?"
+            " WHERE instinct_action_id = ?"
+        )
+        params: list[Any] = [
+            state.value,
+            reply,
+            decided_by,
+            datetime.now().isoformat(),
+            instinct_action_id,
+        ]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
-            await db.execute(
-                "UPDATE paw_print_decisions"
-                " SET state = ?, reply = ?, decided_by = ?, updated_at = ?"
-                " WHERE instinct_action_id = ?",
-                (
-                    state.value,
-                    reply,
-                    decided_by,
-                    datetime.now().isoformat(),
-                    instinct_action_id,
-                ),
-            )
+            await db.execute(sql, params)
             await db.commit()
-        return await self.get_decision_by_action(instinct_action_id)
+        return await self.get_decision_by_action(instinct_action_id, workspace_id=workspace_id)
 
     async def get_latest_decision(self, widget_id: str, customer_ref: str) -> DecisionStatus | None:
         """Return the most-recent decision for a (widget, customer) pair.
