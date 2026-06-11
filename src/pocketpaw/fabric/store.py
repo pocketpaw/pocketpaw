@@ -38,6 +38,15 @@
 #   reads ``$.a-b`` as a literal key) but were unnecessarily permissive and made
 #   ``$.a-b`` ambiguous in a SQL trace. No object type uses hyphenated property
 #   names, so this loses nothing. W0d filter tests unchanged and still pass.
+# Updated: 2026-06-11 (gap1-connfabric — connector→Fabric ingestion slice) — added
+#   get_object_by_source(): looks up a single object by its
+#   (source_connector, source_id) provenance pair via the existing
+#   idx_objects_source index. This is the idempotency primitive the new
+#   connector ingest path (connectors/fabric_ingest.py) needs to upsert instead
+#   of duplicate — until now Fabric had no source-keyed read, so a re-sync
+#   always created a second object (documented in
+#   tests/cloud/test_e2e_connector_to_fabric.py::test_fabric_source_deduplication).
+#   Read-only and additive; honors the W4a workspace scope like get_object().
 
 from __future__ import annotations
 
@@ -384,6 +393,42 @@ class FabricStore:
         if ws_cond:
             sql += f" AND {ws_cond}"
             params.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                row = await cur.fetchone()
+                if not row:
+                    return None
+                return self._row_to_object(row)
+
+    async def get_object_by_source(
+        self,
+        source_connector: str,
+        source_id: str,
+        workspace_id: str | None = None,
+    ) -> FabricObject | None:
+        """Fetch the object that originated from ``(source_connector, source_id)``.
+
+        This is the idempotency lookup for connector ingestion: a connector
+        record carries a stable upstream id (a Google Calendar event id, a
+        Stripe invoice id), so re-syncing should find the prior object and
+        update it rather than create a duplicate. Backed by the existing
+        ``idx_objects_source`` index.
+
+        Returns the most recently created match (defensive — provenance pairs
+        are expected to be unique, but nothing enforces a DB-level constraint
+        yet, so a duplicate from before this path existed resolves to the
+        newest row). ``workspace_id`` applies the same W4a tenancy scope as
+        :meth:`get_object`; ``None`` leaves the read unscoped.
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_objects WHERE source_connector = ? AND source_id = ?"
+        params: list[Any] = [source_connector, source_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        sql += " ORDER BY created_at DESC LIMIT 1"
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row

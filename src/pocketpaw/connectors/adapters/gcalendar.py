@@ -7,6 +7,18 @@
 # Action surface mirrors the 3 hand-written tools in
 # src/pocketpaw/tools/builtin/calendar.py + adds calendar_summary
 # for the home widget aggregator.
+#
+# Updated: 2026-06-11 (gap1-connfabric slice) — this is the FIRST connector to
+#   land typed Fabric objects instead of a sync() stub. Added:
+#     * CALENDAR_EVENT_MAPPING — the declared FabricMapping (CalendarEvent type +
+#       field projection + event-id provenance), the reusable pattern other
+#       connectors copy.
+#     * ingest_to_fabric(store, ...) — pulls events via the client and maps them
+#       into typed, provenanced, idempotent Fabric objects through the shared
+#       connectors.fabric_ingest.ingest_records().
+#   sync() still returns records_synced=0 (it has no FabricStore handle in the
+#   adapter contract); ingest_to_fabric() is the real path a caller with a store
+#   drives. Migrating the sync()/EE service wiring is deferred (see slice notes).
 
 from __future__ import annotations
 
@@ -15,6 +27,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pocketpaw.connectors.fabric_ingest import FabricMapping, IngestResult, ingest_records
 from pocketpaw.connectors.protocol import (
     ActionResult,
     ActionSchema,
@@ -27,8 +40,44 @@ from pocketpaw.connectors.protocol import (
     TrustLevel,
     WidgetRecipe,
 )
+from pocketpaw.fabric.models import PropertyDef
+from pocketpaw.fabric.store import FabricStore
 
 logger = logging.getLogger(__name__)
+
+
+# The connector->Fabric contract for calendar events. A Google Calendar event id
+# is stable across syncs, so it is the idempotency key (source_id). attendees is
+# projected as a count for queryability ("meetings with >3 attendees") while the
+# raw list is preserved alongside it. This declaration is the pattern other
+# connectors replicate: declare a type + field projection + the source-id field,
+# then hand records to ingest_records().
+CALENDAR_EVENT_MAPPING = FabricMapping(
+    type_name="CalendarEvent",
+    type_description="A calendar event ingested from Google Calendar.",
+    type_icon="calendar",
+    source_id_field="id",
+    properties=[
+        PropertyDef(name="summary", type="string", description="Event title"),
+        PropertyDef(name="start", type="date", description="Start time (RFC 3339 or date)"),
+        PropertyDef(name="end", type="date", description="End time (RFC 3339 or date)"),
+        PropertyDef(name="location", type="string", description="Event location"),
+        PropertyDef(name="description", type="string", description="Event description"),
+        PropertyDef(name="attendees", type="string", description="Attendee emails (list)"),
+        PropertyDef(name="attendee_count", type="number", description="Number of attendees"),
+        PropertyDef(name="html_link", type="string", description="Link to the event"),
+    ],
+    field_map={
+        "summary": "summary",
+        "start": "start",
+        "end": "end",
+        "location": "location",
+        "description": "description",
+        "attendees": lambda r: r.get("attendees", []),
+        "attendee_count": lambda r: len(r.get("attendees", []) or []),
+        "html_link": "htmlLink",
+    },
+)
 
 
 class GoogleCalendarConnector:
@@ -216,7 +265,56 @@ class GoogleCalendarConnector:
             return ActionResult(success=False, error=f"Calendar {action} failed: {exc}")
 
     async def sync(self, pocket_id: str) -> SyncResult:
+        # sync() keeps the stub contract: the adapter has no FabricStore handle
+        # in the ConnectorProtocol signature. Real typed ingestion is
+        # ingest_to_fabric() below, which a caller drives with a store. Wiring
+        # the EE connector service's sync path to call ingest_to_fabric is the
+        # next slice (see module header).
         return SyncResult(success=True, connector_name=self.name, records_synced=0)
+
+    async def ingest_to_fabric(
+        self,
+        store: FabricStore,
+        days_ahead: int = 30,
+        max_results: int = 50,
+        workspace_id: str | None = None,
+        user_id: str | None = None,
+    ) -> IngestResult:
+        """Pull calendar events and land them as typed Fabric objects.
+
+        This is the connector's half of the connector->Fabric contract: it
+        fetches records via the existing CalendarClient, then hands them to the
+        shared ``ingest_records`` ingester with this connector's declared
+        ``CALENDAR_EVENT_MAPPING``. Events become ``CalendarEvent`` Fabric
+        objects with ``source_connector="gcalendar"`` and ``source_id`` = the
+        Google event id, so a re-sync UPDATES rather than duplicates.
+
+        Args:
+            store: the FabricStore to persist into.
+            days_ahead: how far forward to pull events (default 30 days).
+            max_results: cap on events fetched (default 50).
+            workspace_id: W4a tenancy scope for the landed objects.
+            user_id: optional per-user calendar token (VIP onboarding Phase B).
+
+        Returns:
+            IngestResult with created / updated / skipped counts.
+        """
+        from pocketpaw.clients.gcalendar import CalendarClient
+
+        client = CalendarClient(user_id=user_id)
+        now = datetime.now(UTC)
+        events = await client.list_events(
+            time_min=now,
+            time_max=now + timedelta(days=max(int(days_ahead), 1)),
+            max_results=min(int(max_results), 250),
+        )
+        return await ingest_records(
+            store=store,
+            connector=self.name,
+            records=events,
+            mapping=CALENDAR_EVENT_MAPPING,
+            workspace_id=workspace_id,
+        )
 
     async def schema(self) -> dict[str, Any]:
         return {"table": "calendar_events", "mapping": {}, "schedule": "manual"}
