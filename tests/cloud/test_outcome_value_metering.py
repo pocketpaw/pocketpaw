@@ -292,3 +292,86 @@ def test_binding_rejects_value_without_outcome_name():
 
     with pytest.raises(pydantic.ValidationError, match="named outcome"):
         _make_binding(outcome_value=1200.0, outcome_unit="usd")
+
+
+def test_binding_rejects_negative_value():
+    """A billable figure cannot be negative (gap-housekeeping)."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError, match="must not be negative"):
+        _make_binding(outcome="refund", outcome_value=-50.0, outcome_unit="usd")
+
+
+def test_binding_accepts_zero_value():
+    """Zero is a valid (free but named+metered) outcome — only negative is rejected."""
+    b = _make_binding(outcome="free_trial", outcome_value=0.0, outcome_unit="usd")
+    assert b.outcome_value == 0.0
+
+
+# ---------------------------------------------------------------------------
+# meter_outcomes — window comparison is on instants, not raw ISO strings
+# ---------------------------------------------------------------------------
+
+
+async def test_meter_window_normalizes_timezone_representations():
+    """A row stamped `...Z` and a bound stamped `...+00:00` are the same instant
+    and must compare correctly — a lexicographic string compare gets this wrong
+    (gap-housekeeping). The `Z` row sits AT the inclusive `since` boundary, so it
+    must be counted; byte-wise, "...Z" > "...+00:00" would exclude it."""
+    # Same instant, different textual forms.
+    await outcomes_service.record_outcome(
+        _valued_event(outcome_value=100.0, outcome_unit="usd", occurred_at="2026-06-01T00:00:00Z")
+    )
+    # since == that instant in +00:00 form (inclusive lower bound).
+    meter = await outcomes_service.meter_outcomes(
+        "w1",
+        MeterOutcomesRequest(since="2026-06-01T00:00:00+00:00"),
+    )
+    assert meter.metered_count == 1
+    assert meter.by_unit["usd"].total_value == 100.0
+
+
+async def test_meter_until_exclusive_across_timezone_forms():
+    """`until` stays EXCLUSIVE even when the row uses `Z` and the bound uses an
+    offset for the SAME instant: the boundary row is excluded, the earlier one in."""
+    await outcomes_service.record_outcome(
+        _valued_event(
+            outcome="early",
+            outcome_value=10.0,
+            outcome_unit="usd",
+            occurred_at="2026-06-30T23:00:00Z",
+        )
+    )
+    # This row is AT the exclusive `until` instant (Z form) — must be excluded.
+    await outcomes_service.record_outcome(
+        _valued_event(
+            outcome="boundary",
+            outcome_value=20.0,
+            outcome_unit="usd",
+            occurred_at="2026-07-01T00:00:00Z",
+        )
+    )
+    meter = await outcomes_service.meter_outcomes(
+        "w1",
+        MeterOutcomesRequest(until="2026-07-01T00:00:00+00:00"),
+    )
+    assert meter.metered_count == 1
+    assert meter.by_unit["usd"].total_value == 10.0
+
+
+async def test_meter_window_handles_offset_timestamps():
+    """An offset timestamp (`-04:00`) is compared on its UTC instant, not its
+    local digits. 20:00-04:00 == 00:00Z next day, so it falls in July, not June."""
+    await outcomes_service.record_outcome(
+        _valued_event(
+            outcome_value=77.0,
+            outcome_unit="usd",
+            occurred_at="2026-06-30T20:00:00-04:00",  # == 2026-07-01T00:00:00Z
+        )
+    )
+    june = await outcomes_service.meter_outcomes(
+        "w1",
+        MeterOutcomesRequest(since="2026-06-01T00:00:00Z", until="2026-07-01T00:00:00Z"),
+    )
+    # Excluded from June: its UTC instant is the July boundary (exclusive until).
+    assert june.metered_count == 0
