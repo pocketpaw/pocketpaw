@@ -1,5 +1,5 @@
 {
-  "_placeholder_note": "Built-in pocket template (applications-triage). The rows and Q&A pairs below carry [bracketed] placeholders — the create specialist rewrites them to the user's real applications and domain. The `sources` block is a PLACEHOLDER live-data binding: if a backend is configured, keep it so GET /applications hydrates state.applications; with NO backend, REMOVE the `sources` block and keep the seeded applications as the working data. ACTION-ROW BINDING POINT: the approve / reject / needs-review buttons set state.pending_proposal to a generic proposal shape {action, application_id, summary} — they do NOT execute. A deployment wires this state event to the Instinct gate so a human confirms in The Tray: read state.pending_proposal, call external_actions.propose.propose_external_action({connector_name, action, params:{application_id}, summary}) (or the pocket-write proposal bridge for a Fabric write), which files an Instinct Action (kind=external_action) and opens the agent.proposed decision chain. Nothing approves inline — the button only proposes. Keep the master-detail selected_id wiring and the each-over-status_counts burndown intact.",
+  "_placeholder_note": "Built-in pocket template (applications-triage). The rows and Q&A pairs below are real sample copy — no placeholder brackets, so a pocket created straight from this template renders as finished UI (live-deploy feedback: brackets read as unfinished). The create specialist still rewrites the sample rows to the user's real applications and domain. The `sources` block is a PLACEHOLDER live-data binding: if a backend is configured, keep it so GET /applications hydrates state.applications; with NO backend, REMOVE the `sources` block and keep the seeded applications as the working data. ACTION-ROW BINDING POINT: the approve / reject / needs-review buttons set state.pending_proposal to a generic proposal shape {action, application_id, summary} — they do NOT execute. A deployment wires this state event to the Instinct gate so a human confirms in The Tray: read state.pending_proposal, call external_actions.propose.propose_external_action({connector_name, action, params:{application_id}, summary}) (or the pocket-write proposal bridge for a Fabric write), which files an Instinct Action (kind=external_action) and opens the agent.proposed decision chain. Nothing approves inline — the button only proposes. Keep the master-detail selected_id wiring and the each-over-status_counts burndown intact.",
   "sources": {
     "applications": {
       "method": "GET",
@@ -20,72 +20,72 @@
     "applications": [
       {
         "id": "a1",
-        "applicant": "[Amara Okafor]",
-        "summary": "[Applying for the standard plan; referred by an existing member]",
+        "applicant": "Amara Okafor",
+        "summary": "Applying for the standard plan; referred by an existing member",
         "status": "Pending",
         "score": 82,
         "recommendation": "Approve",
         "age_days": 2,
         "answers": [
-          { "id": "q1", "question": "[How did you hear about us?]", "answer": "[Referral from a current member]" },
-          { "id": "q2", "question": "[What are you hoping to get out of this?]", "answer": "[Access to the workspace and the monthly sessions]" },
-          { "id": "q3", "question": "[Anything we should know?]", "answer": "[Available to start immediately]" }
+          { "id": "q1", "question": "How did you hear about us?", "answer": "Referral from a current member" },
+          { "id": "q2", "question": "What are you hoping to get out of this?", "answer": "Access to the workspace and the monthly sessions" },
+          { "id": "q3", "question": "Anything we should know?", "answer": "Available to start immediately" }
         ]
       },
       {
         "id": "a2",
-        "applicant": "[Liam Petrov]",
-        "summary": "[First-time applicant; submitted without a referral]",
+        "applicant": "Liam Petrov",
+        "summary": "First-time applicant; submitted without a referral",
         "status": "In review",
         "score": 64,
         "recommendation": "Needs review",
         "age_days": 5,
         "answers": [
-          { "id": "q1", "question": "[How did you hear about us?]", "answer": "[Found you through a web search]" },
-          { "id": "q2", "question": "[What are you hoping to get out of this?]", "answer": "[Still figuring that out]" },
-          { "id": "q3", "question": "[Anything we should know?]", "answer": "[Prefers to start next month]" }
+          { "id": "q1", "question": "How did you hear about us?", "answer": "Found you through a web search" },
+          { "id": "q2", "question": "What are you hoping to get out of this?", "answer": "Still figuring that out" },
+          { "id": "q3", "question": "Anything we should know?", "answer": "Prefers to start next month" }
         ]
       },
       {
         "id": "a3",
-        "applicant": "[Sofia Marchetti]",
-        "summary": "[Renewal of a lapsed application; strong prior history]",
+        "applicant": "Sofia Marchetti",
+        "summary": "Renewal of a lapsed application; strong prior history",
         "status": "Pending",
         "score": 91,
         "recommendation": "Approve",
         "age_days": 1,
         "answers": [
-          { "id": "q1", "question": "[How did you hear about us?]", "answer": "[Returning after a break]" },
-          { "id": "q2", "question": "[What are you hoping to get out of this?]", "answer": "[Picking up where I left off]" },
-          { "id": "q3", "question": "[Anything we should know?]", "answer": "[Was a member two years ago]" }
+          { "id": "q1", "question": "How did you hear about us?", "answer": "Returning after a break" },
+          { "id": "q2", "question": "What are you hoping to get out of this?", "answer": "Picking up where I left off" },
+          { "id": "q3", "question": "Anything we should know?", "answer": "Was a member two years ago" }
         ]
       },
       {
         "id": "a4",
-        "applicant": "[Daniel Cho]",
-        "summary": "[Incomplete answers; waiting on missing details]",
+        "applicant": "Daniel Cho",
+        "summary": "Incomplete answers; waiting on missing details",
         "status": "In review",
         "score": 48,
         "recommendation": "Needs review",
         "age_days": 8,
         "answers": [
-          { "id": "q1", "question": "[How did you hear about us?]", "answer": "[—]" },
-          { "id": "q2", "question": "[What are you hoping to get out of this?]", "answer": "[Did not answer]" },
-          { "id": "q3", "question": "[Anything we should know?]", "answer": "[—]" }
+          { "id": "q1", "question": "How did you hear about us?", "answer": "—" },
+          { "id": "q2", "question": "What are you hoping to get out of this?", "answer": "Did not answer" },
+          { "id": "q3", "question": "Anything we should know?", "answer": "—" }
         ]
       },
       {
         "id": "a5",
-        "applicant": "[Priya Nair]",
-        "summary": "[Clear fit; references checked out]",
+        "applicant": "Priya Nair",
+        "summary": "Clear fit; references checked out",
         "status": "Pending",
         "score": 88,
         "recommendation": "Approve",
         "age_days": 3,
         "answers": [
-          { "id": "q1", "question": "[How did you hear about us?]", "answer": "[Recommended by a colleague]" },
-          { "id": "q2", "question": "[What are you hoping to get out of this?]", "answer": "[The community and the events]" },
-          { "id": "q3", "question": "[Anything we should know?]", "answer": "[Happy to answer follow-up questions]" }
+          { "id": "q1", "question": "How did you hear about us?", "answer": "Recommended by a colleague" },
+          { "id": "q2", "question": "What are you hoping to get out of this?", "answer": "The community and the events" },
+          { "id": "q3", "question": "Anything we should know?", "answer": "Happy to answer follow-up questions" }
         ]
       }
     ]
@@ -97,8 +97,8 @@
       {
         "type": "page-header",
         "props": {
-          "title": "[Applications]",
-          "subtitle": "[Work the queue top to bottom — approve, reject, or flag for a second look]"
+          "title": "Applications",
+          "subtitle": "Work the queue top to bottom — approve, reject, or flag for a second look"
         }
       },
       {
