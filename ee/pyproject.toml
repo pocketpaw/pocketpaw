@@ -127,6 +127,15 @@ extraction = [
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
 ]
+# Firestore→Fabric ingest worker (ee/pocketpaw_ee/cloud/fabric_ingest). The
+# reader lazy-imports google-cloud-firestore behind a Protocol, so it stays
+# optional — a deployment that doesn't mirror Firestore never installs it, and
+# the worker raises a clear install error if a config references Firestore
+# without the extra present. Floor 2.27.0 (released 2026-04-13, well past the
+# workspace's 7-day supply-chain minimum-age rule).
+firestore = [
+    "google-cloud-firestore>=2.27.0",
+]
 
 [project.scripts]
 # Operator tool — mint / inspect enterprise license keys. Lives in EE
@@ -322,6 +331,17 @@ source_modules = [
     "pocketpaw_ee.cloud.notifications.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+
+[[tool.importlinter.contracts]]
+name = "FabricIngest — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.fabric_ingest.dto",
+    "pocketpaw_ee.cloud.fabric_ingest.scheduler",
+    "pocketpaw_ee.cloud.fabric_ingest.firestore_reader",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.fabric_ingest_state"]
 
 [[tool.importlinter.contracts]]
 name = "Sessions — Beanie writes only from service.py"

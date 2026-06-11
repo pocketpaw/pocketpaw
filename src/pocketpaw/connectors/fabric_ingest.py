@@ -6,6 +6,12 @@
 #   create_object(). The store's update_object grew its own W4a tenancy guard, so
 #   an idempotent re-sync stays inside the caller's tenant on the write as well
 #   as the read.
+# Updated: 2026-06-11 (firestore-fabric-ingest) — FabricMapping gains an
+#   optional ``type_id``: when set, ensure_type() returns it directly instead
+#   of resolving/defining by name. Lets callers whose config references an
+#   existing ObjectType by id (the EE Firestore→Fabric worker's per-workspace
+#   mapping) ride this same canonical upsert loop instead of hand-rolling a
+#   parallel one. Additive; name-based callers are unchanged.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -70,6 +76,12 @@ class FabricMapping:
     type_description: str = ""
     type_icon: str = "box"
     type_color: str = "#0A84FF"
+    # Optional: a concrete ObjectType id. When set, ``ensure_type`` returns it
+    # directly instead of resolving/defining by name — for callers whose config
+    # already references an existing type by id (the EE Firestore→Fabric
+    # worker's per-workspace mapping does). ``type_name`` then serves only as
+    # the reporting label on IngestResult.
+    type_id: str | None = None
 
     def extract_source_id(self, record: Mapping[str, Any]) -> str | None:
         """Pull the stable upstream id from a record, or None if absent/empty."""
@@ -108,11 +120,18 @@ class IngestResult:
 async def ensure_type(store: FabricStore, mapping: FabricMapping) -> str:
     """Ensure the mapping's ObjectType exists; return its ``type_id``.
 
-    Define-once-by-name: if a type with this name already exists (a prior sync,
-    a manually-defined ontology type, the EE fabric registry), reuse it rather
-    than creating a second type that would split the same logical objects across
-    two ``type_id``s. Name match is case-insensitive (see get_type_by_name).
+    When the mapping carries an explicit ``type_id`` (the caller's config
+    references an existing type by id), return it directly — no name lookup,
+    no implicit define.
+
+    Otherwise, define-once-by-name: if a type with this name already exists (a
+    prior sync, a manually-defined ontology type, the EE fabric registry),
+    reuse it rather than creating a second type that would split the same
+    logical objects across two ``type_id``s. Name match is case-insensitive
+    (see get_type_by_name).
     """
+    if mapping.type_id:
+        return mapping.type_id
     existing = await store.get_type_by_name(mapping.type_name)
     if existing is not None:
         return existing.id
