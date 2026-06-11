@@ -149,8 +149,15 @@ class RecorderDispatcher:
 @pytest.fixture
 def dispatcher(monkeypatch) -> type[RecorderDispatcher]:
     """Make the executor's DEFAULT dispatcher the recorder, keeping the
-    router→executor seam real — only the station boundary is replaced."""
+    router→executor seam real — only the station boundary is replaced.
+
+    The default dispatcher is now ``station`` (feat/belt-autopilot); these tests
+    exercise the dispatch SEAM (the recorder), so pin the selection to ``bus``
+    and patch ``BusTaskDispatcher`` to the recorder — ``resolve_dispatcher()``
+    then returns the recorder. The real StationTaskDispatcher path is covered by
+    test_belt_autopilot."""
     RecorderDispatcher.instances = []
+    monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "bus")
     monkeypatch.setattr(mandate_executor, "BusTaskDispatcher", RecorderDispatcher)
     return RecorderDispatcher
 

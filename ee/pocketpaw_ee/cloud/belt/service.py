@@ -1,4 +1,11 @@
 # ee/pocketpaw_ee/cloud/belt/service.py
+# Updated: 2026-06-11 (feat/belt-autopilot) — the runs read model now renders a
+#   QUEUED STATION RUN. A pending ``code_change`` Action whose blob carries
+#   ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
+#   the task text but no diff yet) derives status ``queued`` / stage ``station``
+#   instead of ``proposed`` / ``gate``, so the console shows it as waiting for a
+#   human to open the develop station (one click) rather than sitting at the
+#   approve gate.
 # Created: 2026-06-10 (feat/belt-console-backend, SC-1 + SC-2) — the Belt &
 # Pulley console read/write service. Powers the /belt page's three needs the
 # first live runs exposed: (1) DISCOVER repos so the user can bind one up front
@@ -645,9 +652,22 @@ _STATUS_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-def _derive_status_stage(action: Any) -> tuple[str, str]:
+def _derive_status_stage(action: Any, blob: dict[str, Any] | None = None) -> tuple[str, str]:
     """Map an Action's status to the console (status, stage) pair. An unknown
-    status (forward-compat) falls back to (the raw value, 'gate')."""
+    status (forward-compat) falls back to (the raw value, 'gate').
+
+    A QUEUED STATION RUN — a pending ``code_change`` Action whose blob carries
+    ``station_pending=True`` (filed by the mandate ``StationTaskDispatcher`` with
+    no diff yet) — reads as ``("queued", "station")`` so the console shows it as
+    waiting for a human to open the develop station, not sitting at the gate."""
+    if blob is not None and blob.get("station_pending"):
+        raw = getattr(getattr(action, "status", None), "value", None) or str(
+            getattr(action, "status", "")
+        )
+        # Only a still-pending queued run reads as "queued"; once the human drives
+        # the station and a diff is proposed, a fresh non-pending row supersedes it.
+        if raw == "pending":
+            return ("queued", "station")
     raw = getattr(getattr(action, "status", None), "value", None) or str(
         getattr(action, "status", "")
     )
@@ -670,7 +690,7 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         None`` cleanly (key present, value null) so the frontend's
         ``pr_url ? <link> : <chip>`` switch is unambiguous.
     """
-    status, stage = _derive_status_stage(action)
+    status, stage = _derive_status_stage(action, blob)
     created = getattr(action, "created_at", None)
     repo_path = str(blob.get("repo") or "")
     return {
