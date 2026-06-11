@@ -74,6 +74,13 @@ Updated: 2026-05-25 (PR #1222 R1 Blocker 1) — added
   cannot accidentally clobber the auth key. Each isolated backend
   instance carries its own stash, so one request's tenancy can never
   leak into another's subprocess.
+Updated: 2026-06-12 — ``_collect_mcp_tool_ids`` now also allowlists EXTERNAL
+  MCP servers from ``load_mcp_config`` (``~/.pocketpaw/mcp_servers.json``) with
+  a bare ``mcp__<server>`` entry. They are registered with the SDK in
+  ``_get_mcp_servers`` but, lacking an in-process ``tool_ids()`` provider, their
+  tools never reached the allowlist and were uncallable (a deployment's
+  ``fabric`` server was registered yet the agent could not call
+  ``fabric_query`` / ``fabric_stats``).
 Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
   collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
   server now carries a writable ``add_widget`` tool alongside the read tools;
@@ -790,6 +797,31 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 ):
                     continue
                 ids.append(tool_id)
+
+        # External stdio/http MCP servers (``~/.pocketpaw/mcp_servers.json`` via
+        # ``load_mcp_config``) are registered with the SDK in ``_get_mcp_servers``
+        # but have no in-process ``tool_ids()`` provider — their tool names are
+        # only known after the SDK connects to the server. Without an allowlist
+        # entry the SDK refuses every call (e.g. a deployment's ``fabric`` server
+        # exposing ``fabric_query`` / ``fabric_stats`` was registered yet
+        # uncallable). Allow each enabled external server wholesale with a bare
+        # ``mcp__<server>`` entry — the Claude Code permission convention that
+        # admits all of a server's tools — gated by the same tool policy that
+        # gates registration.
+        try:
+            from pocketpaw.mcp.config import load_mcp_config
+
+            for cfg in load_mcp_config():
+                if not cfg.enabled:
+                    continue
+                if cfg.name in self._BUILTIN_SEARCH_MCP_NAMES:
+                    continue
+                if not self._policy.is_mcp_server_allowed(cfg.name):
+                    continue
+                ids.append(f"mcp__{cfg.name}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("External MCP server allowlist not added: %s", exc)
+
         return ids
 
     # Section markers that ``AgentPool.run`` appends to the system prompt
