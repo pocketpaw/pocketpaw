@@ -5,6 +5,17 @@
 # instead of the agent asking, (2) ADD a new repo root durably (admin-gated),
 # (3) read STATION RUNS + a run's diff so the page can show status/output.
 #
+# Updated: 2026-06-11 (feat/belt-repo-init) — added ``init_repo``: create a
+# brand-new git REPOSITORY under an allowlisted root (admin-gated, same RBAC +
+# realpath discipline as add_repo), seed a README + initial commit so it has a
+# HEAD and a default branch, register it via the same persistence add_repo uses,
+# and (optionally) create the GitHub remote via the injectable ``RepoCreator``
+# (default ``GhCliRepoCreator`` shells ``gh repo create --private --source --push``,
+# mirroring the executor's ``GhCliPrOpener`` injectable). A remote-creation
+# failure KEEPS the local repo and returns a ``remote_error`` message — the local
+# init is never rolled back. The runs read model (_run_summary) now also surfaces
+# ``commit_sha`` for local-only (no-origin) landings, where ``pr_url`` is None.
+#
 # What lives here:
 #   * ``resolve_allowlist_roots(workspace_id)`` — the union of
 #     ``settings.belt_repo_allowlist`` and the per-workspace persisted extension
@@ -45,8 +56,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +73,16 @@ MAX_BRANCHES = 20
 # here so the console service has no import dependency on the agent-side MCP
 # module (the OSS-EE boundary keeps the agent layer out of the cloud read path).
 _CODE_CHANGE_PARAM_KEY = "_code_change"
+
+# A repo name must be a SINGLE safe directory segment — lowercase alphanumerics
+# plus ``. _ -``, no path separators, no leading dot. This is the security
+# contract for the init route: the name is joined onto an allowlisted
+# ``location_root`` to form the target dir, so it must NOT be able to traverse
+# (``..``), absolutize (``/foo``), or smuggle a separator. The realpath +
+# containment check after the join is the second line of defense.
+_REPO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+# A repo name capped well under any filesystem limit; keeps the dir name sane.
+_MAX_REPO_NAME = 100
 
 
 async def emit_belt_run_updated(
@@ -358,6 +380,244 @@ async def _persist_root(workspace_id: str, resolved_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# init_repo — create a brand-new git repo under an allowlisted root, register it
+# ---------------------------------------------------------------------------
+
+
+class RepoCreator(Protocol):
+    """Injectable remote-repo creator (mirrors the executor's ``PrOpener``).
+
+    The default implementation shells ``gh repo create`` from the new repo dir;
+    tests inject a fake to assert the call args without touching GitHub. Raises
+    on any failure so the init route can record a ``remote_error`` while keeping
+    the local repo. ``gh`` reads the authenticated token from the environment —
+    no secret is ever passed on the command line."""
+
+    async def create_remote(self, *, repo_path: Path, name: str) -> None: ...
+
+
+class GhCliRepoCreator:
+    """Default ``RepoCreator`` — shells ``gh repo create --private --source
+    <path> --push`` from the new repo dir.
+
+    Mirrors the executor's ``GhCliPrOpener``: argv-only (never ``shell=True``,
+    never string interpolation), the name + path are literal argv elements, and
+    ``gh`` reads its token from the environment. Raises ``RuntimeError`` on a
+    non-zero exit so the caller records the remote failure without rolling back
+    the local repo."""
+
+    async def create_remote(self, *, repo_path: Path, name: str) -> None:
+        from pocketpaw_ee.cloud.belt.executor import _run
+
+        code, out, err = await _run(
+            [
+                "gh",
+                "repo",
+                "create",
+                name,
+                "--private",
+                "--source",
+                str(repo_path),
+                "--push",
+            ],
+            cwd=repo_path,
+        )
+        if code != 0:
+            raise RuntimeError(f"gh repo create failed (exit {code}): {err.strip() or out.strip()}")
+
+
+def _validate_repo_name(name: str) -> str:
+    """Validate ``name`` is a safe single directory segment, return it stripped.
+
+    Rejects (with a clear, path-free message) an empty name, a name with a path
+    separator, a name that starts with a dot or hyphen, a too-long name, or any
+    character outside ``[a-z0-9._-]``. This is the first security gate on the
+    init route — the validated name is joined onto an allowlisted root to form
+    the target dir, so it must never traverse or absolutize."""
+    if not isinstance(name, str) or not name.strip():
+        raise BeltConsoleError(400, "A repository name is required.")
+    candidate = name.strip()
+    if len(candidate) > _MAX_REPO_NAME:
+        raise BeltConsoleError(
+            400, f"Repository name must be {_MAX_REPO_NAME} characters or fewer."
+        )
+    if "/" in candidate or "\\" in candidate or candidate in (".", ".."):
+        raise BeltConsoleError(
+            400, "Repository name cannot contain path separators or be '.' / '..'."
+        )
+    if not _REPO_NAME_RE.match(candidate):
+        raise BeltConsoleError(
+            400,
+            "Repository name must start with a letter or digit and use only "
+            "lowercase letters, digits, '.', '_', or '-'.",
+        )
+    return candidate
+
+
+async def _resolve_location_root(workspace_id: str, raw_root: str) -> Path:
+    """Resolve ``raw_root`` and require it to be an existing dir INSIDE one of
+    the workspace's allowlist roots. Returns the resolved root.
+
+    The containment check runs on the REALPATH so a ``..`` in the submission
+    can't escape the boundary. A root outside every allowlist root, or one that
+    doesn't exist, is refused with a path-free 400 (we never confirm whether an
+    out-of-bounds path exists)."""
+    if not isinstance(raw_root, str) or not raw_root.strip():
+        raise BeltConsoleError(400, "A location is required.")
+    try:
+        resolved = Path(raw_root).expanduser().resolve()
+    except (OSError, RuntimeError):
+        logger.warning("belt: init_repo rejected an unresolvable location root for workspace")
+        raise BeltConsoleError(400, "That location could not be resolved.") from None
+
+    roots = await resolve_allowlist_roots(workspace_id)
+    if not _is_within_roots(resolved, roots):
+        # Don't leak whether the out-of-bounds path exists — same message either way.
+        raise BeltConsoleError(400, "That location is not under an authorized root.")
+    if not resolved.is_dir():
+        raise BeltConsoleError(400, "That location does not exist or is not a directory.")
+    return resolved
+
+
+def _is_within_roots(path: Path, roots: list[Path]) -> bool:
+    """True when ``path`` is inside (or equal to) one of the allowlist ``roots``.
+    ``path`` MUST already be resolved by the caller. Mirrors the MCP resolver's
+    ``_is_within_allowlist``."""
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+async def init_repo(
+    workspace_id: str,
+    *,
+    name: str,
+    location_root: str,
+    create_remote: bool,
+    repo_creator: RepoCreator | None = None,
+) -> dict[str, Any]:
+    """Create a brand-new git repo under an allowlisted root and register it.
+
+    Steps (each failure raises a path-free ``BeltConsoleError`` BEFORE any
+    filesystem mutation it would have to roll back):
+      1. validate ``name`` is a safe single dir segment (no separators / ``..``).
+      2. resolve ``location_root`` and require it under the workspace allowlist.
+      3. refuse if ``<location_root>/<name>`` already exists.
+      4. ``git init`` (argv-only subprocess — never ``shell=True``).
+      5. seed a minimal ``README.md`` (the repo name) and commit it so the repo
+         has a HEAD + a default branch.
+      6. register the new repo path via the same persistence ``add_repo`` uses
+         (``_persist_root``) so discovery + the code-change boundary pick it up.
+      7. if ``create_remote`` — shell ``gh repo create ... --push`` via the
+         injectable ``RepoCreator``. On remote FAILURE the LOCAL repo is KEPT and
+         the response carries a ``remote_error`` message (the frontend shows it
+         inline); the local init is NEVER rolled back.
+
+    Returns ``{"repo": {path, name, current_branch, branches}}`` (the standard
+    repo shape the registry returns) plus an optional top-level ``remote_error``
+    string when a requested remote creation failed.
+    """
+    safe_name = _validate_repo_name(name)
+    root = await _resolve_location_root(workspace_id, location_root)
+    target = root / safe_name
+
+    if target.exists():
+        raise BeltConsoleError(400, f"A directory named '{safe_name}' already exists there.")
+
+    from pocketpaw_ee.cloud.belt.executor import _run
+
+    # 4. Create the dir + git init. We make the dir ourselves so a partial init
+    #    leaves an obvious, removable artifact (no surprise reuse of an existing
+    #    path — we already refused an existing target above).
+    try:
+        target.mkdir(parents=False, exist_ok=False)
+    except OSError:
+        logger.warning("belt: init_repo could not create the target dir for workspace")
+        raise BeltConsoleError(400, "Could not create the repository directory.") from None
+
+    code, _out, err = await _run(["git", "init"], cwd=target)
+    if code != 0:
+        # Clean up the empty dir we just made so a retry isn't blocked.
+        _safe_rmdir(target)
+        raise BeltConsoleError(400, f"git init failed: {err.strip()[:200]}")
+
+    # 5. Seed README.md and make the initial commit so the repo has a HEAD and a
+    #    default branch (an empty repo has neither, which breaks discovery's
+    #    branch read and a later code-change base).
+    try:
+        (target / "README.md").write_text(f"# {safe_name}\n", encoding="utf-8")
+    except OSError:
+        _safe_rmdir(target)
+        raise BeltConsoleError(400, "Could not seed the repository README.") from None
+
+    code, _out, err = await _run(["git", "add", "README.md"], cwd=target)
+    if code != 0:
+        _safe_rmdir(target)
+        raise BeltConsoleError(400, f"git add failed: {err.strip()[:200]}")
+    # Stamp a deterministic committer identity via ``-c`` flags so the seed commit
+    # lands even when the host has no global git ``user.name`` / ``user.email``
+    # (a bare server / CI). argv-only — the identity is literal argv, never a
+    # shell string.
+    code, _out, err = await _run(
+        [
+            "git",
+            "-c",
+            "user.name=PocketPaw Belt",
+            "-c",
+            "user.email=belt@pocketpaw.local",
+            "commit",
+            "-m",
+            "Initial commit",
+        ],
+        cwd=target,
+    )
+    if code != 0:
+        _safe_rmdir(target)
+        raise BeltConsoleError(400, f"git commit failed: {err.strip()[:200]}")
+
+    resolved_target = target.resolve()
+
+    # 6. Register the new repo so discovery + the code-change boundary see it.
+    await _persist_root(workspace_id, str(resolved_target))
+
+    result: dict[str, Any] = {"repo": await _repo_view(resolved_target)}
+
+    # 7. Optional remote creation. A failure NEVER rolls back the local repo —
+    #    the local init already succeeded and is registered; we surface the
+    #    remote failure inline so the user can retry the remote half by hand.
+    if create_remote:
+        creator: RepoCreator = repo_creator or GhCliRepoCreator()
+        try:
+            await creator.create_remote(repo_path=resolved_target, name=safe_name)
+            # Refresh the view so a new ``origin``/branch state is reflected.
+            result["repo"] = await _repo_view(resolved_target)
+        except Exception as exc:  # noqa: BLE001 — keep the local repo, report the remote gap
+            logger.warning("belt: init_repo remote creation failed for workspace", exc_info=True)
+            result["remote_error"] = (
+                f"The local repository was created, but the GitHub remote could "
+                f"not be created: {exc}. Create it manually or retry."
+            )
+
+    return result
+
+
+def _safe_rmdir(path: Path) -> None:
+    """Best-effort removal of a half-initialized target dir — never raises.
+    Used to clean up after a git-init / seed-commit failure so a retry isn't
+    blocked by a stale empty dir."""
+    import shutil
+
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:  # noqa: BLE001 — cleanup is best-effort
+        logger.debug("belt: init_repo cleanup failed (non-fatal)", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # runs read model — over the belt code_change Instinct Actions
 # ---------------------------------------------------------------------------
 
@@ -397,9 +657,18 @@ def _derive_status_stage(action: Any) -> tuple[str, str]:
 def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
     """Build the runs-list row for one belt Action (no diff — that's detail-only).
 
-    Reads task/summary/repo/base_branch/correlation_id off the blob, pr_url +
-    branch STRUCTURALLY off the blob (the executor back-writes them on success),
-    and status/stage from the Action lifecycle. ``created_at`` is ISO-8601.
+    Reads task/summary/repo/base_branch/correlation_id off the blob, and the
+    landing fields — ``branch`` / ``pr_url`` / ``commit_sha`` — STRUCTURALLY off
+    the blob (the executor back-writes them on success), and status/stage from the
+    Action lifecycle. ``created_at`` is ISO-8601.
+
+    Two landing shapes feed this row:
+      * WITH-REMOTE — ``pr_url`` + ``branch`` are present; the page renders a PR
+        link.
+      * LOCAL-ONLY (no origin) — ``branch`` + ``commit_sha`` are present and
+        ``pr_url`` is None; the page renders a branch chip. We emit ``pr_url:
+        None`` cleanly (key present, value null) so the frontend's
+        ``pr_url ? <link> : <chip>`` switch is unambiguous.
     """
     status, stage = _derive_status_stage(action)
     created = getattr(action, "created_at", None)
@@ -415,6 +684,7 @@ def _run_summary(action: Any, blob: dict[str, Any]) -> dict[str, Any]:
         "base_branch": str(blob.get("base_branch") or ""),
         "branch": blob.get("branch") or None,
         "pr_url": blob.get("pr_url") or None,
+        "commit_sha": blob.get("commit_sha") or None,
         "created_at": created.isoformat() if hasattr(created, "isoformat") else None,
         "correlation_id": str(blob.get("correlation_id") or "") or None,
     }
@@ -476,12 +746,15 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
 
 __all__ = [
     "BeltConsoleError",
+    "GhCliRepoCreator",
     "MAX_BRANCHES",
     "MAX_DIFF_BYTES",
+    "RepoCreator",
     "add_repo",
     "discover_repos",
     "emit_belt_run_updated",
     "get_run",
+    "init_repo",
     "list_runs",
     "resolve_allowlist_roots",
 ]

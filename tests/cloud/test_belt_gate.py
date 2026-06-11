@@ -2,6 +2,14 @@
 #
 # Created: 2026-06-10 (feat/belt-gate, Belt & Pulley stations thin slice).
 #
+# Updated: 2026-06-11 (feat/belt-repo-init — local-only gate mode) — added the
+# NO-ORIGIN landing path: a propose→approve cycle against a repo with no
+# ``origin`` remote applies + commits on ``feat/belt-<id>`` LOCALLY, NEVER pushes
+# and NEVER opens a PR (a fake opener proves it's untouched), the branch + commit
+# survive in the repo, and the executed outcome carries the branch + commit sha
+# (and the blob carries branch + commit_sha, NOT pr_url) so the runs read model
+# surfaces a branch chip with pr_url=None.
+#
 # What this pins — the WHOLE gate, driven through the REAL path with a local
 # git fixture (a bare repo as origin + a seeded working clone):
 #   * belt_propose_change (the real MCP handler) validates identity + inputs,
@@ -102,6 +110,29 @@ def repo(tmp_path: Path) -> Path:
     # Ensure the default branch is named 'main' regardless of git's init default.
     _git(work, "branch", "-M", "main")
     _git(work, "push", "-u", "origin", "main")
+    return work
+
+
+@pytest.fixture
+def local_repo(tmp_path: Path) -> Path:
+    """A git repo with NO ``origin`` remote — the local-only landing fixture.
+
+    A committed ``app.py`` on ``main``, identity configured locally so commits
+    succeed, but no remote at all. The executor must apply + commit on the belt
+    branch WITHOUT pushing or opening a PR.
+    """
+    work = tmp_path / "local-work"
+    work.mkdir()
+    _git(work, "init")
+    _git(work, "config", "user.name", "Belt Test")
+    _git(work, "config", "user.email", "belt@test.local")
+    (work / "app.py").write_text("def hello():\n    return 'hi'\n", encoding="utf-8")
+    _git(work, "add", "app.py")
+    _git(work, "commit", "-m", "init")
+    _git(work, "branch", "-M", "main")
+    # Sanity: there is no origin remote.
+    remotes = _git(work, "remote")
+    assert remotes.strip() == ""
     return work
 
 
@@ -506,3 +537,117 @@ async def test_empty_diff_refused(repo, store, allowlist):
     assert res.get("is_error") is True
     assert "non-empty unified `diff`" in res["content"][0]["text"]
     assert await store.list_actions() == []
+
+
+# ---------------------------------------------------------------------------
+# LOCAL-ONLY gate mode — a repo with NO origin: apply + commit locally, NO push,
+# NO PR; the outcome carries branch + commit sha instead of pr_url.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def local_allowlist(local_repo: Path, monkeypatch) -> None:
+    """Allowlist the no-remote repo's parent so the real repo resolves inside."""
+    from pocketpaw.config import get_settings
+
+    real = get_settings()
+
+    class _S:
+        belt_repo_allowlist = [str(local_repo.parent)]
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+
+async def test_local_only_landing_commits_locally_no_push_no_pr(local_repo, store, local_allowlist):
+    """propose→approve against a NO-ORIGIN repo: the change applies + commits on
+    feat/belt-<id> LOCALLY, the PR opener is NEVER called (no push, no PR), the
+    branch + commit survive in the repo, and the outcome / blob carry branch +
+    commit_sha with NO pr_url."""
+    with _identity():
+        res = await belt._propose_change_handler(
+            {
+                "repo": str(local_repo),
+                "base_branch": "main",
+                "diff": _good_diff(),
+                "summary": "Friendlier greeting, landed locally.",
+                "task": "Make hello() friendlier.",
+            }
+        )
+    action_id = (await _result_body(res))["action_id"]
+
+    approved = await store.approve(action_id, approver="u1")
+    opener = FakePrOpener()
+    await belt_executor.execute_approved_change(approved, pr_opener=opener)
+
+    # The PR opener was NEVER called — no remote, so no push and no PR.
+    assert opener.calls == []
+
+    final = await store.get_action(action_id)
+    assert final.status == ActionStatus.EXECUTED, final.outcome
+
+    # The structured blob carries branch + commit_sha, NOT pr_url.
+    blob = final.parameters["_code_change"]
+    assert blob["branch"].startswith("feat/belt-")
+    assert blob.get("commit_sha"), "local-only landing must record the commit sha"
+    assert "pr_url" not in blob or blob["pr_url"] is None
+    assert blob["files_changed"] == 1
+
+    branch = blob["branch"]
+    commit_sha = blob["commit_sha"]
+
+    # The free-text outcome names the branch + sha, and mentions no PR.
+    outcome = final.outcome if isinstance(final.outcome, str) else str(final.outcome)
+    assert branch in outcome
+    assert commit_sha[:12] in outcome
+    assert "no pr" in outcome.lower() or "no origin" in outcome.lower()
+
+    # The branch + commit actually landed in the LOCAL repo (promoted off the
+    # throwaway worktree). The change is on that branch.
+    branches = _git(local_repo, "branch", "--list", branch)
+    assert branch in branches
+    content = _git(local_repo, "show", f"{branch}:app.py")
+    assert "hello world" in content
+    # The branch points at the recorded commit sha.
+    head = _git(local_repo, "rev-parse", branch).strip()
+    assert head == commit_sha
+
+    # Still no origin remote was added.
+    assert _git(local_repo, "remote").strip() == ""
+
+
+async def test_local_only_runs_read_model_branch_chip_no_pr(
+    local_repo, store, local_allowlist, monkeypatch
+):
+    """After a local-only landing, the runs read model returns the run with the
+    branch (+ commit_sha) and pr_url=None — so the page renders a branch chip."""
+    with _identity():
+        res = await belt._propose_change_handler(
+            {
+                "repo": str(local_repo),
+                "base_branch": "main",
+                "diff": _good_diff(),
+                "summary": "Local-only run for the read model.",
+                "task": "tweak greeting",
+            }
+        )
+    action_id = (await _result_body(res))["action_id"]
+    approved = await store.approve(action_id, approver="u1")
+    await belt_executor.execute_approved_change(approved, pr_opener=FakePrOpener())
+
+    from pocketpaw_ee.cloud.belt import service as belt_service
+
+    detail = await belt_service.get_run("w1", action_id)
+    assert detail["status"] == "landed"
+    assert detail["stage"] == "done"
+    assert detail["branch"].startswith("feat/belt-")
+    assert detail["commit_sha"]
+    assert detail["pr_url"] is None  # branch chip, not a PR link
+
+    listed = await belt_service.list_runs("w1")
+    row = next(r for r in listed["runs"] if r["action_id"] == action_id)
+    assert row["branch"].startswith("feat/belt-")
+    assert row["pr_url"] is None
+    assert row["commit_sha"]

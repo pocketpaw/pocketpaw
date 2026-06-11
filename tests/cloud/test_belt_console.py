@@ -8,6 +8,13 @@
 #   * POST /belt/repos — validates the path is an existing git repo, realpaths
 #     it, persists it to the per-workspace allowlist extension. 4xx on
 #     non-existent / non-git path; 403 for a non-admin caller.
+#
+# Updated: 2026-06-11 (feat/belt-repo-init) — added POST /belt/repos/init tests:
+#   creates the dir + git repo + initial commit + registers it + returns the
+#   standard repo shape; name validation rejects unsafe names; a location_root
+#   outside the allowlist rejects; an existing target rejects; 403 for a
+#   non-admin. create_remote: the fake gh-runner is called with the right args;
+#   a remote failure → 200 + remote_error with the local repo intact.
 #   * GET /belt/runs — runs read model over the belt code_change Instinct
 #     Actions, newest-first, status/stage derived from the Action lifecycle.
 #   * GET /belt/runs/{id} — run + diff, diff capped at MAX_DIFF_BYTES, 404 for a
@@ -123,16 +130,24 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
 # ---------------------------------------------------------------------------
 
 
-def _build_app(*, role: str = "admin", workspace_id: str = "w1", user_id: str = "u1") -> FastAPI:
+def _build_app(
+    *,
+    role: str = "admin",
+    workspace_id: str = "w1",
+    user_id: str = "u1",
+    repo_creator=None,
+) -> FastAPI:
     """A TestClient app over the belt console router with the REAL RBAC guard.
 
     The user's workspace role drives ``require_action_any_workspace`` — a
-    ``member`` is rejected on the ADMIN-gated add-repo route (403) but passes the
-    MEMBER-gated reads. License is bypassed.
+    ``member`` is rejected on the ADMIN-gated add-repo / init routes (403) but
+    passes the MEMBER-gated reads. License is bypassed. ``repo_creator`` (when
+    given) overrides the init route's ``RepoCreator`` so the ``gh repo create``
+    shell-out is faked.
     """
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud.auth import current_active_user
-    from pocketpaw_ee.cloud.belt.router import router
+    from pocketpaw_ee.cloud.belt.router import repo_creator_dep, router
     from pocketpaw_ee.cloud.license import require_license
 
     app = FastAPI()
@@ -150,6 +165,8 @@ def _build_app(*, role: str = "admin", workspace_id: str = "w1", user_id: str = 
         return user
 
     app.dependency_overrides[current_active_user] = _fake_user_dep
+    if repo_creator is not None:
+        app.dependency_overrides[repo_creator_dep] = lambda: repo_creator
     return app
 
 
@@ -247,6 +264,162 @@ async def test_add_repo_forbidden_for_non_admin(settings_allowlist, store, mongo
     with TestClient(_build_app(role="member")) as client:
         res = client.post("/api/v1/belt/repos", json={"path": str(roots / "acme-api")})
     assert res.status_code == 403, res.text
+
+
+# ---------------------------------------------------------------------------
+# POST /belt/repos/init — create a brand-new repo + validation + RBAC + remote
+# ---------------------------------------------------------------------------
+
+
+class _FakeRepoCreator:
+    """A fake RepoCreator that records its call args and never touches GitHub."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    async def create_remote(self, *, repo_path, name) -> None:
+        self.calls.append({"repo_path": Path(repo_path), "name": name})
+        if self.fail:
+            raise RuntimeError("gh repo create failed (exit 1): not authenticated")
+
+
+async def test_init_repo_creates_dir_git_commit_and_registers(
+    settings_allowlist, store, mongo_db, tmp_path
+):
+    """A valid init creates the dir + a git repo with an initial commit, registers
+    the repo under the workspace allowlist, and returns the standard repo shape."""
+    location = tmp_path / "checkouts"  # the settings_allowlist root
+    with TestClient(_build_app(role="admin")) as client:
+        res = client.post(
+            "/api/v1/belt/repos/init",
+            json={"name": "fresh-svc", "location_root": str(location), "create_remote": False},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert "remote_error" not in body
+        repo = body["repo"]
+        assert repo["name"] == "fresh-svc"
+        assert set(repo.keys()) == {"path", "name", "current_branch", "branches"}
+        # The repo has a HEAD + default branch (seed commit landed).
+        assert repo["current_branch"] != ""
+
+        target = location / "fresh-svc"
+        assert (target / ".git").is_dir()
+        assert (target / "README.md").read_text(encoding="utf-8") == "# fresh-svc\n"
+        # One commit on the default branch.
+        log = _git(target, "log", "--oneline")
+        assert log.strip()
+
+        # Registered: the workspace extension now carries the resolved repo path.
+        from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
+
+        doc = await BeltWorkspaceConfig.find_one(BeltWorkspaceConfig.workspace == "w1")
+        assert doc is not None
+        assert str(target.resolve()) in doc.allowlist_roots
+
+
+async def test_init_repo_rejects_unsafe_name(settings_allowlist, store, mongo_db, tmp_path):
+    """A name with a path separator (or traversal) is refused before any FS write."""
+    location = tmp_path / "checkouts"
+    with TestClient(_build_app(role="admin")) as client:
+        for bad in ("../escape", "a/b", "Has Space", "UPPER", ".hidden"):
+            res = client.post(
+                "/api/v1/belt/repos/init",
+                json={"name": bad, "location_root": str(location)},
+            )
+            assert res.status_code == 400, f"{bad!r}: {res.text}"
+            assert "error" in res.json()
+    # Nothing was created.
+    assert not (location / "escape").exists()
+
+
+async def test_init_repo_rejects_root_outside_allowlist(
+    settings_allowlist, store, mongo_db, tmp_path
+):
+    """A location_root outside every allowlist root is refused (path-free 400)."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with TestClient(_build_app(role="admin")) as client:
+        res = client.post(
+            "/api/v1/belt/repos/init",
+            json={"name": "x", "location_root": str(outside)},
+        )
+    assert res.status_code == 400, res.text
+    assert "authorized" in res.json()["error"]["message"].lower()
+    assert not (outside / "x").exists()
+
+
+async def test_init_repo_rejects_existing_target(settings_allowlist, store, mongo_db, tmp_path):
+    """An init at a path that already exists is refused — no clobber."""
+    location = tmp_path / "checkouts"
+    (location / "taken").mkdir()
+    with TestClient(_build_app(role="admin")) as client:
+        res = client.post(
+            "/api/v1/belt/repos/init",
+            json={"name": "taken", "location_root": str(location)},
+        )
+    assert res.status_code == 400, res.text
+    assert "already exists" in res.json()["error"]["message"].lower()
+
+
+async def test_init_repo_forbidden_for_non_admin(settings_allowlist, store, mongo_db, tmp_path):
+    """A workspace MEMBER cannot init a repo — belt.manage is ADMIN-gated."""
+    location = tmp_path / "checkouts"
+    with TestClient(_build_app(role="member")) as client:
+        res = client.post(
+            "/api/v1/belt/repos/init",
+            json={"name": "nope", "location_root": str(location)},
+        )
+    assert res.status_code == 403, res.text
+    assert not (location / "nope").exists()
+
+
+async def test_init_repo_with_remote_calls_creator_with_right_args(
+    settings_allowlist, store, mongo_db, tmp_path
+):
+    """create_remote=true → the fake gh-runner is called with the new repo path
+    and name; the response has no remote_error."""
+    location = tmp_path / "checkouts"
+    creator = _FakeRepoCreator()
+    with TestClient(_build_app(role="admin", repo_creator=creator)) as client:
+        res = client.post(
+            "/api/v1/belt/repos/init",
+            json={"name": "remote-svc", "location_root": str(location), "create_remote": True},
+        )
+    assert res.status_code == 200, res.text
+    assert "remote_error" not in res.json()
+    assert len(creator.calls) == 1
+    call = creator.calls[0]
+    assert call["name"] == "remote-svc"
+    assert call["repo_path"] == (location / "remote-svc").resolve()
+
+
+async def test_init_repo_remote_failure_keeps_local_repo(
+    settings_allowlist, store, mongo_db, tmp_path
+):
+    """A remote-creation failure → 200 with remote_error; the local repo is intact
+    and registered (never rolled back)."""
+    location = tmp_path / "checkouts"
+    creator = _FakeRepoCreator(fail=True)
+    with TestClient(_build_app(role="admin", repo_creator=creator)) as client:
+        res = client.post(
+            "/api/v1/belt/repos/init",
+            json={"name": "half-svc", "location_root": str(location), "create_remote": True},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert "remote_error" in body
+        assert "local repository was created" in body["remote_error"].lower()
+        # Local repo is intact.
+        target = location / "half-svc"
+        assert (target / ".git").is_dir()
+        assert (target / "README.md").exists()
+        # And registered despite the remote failure.
+        from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
+
+        doc = await BeltWorkspaceConfig.find_one(BeltWorkspaceConfig.workspace == "w1")
+        assert str(target.resolve()) in doc.allowlist_roots
 
 
 # ---------------------------------------------------------------------------
@@ -579,6 +752,79 @@ async def test_executor_emits_landed_and_persists_pr_result(
     blob = refreshed.parameters["_code_change"]
     assert blob["pr_url"] == "https://github.com/acme/repo/pull/7"
     assert blob["branch"].startswith("feat/belt-")
+    assert blob["files_changed"] == 1
+
+
+async def test_executor_local_only_emits_landed_without_pr_url(
+    monkeypatch, recording_bus, sse, tmp_path
+):
+    """A NO-ORIGIN repo: the executor publishes belt_run_updated(landed, done) on
+    the bus WITHOUT a pr_url, and back-writes branch + commit_sha (not pr_url)."""
+    # A plain repo with NO remote at all.
+    work = tmp_path / "local"
+    work.mkdir()
+    _git(work, "init")
+    _git(work, "config", "user.name", "Belt Test")
+    _git(work, "config", "user.email", "belt@test.local")
+    (work / "app.py").write_text("def hello():\n    return 'hi'\n", encoding="utf-8")
+    _git(work, "add", "app.py")
+    _git(work, "commit", "-m", "init")
+    _git(work, "branch", "-M", "main")
+
+    from pocketpaw.config import get_settings
+
+    real = get_settings()
+
+    class _S:
+        belt_repo_allowlist = [str(tmp_path)]
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
+
+    st = InstinctStore(tmp_path / "exec_local.db")
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+
+    action = await _propose_run(
+        st,
+        repo=str(work),
+        base_branch="main",
+        diff=(
+            "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n"
+            " def hello():\n-    return 'hi'\n+    return 'hello world'\n"
+        ),
+    )
+    await st.approve(action.id)
+
+    from pocketpaw_ee.cloud.belt import executor as belt_executor
+
+    class _FakeOpener:
+        def __init__(self) -> None:
+            self.called = False
+
+        async def open_pr(self, *, repo_path, branch, base_branch, title, body) -> str:
+            self.called = True
+            return "https://should-not-be-used"
+
+    opener = _FakeOpener()
+    await belt_executor.execute_approved_change(action, pr_opener=opener)
+
+    # No PR opener was invoked (no remote → no push, no PR).
+    assert opener.called is False
+
+    # Bus: a landed/done terminal with NO pr_url key.
+    landed = [e for e in _bus_belt_events(recording_bus) if e["status"] == "landed"]
+    assert landed and landed[0]["stage"] == "done"
+    assert "pr_url" not in landed[0]
+    assert landed[0]["workspace_id"] == "w1"
+
+    # Blob: branch + commit_sha back-written, NO pr_url.
+    refreshed = await st.get_action(action.id)
+    blob = refreshed.parameters["_code_change"]
+    assert blob["branch"].startswith("feat/belt-")
+    assert blob["commit_sha"]
+    assert "pr_url" not in blob or blob["pr_url"] is None
     assert blob["files_changed"] == 1
 
 

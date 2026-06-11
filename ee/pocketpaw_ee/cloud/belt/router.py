@@ -4,8 +4,16 @@
 # endpoints (a sibling frontend PR pins the contract):
 #   * GET  /belt/repos          — discover git repos under the allowlist roots
 #   * POST /belt/repos {path}   — add a new repo root (admin/owner-gated)
+#   * POST /belt/repos/init     — CREATE a new git repo under an allowlist root
+#                                 (admin-gated); optional GitHub remote
 #   * GET  /belt/runs           — list this workspace's station runs (newest-first)
 #   * GET  /belt/runs/{action_id} — one run + its proposed diff (capped ~200 KB)
+#
+# Updated: 2026-06-11 (feat/belt-repo-init) — added ``POST /belt/repos/init``.
+# Same ADMIN gate as the add-repo mutation (``belt.manage``) and the same
+# realpath discipline (the service validates the name + location_root). The
+# ``RepoCreator`` is injected via a dependency so tests can fake the ``gh repo
+# create`` shell-out; production gets the default ``GhCliRepoCreator``.
 #
 # Routes are THIN: they read identity (workspace + user) from the cloud deps,
 # delegate to ``ee.cloud.belt.service``, and return the wire dict the service
@@ -50,6 +58,32 @@ class AddRepoRequest(BaseModel):
     path: str = Field(min_length=1)
 
 
+class InitRepoRequest(BaseModel):
+    """Body for ``POST /belt/repos/init`` — create a brand-new git repository.
+
+    * ``name`` — the new repo's directory name. Must be a safe single segment
+      (``[a-z0-9._-]``, no path separators); the service validates it.
+    * ``location_root`` — an existing directory UNDER an allowlist root the new
+      repo dir is created in. The service realpath-resolves it and requires
+      containment.
+    * ``create_remote`` — when true, also create + push a private GitHub remote
+      via ``gh repo create``. A remote failure keeps the local repo and returns
+      a ``remote_error`` message; the local init is never rolled back.
+    """
+
+    name: str = Field(min_length=1)
+    location_root: str = Field(min_length=1)
+    create_remote: bool = False
+
+
+def repo_creator_dep() -> belt_service.RepoCreator | None:
+    """Provide the ``RepoCreator`` for the init route. Production returns ``None``
+    so the service uses its default ``GhCliRepoCreator``; tests override this
+    dependency to inject a fake that records the ``gh repo create`` args without
+    touching GitHub (mirrors how the executor's ``PrOpener`` is faked)."""
+    return None
+
+
 def _to_cloud_error(exc: belt_service.BeltConsoleError) -> CloudError:
     """Map a service ``BeltConsoleError`` to the cloud error envelope.
 
@@ -91,6 +125,45 @@ async def add_repo(
     """
     try:
         return await belt_service.add_repo(workspace_id, body.path)
+    except belt_service.BeltConsoleError as exc:
+        raise _to_cloud_error(exc) from exc
+
+
+@router.post("/repos/init")
+async def init_repo(
+    body: InitRepoRequest,
+    _user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    repo_creator: belt_service.RepoCreator | None = Depends(repo_creator_dep),
+) -> dict[str, Any]:
+    """Create a brand-new git repository under an allowlist root (admin/owner-
+    gated, ``belt.manage``).
+
+    Validates ``name`` is a safe directory segment and ``location_root`` resolves
+    UNDER an authorized allowlist root, refuses an already-existing target,
+    ``git init`` + seeds a README + initial commit (so the repo has a HEAD and a
+    default branch), and registers the new repo via the same persistence the
+    add-repo route uses. Returns ``{"repo": {path, name, current_branch,
+    branches}}`` — the same repo shape the registry returns.
+
+    With ``create_remote=true`` the route also creates + pushes a private GitHub
+    remote via ``gh repo create``. IMPORTANT: a remote-creation failure does NOT
+    roll back the local repo — it returns 200 with the repo plus a top-level
+    ``remote_error`` message (the frontend shows it inline) so the local work is
+    never lost.
+
+    4xx with a clear, path-free message on: an invalid name (not a safe
+    dirname), a ``location_root`` outside the allowlist, an already-existing
+    target dir, or a git-init / commit failure.
+    """
+    try:
+        return await belt_service.init_repo(
+            workspace_id,
+            name=body.name,
+            location_root=body.location_root,
+            create_remote=body.create_remote,
+            repo_creator=repo_creator,
+        )
     except belt_service.BeltConsoleError as exc:
         raise _to_cloud_error(exc) from exc
 
