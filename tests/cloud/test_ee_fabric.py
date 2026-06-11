@@ -14,11 +14,18 @@
 #   combined type+property filters, and the property-name / operator validation
 #   guards. These would all have silently passed (returning every object) before
 #   store.query() learned to honor filters.
+# Updated: 2026-06-11 (gap-housekeeping) — Added TestTypeNameUniqueIndex (a
+#   concurrent ensure_type race can't leave two type rows with the same name; the
+#   unique index exists and a pre-existing duplicate-name DB is de-duped on first
+#   _ensure_schema) and TestUpdateObjectWorkspaceScope (update_object honours its
+#   own W4a tenancy guard — a cross-tenant id writes nothing and returns None).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from pocketpaw.fabric.models import FabricQuery, PropertyDef
@@ -382,3 +389,118 @@ class TestWorkspaceScoping:
 
         result = await store.query(FabricQuery(type_name="Item"))
         assert result.total == 3
+
+
+class TestTypeNameUniqueIndex:
+    """A UNIQUE index on fabric_object_types(name) closes the ensure_type race."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_name_defines_one_type(self, store: FabricStore) -> None:
+        # Two concurrent define_type calls for the same name must not leave two
+        # type rows. The UNIQUE index makes the second INSERT fail rather than
+        # silently splitting the same logical type across two ids.
+        results = await asyncio.gather(
+            store.define_type(name="Customer", properties=[]),
+            store.define_type(name="Customer", properties=[]),
+            return_exceptions=True,
+        )
+        # At least one succeeded; any second one either errored or was rejected.
+        ok = [r for r in results if not isinstance(r, Exception)]
+        assert ok, "at least one define_type must succeed"
+
+        types = [t for t in await store.list_types() if t.name == "Customer"]
+        assert len(types) == 1, "the unique index must prevent a duplicate type row"
+
+    @pytest.mark.asyncio
+    async def test_unique_index_exists(self, store: FabricStore) -> None:
+        await store.define_type(name="Anything", properties=[])  # forces _ensure_schema
+        async with aiosqlite.connect(store._db_path) as db:  # noqa: SLF001
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+                " AND tbl_name='fabric_object_types'"
+            ) as cur:
+                names = {row["name"] async for row in cur}
+        assert "idx_object_types_name_unique" in names
+
+    @pytest.mark.asyncio
+    async def test_preexisting_duplicate_names_are_deduped(self, tmp_path: Path) -> None:
+        # Simulate a pre-this-change DB that already holds duplicate-name type
+        # rows (the race could fire before the unique index existed). _ensure_schema
+        # must de-dup defensively and STILL create the index — never crash.
+        db_path = tmp_path / "dup.db"
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "CREATE TABLE fabric_object_types ("
+                " id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '',"
+                " icon TEXT DEFAULT 'box', color TEXT DEFAULT '#0A84FF',"
+                " properties_schema TEXT DEFAULT '[]',"
+                " created_at TEXT DEFAULT (datetime('now')),"
+                " updated_at TEXT DEFAULT (datetime('now')))"
+            )
+            await db.execute(
+                "CREATE TABLE fabric_objects ("
+                " id TEXT PRIMARY KEY, type_id TEXT NOT NULL, type_name TEXT DEFAULT '',"
+                " properties TEXT NOT NULL DEFAULT '{}', source_connector TEXT, source_id TEXT,"
+                " created_at TEXT DEFAULT (datetime('now')),"
+                " updated_at TEXT DEFAULT (datetime('now')))"
+            )
+            # Two type rows with the same name; an object bound to the LOSER id.
+            await db.execute(
+                "INSERT INTO fabric_object_types (id, name) VALUES ('ot-keep', 'Customer')"
+            )
+            await db.execute(
+                "INSERT INTO fabric_object_types (id, name) VALUES ('ot-dup', 'Customer')"
+            )
+            await db.execute(
+                "INSERT INTO fabric_objects (id, type_id, properties)"
+                " VALUES ('obj-1', 'ot-dup', '{}')"
+            )
+            await db.commit()
+
+        store = FabricStore(db_path)
+        # First read triggers _ensure_schema → de-dup + index creation.
+        types = [t for t in await store.list_types() if t.name == "Customer"]
+        assert len(types) == 1, "duplicate type rows must be collapsed to one survivor"
+        assert types[0].id == "ot-keep", "the lowest-rowid survivor is kept"
+
+        # The orphan object was re-homed onto the survivor, not dropped.
+        obj = await store.get_object("obj-1")
+        assert obj is not None
+        assert obj.type_id == "ot-keep"
+
+
+class TestUpdateObjectWorkspaceScope:
+    """update_object carries its own W4a tenancy guard (gap-housekeeping)."""
+
+    @pytest.mark.asyncio
+    async def test_update_is_workspace_scoped(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Lease", properties=[])
+        b_obj = await store.create_object(t.id, {"rent": 100}, workspace_id="ws-b")
+
+        # Workspace A cannot update B's object — returns None and writes nothing.
+        result = await store.update_object(b_obj.id, {"rent": 999}, workspace_id="ws-a")
+        assert result is None
+        unchanged = await store.get_object(b_obj.id, workspace_id="ws-b")
+        assert unchanged is not None
+        assert unchanged.properties["rent"] == 100
+
+    @pytest.mark.asyncio
+    async def test_owner_can_update_in_scope(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Lease", properties=[])
+        b_obj = await store.create_object(t.id, {"rent": 100}, workspace_id="ws-b")
+        updated = await store.update_object(b_obj.id, {"rent": 250}, workspace_id="ws-b")
+        assert updated is not None
+        assert updated.properties["rent"] == 250
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_workspace_updatable_by_scoped_caller(
+        self, store: FabricStore
+    ) -> None:
+        # A legacy NULL-workspace row stays writable by any scoped caller, matching
+        # the read-side `workspace_id = ? OR workspace_id IS NULL` semantics.
+        t = await store.define_type(name="Lease", properties=[])
+        legacy = await store.create_object(t.id, {"rent": 100})  # NULL workspace
+        updated = await store.update_object(legacy.id, {"rent": 175}, workspace_id="ws-a")
+        assert updated is not None
+        assert updated.properties["rent"] == 175

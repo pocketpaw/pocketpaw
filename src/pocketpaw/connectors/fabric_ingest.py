@@ -1,5 +1,11 @@
 # Connector -> Fabric ingestion — the reusable record-to-typed-object mapper.
 # Created: 2026-06-11 (gap1-connfabric slice).
+# Updated: 2026-06-11 (gap-housekeeping) — ingest_records now threads
+#   ``workspace_id`` into the update_object() call on the re-ingest (UPDATE)
+#   path, matching the workspace it already passes to get_object_by_source() and
+#   create_object(). The store's update_object grew its own W4a tenancy guard, so
+#   an idempotent re-sync stays inside the caller's tenant on the write as well
+#   as the read.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -163,7 +169,7 @@ async def ingest_records(
             workspace_id=workspace_id,
         )
         if existing is not None:
-            updated = await store.update_object(existing.id, properties)
+            updated = await store.update_object(existing.id, properties, workspace_id=workspace_id)
             result.updated += 1
             result.object_ids.append((updated or existing).id)
         else:

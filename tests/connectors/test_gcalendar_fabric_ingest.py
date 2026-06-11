@@ -221,3 +221,13 @@ def test_calendar_mapping_declares_event_id_as_source() -> None:
     props = CALENDAR_EVENT_MAPPING.project(rec)
     assert props["summary"] == "Hi"
     assert props["attendee_count"] == 1
+
+
+def test_attendees_property_is_typed_array() -> None:
+    """`attendees` stores a list, so its PropertyDef must declare type='array'
+    (gap-housekeeping) — it was mislabelled type='string'."""
+    by_name = {p.name: p for p in CALENDAR_EVENT_MAPPING.properties}
+    assert by_name["attendees"].type == "array"
+    # The projection genuinely yields a list, confirming the type label matches.
+    props = CALENDAR_EVENT_MAPPING.project({"id": "e", "attendees": ["a@x.com", "b@x.com"]})
+    assert isinstance(props["attendees"], list)
