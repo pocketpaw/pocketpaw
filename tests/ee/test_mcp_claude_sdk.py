@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) —
+  ``_strip_builtin_servers`` now also drops ``pocketpaw_fabric`` (fabric_query /
+  fabric_stats) and ``pocketpaw_instinct`` (instinct_pending / instinct_audit),
+  the two new always-on read-only servers, so the external-config assertions
+  stay focused. Same regime as pocketpaw_external_actions / pocketpaw_belt.
 Updated: 2026-06-11 (feat/external-action-mcp-tool) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_external_actions`` (the new always-on gated
   external-action proposal server: propose_external_action), so the
@@ -60,7 +65,9 @@ from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_M
 from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
 )
+from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
@@ -122,6 +129,12 @@ def _strip_builtin_servers(result: dict) -> dict:
     # gated connector call (propose_external_action) without an explicit
     # opt-in; the connector only fires after human approval.
     out.pop(_EXTERNAL_ACTIONS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_fabric`` + ``pocketpaw_instinct`` are always-on too — the
+    # cloud chat agent's only path to the Fabric ontology and Instinct gate
+    # visibility on this backend (registry BaseTools never reach it). Both are
+    # read-only.
+    out.pop(_FABRIC_MCP_SERVER_NAME, None)
+    out.pop(_INSTINCT_MCP_SERVER_NAME, None)
     return out
 
 
