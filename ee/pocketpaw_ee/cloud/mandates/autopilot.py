@@ -44,7 +44,12 @@
 # ``decisions._action_sweeper``'s create-task + cancel-and-await shape, but
 # per-mandate so STOP can cancel exactly one). The persisted
 # ``MandateDoc.autopilot.on`` flag is the source of truth for whether autopilot
-# SHOULD be running; the task is process-local and is re-derivable from that flag.
+# SHOULD be running; the task is process-local and is re-derived from that flag
+# at boot by ``reconcile_autopilot_tasks`` (lifespan startup, run_immediate=False
+# so a boot never storms cycles); ``shutdown_all_autopilot_tasks`` drains every
+# loop at lifespan shutdown. Both are registered in ``cloud/__init__.mount_cloud``
+# under the same POCKETPAW_CLOUD_SCHEDULER_ENABLED gate the decisions
+# reconciler / run sweeper use.
 
 from __future__ import annotations
 
@@ -558,6 +563,62 @@ def is_running(mandate_id: str) -> bool:
     return task is not None and not task.done()
 
 
+# ---------------------------------------------------------------------------
+# Lifespan wiring — the startup reconciler + the shutdown drain. Registered in
+# ``cloud/__init__.mount_cloud`` under the same POCKETPAW_CLOUD_SCHEDULER_ENABLED
+# gate the decisions reconciler / run sweeper use (so pytest runs never spawn
+# background loops that outlive the test).
+# ---------------------------------------------------------------------------
+
+
+async def reconcile_autopilot_tasks() -> int:
+    """STARTUP RECONCILER — re-derive the process-local background loops from
+    the persisted ``MandateDoc.autopilot.on`` flags (the source of truth).
+
+    Called once at lifespan startup. For every ACTIVE mandate with autopilot on,
+    start its loop with ``run_immediate=False`` — a boot must NOT storm a cycle
+    per mandate; the first cycle lands after the normal interval. Paused /
+    autopilot-off mandates are ignored (the service read excludes them). Never
+    raises — a reconcile failure logs and returns 0 so app startup is never
+    blocked. Returns the number of loops started."""
+    try:
+        from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+        rows = await mandate_service.list_autopilot_enabled()
+    except Exception:  # noqa: BLE001 — a reconcile read failure must not block startup
+        logger.warning("autopilot: startup reconcile read failed", exc_info=True)
+        return 0
+
+    started = 0
+    for row in rows:
+        try:
+            await start_autopilot(
+                str(row["workspace_id"]),
+                str(row["mandate_id"]),
+                int(row["users"]),
+                run_immediate=False,
+            )
+            started += 1
+        except Exception:  # noqa: BLE001 — one bad mandate never blocks the rest
+            logger.warning(
+                "autopilot: reconcile could not start loop for mandate %s",
+                row.get("mandate_id"),
+                exc_info=True,
+            )
+    logger.info("autopilot: startup reconciler started %d loop(s)", started)
+    return started
+
+
+async def shutdown_all_autopilot_tasks() -> None:
+    """SHUTDOWN DRAIN — cancel + await every registered autopilot loop.
+
+    Called once at lifespan shutdown so the process exits without orphaned
+    tasks. Each stop is the same cancel-and-await ``stop_autopilot`` uses;
+    idempotent and never raises."""
+    for mandate_id in list(_TASKS):
+        await stop_autopilot(mandate_id)
+
+
 __all__ = [
     "ClaudeCliUserSim",
     "MockUserSim",
@@ -565,8 +626,10 @@ __all__ = [
     "UserSim",
     "build_personas",
     "is_running",
+    "reconcile_autopilot_tasks",
     "resolve_user_sim",
     "run_autopilot_cycle",
+    "shutdown_all_autopilot_tasks",
     "start_autopilot",
     "stop_autopilot",
 ]

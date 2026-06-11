@@ -177,9 +177,21 @@ scenario runner in behind `UserSim` with no caller change.
 every feedback POST, and every cycle is wrapped — a failure is logged and
 swallowed per-cycle; the loop sleeps and retries next interval. The persisted
 `MandateDoc.autopilot = {on, users}` is the source of truth for whether
-autopilot *should* run; the live task is process-local (a restart re-derives it
-from the persisted `on` flag). State rides the detail + list wire + the
-`MandateAutopilotChanged` event (`{workspace_id, mandate_id, on, users}`).
+autopilot *should* run; the live task is process-local. State rides the detail +
+list wire + the `MandateAutopilotChanged` event
+(`{workspace_id, mandate_id, on, users}`).
+
+**Lifespan wiring.** A restart re-derives the loops from the persisted flags:
+`reconcile_autopilot_tasks` (lifespan startup) queries every ACTIVE mandate with
+`autopilot.on=True` (via `service.list_autopilot_enabled` — a deliberate
+cross-workspace system read, the stale-run-sweeper posture; paused mandates are
+skipped) and restarts each loop with `run_immediate=False`, so a boot never
+storms a cycle per mandate — the first cycle lands after the normal interval.
+`shutdown_all_autopilot_tasks` (lifespan shutdown) cancels + awaits every
+registered loop so the process exits without orphaned tasks. Both hooks are
+registered in `cloud/__init__.mount_cloud` under the same
+`POCKETPAW_CLOUD_SCHEDULER_ENABLED=true` gate as the decisions reconciler / run
+sweeper, so pytest runs never spawn background loops that outlive the test.
 
 ## Dispatcher reality — REAL station runs vs. announce-only (feat/belt-autopilot)
 
@@ -254,6 +266,8 @@ loop, so it can't observe the task); a full loop autopilot → shift (the mock
 foreman cites the autopilot sightings) → resolve-approve → the **real**
 `StationTaskDispatcher` files one queued `code_change` station run per task
 (`status=queued`, `station_pending=True`, repo pre-bound); the dispatcher env
-selection (`station`/`bus`); the `bus` path's announce-only behaviour; and
-tenant isolation on the autopilot endpoint. All run the deterministic mock
+selection (`station`/`bus`); the `bus` path's announce-only behaviour; the
+startup reconciler (restarts exactly the ACTIVE autopilot-on mandates after a
+simulated restart, skips off/paused, and the shutdown drain cancels every loop);
+and tenant isolation on the autopilot endpoint. All run the deterministic mock
 LLM/UserSim.

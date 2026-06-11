@@ -1,5 +1,11 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-11 (feat/belt-autopilot) — Registers the mandate-autopilot
+    lifespan pair under the POCKETPAW_CLOUD_SCHEDULER_ENABLED gate:
+    ``reconcile_autopilot_tasks`` at startup (re-derives per-mandate autopilot
+    loops from the persisted ``MandateDoc.autopilot.on`` flags,
+    run_immediate=False) and ``shutdown_all_autopilot_tasks`` at shutdown
+    (cancels + awaits every registered loop).
 Modified: 2026-06-10 (W4b — privilege-escalation fix) — Updated the inline
     note on the EEAuthBridge middleware: the bridge now grants OSS
     ``full_access`` only to genuine platform admins (``is_superuser``), not
@@ -744,6 +750,29 @@ def mount_cloud(app: FastAPI) -> None:
         @app.on_event("shutdown")
         async def _stop_fabric_ingest() -> None:
             await stop_fabric_ingest(app)
+
+    # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
+    # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a
+    # mandate's autopilot SHOULD run; the background loop itself is
+    # process-local. At startup the reconciler re-derives the loops from the
+    # persisted flags (run_immediate=False — a boot never storms a cycle per
+    # mandate; the first cycle lands after the normal interval). At shutdown
+    # every registered loop is cancelled + awaited so the process exits without
+    # orphaned tasks. Same scheduler gate as the cycle/decisions loops so pytest
+    # runs never spawn a background loop that outlives the test.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.mandates.autopilot import (
+            reconcile_autopilot_tasks,
+            shutdown_all_autopilot_tasks,
+        )
+
+        @app.on_event("startup")
+        async def _start_mandate_autopilot() -> None:
+            await reconcile_autopilot_tasks()
+
+        @app.on_event("shutdown")
+        async def _stop_mandate_autopilot() -> None:
+            await shutdown_all_autopilot_tasks()
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

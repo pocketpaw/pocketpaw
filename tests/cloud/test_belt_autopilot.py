@@ -29,6 +29,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -117,10 +119,17 @@ def mock_llm(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _drain_autopilot_tasks():
-    """Cancel any autopilot background tasks a test left running, so a leaked
-    loop never bleeds into the next test (the registry is process-local)."""
+async def _drain_autopilot_tasks():
+    """Cancel + AWAIT any autopilot background tasks a test left running before
+    clearing the registry, so a leaked loop never bleeds into the next test.
+    Tasks spawned inside a TestClient request live on that request's (now
+    closed) portal loop — the suppress swallows the cross-loop errors those
+    raise on cancel/await."""
     yield
+    for task in list(autopilot_mod._TASKS.values()):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            task.cancel()
+            await task
     autopilot_mod._TASKS.clear()
 
 
@@ -277,6 +286,59 @@ async def test_autopilot_background_task_lifecycle(tmp_path, mongo_db, store, mo
     assert not autopilot_mod.is_running(mandate_id)
     # Idempotent — a second stop is a no-op.
     await autopilot_mod.stop_autopilot(mandate_id)
+
+
+async def test_reconciler_restarts_only_active_autopilot_on_mandates(
+    tmp_path, mongo_db, store, monkeypatch
+):
+    """The lifespan startup reconciler re-derives the background loops from the
+    persisted ``autopilot.on`` flags: an ACTIVE autopilot-on mandate gets its
+    loop back after a (simulated) restart; an autopilot-off mandate and a PAUSED
+    autopilot-on mandate are ignored. The shutdown drain then cancels every
+    registered loop."""
+    from pocketpaw_ee.cloud.mandates.domain import MandateDoc
+
+    async def _mk(name: str) -> str:
+        repo = _seed_repo(tmp_path, f"{name}-repo")
+        created = await mandate_service.create_mandate(
+            WS, USER, {"name": name, "surface": {"repo_id": str(repo)}, "charter": _charter()}
+        )
+        return created["mandate"]["id"]
+
+    on_id = await _mk("ap-on")
+    off_id = await _mk("ap-off")
+    paused_id = await _mk("ap-paused")
+
+    # Turn autopilot on for two of them through the real service path.
+    await mandate_service.set_autopilot(WS, USER, on_id, {"action": "start", "users": 2})
+    await mandate_service.set_autopilot(WS, USER, paused_id, {"action": "start", "users": 2})
+    # Pause the third mandate AFTER autopilot was enabled — its persisted flag
+    # stays on=True, but the reconciler must skip it (a paused mandate is inert).
+    from bson import ObjectId
+
+    paused_doc = await MandateDoc.find_one(
+        MandateDoc.workspace == WS, MandateDoc.id == ObjectId(paused_id)
+    )
+    paused_doc.status = "paused"
+    await paused_doc.save()
+
+    # Simulate a process restart: drain every live loop — the registry empties
+    # but the persisted flags survive in Mongo.
+    await autopilot_mod.shutdown_all_autopilot_tasks()
+    assert not autopilot_mod.is_running(on_id)
+    assert not autopilot_mod.is_running(paused_id)
+
+    # The reconciler (the lifespan startup hook's body) restarts exactly the
+    # ACTIVE autopilot-on mandate — run_immediate=False, so no cycle storms.
+    started = await autopilot_mod.reconcile_autopilot_tasks()
+    assert started == 1
+    assert autopilot_mod.is_running(on_id)
+    assert not autopilot_mod.is_running(off_id)
+    assert not autopilot_mod.is_running(paused_id)
+
+    # The shutdown drain (the lifespan shutdown hook's body) cancels it again.
+    await autopilot_mod.shutdown_all_autopilot_tasks()
+    assert not autopilot_mod.is_running(on_id)
 
 
 async def test_autopilot_users_clamped_and_deterministic(tmp_path, mongo_db, store, monkeypatch):

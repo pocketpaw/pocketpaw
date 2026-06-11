@@ -1300,6 +1300,33 @@ async def repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
     return doc.surface.repo_id if doc is not None else None
 
 
+async def list_autopilot_enabled() -> list[dict[str, Any]]:
+    """All ACTIVE mandates whose persisted ``autopilot.on`` is True — the
+    startup reconciler's read (``autopilot.reconcile_autopilot_tasks``).
+
+    DELIBERATELY cross-workspace: this is a SYSTEM boot read that re-derives the
+    process-local background loops from the persisted flags, the same posture as
+    the stale-run sweeper's all-workspace scan — not a user-facing query (the
+    tenant-filter rule applies to request-path finds). Paused mandates are
+    excluded: a paused mandate is inert, so its loop is not restarted (it
+    resumes when autopilot is started again via the endpoint).
+
+    Returns ``[{workspace_id, mandate_id, users}]``."""
+    # no-event: read-only path; emit only on writes.
+    docs = await MandateDoc.find(
+        MandateDoc.autopilot.on == True,  # noqa: E712 — Beanie expression syntax
+        MandateDoc.status == "active",
+    ).to_list()
+    return [
+        {
+            "workspace_id": d.workspace,
+            "mandate_id": str(d.id),
+            "users": int(d.autopilot.users) if d.autopilot else 3,
+        }
+        for d in docs
+    ]
+
+
 async def executor_revalidate(workspace_id: str, mandate_id: str) -> dict[str, Any]:
     """Approve-time re-validation read for the plan executor: does the mandate
     still exist, is it active, what is the CURRENT budget."""
@@ -1369,6 +1396,7 @@ __all__ = [
     "file_feedback",
     "get_mandate",
     "get_pawprints",
+    "list_autopilot_enabled",
     "list_mandates",
     "list_sightings",
     "mark_shift",
