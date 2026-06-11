@@ -1,0 +1,81 @@
+# src/pocketpaw/bundled_templates/_bundled/applications-triage/template.pocket.yaml
+# Created: 2026-06-11 (feat/triage-member-templates) — RFC 03 v2 Pocket
+# Template Schema metadata for the generic application/queue triage
+# pocket. ``shape: custom`` because the canvas is a master-detail (queue
+# list + selected-application detail) plus a burndown stat row and an
+# action row — RFC 03's shape enum has no ``master-detail`` value, so the
+# pattern is recorded in the sibling index.json (``pattern: app``) and the
+# shape stays ``custom`` (the same choice crm-record-list made).
+# ``needs: [paw.db.v1]`` declares the generic data-source capability a
+# tenant must wire so the queue hydrates from a real backend; without one
+# the seeded sample applications render. The three review actions declare
+# ``instinct_policy: require_approval`` so each surfaces as a PENDING gated
+# proposal in The Tray rather than executing inline — the deployment wires
+# the action row to external_actions.propose at the documented binding
+# point (see the ripple_spec _placeholder_note).
+schema_version: "2"
+name: applications-triage
+version: 1.0.0
+pattern: app
+vertical: operations
+display_name: Applications Triage
+shape: custom
+description: |
+  A review queue for incoming applications. A scannable list on the left —
+  status, a one-line applicant summary, an optional score or recommendation,
+  and how long the item has waited — with the full application detail of the
+  selected row on the right, rendered as plain question-and-answer pairs. A
+  burndown strip across the top counts the queue by status so a reviewer
+  can see the backlog at a glance. The approve / reject / needs-review row
+  surfaces each decision as a pending proposal for a human to confirm rather
+  than acting on its own. Ships a placeholder live-data source so a connected
+  backend hydrates the queue from a real applications endpoint; with no
+  backend it renders the seeded sample applications.
+icon: inbox
+color: "#5b7c99"
+state:
+  entity_type: Application
+  id_field: id
+  columns:
+    - { field: applicant, label: Applicant, widget: text }
+    - { field: summary, label: Summary, widget: text }
+    - { field: status, label: Status, widget: badge }
+    - { field: score, label: Score, widget: number }
+    - { field: recommendation, label: Recommendation, widget: badge }
+    - { field: age_days, label: Waiting, widget: number }
+data_sources:
+  - name: applications
+    method: GET
+    path: /applications?status=open
+    bind: state.applications
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions:
+  - name: approve_application
+    label: Approve
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [application_approved]
+    description: Proposes approving the selected application. Gated — a human confirms in The Tray.
+  - name: reject_application
+    label: Reject
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [application_rejected]
+    confirm:
+      message: "Propose rejecting this application?"
+      destructive: false
+    description: Proposes rejecting the selected application. Gated — a human confirms in The Tray.
+  - name: flag_for_review
+    label: Needs review
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [application_flagged]
+    description: Proposes flagging the selected application for a second look. Gated.
+outcomes:
+  - application_approved
+  - application_rejected
+  - application_flagged
+connectors: []
+skill_refs: []

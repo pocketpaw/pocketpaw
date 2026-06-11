@@ -19,6 +19,15 @@
 # new template ships shape:"custom" + pattern:"landing"). The landing
 # fast-path's STEP-0 routing + skeleton-shape assertions live in the
 # sibling tests/unit/test_landing_template_fastpath.py.
+# Modified 2026-06-11 (feat/triage-member-templates): split the slug set
+# into ``_SEED_SLUGS`` (the actions:[] seed templates) and
+# ``_VERTICAL_SLUGS`` (applications-triage, member-360 — richer v2
+# templates carrying needs:/actions:/outcomes:/data_sources:). The
+# seed-only field-set + "actions == []" parametrisation runs over
+# ``_SEED_SLUGS``; the installer / index / Pydantic / valid-JSON
+# parametrisations run over the combined ``_EXPECTED_SLUGS`` so both new
+# templates are covered. Vertical-specific shape assertions live in the
+# sibling tests/unit/test_vertical_templates.py.
 """Tests for the ``pocketpaw.bundled_templates`` package and its wiring.
 
 The installer + loader tests mirror into a ``tmp_path`` destination so
@@ -41,11 +50,13 @@ from pocketpaw.bundled_templates.installer import (
 )
 from pocketpaw.bundled_templates.loader import load_template
 
-# The built-in templates the bundled installer ships. Increment 2a
-# shipped six; RFC 07 Slice 3a added `decision-graph`. Update when a
-# new bundled template lands so the parametrized RFC03-shape tests
-# cover it automatically.
-_EXPECTED_SLUGS = {
+# The SEED bundled templates — the Increment-2a-era set that ships
+# ``actions: []`` and omits the not-yet-wired Instinct / Outcomes /
+# data-source blocks. The strict field-set + manifest assertions below
+# parametrize over THIS set only (a seed template's field set is a
+# subset of ``_RFC03_ALLOWED_FIELDS``). RFC 07 Slice 3a added
+# `decision-graph`; the marketing fast-path added `landing-page`.
+_SEED_SLUGS = {
     "todo-task-tracker",
     "kanban-board",
     "metrics-dashboard",
@@ -55,6 +66,22 @@ _EXPECTED_SLUGS = {
     "decision-graph",
     "landing-page",
 }
+
+# The VERTICAL bundled templates — richer, install-ready templates that
+# legitimately carry the full v2 surface: ``needs:`` Senses, gated
+# ``actions:`` + ``outcomes:``, and ``data_sources:``. They are excluded
+# from the seed-only field-set / "actions == []" assertions and covered
+# instead by their own Pydantic-validated shape test in
+# tests/unit/test_vertical_templates.py. Both still ship via the same
+# installer + index and validate against the ``PocketTemplate`` model,
+# so the installer / index / Pydantic parametrizations cover them.
+_VERTICAL_SLUGS = {
+    "applications-triage",
+    "member-360",
+}
+
+# Every bundled template the installer ships and index.json registers.
+_EXPECTED_SLUGS = _SEED_SLUGS | _VERTICAL_SLUGS
 
 # RFC 03 v2 Pocket Template Schema — the field set a seed template may
 # carry after the v1 -> v2 migration. Seed templates still ship
@@ -212,10 +239,13 @@ def test_loader_rejects_path_traversal_slug(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("slug", sorted(_EXPECTED_SLUGS))
+@pytest.mark.parametrize("slug", sorted(_SEED_SLUGS))
 def test_template_yaml_matches_rfc03_field_set(slug: str) -> None:
-    """Each bundled template.pocket.yaml uses ONLY RFC 03 fields, carries
-    every required field, ships ``actions: []``, and uses a valid shape."""
+    """Each SEED bundled template.pocket.yaml uses ONLY the seed RFC 03
+    field subset, carries every required field, ships ``actions: []``,
+    and uses a valid shape. Vertical templates (applications-triage,
+    member-360) carry the richer v2 surface and are asserted separately
+    in tests/unit/test_vertical_templates.py."""
     import yaml
 
     meta_path = _BUNDLED_DIR / slug / "template.pocket.yaml"
@@ -296,7 +326,7 @@ _MANIFEST_PROP_DRIFT_EXEMPT = {"landing-page"}
 
 
 @pytest.mark.parametrize("slug", sorted(_EXPECTED_SLUGS - _MANIFEST_PROP_DRIFT_EXEMPT))
-def test_template_ripple_spec_passes_manifest_validation_if_reachable(slug: str) -> None:
+def test_template_ripple_spec_passes_manifest_validation_if_reachable(slug: str) -> None:  # noqa: D401
     """Each ripple_spec.json passes the Ripple manifest validator when a
     manifest is reachable. The validator needs a network-fetched manifest;
     when offline (CI default) it returns no manifest and the check is

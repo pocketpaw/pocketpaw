@@ -64,6 +64,22 @@
       "pattern": "landing",
       "keywords": ["landing page", "landing site", "marketing page", "marketing site", "sales page", "website for", "site for", "website", "homepage", "home page", "portfolio site", "personal site", "personal website", "about page"],
       "connectors_hint": []
+    },
+    {
+      "slug": "applications-triage",
+      "title": "Applications Triage",
+      "shape": "custom",
+      "pattern": "app",
+      "keywords": ["triage", "application queue", "applications", "review queue", "approval queue", "intake", "applicants", "submissions", "approve reject", "vetting", "screening", "queue"],
+      "connectors_hint": []
+    },
+    {
+      "slug": "member-360",
+      "title": "Member 360",
+      "shape": "custom",
+      "pattern": "viewer",
+      "keywords": ["member", "member 360", "member profile", "customer 360", "member view", "single view", "profile view", "member record", "membership", "account profile", "customer profile"],
+      "connectors_hint": []
     }
   ]
 }
