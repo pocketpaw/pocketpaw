@@ -1,5 +1,24 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-11 (feat/external-action-proposal) — added the THIRD gated
+#   proposal kind: a gated external-action connector call. ``_external_action_blob``
+#   + ``_assert_external_action_workspace`` are the peers of the ``_code_change``
+#   / ``_pocket_write`` blob accessor + tenancy guard. The four dispatch handlers
+#   (approve_action / bulk_approve_actions / reject_action / bulk_reject_actions)
+#   now also branch on an ``_external_action`` blob: on APPROVE the router emits
+#   ``human.corrected`` then fires ``external_actions.executor.
+#   execute_approved_external_action`` (which OWNS the chain close); on REJECT the
+#   router emits ``human.corrected`` + ``decision.completed(rejected)`` itself
+#   (the executor never runs on reject). The up-front tenancy assertion runs in
+#   all four locations. Same exactly-one-terminal discipline as the pocket-write
+#   bridge + belt executor — no double chain close. The blob's
+#   ``proposed_event_id`` (the chain-opening ``agent.proposed`` id) is the
+#   causation source, resolved via the generic ``_code_change_proposed_event_id``
+#   helper (it reads ``blob["proposed_event_id"]``, shared across the two kinds).
+#   Rebased over the paw-print ``_customer_reply`` delivery hooks (gap2) — the
+#   external-action branches sit BEFORE the customer-reply hooks in approve /
+#   reject (all blob kinds are mutually exclusive; customer-reply keeps its
+#   last-before-return placement and its no-bulk / no-assert design unchanged).
 # Updated: 2026-06-11 (merge origin/dev into integration/sovereignty-waves —
 #   Belt code-change union) — reconciled the sovereignty extraction with dev's
 #   Belt feature. The chain-emit helpers (``_emit_human_corrected`` /
@@ -250,6 +269,26 @@ def _code_change_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
+def _external_action_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_external_action`` blob on an Action, or ``None``.
+
+    The blob is the gated external-action payload
+    ``ee.cloud.external_actions.propose`` stores under
+    ``Action.parameters._external_action`` (connector_name / scope / action /
+    params / params_hash / idempotency_key + the originating ``workspace_id``).
+    This is the third gated proposal kind — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    pocket-write bridge on ``_pocket_write`` and the belt executor on
+    ``_code_change``. Anything that is not a dict is treated as "no external
+    action".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_external_action")
+    return blob if isinstance(blob, dict) else None
+
+
 async def _emit_belt_run_updated_safe(
     *, workspace_id: str, action_id: str, status: str, stage: str
 ) -> None:
@@ -292,6 +331,28 @@ def _assert_code_change_workspace(action: Any, current_workspace: str) -> None:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This code change belongs to a different workspace",
+        )
+
+
+def _assert_external_action_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting an external action from another workspace.
+
+    Mirror of ``_assert_code_change_workspace`` for the ``_external_action``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the external-action Action to the
+    caller's active workspace. An external action carries no pocket the way a
+    parked write does, so its tenancy lives entirely on the blob's
+    ``workspace_id``. A blob whose ``workspace_id`` differs from the caller's
+    active workspace → 403. A non-external-action Action (no blob) is unaffected.
+    """
+    blob = _external_action_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This external action belongs to a different workspace",
         )
 
 
@@ -609,6 +670,7 @@ async def bulk_approve_actions(
         if action is not None:
             _assert_pocket_write_workspace(action, workspace_id)
             _assert_code_change_workspace(action, workspace_id)
+            _assert_external_action_workspace(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -660,6 +722,39 @@ async def bulk_approve_actions(
             except Exception:
                 logger.exception(
                     "bulk-approve belt code-change execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A gated ``_external_action`` Action fires the apply-on-approve
+        # connector executor. Mirrors the code-change branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Same
+        # best-effort shape; matched BEFORE the pocket-write branch and
+        # ``continue``d so the two never cross.
+        external_action_blob = _external_action_blob(action)
+        if external_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=external_action_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(external_action_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.external_actions import (
+                    executor as external_action_executor,
+                )
+
+                await external_action_executor.execute_approved_external_action(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve external-action execution failed for %s (non-fatal)",
                     action.id,
                 )
             continue
@@ -739,6 +834,7 @@ async def bulk_reject_actions(
         if action is not None:
             _assert_pocket_write_workspace(action, workspace_id)
             _assert_code_change_workspace(action, workspace_id)
+            _assert_external_action_workspace(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
@@ -797,6 +893,32 @@ async def bulk_reject_actions(
                 status="rejected",
                 stage="done",
             )
+            continue
+
+        # A bulk-rejected gated ``_external_action`` Action closes its chain
+        # HERE (the executor never runs on reject — the router owns the close).
+        # Mirrors the code-change reject branch. Matched AFTER pocket-write +
+        # code-change and ``continue``d so the three never cross.
+        external_action_blob = _external_action_blob(action)
+        if external_action_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=external_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(external_action_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=external_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
@@ -837,6 +959,9 @@ async def approve_action(
     # Same tenancy gate for a Belt code-change Action (BS-3) — its
     # ``_code_change`` blob carries the workspace, not a pocket.
     _assert_code_change_workspace(before, workspace_id)
+    # Same tenancy gate for a gated external-action Action — its
+    # ``_external_action`` blob carries the workspace, not a pocket.
+    _assert_external_action_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -956,6 +1081,46 @@ async def approve_action(
         except Exception:
             logger.exception("belt code-change execution after approval failed (non-fatal)")
 
+    # When the approved Action carries a gated ``_external_action`` blob, fire
+    # the connector call. Same best-effort, lazy-import, never-break-the-approve-
+    # response shape as the pocket-write + code-change hooks above; the executor
+    # records success / failure on the Action itself. A non-external-action
+    # Action skips this.
+    #
+    # The external action is part of its own Decision-Graph chain (the propose
+    # helper minted the ``correlation_id`` + emitted ``agent.proposed``). Emit
+    # the ``human.corrected`` event for the approval HERE (the router owns the
+    # human-action emit on every approve path), citing the ``agent.proposed``
+    # event id (stored on the blob as ``proposed_event_id`` — the same field the
+    # code-change path reads, so ``_code_change_proposed_event_id`` resolves it)
+    # as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval:
+    # ``agent.proposed → human.corrected → decision.completed`` under one
+    # correlation_id. The executor owns the chain CLOSE (success or failure) —
+    # the router does NOT emit ``decision.completed`` here, mirroring the
+    # pocket-write bridge + belt executor. No double terminal.
+    external_action_blob = _external_action_blob(approved)
+    if external_action_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=external_action_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(external_action_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.external_actions import executor as external_action_executor
+
+            await external_action_executor.execute_approved_external_action(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("external-action execution after approval failed (non-fatal)")
+
     # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
     # paw-print customer event awaiting a decision), deliver the owner's reply
     # back to the customer surface. Same best-effort, lazy-import,
@@ -1033,6 +1198,7 @@ async def reject_action(
     # Touch-time security fix — same gate the approve path runs.
     _assert_pocket_write_workspace(before, workspace_id)
     _assert_code_change_workspace(before, workspace_id)
+    _assert_external_action_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -1093,6 +1259,32 @@ async def reject_action(
         # run.
         await _emit_belt_run_updated_safe(
             workspace_id=workspace_id, action_id=str(action.id), status="rejected", stage="done"
+        )
+
+    # A rejected gated ``_external_action`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # code-change reject path). ``human.corrected(rejected)`` cites the
+    # ``agent.proposed`` event (off the blob's ``proposed_event_id``);
+    # ``decision.completed(rejected)`` cites the human event so the chain reads
+    # ``agent.proposed → human.corrected → decision.completed``.
+    external_action_blob = _external_action_blob(action)
+    if external_action_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=external_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(external_action_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=external_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
         )
 
     # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
