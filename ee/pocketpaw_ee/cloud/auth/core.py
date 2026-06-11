@@ -175,7 +175,7 @@ def _resolve_secret() -> str:
             f"({_DEFAULT_SECRET!r}). Refusing to boot in production: JWTs would "
             "be signed with a secret anyone can read, letting attackers forge "
             "admin sessions. Set AUTH_SECRET to a strong random value, e.g.\n"
-            '  AUTH_SECRET="$(python -c \'import secrets; '
+            "  AUTH_SECRET=\"$(python -c 'import secrets; "
             "print(secrets.token_urlsafe(48))')\""
         )
 
