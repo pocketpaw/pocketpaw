@@ -1,6 +1,23 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-2 — runs read model + SSE) —
+#   the executor now feeds the /belt console two things:
+#     * STRUCTURED outcome on the blob — on a SUCCESSFUL apply it back-writes
+#       ``pr_url`` + ``branch`` + ``files_changed`` onto the persisted
+#       ``_code_change`` blob (``_persist_run_result``), so the runs read model
+#       (``ee.cloud.belt.service.get_run`` / ``list_runs``) reads them
+#       structurally instead of regex-parsing the free-text ``mark_executed``
+#       outcome. The free-text outcome stays for The Tray.
+#     * ``belt_run_updated`` realtime event — published at every terminal:
+#       ``landed`` (stage done) on success, ``failed`` (stage done) on any
+#       failure path (the ``_fail`` chokepoint emits once). Routes through
+#       ``belt_service.emit_belt_run_updated``, whose PRIMARY path is the
+#       WORKSPACE REALTIME BUS (the executor runs AFTER the chat turn, so the
+#       per-session SSE drain is gone — only the bus reaches the page). The
+#       blob's ``workspace_id`` drives the workspace-scoped fan-out. Best-effort:
+#       a bus / blob-write failure never breaks the approve response.
+#
 # Updated: 2026-06-10 (feat/belt-trace, BS-4 — Decision-Graph chain close) —
 #   ``execute_approved_change`` now CLOSES the Decision-Graph chain the
 #   propose path opened (RFC 09). It reads the ``correlation_id`` off the
@@ -313,6 +330,87 @@ def _emit_chain_close(
         )
 
 
+async def _emit_run_updated(
+    *,
+    workspace_id: str,
+    action_id: str,
+    status: str,
+    stage: str,
+    pr_url: str | None = None,
+) -> None:
+    """Publish ``belt_run_updated`` for an executor lifecycle terminal.
+
+    Thin wrapper over ``belt_service.emit_belt_run_updated`` (the WORKSPACE
+    REALTIME BUS path + an in-turn SSE) so the executor has one call site per
+    terminal. The bus is the path that actually reaches the /belt page — the
+    executor runs AFTER the chat turn, so there's no per-session SSE sink in
+    scope. Best-effort: an import / bus / SSE failure can never bubble into the
+    approve response."""
+    try:
+        from pocketpaw_ee.cloud.belt import service as belt_service
+
+        await belt_service.emit_belt_run_updated(
+            workspace_id=workspace_id,
+            action_id=action_id,
+            status=status,
+            stage=stage,
+            pr_url=pr_url,
+        )
+    except Exception:  # noqa: BLE001 — emit must never break the apply path
+        logger.debug("belt: belt_run_updated emit failed (non-fatal)", exc_info=True)
+
+
+async def _persist_run_result(
+    *,
+    store: Any,
+    action_id: str,
+    pr_url: str,
+    branch: str,
+    files_changed: int,
+) -> None:
+    """Back-write the PR result onto the persisted ``_code_change`` blob.
+
+    The runs read model reads ``pr_url`` / ``branch`` / ``files_changed`` off the
+    blob STRUCTURALLY rather than parsing the free-text ``mark_executed``
+    outcome. Direct SQL update — the same pattern belt.py's ``_persist_chain_ids``
+    uses for the propose-time chain ids. Best-effort: a write failure leaves the
+    run without the structured fields (the read model falls back to None) but
+    never breaks the approve response.
+    """
+    import json as _json
+
+    import aiosqlite
+
+    try:
+        action = await store.get_action(action_id)
+        if action is None:
+            return
+        params = dict(getattr(action, "parameters", None) or {})
+        blob = params.get(_CODE_CHANGE_PARAM_KEY)
+        if not isinstance(blob, dict):
+            return
+        blob = dict(blob)
+        blob["pr_url"] = pr_url
+        blob["branch"] = branch
+        blob["files_changed"] = files_changed
+        params[_CODE_CHANGE_PARAM_KEY] = blob
+
+        async with aiosqlite.connect(store._db_path) as db:
+            await db.execute(
+                "UPDATE instinct_actions SET parameters = ?,"
+                " updated_at = datetime('now') WHERE id = ?",
+                (_json.dumps(params), action_id),
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001 — back-write is best-effort
+        logger.warning(
+            "belt: failed to persist PR result onto action %s — runs read model "
+            "will show no pr_url/branch for it",
+            action_id,
+            exc_info=True,
+        )
+
+
 async def execute_approved_change(
     action: Any,
     *,
@@ -364,7 +462,9 @@ async def execute_approved_change(
     async def _fail(reason: str, *, error_class: str) -> None:
         """Mark the Action failed AND close the chain with one terminal —
         the single failure-path chokepoint so a path can never both fail
-        and double-fire the terminal."""
+        and double-fire the terminal. SC-2: also pushes the ``belt_run_updated``
+        SSE (status=failed, stage=done) so the /belt page reflects the failure
+        live — best-effort, never raises."""
         await store.mark_failed(action.id, reason)
         _emit_chain_close(
             passed=False,
@@ -375,6 +475,12 @@ async def execute_approved_change(
             workspace_id=workspace_id,
             user_id=requested_by,
             causation_id=causation,
+        )
+        await _emit_run_updated(
+            workspace_id=workspace_id,
+            action_id=str(action.id),
+            status="failed",
+            stage="done",
         )
 
     if blob.get("schema") != _CODE_CHANGE_SCHEMA:
@@ -527,6 +633,26 @@ async def execute_approved_change(
         await store.mark_executed(
             action.id,
             f"PR opened: {pr_url} (branch '{branch}', {len(files_changed)} file(s) changed)",
+        )
+        # SC-2 — back-write the PR result onto the blob so the runs read model
+        # reads pr_url / branch / files_changed STRUCTURALLY (no free-text
+        # parsing). Best-effort: a write failure leaves the run without the
+        # structured fields but the free-text outcome above still records it.
+        await _persist_run_result(
+            store=store,
+            action_id=str(action.id),
+            pr_url=pr_url,
+            branch=branch,
+            files_changed=len(files_changed),
+        )
+        # SC-2 — publish ``belt_run_updated`` (status=landed, stage=done) on the
+        # workspace bus so the /belt page reflects the landed PR live. Best-effort.
+        await _emit_run_updated(
+            workspace_id=workspace_id,
+            action_id=str(action.id),
+            status="landed",
+            stage="done",
+            pr_url=pr_url,
         )
         # BS-4 — close the chain on the SUCCESS path. ``action_outcome="landed"``
         # + the PR url / branch / file count ride on the payload for the explain

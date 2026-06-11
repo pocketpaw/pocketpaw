@@ -315,6 +315,15 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(temporal_sweeps_router, prefix="/api/v1")
 
+    # Belt & Pulley console — the /belt develop-station read + repo-admin
+    # surface (feat/belt-console-backend SC-1 + SC-2). GET/POST /belt/repos for
+    # repo discovery + admin-gated add, GET /belt/runs + /belt/runs/{id} for the
+    # runs read model. The apply-on-approve executor + the propose MCP server
+    # live elsewhere; this is the page's read/bind surface.
+    from pocketpaw_ee.cloud.belt.router import router as belt_console_router
+
+    app.include_router(belt_console_router, prefix="/api/v1")
+
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
     # use the canonical `Depends(current_active_user)` auth chain without

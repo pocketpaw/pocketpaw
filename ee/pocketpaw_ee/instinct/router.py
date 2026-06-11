@@ -250,6 +250,29 @@ def _code_change_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
+async def _emit_belt_run_updated_safe(
+    *, workspace_id: str, action_id: str, status: str, stage: str
+) -> None:
+    """Publish ``belt_run_updated`` for an approve / reject lifecycle change
+    (SC-2) on the WORKSPACE REALTIME BUS.
+
+    The bus is the required path: approve happens in the Tray AFTER the chat turn
+    ended, so there is no per-session SSE sink to drain into — only the
+    workspace-scoped bus fan-out reaches the /belt page. Lazy-imports the belt
+    console service so the instinct package keeps no module-top dependency on
+    ``ee.cloud.belt`` (same lazy-import discipline the executor / bridge hooks
+    use). Best-effort: a bus / import failure is swallowed so the approve /
+    reject response is never broken."""
+    try:
+        from pocketpaw_ee.cloud.belt.service import emit_belt_run_updated
+
+        await emit_belt_run_updated(
+            workspace_id=workspace_id, action_id=action_id, status=status, stage=stage
+        )
+    except Exception:  # noqa: BLE001 — emit must never break approve / reject
+        logger.debug("belt: belt_run_updated emit failed (non-fatal)", exc_info=True)
+
+
 def _assert_code_change_workspace(action: Any, current_workspace: str) -> None:
     """Reject approving a Belt code change from another workspace.
 
@@ -622,6 +645,14 @@ async def bulk_approve_actions(
                 note=req.note,
                 causation_override=_code_change_proposed_event_id(code_change_blob),
             )
+            # SC-2 — same approved/gate nudge as the single-approve path; the
+            # executor publishes the terminal (landed / failed) afterwards.
+            await _emit_belt_run_updated_safe(
+                workspace_id=workspace_id,
+                action_id=str(action.id),
+                status="approved",
+                stage="gate",
+            )
             try:
                 from pocketpaw_ee.cloud.belt import executor as belt_executor
 
@@ -758,6 +789,13 @@ async def bulk_reject_actions(
                 workspace_id=workspace_id,
                 reason=req.reason,
                 causation_override=human_event_id,
+            )
+            # SC-2 — terminal event for a bulk-rejected belt run.
+            await _emit_belt_run_updated_safe(
+                workspace_id=workspace_id,
+                action_id=str(action.id),
+                status="rejected",
+                stage="done",
             )
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
@@ -904,6 +942,13 @@ async def approve_action(
             note=note,
             causation_override=_code_change_proposed_event_id(code_change_blob),
         )
+        # SC-2 — publish ``belt_run_updated`` (status=approved, stage=gate) on
+        # the workspace bus BEFORE the executor runs so the /belt page flips the
+        # run to "applying..." immediately. The executor then publishes the
+        # terminal (landed / failed).
+        await _emit_belt_run_updated_safe(
+            workspace_id=workspace_id, action_id=str(approved.id), status="approved", stage="gate"
+        )
         try:
             from pocketpaw_ee.cloud.belt import executor as belt_executor
 
@@ -1024,6 +1069,13 @@ async def reject_action(
             workspace_id=workspace_id,
             reason=reason,
             causation_override=human_event_id,
+        )
+        # SC-2 — publish ``belt_run_updated`` (status=rejected, stage=done) on
+        # the workspace bus so the /belt page reflects the rejection live. No
+        # executor runs on reject, so this is the terminal event for a rejected
+        # run.
+        await _emit_belt_run_updated_safe(
+            workspace_id=workspace_id, action_id=str(action.id), status="rejected", stage="done"
         )
 
     return action

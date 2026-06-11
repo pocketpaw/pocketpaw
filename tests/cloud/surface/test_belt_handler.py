@@ -11,6 +11,12 @@
 #     skill, and an MCP allow-list that contains the 5 loom ids + the gate id;
 #   * the wire string "belt" resolves to SurfaceKind.BELT (not GENERIC).
 #
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added meta-aware
+# preamble tests: with ``meta.repo`` + ``meta.base_branch`` the preamble states
+# the bound repo + branch and tells the agent NOT to ask for the repo (and to
+# pass exactly those into belt_propose_change); without them it keeps the
+# ask-first behavior.
+#
 # Mirrors test_studio_code_handlers.py. pytest-asyncio runs in auto mode (see
 # pyproject [tool.pytest] asyncio_mode), so async tests are detected
 # automatically — no module-level mark (it would wrongly tag the sync tests).
@@ -79,6 +85,52 @@ async def test_belt_handler_names_builtin_dev_tools() -> None:
 
     for tool in ("Bash", "Read", "Write", "Edit", "Glob", "Grep"):
         assert tool in preamble, f"preamble should name the {tool} tool"
+
+
+# --- Meta-aware repo binding (SC-1) ---
+
+
+async def test_belt_handler_injects_bound_repo_and_branch() -> None:
+    """With repo + base_branch in meta, the preamble states them and tells the
+    agent NOT to ask for the repo + pass exactly those into the gate tool."""
+    meta = SurfaceMeta(
+        route_path="/belt",
+        repo="/srv/checkouts/acme-api",
+        base_branch="develop",
+    )
+    preamble = await belt_handler.build_preamble(WORKSPACE, USER, meta)
+
+    # The bound repo + branch appear verbatim.
+    assert "/srv/checkouts/acme-api" in preamble
+    assert "develop" in preamble
+    # The agent is told NOT to re-ask for the repo.
+    lower = preamble.lower()
+    assert "do not ask" in lower or "do not re-ask" in lower or "not ask" in lower
+    # The propose instruction names the gate tool with the bound values.
+    assert GATE_TOOL_ID in preamble
+
+
+async def test_belt_handler_ask_first_when_no_repo_bound() -> None:
+    """Without repo/base_branch the preamble keeps ask-first behavior — it does
+    NOT inject a repo line and instructs the agent to confirm the repo first."""
+    preamble = await belt_handler.build_preamble(WORKSPACE, USER, SurfaceMeta(route_path="/belt"))
+
+    assert "<belt-repo>" not in preamble
+    lower = preamble.lower()
+    assert "confirm" in lower and "repo" in lower
+
+
+async def test_belt_handler_partial_meta_is_ask_first() -> None:
+    """A repo WITHOUT a base_branch (or vice-versa) is treated as no binding —
+    the page must supply BOTH for the bound path."""
+    only_repo = await belt_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/belt", repo="/srv/checkouts/acme-api")
+    )
+    only_branch = await belt_handler.build_preamble(
+        WORKSPACE, USER, SurfaceMeta(route_path="/belt", base_branch="main")
+    )
+    assert "<belt-repo>" not in only_repo
+    assert "<belt-repo>" not in only_branch
 
 
 # --- Profile (ripple-OFF, station-scoped) ---
