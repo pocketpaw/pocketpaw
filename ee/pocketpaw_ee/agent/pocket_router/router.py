@@ -264,7 +264,10 @@ async def _route_tier0_park(
             exc_info=True,
         )
         return _Tier0Result(
-            error="this write requires Instinct approval but the pocket could not be loaded to queue it"
+            error=(
+                "this write requires Instinct approval but the pocket "
+                "could not be loaded to queue it"
+            )
         )
 
     try:
@@ -285,9 +288,7 @@ async def _route_tier0_park(
             pocket_id,
             exc_info=True,
         )
-        return _Tier0Result(
-            error="this write requires Instinct approval but could not be queued"
-        )
+        return _Tier0Result(error="this write requires Instinct approval but could not be queued")
 
     logger.info(
         "[pocket-router] Tier-0 write on pocket %s parked for approval → Instinct action %s",
@@ -331,7 +332,9 @@ async def _run_tier0(
 
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, input.pocket_id)
     if creds is None:
-        return _Tier0Result(error="pocket has no backend configured — cannot run a declarative tier")
+        return _Tier0Result(
+            error="pocket has no backend configured — cannot run a declarative tier"
+        )
     # RFC 05 M2b.1 / W2c — the executor-creds tuple is a 6-tuple. The
     # trailing `approval_route` is now THREADED into the binding-level park
     # routing below: under W2a deny-by-default a binding that omits
@@ -372,7 +375,9 @@ async def _run_tier0(
         actions = ripple_spec.get("actions")
         raw_action = actions.get(action_key) if isinstance(actions, dict) else None
         if not isinstance(raw_action, dict):
-            return _Tier0Result(error=f"action '{action_key}' is missing or malformed on the pocket")
+            return _Tier0Result(
+                error=f"action '{action_key}' is missing or malformed on the pocket"
+            )
 
         from pocketpaw_ee.cloud.pockets import action_executor
 
