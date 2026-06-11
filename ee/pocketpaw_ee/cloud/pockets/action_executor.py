@@ -1,4 +1,14 @@
 # action_executor.py — Server-side executor for pocket WRITE actions.
+# Updated: 2026-06-11 (gap-3 outcome VALUE metering) — `ActionBinding` now
+#   declares `outcome_value: float | None` and `outcome_unit: str | None`,
+#   the author-time billable-value pair that turns the count-only outcome
+#   meter into the "pay for governed outcomes" pricing primitive. A
+#   `model_validator` (`_outcome_value_pairs_with_unit`) rejects a half-
+#   declared pair (value without unit / unit without value) and a value
+#   with no `outcome` name, so a ledger row the aggregation can never total
+#   never gets persisted. Both fields ride the same path `outcome` already
+#   travels — the gate `park`, the `_park` sentinel, and the direct success
+#   result — so the producers can thread them to `emit_pocket_outcome`.
 # Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) —
 #   `ActionBinding.requires_instinct` now DEFAULTS to True. Every write
 #   binding routes through the Instinct approval gate (parks at gate 7)
@@ -260,6 +270,21 @@ class ActionBinding(BaseModel):
     requires_instinct: bool = True
     instinct_policy: Literal["approve_per_row", "approve_batch"] | None = None
     outcome: str | None = None
+    # --- gap-3 outcome VALUE metering (the "pay for governed outcomes"
+    # pricing primitive) -------------------------------------------------
+    # A named `outcome` is the COUNT; `outcome_value` + `outcome_unit` turn
+    # the count into a billable FIGURE. They are author-time declarations on
+    # the binding (the per-action-type rule from outcome-spec.md Decision 6
+    # / Decision 7: the operator declares what the work is worth). When set
+    # they ride the same end-to-end path `outcome` already travels — park →
+    # propose → execute → emit → ledger row — and persist on the outcome
+    # record (replacing the hardcoded `None` Layer-4 slots). When absent the
+    # record's value/unit stay `None` and the meter is count-only, exactly
+    # as before. `_outcome_value_pairs_with_unit` keeps the ledger clean: a
+    # value without a unit (or vice versa) is uncountable in the aggregation
+    # rollup, so reject the half-declared shape at parse time.
+    outcome_value: float | None = None
+    outcome_unit: str | None = None
     # W2a: explicit, auditable exemption. A binding the author deliberately
     # allows to fire WITHOUT the gate sets this True in the persisted spec.
     instinct_exempt: bool = False
@@ -296,6 +321,34 @@ class ActionBinding(BaseModel):
             raise ValueError(
                 "instinct_exempt is true but instinct_policy is set — an "
                 "exempt binding has no gate for a policy to apply to"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _outcome_value_pairs_with_unit(self) -> ActionBinding:
+        """A billable value needs a unit, and a unit needs a value (gap-3).
+
+        ``outcome_value`` / ``outcome_unit`` are the metering pair: the
+        aggregation rollup sums value BY unit, so a value with no unit
+        (or a unit with no value) is uncountable. Reject the half-declared
+        shape at parse time rather than persisting a ledger row the meter
+        can never total. Declaring NEITHER is fine — that's the count-only
+        binding (``outcome`` set, no monetary value), the prior behaviour.
+        A value also requires a named ``outcome``: there is no business
+        event to attach the value to without one.
+        """
+        has_value = self.outcome_value is not None
+        has_unit = self.outcome_unit is not None
+        if has_value != has_unit:
+            raise ValueError(
+                "outcome_value and outcome_unit must be declared together — "
+                "a value with no unit (or a unit with no value) cannot be "
+                "summed by the outcome aggregation"
+            )
+        if has_value and not self.outcome:
+            raise ValueError(
+                "outcome_value is set but no `outcome` name is declared — "
+                "a billable value needs a named outcome to attach to"
             )
         return self
 
@@ -666,6 +719,10 @@ async def run_action(
             "params": params,
             "idempotency_key": idempotency_key,
             "outcome": binding.outcome,
+            # gap-3 — the billable value/unit ride alongside `outcome` so
+            # the post-approval emit carries them to the ledger row.
+            "outcome_value": binding.outcome_value,
+            "outcome_unit": binding.outcome_unit,
         }
         gate = await instinct_dispatch.gate_action(
             workspace_id=workspace_id,
@@ -919,6 +976,11 @@ async def run_action(
                 "params": params,
                 "idempotency_key": idempotency_key,
                 "outcome": binding.outcome,
+                # gap-3 — billable value/unit ride on _park so the bridge
+                # stashes them on the persisted parked-write blob and the
+                # post-approval emit threads them to the ledger row.
+                "outcome_value": binding.outcome_value,
+                "outcome_unit": binding.outcome_unit,
                 # RFC 09 Slice 2 — correlation_id rides on _park so the
                 # bridge can stash it on the parked Action's schema-2
                 # _pocket_write blob. The Instinct router reads it back
@@ -1126,6 +1188,11 @@ async def run_action(
         # `pocket.outcome` event. `None` when the binding declares none;
         # the emit helper treats `None` as a no-op.
         "outcome": binding.outcome,
+        # gap-3 — the billable value/unit for the direct (non-gated) path.
+        # `None`/`None` when the binding declares no monetary value, leaving
+        # the meter count-only as before.
+        "outcome_value": binding.outcome_value,
+        "outcome_unit": binding.outcome_unit,
         "on_success": binding.on_success,
         "on_error": on_error,
     }

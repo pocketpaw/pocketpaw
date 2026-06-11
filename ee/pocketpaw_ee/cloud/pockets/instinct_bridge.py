@@ -208,6 +208,11 @@ async def propose_pocket_write(
         "params": parked_write.get("params") or {},
         "idempotency_key": parked_write.get("idempotency_key"),
         "outcome": parked_write.get("outcome"),
+        # gap-3 — the billable value/unit declared on the binding. Persisted
+        # on the parked blob so `execute_approved_write` can thread them to
+        # the outcome ledger row after the human-approved write succeeds.
+        "outcome_value": parked_write.get("outcome_value"),
+        "outcome_unit": parked_write.get("outcome_unit"),
         "workspace_id": workspace_id,
         "requested_by": requested_by,
         # RFC 09 Slice 2 — schema-2 chain-correlation fields
@@ -622,6 +627,11 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
             actor=approver,
             via_instinct=True,
             instinct_action_id=str(action.id),
+            # gap-3 — the billable value/unit declared on the binding at
+            # author time, persisted on the parked blob and threaded here so
+            # the GOVERNED (human-approved) outcome carries a real figure.
+            outcome_value=blob.get("outcome_value"),
+            outcome_unit=blob.get("outcome_unit"),
         )
     except Exception:  # noqa: BLE001 — emit is best-effort; the write already succeeded
         logger.warning(

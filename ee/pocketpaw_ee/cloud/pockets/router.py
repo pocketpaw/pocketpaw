@@ -1114,6 +1114,9 @@ async def run_pocket_action(
             actor=user_id,
             via_instinct=False,
             instinct_action_id=None,
+            # gap-3 — billable value/unit for the direct (non-gated) write.
+            outcome_value=result.get("outcome_value"),
+            outcome_unit=result.get("outcome_unit"),
         )
 
     # Strip executor-internal keys (`_park`, `outcome`) the wire model
@@ -1123,7 +1126,15 @@ async def run_pocket_action(
     # assertion below catches a strip that drifts out of sync with the
     # executor's result keys; `RunActionResponse` is also `extra="forbid"`
     # so a missed key fails construction rather than leaking.
-    wire = {k: v for k, v in result.items() if k not in ("_park", "outcome")}
+    wire = {
+        k: v
+        for k, v in result.items()
+        # gap-3 — strip the metering keys too: `outcome_value`/`outcome_unit`
+        # join `outcome` as executor-internal fields the wire model
+        # (`extra="forbid"`) does not carry. They were already consumed by
+        # the `emit_pocket_outcome` call above.
+        if k not in ("_park", "outcome", "outcome_value", "outcome_unit")
+    }
     assert "_park" not in wire, "executor `_park` blob must be stripped before the wire response"
     return RunActionResponse(**wire)
 
