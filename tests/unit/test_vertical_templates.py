@@ -7,6 +7,18 @@
 # action-row gated-proposal wiring (triage), their read-only posture
 # (member-360), and a full service create() round-trip through the mongo
 # fixture so the install-time compile-on-create seam is exercised.
+# Modified 2026-06-11 (feat/triage-redesign): DEMO-GRADE redesign of both
+# vertical ripple_spec.json files. Updated the burndown assertion (the
+# triage burndown now renders color-banded status-dot count cards + a
+# queue-total / oldest-waiting stat, not literal `stat` widgets) and the
+# member-360 state-key assertion (`stats` -> `kpis`, focal widget is now
+# `entity-detail`). Added test_<slug>_bindings_reference_seeded_state — a
+# mechanical guard for the class of bug this redesign fixed: every
+# {state.X...} binding in a vertical template must reference a state key
+# that EXISTS in the seed state, so a detail panel can never bind to a
+# state shape that was never seeded (the old "empty Answers / no values"
+# failure). It also flags the unsupported method-chain-then-property
+# pattern ({...first().field}) that resolved to undefined at render time.
 """Tests for the bundled vertical templates (applications-triage, member-360).
 
 The seed-template field-set assertions in test_bundled_templates.py
@@ -29,6 +41,7 @@ This file owns their shape and behaviour:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -64,6 +77,98 @@ def _iter_widgets(node: object):
     elif isinstance(node, list):
         for item in node:
             yield from _iter_widgets(item)
+
+
+# Matches a binding expression's root scope + first key, e.g. `state.selected`
+# in `{state.selected.applicant}` or `app` in `{app.score}`. Group 1 is the
+# scope (state / data / a loop variable), group 2 is the first key under it.
+_BINDING_RE = re.compile(r"\{\s*([a-zA-Z_][\w]*)\.([a-zA-Z_][\w]*)")
+
+# The Ripple expression engine resolves a method chain ONLY when the whole
+# chain ENDS in `)` (e.g. `{x.where('id', y).first()}`). A method call FOLLOWED
+# BY a PROPERTY access (`{...first().field}`) resolves to `undefined` — the
+# exact bug that left the old triage detail panel empty. This pattern flags a
+# `)` followed by `.<name>` where `<name>` is NOT itself a method call (i.e.
+# not followed by `(`): chaining another method (`.first()`) is fine; reaching
+# into a property (`.applicant`) after a method is the broken form.
+_CHAIN_THEN_PROP_RE = re.compile(r"\)\s*\.[a-zA-Z_]\w*(?![\w(])")
+
+
+def _iter_binding_strings(node: object):
+    """Yield every string that contains a `{...}` binding expression, anywhere
+    in the spec tree (prop values, `items`, `bind`, action `value`s, ...)."""
+    if isinstance(node, dict):
+        for value in node.values():
+            yield from _iter_binding_strings(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _iter_binding_strings(item)
+    elif isinstance(node, str) and "{" in node:
+        yield node
+
+
+def _loop_variables(spec: dict) -> set[str]:
+    """Collect every `each` loop variable name (``item_as``) declared in the
+    spec — these are loop-local scopes, not seed-state keys, so a `{app.x}`
+    reference is satisfied by the loop, not by `state`."""
+    names = {"item", "index"}  # the renderer's implicit loop variables
+    for node in _iter_widgets(spec.get("ui", {})):
+        if node.get("type") == "each":
+            alias = node.get("item_as")
+            if isinstance(alias, str):
+                names.add(alias)
+            idx = node.get("index_as")
+            if isinstance(idx, str):
+                names.add(idx)
+    return names
+
+
+# ---------------------------------------------------------------------------
+# Binding integrity — every {state.X} reference must hit a seeded state key.
+# This is the mechanical guard for the class of bug the DEMO-GRADE redesign
+# fixed: a detail panel that binds to a state shape which was never seeded
+# renders empty. Checkable for EVERY vertical template, not just the two here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("slug", _VERTICAL_SLUGS)
+def test_vertical_template_bindings_reference_seeded_state(slug: str) -> None:
+    """Every `{state.<key>...}` binding in the ripple_spec references a key
+    that EXISTS in the seed `state`, and no binding uses the unsupported
+    method-chain-then-property pattern (`{...first().field}`) that resolves to
+    undefined at render time. Together these make the "empty detail panel /
+    no values" failure mechanically uncatchable-by-eye but catchable here."""
+    spec = _read_spec(slug)
+    seeded_state_keys = set(spec["state"].keys())
+    loop_vars = _loop_variables(spec)
+
+    bad_state_refs: list[tuple[str, str]] = []
+    chain_then_prop: list[str] = []
+
+    for raw in _iter_binding_strings(spec["ui"]):
+        # Flag the unsupported method-chain-then-property pattern outright.
+        if _CHAIN_THEN_PROP_RE.search(raw):
+            chain_then_prop.append(raw)
+        for scope, first_key in _BINDING_RE.findall(raw):
+            if scope == "state":
+                if first_key not in seeded_state_keys:
+                    bad_state_refs.append((raw, first_key))
+            elif scope in {"data"} or scope in loop_vars:
+                # data sources hydrate at runtime; loop vars are local scopes.
+                continue
+            else:
+                # An unknown root scope is itself a binding bug — it can only
+                # be state-relative or a declared loop variable.
+                bad_state_refs.append((raw, scope))
+
+    assert not bad_state_refs, (
+        f"{slug}: bindings reference state keys not in the seed state "
+        f"(or an undeclared loop scope): {bad_state_refs}"
+    )
+    assert not chain_then_prop, (
+        f"{slug}: bindings use the unsupported method-chain-then-property "
+        f"pattern (resolves to undefined at render): {chain_then_prop}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -175,12 +280,32 @@ def test_triage_action_row_proposes_not_executes() -> None:
 
 
 def test_triage_has_burndown_stat_row() -> None:
-    """The triage canvas carries a status-count burndown — an each-loop of
-    stat widgets over state.status_counts."""
+    """The triage canvas carries a status-count burndown — an each-loop over
+    state.status_counts rendering one color-banded count card per status, plus
+    a queue-total and oldest-waiting stat. The DEMO-GRADE redesign renders each
+    bucket as a colored status-dot + count (the `stat` widget has no color
+    prop), so the burndown is asserted by the each-loop over status_counts and
+    the status-dot color carriers, not by a literal `stat` node."""
     spec = _read_spec("applications-triage")
     assert "status_counts" in spec["state"]
-    stats = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "stat"]
-    assert stats, "burndown stat row missing"
+    # Each bucket carries a status color and a status-dot variant so the row
+    # reads as color-banded counts, not a flat number list.
+    for bucket in spec["state"]["status_counts"]:
+        assert bucket.get("color"), f"status bucket {bucket.get('label')} has no color"
+        assert bucket.get("dot"), f"status bucket {bucket.get('label')} has no status-dot variant"
+    # The headline stats the burndown strip adds beyond the per-status counts.
+    assert "queue_total" in spec["state"], "burndown is missing the total stat"
+    assert "oldest_waiting" in spec["state"], "burndown is missing the oldest-waiting stat"
+    # The colored status-dot is the per-status count carrier.
+    dots = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "status-dot"]
+    assert dots, "burndown color-banded status-dot row missing"
+    # The burndown is driven by an each-loop over status_counts.
+    eaches = [
+        w
+        for w in _iter_widgets(spec["ui"])
+        if w.get("type") == "each" and w.get("items") == "{state.status_counts}"
+    ]
+    assert eaches, "burndown each-loop over state.status_counts missing"
 
 
 # ---------------------------------------------------------------------------
@@ -200,13 +325,20 @@ def test_member_360_is_read_only() -> None:
 
 
 def test_member_360_has_profile_membership_and_lists() -> None:
-    """The member-360 state seeds the header member, the stat strip, the
-    key-value profile + membership blocks, and the three record lists."""
+    """The member-360 state seeds the header member, the entity-detail KPI
+    strip + facts rail, the key-value profile + membership blocks, and the
+    three record lists. The DEMO-GRADE redesign renders the headline numbers
+    through the entity-detail focal widget's ``kpis`` strip (renamed from the
+    flat ``stats`` list) and the facts through its right rail."""
     spec = _read_spec("member-360")
     state = spec["state"]
-    for key in ("member", "stats", "profile", "membership", "tickets", "orders", "notes"):
+    for key in ("member", "kpis", "facts", "profile", "membership", "tickets", "orders", "notes"):
         assert key in state, f"member-360 state missing {key}"
     assert state["member"]["name"]
+    # The focal widget is the catalog's "view one record" layout, so the header
+    # KPI strip and facts rail are bound, not hand-assembled stat tiles.
+    entity_details = [w for w in _iter_widgets(spec["ui"]) if w.get("type") == "entity-detail"]
+    assert entity_details, "member-360 should use the entity-detail focal widget"
 
 
 # ---------------------------------------------------------------------------
