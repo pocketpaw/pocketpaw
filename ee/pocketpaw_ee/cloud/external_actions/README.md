@@ -4,6 +4,9 @@ Created: 2026-06-11 (feat/external-action-proposal).
 Documents the third gated proposal kind (alongside `_pocket_write` and
 `_code_change`): its blob contract, the propose/execute split, the
 exactly-one-terminal Decision-Graph discipline, and the router wiring.
+Updated: 2026-06-11 (feat/external-action-mcp-tool) — added the "Agent-facing
+MCP tool surface" section documenting the `propose_external_action` tool that
+lets a chat agent file one of these proposals.
 -->
 
 # Gated external actions
@@ -43,6 +46,42 @@ resolved fresh at execution from the workspace's saved connector config.
 | `correlation_id` / `proposed_event_id` | Decision-Graph chain ids minted at propose time |
 | `summary` | human-readable one-liner for the gate UI |
 | `outcome` | `{status, response_summary, executed_at}` back-written by the executor after the call |
+
+## Agent-facing MCP tool surface
+
+A chat agent files an external-action proposal through one in-process MCP tool.
+The tool is a thin adapter over `propose.propose_external_action` — it resolves
+identity, validates inputs, and delegates; it **never** executes the connector.
+
+| | |
+|---|---|
+| Server name | `pocketpaw_external_actions` |
+| Tool id | `mcp__pocketpaw_external_actions__propose_external_action` |
+| Module | `agent/mcp_servers/external_actions.py` |
+| Provider | `extensions.CloudExternalActionsMcpProvider` (entry point `external_actions`) |
+
+The server is **ambient** (not opt-in) — surfaces scope access via their profile
+allowlist, the same regime the belt / loom / media / sites servers use. It is
+disabled (the registration loop skips it) when the `claude_agent_sdk` isn't
+installed, so chat never breaks.
+
+`propose_external_action(connector, action, params, summary, reason)`:
+
+| Arg | Meaning |
+|-----|---------|
+| `connector` | the bound connector name to call (e.g. `"crm"`) |
+| `action` | the named connector action (e.g. `"approveApplication"`) |
+| `params` | a JSON object of call parameters, passed verbatim to the action |
+| `summary` | a one-line human-readable description of the call (the *what*) |
+| `reason` | why the call should be made — shown to the reviewer (the *why*) |
+
+The tool resolves the `workspace_id` + `requested_by` from the cloud chat
+session's identity ContextVars (never from the agent's args), folds
+`summary` + `reason` into the blob's gate summary, and returns
+`{action_id, status: "pending_approval", summary}` on success. An error
+returns a plain relayable message and files **nothing**. The agent must not
+claim the action ran — it is only **proposed** until a human approves it in The
+Tray, at which point the executor below fires the call.
 
 ## Execute-on-approve contract
 
