@@ -304,6 +304,16 @@ class AudienceResolver:
                 return await self._workspace(wid)
             return []
 
+        # --- Belt mandates (shift plan proposals) --------------------------------
+        # Workspace-scoped, same rationale as belt_run_updated: a plan lands at
+        # the gate asynchronously and must reach every member with the mandates
+        # page open. The UI subscribes to the ``belt_plan`` topic and reads
+        # {mandate_id, proposal} off the payload.
+        if t == "belt_plan":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
         # --- Composio (per-user OAuth identity probes) --------------------------
         if t in {"composio.connection.verified", "composio.connection.mismatch"}:
             if uid := d.get("user_id"):

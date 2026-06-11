@@ -35,7 +35,18 @@ class MandateShiftUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "mandate.shift_updated"
 
 
+# UI contract — fired when a shift's PlanProposal lands as a pending Instinct
+# ``belt_plan`` Action. Payload: {workspace_id, mandate_id, proposal} —
+# ``workspace_id`` drives the audience resolver's workspace fan-out (the same
+# branch shape as ``belt_run_updated``); the /belt mandates page subscribes to
+# exactly the ``belt_plan`` topic and reads {mandate_id, proposal}.
+@dataclass
+class BeltPlanProposed(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_plan"
+
+
 __all__ = [
+    "BeltPlanProposed",
     "MandateCreated",
     "MandateShiftStarted",
     "MandateShiftUpdated",

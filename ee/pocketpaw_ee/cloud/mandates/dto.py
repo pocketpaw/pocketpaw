@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -63,12 +62,15 @@ class CharterRequest(BaseModel):
 
 
 class CreateMandateRequest(BaseModel):
-    """Body for ``POST /belt/mandates``. The charter is the standing brief."""
+    """Body for ``POST /belt/mandates``. The charter is the standing brief.
+    ``patrols`` (UI contract) is the charter composer's senses toggles — which
+    patrols sense this mandate's surface."""
 
     name: str = Field(min_length=1)
     surface: SurfaceRequest
     charter: CharterRequest
     soul_path: str | None = None
+    patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
 
 
 class MandateHealth(BaseModel):
@@ -126,7 +128,8 @@ class MandateDetailResponse(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    """Body for ``POST /belt/mandates/{id}/feedback`` — a human-filed signal.
+    """Body for ``POST /belt/mandates/{id}/feedback`` — a human-filed signal
+    (the GENERAL shape; autopilot and integrations use this).
 
     ``text`` is the feedback. ``severity`` defaults to 3 (mid) when omitted.
     ``source`` names where it came from (e.g. ``"slack"``, ``"support"``)."""
@@ -134,6 +137,21 @@ class FeedbackRequest(BaseModel):
     text: str = Field(min_length=1)
     severity: int | None = Field(default=None, ge=1, le=5)
     source: str = Field(min_length=1)
+
+
+class TeachingFeedbackRequest(BaseModel):
+    """The TEACHING shape of ``POST /belt/mandates/{id}/feedback`` — the human
+    teaching channel the gate UI files from rejections/edits. Discriminated
+    from :class:`FeedbackRequest` by the presence of ``kind``.
+
+    ``kind`` names the gate action (``reject``/``edit``/``plan``); ``reason``
+    is the human's explanation; ``shift_no``/``task_title`` tie it to the plan
+    item it teaches about. Returns ``{"ok": true}`` on the wire."""
+
+    kind: str = Field(pattern="^(reject|edit|plan)$")
+    reason: str = Field(min_length=1)
+    shift_no: int | None = None
+    task_title: str | None = None
 
 
 class SightingResponse(BaseModel):
@@ -174,24 +192,54 @@ class ShiftResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Plan resolve (UI contract) — the console's authoritative gate action
+# ---------------------------------------------------------------------------
+
+
+class PlanDecision(BaseModel):
+    """One per-task verdict in a plan resolution.
+
+    ``index`` is the 0-BASED position in the proposed plan's ``tasks`` array
+    (the order the UI rendered). ``edit`` applies ``edited_title`` and keeps
+    the task; ``reject`` drops it and records ``reason`` as teaching feedback."""
+
+    index: int = Field(ge=0)
+    decision: str = Field(pattern="^(approve|reject|edit)$")
+    edited_title: str | None = None
+    reason: str | None = None
+
+
+class ResolvePlanRequest(BaseModel):
+    """Body for ``POST /belt/mandates/{id}/plan/resolve`` — the console's gate
+    action. Every task in the shift's plan must carry exactly one decision
+    (explicit beats implicit at a human gate)."""
+
+    shift_no: int
+    decisions: list[PlanDecision] = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
 # Pawprints (slice 5) — past-tense event feed
 # ---------------------------------------------------------------------------
 
 
 class PawprintResponse(BaseModel):
-    """One past-tense event in a mandate's history.
+    """One past-tense event in a mandate's history (UI contract shape).
 
-    ``kind`` is the event class (``proposed`` / ``approved`` / ``rejected`` /
-    ``executed`` / ``stood_down``). ``text`` is the human-readable past-tense
-    line. ``shift_no`` ties it to a shift; ``evidence_refs`` lists the sighting
-    ids the underlying task cited."""
+    ``kind`` is the event class — the UI consumes ``executed`` / ``rejected`` /
+    ``edited`` / ``stood_down``; the feed also emits ``proposed`` / ``approved``
+    / ``failed`` / ``planning`` (a superset, same shape). ``summary`` is the
+    human-readable past-tense line. ``id`` is a stable per-item key
+    (``<shift_id>:<kind>``); ``evidence_refs`` lists the sighting ids the
+    underlying plan cited."""
 
+    id: str
+    mandate_id: str
     shift_no: int | None = None
     kind: str
-    text: str
+    summary: str
     evidence_refs: list[str] = Field(default_factory=list)
     ts: datetime | None = None
-    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class PawprintsListResponse(BaseModel):
@@ -208,11 +256,14 @@ __all__ = [
     "MandateHealth",
     "MandateListResponse",
     "MandateSummaryResponse",
+    "PlanDecision",
     "PawprintResponse",
     "PawprintsListResponse",
+    "ResolvePlanRequest",
     "ShiftResponse",
     "ShiftSummaryResponse",
     "SightingResponse",
     "SightingsListResponse",
     "SurfaceRequest",
+    "TeachingFeedbackRequest",
 ]

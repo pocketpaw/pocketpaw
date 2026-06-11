@@ -37,6 +37,7 @@ from pocketpaw_ee.cloud.mandates.domain import (
 from pocketpaw_ee.cloud.mandates.dto import (
     CreateMandateRequest,
     FeedbackRequest,
+    TeachingFeedbackRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,7 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
         charter=_charter_from_request(body),
         status="active",
         soul_path=body.soul_path,
+        patrols=list(body.patrols),
     )
     await doc.insert()
 
@@ -137,7 +139,9 @@ async def create_mandate(workspace_id: str, user_id: str, body: Any) -> dict[str
     logger.info(
         "mandate: created %s (workspace=%s, repo=%s)", doc.id, workspace_id, body.surface.repo_id
     )
-    return await _mandate_detail_wire(doc)
+    # UI contract — the create response wraps the detail in a ``mandate``
+    # envelope; GET /belt/mandates/{id} stays bare.
+    return {"mandate": await _mandate_detail_wire(doc)}
 
 
 async def list_mandates(workspace_id: str, user_id: str, body: Any = None) -> dict[str, Any]:
@@ -217,6 +221,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         "surface": {"repo_id": doc.surface.repo_id},
         "charter": _charter_to_wire(doc.charter),
         "soul_path": doc.soul_path,
+        "patrols": list(doc.patrols),
         "recent_shifts": [
             {
                 "id": str(s.id),
@@ -242,10 +247,53 @@ async def file_feedback(
 ) -> dict[str, Any]:
     """Intake patrol — turn a human's feedback into a Sighting.
 
-    Severity defaults to 3 (mid) when omitted. The sighting's ``patrol`` is
-    ``"feedback"`` and the ``source`` rides on the evidence so the foreman can
-    weight it."""
-    body = FeedbackRequest.model_validate(body)
+    Two body shapes (UI contract), discriminated on the presence of ``kind``:
+
+    * GENERAL — ``{text, severity?, source}`` (autopilot / integrations).
+      Severity defaults to 3 (mid). Returns the sighting wire dict.
+    * TEACHING — ``{kind: reject|edit|plan, reason, shift_no?, task_title?}``
+      (the gate UI's human-teaching channel from rejections/edits). Returns
+      ``{"ok": true}``.
+
+    Both shapes persist a ``patrol="feedback"`` Sighting so the foreman's next
+    digest sees the signal; teaching items carry the gate context on the
+    evidence."""
+    raw = dict(body or {})
+    if "kind" in raw:
+        teaching = TeachingFeedbackRequest.model_validate(raw)
+        # Tenant gate — a mandate in another workspace is a 404.
+        await _fetch_mandate(workspace_id, mandate_id)
+        summary = f"[gate {teaching.kind}] {teaching.reason.strip()}"[:280]
+        sighting = SightingDoc(
+            workspace=workspace_id,
+            mandate_id=mandate_id,
+            patrol="feedback",
+            severity=3,
+            summary=summary,
+            evidence={
+                "source": "gate",
+                "kind": teaching.kind,
+                "filed_by": user_id,
+                "reason": teaching.reason.strip(),
+                "shift_no": teaching.shift_no,
+                "task_title": teaching.task_title,
+            },
+        )
+        await sighting.insert()
+        await emit(
+            mandate_events.MandateSightingAdded(
+                data={
+                    "workspace_id": workspace_id,
+                    "mandate_id": mandate_id,
+                    "sighting_id": str(sighting.id),
+                    "patrol": "feedback",
+                    "severity": 3,
+                }
+            )
+        )
+        return {"ok": True}
+
+    body = FeedbackRequest.model_validate(raw)
     # Tenant gate — a mandate in another workspace is a 404.
     await _fetch_mandate(workspace_id, mandate_id)
 
@@ -305,7 +353,13 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
     seen_keys = {(s.patrol, str((s.evidence or {}).get("package") or s.summary)) for s in existing}
 
     created: list[SightingDoc] = []
+    enabled = set(doc.patrols or [])
     for patrol_name, patrol in PATROLS.items():
+        # UI contract — the mandate's ``patrols`` toggles scope the sense loop;
+        # an un-toggled patrol never runs. (The "feedback" intake endpoint is a
+        # human channel and stays open regardless — it has no sense callable.)
+        if patrol_name not in enabled:
+            continue
         try:
             drafts = await patrol(doc.surface.repo_id)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
@@ -509,13 +563,16 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         await soul_link.remember_shift(
             doc.soul_path, f"Mandate '{doc.name}' shift {shift_no} {outcome}"
         )
+        # UI contract — the shift response rides a ``shift`` envelope.
         return {
-            "shift_id": str(shift.id),
-            "no": shift_no,
-            "state": "stood_down",
-            "plan_action_id": None,
-            "task_count": 0,
-            "no_action_reason": plan.no_action_reason,
+            "shift": {
+                "shift_id": str(shift.id),
+                "no": shift_no,
+                "state": "stood_down",
+                "plan_action_id": None,
+                "task_count": 0,
+                "no_action_reason": plan.no_action_reason,
+            }
         }
 
     # 5b. TASK PLAN — propose through the Instinct PLAN GATE as a ``belt_plan``
@@ -612,6 +669,23 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         state="in_gate",
         plan_action_id=str(action.id),
     )
+    # UI contract — announce the new plan proposal on the ``belt_plan`` topic
+    # (workspace fan-out, mirroring how belt_run_updated rides the bus). The
+    # page subscribing to this topic reads {mandate_id, proposal}.
+    await emit(
+        mandate_events.BeltPlanProposed(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "proposal": {
+                    "plan_action_id": str(action.id),
+                    "shift_id": str(shift.id),
+                    "shift_no": shift_no,
+                    **plan.model_dump(),
+                },
+            }
+        )
+    )
     logger.info(
         "mandate: shift %s of %s proposed %d task(s) via belt_plan action %s (correlation_id=%s)",
         shift_no,
@@ -620,13 +694,16 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         action.id,
         correlation_id,
     )
+    # UI contract — the shift response rides a ``shift`` envelope.
     return {
-        "shift_id": str(shift.id),
-        "no": shift_no,
-        "state": "in_gate",
-        "plan_action_id": str(action.id),
-        "task_count": len(plan.tasks),
-        "no_action_reason": None,
+        "shift": {
+            "shift_id": str(shift.id),
+            "no": shift_no,
+            "state": "in_gate",
+            "plan_action_id": str(action.id),
+            "task_count": len(plan.tasks),
+            "no_action_reason": None,
+        }
     }
 
 
@@ -776,14 +853,179 @@ async def _persist_plan_chain_ids(*, store: Any, action_id: str, proposed_event_
 
 
 # ---------------------------------------------------------------------------
+# Plan resolve (UI contract) — map per-task gate verdicts onto the Instinct path
+# ---------------------------------------------------------------------------
+
+
+async def prepare_plan_resolution(
+    workspace_id: str, user_id: str, mandate_id: str, body: Any
+) -> dict[str, Any]:
+    """Validate a console plan-resolution and translate it into ONE Instinct
+    transition the router then performs through the REAL approve/reject path.
+
+    The instinct gate stays the single authority: an approved/edited subset
+    becomes an APPROVE-WITH-EDITS (the blob's task list filtered + retitled —
+    the same Corrections machinery every instinct edit uses), and an all-reject
+    becomes a plain REJECT. The chain therefore closes exactly once, in the
+    same code paths the Tray uses. Rejected tasks are recorded as teaching
+    sightings (the feedback patrol) so the foreman's next digest learns.
+
+    Rules: the shift must be ``in_gate`` with a plan Action still PENDING;
+    decision ``index`` is 0-BASED into the plan's tasks array; EVERY task must
+    carry exactly one decision (explicit beats implicit at a human gate).
+
+    Returns the router's marching orders:
+    ``{action_id, shift_id, mode: "approve"|"reject", parameters?, edited,
+    reject_reason?}`` — ``parameters`` (approve mode) is the full edited
+    parameters dict for ``ApproveRequest``; ``edited`` says whether any task
+    was edited/dropped (drives the corrections path)."""
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.cloud.mandates.dto import ResolvePlanRequest
+    from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
+
+    body = ResolvePlanRequest.model_validate(body)
+    await _fetch_mandate(workspace_id, mandate_id)
+
+    shift = await ShiftDoc.find_one(
+        ShiftDoc.workspace == workspace_id,
+        ShiftDoc.mandate_id == mandate_id,
+        ShiftDoc.no == body.shift_no,
+    )
+    if shift is None:
+        raise NotFound("shift", str(body.shift_no))
+    if shift.state != "in_gate" or not shift.plan_action_id:
+        raise ValidationError(
+            "mandate.shift_not_in_gate",
+            f"shift {body.shift_no} is {shift.state!r} — only an in_gate shift can be resolved",
+        )
+
+    store = get_instinct_store()
+    action = await store.get_action(shift.plan_action_id)
+    params = dict(getattr(action, "parameters", None) or {}) if action else {}
+    blob = params.get(BELT_PLAN_PARAM_KEY)
+    if action is None or not isinstance(blob, dict):
+        raise ValidationError(
+            "mandate.plan_missing", "the shift's plan Action is missing or malformed"
+        )
+    status = str(getattr(getattr(action, "status", None), "value", "") or "")
+    if status != "pending":
+        raise ValidationError("mandate.plan_already_resolved", f"the plan is already {status}")
+
+    tasks = list((blob.get("plan") or {}).get("tasks") or [])
+    by_index: dict[int, Any] = {}
+    for d in body.decisions:
+        if d.index >= len(tasks):
+            raise ValidationError(
+                "mandate.bad_decision_index",
+                f"decision index {d.index} is out of range (plan has {len(tasks)} tasks; "
+                "indices are 0-based)",
+            )
+        if d.index in by_index:
+            raise ValidationError(
+                "mandate.duplicate_decision", f"task index {d.index} has two decisions"
+            )
+        if d.decision == "edit" and not (d.edited_title or "").strip():
+            raise ValidationError(
+                "mandate.edit_without_title", f"edit decision on task {d.index} needs edited_title"
+            )
+        by_index[d.index] = d
+    missing = [i for i in range(len(tasks)) if i not in by_index]
+    if missing:
+        raise ValidationError(
+            "mandate.incomplete_decisions",
+            f"every task needs a decision; missing indices {missing} (0-based)",
+        )
+
+    kept: list[dict[str, Any]] = []
+    edited = False
+    rejected: list[tuple[int, Any]] = []
+    for i, task in enumerate(tasks):
+        d = by_index[i]
+        if d.decision == "reject":
+            rejected.append((i, d))
+            edited = True
+            continue
+        t = dict(task)
+        if d.decision == "edit":
+            t["title"] = d.edited_title.strip()
+            edited = True
+        kept.append(t)
+
+    # Rejected tasks become teaching sightings — the foreman's next digest
+    # reads the human's reasons. (Each insert emits MandateSightingAdded.)
+    for i, d in rejected:
+        await file_feedback(
+            workspace_id,
+            user_id,
+            mandate_id,
+            {
+                "kind": "reject",
+                "reason": (d.reason or "rejected at the gate").strip(),
+                "shift_no": body.shift_no,
+                "task_title": str(tasks[i].get("title") or ""),
+            },
+        )
+
+    if not kept:
+        reasons = "; ".join((d.reason or "").strip() for _, d in rejected if d.reason)
+        return {
+            "action_id": str(shift.plan_action_id),
+            "shift_id": str(shift.id),
+            "mode": "reject",
+            "edited": True,
+            "reject_reason": reasons or "all tasks rejected at the gate",
+        }
+
+    new_blob = dict(blob)
+    new_plan = dict(blob.get("plan") or {})
+    new_plan["tasks"] = kept
+    new_blob["plan"] = new_plan
+    new_params = dict(params)
+    new_params[BELT_PLAN_PARAM_KEY] = new_blob
+    return {
+        "action_id": str(shift.plan_action_id),
+        "shift_id": str(shift.id),
+        "mode": "approve",
+        "edited": edited,
+        "parameters": new_params,
+    }
+
+
+async def shift_wire(workspace_id: str, shift_id: str) -> dict[str, Any]:
+    """Refresh one shift's wire dict (the resolve response's ``shift``)."""
+    # no-event: read-only path; emit only on writes.
+    try:
+        doc = await ShiftDoc.find_one(
+            ShiftDoc.workspace == workspace_id, ShiftDoc.id == _as_object_id(shift_id)
+        )
+    except Exception:  # noqa: BLE001 — malformed id == 404
+        doc = None
+    if doc is None:
+        raise NotFound("shift", shift_id)
+    return {
+        "shift_id": str(doc.id),
+        "no": doc.no,
+        "state": doc.state,
+        "plan_action_id": doc.plan_action_id,
+        "outcome": doc.outcome,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Pawprints — the past-tense event feed (slice 5)
 # ---------------------------------------------------------------------------
 
 
 async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dict[str, Any]:
     """Walk the mandate's shift history + decision chains into a past-tense
-    event feed: shift n proposed / approved / rejected / executed / failed /
-    stood_down, with the evidence (sighting) refs the plan cited.
+    event feed (UI contract item shape: ``{id, mandate_id, shift_no, kind,
+    summary, evidence_refs, ts}``).
+
+    Kinds: the UI consumes ``executed`` / ``rejected`` / ``edited`` /
+    ``stood_down``; the feed also emits ``proposed`` / ``approved`` /
+    ``failed`` / ``planning`` with the same shape (a documented superset).
+    ``edited`` fires instead of ``approved`` when the approval carried human
+    edits (the action has Corrections recorded).
 
     Sources: the ShiftDoc rows (state + outcome) and each shift's ``belt_plan``
     Instinct Action (status + the plan blob's evidence refs) — the same records
@@ -802,34 +1044,36 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
 
     store = get_instinct_store()
     prints: list[dict[str, Any]] = []
+
+    def _item(shift: Any, kind: str, summary: str, refs: list[str], ts: Any) -> dict[str, Any]:
+        return {
+            "id": f"{shift.id}:{kind}",
+            "mandate_id": mandate_id,
+            "shift_no": shift.no,
+            "kind": kind,
+            "summary": summary,
+            "evidence_refs": refs,
+            "ts": ts,
+        }
+
     for shift in shifts:
         if shift.state == "stood_down":
+            reason = (shift.outcome or "no action needed").removeprefix("stood down: ")
             prints.append(
-                {
-                    "shift_no": shift.no,
-                    "kind": "stood_down",
-                    "text": f"Shift {shift.no}: the foreman stood down — "
-                    f"{(shift.outcome or 'no action needed').removeprefix('stood down: ')}",
-                    "evidence_refs": [],
-                    "ts": shift.updatedAt,
-                    "extra": {},
-                }
+                _item(
+                    shift,
+                    "stood_down",
+                    f"Shift {shift.no}: the foreman stood down — {reason}",
+                    [],
+                    shift.updatedAt,
+                )
             )
             continue
         if shift.state == "planning":
-            text = f"Shift {shift.no}: planning"
+            summary = f"Shift {shift.no}: planning"
             if shift.outcome:
-                text = f"Shift {shift.no}: plan did not reach the gate — {shift.outcome}"
-            prints.append(
-                {
-                    "shift_no": shift.no,
-                    "kind": "planning",
-                    "text": text,
-                    "evidence_refs": [],
-                    "ts": shift.updatedAt,
-                    "extra": {},
-                }
-            )
+                summary = f"Shift {shift.no}: plan did not reach the gate — {shift.outcome}"
+            prints.append(_item(shift, "planning", summary, [], shift.updatedAt))
             continue
 
         # in_gate / executing / done — read the plan Action for status + refs.
@@ -847,63 +1091,69 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
         task_count = len(tasks)
 
         prints.append(
-            {
-                "shift_no": shift.no,
-                "kind": "proposed",
-                "text": f"Shift {shift.no}: the foreman proposed {task_count} task(s) "
+            _item(
+                shift,
+                "proposed",
+                f"Shift {shift.no}: the foreman proposed {task_count} task(s) "
                 "through the plan gate",
-                "evidence_refs": refs,
-                "ts": shift.createdAt,
-                "extra": {"plan_action_id": shift.plan_action_id},
-            }
+                refs,
+                shift.createdAt,
+            )
         )
         status = str(getattr(getattr(action, "status", None), "value", "") or "")
         if status in ("approved", "executed", "failed"):
+            # ``edited`` when the human approved WITH edits (Corrections exist
+            # on the action); plain ``approved`` otherwise.
+            approve_kind = "approved"
+            try:
+                if shift.plan_action_id and await store.get_corrections_for_action(
+                    shift.plan_action_id
+                ):
+                    approve_kind = "edited"
+            except Exception:  # noqa: BLE001 — corrections lookup degrades to approved
+                logger.debug("mandate: pawprints corrections read failed", exc_info=True)
+            verb = "approved" if approve_kind == "approved" else "approved with edits"
             prints.append(
-                {
-                    "shift_no": shift.no,
-                    "kind": "approved",
-                    "text": f"Shift {shift.no}: a human approved the plan at the gate",
-                    "evidence_refs": refs,
-                    "ts": shift.updatedAt,
-                    "extra": {},
-                }
+                _item(
+                    shift,
+                    approve_kind,
+                    f"Shift {shift.no}: a human {verb} the plan at the gate",
+                    refs,
+                    shift.updatedAt,
+                )
             )
         if status == "rejected":
             prints.append(
-                {
-                    "shift_no": shift.no,
-                    "kind": "rejected",
-                    "text": f"Shift {shift.no}: a human rejected the plan at the gate"
+                _item(
+                    shift,
+                    "rejected",
+                    f"Shift {shift.no}: a human rejected the plan at the gate"
                     + (f" — {shift.outcome}" if shift.outcome else ""),
-                    "evidence_refs": refs,
-                    "ts": shift.updatedAt,
-                    "extra": {},
-                }
+                    refs,
+                    shift.updatedAt,
+                )
             )
         elif status == "executed":
             prints.append(
-                {
-                    "shift_no": shift.no,
-                    "kind": "executed",
-                    "text": f"Shift {shift.no}: "
+                _item(
+                    shift,
+                    "executed",
+                    f"Shift {shift.no}: "
                     + (shift.outcome or f"dispatched {task_count} task(s) as belt runs"),
-                    "evidence_refs": refs,
-                    "ts": shift.updatedAt,
-                    "extra": {"outcome": getattr(action, "outcome", None)},
-                }
+                    refs,
+                    shift.updatedAt,
+                )
             )
         elif status == "failed":
             prints.append(
-                {
-                    "shift_no": shift.no,
-                    "kind": "failed",
-                    "text": f"Shift {shift.no}: the approved plan failed to dispatch"
+                _item(
+                    shift,
+                    "failed",
+                    f"Shift {shift.no}: the approved plan failed to dispatch"
                     + (f" — {shift.outcome}" if shift.outcome else ""),
-                    "evidence_refs": refs,
-                    "ts": shift.updatedAt,
-                    "extra": {},
-                }
+                    refs,
+                    shift.updatedAt,
+                )
             )
     return {"pawprints": prints}
 
@@ -985,6 +1235,8 @@ __all__ = [
     "list_mandates",
     "list_sightings",
     "mark_shift",
+    "prepare_plan_resolution",
     "run_patrols",
+    "shift_wire",
     "trigger_shift",
 ]
