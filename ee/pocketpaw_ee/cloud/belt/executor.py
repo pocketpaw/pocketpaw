@@ -1,6 +1,19 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-06-11 (feat/belt-repo-init — local-only gate mode) — the executor
+#   now lands a change on a repo with NO ``origin`` remote WITHOUT pushing or
+#   opening a PR. ``_has_origin`` is checked once up front (step 0): with a remote
+#   the worktree bases on ``origin/<base>`` and the push + PR path runs as before;
+#   with no remote the worktree bases on the LOCAL ``<base>`` ref, the push + PR
+#   steps are SKIPPED, and ``_land_local_only`` records the executed outcome
+#   carrying the ``branch`` + ``commit_sha`` instead of a ``pr_url``. The branch is
+#   promoted into the real repo (``git branch <branch> <sha>``) so it survives the
+#   worktree teardown. ``_persist_run_result`` back-writes branch + commit_sha (and
+#   NOT pr_url) so the runs read model emits ``pr_url=None`` and the page renders a
+#   branch chip; ``belt_run_updated`` still fires (landed/done, no pr_url); the
+#   Decision-Graph chain still closes once. The with-remote path is unchanged.
+#
 # Updated: 2026-06-10 (feat/belt-console-backend, SC-2 — runs read model + SSE) —
 #   the executor now feeds the /belt console two things:
 #     * STRUCTURED outcome on the blob — on a SUCCESSFUL apply it back-writes
@@ -52,15 +65,20 @@
 #   2. RE-resolves the repo path against the allowlist (defense in depth — the
 #      allowlist may have tightened between propose and approve).
 #   3. Creates a FRESH git worktree (one per action id, under a tmp dir; NEVER
-#      the repo's live checkout) at ``origin/<base_branch>`` after a fetch.
+#      the repo's live checkout). WITH a remote: at ``origin/<base_branch>`` after
+#      a fetch. LOCAL-ONLY (no origin): DETACHED at the local ``<base_branch>``
+#      commit (never the branch name, which the live working tree holds).
 #   4. ``git apply --3way`` the diff (written to a temp FILE — never echoed/
 #      interpolated into a shell).
 #   5. Branches ``feat/belt-<action-id-short>``, commits (Conventional Commits;
-#      the agent's summary as the body; NO AI attribution), pushes.
-#   6. Opens a PR via an injectable opener (default shells ``gh pr create``;
-#      tests inject a fake).
-#   7. ``mark_executed`` with outcome ``{pr_url, branch, files_changed}``.
-#   8. ALWAYS removes the worktree — on success or any failure. On apply
+#      the agent's summary as the body; NO AI attribution).
+#   6a. WITH a remote — pushes, opens a PR via an injectable opener (default
+#       shells ``gh pr create``; tests inject a fake), ``mark_executed`` with
+#       outcome ``{pr_url, branch, files_changed}``.
+#   6b. LOCAL-ONLY (no origin) — NO push, NO PR. Promotes the belt branch into
+#       the real repo and ``mark_executed`` with outcome ``{branch, commit_sha,
+#       files_changed}`` (no pr_url). ``belt_run_updated`` still fires (landed).
+#   7. ALWAYS removes the worktree — on success or any failure. On apply
 #      conflict / any error → ``mark_failed`` with a clear outcome (the agent /
 #      user can re-propose); never leave half-state.
 #
@@ -265,6 +283,7 @@ def _emit_chain_close(
     causation_id: Any | None,
     pr_url: str | None = None,
     branch: str | None = None,
+    commit_sha: str | None = None,
     files_changed: int | None = None,
 ) -> None:
     """Emit the ``decision.completed`` chain-close for a Belt code-change run.
@@ -309,6 +328,8 @@ def _emit_chain_close(
         payload["pr_url"] = pr_url
     if branch:
         payload["branch"] = branch
+    if commit_sha:
+        payload["commit_sha"] = commit_sha
     if files_changed is not None:
         payload["files_changed"] = files_changed
 
@@ -364,18 +385,25 @@ async def _persist_run_result(
     *,
     store: Any,
     action_id: str,
-    pr_url: str,
     branch: str,
     files_changed: int,
+    pr_url: str | None = None,
+    commit_sha: str | None = None,
 ) -> None:
-    """Back-write the PR result onto the persisted ``_code_change`` blob.
+    """Back-write the apply result onto the persisted ``_code_change`` blob.
 
-    The runs read model reads ``pr_url`` / ``branch`` / ``files_changed`` off the
-    blob STRUCTURALLY rather than parsing the free-text ``mark_executed``
-    outcome. Direct SQL update — the same pattern belt.py's ``_persist_chain_ids``
-    uses for the propose-time chain ids. Best-effort: a write failure leaves the
-    run without the structured fields (the read model falls back to None) but
-    never breaks the approve response.
+    The runs read model reads ``pr_url`` / ``branch`` / ``commit_sha`` /
+    ``files_changed`` off the blob STRUCTURALLY rather than parsing the free-text
+    ``mark_executed`` outcome. Direct SQL update — the same pattern belt.py's
+    ``_persist_chain_ids`` uses for the propose-time chain ids. Best-effort: a
+    write failure leaves the run without the structured fields (the read model
+    falls back to None) but never breaks the approve response.
+
+    Two landing shapes share this writer:
+      * WITH-REMOTE — ``pr_url`` + ``branch`` are set; ``commit_sha`` is omitted.
+      * LOCAL-ONLY (no ``origin``) — ``branch`` + ``commit_sha`` are set; ``pr_url``
+        stays absent so the read model emits ``pr_url=None`` and the page renders
+        a branch chip instead of a PR link.
     """
     import json as _json
 
@@ -390,9 +418,15 @@ async def _persist_run_result(
         if not isinstance(blob, dict):
             return
         blob = dict(blob)
-        blob["pr_url"] = pr_url
         blob["branch"] = branch
         blob["files_changed"] = files_changed
+        # Only set the fields that apply to THIS landing shape — never write a
+        # null pr_url over a real one (and vice-versa). The read model treats an
+        # absent key the same as None.
+        if pr_url is not None:
+            blob["pr_url"] = pr_url
+        if commit_sha is not None:
+            blob["commit_sha"] = commit_sha
         params[_CODE_CHANGE_PARAM_KEY] = blob
 
         async with aiosqlite.connect(store._db_path) as db:
@@ -524,21 +558,48 @@ async def execute_approved_change(
     worktree_created = False
 
     try:
-        # 1. Fetch the latest base so we branch off the freshest origin tip.
-        code, _out, err = await _run(["git", "fetch", "origin", base_branch], cwd=repo_path)
-        if code != 0:
-            await _fail(
-                f"git fetch origin {base_branch} failed: {err.strip()[:300]}",
-                error_class="GitFetchFailed",
-            )
-            return
+        # 0. LOCAL-ONLY DETECTION — does the repo have an ``origin`` remote? A
+        #    repo with no origin is a local-only landing: we branch off the LOCAL
+        #    base ref (never ``origin/<base>``, which doesn't exist) and skip the
+        #    push + PR entirely (handled after the commit, step 6).
+        has_origin = await _has_origin(repo_path)
 
-        # 2. Fresh worktree at origin/<base_branch>. If the dir somehow exists
-        #    from a prior crash, remove it first so add doesn't refuse.
+        # 1. With a remote: fetch the latest base so we branch off the freshest
+        #    origin tip, then base the worktree on ``origin/<base>`` (a remote-
+        #    tracking ref — ``worktree add`` checks it out DETACHED, never as a
+        #    local branch). Local-only: no fetch, resolve the LOCAL ``<base>``
+        #    branch to its commit sha so the worktree can check it out DETACHED —
+        #    we MUST NOT ``worktree add`` a local branch name that is already
+        #    checked out in the repo's live working tree (git refuses it).
+        if has_origin:
+            code, _out, err = await _run(["git", "fetch", "origin", base_branch], cwd=repo_path)
+            if code != 0:
+                await _fail(
+                    f"git fetch origin {base_branch} failed: {err.strip()[:300]}",
+                    error_class="GitFetchFailed",
+                )
+                return
+            worktree_base = f"origin/{base_branch}"
+        else:
+            code, out, err = await _run(
+                ["git", "rev-parse", "--verify", base_branch], cwd=repo_path
+            )
+            if code != 0:
+                await _fail(
+                    f"local base branch {base_branch!r} not found: {err.strip()[:300]}",
+                    error_class="BaseBranchNotFound",
+                )
+                return
+            worktree_base = out.strip()
+
+        # 2. Fresh worktree DETACHED at the base ref. If the dir somehow exists
+        #    from a prior crash, remove it first so add doesn't refuse. ``--detach``
+        #    keeps it a detached HEAD so step 3 can create the belt branch without
+        #    colliding with a branch already checked out in the live working tree.
         if worktree_dir.exists():
             await _force_remove_worktree(repo_path, worktree_dir)
         code, _out, err = await _run(
-            ["git", "worktree", "add", str(worktree_dir), f"origin/{base_branch}"],
+            ["git", "worktree", "add", "--detach", str(worktree_dir), worktree_base],
             cwd=repo_path,
         )
         if code != 0:
@@ -603,13 +664,37 @@ async def execute_approved_change(
             await _fail(f"git commit failed: {err.strip()[:300]}", error_class="GitCommitFailed")
             return
 
-        # 6. Push the branch.
+        commit_sha = await _head_sha(worktree_dir)
+
+        # 6. LOCAL-ONLY GATE MODE — a repo with NO ``origin`` remote can't be
+        #    pushed and has no PR target. Approve = apply + commit on the belt
+        #    branch LOCALLY. We detected the missing remote BEFORE the push step
+        #    (step 0) so the push / PR path is skipped entirely (never attempted).
+        #    The outcome carries the branch + commit sha instead of a pr_url; the
+        #    run still lands as executed and ``belt_run_updated`` still fires.
+        if not has_origin:
+            await _land_local_only(
+                store=store,
+                action=action,
+                worktree_dir=worktree_dir,
+                repo_path=repo_path,
+                branch=branch,
+                commit_sha=commit_sha,
+                files_changed=files_changed,
+                workspace_id=workspace_id,
+                requested_by=requested_by,
+                correlation_id=correlation_id,
+                causation=causation,
+            )
+            return
+
+        # 7. Push the branch.
         code, _out, err = await _run(["git", "push", "-u", "origin", branch], cwd=worktree_dir)
         if code != 0:
             await _fail(f"git push failed: {err.strip()[:300]}", error_class="GitPushFailed")
             return
 
-        # 7. Open the PR via the injectable opener.
+        # 8. Open the PR via the injectable opener.
         try:
             pr_url = await opener.open_pr(
                 repo_path=worktree_dir,
@@ -629,7 +714,7 @@ async def execute_approved_change(
             )
             return
 
-        # 8. Mark executed with the structured outcome.
+        # 9. Mark executed with the structured outcome.
         await store.mark_executed(
             action.id,
             f"PR opened: {pr_url} (branch '{branch}', {len(files_changed)} file(s) changed)",
@@ -641,9 +726,9 @@ async def execute_approved_change(
         await _persist_run_result(
             store=store,
             action_id=str(action.id),
-            pr_url=pr_url,
             branch=branch,
             files_changed=len(files_changed),
+            pr_url=pr_url,
         )
         # SC-2 — publish ``belt_run_updated`` (status=landed, stage=done) on the
         # workspace bus so the /belt page reflects the landed PR live. Best-effort.
@@ -703,6 +788,124 @@ async def _changed_files(worktree_dir: Path) -> list[str]:
     if code != 0:
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+async def _has_origin(cwd: Path) -> bool:
+    """True when the repo has an ``origin`` remote (``git remote get-url origin``
+    exits 0). A repo with no origin is a LOCAL-ONLY landing — the executor skips
+    the push + PR and lands the change on the belt branch locally. Checked once
+    up front against the repo (the worktree shares the repo's remotes)."""
+    code, _out, _err = await _run(["git", "remote", "get-url", "origin"], cwd=cwd)
+    return code == 0
+
+
+async def _head_sha(worktree_dir: Path) -> str:
+    """Resolve the worktree's current HEAD commit sha (``git rev-parse HEAD``).
+    Returns the full sha, or ``""`` on any error — the local-only outcome still
+    records the branch even if the sha read fails."""
+    code, out, _err = await _run(["git", "rev-parse", "HEAD"], cwd=worktree_dir)
+    if code != 0:
+        return ""
+    return out.strip()
+
+
+async def _land_local_only(
+    *,
+    store: Any,
+    action: Any,
+    worktree_dir: Path,
+    repo_path: Path,
+    branch: str,
+    commit_sha: str,
+    files_changed: list[str],
+    workspace_id: str,
+    requested_by: str,
+    correlation_id: Any | None,
+    causation: Any | None,
+) -> None:
+    """Land a local-only (no-origin) Belt code change.
+
+    The change is already committed on ``branch`` in the throwaway worktree. A
+    local-only repo has no push target and no PR, so we promote the branch into
+    the REAL repo (``git branch <branch> <sha>`` run in ``repo_path``) so the
+    landed branch survives the worktree teardown, then record the executed
+    outcome carrying the branch + commit sha INSTEAD of a pr_url:
+
+      * ``mark_executed`` free-text outcome names the branch + sha (The Tray).
+      * ``_persist_run_result`` back-writes ``branch`` + ``commit_sha`` (and NOT
+        ``pr_url``) onto the blob so the runs read model surfaces them
+        structurally and emits ``pr_url=None`` — the page renders a branch chip.
+      * ``belt_run_updated`` fires (status=landed, stage=done) with NO pr_url.
+      * the Decision-Graph chain closes once (``action_outcome="landed"``) with
+        the branch + sha on the payload (no pr_url).
+
+    Mirrors the with-remote success terminal exactly (one mark_executed, one
+    persist, one emit, one chain-close) so the runs read model and the Tray stay
+    consistent across both landing shapes.
+    """
+    n_files = len(files_changed)
+
+    # Promote the worktree branch into the real repo so it outlives the worktree
+    # teardown in the finally block. ``git worktree remove`` would otherwise drop
+    # the only ref to the commit. Best-effort: a failure here still records the
+    # outcome (the commit object survives, reachable by sha) but logs the gap.
+    if commit_sha:
+        code, _out, err = await _run(["git", "branch", branch, commit_sha], cwd=repo_path)
+        if code != 0:
+            logger.warning(
+                "belt: could not promote local-only branch %s in repo %s: %s",
+                branch,
+                repo_path,
+                err.strip()[:200],
+            )
+
+    await store.mark_executed(
+        action.id,
+        (
+            f"Committed locally on branch '{branch}' "
+            f"({commit_sha[:12] or 'unknown'}, {n_files} file(s) changed). "
+            "No origin remote — not pushed, no PR opened."
+        ),
+    )
+    # Back-write branch + commit_sha (NOT pr_url) so the runs read model reads
+    # them structurally and surfaces pr_url=None for the page's branch chip.
+    await _persist_run_result(
+        store=store,
+        action_id=str(action.id),
+        branch=branch,
+        files_changed=n_files,
+        commit_sha=commit_sha,
+    )
+    # Publish belt_run_updated (status=landed, stage=done) — NO pr_url for a
+    # local-only landing. Best-effort.
+    await _emit_run_updated(
+        workspace_id=workspace_id,
+        action_id=str(action.id),
+        status="landed",
+        stage="done",
+    )
+    # Close the Decision-Graph chain once on the success path — branch + sha
+    # ride the payload (no pr_url) for the explain narrator.
+    _emit_chain_close(
+        passed=True,
+        action_outcome="landed",
+        error_class=None,
+        reason=None,
+        correlation_id=correlation_id,
+        workspace_id=workspace_id,
+        user_id=requested_by,
+        causation_id=causation,
+        branch=branch,
+        commit_sha=commit_sha,
+        files_changed=n_files,
+    )
+    logger.info(
+        "belt: applied local-only code_change action %s → branch %s, %d file(s), sha %s",
+        action.id,
+        branch,
+        n_files,
+        commit_sha[:12] or "unknown",
+    )
 
 
 async def _force_remove_worktree(repo_path: Path, worktree_dir: Path) -> None:
