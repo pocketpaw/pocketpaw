@@ -5088,6 +5088,7 @@ requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.100.0" },
     { name = "google-auth", specifier = ">=2.25.0" },
     { name = "google-auth-oauthlib", specifier = ">=1.2.0" },
+    { name = "google-cloud-firestore", marker = "extra == 'firestore'", specifier = ">=2.27.0" },
     { name = "google-cloud-storage", specifier = ">=2.14.0" },
     { name = "igraph", specifier = ">=0.11" },
     { name = "livekit-agents", extras = ["codecs"], specifier = ">=1.5.9" },
@@ -5105,7 +5106,7 @@ requires-dist = [
     { name = "slowapi", specifier = ">=0.1.9" },
     { name = "trafilatura", marker = "extra == 'extraction'" },
 ]
-provides-extras = ["extraction"]
+provides-extras = ["extraction", "firestore"]
 
 [[package]]
 name = "portalocker"

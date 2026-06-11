@@ -759,6 +759,15 @@ class MemberDataPurged(Event):
     EVENT_TYPE: ClassVar[str] = "member_ingest.purged"
 
 
+# Fabric ingest — generic Firestore→Fabric mirror worker. Fired when the
+# per-source ingest worker finishes mirroring one Firestore collection into
+# Fabric objects (backfill or incremental). data: workspace_id, source_id,
+# object_type_id, mode, status, objects_ingested, cursor.
+@dataclass
+class FabricIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "fabric_ingest.completed"
+
+
 # Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
 # are defined above with the rest of the LiveKit group-call types; this is the
 # post-call notes fan-out, audience = the group's members.

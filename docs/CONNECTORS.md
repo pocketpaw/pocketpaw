@@ -5,6 +5,10 @@
   a declared credential, name set via auth.credential) and `header` (emits an
   arbitrary header named by auth.header — the escape hatch for keys that are
   not Bearer tokens). Both are additive; api_key/bearer/basic are unchanged.
+  Updated: 2026-06-11 (firestore-fabric-ingest) — added the "Firestore → Fabric
+  ingestion worker" section: the cloud background worker that mirrors selected
+  Firestore collections into Fabric objects per a per-workspace mapping config,
+  with a real high-water cursor, upsert-by-source, and tenant-stamped writes.
   Updated: 2026-06-08 (sense-mcp / Sense tier chunk 4) — added the Senses
   section: the "Sense" glossary entry, the sense-vs-connector distinction, and
   the two new agent tools (list_senses / sense_execute on the same
@@ -328,6 +332,77 @@ connector_execute("gmail", "gmail_search",
 connector_execute("gmail", "gmail_send", {...})
   → blocked: "needs approval (coming in v2). Not executed."
 ```
+
+## Firestore → Fabric ingestion worker
+
+The connectors above pull data on demand into a pocket's SQLite tables. A
+separate cloud background worker mirrors a different shape of source — a
+Firestore database — into **Fabric**, PocketPaw's ontology layer of typed
+objects and links. Use it when a deployment already runs on Firestore and wants
+those records to show up as Fabric objects that agents and pockets can query.
+
+The worker is **fully generic**. There are no collection names, field names, or
+object types in the code. A deployment describes its own mapping in a
+per-workspace `FabricIngestConfig`, and the worker walks it.
+
+### What it does
+
+On a schedule (every 5 minutes by default), for each workspace that has a config:
+
+1. Read each mapped Firestore collection. The first run is a full **backfill**;
+   later runs are **incremental** and read only documents newer than the stored
+   cursor.
+2. For each document, create or update a Fabric object of the mapped type. The
+   field map decides which Firestore fields become which object properties.
+3. Stamp every object with the workspace, `source_connector="firestore"`, and
+   `source_id` set to the full Firestore document path.
+4. Apply any link rules, wiring objects together by source path.
+
+### Upsert, not duplicate
+
+Each document maps to one object, keyed on its Firestore path. The worker rides
+the same connector→Fabric mapper the Google Calendar ingestion uses
+(`pocketpaw.connectors.fabric_ingest.ingest_records`): on a re-run it looks the
+object up by `(source_connector, source_id)` and updates it in place, so
+re-ingesting the same collection never piles up duplicates.
+
+### The cursor is a real high-water mark
+
+The incremental cursor is taken from the **document data** — the value of the
+mapping's `cursor_field` (typically an `updated_at` timestamp) on the
+newest-updated document seen, falling back to the Firestore snapshot's
+`update_time` when a document has no value for that field. It is **not** the
+run's wall clock. A document that arrives late but carries an older timestamp is
+still picked up on its own merits, and a re-run never re-scans a time window.
+
+### Configuring a mapping
+
+One `FabricIngestConfig` row per workspace holds a list of mappings:
+
+| Field | Meaning |
+|-------|---------|
+| `collection` | The Firestore collection path to mirror. |
+| `object_type_id` | The Fabric object type mirrored documents become. |
+| `field_map` | Firestore field name → Fabric property name. Unmapped fields are dropped. |
+| `cursor_field` | The document field used as the incremental high-water mark. |
+| `link_rules` | Optional. Each rule reads `via_field` off the document and links the new object to another mirrored object (`to_type`) found at that path, with `link_type`. |
+
+The mapping is validated at entry — a blank collection, a blank object type, or
+a link rule missing a field is rejected before any Firestore read, so a bad
+config fails loudly instead of mirroring nothing.
+
+### Operational notes
+
+- Gated by `POCKETPAW_CLOUD_SCHEDULER_ENABLED=true`, the same gate the other
+  cloud sweeps use, so tests never spawn a background loop. Override the cadence
+  with `POCKETPAW_FABRIC_INGEST_INTERVAL_SECONDS`.
+- The Firestore client is an **optional** dependency
+  (`pocketpaw-ee[firestore]`). A deployment that doesn't mirror Firestore never
+  installs it; the worker raises a clear install error if a config references
+  Firestore without the extra present.
+- Credentials resolve through Google Application Default Credentials — the
+  worker holds no secrets of its own.
+- Writes commit one object per row in v1. Batching is a known follow-up.
 
 ## Senses — provider-agnostic capabilities above connectors
 

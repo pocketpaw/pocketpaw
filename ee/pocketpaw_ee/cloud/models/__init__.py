@@ -30,6 +30,12 @@ Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added
 to the imports, ``__all__``, and ``get_all_documents()`` so the console's
 add-repo route persistence is wired into ``init_beanie``. Only
 ``ee.cloud.belt.service`` imports the doc class directly.
+Updated: 2026-06-11 (feat/firestore-fabric-ingest) — added
+``FabricIngestConfig`` (the per-workspace Firestore→Fabric mapping) and
+``FabricIngestState`` (the per-(workspace, collection) sync bookkeeping) to the
+imports, ``__all__``, and ``get_all_documents()`` so the ingestion worker's
+collections are wired into ``init_beanie``. Only
+``ee.cloud.fabric_ingest.service`` imports the doc classes directly.
 """
 
 from __future__ import annotations
@@ -45,6 +51,10 @@ from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTar
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
+from pocketpaw_ee.cloud.models.fabric_ingest_state import (
+    FabricIngestConfig,
+    FabricIngestState,
+)
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
@@ -137,6 +147,8 @@ __all__ = [
     "ComposioConnection",
     "Cycle",
     "CycleDailyPoint",
+    "FabricIngestConfig",
+    "FabricIngestState",
     "FileFolder",
     "FileObj",
     "FileUpload",
@@ -223,6 +235,8 @@ def get_all_documents():
         MeetingProviderCredentials,
         MeetingsSettings,
         MemberIngestState,
+        FabricIngestConfig,
+        FabricIngestState,
         # Calendar — sibling enterprise package.
         _CalendarDoc,
         _EventDoc,

@@ -714,6 +714,28 @@ def mount_cloud(app: FastAPI) -> None:
         async def _stop_member_ingest() -> None:
             await stop_member_ingest(app)
 
+    # Generic Firestore→Fabric ingest sweep. Every 5 minutes
+    # (POCKETPAW_FABRIC_INGEST_INTERVAL_SECONDS override) it mirrors each
+    # workspace's configured Firestore collections into Fabric objects (backfill
+    # on first sight of a source, incremental thereafter). The per-deployment
+    # mapping lives in FabricIngestConfig; nothing domain-specific is in code.
+    # Same scheduler gate as the cycle/decisions/member-ingest loops so pytest
+    # runs never spawn a background loop that outlives the test; production sets
+    # POCKETPAW_CLOUD_SCHEDULER_ENABLED=true.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.fabric_ingest.scheduler import (
+            start_fabric_ingest,
+            stop_fabric_ingest,
+        )
+
+        @app.on_event("startup")
+        async def _start_fabric_ingest() -> None:
+            await start_fabric_ingest(app)
+
+        @app.on_event("shutdown")
+        async def _stop_fabric_ingest() -> None:
+            await stop_fabric_ingest(app)
+
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe
     # AFTER init_realtime installed the singleton bus.
