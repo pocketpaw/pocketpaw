@@ -48,6 +48,16 @@ code-change gate in-process server (``pocketpaw_belt``; one tool
 ``CloudMediaMcpProvider``. The develop station proposes a diff through Instinct;
 the ee instinct router fires ``ee.cloud.belt.executor.execute_approved_change``
 on approval. Ambient (not opt-in).
+
+Updated: 2026-06-11 (feat/external-action-mcp-tool) — added
+``CloudExternalActionsMcpProvider`` (``pocketpaw.mcp_servers`` entry
+``external_actions``) exposing the gated external-action proposal server
+(``pocketpaw_external_actions``; one tool ``propose_external_action``) to the
+claude_agent_sdk cloud chat backend, mirroring ``CloudBeltMcpProvider``. A chat
+agent proposes a connector call through Instinct; the ee instinct router fires
+``ee.cloud.external_actions.executor.execute_approved_external_action`` on
+approval. Propose-only — the tool never fires the connector itself. Ambient
+(not opt-in).
 """
 
 from __future__ import annotations
@@ -690,6 +700,44 @@ class CloudBeltMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.belt import BELT_TOOL_IDS
 
         return list(BELT_TOOL_IDS)
+
+
+class CloudExternalActionsMcpProvider:
+    """`pocketpaw.mcp_servers` — the gated external-action proposal in-process
+    server (``pocketpaw_external_actions``). Hosts ``propose_external_action``
+    only.
+
+    A chat agent proposes a call to an external system through a bound connector
+    THROUGH Instinct (the human approve/reject layer) via this tool. On approval
+    the ee instinct router fires
+    ``ee.cloud.external_actions.executor.execute_approved_external_action`` to
+    make the connector call — the tool itself never executes anything (propose
+    only).
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) — surfaces scope access via their
+    profile allowlist, the same regime the sibling belt / loom / media / sites
+    servers use. ``build_external_actions_server`` returns None — and the loop
+    skips it — when the claude_agent_sdk isn't installed, so chat never breaks.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.external_actions import (
+                build_external_actions_server,
+            )
+
+            return build_external_actions_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the server is unavailable, same as
+            # the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.external_actions import (
+            EXTERNAL_ACTIONS_TOOL_IDS,
+        )
+
+        return list(EXTERNAL_ACTIONS_TOOL_IDS)
 
 
 class CloudAgentExtension:

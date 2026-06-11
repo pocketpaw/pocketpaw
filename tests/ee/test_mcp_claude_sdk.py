@@ -1,5 +1,10 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-11 (feat/external-action-mcp-tool) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_external_actions`` (the new always-on gated
+  external-action proposal server: propose_external_action), so the
+  external-config assertions stay focused after that MCP server became
+  ambient. Same regime as pocketpaw_belt / pocketpaw_media.
 Updated: 2026-06-10 (integration/belt-thin-slice) — ``_strip_builtin_servers``
   now also drops ``pocketpaw_belt`` (the always-on Belt gate server:
   belt_propose_change — the bundled `belt` skill calls it without an explicit
@@ -52,6 +57,9 @@ from unittest.mock import patch
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.external_actions import (
+    SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
+)
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
@@ -110,6 +118,10 @@ def _strip_builtin_servers(result: dict) -> dict:
     # otherwise register it in these tests.
     out.pop(_BELT_MCP_SERVER_NAME, None)
     out.pop(_LOOM_MCP_SERVER_NAME, None)
+    # ``pocketpaw_external_actions`` is always-on too — a chat agent proposes a
+    # gated connector call (propose_external_action) without an explicit
+    # opt-in; the connector only fires after human approval.
+    out.pop(_EXTERNAL_ACTIONS_MCP_SERVER_NAME, None)
     return out
 
 
