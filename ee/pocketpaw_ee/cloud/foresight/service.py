@@ -2051,9 +2051,7 @@ async def _existing_dedupe_keys(
     collide with, another tenant's foresight rows in the same synthetic
     pocket namespace. ``None`` leaves the read unscoped (the OSS/CLI path).
     """
-    actions = await store.list_actions(
-        pocket_id=pocket_id, limit=500, workspace_id=workspace_id
-    )
+    actions = await store.list_actions(pocket_id=pocket_id, limit=500, workspace_id=workspace_id)
     keys: set[str] = set()
     for act in actions:
         params = getattr(act, "parameters", {}) or {}
@@ -2260,9 +2258,7 @@ async def list_instinct_proposals_for_run(
     # caller drops an Action into the same pocket-id namespace by hand.
     # W4c — scope the read to the caller's workspace (plus legacy NULL rows)
     # as defense-in-depth behind the run-level _fetch_in_workspace guard.
-    raw = await store.list_actions(
-        pocket_id=pocket_id, limit=500, workspace_id=workspace_id
-    )
+    raw = await store.list_actions(pocket_id=pocket_id, limit=500, workspace_id=workspace_id)
     matching = [
         a
         for a in raw

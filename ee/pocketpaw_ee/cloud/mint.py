@@ -51,9 +51,7 @@ def _normalize_seed(raw: bytes) -> bytes:
     try:
         decoded = bytes.fromhex(text)
     except ValueError as exc:
-        raise ValueError(
-            "private key must be a raw 32-byte seed or a 64-char hex string"
-        ) from exc
+        raise ValueError("private key must be a raw 32-byte seed or a 64-char hex string") from exc
     if len(decoded) != 32:
         raise ValueError("hex private key must decode to exactly 32 bytes")
     return decoded
@@ -203,9 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    gen_p = sub.add_parser(
-        "generate-keypair", help="Generate a new operator Ed25519 keypair (hex)"
-    )
+    gen_p = sub.add_parser("generate-keypair", help="Generate a new operator Ed25519 keypair (hex)")
     gen_p.add_argument(
         "--out", default=None, help="Write the private key (hex) to this file instead of stdout"
     )
@@ -269,8 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"INVALID: {exc}", file=sys.stderr)
             return 1
         print(
-            f"VALID org={payload.org} plan={payload.plan} "
-            f"seats={payload.seats} exp={payload.exp}"
+            f"VALID org={payload.org} plan={payload.plan} seats={payload.seats} exp={payload.exp}"
         )
         return 0
 

@@ -506,9 +506,7 @@ async def pending_actions(
     W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
     rows) so The Tray for tenant A never surfaces tenant B's pending decisions.
     """
-    return await _store().pending(
-        pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id
-    )
+    return await _store().pending(pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id)
 
 
 @router.get(
