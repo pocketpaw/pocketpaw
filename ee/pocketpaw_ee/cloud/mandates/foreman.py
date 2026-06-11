@@ -135,9 +135,7 @@ class ClaudeCliLlm:
         out = out_b.decode("utf-8", "replace")
         if proc.returncode != 0:
             err = err_b.decode("utf-8", "replace")
-            raise RuntimeError(
-                f"claude CLI failed (exit {proc.returncode}): {err.strip()[:300]}"
-            )
+            raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err.strip()[:300]}")
         # The envelope is JSON with a ``result`` field; tolerate a bare-text
         # response (older CLI / plain output) by falling back to stdout.
         try:
@@ -172,16 +170,10 @@ class MockLlm:
         if _MOCK_PLAN is not None:
             return _MOCK_PLAN if isinstance(_MOCK_PLAN, str) else json.dumps(_MOCK_PLAN)
 
-        budget = int(
-            (context.charter.get("budget") or {}).get("max_tasks_per_shift") or 3
-        )
+        budget = int((context.charter.get("budget") or {}).get("max_tasks_per_shift") or 3)
         kpis = context.charter.get("kpis") or []
-        kpi_hint = (
-            f"{kpis[0]['name']} {kpis[0]['direction']}" if kpis else "surface health up"
-        )
-        ranked = sorted(
-            context.sightings, key=lambda s: int(s.get("severity") or 0), reverse=True
-        )
+        kpi_hint = f"{kpis[0]['name']} {kpis[0]['direction']}" if kpis else "surface health up"
+        ranked = sorted(context.sightings, key=lambda s: int(s.get("severity") or 0), reverse=True)
         if not ranked:
             return json.dumps(
                 {
@@ -336,8 +328,7 @@ def validate_plan(plan: PlanProposal, charter: dict[str, Any]) -> list[str]:
 
     if len(plan.tasks) > budget:
         violations.append(
-            f"plan proposes {len(plan.tasks)} tasks but the charter budget caps a "
-            f"shift at {budget}"
+            f"plan proposes {len(plan.tasks)} tasks but the charter budget caps a shift at {budget}"
         )
 
     forbidden = [
