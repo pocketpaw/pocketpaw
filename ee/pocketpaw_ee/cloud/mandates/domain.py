@@ -114,6 +114,10 @@ class MandateDoc(TimestampedDocument):
     charter: Charter
     status: MandateStatus = "active"
     soul_path: str | None = None
+    # UI contract — the charter composer's senses toggles. Scopes which SENSE
+    # patrols run on a shift trigger ("feedback" intake stays open as a human
+    # channel regardless; the list gates the automated sense loop).
+    patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
 
     class Settings:
         name = "mandates"

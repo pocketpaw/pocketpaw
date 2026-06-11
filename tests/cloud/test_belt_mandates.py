@@ -203,7 +203,7 @@ def _create_mandate(client: TestClient, repo_dir: Path, *, budget: int = 3, **ch
         },
     )
     assert res.status_code == 200, res.text
-    return res.json()["id"]
+    return res.json()["mandate"]["id"]
 
 
 def _events(journal, action: str) -> list:
@@ -221,7 +221,7 @@ def _chain(journal, correlation_id: UUID) -> list:
 
 
 async def test_full_shift_gate_one_clean_chain(
-    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch
+    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch, recording_bus
 ):
     """Create mandate → seed 2 feedback sightings → trigger shift (mock LLM
     plans 2 tasks) → the plan lands as a pending ``belt_plan`` Instinct Action →
@@ -245,7 +245,7 @@ async def test_full_shift_gate_one_clean_chain(
     # Trigger the shift — the mock foreman plans one task per sighting (2).
     res = client.post(f"/belt/mandates/{mandate_id}/shift")
     assert res.status_code == 200, res.text
-    shift = res.json()
+    shift = res.json()["shift"]
     assert shift["state"] == "in_gate"
     assert shift["task_count"] == 2
     plan_action_id = shift["plan_action_id"]
@@ -315,6 +315,31 @@ async def test_full_shift_gate_one_clean_chain(
     kinds = [p["kind"] for p in prints]
     assert kinds == ["proposed", "approved", "executed"], kinds
     assert prints[0]["evidence_refs"]  # the cited sighting ids surface
+    # UI contract item shape: {id, mandate_id, shift_no, kind, summary,
+    # evidence_refs, ts}.
+    for item in prints:
+        assert set(item) == {
+            "id",
+            "mandate_id",
+            "shift_no",
+            "kind",
+            "summary",
+            "evidence_refs",
+            "ts",
+        }, item
+        assert item["mandate_id"] == mandate_id
+        assert item["summary"].startswith("Shift 1:")
+
+    # UI contract — the plan proposal rode the realtime bus on the
+    # ``belt_plan`` topic with {mandate_id, proposal} (workspace_id rides
+    # along for the audience fan-out).
+    plan_events = [e for e in recording_bus.events if e.type == "belt_plan"]
+    assert len(plan_events) == 1
+    payload = plan_events[0].data
+    assert payload["mandate_id"] == mandate_id
+    assert payload["workspace_id"] == WS
+    assert payload["proposal"]["plan_action_id"] == plan_action_id
+    assert len(payload["proposal"]["tasks"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +359,7 @@ async def test_no_action_stands_down(tmp_path, mongo_db, store, journal, graph, 
     mandate_id = _create_mandate(client, repo)
     res = client.post(f"/belt/mandates/{mandate_id}/shift")
     assert res.status_code == 200, res.text
-    shift = res.json()
+    shift = res.json()["shift"]
     assert shift["state"] == "stood_down"
     assert shift["plan_action_id"] is None
     assert shift["task_count"] == 0
@@ -444,7 +469,7 @@ async def test_boundary_check_ignores_why(tmp_path, mongo_db, store, journal, gr
     )
     res = client.post(f"/belt/mandates/{mandate_id}/shift")
     assert res.status_code == 200, res.text
-    assert res.json()["state"] == "in_gate"
+    assert res.json()["shift"]["state"] == "in_gate"
 
     # FAIL — the same phrase in the TITLE (an action field) is refused.
     foreman.set_mock_plan(
@@ -481,6 +506,45 @@ async def test_feedback_intake_creates_sighting(tmp_path, mongo_db, store, monke
     assert listed[0]["evidence"]["source"] == "slack"
 
 
+async def test_teaching_feedback_shape(tmp_path, mongo_db, store, monkeypatch):
+    """The gate UI's teaching shape ({kind, reason, shift_no?, task_title?})
+    returns {ok: true} and still lands as a feedback Sighting the foreman's
+    next digest will see — discriminated from the general shape on ``kind``."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/feedback",
+        json={
+            "kind": "reject",
+            "reason": "too risky during the release freeze",
+            "shift_no": 1,
+            "task_title": "bump lodash",
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json() == {"ok": True}
+
+    listed = client.get(f"/belt/mandates/{mandate_id}/sightings").json()["sightings"]
+    assert len(listed) == 1
+    s = listed[0]
+    assert s["patrol"] == "feedback"
+    assert s["evidence"]["kind"] == "reject"
+    assert s["evidence"]["source"] == "gate"
+    assert s["evidence"]["task_title"] == "bump lodash"
+    assert "too risky" in s["summary"]
+
+    # The general shape keeps working side by side.
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/feedback",
+        json={"text": "autopilot ping", "source": "autopilot"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["patrol"] == "feedback"
+
+
 async def test_deps_patrol_flags_known_stale_manifest_entries(tmp_path, mongo_db, store):
     """The deps patrol parses a REAL pyproject.toml and files sightings for
     entries in the (demo-bar) stub advisory table — deduped on re-run."""
@@ -496,7 +560,7 @@ async def test_deps_patrol_flags_known_stale_manifest_entries(tmp_path, mongo_db
         USER,
         {"name": "m", "surface": {"repo_id": str(repo)}, "charter": _charter()},
     )
-    mandate_id = created["id"]
+    mandate_id = created["mandate"]["id"]
 
     out = await mandate_service.run_patrols(WS, USER, mandate_id)
     assert len(out["sightings"]) == 1
@@ -508,6 +572,30 @@ async def test_deps_patrol_flags_known_stale_manifest_entries(tmp_path, mongo_db
     # Re-running the patrol does not duplicate the sighting.
     again = await mandate_service.run_patrols(WS, USER, mandate_id)
     assert again["sightings"] == []
+
+
+async def test_patrols_toggles_scope_the_sense_loop(tmp_path, mongo_db, store):
+    """UI contract — a mandate created with ``patrols: ["feedback"]`` never
+    runs the deps patrol, even against a manifest full of stale entries."""
+    repo = tmp_path / "pyrepo2"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = ["requests>=2.28"]\n',
+        encoding="utf-8",
+    )
+    created = await mandate_service.create_mandate(
+        WS,
+        USER,
+        {
+            "name": "m2",
+            "surface": {"repo_id": str(repo)},
+            "charter": _charter(),
+            "patrols": ["feedback"],
+        },
+    )
+    assert created["mandate"]["patrols"] == ["feedback"]
+    out = await mandate_service.run_patrols(WS, USER, created["mandate"]["id"])
+    assert out["sightings"] == []  # deps patrol toggled off
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +640,7 @@ async def test_reject_closes_chain_once(
         f"/belt/mandates/{mandate_id}/feedback",
         json={"text": "minor papercut", "source": "support"},
     )
-    shift = client.post(f"/belt/mandates/{mandate_id}/shift").json()
+    shift = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
     plan_action_id = shift["plan_action_id"]
 
     res = client.post(
@@ -579,3 +667,147 @@ async def test_reject_closes_chain_once(
     # The shift record reflects the rejection and pawprints read it.
     prints = client.get(f"/belt/mandates/{mandate_id}/pawprints").json()["pawprints"]
     assert [p["kind"] for p in prints] == ["proposed", "rejected"]
+
+
+# ---------------------------------------------------------------------------
+# plan/resolve — the console gate action, mapped onto the real instinct path
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_mixed_verdicts_dispatches_kept_tasks_one_terminal(
+    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch
+):
+    """approve + reject + edit on a 3-task plan: the kept two tasks (one with
+    the edited title) dispatch as belt runs through the REAL approve-with-edits
+    path; the rejected task lands as a teaching sighting; the chain closes with
+    EXACTLY ONE decision.completed; pawprints read kind=edited."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+
+    for text in ("signal one", "signal two", "signal three"):
+        client.post(
+            f"/belt/mandates/{mandate_id}/feedback",
+            json={"text": text, "severity": 3, "source": "support"},
+        )
+    shift = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    assert shift["task_count"] == 3
+    plan_action_id = shift["plan_action_id"]
+    action = await store.get_action(plan_action_id)
+    corr = UUID(action.parameters["_belt_plan"]["correlation_id"])
+
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/plan/resolve",
+        json={
+            "shift_no": shift["no"],
+            "decisions": [
+                {"index": 0, "decision": "approve"},
+                {"index": 1, "decision": "reject", "reason": "not worth the risk"},
+                {"index": 2, "decision": "edit", "edited_title": "tighter scoped fix"},
+            ],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["shift"]["state"] == "done"
+
+    final = await store.get_action(plan_action_id)
+    assert final.status == ActionStatus.EXECUTED, final.outcome
+
+    # Two kept tasks dispatched; the edited one carries the new title.
+    calls = RecorderDispatcher.instances[0].calls
+    assert len(calls) == 2
+    titles = [c["task"]["title"] for c in calls]
+    assert "tighter scoped fix" in titles
+
+    # The chain closed EXACTLY once, through the real instinct edit path.
+    chain = _chain(journal, corr)
+    assert [e.action for e in chain] == [
+        "agent.proposed",
+        "human.corrected",
+        "decision.completed",
+    ]
+    assert chain[1].payload["disposition"] == "edited"
+    assert chain[2].payload["passed"] is True
+    assert chain[2].payload["action_outcome"] == "dispatched"
+    assert chain[2].payload["task_count"] == 2
+    assert len(_events(journal, "decision.completed")) == 1
+
+    # The rejected task became a teaching sighting with the human's reason.
+    sightings = client.get(f"/belt/mandates/{mandate_id}/sightings").json()["sightings"]
+    teaching = [s for s in sightings if s["evidence"].get("kind") == "reject"]
+    assert len(teaching) == 1
+    assert "not worth the risk" in teaching[0]["summary"]
+    assert teaching[0]["evidence"]["shift_no"] == shift["no"]
+
+    # Pawprints read the edited approval.
+    prints = client.get(f"/belt/mandates/{mandate_id}/pawprints").json()["pawprints"]
+    assert [p["kind"] for p in prints] == ["proposed", "edited", "executed"]
+
+
+async def test_resolve_all_reject_closes_chain_once(
+    tmp_path, mongo_db, store, journal, graph, dispatcher, monkeypatch
+):
+    """All tasks rejected → the REAL reject path closes the chain once; zero
+    dispatches; the reasons land as teaching sightings."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    client.post(
+        f"/belt/mandates/{mandate_id}/feedback",
+        json={"text": "one thing", "source": "support"},
+    )
+    shift = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/plan/resolve",
+        json={
+            "shift_no": shift["no"],
+            "decisions": [{"index": 0, "decision": "reject", "reason": "freeze week"}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["shift"]["state"] == "done"
+
+    final = await store.get_action(shift["plan_action_id"])
+    assert final.status == ActionStatus.REJECTED
+
+    completed = _events(journal, "decision.completed")
+    assert len(completed) == 1
+    assert completed[0].payload["action_outcome"] == "rejected"
+    assert all(not inst.calls for inst in RecorderDispatcher.instances)
+
+    teaching = [
+        s
+        for s in client.get(f"/belt/mandates/{mandate_id}/sightings").json()["sightings"]
+        if s["evidence"].get("kind") == "reject"
+    ]
+    assert len(teaching) == 1 and "freeze week" in teaching[0]["summary"]
+
+
+async def test_resolve_requires_complete_decisions(
+    tmp_path, mongo_db, store, journal, graph, monkeypatch
+):
+    """Every task needs exactly one decision; a partial verdict set is a 422
+    and the plan stays pending at the gate."""
+    client = _make_client(monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mandate_id = _create_mandate(client, repo)
+    for text in ("a", "b"):
+        client.post(
+            f"/belt/mandates/{mandate_id}/feedback",
+            json={"text": text, "source": "support"},
+        )
+    shift = client.post(f"/belt/mandates/{mandate_id}/shift").json()["shift"]
+    assert shift["task_count"] == 2
+
+    res = client.post(
+        f"/belt/mandates/{mandate_id}/plan/resolve",
+        json={"shift_no": shift["no"], "decisions": [{"index": 0, "decision": "approve"}]},
+    )
+    assert res.status_code == 422, res.text
+    assert "missing indices" in res.json()["error"]["message"]
+    final = await store.get_action(shift["plan_action_id"])
+    assert final.status == ActionStatus.PENDING

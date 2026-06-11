@@ -14,6 +14,13 @@
 # sightings read.
 # Updated: 2026-06-11 (slice 4 — plan gate) — added POST .../shift.
 # Updated: 2026-06-11 (slice 5 — pawprints) — added GET .../pawprints.
+# Updated: 2026-06-11 (UI contract sync 2) — added POST .../plan/resolve (the
+# console's per-task gate action, mapped onto the real instinct approve-with-
+# edits / reject paths) and the `patrols` senses toggles on create.
+# Updated: 2026-06-11 (UI contract sync) — POST create returns {"mandate"},
+# POST shift returns {"shift"}; the feedback route accepts BOTH the general
+# {text, severity?, source} shape and the teaching {kind, reason, shift_no?,
+# task_title?} shape (discriminated in the service on `kind`).
 
 """FastAPI router for Belt mandates (standing jobs)."""
 
@@ -32,7 +39,6 @@ from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.mandates import service as mandate_service
 from pocketpaw_ee.cloud.mandates.dto import (
     CreateMandateRequest,
-    FeedbackRequest,
 )
 
 router = APIRouter(
@@ -47,7 +53,8 @@ async def create_mandate(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
-    """Create a standing mandate (admin-gated). Returns the mandate detail."""
+    """Create a standing mandate (admin-gated). Returns ``{"mandate": <detail>}``
+    (UI contract envelope; the GET detail route stays unwrapped)."""
     return await mandate_service.create_mandate(workspace_id, user_id, body.model_dump())
 
 
@@ -76,13 +83,22 @@ async def get_mandate(
 @router.post("/{mandate_id}/feedback")
 async def file_feedback(
     mandate_id: str,
-    body: FeedbackRequest,
+    body: dict[str, Any],
     _user: Any = Depends(require_action_any_workspace("belt.manage")),
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
-    """Intake patrol — file human feedback as a Sighting on the mandate."""
-    return await mandate_service.file_feedback(workspace_id, user_id, mandate_id, body.model_dump())
+    """Intake patrol — file human feedback as a Sighting on the mandate.
+
+    Two body shapes (UI contract), discriminated on the presence of ``kind``;
+    the SERVICE validates the raw dict against the matching schema at entry
+    (the validate-at-entry rule holds — discrimination just happens first):
+
+    * GENERAL  — ``{text, severity?, source}`` → the sighting wire dict
+      (autopilot and integrations keep using this).
+    * TEACHING — ``{kind: reject|edit|plan, reason, shift_no?, task_title?}``
+      → ``{"ok": true}`` (the gate UI's teaching channel)."""
+    return await mandate_service.file_feedback(workspace_id, user_id, mandate_id, body)
 
 
 @router.get("/{mandate_id}/sightings")
@@ -104,8 +120,64 @@ async def trigger_shift(
     user_id: str = Depends(current_user_id),
 ) -> dict[str, Any]:
     """Run a SHIFT — the foreman plans a few tasks; the plan routes through the
-    Instinct plan gate. Demo-bar manual trigger (admin-gated)."""
+    Instinct plan gate. Demo-bar manual trigger (admin-gated). Returns
+    ``{"shift": {...}}`` (UI contract envelope)."""
     return await mandate_service.trigger_shift(workspace_id, user_id, mandate_id)
+
+
+@router.post("/{mandate_id}/plan/resolve")
+async def resolve_plan(
+    mandate_id: str,
+    body: dict[str, Any],
+    user: Any = Depends(require_action_any_workspace("belt.manage")),
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> dict[str, Any]:
+    """The console's authoritative gate action (UI contract): per-task verdicts
+    for an in_gate shift plan → ``{"shift": {...}}``.
+
+    The verdicts are MAPPED ONTO THE REAL INSTINCT PATH — the single chain
+    authority — so the decision chain still closes exactly once in the same
+    code the Tray uses:
+
+    * any approved/edited subset → ``approve_action`` WITH EDITS (the blob's
+      task list filtered + retitled; Corrections recorded; the plan executor
+      dispatches the kept tasks as belt runs).
+    * all tasks rejected → ``reject_action`` (router closes the chain; the
+      shift records the rejection).
+
+    Rejected tasks are recorded as teaching sightings (reason + task title) so
+    the foreman's next digest learns. Decision ``index`` is 0-based into the
+    plan's tasks array, and every task must carry exactly one decision."""
+    orders = await mandate_service.prepare_plan_resolution(workspace_id, user_id, mandate_id, body)
+
+    # Lazy import — the mandates router must not put a module-top dependency on
+    # the instinct package (mirrors how the instinct router lazy-imports the
+    # mandates executor on its approve path).
+    from pocketpaw_ee.instinct.router import (
+        ApproveRequest,
+        RejectRequest,
+        approve_action,
+        reject_action,
+    )
+
+    if orders["mode"] == "reject":
+        await reject_action(
+            orders["action_id"],
+            req=RejectRequest(reason=str(orders.get("reject_reason") or "")),
+            user=user,
+            workspace_id=workspace_id,
+        )
+    else:
+        req = ApproveRequest(parameters=orders["parameters"]) if orders["edited"] else None
+        await approve_action(
+            orders["action_id"],
+            req=req,
+            user=user,
+            workspace_id=workspace_id,
+        )
+
+    return {"shift": await mandate_service.shift_wire(workspace_id, orders["shift_id"])}
 
 
 @router.get("/{mandate_id}/pawprints")
