@@ -103,10 +103,7 @@ def _default_reply(event_type: str) -> str:
     flows through the existing Instinct correction path (the edit is captured as
     a Correction and the edited recommendation is what gets delivered).
     """
-    return (
-        f"Thanks for your '{event_type}' request — we've received it and "
-        "will follow up shortly."
-    )
+    return f"Thanks for your '{event_type}' request — we've received it and will follow up shortly."
 
 
 async def propose_customer_decision(
