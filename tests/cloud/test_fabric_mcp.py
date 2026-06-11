@@ -203,7 +203,13 @@ async def test_query_truncates_oversized_results(store, monkeypatch):
 
 
 async def test_stats_returns_counts_and_type_names(store):
-    """Stats come back JSON-friendly with counts + type names."""
+    """Stats come back JSON-friendly with counts + type names, scoped to the
+    caller's workspace.
+
+    fix/fabric-stats-workspace-scope: the seed puts 2 Customer rows in w1 and 1
+    in w2. A w1-scoped stats counts only w1's 2 objects (NOT the instance-wide
+    3) so it agrees with fabric_query.
+    """
     await _seed_customers(store)
 
     with _identity(workspace="w1"):
@@ -211,9 +217,46 @@ async def test_stats_returns_counts_and_type_names(store):
 
     body = await _result_body(res)
     assert body["types"] == 1
-    assert body["objects"] == 3  # instance-wide — the store has no scoped stats yet
+    assert body["objects"] == 2  # w1's two rows — NOT the instance-wide 3
     assert body["type_names"] == ["Customer"]
     assert "links" in body
+
+
+async def test_stats_does_not_leak_other_tenant_type_names(store):
+    """The live leak, pinned at the MCP boundary.
+
+    w2 alone models "Lease" / "Lease2"; w1 models "Customer". A w1-scoped
+    fabric_stats must NOT name w2's experimental types — even though the type
+    DEFINITIONS are global in the schema.
+    """
+    await _seed_customers(store)  # Customer rows in w1 (+ one in w2)
+    lease = await store.define_type(name="Lease", properties=[])
+    lease2 = await store.define_type(name="Lease2", properties=[])
+    await store.create_object(lease.id, {"tenant": "X"}, workspace_id="w2")
+    await store.create_object(lease2.id, {"tenant": "Y"}, workspace_id="w2")
+
+    with _identity(workspace="w1"):
+        res = await fabric_mcp._fabric_stats_handler({})
+    body = await _result_body(res)
+
+    assert body["type_names"] == ["Customer"]
+    assert "Lease" not in body["type_names"]
+    assert "Lease2" not in body["type_names"]
+    assert body["types"] == 1  # count matches the visible type list
+
+
+async def test_stats_agrees_with_query_object_count(store):
+    """The stats/query consistency invariant that surfaced the bug: a w1-scoped
+    stats object count equals the total of a w1-scoped (unfiltered) query."""
+    await _seed_customers(store)  # 2 in w1, 1 in w2
+
+    with _identity(workspace="w1"):
+        stats_res = await fabric_mcp._fabric_stats_handler({})
+        query_res = await fabric_mcp._fabric_query_handler({})
+
+    stats_body = await _result_body(stats_res)
+    query_body = await _result_body(query_res)
+    assert stats_body["objects"] == query_body["total"] == 2
 
 
 # ---------------------------------------------------------------------------

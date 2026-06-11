@@ -19,6 +19,14 @@
 #   unique index exists and a pre-existing duplicate-name DB is de-duped on first
 #   _ensure_schema) and TestUpdateObjectWorkspaceScope (update_object honours its
 #   own W4a tenancy guard — a cross-tenant id writes nothing and returns None).
+# Updated: 2026-06-11 (fix/fabric-stats-workspace-scope) — Added
+#   TestStatsWorkspaceScoping: scoped stats() / list_types() close the LAST two
+#   unscoped W4a reads. Pins the live leak (another tenant's experimental type
+#   names "Lease"/"Lease2" must NOT appear in a scoped type list), proves a
+#   scoped object/link/type count excludes other-tenant rows, asserts the
+#   stats/query consistency invariant (scoped stats["objects"] == scoped query
+#   total — the count mismatch that surfaced the bug), confirms legacy NULL rows
+#   stay visible, and that workspace_id=None keeps the instance-wide behavior.
 
 from __future__ import annotations
 
@@ -389,6 +397,134 @@ class TestWorkspaceScoping:
 
         result = await store.query(FabricQuery(type_name="Item"))
         assert result.total == 3
+
+
+class TestStatsWorkspaceScoping:
+    """fix/fabric-stats-workspace-scope — scoped stats() and list_types().
+
+    The last two W4a reads were left instance-wide. On a shared ``fabric.db``
+    that leaked: a tenant's chat called fabric_stats and got back another
+    context's experimental type names (``Lease`` / ``Lease2``), and the global
+    object count (13) disagreed with what the workspace-scoped query actually
+    saw (11). These tests pin both: scoped counts mirror ``query()`` exactly,
+    and a scoped type list never names a type only another tenant has rows for.
+
+    Subtlety being guarded: ``fabric_object_types`` has NO workspace column —
+    type DEFINITIONS are global. So a scoped type list cannot come from the
+    type table; it must be derived from types with at least one object row
+    VISIBLE to the workspace.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stats_objects_excludes_other_workspace(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Customer", properties=[])
+        await store.create_object(t.id, {"name": "A1"}, workspace_id="ws-a")
+        await store.create_object(t.id, {"name": "A2"}, workspace_id="ws-a")
+        await store.create_object(t.id, {"name": "B1"}, workspace_id="ws-b")
+
+        a_stats = await store.stats(workspace_id="ws-a")
+        assert a_stats["objects"] == 2  # B1 is excluded
+        b_stats = await store.stats(workspace_id="ws-b")
+        assert b_stats["objects"] == 1
+
+    @pytest.mark.asyncio
+    async def test_stats_links_excludes_other_workspace(self, store: FabricStore) -> None:
+        t = await store.define_type(name="Node", properties=[])
+        a1 = await store.create_object(t.id, {"n": 1}, workspace_id="ws-a")
+        a2 = await store.create_object(t.id, {"n": 2}, workspace_id="ws-a")
+        b1 = await store.create_object(t.id, {"n": 3}, workspace_id="ws-b")
+        b2 = await store.create_object(t.id, {"n": 4}, workspace_id="ws-b")
+        await store.link(a1.id, a2.id, "rel", workspace_id="ws-a")
+        await store.link(b1.id, b2.id, "rel", workspace_id="ws-b")
+
+        assert (await store.stats(workspace_id="ws-a"))["links"] == 1
+        assert (await store.stats(workspace_id="ws-b"))["links"] == 1
+
+    @pytest.mark.asyncio
+    async def test_scoped_type_list_excludes_other_tenant_type_names(
+        self, store: FabricStore
+    ) -> None:
+        # The exact live leak: ws-b defines "Lease" / "Lease2" and only B has
+        # rows of them. ws-a, which only models "Customer", must NOT see those
+        # type names — even though the type DEFINITIONS are global.
+        customer = await store.define_type(name="Customer", properties=[])
+        lease = await store.define_type(name="Lease", properties=[])
+        lease2 = await store.define_type(name="Lease2", properties=[])
+        await store.create_object(customer.id, {"name": "A1"}, workspace_id="ws-a")
+        await store.create_object(lease.id, {"tenant": "B-co"}, workspace_id="ws-b")
+        await store.create_object(lease2.id, {"tenant": "B-co"}, workspace_id="ws-b")
+
+        a_types = {t.name for t in await store.list_types(workspace_id="ws-a")}
+        assert a_types == {"Customer"}
+        assert "Lease" not in a_types
+        assert "Lease2" not in a_types
+
+        b_types = {t.name for t in await store.list_types(workspace_id="ws-b")}
+        assert b_types == {"Lease", "Lease2"}
+
+    @pytest.mark.asyncio
+    async def test_stats_types_count_matches_scoped_type_list(self, store: FabricStore) -> None:
+        # stats["types"] is the count of types VISIBLE to the workspace — it
+        # must equal len(list_types(workspace_id)), not the global type count.
+        customer = await store.define_type(name="Customer", properties=[])
+        lease = await store.define_type(name="Lease", properties=[])
+        await store.create_object(customer.id, {"name": "A1"}, workspace_id="ws-a")
+        await store.create_object(lease.id, {"tenant": "B-co"}, workspace_id="ws-b")
+
+        a_stats = await store.stats(workspace_id="ws-a")
+        a_types = await store.list_types(workspace_id="ws-a")
+        assert a_stats["types"] == len(a_types) == 1  # NOT 2 (the global count)
+
+    @pytest.mark.asyncio
+    async def test_stats_objects_consistent_with_query_total(self, store: FabricStore) -> None:
+        # The invariant that surfaced the bug: scoped stats and scoped query
+        # must agree on the object count. Mixed-tenant + legacy NULL rows.
+        t = await store.define_type(name="Customer", properties=[])
+        await store.create_object(t.id, {"name": "A1"}, workspace_id="ws-a")
+        await store.create_object(t.id, {"name": "A2"}, workspace_id="ws-a")
+        await store.create_object(t.id, {"name": "B1"}, workspace_id="ws-b")
+        await store.create_object(t.id, {"name": "legacy"})  # NULL workspace
+
+        a_stats = await store.stats(workspace_id="ws-a")
+        a_query = await store.query(FabricQuery(), workspace_id="ws-a")
+        assert a_stats["objects"] == a_query.total == 3  # A1, A2, legacy — not B1
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_type_visible_to_all_scoped_readers(self, store: FabricStore) -> None:
+        # A type whose only rows predate tenancy (NULL workspace) stays visible
+        # to every scoped reader — matching the query()-side legacy rule.
+        legacy_type = await store.define_type(name="Legacy", properties=[])
+        await store.create_object(legacy_type.id, {"name": "pre-tenancy"})  # NULL
+
+        for ws in ("ws-a", "ws-b"):
+            names = {t.name for t in await store.list_types(workspace_id=ws)}
+            assert "Legacy" in names
+            assert (await store.stats(workspace_id=ws))["objects"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unscoped_stats_is_instance_wide(self, store: FabricStore) -> None:
+        # workspace_id=None keeps the original instance-wide behavior for OSS /
+        # registry-tool / single-tenant callers (full backward-compat).
+        customer = await store.define_type(name="Customer", properties=[])
+        lease = await store.define_type(name="Lease", properties=[])
+        await store.create_object(customer.id, {"name": "A1"}, workspace_id="ws-a")
+        await store.create_object(lease.id, {"tenant": "B-co"}, workspace_id="ws-b")
+
+        s = await store.stats()
+        assert s["objects"] == 2
+        assert s["types"] == 2  # both defined types
+        names = {t.name for t in await store.list_types()}
+        assert names == {"Customer", "Lease"}
+
+    @pytest.mark.asyncio
+    async def test_scoped_type_with_no_visible_rows_is_omitted(self, store: FabricStore) -> None:
+        # A defined type with zero visible rows (even the caller's own empty
+        # type) is omitted, and reappears the moment a visible object exists.
+        empty = await store.define_type(name="Empty", properties=[])
+        assert {t.name for t in await store.list_types(workspace_id="ws-a")} == set()
+
+        await store.create_object(empty.id, {"k": "v"}, workspace_id="ws-a")
+        assert {t.name for t in await store.list_types(workspace_id="ws-a")} == {"Empty"}
 
 
 class TestTypeNameUniqueIndex:

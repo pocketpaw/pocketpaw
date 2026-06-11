@@ -25,8 +25,16 @@
 #   (``list_objects`` / ``list_links`` / ``query_fabric`` / ``get_object``) are
 #   scoped to that tenant; writes (``create_object`` / ``create_link``) stamp
 #   it. Legacy NULL-workspace rows stay visible to all tenants (see the store
-#   header). ``list_types`` / ``stats`` remain global — object-type definitions
-#   and bare counts are not tenant data; the leak is in object/link CONTENT.
+#   header).
+# Updated: 2026-06-11 (fix/fabric-stats-workspace-scope) — scoped the LAST two
+#   reads, ``list_types`` and ``fabric_stats``. W4a left them global on the
+#   assumption that type definitions and bare counts are not tenant data; a
+#   live shared box disproved it — one tenant's chat listed another context's
+#   experimental type names through the unscoped stats path. Type NAMES are
+#   tenant metadata. Both endpoints now thread ``current_workspace_id`` into
+#   the store's scoped ``list_types()`` / ``stats()`` (own rows + legacy NULL
+#   rows, matching every other scoped read; type list = defined types with at
+#   least one visible object row — definitions stay global in the schema).
 
 from __future__ import annotations
 
@@ -101,8 +109,14 @@ class LinkRequest(BaseModel):
     response_model=list[ObjectType],
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def list_types():
-    return await _store().list_types()
+async def list_types(workspace_id: str = Depends(current_workspace_id)):
+    """List object types visible to the caller's workspace.
+
+    Scoped (fix/fabric-stats-workspace-scope): only types with at least one
+    object row visible to the workspace — type names are tenant metadata on a
+    shared deployment.
+    """
+    return await _store().list_types(workspace_id=workspace_id)
 
 
 @router.post(
@@ -263,5 +277,13 @@ async def create_link(
     "/fabric/stats",
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def fabric_stats():
-    return await _store().stats()
+async def fabric_stats(workspace_id: str = Depends(current_workspace_id)):
+    """Ontology counts scoped to the caller's workspace.
+
+    Scoped (fix/fabric-stats-workspace-scope): counts mirror ``list_objects``
+    / ``query`` visibility exactly (own rows plus legacy NULL-workspace rows),
+    and ``types`` counts only types with at least one visible object row — type
+    names are tenant metadata on a shared deployment, so an unscoped stats here
+    leaked another tenant's experimental type names into chat.
+    """
+    return await _store().stats(workspace_id=workspace_id)

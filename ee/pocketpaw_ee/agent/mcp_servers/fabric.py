@@ -1,6 +1,10 @@
 # fabric.py — in-process MCP server exposing read-only Fabric ontology access
 # to the claude_agent_sdk cloud chat backend. Created: 2026-06-11
 # (feat/fabric-instinct-mcp-providers).
+# Updated: 2026-06-11 (fix/fabric-stats-workspace-scope) — fabric_stats now
+# passes the resolved workspace into the store's scoped stats()/list_types(),
+# closing the live cross-tenant type-name leak the original instance-wide
+# stats had on a shared fabric.db.
 #
 # Why this exists: on the claude_agent_sdk backend, PocketPaw registry tools
 # (BaseTool) never reach the agent — only MCP servers do — and there was no
@@ -26,10 +30,12 @@
 #     returned JSON-friendly ({total, returned, truncated, objects}) and
 #     size-capped: the limit clamps to MAX_QUERY_LIMIT and oversized result
 #     sets are truncated from the tail under MAX_RESULT_BYTES.
-#   * fabric_stats — ontology counts + type names. NOTE: the store's ``stats``
-#     / ``list_types`` have no workspace scope yet — counts are instance-wide.
-#     Workspace identity is still required for parity with the sibling tools
-#     (and so a scoped stats can slot in without an interface change).
+#   * fabric_stats — ontology counts + type names, scoped to the caller's
+#     workspace (fix/fabric-stats-workspace-scope: the original instance-wide
+#     stats leaked another tenant's experimental type names into chat on a
+#     shared box). Counts mirror fabric_query's visibility exactly; the type
+#     list holds only types with object rows visible to the workspace (type
+#     DEFINITIONS are global in the schema — see FabricStore.list_types).
 #
 # Read-only: neither tool writes anything. FabricCreateTool is deliberately
 # NOT wrapped — ontology writes from the SDK backend should arrive as gated
@@ -224,9 +230,10 @@ async def _fabric_stats_handler(args: dict) -> dict:
     """MCP handler for ``fabric__fabric_stats``.
 
     Returns ontology counts + type names: ``{types, objects, links,
-    type_names}``. Read-only. NOTE: the store's stats are instance-wide (no
-    workspace-scoped stats yet); identity is still required for parity with
-    the sibling tools.
+    type_names}``, scoped to the caller's workspace so stats and fabric_query
+    agree (own rows plus legacy NULL-workspace rows). The type list holds only
+    types with object rows visible to the workspace — never another tenant's
+    experiment names. Read-only.
     """
     workspace_id, _user_id = _identity()
     if not workspace_id:
@@ -239,8 +246,8 @@ async def _fabric_stats_handler(args: dict) -> dict:
         return _error_response("Fabric is not available (enterprise feature).")
 
     try:
-        stats = await store.stats()
-        types = await store.list_types()
+        stats = await store.stats(workspace_id=workspace_id)
+        types = await store.list_types(workspace_id=workspace_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("fabric_stats failed", exc_info=True)
         return _error_response(f"could not read Fabric stats: {exc}")
@@ -320,7 +327,8 @@ def build_fabric_server() -> tuple[str, Any] | None:
         "fabric_stats",
         (
             "Get statistics about the Fabric ontology: number of object types, "
-            "objects, and links, plus the list of type names. READ-ONLY. Takes "
+            "objects, and links, plus the list of type names — scoped to the "
+            "current workspace, consistent with fabric_query. READ-ONLY. Takes "
             "no arguments. Returns {types, objects, links, type_names}. An "
             "error means relay the reason."
         ),

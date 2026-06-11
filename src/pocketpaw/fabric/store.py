@@ -62,6 +62,16 @@
 #       get_object_by_source, so the write has its OWN tenancy guard rather than
 #       trusting the caller to have scoped the prior read. connectors.fabric_ingest
 #       passes workspace_id through.
+# Updated: 2026-06-11 (fix/fabric-stats-workspace-scope) — stats() and
+#   list_types() take an optional workspace_id, closing the LAST unscoped W4a
+#   reads (a live shared box leaked one tenant's experimental type names into
+#   another tenant's chat via fabric_stats). Scoped stats mirrors query()'s
+#   visibility exactly (own rows + legacy NULL rows, via _workspace_scope) so
+#   stats and query always agree; scoped types/list_types return only DEFINED
+#   types with at least one visible object row — definitions are global (no
+#   workspace_id column on fabric_object_types), but which types a tenant sees
+#   is tenant metadata. workspace_id=None keeps the original unscoped behavior
+#   (OSS / registry-tool / single-tenant callers).
 
 
 from __future__ import annotations
@@ -417,11 +427,36 @@ class FabricStore:
                     return None
                 return self._row_to_type(row)
 
-    async def list_types(self) -> list[ObjectType]:
+    async def list_types(self, workspace_id: str | None = None) -> list[ObjectType]:
+        """List object types, optionally scoped to a tenant (W4a follow-up).
+
+        Type DEFINITIONS are global — ``fabric_object_types`` has no
+        ``workspace_id`` column (a deliberate W4a choice: the shared schema is
+        not per-tenant data). But the type NAMES a tenant can see are tenant
+        metadata: on a shared deployment, listing every defined type leaks what
+        other tenants are modeling. So a scoped call returns only the types
+        with at least one object row VISIBLE to that workspace — the same
+        visibility ``query()`` applies (own rows plus legacy NULL-workspace
+        rows, via ``_workspace_scope``). A defined type with no visible rows
+        (including the caller's own empty types) is omitted; it reappears the
+        moment a visible object exists. ``workspace_id=None`` keeps the
+        original unscoped behavior (all defined types) for OSS / single-tenant
+        callers.
+        """
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT * FROM fabric_object_types ORDER BY name") as cur:
+            if workspace_id is None:
+                sql = "SELECT * FROM fabric_object_types ORDER BY name"
+                params: list[Any] = []
+            else:
+                ws_cond, params = _workspace_scope(workspace_id, column="o.workspace_id")
+                sql = (
+                    "SELECT DISTINCT t.* FROM fabric_object_types t"
+                    " JOIN fabric_objects o ON o.type_id = t.id"
+                    f" WHERE {ws_cond} ORDER BY t.name"
+                )
+            async with db.execute(sql, params) as cur:
                 return [self._row_to_type(row) async for row in cur]
 
     async def remove_type(self, type_id: str) -> None:
@@ -797,12 +832,46 @@ class FabricStore:
 
     # --- Stats ---
 
-    async def stats(self) -> dict[str, int]:
+    async def stats(self, workspace_id: str | None = None) -> dict[str, int]:
+        """Ontology counts, optionally scoped to a tenant (W4a follow-up).
+
+        A scoped call mirrors ``query()``'s visibility EXACTLY (own rows plus
+        legacy NULL-workspace rows, via ``_workspace_scope``) so stats and
+        query always agree: ``stats(workspace_id=w)["objects"]`` equals the
+        ``total`` of an unfiltered scoped query. ``links`` applies the same
+        scope to ``fabric_links``. ``types`` counts the DEFINED types with at
+        least one visible object row — matching ``list_types(workspace_id=w)``
+        — because type definitions are global but which types a tenant sees is
+        tenant metadata (the cross-tenant type-name leak this closes).
+        ``workspace_id=None`` keeps the original unscoped, instance-wide
+        behavior for OSS / single-tenant callers.
+        """
         await self._ensure_schema()
         async with self._conn() as db:
-            types = await db.execute_fetchall("SELECT COUNT(*) FROM fabric_object_types")
-            objects = await db.execute_fetchall("SELECT COUNT(*) FROM fabric_objects")
-            links = await db.execute_fetchall("SELECT COUNT(*) FROM fabric_links")
+            if workspace_id is None:
+                types = await db.execute_fetchall("SELECT COUNT(*) FROM fabric_object_types")
+                objects = await db.execute_fetchall("SELECT COUNT(*) FROM fabric_objects")
+                links = await db.execute_fetchall("SELECT COUNT(*) FROM fabric_links")
+                return {
+                    "types": types[0][0] if types else 0,
+                    "objects": objects[0][0] if objects else 0,
+                    "links": links[0][0] if links else 0,
+                }
+            obj_cond, obj_params = _workspace_scope(workspace_id)
+            link_cond, link_params = _workspace_scope(workspace_id)
+            type_cond, type_params = _workspace_scope(workspace_id, column="o.workspace_id")
+            types = await db.execute_fetchall(
+                "SELECT COUNT(DISTINCT t.id) FROM fabric_object_types t"
+                " JOIN fabric_objects o ON o.type_id = t.id"
+                f" WHERE {type_cond}",
+                type_params,
+            )
+            objects = await db.execute_fetchall(
+                f"SELECT COUNT(*) FROM fabric_objects WHERE {obj_cond}", obj_params
+            )
+            links = await db.execute_fetchall(
+                f"SELECT COUNT(*) FROM fabric_links WHERE {link_cond}", link_params
+            )
             return {
                 "types": types[0][0] if types else 0,
                 "objects": objects[0][0] if objects else 0,
