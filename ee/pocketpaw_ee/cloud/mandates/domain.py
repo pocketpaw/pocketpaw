@@ -126,7 +126,9 @@ class ShiftDoc(TimestampedDocument):
     walks ``planning → in_gate → executing → done`` on the happy path, or lands
     on ``stood_down`` when the foreman returned an empty plan (a SUCCESS state,
     not an error). ``plan_action_id`` is the Instinct ``belt_plan`` Action id the
-    plan was proposed through (None until the gate proposal lands).
+    plan was proposed through (None until the gate proposal lands). ``outcome``
+    is the free-text result of the shift (what landed / was rejected / why the
+    foreman stood down) — the foreman's history context reads the last 3.
     """
 
     workspace: Indexed(str)  # type: ignore[valid-type]
@@ -134,6 +136,7 @@ class ShiftDoc(TimestampedDocument):
     no: int
     state: ShiftState = "planning"
     plan_action_id: str | None = None
+    outcome: str | None = None
 
     class Settings:
         name = "mandate_shifts"

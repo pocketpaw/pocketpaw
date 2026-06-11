@@ -250,6 +250,62 @@ def _code_change_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
+def _belt_plan_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_belt_plan`` blob on an Action, or ``None``.
+
+    The blob is the mandate FOREMAN's shift-plan payload
+    (``ee.cloud.mandates.service.trigger_shift`` stores it under
+    ``Action.parameters._belt_plan``: the PlanProposal + mandate/shift ids +
+    budget snapshot + chain correlation fields). The third peer of
+    ``_pocket_write`` / ``_code_change`` — the approve path dispatches the
+    plan executor on its presence; reject closes the chain here in the router.
+    Anything that is not a dict is treated as "no plan".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_belt_plan")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_belt_plan_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving/rejecting a mandate shift plan from another workspace.
+
+    Mirror of ``_assert_code_change_workspace`` for the ``_belt_plan`` blob —
+    its tenancy lives entirely on the blob's ``workspace_id``.
+    """
+    blob = _belt_plan_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This shift plan belongs to a different workspace",
+        )
+
+
+def _belt_plan_proposed_event_id(blob: dict[str, Any]) -> Any:
+    """Pull the ``proposed_event_id`` off a ``_belt_plan`` blob (same field
+    contract as the code-change blob) for ``human.corrected`` causation."""
+    return _code_change_proposed_event_id(blob)
+
+
+async def _mark_plan_rejected_safe(action: Any, reason: str) -> None:
+    """Best-effort shift-record update for a rejected ``belt_plan`` Action.
+
+    The router owns the CHAIN close on reject (the executor never runs); this
+    lazy-imported hook only reflects the rejection onto the mandate's ShiftDoc
+    (state=done, outcome carries the reason) so the pawprints feed reads it.
+    Never breaks the reject response."""
+    try:
+        from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+
+        await mandate_executor.mark_plan_rejected(action, reason)
+    except Exception:  # noqa: BLE001 — read-model nudge must never break reject
+        logger.debug("mandate: mark_plan_rejected hook failed (non-fatal)", exc_info=True)
+
+
 async def _emit_belt_run_updated_safe(
     *, workspace_id: str, action_id: str, status: str, stage: str
 ) -> None:
@@ -609,6 +665,7 @@ async def bulk_approve_actions(
         if action is not None:
             _assert_pocket_write_workspace(action, workspace_id)
             _assert_code_change_workspace(action, workspace_id)
+            _assert_belt_plan_workspace(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -660,6 +717,34 @@ async def bulk_approve_actions(
             except Exception:
                 logger.exception(
                     "bulk-approve belt code-change execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # MANDATES — a bulk-approved ``_belt_plan`` Action fires the plan
+        # executor, exactly like the single-approve hook (disposition is always
+        # ``accepted`` — bulk-approve has no edit surface). The executor owns
+        # the chain close.
+        belt_plan_blob = _belt_plan_blob(action)
+        if belt_plan_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=belt_plan_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+
+                await mandate_executor.execute_approved_plan(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve belt_plan execution failed for %s (non-fatal)",
                     action.id,
                 )
             continue
@@ -739,6 +824,7 @@ async def bulk_reject_actions(
         if action is not None:
             _assert_pocket_write_workspace(action, workspace_id)
             _assert_code_change_workspace(action, workspace_id)
+            _assert_belt_plan_workspace(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
@@ -797,6 +883,31 @@ async def bulk_reject_actions(
                 status="rejected",
                 stage="done",
             )
+            continue
+
+        # MANDATES — a bulk-rejected ``_belt_plan`` Action closes its chain
+        # here (the plan executor never runs on reject), mirroring the
+        # code-change branch above.
+        belt_plan_blob = _belt_plan_blob(action)
+        if belt_plan_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=belt_plan_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=belt_plan_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            await _mark_plan_rejected_safe(action, req.reason)
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
@@ -837,6 +948,9 @@ async def approve_action(
     # Same tenancy gate for a Belt code-change Action (BS-3) — its
     # ``_code_change`` blob carries the workspace, not a pocket.
     _assert_code_change_workspace(before, workspace_id)
+    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
+    # ``_belt_plan`` blob carries the workspace.
+    _assert_belt_plan_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -956,6 +1070,32 @@ async def approve_action(
         except Exception:
             logger.exception("belt code-change execution after approval failed (non-fatal)")
 
+    # MANDATES — when the approved Action carries a ``_belt_plan`` blob (the
+    # mandate foreman's shift plan), dispatch the plan executor. Same shape as
+    # the code-change hook: the router owns the ``human.corrected`` emit, the
+    # EXECUTOR owns the chain close (success or failure) — the router never
+    # emits ``decision.completed`` for belt_plan. Best-effort, lazy import,
+    # never breaks the approve response.
+    belt_plan_blob = _belt_plan_blob(approved)
+    if belt_plan_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=belt_plan_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.mandates import executor as mandate_executor
+
+            await mandate_executor.execute_approved_plan(approved, human_event_id=human_event_id)
+        except Exception:
+            logger.exception("belt_plan execution after approval failed (non-fatal)")
+
     return ApproveResponse(action=approved, correction=correction)
 
 
@@ -1016,6 +1156,9 @@ async def reject_action(
     # Touch-time security fix — same gate the approve path runs.
     _assert_pocket_write_workspace(before, workspace_id)
     _assert_code_change_workspace(before, workspace_id)
+    # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
+    # ``_belt_plan`` blob carries the workspace.
+    _assert_belt_plan_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -1077,6 +1220,31 @@ async def reject_action(
         await _emit_belt_run_updated_safe(
             workspace_id=workspace_id, action_id=str(action.id), status="rejected", stage="done"
         )
+
+    # MANDATES — a rejected ``_belt_plan`` Action closes its chain HERE (the
+    # plan executor never runs on reject), mirroring the code-change shape:
+    # ``human.corrected(rejected)`` cites ``agent.proposed``; the terminal
+    # cites the human event. The shift record is updated best-effort.
+    belt_plan_blob = _belt_plan_blob(action)
+    if belt_plan_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=belt_plan_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_belt_plan_proposed_event_id(belt_plan_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=belt_plan_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        await _mark_plan_rejected_safe(action, reason)
 
     return action
 

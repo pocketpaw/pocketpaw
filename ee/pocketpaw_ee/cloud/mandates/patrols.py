@@ -28,8 +28,9 @@ import json
 import logging
 import re
 import tomllib
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
