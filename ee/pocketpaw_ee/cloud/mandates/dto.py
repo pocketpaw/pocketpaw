@@ -117,6 +117,7 @@ class MandateDetailResponse(BaseModel):
     surface: SurfaceRequest
     charter: CharterRequest
     soul_path: str | None = None
+    patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
     recent_shifts: list[ShiftSummaryResponse] = Field(default_factory=list)
     sightings_by_patrol: dict[str, int] = Field(default_factory=dict)
     created_at: datetime
