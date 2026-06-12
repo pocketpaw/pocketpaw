@@ -55,6 +55,8 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     BulkReassignRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -231,6 +233,24 @@ async def attach_cycle_items(
     so a half-stale selection still partially succeeds.
     """
     return await mc_service.agent_attach_cycle_items(ctx, cycle_id, body)
+
+
+@router.post(
+    "/cycles/{cycle_id}/items/detach",
+    response_model=DetachCycleItemsResponse,
+)
+async def detach_cycle_items(
+    cycle_id: str,
+    body: DetachCycleItemsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DetachCycleItemsResponse:
+    """Detach work items from a sprint.
+
+    Removes items from the sprint by clearing their ``cycle_id``.
+    Items the caller can't see are reported back in ``skipped``
+    rather than failing the whole batch.
+    """
+    return await mc_service.agent_detach_cycle_items(ctx, cycle_id, body)
 
 
 @router.get("/analytics", response_model=AnalyticsResponse)

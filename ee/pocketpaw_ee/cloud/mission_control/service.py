@@ -141,6 +141,7 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     BulkReassignRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -1172,6 +1173,56 @@ async def agent_attach_cycle_items(
 
     return AttachCycleItemsResponse(
         attached=attached,
+        skipped=skipped,
+        cycle_id=cycle_id,
+    )
+
+
+async def agent_detach_cycle_items(
+    ctx: RequestContext,
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+) -> DetachCycleItemsResponse:
+    """Detach a batch of work items from a sprint.
+
+    Validates the sprint exists in the caller's workspace, then for each
+    item id calls ``tasks.service.agent_set_task_cycle`` with ``None``
+    to clear the cycle pointer. Items the caller can't see are reported
+    back as ``skipped`` rather than failing the whole batch.
+    """
+
+    body = AttachCycleItemsRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    from pocketpaw_ee.cloud.cycles import service as cycles_service
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    # Tenancy check on the cycle itself
+    await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+
+    detached: list[str] = []
+    skipped: list[str] = []
+    for task_id in body.item_ids:
+        try:
+            raw_id = task_id.removeprefix("task:")
+            await tasks_service.agent_set_task_cycle(ctx, raw_id, None)
+            detached.append(task_id)
+        except Exception:
+            skipped.append(task_id)
+
+    # Refresh counters on the cycle so scope/started/completed update
+    tasks = await cycles_service._tasks_for_cycle(ctx, cycle_id)
+    if tasks is not None:
+        scope, started, completed = cycles_service._counters_from_tasks(tasks)
+        doc = await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+        if (doc.scope, doc.started, doc.completed) != (scope, started, completed):
+            doc.scope = scope
+            doc.started = started
+            doc.completed = completed
+            await doc.save()
+
+    return DetachCycleItemsResponse(
+        detached=detached,
         skipped=skipped,
         cycle_id=cycle_id,
     )
