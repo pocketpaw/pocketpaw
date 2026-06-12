@@ -1,4 +1,9 @@
-"""Pytest configuration."""
+"""Pytest configuration.
+
+Updated: 2026-06-12 (connector-store-unification CS-1) — added
+_isolate_connector_state so the registry's write-through state store never
+persists test config to the real ~/.pocketpaw/connectors/state.
+"""
 
 import asyncio
 import os
@@ -44,6 +49,22 @@ def _enable_test_full_access(request, monkeypatch):
     if "enforce_scope" in request.keywords:
         return
     monkeypatch.setattr("pocketpaw.api.deps._TESTING_FULL_ACCESS", True)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_connector_state(tmp_path, monkeypatch):
+    """Prevent tests from persisting connector config to the real ~/.pocketpaw.
+
+    ConnectorRegistry.connect() is write-through to a state store that
+    defaults to ~/.pocketpaw/connectors/state (CS-1). Point the default at a
+    per-test temp dir so suites that build a registry with the default store
+    stay hermetic. Tests that exercise the store directly pass an explicit
+    ``base_dir`` instead.
+    """
+    monkeypatch.setattr(
+        "pocketpaw.connectors.state_store._default_state_dir",
+        lambda: tmp_path / "connector-state",
+    )
 
 
 @pytest.fixture(autouse=True)
