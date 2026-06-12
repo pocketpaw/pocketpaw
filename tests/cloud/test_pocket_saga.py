@@ -119,8 +119,20 @@ def _step(
     outcome: str | None = None,
     idempotency_key: str | None = None,
 ) -> SagaStep:
-    """Build a SagaStep whose raw_action carries an optional compensate spec."""
-    raw: dict = {"kind": "write_binding", "method": method, "path": path, "params": {}}
+    """Build a SagaStep whose raw_action carries an optional compensate spec.
+
+    Steps are built `instinct_exempt` because these tests exercise the saga
+    MECHANICS (ordering, rollback, idempotency) — W2a's deny-by-default
+    would otherwise park every step at the gate. The gated-step test flips
+    the exemption off explicitly to cover the park-then-rollback path.
+    """
+    raw: dict = {
+        "kind": "write_binding",
+        "method": method,
+        "path": path,
+        "params": {},
+        "instinct_exempt": True,
+    }
     if compensate is not None:
         raw["compensate"] = compensate
     if outcome is not None:
@@ -404,9 +416,11 @@ async def test_parked_forward_step_rolls_back_prior_steps(monkeypatch, _capture_
     never fires, so the sequence cannot continue — the prior committed step
     rolls back and the park is the recorded failure."""
     rec = _Recorder({("POST", "/refund"): 200})
-    # step 2 requires instinct → parks before any call.
+    # step 2 requires instinct → parks before any call. Drop the test
+    # default exemption so W2a's gate actually engages.
     gated = _step("charge", "POST", "/charge")
     gated.raw_action["requires_instinct"] = True
+    gated.raw_action["instinct_exempt"] = False
 
     steps = [
         _step("reserve", "POST", "/reserve", compensate={"method": "POST", "path": "/refund"}),

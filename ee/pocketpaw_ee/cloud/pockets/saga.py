@@ -1,4 +1,11 @@
 # saga.py — Saga-pattern rollback for multi-step pocket write SEQUENCES.
+# Updated: 2026-06-12 (W2a rebase) — compensations now declare
+#   `instinct_exempt: True` on their built raw_action. W2a flipped
+#   `ActionBinding.requires_instinct` to default True (deny-by-default), so
+#   an undeclared compensation binding would PARK at the gate — a rollback
+#   awaiting human approval is exactly the inconsistent-state hazard this
+#   module exists to prevent. The exemption is the declarative, auditable
+#   W2a mechanism; the forward write's gate remains the human checkpoint.
 # Created: 2026-06-01 (RFC 05 Saga Compensate — first pass).
 #
 # WHY THIS EXISTS
@@ -414,14 +421,19 @@ async def _compensate(
             )
             continue
 
-        # A compensation IS a write binding. Build its raw_action with NO
-        # `requires_instinct` (it fires AUTO — never parks) and run it
-        # through the same executor + the same allowlist as any write.
+        # A compensation IS a write binding. It fires AUTO — never parks:
+        # under W2a deny-by-default it must carry the declarative
+        # `instinct_exempt` flag, because a rollback parked for human
+        # approval would leave the backend in the inconsistent state the
+        # rollback exists to repair. The forward write's gate is the human
+        # checkpoint; the compensation is automatic cleanup. Same executor +
+        # same allowlist as any write.
         comp_raw = {
             "kind": "write_binding",
             "method": spec.method,
             "path": spec.path,
             "params": dict(spec.params),
+            "instinct_exempt": True,
         }
         comp_result = await run_action(
             workspace_id=workspace_id,
