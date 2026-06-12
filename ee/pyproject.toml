@@ -6,6 +6,10 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-06-12 (connector-store-unification CS-3): registered the
+#     `pocketpaw.connector_state_stores` entry-point
+#     (CloudConnectorStateStoreProvider) so the ConnectorRegistry's durable
+#     state defaults to the WorkspaceConnector-backed cloud store.
 #   - 2026-06-10 (sov/w0a-license): added the `pocketpaw-ee-license`
 #     console script (operator license MINTING / keypair / verify) — see
 #     `[project.scripts]` and `pocketpaw_ee/cloud/mint.py`.
@@ -207,6 +211,9 @@ cloud = "pocketpaw_ee.extensions:CloudAgentExtension"
 
 [project.entry-points."pocketpaw.composio_tools"]
 cloud = "pocketpaw_ee.extensions:CloudComposioToolProvider"
+
+[project.entry-points."pocketpaw.connector_state_stores"]
+cloud = "pocketpaw_ee.extensions:CloudConnectorStateStoreProvider"
 
 [tool.hatch.metadata]
 # Allow git+ direct references in dependencies (PEP 440 disallows them

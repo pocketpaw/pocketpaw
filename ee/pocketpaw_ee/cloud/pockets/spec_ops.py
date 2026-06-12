@@ -15,6 +15,27 @@ ID format: ``n_<8 chars from [a-z0-9]>``. 40 bits of randomness — at the
 pocket sizes we see (max ~1k nodes) collision probability is
 vanishingly small, and the format is short enough for the agent to
 copy/paste over the wire without errors.
+
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — added
+``summarize_ripple_spec``: a pure, lightweight metadata read over a
+rippleSpec (top-level ui node count/types, capped state-key names,
+source summaries, action keys, legacy ``widgets_count`` passthrough).
+Shared by the chat ``<pocket-summary>`` context block and the
+``get_pocket`` agent view's ``_summary`` lead, so the agent stops
+reading the empty legacy ``widgets[]`` array and concluding a fully
+composed template pocket is "an empty shell". Degrades gracefully on
+None / empty / malformed specs.
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context, review pass) —
+summary hardening. Every string the summary emits now passes through
+``_summary_item``: whitespace collapsed, angle brackets swapped for
+lookalikes (kills the forged-``</pocket-summary>``-tag prompt-injection
+a member-authored state key / node type could mount), and per-item
+clamp at 120 chars (a 50k-char key can't ride into a prompt). Source
+paths drop their query string / fragment so ``?api_key=...`` never
+lands in agent context. Every capped list gained an ``*_omitted``
+sibling (``ui_node_types_omitted`` / ``sources_omitted`` /
+``action_keys_omitted``) matching the existing ``state_keys_omitted``,
+so truncation is always visible.
 """
 
 from __future__ import annotations
@@ -414,6 +435,151 @@ def match_array_item_candidates(arr: list[Any], match: dict[str, Any]) -> list[i
     return [i for i, item in enumerate(arr) if _item_matches(item, form, match)]
 
 
+# ---------------------------------------------------------------------------
+# Lightweight spec summary (agent orientation)
+# ---------------------------------------------------------------------------
+
+# Cap on the lists the summary carries (state keys, source rows, node types,
+# action keys). The summary is an ORIENTATION read injected into the system
+# prompt and the get_pocket lead — it must stay token-light no matter how big
+# the spec is. Every capped list reports its overflow via a sibling
+# ``*_omitted`` counter so the agent knows the list is truncated.
+_SUMMARY_LIST_CAP = 20
+# Per-item clamp. Spec content is member-authored — a single 50k-char state
+# key must not ride whole into a prompt or the get_pocket lead.
+_SUMMARY_ITEM_CHAR_CAP = 120
+
+
+def _summary_item(value: Any) -> str:
+    """Sanitize ONE summary item for prompt embedding.
+
+    Spec content (state keys, node types, source paths, action names) is
+    member-authored and lands in every co-member's system prompt via the
+    ``<pocket-summary>`` block, so each item is neutralized here at the
+    source: whitespace collapsed (no smuggled newlines), angle brackets
+    swapped for lookalikes (no forged ``</pocket-summary>`` — or ANY tag —
+    survives), and length clamped to ``_SUMMARY_ITEM_CHAR_CAP``.
+    """
+    text = " ".join(str(value).split())
+    text = text.replace("<", "‹").replace(">", "›")
+    if len(text) > _SUMMARY_ITEM_CHAR_CAP:
+        text = text[:_SUMMARY_ITEM_CHAR_CAP].rstrip() + "…"
+    return text
+
+
+def _summary_item_or_none(value: Any) -> str | None:
+    return None if value is None else _summary_item(value)
+
+
+def summarize_ripple_spec(spec: Any, *, widgets_count: int = 0) -> dict[str, Any]:
+    """Return lightweight, token-cheap metadata about a rippleSpec.
+
+    Pure and total: any input — ``None``, ``{}``, or arbitrarily malformed
+    junk — yields the same fixed-shape dict, never an exception. Shape::
+
+        {
+            "has_ripple_spec": bool,        # a non-empty dict spec exists
+            "ui_node_count": int,           # top-level ui nodes
+            "ui_node_types": [str],         # their component types, in order
+            "ui_node_types_omitted": int,   # how many the list cap dropped
+            "state_keys": [str],            # capped at _SUMMARY_LIST_CAP
+            "state_keys_omitted": int,
+            "sources": [{key, method, path, bind}],
+            "sources_omitted": int,
+            "action_keys": [str],
+            "action_keys_omitted": int,
+            "widgets_count": int,           # legacy widgets[] passthrough
+        }
+
+    "Top-level" nodes: the entries of a list-shaped ``ui``, or a dict
+    root's ``children`` (the root is usually just the layout container —
+    its children are what the user actually sees). A childless dict root
+    counts as the single node itself.
+
+    SECURITY: every string in the output passes through ``_summary_item``
+    (whitespace collapse, angle-bracket neutralization, per-item clamp) so
+    member-authored spec content can never forge prompt tags or smuggle
+    newlines through the chat block or the get_pocket ``_summary`` lead.
+    Source paths additionally drop their query string / fragment — a
+    ``?api_key=...`` credential must never land in a prompt.
+
+    ``widgets_count`` is the length of the pocket's LEGACY top-level
+    ``widgets[]`` array, passed through by the caller (it lives on the
+    Pocket document, not in the spec). Surfacing it next to the real
+    layout stats is the point: an agent that sees ``widgets_count: 0``
+    alone concludes "empty pocket" even when ``rippleSpec.ui`` carries a
+    fully composed dashboard.
+    """
+    out: dict[str, Any] = {
+        "has_ripple_spec": isinstance(spec, dict) and bool(spec),
+        "ui_node_count": 0,
+        "ui_node_types": [],
+        "ui_node_types_omitted": 0,
+        "state_keys": [],
+        "state_keys_omitted": 0,
+        "sources": [],
+        "sources_omitted": 0,
+        "action_keys": [],
+        "action_keys_omitted": 0,
+        "widgets_count": widgets_count if isinstance(widgets_count, int) else 0,
+    }
+    if not isinstance(spec, dict):
+        return out
+
+    ui = spec.get("ui")
+    top_nodes: list[dict[str, Any]] = []
+    if isinstance(ui, list):
+        top_nodes = [n for n in ui if isinstance(n, dict)]
+    elif isinstance(ui, dict):
+        children = ui.get("children")
+        if isinstance(children, list) and any(isinstance(n, dict) for n in children):
+            top_nodes = [n for n in children if isinstance(n, dict)]
+        else:
+            top_nodes = [ui]
+    out["ui_node_count"] = len(top_nodes)
+    out["ui_node_types"] = [
+        _summary_item(n.get("type") or "unknown") for n in top_nodes[:_SUMMARY_LIST_CAP]
+    ]
+    out["ui_node_types_omitted"] = max(0, len(top_nodes) - _SUMMARY_LIST_CAP)
+
+    state = spec.get("state")
+    if isinstance(state, dict):
+        keys = list(state)
+        out["state_keys"] = [_summary_item(k) for k in keys[:_SUMMARY_LIST_CAP]]
+        out["state_keys_omitted"] = max(0, len(keys) - _SUMMARY_LIST_CAP)
+
+    sources = spec.get("sources")
+    if isinstance(sources, dict):
+        entries = list(sources.items())
+        for key, binding in entries[:_SUMMARY_LIST_CAP]:
+            row: dict[str, Any] = {
+                "key": _summary_item(key),
+                "method": None,
+                "path": None,
+                "bind": None,
+            }
+            if isinstance(binding, dict):
+                row["method"] = _summary_item_or_none(binding.get("method"))
+                path = binding.get("path")
+                if path is not None:
+                    # Drop the query string / fragment — `?api_key=...`
+                    # credentials must never ride into a prompt. The path
+                    # itself stays.
+                    path = str(path).split("?", 1)[0].split("#", 1)[0]
+                row["path"] = _summary_item_or_none(path)
+                row["bind"] = _summary_item_or_none(binding.get("bind"))
+            out["sources"].append(row)
+        out["sources_omitted"] = max(0, len(entries) - _SUMMARY_LIST_CAP)
+
+    actions = spec.get("actions")
+    if isinstance(actions, dict):
+        keys = list(actions)
+        out["action_keys"] = [_summary_item(k) for k in keys[:_SUMMARY_LIST_CAP]]
+        out["action_keys_omitted"] = max(0, len(keys) - _SUMMARY_LIST_CAP)
+
+    return out
+
+
 __all__ = [
     "ensure_ids",
     "find_by_id",
@@ -427,4 +593,5 @@ __all__ = [
     "remove_node",
     "replace_node",
     "set_prop",
+    "summarize_ripple_spec",
 ]

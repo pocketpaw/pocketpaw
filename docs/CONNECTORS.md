@@ -1,5 +1,17 @@
 <!--
   Connectors documentation.
+  Updated: 2026-06-12 (connector-store-unification CS-6) — added the
+  "Lifecycle: definitions, state, cache" section: the three layers a connector
+  lives in (YAML definitions with two scan dirs + CWD precedence, the durable
+  state store at ~/.pocketpaw/connectors/state, and the in-memory adapter
+  cache), restart semantics, and the presence-based "connected" status.
+  Updated: 2026-06-12 (workspace-scope reach) — the agent tool surface now
+  reaches workspace-scoped connectors: list_connector_actions returns the
+  current pocket's bound connectors PLUS the workspace-enabled ones (deduped
+  by name), unanchored chats (no pocket) reach exactly the workspace-scoped
+  set, and connector_execute passes for pocket-bound OR workspace-scoped
+  rows (executing with workspace-scope credentials when unanchored). The
+  read-first / write-blocked trust gate is unchanged.
   Updated: 2026-06-11 (connector cookie/session auth) — documented two new
   auth methods on the DirectREST engine: `cookie` (emits a Cookie: header from
   a declared credential, name set via auth.credential) and `header` (emits an
@@ -57,6 +69,45 @@ pocket.db (data lands in SQLite tables)
     ↓
 Pocket widgets auto-update with fresh data
 ```
+
+## Lifecycle: definitions, state, cache
+
+A connector lives in three layers with different lifetimes:
+
+| Layer | What it holds | Where | Lifetime |
+|-------|--------------|-------|----------|
+| **Definition** | What the connector *is* — endpoints, auth schema, actions | `~/.pocketpaw/connectors/*.yaml`, then `connectors/*.yaml` (CWD) | As long as the file exists |
+| **State** | That a connector *is configured* — the config passed to `/connect`, keyed by (name, pocket) | `~/.pocketpaw/connectors/state/*.json` (the durable state store) | Until `/disconnect` |
+| **Cache** | Live adapter instances (HTTP clients, DB pools, OAuth sessions) | In-memory, per process | Until the process exits |
+
+**Definition scan.** The registry scans the home dir
+(`~/.pocketpaw/connectors/`) first, then the CWD `connectors/` dir. On a name
+collision the CWD definition wins — deploys override user-installed
+definitions. A definition dropped in after startup is picked up on the next
+lookup miss (the registry rescans cheaply instead of requiring a restart).
+
+**State.** `/connect` is write-through: the config is persisted to the state
+store before the adapter connects, and rolled back if the connect fails.
+`/disconnect` deletes the row. State files are chmod 0600 and live under a
+0700 dir — the config can carry credentials, same posture as the OAuth token
+store.
+
+**Restart semantics.** The cache dies with the process; definitions and state
+do not. After a restart the list/detail/status endpoints report a configured
+connector as `connected` (derived from definition-present + config-persisted,
+never from the in-memory adapter map), and `/execute` lazily reconnects the
+adapter from the persisted config via `ensure_connected` — no manual
+re-`/connect` step.
+
+**What "connected" means.** Status is a *presence* semantic: a definition
+exists and config is persisted. It does not probe the remote service per
+request — a revoked API key still shows `connected` until an execute fails.
+Use a connector's `health()` for a live check.
+
+**Orphaned state.** A state row whose definition is gone (YAML deleted, or a
+deploy dropped it) surfaces in list/status as `definition_missing` instead of
+disappearing or crashing. It heals automatically once the definition is back,
+or can be cleared with `/disconnect`.
 
 ## Writing a Connector YAML
 
@@ -256,13 +307,16 @@ server exposes two tools to the agent, namespaced
 
 | Tool | What it does |
 |------|--------------|
-| `list_connector_actions()` | Lists the connectors bound to the **current pocket** and, per connector, its READ actions (runnable) and WRITE actions (listed, blocked). No arguments — the pocket comes from the active chat. |
+| `list_connector_actions()` | Lists the connectors **reachable from the current chat** — the current pocket's bound connectors plus the workspace-enabled ones, deduped by name — and, per connector, its READ actions (runnable) and WRITE actions (listed, blocked). No arguments — the identity comes from the active chat. |
 | `connector_execute(connector_name, action, params)` | Runs ONE action. Read (auto-trust) actions execute; write actions are refused (see below). |
 
 The agent reads the pocket it is in from the per-run identity (the same
 mechanism that scopes pocket reads/writes), so the tools always act on the room
-the user is chatting in. Outside a chat stream — or in a chat not anchored to a
-pocket — the tools return a clear message instead of mis-scoping.
+the user is chatting in. A chat not anchored to a pocket (a plain DM or group
+thread) still reaches the **workspace-scoped** connectors — the workspace is
+the tenant boundary, so anything enabled workspace-wide is available from any
+chat in it. Pocket-scoped connectors stay private to their room. Outside a
+chat stream entirely, the tools return a clear error instead of mis-scoping.
 
 ### v1 policy: read-first, writes blocked
 
@@ -285,9 +339,11 @@ reads `auto` and writes `confirm` and the tool surface does the rest.
 
 Three things make a connector callable from a pocket's chat:
 
-1. **Bind it at `scope=pocket`** — enable the connector with the pocket's id.
-   The tools are tenant-scoped: a connector bound to pocket A is not reachable
-   from pocket B.
+1. **Bind it** — either at `scope=pocket` (enable with the pocket's id; private
+   to that room — a connector bound to pocket A is not reachable from pocket B)
+   or at `scope=workspace` (enable workspace-wide; reachable from every chat in
+   the workspace, anchored or not). When the same connector is enabled at both
+   scopes, the listing dedupes it by name.
 2. **Put a token in the connector's config** — v1 auth is the PAT / API token
    already stored in the connector config (no OAuth flow). For GitHub that's a
    `GITHUB_TOKEN`; for a bearer/`api_key` connector it's the credential named in
