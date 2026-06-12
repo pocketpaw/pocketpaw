@@ -26,6 +26,11 @@
 #   wins on name collision (deploys override). ``get_definition`` rescans on
 #   miss. Orphan state rows whose definition is gone surface as
 #   ``definition_missing`` instead of vanishing or crashing.
+# Updated: 2026-06-12 (connector-store-unification CS-6) — ``disconnect()``
+#   now operates on durable state, not just live adapters: it deletes the
+#   persisted row even when no adapter is in memory (post-restart disconnect,
+#   orphan-row cleanup). Returns True when an adapter was disconnected OR a
+#   row was deleted; still False when there was nothing to forget.
 
 from __future__ import annotations
 
@@ -307,15 +312,23 @@ class ConnectorRegistry:
         return self._instances.get(key)
 
     async def disconnect(self, pocket_id: str, connector_name: str) -> bool:
-        """Disconnect a connector from a pocket and forget its persisted config."""
+        """Disconnect a connector from a pocket and forget its persisted config.
+
+        Works on durable state, not just live adapters: after a restart there
+        is no adapter in memory, but the persisted row must still be deletable
+        or the connector could never be disconnected again. Also the only way
+        to clear an orphaned (``definition_missing``) row. Returns ``True``
+        when either a live adapter was disconnected or a persisted row was
+        deleted.
+        """
         key = f"{pocket_id}:{connector_name}"
-        adapter = self._instances.get(key)
-        if not adapter:
-            return False
-        await adapter.disconnect(pocket_id)
-        del self._instances[key]
-        self._state_store.delete(connector_name, pocket_id)
-        return True
+        adapter = self._instances.pop(key, None)
+        if adapter is not None:
+            await adapter.disconnect(pocket_id)
+        had_state = self._state_store.get(connector_name, pocket_id) is not None
+        if had_state:
+            self._state_store.delete(connector_name, pocket_id)
+        return adapter is not None or had_state
 
     def status(self, pocket_id: str) -> list[dict[str, Any]]:
         """Get connection status for all connectors in a pocket.
