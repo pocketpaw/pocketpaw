@@ -1,5 +1,12 @@
 <!--
   Connectors documentation.
+  Updated: 2026-06-12 (workspace-scope reach) — the agent tool surface now
+  reaches workspace-scoped connectors: list_connector_actions returns the
+  current pocket's bound connectors PLUS the workspace-enabled ones (deduped
+  by name), unanchored chats (no pocket) reach exactly the workspace-scoped
+  set, and connector_execute passes for pocket-bound OR workspace-scoped
+  rows (executing with workspace-scope credentials when unanchored). The
+  read-first / write-blocked trust gate is unchanged.
   Updated: 2026-06-11 (connector cookie/session auth) — documented two new
   auth methods on the DirectREST engine: `cookie` (emits a Cookie: header from
   a declared credential, name set via auth.credential) and `header` (emits an
@@ -256,13 +263,16 @@ server exposes two tools to the agent, namespaced
 
 | Tool | What it does |
 |------|--------------|
-| `list_connector_actions()` | Lists the connectors bound to the **current pocket** and, per connector, its READ actions (runnable) and WRITE actions (listed, blocked). No arguments — the pocket comes from the active chat. |
+| `list_connector_actions()` | Lists the connectors **reachable from the current chat** — the current pocket's bound connectors plus the workspace-enabled ones, deduped by name — and, per connector, its READ actions (runnable) and WRITE actions (listed, blocked). No arguments — the identity comes from the active chat. |
 | `connector_execute(connector_name, action, params)` | Runs ONE action. Read (auto-trust) actions execute; write actions are refused (see below). |
 
 The agent reads the pocket it is in from the per-run identity (the same
 mechanism that scopes pocket reads/writes), so the tools always act on the room
-the user is chatting in. Outside a chat stream — or in a chat not anchored to a
-pocket — the tools return a clear message instead of mis-scoping.
+the user is chatting in. A chat not anchored to a pocket (a plain DM or group
+thread) still reaches the **workspace-scoped** connectors — the workspace is
+the tenant boundary, so anything enabled workspace-wide is available from any
+chat in it. Pocket-scoped connectors stay private to their room. Outside a
+chat stream entirely, the tools return a clear error instead of mis-scoping.
 
 ### v1 policy: read-first, writes blocked
 
@@ -285,9 +295,11 @@ reads `auto` and writes `confirm` and the tool surface does the rest.
 
 Three things make a connector callable from a pocket's chat:
 
-1. **Bind it at `scope=pocket`** — enable the connector with the pocket's id.
-   The tools are tenant-scoped: a connector bound to pocket A is not reachable
-   from pocket B.
+1. **Bind it** — either at `scope=pocket` (enable with the pocket's id; private
+   to that room — a connector bound to pocket A is not reachable from pocket B)
+   or at `scope=workspace` (enable workspace-wide; reachable from every chat in
+   the workspace, anchored or not). When the same connector is enabled at both
+   scopes, the listing dedupes it by name.
 2. **Put a token in the connector's config** — v1 auth is the PAT / API token
    already stored in the connector config (no OAuth flow). For GitHub that's a
    `GITHUB_TOKEN`; for a bearer/`api_key` connector it's the credential named in
