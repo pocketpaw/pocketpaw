@@ -142,9 +142,7 @@ async def _list_connector_actions_handler(args: dict) -> dict:  # noqa: ARG001 â
         # Unanchored chats (pocket_id=None) pass "" â€” the pocket arm of the
         # service query matches nothing, so only workspace-scoped connectors
         # come back. Anchored chats get pocket-scoped + workspace-scoped.
-        connectors = await connectors_service.list_pocket_connectors(
-            workspace_id, pocket_id or ""
-        )
+        connectors = await connectors_service.list_pocket_connectors(workspace_id, pocket_id or "")
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_connector_actions failed", exc_info=True)
         return _error_response(f"list_connector_actions failed: {exc}")
