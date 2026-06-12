@@ -1,6 +1,13 @@
 # ee/pocketpaw_ee/cloud/mandates/domain.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
 #
+# Updated: 2026-06-11 (feat/belt-autopilot) — added the ``Autopilot`` embedded
+# value object + the ``autopilot`` field on ``MandateDoc``. Autopilot runs
+# Foresight-seeded simulated users against the mandate's surface on a background
+# cycle, emitting structured feedback sightings the next shift's foreman cites.
+# The persisted state is ``{on: bool, users: int}``; the background asyncio task
+# itself is process-local (the ``autopilot`` module's registry), never persisted.
+#
 # The MANDATE primitive's persistence + value objects. A MANDATE is a standing
 # JOB the Belt holds over time (an FDE retainer): it senses its surface via
 # PATROLS, plans a FEW tasks per SHIFT via a FOREMAN (LLM judgment), routes the
@@ -94,6 +101,20 @@ class Surface(BaseModel):
     repo_id: str
 
 
+class Autopilot(BaseModel):
+    """Autopilot state on a mandate — Foresight-seeded simulated users.
+
+    ``on`` is whether a background autopilot cycle is running; ``users`` is how
+    many personas each cycle builds (1-10). The persisted state is the
+    SOURCE OF TRUTH for whether autopilot SHOULD be running; the live asyncio
+    task lives in the ``autopilot`` module's process-local registry (a process
+    restart re-derives the task from this persisted ``on`` flag — see the
+    autopilot module). DEFAULT off."""
+
+    on: bool = False
+    users: int = 3
+
+
 # ---------------------------------------------------------------------------
 # Beanie documents — service.py is the SOLE importer.
 # ---------------------------------------------------------------------------
@@ -118,6 +139,9 @@ class MandateDoc(TimestampedDocument):
     # patrols run on a shift trigger ("feedback" intake stays open as a human
     # channel regardless; the list gates the automated sense loop).
     patrols: list[str] = Field(default_factory=lambda: ["deps", "feedback"])
+    # Autopilot — Foresight-seeded simulated users feeding the feedback patrol.
+    # Persisted so a restart re-derives the running task; default off.
+    autopilot: Autopilot = Field(default_factory=Autopilot)
 
     class Settings:
         name = "mandates"
@@ -217,6 +241,7 @@ class SightingView:
 
 
 __all__ = [
+    "Autopilot",
     "Budget",
     "Cadence",
     "Charter",

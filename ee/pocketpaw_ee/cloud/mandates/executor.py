@@ -1,6 +1,33 @@
 # ee/pocketpaw_ee/cloud/mandates/executor.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 4 — plan gate + executor).
 #
+# Updated: 2026-06-11 (feat/belt-autopilot — REAL task dispatcher) — added the
+#   ``StationTaskDispatcher`` and ``resolve_dispatcher()`` so an approved plan
+#   task starts a REAL Belt station run instead of a bus-only echo. The
+#   dispatcher selection is env-driven (``POCKETPAW_MANDATE_DISPATCHER=
+#   station|bus``; default ``station`` when the belt plumbing imports cleanly,
+#   else a clean fall-back to ``bus``).
+#
+#   HONESTY (the dispatcher-reality verdict): a genuinely HEADLESS belt station
+#   run is NOT reachable with the existing machinery. The belt "develop station"
+#   is an INTERACTIVE chat-agent loop — the ``/belt`` surface preamble
+#   (``cloud/surface/handlers/belt.py``) drives a Claude chat session that
+#   ORIENTs, DEVELOPs, and produces a unified diff, which the
+#   ``mcp__pocketpaw_belt__belt_propose_change`` tool then files as a
+#   ``code_change`` Instinct Action. There is NO programmatic "task → diff"
+#   runner to call from here; the diff is the OUTPUT of an LLM chat session.
+#   So ``StationTaskDispatcher`` does the CLOSEST REAL thing: it files a real
+#   ``code_change`` Instinct Action (the SAME row type the console Runs tab reads
+#   and the belt gate executes) carrying the task text, in a QUEUED state
+#   (``station_pending=True``, no diff yet), and fires the real
+#   ``belt_run_updated`` event so the run shows up live in the console. A human
+#   opens the ``/belt`` station for that queued run (one click) to drive it to a
+#   diff, which rides the existing gate as normal. This is a genuine run record,
+#   not a bus echo — the tests assert the persisted ``code_change`` Action and
+#   its ``station_pending`` queued state, not a bus message. If a later PR lands
+#   a real headless station runner, swap its call into ``StationTaskDispatcher``
+#   behind this same ``TaskDispatcher`` protocol with no caller change.
+#
 # The apply-on-approve half of the MANDATE plan gate. ``service.trigger_shift``
 # proposes the foreman's PlanProposal THROUGH Instinct as a ``belt_plan``
 # Action (blob under ``Action.parameters._belt_plan``); after a human approves
@@ -106,6 +133,168 @@ class BusTaskDispatcher:
             str(task.get("title", ""))[:80],
         )
         return run_ref
+
+
+# The blob key + kind a Belt station run rides under — kept in sync with the
+# agent-side MCP server's ``CODE_CHANGE_PARAM_KEY`` / ``CODE_CHANGE_KIND`` /
+# ``CODE_CHANGE_SCHEMA`` literals. Duplicated here (not imported) so the
+# dispatcher has no hard dependency on the agent MCP module — same OSS/EE
+# discipline the belt console service uses for the same literals.
+_CODE_CHANGE_PARAM_KEY = "_code_change"
+_CODE_CHANGE_KIND = "code_change"
+_CODE_CHANGE_SCHEMA = 2
+
+
+class StationTaskDispatcher:
+    """REAL ``TaskDispatcher`` — starts a Belt STATION RUN for each approved task.
+
+    HONESTY (see the module header): a headless station run that PRODUCES a diff
+    is not reachable — the belt develop station is an interactive chat-agent
+    loop (the ``/belt`` surface), and the diff is the OUTPUT of that LLM session,
+    not a function we can call. So this dispatcher does the closest REAL thing:
+    it files a real ``code_change`` Instinct Action (the SAME row the console
+    Runs tab reads and the belt gate executes) carrying the task text in a
+    QUEUED state — ``station_pending=True``, no diff yet — and fires the real
+    ``belt_run_updated`` event so the run shows up live in the console. A human
+    opens the ``/belt`` station for that queued run (one click) and drives it to
+    a diff, which rides the existing belt gate as normal.
+
+    This is NOT a bus echo: the run is a durable Instinct Action the tests assert
+    against. Because the blob carries no diff, the run is NOT auto-executable —
+    the belt executor refuses a ``station_pending`` blob loud (defense in depth),
+    but the normal flow never approves a queued run; a human re-proposes the diff
+    through the station, which files a fresh, applyable ``code_change`` Action.
+    """
+
+    async def dispatch(
+        self,
+        *,
+        workspace_id: str,
+        mandate_id: str,
+        shift_no: int,
+        plan_action_id: str,
+        index: int,
+        task: dict[str, Any],
+    ) -> str:
+        from pocketpaw.instinct.models import ActionCategory, ActionPriority, ActionTrigger
+        from pocketpaw.stores import get_instinct_store
+        from pocketpaw_ee.cloud.belt import service as belt_service
+
+        store = get_instinct_store()
+
+        title = str(task.get("title") or "Belt station task")
+        why = str(task.get("why") or "")
+        expected = str(task.get("expected_outcome") or "")
+        repo = await _repo_for_mandate(workspace_id, mandate_id)
+
+        # The QUEUED-run blob: the SAME ``_code_change`` shape the console reads,
+        # but with ``station_pending=True`` and NO diff. ``task`` carries the
+        # human-readable text the station agent picks up; ``repo`` lets the
+        # ``/belt`` page pre-bind the surface so the human doesn't re-pick it.
+        blob: dict[str, Any] = {
+            "kind": _CODE_CHANGE_KIND,
+            "schema": _CODE_CHANGE_SCHEMA,
+            # A station-queued run carries the task text instead of a diff.
+            "station_pending": True,
+            "repo": repo or "",
+            "base_branch": "",
+            "diff": "",
+            "task": f"{title}\n\n{why}".strip(),
+            "summary": expected or title,
+            "workspace_id": workspace_id,
+            "requested_by": str(task.get("requested_by") or ""),
+            # Provenance — tie the queued run back to the mandate shift + plan.
+            "mandate_id": mandate_id,
+            "shift_no": shift_no,
+            "plan_action_id": plan_action_id,
+            "task_index": index,
+        }
+
+        trigger = ActionTrigger(
+            type="agent",
+            source="belt:mandate-dispatch",
+            reason="approved mandate shift task queued for the develop station",
+        )
+        action = await store.propose(
+            pocket_id=workspace_id,
+            title=f"Station task — {title[:60]}",
+            description=f"Queued from mandate shift {shift_no}. {expected}".strip(),
+            recommendation=(
+                f"Open the develop station to work this task: {title}. "
+                "It was approved on a mandate shift and is waiting for the station."
+            ),
+            trigger=trigger,
+            category=ActionCategory.EXTERNAL,
+            priority=ActionPriority.HIGH,
+            parameters={_CODE_CHANGE_PARAM_KEY: blob},
+            assignee=blob["requested_by"] or None,
+            workspace_id=workspace_id,
+        )
+
+        run_ref = str(action.id)
+        # Fire the REAL run feed event so the console Runs tab shows the queued
+        # station run live (status=queued, stage=station). Best-effort.
+        await belt_service.emit_belt_run_updated(
+            workspace_id=workspace_id,
+            action_id=run_ref,
+            status="queued",
+            stage="station",
+        )
+        logger.info(
+            "mandate: queued station run %s for task %d of shift %s (mandate=%s): %s",
+            run_ref,
+            index,
+            shift_no,
+            mandate_id,
+            title[:80],
+        )
+        return run_ref
+
+
+async def _repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
+    """Best-effort read of a mandate's bound repo path (the surface ``repo_id``).
+
+    Used by ``StationTaskDispatcher`` to pre-bind the ``/belt`` station to the
+    mandate's repo on the queued run. Goes through the mandates service (the sole
+    Beanie importer); a read failure degrades to ``None`` (the station then asks
+    for the repo) — it never breaks the dispatch."""
+    try:
+        from pocketpaw_ee.cloud.mandates import service as mandate_service
+
+        return await mandate_service.repo_for_mandate(workspace_id, mandate_id)
+    except Exception:  # noqa: BLE001 — a repo read must never break dispatch
+        logger.debug("mandate: repo lookup for station run failed (non-fatal)", exc_info=True)
+        return None
+
+
+def resolve_dispatcher() -> TaskDispatcher:
+    """Pick the dispatcher from ``POCKETPAW_MANDATE_DISPATCHER``.
+
+    * ``station`` (default) — the REAL ``StationTaskDispatcher``: each approved
+      task becomes a queued belt station run (a real ``code_change`` Instinct
+      Action) that shows in the console Runs tab. Falls back to ``bus`` if the
+      belt plumbing can't be imported (an OSS-only / partial install).
+    * ``bus`` — the announce-only ``BusTaskDispatcher`` (the prior default).
+
+    An unrecognized value falls back to the station default.
+    """
+    import os
+
+    choice = (os.environ.get("POCKETPAW_MANDATE_DISPATCHER") or "station").strip().lower()
+    if choice == "bus":
+        return BusTaskDispatcher()
+    # Default / "station": prefer the real station dispatcher, but degrade to the
+    # bus dispatcher cleanly if the belt service can't be imported.
+    try:
+        import pocketpaw_ee.cloud.belt.service  # noqa: F401
+        from pocketpaw.stores import get_instinct_store  # noqa: F401
+    except Exception:  # noqa: BLE001 — a partial install falls back to bus
+        logger.warning(
+            "mandate: belt plumbing unavailable — falling back to the bus dispatcher",
+            exc_info=True,
+        )
+        return BusTaskDispatcher()
+    return StationTaskDispatcher()
 
 
 def _coerce_uuid(raw: Any) -> Any | None:
@@ -221,7 +410,7 @@ async def execute_approved_plan(
     from pocketpaw.stores import get_instinct_store
 
     store = get_instinct_store()
-    dispatch: TaskDispatcher = dispatcher or BusTaskDispatcher()
+    dispatch: TaskDispatcher = dispatcher or resolve_dispatcher()
 
     params = getattr(action, "parameters", None) or {}
     blob = params.get(BELT_PLAN_PARAM_KEY)
@@ -417,7 +606,9 @@ __all__ = [
     "BELT_PLAN_PARAM_KEY",
     "BELT_PLAN_SCHEMA",
     "BusTaskDispatcher",
+    "StationTaskDispatcher",
     "TaskDispatcher",
     "execute_approved_plan",
     "mark_plan_rejected",
+    "resolve_dispatcher",
 ]

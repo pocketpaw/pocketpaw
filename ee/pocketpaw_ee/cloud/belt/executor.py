@@ -1,6 +1,13 @@
 # executor.py — applies an approved Belt code-change Action and opens a PR.
 # Created: 2026-06-10 (feat/belt-gate, BS-3).
 #
+# Updated: 2026-06-11 (feat/belt-autopilot) — refuses a QUEUED station run loud.
+#   A ``code_change`` blob carrying ``station_pending=True`` (filed by the
+#   mandate ``StationTaskDispatcher`` with the task text but NO diff) is a
+#   placeholder run waiting for a human to drive the develop station to a diff —
+#   it is never auto-applyable. The executor fails it with error_class
+#   ``StationPending`` if it is ever (mistakenly) approved.
+#
 # Updated: 2026-06-11 (feat/belt-repo-init — local-only gate mode) — the executor
 #   now lands a change on a repo with NO ``origin`` remote WITHOUT pushing or
 #   opening a PR. ``_has_origin`` is checked once up front (step 0): with a remote
@@ -522,6 +529,19 @@ async def execute_approved_change(
             "code-change schema mismatch — the change blob is from an "
             "incompatible build and cannot be applied",
             error_class="SchemaMismatch",
+        )
+        return
+
+    # A QUEUED STATION RUN (filed by the mandate StationTaskDispatcher) carries
+    # the task text but NO diff — it is waiting for a human to drive the develop
+    # station to a diff, which files a FRESH applyable code_change Action. It must
+    # never auto-apply (there is nothing to apply). The normal flow never approves
+    # a queued run, but a stray bulk-approve would land here — refuse it loud.
+    if blob.get("station_pending"):
+        await _fail(
+            "this is a QUEUED station run, not an applyable change — open the "
+            "develop station to produce a diff first, then approve that proposal",
+            error_class="StationPending",
         )
         return
 

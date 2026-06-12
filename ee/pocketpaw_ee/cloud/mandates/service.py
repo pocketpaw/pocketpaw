@@ -10,6 +10,9 @@
 #   slice 2: file_feedback, list_sightings, run_patrols (deps patrol)
 #   slice 4: trigger_shift (foreman → plan gate)
 #   slice 5: get_pawprints
+#   autopilot (feat/belt-autopilot): set_autopilot (start/stop Foresight-seeded
+#     simulated users feeding the feedback patrol) + repo_for_mandate (the
+#     dispatcher/autopilot surface read).
 #
 # Conventions (cloud entity rules): validate body at entry
 # (``Schema.model_validate(body)``); tenant filter ``workspace=...`` on EVERY
@@ -107,6 +110,17 @@ def _as_object_id(raw: str) -> Any:
     return ObjectId(raw)
 
 
+def _first_pydantic_msg(exc: Any) -> str:
+    """Render the first error off a Pydantic ``ValidationError`` as a single
+    user-facing message ``"<field>: <reason>"`` for a 422 CloudError."""
+    try:
+        err = exc.errors()[0]
+        loc = ".".join(str(p) for p in err.get("loc", ())) or "body"
+        return f"{loc}: {err.get('msg', 'invalid value')}"
+    except Exception:  # noqa: BLE001 — fall back to the str form
+        return str(exc)
+
+
 # ---------------------------------------------------------------------------
 # CRUD (slice 1)
 # ---------------------------------------------------------------------------
@@ -181,10 +195,18 @@ async def list_mandates(workspace_id: str, user_id: str, body: Any = None) -> di
                     "open_gate_count": open_gate_count,
                     "sighting_count": sighting_count,
                 },
+                "autopilot": _autopilot_to_wire(doc),
                 "created_at": doc.createdAt,
             }
         )
     return {"mandates": out}
+
+
+def _autopilot_to_wire(doc: MandateDoc) -> dict[str, Any]:
+    """Render a mandate's persisted autopilot state for the wire ({on, users}).
+    A mandate predating the autopilot field reads as off/3 (the doc default)."""
+    ap = doc.autopilot
+    return {"on": bool(ap.on), "users": int(ap.users)} if ap else {"on": False, "users": 3}
 
 
 async def get_mandate(workspace_id: str, user_id: str, mandate_id: str) -> dict[str, Any]:
@@ -222,6 +244,7 @@ async def _mandate_detail_wire(doc: MandateDoc) -> dict[str, Any]:
         "charter": _charter_to_wire(doc.charter),
         "soul_path": doc.soul_path,
         "patrols": list(doc.patrols),
+        "autopilot": _autopilot_to_wire(doc),
         "recent_shifts": [
             {
                 "id": str(s.id),
@@ -397,6 +420,75 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
             )
         )
     return {"sightings": [_sighting_to_wire(s) for s in created]}
+
+
+async def set_autopilot(
+    workspace_id: str, user_id: str, mandate_id: str, body: Any
+) -> dict[str, Any]:
+    """Start or stop AUTOPILOT on a mandate — Foresight-seeded simulated users
+    feeding the feedback patrol. Body: ``{action: "start"|"stop", users?: int}``.
+
+    START: persist ``autopilot={on: True, users: N}``, run ONE cycle SYNCHRONOUSLY
+    (so this response already reflects the first cycle's sightings — the brief's
+    "run ONE cycle immediately on start"), then spawn the background loop for the
+    subsequent every-interval cycles. STOP: cancel the background task, persist
+    ``autopilot.on=False``. Either way, emit ``MandateAutopilotChanged`` and
+    return the mandate detail wire dict (envelope-free, matching GET detail).
+
+    A cross-tenant mandate is a 404. Autopilot must never crash a shift or the
+    app — the immediate cycle is failure-swallowing by construction
+    (``autopilot.run_autopilot_cycle`` never raises)."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from pocketpaw_ee.cloud.mandates import autopilot as autopilot_mod
+    from pocketpaw_ee.cloud.mandates.domain import Autopilot
+    from pocketpaw_ee.cloud.mandates.dto import AutopilotRequest
+
+    # Validate at entry — a bad body (unknown action / out-of-range users) is a
+    # 422 ``ValidationError`` CloudError, not a 500 (the cloud error handler only
+    # maps CloudError; a raw Pydantic error would escape as a 500).
+    try:
+        req = AutopilotRequest.model_validate(body)
+    except PydanticValidationError as exc:
+        raise ValidationError("mandate.autopilot_invalid", _first_pydantic_msg(exc)) from exc
+
+    doc = await _fetch_mandate(workspace_id, mandate_id)
+
+    if req.action == "start":
+        users = max(1, min(10, req.users))
+        doc.autopilot = Autopilot(on=True, users=users)
+        await doc.save()
+        # Run the first cycle SYNCHRONOUSLY so the response/assertions see its
+        # sightings, THEN start the loop (which skips its own immediate cycle so
+        # the first cycle isn't double-filed). The cycle never raises.
+        await autopilot_mod.run_autopilot_cycle(workspace_id, mandate_id, users=users)
+        await autopilot_mod.start_autopilot(workspace_id, mandate_id, users, run_immediate=False)
+    else:  # stop
+        await autopilot_mod.stop_autopilot(mandate_id)
+        users = doc.autopilot.users if doc.autopilot else 3
+        doc.autopilot = Autopilot(on=False, users=users)
+        await doc.save()
+
+    await emit(
+        mandate_events.MandateAutopilotChanged(
+            data={
+                "workspace_id": workspace_id,
+                "mandate_id": mandate_id,
+                "on": doc.autopilot.on,
+                "users": doc.autopilot.users,
+            }
+        )
+    )
+    logger.info(
+        "mandate: autopilot %s for %s (workspace=%s, users=%d)",
+        "started" if doc.autopilot.on else "stopped",
+        mandate_id,
+        workspace_id,
+        doc.autopilot.users,
+    )
+    # UI contract — the autopilot response wraps the detail in a ``mandate``
+    # envelope (same shape as create), so the console can re-render the row.
+    return {"mandate": await _mandate_detail_wire(doc)}
 
 
 def _sighting_to_wire(s: SightingDoc) -> dict[str, Any]:
@@ -1192,6 +1284,49 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
 # ---------------------------------------------------------------------------
 
 
+async def repo_for_mandate(workspace_id: str, mandate_id: str) -> str | None:
+    """Read a mandate's bound repo path (the surface ``repo_id``), tenant-scoped.
+
+    Used by the ``StationTaskDispatcher`` to pre-bind the ``/belt`` station to
+    the mandate's repo on a queued station run. Returns ``None`` on a miss /
+    cross-tenant id (a malformed id is a clean miss, not a 500)."""
+    # no-event: read-only path; emit only on writes.
+    try:
+        doc = await MandateDoc.find_one(
+            MandateDoc.workspace == workspace_id, MandateDoc.id == _as_object_id(mandate_id)
+        )
+    except Exception:  # noqa: BLE001 — malformed id == miss
+        doc = None
+    return doc.surface.repo_id if doc is not None else None
+
+
+async def list_autopilot_enabled() -> list[dict[str, Any]]:
+    """All ACTIVE mandates whose persisted ``autopilot.on`` is True — the
+    startup reconciler's read (``autopilot.reconcile_autopilot_tasks``).
+
+    DELIBERATELY cross-workspace: this is a SYSTEM boot read that re-derives the
+    process-local background loops from the persisted flags, the same posture as
+    the stale-run sweeper's all-workspace scan — not a user-facing query (the
+    tenant-filter rule applies to request-path finds). Paused mandates are
+    excluded: a paused mandate is inert, so its loop is not restarted (it
+    resumes when autopilot is started again via the endpoint).
+
+    Returns ``[{workspace_id, mandate_id, users}]``."""
+    # no-event: read-only path; emit only on writes.
+    docs = await MandateDoc.find(
+        MandateDoc.autopilot.on == True,  # noqa: E712 — Beanie expression syntax
+        MandateDoc.status == "active",
+    ).to_list()
+    return [
+        {
+            "workspace_id": d.workspace,
+            "mandate_id": str(d.id),
+            "users": int(d.autopilot.users) if d.autopilot else 3,
+        }
+        for d in docs
+    ]
+
+
 async def executor_revalidate(workspace_id: str, mandate_id: str) -> dict[str, Any]:
     """Approve-time re-validation read for the plan executor: does the mandate
     still exist, is it active, what is the CURRENT budget."""
@@ -1261,11 +1396,14 @@ __all__ = [
     "file_feedback",
     "get_mandate",
     "get_pawprints",
+    "list_autopilot_enabled",
     "list_mandates",
     "list_sightings",
     "mark_shift",
     "prepare_plan_resolution",
+    "repo_for_mandate",
     "run_patrols",
+    "set_autopilot",
     "shift_wire",
     "trigger_shift",
 ]
