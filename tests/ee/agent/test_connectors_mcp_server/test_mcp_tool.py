@@ -618,15 +618,27 @@ class TestSenseTools:
     @pytest.mark.asyncio
     async def test_sense_execute_guards_and_validation(self) -> None:
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
+        from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
 
-        # No pocket → refused.
+        # No pocket → flows through with pocket_id=None (workspace-scoped
+        # providers stay reachable from unanchored chats, matching list_senses).
         ws_p, u_p, pk_p = _patch_identity("ws_1", "u_1", None)
-        with ws_p, u_p, pk_p:
+        mock_exec = AsyncMock(
+            return_value=SenseExecutionResult(
+                ok=True, sense_id="paw.email.v1", action="gmail_search"
+            )
+        )
+        with (
+            ws_p,
+            u_p,
+            pk_p,
+            patch("pocketpaw_ee.cloud.senses.resolver.execute_sense", new=mock_exec),
+        ):
             out = await connectors_mcp._sense_execute_handler(
                 {"sense": "paw.email.v1", "action": "gmail_search"}
             )
-        assert out.get("is_error") is True
-        assert "pocket" in out["content"][0]["text"]
+        assert out.get("is_error") is not True
+        assert mock_exec.await_args.kwargs["pocket_id"] is None
 
         # Missing sense → refused.
         ws_p, u_p, pk_p = _patch_identity("ws_1", "u_1", "pk_1")
