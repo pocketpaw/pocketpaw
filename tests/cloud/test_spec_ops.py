@@ -3,6 +3,13 @@
 These tests exercise the walk + mutate primitives against fixture trees
 — no DB, no events, no MCP. They lock down the contract the service
 layer's granular ops rely on.
+
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — added the
+``summarize_ripple_spec`` suite: composed template-style spec, list-root
+ui, the 20-key state cap, empty/None/malformed degradation, and the
+legacy ``widgets_count`` passthrough. Locks the lightweight-metadata
+contract both the chat ``<pocket-summary>`` block and the get_pocket
+agent view ``_summary`` lead are built from.
 """
 
 from __future__ import annotations
@@ -371,3 +378,143 @@ def test_match_rejects_unknown_match_form():
 def test_match_rejects_empty_match():
     with pytest.raises(ValueError, match="empty"):
         spec_ops.match_array_item(_sample_array(), {})
+
+
+# ---------------------------------------------------------------------------
+# summarize_ripple_spec — lightweight metadata for agent orientation
+# ---------------------------------------------------------------------------
+
+
+def _composed_spec() -> dict:
+    """Template-style spec: dict ui root with children, state, sources,
+    actions — the applications-triage shape from the bug transcript."""
+    return {
+        "version": "1.0",
+        "ui": {
+            "id": "n_root0000",
+            "type": "flex",
+            "children": [
+                {"id": "n_header00", "type": "page-header"},
+                {"id": "n_grid0001", "type": "grid"},
+                {"id": "n_grid0002", "type": "grid"},
+            ],
+        },
+        "state": {
+            "selected_id": None,
+            "pending_proposal": None,
+            "status_counts": {},
+            "queue_total": 0,
+            "oldest_waiting": "",
+            "applications": [],
+            "selected": None,
+        },
+        "sources": {
+            "applications": {
+                "method": "GET",
+                "path": "/applications?status=open",
+                "bind": "state.applications",
+                "refresh": ["pocket_open", "manual"],
+            },
+        },
+        "actions": {"approve": {"method": "POST"}, "reject": {"method": "POST"}},
+    }
+
+
+def test_summarize_composed_spec():
+    out = spec_ops.summarize_ripple_spec(_composed_spec(), widgets_count=0)
+    assert out["has_ripple_spec"] is True
+    # Top-level nodes = the dict root's children (the root is just the
+    # layout container; its children are what the user sees).
+    assert out["ui_node_count"] == 3
+    assert out["ui_node_types"] == ["page-header", "grid", "grid"]
+    assert out["state_keys"] == [
+        "selected_id",
+        "pending_proposal",
+        "status_counts",
+        "queue_total",
+        "oldest_waiting",
+        "applications",
+        "selected",
+    ]
+    assert out["state_keys_omitted"] == 0
+    assert out["sources"] == [
+        {
+            "key": "applications",
+            "method": "GET",
+            "path": "/applications?status=open",
+            "bind": "state.applications",
+        }
+    ]
+    assert out["action_keys"] == ["approve", "reject"]
+    assert out["widgets_count"] == 0
+
+
+def test_summarize_list_ui_root():
+    spec = {"ui": [{"type": "heading"}, {"type": "table"}, "garbage-entry"]}
+    out = spec_ops.summarize_ripple_spec(spec)
+    assert out["ui_node_count"] == 2
+    assert out["ui_node_types"] == ["heading", "table"]
+
+
+def test_summarize_dict_root_without_children_counts_the_root():
+    spec = {"ui": {"id": "n_root0000", "type": "markdown"}}
+    out = spec_ops.summarize_ripple_spec(spec)
+    assert out["ui_node_count"] == 1
+    assert out["ui_node_types"] == ["markdown"]
+
+
+def test_summarize_caps_state_keys_at_20_with_omitted_count():
+    spec = {"state": {f"key_{i:02d}": i for i in range(25)}}
+    out = spec_ops.summarize_ripple_spec(spec)
+    assert len(out["state_keys"]) == 20
+    assert out["state_keys"][0] == "key_00"
+    assert out["state_keys_omitted"] == 5
+
+
+def test_summarize_empty_spec():
+    out = spec_ops.summarize_ripple_spec({})
+    assert out["has_ripple_spec"] is False
+    assert out["ui_node_count"] == 0
+    assert out["ui_node_types"] == []
+    assert out["state_keys"] == []
+    assert out["state_keys_omitted"] == 0
+    assert out["sources"] == []
+    assert out["action_keys"] == []
+    assert out["widgets_count"] == 0
+
+
+def test_summarize_none_spec():
+    out = spec_ops.summarize_ripple_spec(None, widgets_count=4)
+    assert out["has_ripple_spec"] is False
+    assert out["ui_node_count"] == 0
+    assert out["widgets_count"] == 4
+
+
+def test_summarize_malformed_spec_degrades_gracefully():
+    spec = {
+        "ui": "not-a-tree",
+        "state": ["not", "a", "dict"],
+        "sources": ["not-a-dict"],
+        "actions": "nope",
+    }
+    out = spec_ops.summarize_ripple_spec(spec)
+    assert out["has_ripple_spec"] is True  # a dict spec exists, even if junk
+    assert out["ui_node_count"] == 0
+    assert out["ui_node_types"] == []
+    assert out["state_keys"] == []
+    assert out["sources"] == []
+    assert out["action_keys"] == []
+    # Not even a dict at the top → same shape as None.
+    assert spec_ops.summarize_ripple_spec("garbage")["has_ripple_spec"] is False
+
+
+def test_summarize_source_row_survives_non_dict_binding():
+    spec = {"sources": {"weird": "just-a-string"}}
+    out = spec_ops.summarize_ripple_spec(spec)
+    assert out["sources"] == [{"key": "weird", "method": None, "path": None, "bind": None}]
+
+
+def test_summarize_node_without_type_reports_unknown():
+    spec = {"ui": {"children": [{"id": "n_notype00"}]}}
+    out = spec_ops.summarize_ripple_spec(spec)
+    assert out["ui_node_types"] == ["unknown"]

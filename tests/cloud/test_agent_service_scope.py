@@ -10,6 +10,14 @@ appear in member B's resolved scopes nor in any multi-member room — it is
 emitted ONLY in A's own solo session. These are the RED-before / GREEN-after
 tests for the gate that keeps one member's Gmail/calendar KB out of every
 other member's agent context.
+
+Updated: 2026-06-12 (fix/pocket-anchored-chat-context) — added the
+``ScopeContext.pocket_summary`` population tests: ``_resolve_pocket`` and
+``_resolve_session`` (when the session is pocket-anchored) must stash the
+pocket's orientation data (name, description, type, template/pattern, ripple
+summary) for ALL pocket types using the already-fetched Pocket doc — no
+extra DB round-trips. Home keeps its backend_summary alongside the new
+field; non-pocket scopes carry ``pocket_summary=None``.
 """
 
 from __future__ import annotations
@@ -565,3 +573,175 @@ def test_no_user_scope_regression_existing_ordering_preserved():
     )
     scopes = _kb_scopes_for_context(ctx)
     assert scopes == ["pocket:p1", "agent:agentZ", "workspace:w1"]
+
+
+# ===========================================================================
+# fix/pocket-anchored-chat-context — ScopeContext.pocket_summary population.
+#
+# The resolvers already hold the fetched Pocket doc; they must stash its
+# orientation data (name, description, type, template/pattern metadata, and
+# the rippleSpec summary) for EVERY pocket-anchored scope, paying no extra
+# DB read. This is what fixes "what's this pocket about?" → "an empty shell".
+# ===========================================================================
+
+
+def _template_pocket_ns(**overrides) -> SimpleNamespace:
+    """A template-instantiated pocket: composed rippleSpec, empty legacy
+    widgets[] — the exact shape the bug transcript hit."""
+    base = dict(
+        id="p_apps",
+        type="custom",
+        name="Applications",
+        description="Triage queue for inbound applications",
+        template_slug="applications-triage",
+        pattern="dashboard",
+        workspace="w1",
+        owner="u_caller",
+        team=["u_caller"],
+        agents=["agent_primary"],
+        tool_specs=[],
+        visibility="workspace",
+        shared_with=[],
+        widgets=[],
+        rippleSpec={
+            "version": "1.0",
+            "ui": {
+                "id": "n_root0000",
+                "type": "flex",
+                "children": [
+                    {"id": "n_header00", "type": "page-header"},
+                    {"id": "n_grid0001", "type": "grid"},
+                ],
+            },
+            "state": {"selected_id": None, "applications": []},
+            "sources": {
+                "applications": {
+                    "method": "GET",
+                    "path": "/applications?status=open",
+                    "bind": "state.applications",
+                }
+            },
+        },
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.asyncio
+async def test_resolve_non_home_pocket_populates_pocket_summary():
+    """The fix: a non-home pocket scope carries the pocket's summary data —
+    name, description, template/pattern metadata, and the ripple summary —
+    without any extra backend read."""
+    backend_mock = AsyncMock(return_value={"configured": True})
+    with (
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service._get_pocket",
+            AsyncMock(return_value=_template_pocket_ns()),
+        ),
+        patch("pocketpaw_ee.cloud.pockets.service.get_pocket_backend", backend_mock),
+    ):
+        ctx = await resolve_scope_context(
+            scope="pocket", scope_id="p_apps", user_id="u_caller", agent_id_hint=None
+        )
+    summary = ctx.pocket_summary
+    assert summary is not None
+    assert summary["name"] == "Applications"
+    assert summary["description"] == "Triage queue for inbound applications"
+    assert summary["type"] == "custom"
+    assert summary["template_slug"] == "applications-triage"
+    assert summary["pattern"] == "dashboard"
+    ripple = summary["ripple"]
+    assert ripple["has_ripple_spec"] is True
+    assert ripple["ui_node_count"] == 2
+    assert ripple["ui_node_types"] == ["page-header", "grid"]
+    assert "selected_id" in ripple["state_keys"]
+    assert ripple["sources"][0]["key"] == "applications"
+    assert ripple["widgets_count"] == 0
+    # Still no backend read for non-home pockets (existing rule unchanged).
+    backend_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resolve_home_pocket_keeps_backend_summary_and_gains_pocket_summary():
+    """Home behavior is unchanged (backend summary still resolved) — the
+    pocket summary is additive."""
+    pocket = _template_pocket_ns(id="home-1", type="home", name="Home", template_slug=None)
+    backend = {"configured": True, "base_url": "https://api.acme.test", "auth_type": "bearer"}
+    with (
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.get_pocket_backend",
+            AsyncMock(return_value=backend),
+        ),
+    ):
+        ctx = await resolve_scope_context(
+            scope="pocket", scope_id="home-1", user_id="u_caller", agent_id_hint=None
+        )
+    assert ctx.backend_summary == backend
+    assert ctx.pocket_summary is not None
+    assert ctx.pocket_summary["name"] == "Home"
+    assert ctx.pocket_summary["type"] == "home"
+
+
+@pytest.mark.asyncio
+async def test_resolve_pocket_summary_degrades_without_ripple_spec():
+    """A pocket with no rippleSpec still yields a summary (name/description/
+    legacy widgets count) — has_ripple_spec is simply False."""
+    pocket = _template_pocket_ns(
+        rippleSpec=None, template_slug=None, pattern=None, widgets=["w1", "w2"]
+    )
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_pocket", AsyncMock(return_value=pocket)):
+        ctx = await resolve_scope_context(
+            scope="pocket", scope_id="p_apps", user_id="u_caller", agent_id_hint=None
+        )
+    assert ctx.pocket_summary is not None
+    assert ctx.pocket_summary["ripple"]["has_ripple_spec"] is False
+    assert ctx.pocket_summary["ripple"]["widgets_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_with_pocket_populates_pocket_summary():
+    """Pocket chats commonly route through session scope (the frontend
+    prefers it) — the same summary must ride along there."""
+    from pocketpaw_ee.cloud.models.session import Session
+
+    fake = Session.model_construct(
+        id="s1",
+        sessionId="ws",
+        workspace="w1",
+        owner="u_caller",
+        agent="a1",
+        pocket="p_apps",
+        deleted_at=None,
+    )
+    with (
+        patch("pocketpaw_ee.cloud.chat.agent_service._get_session", AsyncMock(return_value=fake)),
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service._get_pocket",
+            AsyncMock(return_value=_template_pocket_ns()),
+        ),
+    ):
+        ctx = await resolve_scope_context(
+            scope="session", scope_id="s1", user_id="u_caller", agent_id_hint=None
+        )
+    assert ctx.pocket_summary is not None
+    assert ctx.pocket_summary["name"] == "Applications"
+    assert ctx.pocket_summary["ripple"]["ui_node_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_group_scope_has_no_pocket_summary():
+    """Non-anchored scopes carry pocket_summary=None — behavior unchanged."""
+    group = SimpleNamespace(
+        id="g1",
+        type="private",
+        members=["u_caller"],
+        agents=[SimpleNamespace(agent="a1", respond_mode="auto")],
+        archived=False,
+        workspace="w1",
+    )
+    with patch("pocketpaw_ee.cloud.chat.agent_service._get_group", AsyncMock(return_value=group)):
+        ctx = await resolve_scope_context(
+            scope="group", scope_id="g1", user_id="u_caller", agent_id_hint=None
+        )
+    assert ctx.pocket_summary is None

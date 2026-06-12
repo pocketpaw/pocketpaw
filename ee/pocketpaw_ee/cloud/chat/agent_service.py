@@ -94,6 +94,24 @@ ABSENT (and the digest never even pulled) in every shared / multi-member
 room. Graceful: an empty digest (no connected accounts) or a digest that
 raises → ``""``, so unconnected and non-solo sessions are byte-identical to
 before.
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``ScopeContext``
+carries an optional ``pocket_summary``: the anchored pocket's orientation
+data ({name, description, type, template_slug, pattern, ripple}) where
+``ripple`` is ``spec_ops.summarize_ripple_spec`` over the pocket's
+rippleSpec (top-level ui node count/types, capped state keys, source
+summaries, action keys, legacy widgets count). Populated by
+``_pocket_summary_data`` in ``_resolve_pocket`` AND ``_resolve_session``
+(when the session is pocket-anchored) for ALL pocket types, from the
+Pocket doc those resolvers already fetched — zero extra DB reads.
+``build_behavior_instructions`` renders it as a ``<pocket-summary>``
+block (description clamped, whole block hard-capped — the about-member
+precedent) appended after the per-scope pocket prompts and gated off for
+``intent="pocket_create"`` (mirrors the ``<current-pocket>`` tag gate).
+Fixes the context-starvation bug where a chat anchored to a fully
+composed template pocket had NO pocket content in its prompt, so the
+agent read the empty legacy ``widgets[]`` via get_pocket and answered
+"an empty shell". HOME pockets keep HOME_POCKET_PROMPT + backend_summary
+byte-identical — the new block is purely additive.
 """
 
 from __future__ import annotations
@@ -331,6 +349,19 @@ class ScopeContext:
     # agent then behaves exactly as before, no block. Stays a pre-rendered
     # string so the sync ``build_behavior_instructions`` never has to await.
     about_member_block: str | None = None
+    # The anchored pocket's orientation data: {name, description, type,
+    # template_slug, pattern, ripple} where ``ripple`` is
+    # ``spec_ops.summarize_ripple_spec`` over the pocket's rippleSpec
+    # (top-level ui node count/types, capped state keys, source summaries,
+    # action keys, legacy widgets count). Populated for ALL pocket-anchored
+    # scopes by ``_pocket_summary_data`` — built from the Pocket doc the
+    # resolvers already fetched, so it costs no extra DB read.
+    # ``build_behavior_instructions`` renders it as the ``<pocket-summary>``
+    # block so the agent knows what the pocket contains WITHOUT having to
+    # call get_pocket (and without misreading the empty legacy ``widgets[]``
+    # array as "this pocket is an empty shell"). ``None`` when the chat
+    # isn't anchored to a pocket — no block, behavior unchanged.
+    pocket_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +424,40 @@ async def _home_backend_summary(
         logger.debug("home backend summary fetch failed for pocket %s", pocket_id, exc_info=True)
         return None
     return summary
+
+
+def _pocket_summary_data(pocket: Any) -> dict[str, Any] | None:
+    """Build the ``ScopeContext.pocket_summary`` dict from an already-fetched
+    Pocket doc, or ``None``.
+
+    Pure read over the in-hand document — NO DB round-trip. Runs for ALL
+    pocket types (home included; there the summary is additive next to the
+    existing backend_summary flow). A malformed doc degrades to ``None`` so
+    a summary failure can never block scope resolution — the agent then
+    simply behaves as before the block existed.
+    """
+    if pocket is None:
+        return None
+    try:
+        # Lazy import, mirroring ``_home_backend_summary`` — chat paths that
+        # never anchor to a pocket shouldn't pull the pockets package in.
+        from pocketpaw_ee.cloud.pockets.spec_ops import summarize_ripple_spec
+
+        ripple = summarize_ripple_spec(
+            getattr(pocket, "rippleSpec", None),
+            widgets_count=len(getattr(pocket, "widgets", None) or []),
+        )
+        return {
+            "name": str(getattr(pocket, "name", "") or ""),
+            "description": str(getattr(pocket, "description", "") or ""),
+            "type": getattr(pocket, "type", None),
+            "template_slug": getattr(pocket, "template_slug", None),
+            "pattern": getattr(pocket, "pattern", None),
+            "ripple": ripple,
+        }
+    except Exception:  # noqa: BLE001 — a summary failure must not block resolution
+        logger.debug("pocket summary build failed", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +560,95 @@ async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
     return block or None
 
 
+# ---------------------------------------------------------------------------
+# "<pocket-summary>" block (agent orientation, fix/pocket-anchored-chat-context)
+# ---------------------------------------------------------------------------
+
+# Same prompt-bloat discipline as the about-member block: the description is
+# the only unbounded user-authored field, so it gets a per-field clamp; the
+# whole rendered block gets a hard backstop cap. ~4 chars/token ⇒ 2000 chars
+# ≈ ~500 tokens for a fully composed pocket — cheap orientation that saves
+# the get_pocket round-trip (and the "widgets: 0 ⇒ empty shell" misread).
+_POCKET_SUMMARY_DESC_CHAR_CAP = 280
+_POCKET_SUMMARY_CHAR_CAP = 2000
+
+
+def _render_pocket_summary_block(summary: dict[str, Any]) -> str:
+    """Render ``ScopeContext.pocket_summary`` as the ``<pocket-summary>``
+    system-prompt block.
+
+    Sync and pure — the data was resolved (and the ripple summary computed)
+    in the scope resolvers, mirroring the about-member flow. Only lines with
+    content are emitted. Ends with the one-line get_pocket hint so the agent
+    knows where the full spec lives.
+    """
+    name = " ".join(str(summary.get("name") or "").split())
+    desc = " ".join(str(summary.get("description") or "").split())
+    if len(desc) > _POCKET_SUMMARY_DESC_CHAR_CAP:
+        desc = desc[:_POCKET_SUMMARY_DESC_CHAR_CAP].rstrip() + "…"
+    ripple = summary.get("ripple") or {}
+
+    lines = [
+        "<pocket-summary>",
+        "This chat is anchored to the pocket below. Orient from this summary",
+        "when asked what the pocket is or contains.",
+        f"  name: {name or '(unnamed)'}",
+    ]
+    if desc:
+        lines.append(f"  description: {desc}")
+    meta_bits = []
+    if summary.get("type"):
+        lines.append(f"  type: {summary['type']}")
+    if summary.get("template_slug"):
+        meta_bits.append(f"template: {summary['template_slug']}")
+    if summary.get("pattern"):
+        meta_bits.append(f"pattern: {summary['pattern']}")
+    if meta_bits:
+        lines.append("  " + " · ".join(meta_bits))
+
+    if ripple.get("has_ripple_spec"):
+        types = ", ".join(ripple.get("ui_node_types") or []) or "(untyped)"
+        lines.append(
+            f"  layout: rippleSpec.ui — {ripple.get('ui_node_count', 0)} top-level node(s): {types}"
+        )
+        state_keys = ripple.get("state_keys") or []
+        if state_keys:
+            omitted = ripple.get("state_keys_omitted") or 0
+            suffix = f" (+{omitted} more)" if omitted else ""
+            lines.append(
+                f"  state keys ({len(state_keys) + omitted}): {', '.join(state_keys)}{suffix}"
+            )
+        sources = ripple.get("sources") or []
+        if sources:
+            rendered = "; ".join(
+                f"{s.get('key')} — {s.get('method') or '?'} {s.get('path') or '?'}"
+                f" → {s.get('bind') or '?'}"
+                for s in sources
+            )
+            lines.append(f"  sources ({len(sources)}): {rendered}")
+        action_keys = ripple.get("action_keys") or []
+        if action_keys:
+            lines.append(f"  actions ({len(action_keys)}): {', '.join(action_keys)}")
+        # The misread this block exists to kill: an empty top-level widgets[]
+        # does NOT mean the pocket is empty — the real layout is the spec.
+        lines.append(
+            f"  widgets[]: {ripple.get('widgets_count', 0)} entries — this is a "
+            "legacy array; the real layout lives in rippleSpec.ui above"
+        )
+    else:
+        lines.append(
+            f"  layout: no rippleSpec — {ripple.get('widgets_count', 0)} legacy widgets[] entries"
+        )
+    lines.append("Call get_pocket for the full rippleSpec, state, and sources.")
+    lines.append("</pocket-summary>")
+    block = "\n".join(lines)
+
+    if len(block) > _POCKET_SUMMARY_CHAR_CAP:
+        # Backstop hard cap — keep the block well-formed by re-closing it.
+        block = block[:_POCKET_SUMMARY_CHAR_CAP].rstrip() + "…\n</pocket-summary>"
+    return block
+
+
 async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
     """Resolve the workspace's default ``pocketpaw`` agent id, or ``None``.
 
@@ -559,6 +713,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
     pocket_tool_specs: list[dict[str, Any]] = []
     pocket_type: str | None = None
     backend_summary: dict[str, Any] | None = None
+    pocket_summary: dict[str, Any] | None = None
     pocket_id = getattr(session, "pocket", None)
     if pocket_id:
         pocket = await _get_pocket(str(pocket_id))
@@ -572,6 +727,11 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
             backend_summary = await _home_backend_summary(
                 pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
             )
+            # Pocket orientation for ALL pocket types — built from the doc
+            # we already fetched, no extra read. Mirrors the pocket-scope
+            # path so the agent sees the same <pocket-summary> block
+            # whichever scope the frontend routed the chat through.
+            pocket_summary = _pocket_summary_data(pocket)
 
     workspace_id = str(getattr(session, "workspace", ""))
     target = agent_id_hint or getattr(session, "agent", None)
@@ -603,6 +763,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         pocket_type=pocket_type,
         backend_summary=backend_summary,
         about_member_block=about_member_block,
+        pocket_summary=pocket_summary,
     )
 
 
@@ -703,6 +864,9 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
 
     pocket_type = getattr(pocket, "type", None)
     backend_summary = await _home_backend_summary(pocket_type, workspace_id, scope_id)
+    # Pocket orientation for ALL pocket types (fix/pocket-anchored-chat-
+    # context) — built from the doc we already fetched, no extra read.
+    pocket_summary = _pocket_summary_data(pocket)
     # Orient the agent to the calling member (pp#1367) — pre-rendered capped
     # block, ``None`` when the member has no Person.
     about_member_block = await _resolve_about_member(workspace_id, user_id)
@@ -720,6 +884,7 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         pocket_type=pocket_type,
         backend_summary=backend_summary,
         about_member_block=about_member_block,
+        pocket_summary=pocket_summary,
     )
 
 
@@ -894,6 +1059,18 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         parts.append(
             fill_current_pocket(HOME_POCKET_PROMPT, ctx.pocket_id or "", ctx.backend_summary)
         )
+    # ADDITIVE pocket orientation (fix/pocket-anchored-chat-context): every
+    # pocket-anchored scope — home included — gets a <pocket-summary> block
+    # (name, description, template/pattern, ui node types, state keys,
+    # sources, legacy widgets count) so the agent can answer "what's this
+    # pocket about?" without misreading the empty legacy widgets[] array as
+    # "an empty shell". Resolved on the ScopeContext from the already-fetched
+    # Pocket doc; rendered sync here (the about-member pattern). Gated off
+    # for intent="pocket_create" — that flow is about a NEW pocket, so the
+    # anchor's summary would mislead (mirrors the <current-pocket> tag gate
+    # in build_dynamic_context). ``None`` ⇒ no block, byte-identical prompt.
+    if ctx.pocket_summary and ctx.intent != "pocket_create":
+        parts.append(_render_pocket_summary_block(ctx.pocket_summary))
     # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
     # "about this member" block LAST so the agent greets the caller by name and
     # tailors to their role/focus from turn one. It is pre-resolved on the

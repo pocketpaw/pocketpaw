@@ -168,6 +168,15 @@ connector is enabled for the workspace (via
 the source executor can route a connector backend through
 ``connectors_service.execute`` instead of an HTTP GET. The executor tuple
 grew two trailing elements; the write-path consumers ignore them.
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``_agent_view_dict``
+now LEADS with a ``_summary`` field (``spec_ops.summarize_ripple_spec`` over
+the doc's rippleSpec: ui node count/types, capped state keys, source
+summaries, action keys, legacy ``widgets_count``, plus a note that the
+top-level ``widgets[]`` array is legacy and the real layout lives in
+rippleSpec). Fixes the agent-view misread where ``get_pocket`` returned the
+empty legacy ``widgets: []`` alongside the full rippleSpec and agents
+concluded a fully composed template pocket was "an empty shell". The
+``widgets`` field itself is NOT removed — other consumers may rely on it.
 """
 
 from __future__ import annotations
@@ -1936,13 +1945,29 @@ def _agent_view_dict(doc: _PocketDoc) -> dict:
 
     Used by the in-process MCP tool channel — same shape every
     ``agent_*`` helper returns on success.
+
+    LEADS with a ``_summary`` field (``spec_ops.summarize_ripple_spec``)
+    so the agent reads the truth first: the dump's legacy top-level
+    ``widgets[]`` array is empty on template-instantiated pockets, and
+    agents that read it before ``rippleSpec`` concluded a fully composed
+    pocket was "an empty shell". ``widgets`` itself stays in the view —
+    other consumers may rely on it — but the summary names it legacy.
     """
     import json
 
     raw = doc.model_dump(mode="json", by_alias=True, exclude_none=True)
     for k in _AGENT_INVISIBLE_FIELDS:
         raw.pop(k, None)
-    return json.loads(json.dumps(raw, default=str))
+    summary = spec_ops.summarize_ripple_spec(doc.rippleSpec, widgets_count=len(doc.widgets or []))
+    if summary["has_ripple_spec"]:
+        summary["note"] = (
+            "The authoritative layout lives in rippleSpec.ui — the top-level "
+            "widgets[] array is a legacy field"
+            + (" and is empty for this pocket." if not summary["widgets_count"] else ".")
+        )
+    view: dict = {"_summary": summary}
+    view.update(raw)
+    return json.loads(json.dumps(view, default=str))
 
 
 async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None]:
