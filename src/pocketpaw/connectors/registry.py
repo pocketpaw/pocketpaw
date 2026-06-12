@@ -17,6 +17,15 @@
 #   from persisted config so the execute path no longer assumes a prior
 #   /connect in the same process. ``disconnect()`` deletes the persisted row.
 #   With an empty store, behavior is identical to before.
+# Updated: 2026-06-12 (connector-store-unification CS-2) — Status tells the
+#   truth + home-dir definitions. ``status()`` derives "connected" from
+#   durable state (definition present + config persisted in the state store),
+#   never from the in-process adapter dict, so a fresh process reports the
+#   same status as the one that connected. Definition scan now reads
+#   ~/.pocketpaw/connectors/*.yaml first, then CWD connectors/*.yaml — CWD
+#   wins on name collision (deploys override). ``get_definition`` rescans on
+#   miss. Orphan state rows whose definition is gone surface as
+#   ``definition_missing`` instead of vanishing or crashing.
 
 from __future__ import annotations
 
@@ -126,6 +135,15 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
     return None
 
 
+def _default_home_connectors_dir() -> Path:
+    """Default home-dir location for user-installed connector definitions.
+
+    Resolved lazily (not at construction) so tests can patch this function
+    and already-built registries pick up the override.
+    """
+    return Path.home() / ".pocketpaw" / "connectors"
+
+
 class ConnectorRegistry:
     """Discovers available connectors and manages instances per pocket."""
 
@@ -134,23 +152,32 @@ class ConnectorRegistry:
         connectors_dir: Path | None = None,
         *,
         state_store: ConnectorStateStore | None = None,
+        home_connectors_dir: Path | None = None,
     ) -> None:
         self._connectors_dir = connectors_dir or Path("connectors")
+        self._home_connectors_dir = home_connectors_dir
         self._state_store: ConnectorStateStore = state_store or FileConnectorStateStore()
         self._definitions: dict[str, ConnectorDef] = {}
         self._instances: dict[str, AnyAdapter] = {}  # key = "{pocket_id}:{connector_name}"
         self._scan()
 
     def _scan(self) -> None:
-        """Scan connectors directory for YAML definitions."""
-        if not self._connectors_dir.exists():
-            return
-        for path in sorted(self._connectors_dir.glob("*.yaml")):
-            try:
-                defn = parse_connector_yaml(path)
-                self._definitions[defn.name] = defn
-            except Exception:
-                pass  # Skip malformed YAMLs
+        """Scan both connector directories for YAML definitions.
+
+        Home dir (``~/.pocketpaw/connectors``) first, then the CWD dir —
+        scanned second so it overwrites on name collision: deploys override
+        user-installed definitions.
+        """
+        home_dir = self._home_connectors_dir or _default_home_connectors_dir()
+        for directory in (home_dir, self._connectors_dir):
+            if not directory.exists():
+                continue
+            for path in sorted(directory.glob("*.yaml")):
+                try:
+                    defn = parse_connector_yaml(path)
+                    self._definitions[defn.name] = defn
+                except Exception:
+                    pass  # Skip malformed YAMLs
 
     @property
     def available(self) -> list[dict[str, str]]:
@@ -178,8 +205,17 @@ class ConnectorRegistry:
         return list(self._definitions.values())
 
     def get_definition(self, name: str) -> ConnectorDef | None:
-        """Get a connector definition by name."""
-        return self._definitions.get(name)
+        """Get a connector definition by name, rescanning once on a miss.
+
+        The rescan is cheap (a few dozen small YAMLs) and lets a definition
+        dropped into either scan dir after registry construction resolve
+        without a process restart.
+        """
+        defn = self._definitions.get(name)
+        if defn is None:
+            self.reload()
+            defn = self._definitions.get(name)
+        return defn
 
     def get_adapter(self, pocket_id: str, connector_name: str) -> AnyAdapter | None:
         """Get an active adapter instance for a pocket+connector."""
@@ -282,19 +318,41 @@ class ConnectorRegistry:
         return True
 
     def status(self, pocket_id: str) -> list[dict[str, Any]]:
-        """Get connection status for all connectors in a pocket."""
+        """Get connection status for all connectors in a pocket.
+
+        "Connected" is derived from durable state — definition present +
+        config persisted in the state store — never from the in-process
+        adapter dict, so a fresh process reports the same status as the one
+        that ran /connect. Persisted rows whose definition no longer resolves
+        surface as ``definition_missing`` instead of disappearing.
+        """
+        persisted = {name for name, scope in self._state_store.list() if scope == pocket_id}
+        orphans = persisted - set(self._definitions)
+        if orphans:
+            # A definition may have landed since the last scan — rescan once
+            # before declaring rows orphaned.
+            self.reload()
+            orphans = persisted - set(self._definitions)
+
         results = []
         for name, defn in self._definitions.items():
-            key = f"{pocket_id}:{name}"
-            adapter = self._instances.get(key)
             results.append(
                 {
                     "name": name,
                     "display_name": defn.display_name,
                     "icon": defn.icon,
                     "status": ConnectorStatus.CONNECTED
-                    if adapter
+                    if name in persisted
                     else ConnectorStatus.DISCONNECTED,
+                }
+            )
+        for name in sorted(orphans):
+            results.append(
+                {
+                    "name": name,
+                    "display_name": name,
+                    "icon": "plug",
+                    "status": ConnectorStatus.DEFINITION_MISSING,
                 }
             )
         return results
