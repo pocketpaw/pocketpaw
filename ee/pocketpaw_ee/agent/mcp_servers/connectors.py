@@ -370,11 +370,9 @@ async def _sense_execute_handler(args: dict) -> dict:
         return _error_response(
             "no active workspace — sense_execute can only be called from inside a cloud chat stream"
         )
-    if not pocket_id:
-        return _error_response(
-            "this chat isn't anchored to a pocket — sense_execute needs a "
-            "pocket-scoped room with a bound connector"
-        )
+    # No pocket guard: ``execute_sense`` takes ``pocket_id=None`` natively and
+    # resolves workspace-scoped providers, matching ``_list_senses_handler`` —
+    # a sense the agent can list must also be executable from the same chat.
 
     sense = args.get("sense")
     if not isinstance(sense, str) or not sense:
