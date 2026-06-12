@@ -116,6 +116,20 @@
 #   correlation_id is THREADED through to ``_park`` so the bridge can stash
 #   it on the parked Instinct Action (schema-2 bump in ``instinct_bridge``).
 #
+# Updated: 2026-06-01 (RFC 05 Saga Compensate — first pass) — ``ActionBinding``
+#   gains an optional ``compensate`` field: a nested ``CompensateSpec``
+#   (method / path / params / outcome) declaring the inverse write that
+#   undoes this action ("charge→refund", "reserve→release"). The field is
+#   declaration-only HERE — ``run_action`` does NOT read or fire it, and a
+#   single write is unchanged byte-for-byte. The rollback runtime lives in
+#   the new ``saga.py`` module, which orchestrates a SEQUENCE of
+#   ``run_action`` calls, tracks the completed (fired) writes, and on a
+#   mid-sequence failure fires each completed write's ``compensate`` via
+#   ``run_action`` in REVERSE order. Keeping ``run_action`` a pure
+#   single-write executor preserves its contract for the three existing
+#   callers (direct route, bulk fan-out, Instinct re-entry); the saga is a
+#   wrapper, not a fork.
+#
 # A write has blast radius a read does not, so this executor adds three
 # concerns on TOP of the shared SSRF guards:
 #   1. The per-pocket WRITE ALLOWLIST (`allowed_writes`) — set by a human in
@@ -217,6 +231,46 @@ class _BackendHTTPError(Exception):
         self.status_code = status_code
 
 
+class CompensateSpec(BaseModel):
+    """The inverse write that undoes a forward action (RFC 05 Saga Compensate).
+
+    A forward write declares ``compensate`` to name the action that rolls
+    it back: ``charge`` → ``refund``, ``reserve`` → ``release``,
+    ``send_invite`` → ``revoke_invite``. When a multi-step write SEQUENCE
+    fails partway, the saga runtime (``saga.py``) fires the completed
+    writes' compensations in REVERSE order so the backend is left
+    consistent.
+
+    A compensation IS a write binding — it shares the executor with the
+    forward action and is subject to the SAME guards (allowlist, SSRF,
+    rate limit). The owner must allow-list the compensation's method+path
+    just like any other write, or the rollback is rejected at the gate.
+
+    Two fields are DELIBERATELY absent versus ``ActionBinding``:
+
+    * ``requires_instinct`` — a compensation fires AUTO. Pausing a rollback
+      for human approval would leave the backend in the inconsistent state
+      the rollback exists to repair (money charged, inventory reserved).
+      The forward write's gate is the human checkpoint; the compensation
+      is the automatic cleanup once a committed write must be undone. The
+      gated-compensation case is an explicit open question in the RFC.
+    * ``compensate`` — no nested compensation-of-a-compensation. A
+      compensation that itself fails is logged and surfaced for manual
+      reconciliation (saga policy), not auto-compensated recursively.
+
+    ``outcome`` is carried so a successful compensation emits its own named
+    outcome (e.g. ``renewal_refunded``) and the audit trail closes — a
+    rollback is a real business event, not a silent side effect.
+    """
+
+    model_config = {"extra": "ignore"}
+
+    method: Literal["POST", "PUT", "PATCH", "DELETE"]
+    path: str
+    params: dict = Field(default_factory=dict)
+    outcome: str | None = None
+
+
 class ActionBinding(BaseModel):
     """One write binding parsed from `rippleSpec.actions`.
 
@@ -250,6 +304,15 @@ class ActionBinding(BaseModel):
     binding never sets ``requires_instinct``, so under the old ``False``
     default it bypassed the gate. Flipping the default closes that bypass at
     the single chokepoint every author and the executor validate through.
+
+    Saga Compensate adds one optional field:
+
+    * ``compensate`` — a :class:`CompensateSpec`, the inverse write that
+      undoes this action if a later step in a write SEQUENCE fails. The
+      executor does NOT read it on a single ``run_action`` call; the saga
+      runtime (``saga.py``) fires it on rollback. ``None`` (the default)
+      means this action has no declared undo — a saga that has to roll
+      back past it records the gap instead of silently dropping it.
 
     A ``model_validator`` rejects an ``instinct_policy`` set WITHOUT
     ``requires_instinct`` — a policy with no gate to apply to is a
@@ -295,6 +358,11 @@ class ActionBinding(BaseModel):
     # W2a: explicit, auditable exemption. A binding the author deliberately
     # allows to fire WITHOUT the gate sets this True in the persisted spec.
     instinct_exempt: bool = False
+    # --- Saga Compensate (RFC 05) ---------------------------------------
+    # The inverse write that undoes this action on a mid-sequence rollback.
+    # Declaration-only here; ``saga.py`` reads + fires it. ``None`` means
+    # no declared undo for this action.
+    compensate: CompensateSpec | None = None
 
     @model_validator(mode="after")
     def _policy_needs_gate(self) -> ActionBinding:
@@ -1327,4 +1395,4 @@ async def _do_request(
     return {"status": resp.status_code, "response": response}
 
 
-__all__ = ["ActionBinding", "run_action"]
+__all__ = ["ActionBinding", "CompensateSpec", "run_action"]

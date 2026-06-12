@@ -19,6 +19,13 @@
 #   the ledger row so `meter_outcomes` can sum value by unit per workspace.
 #   The fields and their defaults are unchanged; only the meaning is — a
 #   pre-gap-3 ledger row (both `None`) reads back as a count-only outcome.
+# Updated: 2026-06-01 (RFC 05 Saga Compensate) — added the optional
+#   `compensated` flag. A compensating write (a rollback fired when a
+#   multi-step write sequence failed partway) lands an outcome too — a
+#   rollback is a real business event, not a silent side effect — but the
+#   ledger must distinguish it from a forward outcome so a "renewal_sent"
+#   that was later refunded does not over-count. Defaults False so every
+#   pre-saga ledger row is byte-stable.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -50,6 +57,10 @@ class OutcomeRecord:
     outcome_value: float | None = None
     outcome_unit: str | None = None
     decision_id: str | None = None  # RFC 07 Slice 2 back-reference
+    # RFC 05 Saga Compensate — True when this outcome is a rollback (a
+    # compensating write fired because a later step in a sequence failed),
+    # False for an ordinary forward outcome. The meter can net these out.
+    compensated: bool = False
 
 
 __all__ = ["OutcomeRecord"]

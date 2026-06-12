@@ -291,6 +291,12 @@ source_modules = [
     # pure. Both go through ``pockets.service`` only.
     "pocketpaw_ee.cloud.connectors.service",
     "pocketpaw_ee.cloud.connectors.derivation",
+    # RFC 05 Saga Compensate — the multi-step write-sequence rollback
+    # runtime. Orchestrates ``action_executor.run_action`` per step and
+    # fires compensations in reverse on failure; emits outcomes through
+    # ``outcomes.service``. Receives backend creds + bindings by
+    # parameter — never imports a Beanie document class directly.
+    "pocketpaw_ee.cloud.pockets.saga",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
