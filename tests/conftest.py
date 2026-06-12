@@ -3,6 +3,9 @@
 Updated: 2026-06-12 (connector-store-unification CS-1) — added
 _isolate_connector_state so the registry's write-through state store never
 persists test config to the real ~/.pocketpaw/connectors/state.
+Updated: 2026-06-12 (CS-2) — the same fixture also redirects the registry's
+home-dir definition scan (~/.pocketpaw/connectors/*.yaml) to a temp dir so
+YAMLs on a dev machine can't leak into test registries.
 """
 
 import asyncio
@@ -64,6 +67,10 @@ def _isolate_connector_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "pocketpaw.connectors.state_store._default_state_dir",
         lambda: tmp_path / "connector-state",
+    )
+    monkeypatch.setattr(
+        "pocketpaw.connectors.registry._default_home_connectors_dir",
+        lambda: tmp_path / "home-connectors",
     )
 
 
