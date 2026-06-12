@@ -5,9 +5,14 @@
 #   /connect; a config change disconnects and reconnects the live adapter; a
 #   failed connect rolls the persisted row back; an empty store keeps behavior
 #   identical to the pre-store registry.
+# Updated: 2026-06-12 (PR #1447 review fixes) — added the concurrency contract
+#   (two racing ensure_connected calls connect exactly once, no leaked
+#   adapter) and the raised-exception rollback contract (adapter.connect that
+#   raises must not leave the never-connected config in the store).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -37,12 +42,20 @@ actions:
 
 
 class FakeAdapter:
-    """Minimal AnyAdapter that records connect/disconnect/execute calls."""
+    """Minimal AnyAdapter that records connect/disconnect/execute calls.
+
+    ``connect_delay`` (class attribute, patchable per test) makes connect()
+    slow so races can be staged; ``raise_connect`` makes it blow up instead
+    of returning a failure result.
+    """
+
+    connect_delay: float = 0.0
 
     def __init__(self) -> None:
         self.connect_calls: list[tuple[str, dict[str, Any]]] = []
         self.disconnect_calls: list[str] = []
         self.fail_connect = False
+        self.raise_connect = False
 
     @property
     def name(self) -> str:
@@ -53,7 +66,11 @@ class FakeAdapter:
         return "Test Service"
 
     async def connect(self, pocket_id: str, config: dict[str, Any]) -> ConnectionResult:
+        if self.connect_delay:
+            await asyncio.sleep(self.connect_delay)
         self.connect_calls.append((pocket_id, config))
+        if self.raise_connect:
+            raise RuntimeError("connect exploded")
         if self.fail_connect:
             return ConnectionResult(
                 success=False,
@@ -174,6 +191,29 @@ class TestRestartSurvival:
         # The persisted config must survive so a later retry can succeed.
         assert store.get("testsvc", "default") == {"api_key": "k1"}
 
+    @pytest.mark.asyncio
+    async def test_concurrent_ensure_connected_connects_exactly_once(
+        self, defs_dir, store, fake_adapters, monkeypatch
+    ) -> None:
+        """Post-restart thundering herd: two racing executes for the same key
+        must share one adapter — no double connect, no leaked instance."""
+        store.set("testsvc", "default", {"api_key": "k1"})
+        reg = _registry(defs_dir, store)
+        # Slow connect so the second call arrives while the first is mid-flight.
+        monkeypatch.setattr(FakeAdapter, "connect_delay", 0.05)
+
+        first, second = await asyncio.gather(
+            reg.ensure_connected("testsvc", "default"),
+            reg.ensure_connected("testsvc", "default"),
+        )
+
+        assert first is not None
+        assert first is second
+        # Exactly one adapter was ever built and connected — nothing to leak.
+        assert len(fake_adapters) == 1
+        assert len(fake_adapters[0].connect_calls) == 1
+        assert reg.get_adapter("default", "testsvc") is first
+
 
 class TestWriteThrough:
     @pytest.mark.asyncio
@@ -199,6 +239,27 @@ class TestWriteThrough:
         result = await reg.connect("default", "testsvc", {"api_key": "bad"})
         assert result.success is False
         assert store.get("testsvc", "default") is None
+
+    @pytest.mark.asyncio
+    async def test_raising_connect_rolls_back_state(
+        self, defs_dir, store, fake_adapters, monkeypatch
+    ) -> None:
+        """A raised exception is rolled back like a failure result — the
+        never-connected config must not survive in the store."""
+        original = registry_module._create_native_adapter
+
+        def _raising_create(connector_name: str):
+            adapter = original(connector_name)
+            if adapter is not None:
+                adapter.raise_connect = True
+            return adapter
+
+        monkeypatch.setattr(registry_module, "_create_native_adapter", _raising_create)
+        reg = _registry(defs_dir, store)
+        with pytest.raises(RuntimeError, match="connect exploded"):
+            await reg.connect("default", "testsvc", {"api_key": "boom"})
+        assert store.get("testsvc", "default") is None
+        assert reg.get_adapter("default", "testsvc") is None
 
     @pytest.mark.asyncio
     async def test_config_change_disconnects_then_reconnects(
