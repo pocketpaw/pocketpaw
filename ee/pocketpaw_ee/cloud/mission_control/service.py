@@ -74,6 +74,18 @@
 # shared ``ee.instinct.chain_emitters`` module instead of reaching into the
 # Instinct router's private internals. Behavior is identical (same helpers,
 # same call order) — the façade no longer couples to the router.
+# Updated: 2026-06-12 (fix/tray-workspace-scoped-nudges) — workspace-scoped
+# nudges now reach The Tray. External-action proposals stamp
+# ``Action.pocket_id = workspace_id`` (they aren't pocket-bound — see
+# ``external_actions/propose.py``), but ``agent_list_work_items`` dropped any
+# action whose ``pocket_id`` wasn't a visible POCKET id, so every gated
+# external action sat pending without ever surfacing in the feed. The
+# per-action filter now also admits ``a.pocket_id == workspace_id`` (the
+# caller's own workspace only — the W4c store-level scope still keeps other
+# tenants' rows out in SQL), the instinct block runs even when the workspace
+# has zero visible pockets, and a workspace-scoped item projects with
+# pocket_name "Workspace" instead of leaking the raw workspace hex id.
+# Pocket-bound nudges keep the exact same visibility filter as before.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -95,7 +107,10 @@ Tenancy:
          is visible to the caller's workspace. ``pockets_service.list_pockets``
          enforces this as the chokepoint. This stays as a second filter
          (owner / shared_with / visibility within the tenant), layered on
-         top of the store scope, not in place of it.
+         top of the store scope, not in place of it. Workspace-scoped
+         nudges (``pocket_id == workspace_id``, e.g. external-action
+         proposals) bypass only this pocket layer — the store scope in
+         (1) is still what isolates them per tenant.
 
 No Beanie writes here — the façade is read-only against Instinct + the
 activity buffer. Bulk-approve / bulk-reject delegate to
@@ -385,40 +400,50 @@ async def agent_list_work_items(
 
     items: list[WorkItem] = []
 
-    # --- Instinct Nudges (pocket-scoped) -----------------------------------
-    # Nudges always live inside a pocket, so an empty visible set means
-    # there are no Nudges to show. Tasks below have their own workspace-
-    # level tenancy and are NOT gated by pocket visibility.
-    if visible:
-        store = get_instinct_store()
-        # W4c — scope the instinct reads to the caller's workspace (plus legacy
-        # NULL rows) at the store/SQL layer so a tenant never reads another
-        # tenant's Nudges off the shared DB. The pocket-visibility filter below
-        # is a second, intra-tenant layer (owner / shared_with / visibility).
-        pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
-        resolved = await store.list_actions(
-            pocket_id=body.pocket, limit=200, workspace_id=workspace_id
-        )
+    # --- Instinct Nudges (pocket- or workspace-scoped) ----------------------
+    # Most Nudges live inside a pocket and only surface when that pocket is
+    # visible. External-action proposals are the exception: they stamp
+    # ``pocket_id = workspace_id`` (see ``external_actions/propose.py``), so
+    # they're admitted by workspace identity instead — which also means the
+    # block must run even when the workspace has zero visible pockets. Tasks
+    # below have their own workspace-level tenancy and are NOT gated by
+    # pocket visibility.
+    store = get_instinct_store()
+    # W4c — scope the instinct reads to the caller's workspace (plus legacy
+    # NULL rows) at the store/SQL layer so a tenant never reads another
+    # tenant's Nudges off the shared DB. The pocket-visibility filter below
+    # is a second, intra-tenant layer (owner / shared_with / visibility);
+    # the store scope is also what keeps OTHER tenants' workspace-scoped
+    # nudges out — ``a.pocket_id == workspace_id`` below can only ever match
+    # the caller's own rows.
+    pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
+    resolved = await store.list_actions(pocket_id=body.pocket, limit=200, workspace_id=workspace_id)
 
-        actions: list[Action] = []
-        seen: set[str] = set()
-        for a in (*pending, *resolved):
-            if a.id in seen:
-                continue
-            if a.pocket_id not in visible:
-                continue
-            if body.agent and a.trigger.source != body.agent:
-                continue
-            seen.add(a.id)
-            actions.append(a)
-        items.extend(
-            _action_to_work_item(
-                a,
-                workspace_id,
-                pocket_name=name_map.get(a.pocket_id, a.pocket_id or ""),
-            )
-            for a in actions
+    actions: list[Action] = []
+    seen: set[str] = set()
+    for a in (*pending, *resolved):
+        if a.id in seen:
+            continue
+        if a.pocket_id not in visible and a.pocket_id != workspace_id:
+            continue
+        if body.agent and a.trigger.source != body.agent:
+            continue
+        seen.add(a.id)
+        actions.append(a)
+    items.extend(
+        _action_to_work_item(
+            a,
+            workspace_id,
+            # A workspace-scoped nudge has no pocket — show "Workspace"
+            # rather than leaking the raw workspace hex id as a name.
+            pocket_name=(
+                "Workspace"
+                if a.pocket_id == workspace_id
+                else name_map.get(a.pocket_id, a.pocket_id or "")
+            ),
         )
+        for a in actions
+    )
 
     # --- Tasks (workspace-scoped) ------------------------------------------
     # Lazy import keeps the façade installable on forks that haven't
