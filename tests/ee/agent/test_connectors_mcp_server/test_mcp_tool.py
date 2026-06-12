@@ -178,7 +178,9 @@ class TestListConnectorActionsHandler:
         mock_list.assert_awaited_once_with("ws_1", "pk_1")
 
     @pytest.mark.asyncio
-    async def test_no_pocket_returns_clear_message(self) -> None:
+    async def test_no_pocket_falls_through_to_workspace_scope(self) -> None:
+        """Unanchored chats (pocket_id=None) query the service with pocket ""
+        so workspace-scoped connectors stay reachable from any chat."""
         from pocketpaw_ee.agent.mcp_servers import connectors as connectors_mcp
 
         ws_patch, user_patch, pocket_patch = _patch_identity("ws_1", "u_1", None)
@@ -188,15 +190,15 @@ class TestListConnectorActionsHandler:
             pocket_patch,
             patch(
                 "pocketpaw_ee.cloud.connectors.service.list_pocket_connectors",
-                new=AsyncMock(),
+                new=AsyncMock(return_value=[]),
             ) as mock_list,
         ):
             out = await connectors_mcp._list_connector_actions_handler({})
 
         body = _decode_payload(out)
         assert body["connectors"] == []
-        assert "isn't anchored to a pocket" in body["message"]
-        mock_list.assert_not_awaited()
+        assert "No connectors are reachable" in body["message"]
+        mock_list.assert_awaited_once_with("ws_1", "")
 
     @pytest.mark.asyncio
     async def test_no_connectors_returns_clear_message(self) -> None:
@@ -216,7 +218,7 @@ class TestListConnectorActionsHandler:
 
         body = _decode_payload(out)
         assert body["connectors"] == []
-        assert "No connectors are bound" in body["message"]
+        assert "No connectors are reachable" in body["message"]
 
     @pytest.mark.asyncio
     async def test_no_workspace_is_error(self) -> None:
