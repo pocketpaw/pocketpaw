@@ -1,5 +1,10 @@
 <!--
   Connectors documentation.
+  Updated: 2026-06-12 (connector-store-unification CS-6) — added the
+  "Lifecycle: definitions, state, cache" section: the three layers a connector
+  lives in (YAML definitions with two scan dirs + CWD precedence, the durable
+  state store at ~/.pocketpaw/connectors/state, and the in-memory adapter
+  cache), restart semantics, and the presence-based "connected" status.
   Updated: 2026-06-12 (workspace-scope reach) — the agent tool surface now
   reaches workspace-scoped connectors: list_connector_actions returns the
   current pocket's bound connectors PLUS the workspace-enabled ones (deduped
@@ -64,6 +69,45 @@ pocket.db (data lands in SQLite tables)
     ↓
 Pocket widgets auto-update with fresh data
 ```
+
+## Lifecycle: definitions, state, cache
+
+A connector lives in three layers with different lifetimes:
+
+| Layer | What it holds | Where | Lifetime |
+|-------|--------------|-------|----------|
+| **Definition** | What the connector *is* — endpoints, auth schema, actions | `~/.pocketpaw/connectors/*.yaml`, then `connectors/*.yaml` (CWD) | As long as the file exists |
+| **State** | That a connector *is configured* — the config passed to `/connect`, keyed by (name, pocket) | `~/.pocketpaw/connectors/state/*.json` (the durable state store) | Until `/disconnect` |
+| **Cache** | Live adapter instances (HTTP clients, DB pools, OAuth sessions) | In-memory, per process | Until the process exits |
+
+**Definition scan.** The registry scans the home dir
+(`~/.pocketpaw/connectors/`) first, then the CWD `connectors/` dir. On a name
+collision the CWD definition wins — deploys override user-installed
+definitions. A definition dropped in after startup is picked up on the next
+lookup miss (the registry rescans cheaply instead of requiring a restart).
+
+**State.** `/connect` is write-through: the config is persisted to the state
+store before the adapter connects, and rolled back if the connect fails.
+`/disconnect` deletes the row. State files are chmod 0600 and live under a
+0700 dir — the config can carry credentials, same posture as the OAuth token
+store.
+
+**Restart semantics.** The cache dies with the process; definitions and state
+do not. After a restart the list/detail/status endpoints report a configured
+connector as `connected` (derived from definition-present + config-persisted,
+never from the in-memory adapter map), and `/execute` lazily reconnects the
+adapter from the persisted config via `ensure_connected` — no manual
+re-`/connect` step.
+
+**What "connected" means.** Status is a *presence* semantic: a definition
+exists and config is persisted. It does not probe the remote service per
+request — a revoked API key still shows `connected` until an execute fails.
+Use a connector's `health()` for a live check.
+
+**Orphaned state.** A state row whose definition is gone (YAML deleted, or a
+deploy dropped it) surfaces in list/status as `definition_missing` instead of
+disappearing or crashing. It heals automatically once the definition is back,
+or can be cleared with `/disconnect`.
 
 ## Writing a Connector YAML
 
