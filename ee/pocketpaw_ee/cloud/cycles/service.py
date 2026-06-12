@@ -413,6 +413,42 @@ async def agent_update_cycle(
     return response
 
 
+async def agent_start_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse:
+    """Transition a cycle from ``upcoming`` to ``active``.
+
+    Only upcoming cycles can be started — already-active cycles should
+    continue via the normal close flow, and completed cycles are immutable.
+    Validates workspace tenancy and that no overlapping active cycle exists
+    on the same pocket.
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_in_workspace(workspace_id, cycle_id)
+
+    if doc.status == "active":
+        raise ConflictError("cycle.already_active", "This cycle is already active")
+    if doc.status == "completed":
+        raise ConflictError("cycle.already_closed", "This cycle is already completed")
+
+    if doc.pocket_id is not None and await _has_active_overlap(
+        workspace_id,
+        doc.pocket_id,
+        doc.start,
+        doc.end,
+        exclude_id=cycle_id,
+    ):
+        raise ConflictError(
+            "cycle.overlap",
+            "Another active cycle on the same pocket overlaps this date range",
+        )
+
+    doc.status = "active"
+    await doc.save()
+
+    response = _to_response(_to_domain(doc))
+    await emit(CycleUpdated(data=response.model_dump()))
+    return response
+
+
 async def agent_close_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse:
     """Mark a cycle ``completed`` and roll incomplete tasks forward.
 
@@ -686,6 +722,7 @@ __all__ = [
     "agent_get_cycle",
     "agent_list_cycle_items",
     "agent_list_cycles",
+    "agent_start_cycle",
     "agent_update_cycle",
     "list_active_cycle_ids",
     "list_active_workspace_ids",
