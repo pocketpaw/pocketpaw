@@ -7,6 +7,16 @@
 #   ConnectorDef list incl. ``.senses``) so the EE SenseResolver can index
 #   connectors by sense without reaching into the private ``_definitions``
 #   dict. OSS-only change; must not import pocketpaw_ee.
+# Updated: 2026-06-12 (connector-store-unification CS-1) — Connector config now
+#   survives restarts. The registry takes an optional ``state_store``
+#   (default: FileConnectorStateStore at ~/.pocketpaw/connectors/state/).
+#   ``connect()`` is write-through: persist config, then connect the adapter
+#   (rolled back on a failed connect so a bad config never reads as
+#   configured); a live adapter with different config is disconnected and
+#   reconnected. New ``ensure_connected(name, scope_key)`` lazily reconnects
+#   from persisted config so the execute path no longer assumes a prior
+#   /connect in the same process. ``disconnect()`` deletes the persisted row.
+#   With an empty store, behavior is identical to before.
 
 from __future__ import annotations
 
@@ -19,6 +29,7 @@ from pocketpaw.connectors.protocol import (
     ConnectionResult,
     ConnectorStatus,
 )
+from pocketpaw.connectors.state_store import ConnectorStateStore, FileConnectorStateStore
 from pocketpaw.connectors.yaml_engine import ConnectorDef, DirectRESTAdapter, parse_connector_yaml
 
 
@@ -118,8 +129,14 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
 class ConnectorRegistry:
     """Discovers available connectors and manages instances per pocket."""
 
-    def __init__(self, connectors_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        connectors_dir: Path | None = None,
+        *,
+        state_store: ConnectorStateStore | None = None,
+    ) -> None:
         self._connectors_dir = connectors_dir or Path("connectors")
+        self._state_store: ConnectorStateStore = state_store or FileConnectorStateStore()
         self._definitions: dict[str, ConnectorDef] = {}
         self._instances: dict[str, AnyAdapter] = {}  # key = "{pocket_id}:{connector_name}"
         self._scan()
@@ -170,11 +187,44 @@ class ConnectorRegistry:
         return self._instances.get(key)
 
     async def connect(self, pocket_id: str, connector_name: str, config: dict[str, Any]) -> Any:
-        """Create and connect a connector adapter for a pocket."""
+        """Create and connect a connector adapter for a pocket.
+
+        Write-through: the config is persisted to the state store before the
+        adapter connects, so the binding survives a process restart (see
+        ``ensure_connected``). A failed connect rolls the persisted row back —
+        a config that never connected must not read as configured. If a live
+        adapter exists with *different* config, it is disconnected first and
+        reconnected with the new config.
+        """
         defn = self._definitions.get(connector_name)
         if not defn:
             return None
 
+        key = f"{pocket_id}:{connector_name}"
+        if key in self._instances:
+            previous = self._state_store.get(connector_name, pocket_id)
+            if previous is not None and previous != config:
+                await self.disconnect(pocket_id, connector_name)
+
+        self._state_store.set(connector_name, pocket_id, config)
+        result = await self._connect_adapter(pocket_id, connector_name, defn, config)
+        if result is None or not result.success:
+            self._state_store.delete(connector_name, pocket_id)
+        return result
+
+    async def _connect_adapter(
+        self,
+        pocket_id: str,
+        connector_name: str,
+        defn: ConnectorDef,
+        config: dict[str, Any],
+    ) -> ConnectionResult:
+        """Build and connect an adapter; register it on success.
+
+        Internal — never touches the state store, so the restart-recovery
+        path (``ensure_connected``) can retry a transient failure without
+        wiping the persisted config.
+        """
         # Use native adapter if available, otherwise fall back to YAML/REST.
         adapter: AnyAdapter
         native = _create_native_adapter(connector_name)
@@ -191,14 +241,44 @@ class ConnectorRegistry:
 
         return result
 
+    async def ensure_connected(self, connector_name: str, scope_key: str) -> AnyAdapter | None:
+        """Return a live adapter for (connector, scope_key), reconnecting if needed.
+
+        The execute path calls this instead of assuming a prior ``connect()``
+        in the same process: if no adapter is live, the persisted config is
+        read from the state store and the adapter reconnects. No-op when
+        already connected (a live adapter always carries the current config —
+        ``connect()`` keeps the store and the instance map in sync). Returns
+        ``None`` when there is no persisted config, the definition is gone,
+        or the reconnect fails; the persisted config is kept either way so a
+        transient failure can be retried.
+        """
+        key = f"{scope_key}:{connector_name}"
+        adapter = self._instances.get(key)
+        if adapter is not None:
+            return adapter
+
+        config = self._state_store.get(connector_name, scope_key)
+        if config is None:
+            return None
+        defn = self.get_definition(connector_name)
+        if defn is None:
+            return None
+
+        result = await self._connect_adapter(scope_key, connector_name, defn, config)
+        if not result.success:
+            return None
+        return self._instances.get(key)
+
     async def disconnect(self, pocket_id: str, connector_name: str) -> bool:
-        """Disconnect a connector from a pocket."""
+        """Disconnect a connector from a pocket and forget its persisted config."""
         key = f"{pocket_id}:{connector_name}"
         adapter = self._instances.get(key)
         if not adapter:
             return False
         await adapter.disconnect(pocket_id)
         del self._instances[key]
+        self._state_store.delete(connector_name, pocket_id)
         return True
 
     def status(self, pocket_id: str) -> list[dict[str, Any]]:
