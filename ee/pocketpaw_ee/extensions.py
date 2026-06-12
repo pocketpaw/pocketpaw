@@ -59,6 +59,12 @@ agent proposes a connector call through Instinct; the ee instinct router fires
 approval. Propose-only — the tool never fires the connector itself. Ambient
 (not opt-in).
 
+Updated: 2026-06-12 (connector-store-unification CS-3) — added
+``CloudConnectorStateStoreProvider`` (``pocketpaw.connector_state_stores``)
+supplying the ``WorkspaceConnector``-backed ``CloudConnectorStateStore`` as the
+ConnectorRegistry's default durable state store, so cloud connector config
+rehydrates from the tenant DB after a process restart (no /connect needed).
+
 Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added
 ``CloudFabricMcpProvider`` (entry ``fabric``; server ``pocketpaw_fabric``,
 tools ``fabric_query`` / ``fabric_stats``) and ``CloudInstinctMcpProvider``
@@ -862,6 +868,24 @@ class CloudAgentExtension:
             if value:
                 env[var] = str(value)
         return env
+
+
+class CloudConnectorStateStoreProvider:
+    """`pocketpaw.connector_state_stores` — durable connector state from the
+    cloud DB.
+
+    Backs the ConnectorRegistry's restart-survival seam with the
+    ``WorkspaceConnector`` Beanie doc (namespaced ``ws:<workspace_id>`` /
+    ``pocket:<pocket_id>`` scope keys; everything else delegates to the OSS
+    file store). With this registered, ``registry.ensure_connected`` on a
+    fresh process rehydrates a connector from its workspace row — a cloud
+    execute needs no prior /connect call.
+    """
+
+    def get_state_store(self) -> Any:
+        from pocketpaw_ee.cloud.connectors.state_provider import CloudConnectorStateStore
+
+        return CloudConnectorStateStore()
 
 
 class CloudComposioToolProvider:
