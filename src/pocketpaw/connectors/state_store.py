@@ -9,6 +9,10 @@
 #   same prefix never share a file and no key can path-traverse out of the dir.
 #   Files are chmod 0600 (config may carry credentials, same posture as the
 #   OAuth token store).
+# Updated: 2026-06-12 (connector-store-unification CS-3) — Protocol docs note
+#   that implementations may make get/set/delete async (the registry awaits
+#   awaitable results via _maybe_await); list must stay sync. Lets the EE
+#   WorkspaceConnector-backed store satisfy the same seam.
 
 from __future__ import annotations
 
@@ -62,7 +66,14 @@ class ConnectorStateStore(Protocol):
     """Durable store for connector config, keyed by (name, scope_key).
 
     ``scope_key`` is the registry's scoping segment — the pocket_id on the
-    OSS path. Implementations must treat both key parts as untrusted input.
+    OSS path, a namespaced ``ws:<workspace_id>`` / ``pocket:<pocket_id>``
+    key on the cloud path. Implementations must treat both key parts as
+    untrusted input.
+
+    Implementations may make ``get``/``set``/``delete`` async (return an
+    awaitable) — every registry call site on an async path awaits awaitable
+    results (see ``ConnectorRegistry._maybe_await``). ``list`` must stay
+    sync: it is called from the registry's sync ``status()``.
     """
 
     def get(self, name: str, scope_key: str) -> dict[str, Any] | None:
