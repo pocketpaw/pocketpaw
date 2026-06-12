@@ -25,6 +25,14 @@
 #   ``backend_type="connector"`` backend. Keeps the WorkspaceConnector Beanie
 #   read in THIS service (the owner of the connector docs) so the pockets
 #   service never imports the connector model.
+# Updated: 2026-06-12 (connector-store-unification CS-3) — the cloud
+#   ``execute()`` path now goes through ``registry.ensure_connected`` (scope
+#   keys ``pocket:<pocket_id>`` / ``ws:<workspace_id>``) backed by the
+#   WorkspaceConnector state store, so a fresh process executes from a seeded
+#   doc with NO prior /connect; the inline ``adapter._connected`` check is
+#   gone. ``enable_connector`` / ``update_config`` / ``disable_connector``
+#   drop any live registry adapter for the touched row so the next execute
+#   rehydrates with current config instead of serving a stale connection.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -172,6 +180,27 @@ async def _rederive_pocket_surface_profile(workspace_id: str, pocket_id: str) ->
     await apply_derived_surface_profile(workspace_id, pocket_id, profile)
 
 
+async def _drop_live_adapter(doc: _WCDoc) -> None:
+    """Drop any live registry adapter for this row's scope keys.
+
+    Called after enable/disable/config writes so the next execute rehydrates
+    through ``ensure_connected`` with the row's CURRENT state instead of
+    serving an adapter connected with stale config (or one for a row that was
+    just disabled). ``registry.disconnect`` closes the adapter's held handles;
+    the durable row itself is untouched — the cloud state store's delete is a
+    deliberate no-op for namespaced keys (see ``state_provider.py``).
+    """
+    reg = _get_registry()
+    keys = [f"ws:{doc.workspace}"]
+    if doc.pocket_id:
+        keys.append(f"pocket:{doc.pocket_id}")
+    for key in keys:
+        try:
+            await reg.disconnect(key, doc.name)
+        except Exception as exc:  # noqa: BLE001 — best-effort cache drop
+            logger.warning("live adapter drop failed for %s (%s): %s", doc.name, key, exc)
+
+
 # ---------------------------------------------------------------------------
 # Mapping helpers
 # ---------------------------------------------------------------------------
@@ -298,6 +327,9 @@ async def enable_connector(
         if body.config:
             doc.config = body.config
         await doc.save()
+        # Re-enable may have changed config/scope — a live adapter from a
+        # previous execute must not keep serving the old connection.
+        await _drop_live_adapter(doc)
 
     a = available[name]
     await event_bus.emit(
@@ -343,6 +375,9 @@ async def disable_connector(workspace_id: str, name: str) -> ConnectorResponse:
     pocket_id_for_rederive = doc.pocket_id
     doc.enabled = False
     await doc.save()
+    # A disabled connector must stop executing immediately — drop any live
+    # adapter so the next execute can't reuse the old connection.
+    await _drop_live_adapter(doc)
     await event_bus.emit(
         "connector.disabled",
         {"workspace_id": workspace_id, "name": name},
@@ -379,6 +414,9 @@ async def update_config(
         raise NotFound("connector", name)
     doc.config = {**doc.config, **body.config}
     await doc.save()
+    # Config changed — drop any live adapter so the next execute reconnects
+    # with the patched config instead of the one it was built with.
+    await _drop_live_adapter(doc)
     await event_bus.emit(
         "connector.config_updated",
         {"workspace_id": workspace_id, "name": name},
@@ -708,15 +746,29 @@ async def execute(
             "which isn't connected. Open your local app and retry.",
         )
 
-    # CLOUD path — run in-process. Connect first if needed, using the
-    # workspace's saved config from the connector entity.
-    doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
-    config = dict(doc.config) if doc else {}
-    pocket_key = body.pocket_id or workspace_id
-    if not adapter._connected:  # noqa: SLF001 — adapter API doesn't expose is_connected
-        await adapter.connect(pocket_key, config)
+    # CLOUD path — run in-process through the registry's durable seam (CS-3).
+    # ``ensure_connected`` rehydrates the adapter from the WorkspaceConnector
+    # row's config on a fresh process, so execute works with no prior
+    # /connect call. Pocket-keyed lookup is gated on the tenant bind check —
+    # ``pocket:<pocket_id>`` alone carries no workspace filter, so an
+    # unverified foreign pocket_id must never select another tenant's config.
+    exec_adapter = None
+    if body.pocket_id and await is_connector_bound_to_pocket(workspace_id, body.pocket_id, name):
+        exec_adapter = await reg.ensure_connected(name, f"pocket:{body.pocket_id}")
+    if exec_adapter is None:
+        exec_adapter = await reg.ensure_connected(name, f"ws:{workspace_id}")
+    if exec_adapter is None:
+        # Legacy fallback — no enabled row with usable config (or the
+        # reconnect failed). Preserve the pre-CS-3 semantics: one-shot
+        # adapter, best-effort connect with whatever the workspace row
+        # carries, and let the adapter surface its own failure on execute.
+        doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
+        config = dict(doc.config) if doc else {}
+        pocket_key = body.pocket_id or workspace_id
+        exec_adapter = adapter
+        await exec_adapter.connect(pocket_key, config)
 
-    result = await adapter.execute(body.action, body.params)
+    result = await exec_adapter.execute(body.action, body.params)
     return ExecuteActionResponse(
         success=result.success,
         data=result.data,

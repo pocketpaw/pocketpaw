@@ -38,10 +38,20 @@
 #   *raises*, not just when it returns a failure result; (3) connect() routes
 #   through get_definition() so a YAML dropped in after startup is connectable
 #   without a restart (it was already visible to detail/status).
+# Updated: 2026-06-12 (connector-store-unification CS-3) — The default state
+#   store is now pluggable: when no explicit ``state_store`` is passed, the
+#   registry asks the ``pocketpaw.connector_state_stores`` entry-point group
+#   (see ``ConnectorStateStoreProvider`` in pocketpaw/extensions.py) before
+#   falling back to FileConnectorStateStore — so an EE install transparently
+#   backs every registry with the cloud DB. Store ``get``/``set``/``delete``
+#   calls on async paths go through ``_maybe_await`` so an async (DB-backed)
+#   store and the sync file store both work behind the same seam.
 
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -53,6 +63,21 @@ from pocketpaw.connectors.protocol import (
 )
 from pocketpaw.connectors.state_store import ConnectorStateStore, FileConnectorStateStore
 from pocketpaw.connectors.yaml_engine import ConnectorDef, DirectRESTAdapter, parse_connector_yaml
+
+logger = logging.getLogger(__name__)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await *value* if it is awaitable, else return it as-is.
+
+    The seam that lets one registry speak to both store shapes: the sync
+    file store returns plain values; the EE cloud store's ``get``/``set``/
+    ``delete`` are async (Beanie). Only ``list`` must stay sync — it is
+    called from the sync ``status()``.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 @runtime_checkable
@@ -157,6 +182,28 @@ def _default_home_connectors_dir() -> Path:
     return Path.home() / ".pocketpaw" / "connectors"
 
 
+def _provider_state_store() -> ConnectorStateStore | None:
+    """State store from the ``pocketpaw.connector_state_stores`` entry-point.
+
+    Same discovery pattern as every other extension point (see
+    ``pocketpaw.extensions.ConnectorStateStoreProvider``): an OSS install
+    finds no provider and returns ``None``; a cloud install returns the
+    DB-backed store so connector config rehydrates from the tenant database
+    after a restart. A provider that blows up is skipped — a broken plugin
+    must not take connector support down with it.
+    """
+    from pocketpaw._registry import first
+
+    provider = first("pocketpaw.connector_state_stores")
+    if provider is None:
+        return None
+    try:
+        return provider.get_state_store()
+    except Exception as exc:  # noqa: BLE001 — isolate plugin failures
+        logger.warning("connector state store provider failed, using file store: %s", exc)
+        return None
+
+
 class ConnectorRegistry:
     """Discovers available connectors and manages instances per pocket."""
 
@@ -169,7 +216,9 @@ class ConnectorRegistry:
     ) -> None:
         self._connectors_dir = connectors_dir or Path("connectors")
         self._home_connectors_dir = home_connectors_dir
-        self._state_store: ConnectorStateStore = state_store or FileConnectorStateStore()
+        self._state_store: ConnectorStateStore = (
+            state_store or _provider_state_store() or FileConnectorStateStore()
+        )
         self._definitions: dict[str, ConnectorDef] = {}
         self._instances: dict[str, AnyAdapter] = {}  # key = "{pocket_id}:{connector_name}"
         # Per-key locks serializing the connect paths — see _lock_for().
@@ -268,20 +317,20 @@ class ConnectorRegistry:
         key = f"{pocket_id}:{connector_name}"
         async with self._lock_for(key):
             if key in self._instances:
-                previous = self._state_store.get(connector_name, pocket_id)
+                previous = await _maybe_await(self._state_store.get(connector_name, pocket_id))
                 if previous is not None and previous != config:
                     await self.disconnect(pocket_id, connector_name)
 
-            self._state_store.set(connector_name, pocket_id, config)
+            await _maybe_await(self._state_store.set(connector_name, pocket_id, config))
             try:
                 result = await self._connect_adapter(pocket_id, connector_name, defn, config)
             except BaseException:
                 # adapter.connect blew up (or was cancelled) — the row must
                 # not survive, same invariant as a failure result.
-                self._state_store.delete(connector_name, pocket_id)
+                await _maybe_await(self._state_store.delete(connector_name, pocket_id))
                 raise
             if result is None or not result.success:
-                self._state_store.delete(connector_name, pocket_id)
+                await _maybe_await(self._state_store.delete(connector_name, pocket_id))
             return result
 
     async def _connect_adapter(
@@ -341,7 +390,7 @@ class ConnectorRegistry:
             if adapter is not None:
                 return adapter
 
-            config = self._state_store.get(connector_name, scope_key)
+            config = await _maybe_await(self._state_store.get(connector_name, scope_key))
             if config is None:
                 return None
             defn = self.get_definition(connector_name)
@@ -367,9 +416,9 @@ class ConnectorRegistry:
         adapter = self._instances.pop(key, None)
         if adapter is not None:
             await adapter.disconnect(pocket_id)
-        had_state = self._state_store.get(connector_name, pocket_id) is not None
+        had_state = await _maybe_await(self._state_store.get(connector_name, pocket_id)) is not None
         if had_state:
-            self._state_store.delete(connector_name, pocket_id)
+            await _maybe_await(self._state_store.delete(connector_name, pocket_id))
         return adapter is not None or had_state
 
     def status(self, pocket_id: str) -> list[dict[str, Any]]:
