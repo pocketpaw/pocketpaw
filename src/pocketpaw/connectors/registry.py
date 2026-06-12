@@ -31,9 +31,17 @@
 #   persisted row even when no adapter is in memory (post-restart disconnect,
 #   orphan-row cleanup). Returns True when an adapter was disconnected OR a
 #   row was deleted; still False when there was nothing to forget.
+# Updated: 2026-06-12 (PR #1447 review fixes) — (1) per-key asyncio.Lock
+#   serializes connect()/ensure_connected() so the post-restart thundering
+#   herd (two concurrent executes) can't double-connect and leak the losing
+#   adapter; (2) connect() rolls the persisted row back when adapter.connect
+#   *raises*, not just when it returns a failure result; (3) connect() routes
+#   through get_definition() so a YAML dropped in after startup is connectable
+#   without a restart (it was already visible to detail/status).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -164,7 +172,22 @@ class ConnectorRegistry:
         self._state_store: ConnectorStateStore = state_store or FileConnectorStateStore()
         self._definitions: dict[str, ConnectorDef] = {}
         self._instances: dict[str, AnyAdapter] = {}  # key = "{pocket_id}:{connector_name}"
+        # Per-key locks serializing the connect paths — see _lock_for().
+        self._connect_locks: dict[str, asyncio.Lock] = {}
         self._scan()
+
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        """Per-(pocket, connector) lock for connect()/ensure_connected().
+
+        Two concurrent executes for the same key right after a restart (the
+        thundering-herd shape ensure_connected creates) would otherwise both
+        build and connect an adapter; the last ``_instances`` write wins and
+        the loser's adapter (DB engine, HTTP client) leaks without a
+        disconnect. ``setdefault`` on a plain dict is safe here — it runs
+        between awaits on the event loop, so no two coroutines can interleave
+        inside it.
+        """
+        return self._connect_locks.setdefault(key, asyncio.Lock())
 
     def _scan(self) -> None:
         """Scan both connector directories for YAML definitions.
@@ -232,26 +255,34 @@ class ConnectorRegistry:
 
         Write-through: the config is persisted to the state store before the
         adapter connects, so the binding survives a process restart (see
-        ``ensure_connected``). A failed connect rolls the persisted row back —
-        a config that never connected must not read as configured. If a live
-        adapter exists with *different* config, it is disconnected first and
-        reconnected with the new config.
+        ``ensure_connected``). A failed connect — failure result *or* raised
+        exception — rolls the persisted row back: a config that never
+        connected must not read as configured. If a live adapter exists with
+        *different* config, it is disconnected first and reconnected with the
+        new config. Serialized per key with ``ensure_connected``.
         """
-        defn = self._definitions.get(connector_name)
+        defn = self.get_definition(connector_name)
         if not defn:
             return None
 
         key = f"{pocket_id}:{connector_name}"
-        if key in self._instances:
-            previous = self._state_store.get(connector_name, pocket_id)
-            if previous is not None and previous != config:
-                await self.disconnect(pocket_id, connector_name)
+        async with self._lock_for(key):
+            if key in self._instances:
+                previous = self._state_store.get(connector_name, pocket_id)
+                if previous is not None and previous != config:
+                    await self.disconnect(pocket_id, connector_name)
 
-        self._state_store.set(connector_name, pocket_id, config)
-        result = await self._connect_adapter(pocket_id, connector_name, defn, config)
-        if result is None or not result.success:
-            self._state_store.delete(connector_name, pocket_id)
-        return result
+            self._state_store.set(connector_name, pocket_id, config)
+            try:
+                result = await self._connect_adapter(pocket_id, connector_name, defn, config)
+            except BaseException:
+                # adapter.connect blew up (or was cancelled) — the row must
+                # not survive, same invariant as a failure result.
+                self._state_store.delete(connector_name, pocket_id)
+                raise
+            if result is None or not result.success:
+                self._state_store.delete(connector_name, pocket_id)
+            return result
 
     async def _connect_adapter(
         self,
@@ -293,23 +324,34 @@ class ConnectorRegistry:
         ``None`` when there is no persisted config, the definition is gone,
         or the reconnect fails; the persisted config is kept either way so a
         transient failure can be retried.
+
+        The miss path is serialized per key (see ``_lock_for``): concurrent
+        post-restart executes wait for the first reconnect instead of each
+        building an adapter and leaking all but the last one.
         """
         key = f"{scope_key}:{connector_name}"
         adapter = self._instances.get(key)
         if adapter is not None:
             return adapter
 
-        config = self._state_store.get(connector_name, scope_key)
-        if config is None:
-            return None
-        defn = self.get_definition(connector_name)
-        if defn is None:
-            return None
+        async with self._lock_for(key):
+            # Re-check under the lock — a racing call may have connected
+            # while this one waited.
+            adapter = self._instances.get(key)
+            if adapter is not None:
+                return adapter
 
-        result = await self._connect_adapter(scope_key, connector_name, defn, config)
-        if not result.success:
-            return None
-        return self._instances.get(key)
+            config = self._state_store.get(connector_name, scope_key)
+            if config is None:
+                return None
+            defn = self.get_definition(connector_name)
+            if defn is None:
+                return None
+
+            result = await self._connect_adapter(scope_key, connector_name, defn, config)
+            if not result.success:
+                return None
+            return self._instances.get(key)
 
     async def disconnect(self, pocket_id: str, connector_name: str) -> bool:
         """Disconnect a connector from a pocket and forget its persisted config.

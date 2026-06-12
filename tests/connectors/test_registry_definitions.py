@@ -5,6 +5,9 @@
 #   connected); home-dir YAML pickup (~/.pocketpaw/connectors); CWD precedence
 #   on name collision; orphan state rows surface as definition_missing without
 #   crashing; get_definition rescans on miss.
+# Updated: 2026-06-12 (PR #1447 review fixes) — connect() routes through
+#   get_definition, so a YAML dropped in after registry construction is
+#   connectable, not just visible to detail/status.
 
 from __future__ import annotations
 
@@ -154,6 +157,17 @@ class TestDefinitionScan:
         defn = reg.get_definition("latesvc")
         assert defn is not None
         assert defn.display_name == "Late Service"
+
+    @pytest.mark.asyncio
+    async def test_connect_picks_up_late_definition(self, defs_dir, store, home_dir) -> None:
+        """connect() routes through the rescan-on-miss path too — drop a YAML,
+        then /connect, without a restart in between."""
+        reg = _registry(defs_dir, store, home_dir)
+        _write_yaml(defs_dir, "latesvc", "Late Service")
+        result = await reg.connect("default", "latesvc", {"api_key": "k1"})
+        assert result is not None
+        assert result.success is True
+        assert _status_of(reg, "default", "latesvc")["status"] == ConnectorStatus.CONNECTED
 
     def test_missing_dirs_scan_to_empty(self, tmp_path, store) -> None:
         reg = ConnectorRegistry(
