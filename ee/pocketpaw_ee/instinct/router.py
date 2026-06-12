@@ -834,9 +834,7 @@ async def bulk_approve_actions(
             try:
                 from pocketpaw_ee.cloud.mandates import executor as mandate_executor
 
-                await mandate_executor.execute_approved_plan(
-                    action, human_event_id=human_event_id
-                )
+                await mandate_executor.execute_approved_plan(action, human_event_id=human_event_id)
             except Exception:
                 logger.exception(
                     "bulk-approve belt_plan execution failed for %s (non-fatal)",
