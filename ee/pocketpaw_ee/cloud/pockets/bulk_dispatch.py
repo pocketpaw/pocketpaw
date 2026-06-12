@@ -399,7 +399,9 @@ async def _fire_executions(
             )
             for row in plan.executions
         ]
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+    # Trailing `backend_type` / `connector_name` (connector-backend feature)
+    # don't apply to the http write executor — absorbed and ignored.
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route, *_ = creds
 
     # Per-row path/params: the OSS planner does not resolve Ripple
     # ``{...}`` expressions — that's a frontend / executor concern. For

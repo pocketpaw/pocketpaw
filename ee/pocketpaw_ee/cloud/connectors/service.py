@@ -19,6 +19,12 @@
 #   doc (OSS-EE boundary §2). The MCP ``connector_execute`` tool reuses the
 #   existing ``execute(...)`` for read (auto-trust) actions and blocks
 #   write/confirm-trust actions in v1.
+# Updated: 2026-06-12 (feat/connector-as-pocket-backend) — added
+#   ``is_connector_enabled_for_workspace``: the validation gate
+#   ``pockets.service.set_pocket_backend`` calls before binding a pocket to a
+#   ``backend_type="connector"`` backend. Keeps the WorkspaceConnector Beanie
+#   read in THIS service (the owner of the connector docs) so the pockets
+#   service never imports the connector model.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -590,6 +596,31 @@ async def is_connector_bound_to_pocket(workspace_id: str, pocket_id: str, name: 
     return doc is not None
 
 
+async def is_connector_enabled_for_workspace(workspace_id: str, name: str) -> bool:
+    """True when ``name`` is a real registry connector AND enabled for the workspace.
+
+    The validation gate ``pockets.service.set_pocket_backend`` uses before it
+    binds a pocket to ``backend_type="connector"``: a connector backend must
+    name a connector the registry knows and that this workspace has actually
+    enabled (any scope). Keeping the ``WorkspaceConnector`` Beanie read HERE
+    (not in the pockets service) holds the boundary — the pockets service owns
+    the pocket/backend docs, this service owns the connector docs. Both stay
+    sole writers/readers of their own collection.
+
+    Tenant-filtered on ``workspace`` (cloud rule §7). An unknown registry name
+    or a workspace with no enabled row for it returns ``False``.
+    """
+    available = {a.name for a in _available_from_registry()}
+    if name not in available:
+        return False
+    doc = await _WCDoc.find_one(
+        _WCDoc.workspace == workspace_id,
+        _WCDoc.name == name,
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    )
+    return doc is not None
+
+
 def _adapter_for_definition(defn, name: str):
     """Build an adapter without connecting — for static metadata reads.
 
@@ -731,6 +762,7 @@ __all__ = [
     "get_action_trust",
     "get_connector",
     "is_connector_bound_to_pocket",
+    "is_connector_enabled_for_workspace",
     "list_connectors",
     "list_pocket_connectors",
     "list_widget_recipes",

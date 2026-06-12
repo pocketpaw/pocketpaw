@@ -345,6 +345,41 @@ async def test_get_action_trust_reads_vs_writes(mongo_db):  # noqa: ARG001
     write = await connectors_service.get_action_trust("github", "create_issue")
     assert write is not None and not write.is_read and write.trust_level == "confirm"
 
+
+@pytest.mark.asyncio
+async def test_is_connector_enabled_for_workspace(mongo_db):  # noqa: ARG001
+    """The validation gate the pocket-backend setter uses: True only when the
+    connector is a real registry connector AND enabled for the workspace."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+
+    # Enable github at workspace scope.
+    await WorkspaceConnector(
+        workspace="ws-1", name="github", enabled=True, scope="workspace"
+    ).insert()
+
+    assert await connectors_service.is_connector_enabled_for_workspace("ws-1", "github")
+    # Not enabled in another workspace.
+    assert not await connectors_service.is_connector_enabled_for_workspace("ws-OTHER", "github")
+    # A registry connector with no enabled row → False.
+    assert not await connectors_service.is_connector_enabled_for_workspace("ws-1", "gmail")
+    # A name the registry doesn't know → False.
+    assert not await connectors_service.is_connector_enabled_for_workspace(
+        "ws-1", "no-such-connector"
+    )
+
+
+@pytest.mark.asyncio
+async def test_is_connector_enabled_false_when_disabled(mongo_db):  # noqa: ARG001
+    """A disabled row does not count as enabled."""
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+
+    await WorkspaceConnector(
+        workspace="ws-1", name="github", enabled=False, scope="workspace"
+    ).insert()
+    assert not await connectors_service.is_connector_enabled_for_workspace("ws-1", "github")
+
     assert await connectors_service.get_action_trust("github", "nope") is None
 
 

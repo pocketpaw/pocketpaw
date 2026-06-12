@@ -127,7 +127,9 @@ async def test_pocket_open_no_ripple_spec_no_backend_is_noop():
 async def test_configured_backend_runs_executor():
     """With a backend bound, the route delegates to the executor unchanged."""
     pocket = _pocket({"version": "1.0", "sources": {"revenue": dict(_REVENUE_SOURCE)}, "ui": {}})
-    creds = ("https://api.example.com", "bearer", None, "tok", [], None)
+    # connector-as-backend: the executor tuple is an 8-tuple — trailing
+    # backend_type / connector_name (http / None for this http backend).
+    creds = ("https://api.example.com", "bearer", None, "tok", [], None, "http", None)
     executor_result = {"ran": [{"source": "revenue", "bind": "revenue", "value": 42}], "errors": []}
     with _patch_service(pocket=pocket, creds=creds):
         with patch(

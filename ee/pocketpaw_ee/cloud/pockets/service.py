@@ -156,6 +156,18 @@ empty/absent existing ``ui`` is template-owned (adopt the template's
 compiled values); a non-empty ``ui`` is user-owned (machinery-only
 merge, exactly the prior recompile semantics). Both ``create`` and
 ``update`` pass the loader's ``ripple_spec`` sibling through.
+Changes: 2026-06-12 (feat/connector-as-pocket-backend) — a pocket backend
+can now be an existing CONNECTOR, not only an HTTP base_url.
+``set_pocket_backend`` gained ``backend_type`` (``"http"`` default |
+``"connector"``) + ``connector_name``: a connector backend validates the
+connector is enabled for the workspace (via
+``connectors.service.is_connector_enabled_for_workspace``), needs no
+``base_url``, and clears any stale http credential. ``get_pocket_backend``
++ ``get_pocket_backend_for_executor`` now carry ``backend_type`` /
+``connector_name`` (``getattr`` defaults so a legacy row reads as http) so
+the source executor can route a connector backend through
+``connectors_service.execute`` instead of an HTTP GET. The executor tuple
+grew two trailing elements; the write-path consumers ignore them.
 """
 
 from __future__ import annotations
@@ -2127,7 +2139,11 @@ async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
     # so the edit specialist can see which write methods+paths the owner
     # has authorized before it authors a write action; ``approval_route``
     # so it knows who approves a `requires_instinct` write.
+    # ``backend_type`` / ``connector_name`` so the specialist knows whether to
+    # author http-path sources or connector-action sources.
     return {
+        "backend_type": summary.get("backend_type", "http"),
+        "connector_name": summary.get("connector_name"),
         "base_url": summary.get("base_url"),
         "auth_type": summary.get("auth_type"),
         "configured": True,
@@ -3635,38 +3651,86 @@ async def set_pocket_backend(
     auth_type: str,
     auth_token: str,
     auth_header: str | None = None,
+    *,
+    backend_type: str = "http",
+    connector_name: str | None = None,
 ) -> dict:
     """Bind a pocket to one backend — upsert its credential row.
 
-    ``base_url`` is validated strictly (https-only, no internal hosts). The
-    token is encrypted via ``backend_crypto`` before it touches the DB; the
-    plaintext is never persisted or logged. Returns the non-secret summary.
+    Two backend shapes:
+
+    * ``backend_type="http"`` (the default) — ``base_url`` is validated
+      strictly (https-only, no internal hosts), the token is encrypted via
+      ``backend_crypto`` before it touches the DB, and the plaintext is never
+      persisted or logged.
+    * ``backend_type="connector"`` — ``connector_name`` names a
+      workspace-bound connector. ``base_url``/``auth_*`` are ignored (and NOT
+      required); the connector is validated to actually exist + be enabled for
+      this workspace via ``connectors.service.is_connector_enabled_for_workspace``
+      (rejected with ``pocket_backend.unknown_connector`` otherwise).
+
+    Returns the non-secret summary (carries ``backend_type`` +
+    ``connector_name``, never the token).
     """
-    from pocketpaw.security.url_validators import validate_external_url_strict
-
-    # Raises ValueError on a bad URL — surfaces as a 400 via the router.
-    try:
-        base_url = validate_external_url_strict(base_url)
-    except ValueError as exc:
-        raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
-
-    if auth_type != "none" and not auth_token:
+    if backend_type not in ("http", "connector"):
         raise ValidationError(
-            "pocket_backend.missing_token",
-            f"auth_type '{auth_type}' requires a non-empty auth_token",
+            "pocket_backend.invalid_backend_type",
+            f"backend_type must be 'http' or 'connector', got {backend_type!r}",
         )
 
-    encrypted_token: bytes | None = None
-    nonce: bytes | None = None
-    salt: bytes | None = None
-    if auth_type != "none":
-        encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+    if backend_type == "connector":
+        if not connector_name:
+            raise ValidationError(
+                "pocket_backend.missing_connector",
+                "backend_type 'connector' requires a connector_name",
+            )
+        # The connector must be a real registry connector AND enabled for this
+        # workspace. The Beanie read lives in the connectors service (the owner
+        # of the connector docs) — imported lazily to keep the static import
+        # graph free of a cycle (the connectors service imports this service).
+        from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+        if not await connectors_service.is_connector_enabled_for_workspace(
+            workspace_id, connector_name
+        ):
+            raise ValidationError(
+                "pocket_backend.unknown_connector",
+                f"connector {connector_name!r} is not enabled for this workspace — "
+                "enable it before binding it as a pocket backend",
+            )
+        # A connector backend carries no base_url / auth — clear them so a
+        # row that switched http -> connector never keeps a stale credential.
+        base_url = ""
+        auth_type = "none"
+        auth_header = None
+        encrypted_token = nonce = salt = None
+    else:
+        from pocketpaw.security.url_validators import validate_external_url_strict
+
+        # Raises ValueError on a bad URL — surfaces as a 400 via the router.
+        try:
+            base_url = validate_external_url_strict(base_url)
+        except ValueError as exc:
+            raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
+
+        if auth_type != "none" and not auth_token:
+            raise ValidationError(
+                "pocket_backend.missing_token",
+                f"auth_type '{auth_type}' requires a non-empty auth_token",
+            )
+
+        encrypted_token = nonce = salt = None
+        if auth_type != "none":
+            encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+        connector_name = None
 
     existing = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
         _BackendCredentialDoc.workspace_id == workspace_id,
     )
     if existing is not None:
+        existing.backend_type = backend_type
+        existing.connector_name = connector_name
         existing.base_url = base_url
         existing.auth_type = auth_type
         existing.auth_header = auth_header
@@ -3678,6 +3742,8 @@ async def set_pocket_backend(
         await _BackendCredentialDoc(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
+            backend_type=backend_type,
+            connector_name=connector_name,
             base_url=base_url,
             auth_type=auth_type,
             auth_header=auth_header,
@@ -3696,7 +3762,13 @@ async def set_pocket_backend(
     )
     # no-event: backend credentials are a separate collection, not pocket
     # state — no downstream handler keys off a PocketUpdated for them.
-    return {"base_url": base_url, "auth_type": auth_type, "configured": True}
+    return {
+        "backend_type": backend_type,
+        "connector_name": connector_name,
+        "base_url": base_url,
+        "auth_type": auth_type,
+        "configured": True,
+    }
 
 
 def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
@@ -3727,21 +3799,17 @@ def _approval_route_wire(doc: _BackendCredentialDoc) -> dict[str, str | None] | 
     return {"mode": route.mode, "user_id": route.user_id}
 
 
-async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
-    """Return the pocket's backend binding summary, or ``None`` if unset.
+def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
+    """Render the full NON-SECRET backend summary for a credential row.
 
-    NEVER returns the token — only ``base_url`` / ``auth_type`` /
-    ``configured`` / ``allowed_writes`` (the write allowlist) /
-    ``approval_route`` (the gated-write approver routing; ``None`` when
-    unset). All owner/editor-facing non-secrets.
+    The ONE place the wire summary is shaped so ``get_pocket_backend`` and the
+    write-policy / approval-route setters never drift. NEVER includes the
+    token. ``backend_type`` / ``connector_name`` come via ``getattr`` defaults
+    so a legacy row reads as an http backend — back-compatible.
     """
-    doc = await _BackendCredentialDoc.find_one(
-        _BackendCredentialDoc.pocket_id == pocket_id,
-        _BackendCredentialDoc.workspace_id == workspace_id,
-    )
-    if doc is None:
-        return None
     return {
+        "backend_type": getattr(doc, "backend_type", "http"),
+        "connector_name": getattr(doc, "connector_name", None),
         "base_url": doc.base_url,
         "auth_type": doc.auth_type,
         "configured": True,
@@ -3750,18 +3818,56 @@ async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
     }
 
 
+async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return the pocket's backend binding summary, or ``None`` if unset.
+
+    NEVER returns the token — only ``backend_type`` / ``connector_name`` /
+    ``base_url`` / ``auth_type`` / ``configured`` / ``allowed_writes`` (the
+    write allowlist) / ``approval_route`` (the gated-write approver routing;
+    ``None`` when unset). All owner/editor-facing non-secrets.
+
+    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
+    row written before this feature reads as ``backend_type="http"`` /
+    ``connector_name=None`` — back-compatible.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+    return _backend_summary_wire(doc)
+
+
 async def get_pocket_backend_for_executor(
     workspace_id: str, pocket_id: str
-) -> tuple[str, str, str | None, str, list[dict[str, str]], dict[str, str | None] | None] | None:
+) -> (
+    tuple[
+        str,
+        str,
+        str | None,
+        str,
+        list[dict[str, str]],
+        dict[str, str | None] | None,
+        str,
+        str | None,
+    ]
+    | None
+):
     """Internal — return ``(base_url, auth_type, auth_header, token,
-    allowed_writes, approval_route)``.
+    allowed_writes, approval_route, backend_type, connector_name)``.
 
-    Decrypts the stored token. Used by the run-sources route handler (it
-    ignores the trailing elements), the run-action route handler (it needs
-    ``allowed_writes`` and ``approval_route``), and ``instinct_bridge``.
-    Returns ``None`` when the pocket has no backend configured. The
-    plaintext token returned here must never be logged or returned to a
-    client. ``approval_route`` is ``None`` when no route is set.
+    Decrypts the stored token (http backends only; a connector backend has no
+    token). Used by the run-sources route handler (which now also reads the
+    trailing ``backend_type`` / ``connector_name`` to route the run), the
+    run-action route handler (it needs ``allowed_writes`` / ``approval_route``),
+    and ``instinct_bridge`` / ``temporal_dispatcher`` / ``bulk_dispatch`` (which
+    ignore the trailing elements). Returns ``None`` when the pocket has no
+    backend configured. The plaintext token must never be logged or returned to
+    a client.
+
+    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
+    legacy row reads as ``"http"`` / ``None`` — back-compatible.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -3780,6 +3886,8 @@ async def get_pocket_backend_for_executor(
         token,
         _allowed_writes_wire(doc),
         _approval_route_wire(doc),
+        getattr(doc, "backend_type", "http"),
+        getattr(doc, "connector_name", None),
     )
 
 
@@ -3829,13 +3937,7 @@ async def set_pocket_write_policy(
     # no-event: backend credentials (and the write policy on them) are a
     # separate collection, not pocket state — no downstream handler keys
     # off a PocketUpdated for them.
-    return {
-        "base_url": doc.base_url,
-        "auth_type": doc.auth_type,
-        "configured": True,
-        "allowed_writes": _allowed_writes_wire(doc),
-        "approval_route": _approval_route_wire(doc),
-    }
+    return _backend_summary_wire(doc)
 
 
 async def set_pocket_approval_route(
@@ -3901,13 +4003,7 @@ async def set_pocket_approval_route(
         auth_type=doc.auth_type,
     )
     # no-event: see set_pocket_write_policy — credential rows aren't pocket state.
-    return {
-        "base_url": doc.base_url,
-        "auth_type": doc.auth_type,
-        "configured": True,
-        "allowed_writes": _allowed_writes_wire(doc),
-        "approval_route": _approval_route_wire(doc),
-    }
+    return _backend_summary_wire(doc)
 
 
 async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str) -> None:

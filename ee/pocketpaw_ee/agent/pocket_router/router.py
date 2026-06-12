@@ -342,7 +342,19 @@ async def _run_tier0(
     # write must reach the approval surface with the pocket's configured
     # approver route — exactly as the REST `/actions/run` path passes it to
     # `propose_pocket_write`.
-    base_url, auth_type, auth_header, token, allowed_writes, approval_route = creds
+    # The connector-backend feature appended `backend_type` / `connector_name`
+    # to the executor tuple — threaded into `run_sources` below so a connector
+    # backend routes correctly; the write-action branch ignores them.
+    (
+        base_url,
+        auth_type,
+        auth_header,
+        token,
+        allowed_writes,
+        approval_route,
+        backend_type,
+        connector_name,
+    ) = creds
 
     if classification.op == "run_source":
         # A source run mirrors ``POST /pockets/{id}/sources/run`` — read
@@ -360,6 +372,8 @@ async def _run_tier0(
             token=token,
             only_source=classification.op_args.get("source"),
             workspace_id=workspace_id,
+            backend_type=backend_type,
+            connector_name=connector_name,
         )
         errors = result.get("errors") or []
         if errors:

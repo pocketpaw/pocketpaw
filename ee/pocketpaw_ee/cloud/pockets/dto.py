@@ -95,6 +95,13 @@ Updated: 2026-06-07 (feat/entity-pocket-profile-field) — import
 importing ``models.*``; the class is a plain value object, not a Beanie doc,
 so sharing it via the leaf domain module keeps one shape without crossing the
 boundary.
+Updated: 2026-06-12 (feat/connector-as-pocket-backend) — a pocket backend
+can be an existing CONNECTOR, not only an http base_url.
+PocketBackendConfigRequest gained ``backend_type`` ("http" default |
+"connector") + ``connector_name`` and made ``base_url`` optional (a
+connector backend needs none; the service still requires a valid URL for an
+http backend). PocketBackendConfigResponse echoes ``backend_type`` /
+``connector_name`` back (never the token).
 """
 
 from __future__ import annotations
@@ -329,21 +336,31 @@ class AllowedWriteDTO(BaseModel):
 class PocketBackendConfigRequest(BaseModel):
     """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
 
-    ``auth_token`` carries the secret only on the way IN; it is encrypted
-    server-side and never returned. Its meaning depends on ``auth_type``:
+    ``backend_type`` selects the shape:
 
-    * ``bearer`` — the bearer token, sent as ``Authorization: Bearer <token>``.
-    * ``api_key`` — the API key value, sent in the ``auth_header`` header.
-    * ``basic`` — the raw ``user:pass`` credential. The server base64-encodes
-      it to form a valid ``Authorization: Basic`` header — do NOT pre-encode.
-    * ``none`` — unused.
+    * ``"http"`` (the default) — ``base_url`` + optional auth. ``auth_token``
+      carries the secret only on the way IN; it is encrypted server-side and
+      never returned. Its meaning depends on ``auth_type``:
+        - ``bearer`` — the bearer token (``Authorization: Bearer <token>``).
+        - ``api_key`` — the API key value, sent in the ``auth_header`` header.
+        - ``basic`` — the raw ``user:pass`` credential. The server
+          base64-encodes it — do NOT pre-encode.
+        - ``none`` — unused.
+      ``auth_header`` names the custom header for the ``api_key`` auth type
+      (defaults to ``X-Api-Key`` when omitted).
+    * ``"connector"`` — ``connector_name`` names a workspace-bound connector.
+      ``base_url``/``auth_*`` are unused (and not required); the service
+      validates the connector is enabled for the workspace.
 
-    ``auth_header`` names the custom header for the ``api_key`` auth type
-    (defaults to ``X-Api-Key`` when omitted).
+    ``base_url`` is OPTIONAL here (defaults to ``""``) so a connector backend
+    needn't send one; the service still requires a valid URL for an http
+    backend.
     """
 
-    base_url: str = Field(min_length=1)
-    auth_type: Literal["bearer", "api_key", "basic", "none"]
+    backend_type: Literal["http", "connector"] = "http"
+    connector_name: str | None = None
+    base_url: str = ""
+    auth_type: Literal["bearer", "api_key", "basic", "none"] = "none"
     auth_token: str = ""
     auth_header: str | None = None
 
@@ -369,6 +386,12 @@ class ApprovalRouteDTO(BaseModel):
 class PocketBackendConfigResponse(BaseModel):
     """Backend binding as returned to clients — never carries the token.
 
+    ``backend_type`` is ``"http"`` (the default / legacy) or ``"connector"``;
+    ``connector_name`` names the bound connector when ``backend_type`` is
+    ``"connector"`` (``None`` for http). For an http backend ``base_url`` /
+    ``auth_type`` describe the endpoint; for a connector backend ``base_url``
+    is ``""`` and ``auth_type`` is ``"none"``.
+
     ``allowed_writes`` is the per-pocket write allowlist (RFC 05 M2a) —
     an owner/editor-facing non-secret. Empty by default (fail-closed: no
     write fires until a human allow-lists it).
@@ -378,6 +401,8 @@ class PocketBackendConfigResponse(BaseModel):
     default — the pocket owner approves.
     """
 
+    backend_type: str = "http"
+    connector_name: str | None = None
     base_url: str
     auth_type: str
     configured: bool
