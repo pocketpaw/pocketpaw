@@ -309,6 +309,14 @@ class ConnectorRegistry:
         connected must not read as configured. If a live adapter exists with
         *different* config, it is disconnected first and reconnected with the
         new config. Serialized per key with ``ensure_connected``.
+
+        WARNING: never pass a namespaced (``ws:``/``pocket:``) scope key as
+        ``pocket_id`` — against the EE cloud store, the write-through ``set``
+        would mirror this unproven config onto the service-owned
+        WorkspaceConnector row, and the rollback ``delete`` no-ops there, so
+        a failed connect could not undo it. Cloud rows reconnect through
+        ``ensure_connected`` only; their lifecycle belongs to the connectors
+        service.
         """
         defn = self.get_definition(connector_name)
         if not defn:

@@ -8,6 +8,10 @@
 #   (set mirrors config onto existing rows only; delete on namespaced keys is
 #   a no-op; non-namespaced keys delegate to the file store), and the
 #   stale-adapter drops on update_config / disable_connector.
+# Updated: 2026-06-12 (PR #1449 review fix) — added the credential-provenance
+#   test: a disabled row's credentials must never reach the legacy fallback's
+#   connect() (the fallback doc read now filters enabled == True), so disable
+#   revokes on the HTTP execute path too, not just the durable seam.
 
 from __future__ import annotations
 
@@ -312,3 +316,53 @@ async def test_disable_drops_live_adapter(
     assert fresh_registry.get_adapter("ws:ws-1", "github") is None
     # And the durable read now reports no binding (enabled filter).
     assert await fresh_registry._state_store.get("github", "ws:ws-1") is None
+
+
+@pytest.mark.asyncio
+async def test_disabled_row_credentials_never_reach_fallback_connect(
+    mongo_db,  # noqa: ARG001 — wires Beanie
+    fresh_registry,
+):
+    """Disable must revoke on EVERY execute path (PR #1449 review fix).
+
+    The durable seam already refuses disabled rows (enabled filter in the
+    cloud store), but the legacy one-shot fallback used to re-read the doc
+    WITHOUT an enabled filter — a disabled row's credentials still connected
+    and executed via the HTTP router. Provenance check: seed a DISABLED row
+    with credentials, spy on every config that reaches connect(), and assert
+    the credentials never appear — the fallback gets {} and real adapters
+    fail to connect.
+    """
+    from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
+
+    await _seed_doc(enabled=False, config={"GITHUB_TOKEN": "ghp_revoked"})
+
+    connect_configs: list[dict] = []
+    original_connect = DirectRESTAdapter.connect
+
+    async def _spy_connect(self, pocket_id, config):
+        connect_configs.append(dict(config))
+        return await original_connect(self, pocket_id, config)
+
+    with (
+        patch.object(DirectRESTAdapter, "connect", _spy_connect),
+        patch.object(
+            DirectRESTAdapter,
+            "execute",
+            return_value=ActionResult(success=True, data=[], records_affected=0),
+        ),
+    ):
+        await connectors_service.execute(
+            "ws-1",
+            "github",
+            ExecuteActionRequest(action="list_issues", params={"owner": "a", "repo": "b"}),
+            user_id="u-1",
+        )
+
+    # The disabled row's credentials never reached any connect() call: the
+    # durable seam refused the row, and the fallback's enabled-filtered doc
+    # read fell through to {} config.
+    assert connect_configs == [{}]
+    assert all("GITHUB_TOKEN" not in c for c in connect_configs)
+    # Nothing was cached under the durable key either.
+    assert fresh_registry.get_adapter("ws:ws-1", "github") is None

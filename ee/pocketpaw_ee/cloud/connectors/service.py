@@ -33,6 +33,10 @@
 #   gone. ``enable_connector`` / ``update_config`` / ``disable_connector``
 #   drop any live registry adapter for the touched row so the next execute
 #   rehydrates with current config instead of serving a stale connection.
+# Updated: 2026-06-12 (PR #1449 review fix) — the legacy one-shot fallback in
+#   ``execute()`` filters its doc read on ``enabled == True``, so a disabled
+#   row's credentials can never connect through the fallback: disable now
+#   revokes on every execute path, not just the durable seam.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -759,10 +763,18 @@ async def execute(
         exec_adapter = await reg.ensure_connected(name, f"ws:{workspace_id}")
     if exec_adapter is None:
         # Legacy fallback — no enabled row with usable config (or the
-        # reconnect failed). Preserve the pre-CS-3 semantics: one-shot
-        # adapter, best-effort connect with whatever the workspace row
-        # carries, and let the adapter surface its own failure on execute.
-        doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
+        # reconnect failed). Preserve the pre-CS-3 shape (one-shot adapter,
+        # best-effort connect, the adapter surfaces its own failure on
+        # execute) for ENABLED rows only: the enabled filter below is what
+        # makes disable actually revoke on this path — a disabled row's
+        # credentials must never reach connect(), so a disabled (or
+        # never-enabled) connector gets {} config and real adapters fail
+        # to connect.
+        doc = await _WCDoc.find_one(
+            _WCDoc.workspace == workspace_id,
+            _WCDoc.name == name,
+            _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+        )
         config = dict(doc.config) if doc else {}
         pocket_key = body.pocket_id or workspace_id
         exec_adapter = adapter
