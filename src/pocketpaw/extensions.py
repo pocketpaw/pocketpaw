@@ -10,6 +10,11 @@ contract enforces it.
 Each Protocol documents the entry-point group that carries its implementations.
 An entry-point points at a zero-arg callable (usually the class itself) that
 the registry instantiates once and caches.
+
+Updated: 2026-06-12 (connector-store-unification CS-3) — added
+``ConnectorStateStoreProvider`` (group ``pocketpaw.connector_state_stores``)
+so EE can back the ConnectorRegistry's durable state with the cloud DB
+instead of the file store.
 """
 
 from __future__ import annotations
@@ -199,6 +204,27 @@ class PocketWriter(Protocol):
         """Create the pocket + linked session. Returns the new pocket id,
         or ``None`` on failure."""
         ...
+
+
+@runtime_checkable
+class ConnectorStateStoreProvider(Protocol):
+    """Entry-point group: ``pocketpaw.connector_state_stores``
+
+    Supplies the durable ``ConnectorStateStore`` that backs
+    ``ConnectorRegistry`` when no explicit store is passed. Core ships the
+    file-backed default (``~/.pocketpaw/connectors/state/``); the cloud
+    product swaps in a store backed by the ``WorkspaceConnector`` document
+    so connector config rehydrates from the tenant database after a
+    process restart.
+
+    The returned store satisfies
+    ``pocketpaw.connectors.state_store.ConnectorStateStore``. Its
+    ``get``/``set``/``delete`` methods may be async (return awaitables) —
+    the registry awaits awaitable results; ``list`` must stay sync (it is
+    called from the registry's sync ``status()``).
+    """
+
+    def get_state_store(self) -> Any: ...
 
 
 @runtime_checkable
