@@ -101,6 +101,9 @@ async def test_agent_view_includes_configured_backend_summary(mongo_db, agent_id
     assert err is None
     assert view is not None
     assert view["backend"] == {
+        # connector-as-backend: backend_type/connector_name lead the summary.
+        "backend_type": "http",
+        "connector_name": None,
         "base_url": "https://jsonplaceholder.typicode.com",
         "auth_type": "none",
         "configured": True,
@@ -139,6 +142,8 @@ async def test_agent_view_backend_summary_never_leaks_the_token(mongo_db, agent_
     # `allowed_writes` — the write allowlist; M2b.1 adds `approval_route`
     # — the gated-write approver routing — both non-secret).
     assert set(backend) == {
+        "backend_type",
+        "connector_name",
         "base_url",
         "auth_type",
         "configured",
@@ -198,6 +203,8 @@ async def test_fetch_pocket_for_agent_carries_backend_summary(mongo_db, agent_id
 
     assert result["ok"] is True
     assert result["pocket"]["backend"] == {
+        "backend_type": "http",
+        "connector_name": None,
         "base_url": "https://jsonplaceholder.typicode.com",
         "auth_type": "none",
         "configured": True,

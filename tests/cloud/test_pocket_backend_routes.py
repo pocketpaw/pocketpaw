@@ -73,7 +73,18 @@ def client(app: FastAPI) -> TestClient:
 def test_put_backend_configures(monkeypatch, client):
     captured = {}
 
-    async def _set(workspace_id, user_id, pocket_id, base_url, auth_type, auth_token, auth_header):
+    async def _set(
+        workspace_id,
+        user_id,
+        pocket_id,
+        base_url,
+        auth_type,
+        auth_token,
+        auth_header,
+        *,
+        backend_type="http",
+        connector_name=None,
+    ):
         captured.update(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -81,8 +92,16 @@ def test_put_backend_configures(monkeypatch, client):
             base_url=base_url,
             auth_type=auth_type,
             auth_token=auth_token,
+            backend_type=backend_type,
+            connector_name=connector_name,
         )
-        return {"base_url": base_url, "auth_type": auth_type, "configured": True}
+        return {
+            "backend_type": backend_type,
+            "connector_name": connector_name,
+            "base_url": base_url,
+            "auth_type": auth_type,
+            "configured": True,
+        }
 
     monkeypatch.setattr(pockets_service, "set_pocket_backend", _set)
 
@@ -97,6 +116,11 @@ def test_put_backend_configures(monkeypatch, client):
     assert res.status_code == 200, res.text
     body = res.json()
     assert body == {
+        # connector-as-backend: the response now carries backend_type +
+        # connector_name. The faked service omits them, so the response model
+        # fills the http defaults.
+        "backend_type": "http",
+        "connector_name": None,
         "base_url": "https://api.example.com",
         "auth_type": "bearer",
         "configured": True,
@@ -229,9 +253,10 @@ def test_run_sources_happy_path(monkeypatch, client):
         return {"_id": pocket_id, "rippleSpec": spec}
 
     async def _get_creds(workspace_id, pocket_id):
-        # RFC 05 M2b.1: 6-tuple — trailing elements are the write
-        # allowlist and the approval route (None = owner approves).
-        return ("https://api.example.com", "bearer", None, "tok", [], None)
+        # connector-as-backend: 8-tuple — trailing elements are the write
+        # allowlist, approval route (None = owner approves), backend_type,
+        # connector_name.
+        return ("https://api.example.com", "bearer", None, "tok", [], None, "http", None)
 
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
     monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)

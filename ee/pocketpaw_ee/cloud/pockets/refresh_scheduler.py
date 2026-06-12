@@ -137,7 +137,7 @@ async def _refresh_one_pocket(pocket: dict) -> None:
             _last_run[(pocket_id, key)] = now
         logger.debug("refresh-scheduler: pocket %s has interval sources but no backend", pocket_id)
         return
-    base_url, auth_type, auth_header, token, _allowed, _route = creds
+    base_url, auth_type, auth_header, token, _allowed, _route, backend_type, connector_name = creds
     ripple_spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
     if ripple_spec is None:
         return
@@ -164,6 +164,8 @@ async def _refresh_one_pocket(pocket: dict) -> None:
                 token=token,
                 only_source=key,
                 workspace_id=workspace_id,
+                backend_type=backend_type,
+                connector_name=connector_name,
             )
             if result.get("errors"):
                 logger.debug(

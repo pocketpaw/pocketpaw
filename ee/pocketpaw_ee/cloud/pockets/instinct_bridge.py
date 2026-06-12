@@ -525,9 +525,11 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         )
         return
 
-    # The executor-creds tuple is a 6-tuple (M2b.1); `approval_route` is
-    # unused at execution — the approver already approved.
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+    # The executor-creds tuple gained trailing `backend_type` /
+    # `connector_name` (connector-backend feature); the http write executor
+    # ignores them, and `approval_route` is unused at execution — the approver
+    # already approved.
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route, *_ = creds
 
     try:
         result = await action_executor.run_action(

@@ -621,10 +621,13 @@ async def set_pocket_backend(
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> PocketBackendConfigResponse:
-    """Bind this pocket to one external backend (base URL + auth credential).
+    """Bind this pocket to one external backend.
 
-    The token is encrypted server-side; the response never echoes it back.
-    A bad base URL (non-https, internal host) yields a 400.
+    ``backend_type="http"`` (the default) binds a base URL + auth credential;
+    the token is encrypted server-side and never echoed back, and a bad base
+    URL (non-https, internal host) yields a 400. ``backend_type="connector"``
+    binds an existing workspace connector by ``connector_name`` (no base_url
+    needed); an unknown / not-enabled connector yields a 400.
     """
     result = await pockets_service.set_pocket_backend(
         workspace_id,
@@ -634,6 +637,8 @@ async def set_pocket_backend(
         body.auth_type,
         body.auth_token,
         body.auth_header,
+        backend_type=body.backend_type,
+        connector_name=body.connector_name,
     )
     return PocketBackendConfigResponse(**result)
 
@@ -731,8 +736,19 @@ async def run_pocket_sources(
             ],
         }
     # M2b.1 — the executor-creds tuple gained `allowed_writes` (M2a) and
-    # `approval_route` (M2b.1); read-only source runs need neither.
-    base_url, auth_type, auth_header, token, _allowed_writes, _approval_route = creds
+    # `approval_route` (M2b.1); read-only source runs need neither. The
+    # connector-backend feature appended `backend_type` / `connector_name`,
+    # which the run DOES need to pick the http vs connector transport.
+    (
+        base_url,
+        auth_type,
+        auth_header,
+        token,
+        _allowed_writes,
+        _approval_route,
+        backend_type,
+        connector_name,
+    ) = creds
 
     # no-event: source hydration is response-body delivery, not persisted
     return await source_executor.run_sources(
@@ -746,6 +762,8 @@ async def run_pocket_sources(
         trigger=body.trigger,
         only_source=body.source,
         workspace_id=workspace_id,
+        backend_type=backend_type,
+        connector_name=connector_name,
     )
 
 
@@ -999,7 +1017,10 @@ async def run_pocket_action(
             "pocket_backend.not_configured",
             "This pocket has no backend configured — set one via PUT /pockets/{id}/backend",
         )
-    base_url, auth_type, auth_header, token, allowed_writes, approval_route = creds
+    # Write-action run: the trailing `backend_type` / `connector_name` (added
+    # by the connector-backend feature) don't apply to the http write executor,
+    # so they're ignored here.
+    base_url, auth_type, auth_header, token, allowed_writes, approval_route, *_ = creds
 
     from pocketpaw_ee.cloud.pockets import action_executor
 

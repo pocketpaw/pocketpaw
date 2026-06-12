@@ -171,7 +171,16 @@ async def test_tier0_invokes_source_executor_and_handles():
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
             new=AsyncMock(
-                return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+                return_value=(
+                    "https://api.example.com",
+                    "bearer",
+                    None,
+                    "tok",
+                    [],
+                    None,
+                    "http",
+                    None,
+                )
             ),
         ),
         patch("pocketpaw_ee.cloud.pockets.source_executor.run_sources", new=fake_run),
@@ -209,7 +218,16 @@ async def test_tier0_emits_execution_frame_with_zero_tokens_and_skipped_stages()
             patch(
                 "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
                 new=AsyncMock(
-                    return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+                    return_value=(
+                        "https://api.example.com",
+                        "bearer",
+                        None,
+                        "tok",
+                        [],
+                        None,
+                        "http",
+                        None,
+                    )
                 ),
             ),
             patch(
@@ -252,7 +270,16 @@ async def test_tier0_source_errors_escalate():
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
             new=AsyncMock(
-                return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+                return_value=(
+                    "https://api.example.com",
+                    "bearer",
+                    None,
+                    "tok",
+                    [],
+                    None,
+                    "http",
+                    None,
+                )
             ),
         ),
         patch(
@@ -306,7 +333,16 @@ async def test_router_resolves_spec_via_agent_view_when_pocket_absent():
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
             new=AsyncMock(
-                return_value=("https://api.example.com", "bearer", None, "tok", [], None)
+                return_value=(
+                    "https://api.example.com",
+                    "bearer",
+                    None,
+                    "tok",
+                    [],
+                    None,
+                    "http",
+                    None,
+                )
             ),
         ),
         patch("pocketpaw_ee.cloud.pockets.source_executor.run_sources", new=fake_run),
@@ -539,7 +575,16 @@ async def test_tier0_deny_by_default_write_lands_in_instinct_pending(monkeypatch
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
             new=AsyncMock(
-                return_value=("https://api.example.com", "none", None, "", _ALLOWLIST, None)
+                return_value=(
+                    "https://api.example.com",
+                    "none",
+                    None,
+                    "",
+                    _ALLOWLIST,
+                    None,
+                    "http",
+                    None,
+                )
             ),
         ),
         patch(
@@ -605,7 +650,16 @@ async def test_tier0_explicitly_exempt_write_still_fires(monkeypatch, tmp_path):
         patch(
             "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor",
             new=AsyncMock(
-                return_value=("https://api.example.com", "none", None, "", _ALLOWLIST, None)
+                return_value=(
+                    "https://api.example.com",
+                    "none",
+                    None,
+                    "",
+                    _ALLOWLIST,
+                    None,
+                    "http",
+                    None,
+                )
             ),
         ),
         patch(

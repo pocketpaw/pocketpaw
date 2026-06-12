@@ -285,7 +285,9 @@ async def _invoke_executor(
             "code": "pocket_backend.not_configured",
             "on_error": [],
         }
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+    # Trailing `backend_type` / `connector_name` (connector-backend feature)
+    # don't apply to the http write executor — absorbed and ignored.
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route, *_ = creds
 
     ripple_spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
     actions = (ripple_spec or {}).get("actions")
