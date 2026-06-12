@@ -31,6 +31,15 @@
 # (decoupling the façade from the router). The bulk-approve chain-emit spy test
 # now monkeypatches ``ee.instinct.chain_emitters._emit_*`` (where the service
 # imports them from) instead of the old router path.
+# Updated: 2026-06-12 (fix/tray-workspace-scoped-nudges) — added
+# ``TestWorkspaceScopedNudges`` pinning the Tray fix: an external-action
+# proposal stamps ``Action.pocket_id = workspace_id`` (workspace-scoped, not
+# pocket-bound — see ``external_actions/propose.py``), so the old
+# pocket-visibility filter in ``agent_list_work_items`` dropped every such
+# proposal from the feed. The tests assert (1) a workspace-scoped pending
+# action projects as ``nudge:<id>`` with pocket_name "Workspace", even when
+# the workspace has zero visible pockets, and (2) another tenant's
+# workspace-scoped action stays invisible (store-level W4c scoping intact).
 
 from __future__ import annotations
 
@@ -263,6 +272,80 @@ class TestListWorkItems:
         monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
         out2 = await mc_service.agent_list_work_items(_ctx(), {})
         assert "Drafted from the modal" in [it.title for it in out2]
+
+
+# ---------------------------------------------------------------------------
+# workspace-scoped nudges (external-action proposals) must reach The Tray
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceScopedNudges:
+    """External-action proposals stamp ``Action.pocket_id = workspace_id``
+    (they're workspace-scoped, not pocket-bound — see
+    ``external_actions/propose.py``). Before the fix, the façade's
+    pocket-visibility filter (``a.pocket_id not in visible``) dropped every
+    such proposal: a workspace id is never a visible pocket id, so gated
+    external actions sat pending forever without ever surfacing in The Tray.
+    """
+
+    @pytest.mark.asyncio
+    async def test_workspace_scoped_action_surfaces_in_tray(self, store: InstinctStore) -> None:
+        a = await store.propose(
+            "w1",  # pocket_id carries the workspace for external actions
+            "External action — send invoice",
+            "gated call",
+            "approve to call 'send_invoice' on connector 'stripe'",
+            _trigger(),
+            parameters={"_external_action": {"connector": "stripe", "action": "send_invoice"}},
+            workspace_id="w1",
+        )
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert [it.id for it in items] == [f"nudge:{a.id}"]
+        item = items[0]
+        assert item.section == WorkItemSection.TRAY
+        assert item.status == WorkItemStatus.AWAITING_APPROVAL
+        # Don't leak the raw workspace hex id where a pocket name belongs.
+        assert item.pocket_name == "Workspace"
+
+    @pytest.mark.asyncio
+    async def test_workspace_scoped_action_surfaces_even_with_no_visible_pockets(
+        self, monkeypatch, store: InstinctStore
+    ) -> None:
+        # The old code skipped the whole instinct block when the workspace
+        # had zero visible pockets — workspace-scoped nudges vanished too.
+        monkeypatch.setattr(mc_service.pockets_service, "list_pockets", AsyncMock(return_value=[]))
+        a = await store.propose(
+            "w1",
+            "External action — pocketless workspace",
+            "",
+            "",
+            _trigger(),
+            parameters={"_external_action": {"connector": "gmail", "action": "send"}},
+            workspace_id="w1",
+        )
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert [it.id for it in items] == [f"nudge:{a.id}"]
+        assert items[0].pocket_name == "Workspace"
+
+    @pytest.mark.asyncio
+    async def test_other_tenants_workspace_scoped_action_stays_invisible(
+        self, store: InstinctStore
+    ) -> None:
+        # Tenancy guard: w2's workspace-scoped proposal (stored under w2)
+        # must never surface for a w1 caller. The store-level W4c scope is
+        # what isolates it — accepting pocket_id == workspace_id must not
+        # loosen that.
+        await store.propose(
+            "w2",
+            "theirs — external action",
+            "",
+            "",
+            _trigger(),
+            parameters={"_external_action": {"connector": "stripe", "action": "refund"}},
+            workspace_id="w2",
+        )
+        items = await mc_service.agent_list_work_items(_ctx(workspace_id="w1"), {})
+        assert items == []
 
 
 # ---------------------------------------------------------------------------
