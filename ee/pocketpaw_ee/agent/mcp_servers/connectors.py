@@ -24,21 +24,30 @@
 #   the read-first gate (only trust=auto runs) so this module does NOT re-gate.
 #   Tool ids namespace as ``mcp__pocketpaw_connectors__list_senses`` /
 #   ``…__sense_execute``.
-"""Agent-side MCP surface for executing a pocket's bound connectors.
+# Updated: 2026-06-12 (workspace-scope reach) — unanchored chats (DM/group
+#   threads with ``pocket_id=None``) no longer short-circuit to "no pocket":
+#   both tools now fall through to the service with the workspace identity, so
+#   WORKSPACE-scoped connectors are listable and executable from any chat in
+#   the tenant. Pocket-scoped connectors stay room-private (the service's
+#   pocket arm matches nothing for a null pocket). Execute uses
+#   ``scope="workspace"`` credentials when unanchored. Trust gate unchanged —
+#   writes still refuse pre-execute.
+"""Agent-side MCP surface for executing a chat's reachable connectors.
 
 Tools registered:
 
-  - ``list_connector_actions()`` — for the CURRENT pocket (``pocket_id`` from
-    the per-stream ContextVar), list each enabled, pocket-scoped connector and
-    its READ actions (``trust=auto``) the agent may call, plus its WRITE actions
-    flagged "(needs approval — v2, blocked)". No pocket / no connectors → a clear
-    message rather than a silent empty list.
+  - ``list_connector_actions()`` — for the CURRENT chat, list each reachable
+    connector and its READ actions (``trust=auto``) the agent may call, plus
+    its WRITE actions flagged "(needs approval — v2, blocked)". Reachable =
+    enabled pocket-scoped connectors of the chat's pocket (when anchored) plus
+    the workspace-scoped connectors of the tenant (always). No connectors → a
+    clear message rather than a silent empty list.
   - ``connector_execute(connector_name, action, params)`` — run ONE read action.
-    Gates in order: (a) connector must be enabled + bound to THIS pocket
-    (tenant-scoped on workspace+pocket); (b) the action's trust level decides
-    read vs write; (c) ``auto`` → call ``connectors.service.execute`` and return
-    the result; (d) ``confirm`` / ``restricted`` → refuse with the v2 message,
-    never executing the write.
+    Gates in order: (a) connector must be enabled for this chat's reach (bound
+    to THIS pocket, or workspace-scoped in THIS workspace); (b) the action's
+    trust level decides read vs write; (c) ``auto`` → call
+    ``connectors.service.execute`` and return the result; (d) ``confirm`` /
+    ``restricted`` → refuse with the v2 message, never executing the write.
 
 Identity comes from ``agent_service.current_workspace_id`` /
 ``current_user_id`` / ``current_pocket_id``. Outside an SSE chat stream those
@@ -127,23 +136,15 @@ async def _list_connector_actions_handler(args: dict) -> dict:  # noqa: ARG001 �
             "no active workspace — list_connector_actions can only be called "
             "from inside a cloud chat stream"
         )
-    if not pocket_id:
-        return _success_response(
-            {
-                "pocket_id": None,
-                "connectors": [],
-                "message": (
-                    "This chat isn't anchored to a pocket, so it has no bound "
-                    "connectors. Open this conversation inside a pocket/room and "
-                    "bind a connector to use connector actions."
-                ),
-            }
-        )
-
     from pocketpaw_ee.cloud.connectors import service as connectors_service
 
     try:
-        connectors = await connectors_service.list_pocket_connectors(workspace_id, pocket_id)
+        # Unanchored chats (pocket_id=None) pass "" — the pocket arm of the
+        # service query matches nothing, so only workspace-scoped connectors
+        # come back. Anchored chats get pocket-scoped + workspace-scoped.
+        connectors = await connectors_service.list_pocket_connectors(
+            workspace_id, pocket_id or ""
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("list_connector_actions failed", exc_info=True)
         return _error_response(f"list_connector_actions failed: {exc}")
@@ -154,8 +155,9 @@ async def _list_connector_actions_handler(args: dict) -> dict:  # noqa: ARG001 �
                 "pocket_id": pocket_id,
                 "connectors": [],
                 "message": (
-                    "No connectors are bound to this pocket yet. Bind one "
-                    "(scope=pocket) and add its token to the connector config to "
+                    "No connectors are reachable from this chat — none bound to "
+                    "this pocket and none enabled workspace-wide. Enable a "
+                    "connector (workspace scope) or bind one to this pocket to "
                     "use its actions here."
                 ),
             }
@@ -204,12 +206,6 @@ async def _connector_execute_handler(args: dict) -> dict:
             "no active workspace — connector_execute can only be called from "
             "inside a cloud chat stream"
         )
-    if not pocket_id:
-        return _error_response(
-            "this chat isn't anchored to a pocket — connector_execute needs a "
-            "pocket-scoped room with a bound connector"
-        )
-
     connector_name = args.get("connector_name")
     if not isinstance(connector_name, str) or not connector_name:
         return _error_response("connector_name is required (string)")
@@ -224,18 +220,21 @@ async def _connector_execute_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.connectors import service as connectors_service
     from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
 
-    # Gate 1 — the connector must be enabled AND bound to THIS pocket. An agent
-    # in pocket A must never reach a connector bound only to pocket B / workspace.
+    # Gate 1 — the connector must be reachable from THIS chat: bound to this
+    # pocket, or enabled workspace-wide in this workspace. An agent in pocket A
+    # must never reach a connector bound only to pocket B; workspace scope is
+    # the tenant boundary, so it passes from any chat (anchored or not).
     try:
         bound = await connectors_service.is_connector_bound_to_pocket(
-            workspace_id, pocket_id, connector_name
+            workspace_id, pocket_id or "", connector_name
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("connector bind check failed", exc_info=True)
         return _error_response(f"connector_execute failed: {exc}")
     if not bound:
         return _error_response(
-            f"connector '{connector_name}' is not bound to this pocket. "
+            f"connector '{connector_name}' is not reachable from this chat — "
+            "not bound to this pocket and not workspace-enabled. "
             "Call list_connector_actions to see what's available here."
         )
 
@@ -263,12 +262,14 @@ async def _connector_execute_handler(args: dict) -> dict:
 
     # Gate 4 — READ (auto-trust): run via the existing cloud execute path. It
     # uses the connector's stored config (PAT/token) through the
-    # DirectRESTAdapter / native adapter — no OAuth flow in v1.
+    # DirectRESTAdapter / native adapter — no OAuth flow in v1. Anchored chats
+    # execute with the pocket's credentials; unanchored chats fall back to the
+    # workspace scope's credentials.
     body = ExecuteActionRequest(
         action=action,
         params=params,
-        scope="pocket",
-        pocket_id=pocket_id,
+        scope="pocket" if pocket_id else "workspace",
+        pocket_id=pocket_id or None,
     )
     try:
         result = await connectors_service.execute(
@@ -369,11 +370,9 @@ async def _sense_execute_handler(args: dict) -> dict:
         return _error_response(
             "no active workspace — sense_execute can only be called from inside a cloud chat stream"
         )
-    if not pocket_id:
-        return _error_response(
-            "this chat isn't anchored to a pocket — sense_execute needs a "
-            "pocket-scoped room with a bound connector"
-        )
+    # No pocket guard: ``execute_sense`` takes ``pocket_id=None`` natively and
+    # resolves workspace-scoped providers, matching ``_list_senses_handler`` —
+    # a sense the agent can list must also be executable from the same chat.
 
     sense = args.get("sense")
     if not isinstance(sense, str) or not sense:

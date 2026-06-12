@@ -25,6 +25,14 @@
 #   ``backend_type="connector"`` backend. Keeps the WorkspaceConnector Beanie
 #   read in THIS service (the owner of the connector docs) so the pockets
 #   service never imports the connector model.
+# Updated: 2026-06-12 (workspace-scope visibility) — ``list_pocket_connectors``
+#   and ``is_connector_bound_to_pocket`` now ALSO match ``scope="workspace"``
+#   rows: a workspace-enabled connector is visible/usable from every pocket in
+#   that workspace, not only pockets with an explicit pocket-scoped row. Fixes
+#   the UI-says-connected / agent-says-no-connectors split (the connectors page
+#   reads the workspace catalog; the agent MCP tool read only pocket-scoped
+#   rows). Cross-tenant posture unchanged — workspace scope IS the tenant; the
+#   read/write trust gate still applies per action.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -42,6 +50,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+
+from beanie.operators import And, Or
 
 from pocketpaw.connectors.protocol import ExecutionMode
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
@@ -499,10 +509,12 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     classified by trust level so the agent MCP server can show read actions as
     callable and write actions as "needs approval (v2)".
 
-    Tenant-filtered on ``workspace`` AND ``pocket_id`` (cloud rule §7) and
-    further on ``scope == "pocket"`` + ``enabled``. The Beanie read lives here
-    (not in the MCP layer) so the OSS-EE boundary holds: the MCP server imports
-    this service, never the ``WorkspaceConnector`` doc.
+    Tenant-filtered on ``workspace`` (cloud rule §7); matches rows enabled for
+    THIS pocket (``scope == "pocket"`` + ``pocket_id``) OR workspace-wide
+    (``scope == "workspace"`` — available from every pocket in the tenant).
+    The Beanie read lives here (not in the MCP layer) so the OSS-EE boundary
+    holds: the MCP server imports this service, never the
+    ``WorkspaceConnector`` doc.
 
     Trust gating: ``auto``-trust actions are read-first (``is_read=True``);
     ``confirm`` / ``restricted`` actions are write-shaped and marked
@@ -510,8 +522,10 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     """
     enabled_docs = await _WCDoc.find(
         _WCDoc.workspace == workspace_id,
-        _WCDoc.pocket_id == pocket_id,
-        _WCDoc.scope == "pocket",
+        Or(
+            _WCDoc.scope == "workspace",
+            And(_WCDoc.scope == "pocket", _WCDoc.pocket_id == pocket_id),
+        ),
         _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
     ).to_list()
     if not enabled_docs:
@@ -520,7 +534,11 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     reg = _get_registry()
     available = {a.name: a for a in _available_from_registry()}
     out: list[PocketConnectorInfo] = []
+    seen: set[str] = set()
     for doc in enabled_docs:
+        if doc.name in seen:
+            continue
+        seen.add(doc.name)
         a = available.get(doc.name)
         defn = reg.get_definition(doc.name)
         if a is None or defn is None:
@@ -580,16 +598,19 @@ async def get_action_trust(name: str, action: str) -> ConnectorActionInfo | None
 
 
 async def is_connector_bound_to_pocket(workspace_id: str, pocket_id: str, name: str) -> bool:
-    """True when ``name`` is enabled at ``scope=pocket`` for this exact pocket.
+    """True when ``name`` is enabled for this pocket or workspace-wide.
 
     The tenant gate the MCP ``connector_execute`` tool checks first: an agent in
-    pocket A must not run a connector only bound to pocket B (or workspace-wide
-    only). Tenant-filtered (cloud rule §7).
+    pocket A must not run a connector only bound to pocket B. Workspace-scoped
+    rows pass for every pocket in the tenant — workspace scope IS the tenant
+    boundary, so there is no cross-pocket leak. Tenant-filtered (cloud rule §7).
     """
     doc = await _WCDoc.find_one(
         _WCDoc.workspace == workspace_id,
-        _WCDoc.pocket_id == pocket_id,
-        _WCDoc.scope == "pocket",
+        Or(
+            _WCDoc.scope == "workspace",
+            And(_WCDoc.scope == "pocket", _WCDoc.pocket_id == pocket_id),
+        ),
         _WCDoc.name == name,
         _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
     )
