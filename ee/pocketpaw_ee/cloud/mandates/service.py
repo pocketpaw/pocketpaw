@@ -1,6 +1,20 @@
 # ee/pocketpaw_ee/cloud/mandates/service.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
 #
+# Updated: 2026-06-13 (feat/patrol-engine) — added ``list_cadence_due(now)``, the
+#   cadence scheduler's read: all ACTIVE mandates whose charter cadence interval
+#   has elapsed since their last shift (or that never shifted). "manual" mandates
+#   are never returned. Also: ``run_patrols`` now passes ``workspace_id`` to any
+#   patrol whose signature accepts it (the LIVE ``issues`` patrol needs it to
+#   reach its connector) via signature inspection — the legacy ``deps_patrol``
+#   ``(repo_id)`` shape is unchanged. Additive only.
+# Updated: 2026-06-13 (PR #1463 review) — ``run_patrols`` also threads ``user_id``
+#   to patrols that accept it (audit attribution); the sighting dedup key is
+#   generalized to ``_dedup_signal`` (issues key on ``evidence.iid``, deps on
+#   ``evidence.package``, else summary) so a retitled issue no longer
+#   double-persists; ``list_cadence_due`` carries an explicit N+1 demo-bar
+#   concession note (TODO: single aggregation pipeline).
+#
 # Business logic for the MANDATE primitive — the standing Belt JOB. Sole owner
 # of writes to MandateDoc / ShiftDoc / SightingDoc (the only module that imports
 # those Beanie classes, per the 4-file entity rule).
@@ -21,8 +35,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
@@ -359,12 +374,25 @@ async def list_sightings(workspace_id: str, user_id: str, mandate_id: str) -> di
     return {"sightings": [_sighting_to_wire(s) for s in docs]}
 
 
+def _dedup_signal(evidence: dict[str, Any] | None, summary: str | None) -> str:
+    """The stable per-patrol dedup signal for a sighting / draft.
+
+    Generalized across patrols: ``issues`` carry ``evidence.iid`` (stable across a
+    retitle), ``deps`` carry ``evidence.package``; anything else falls back to the
+    summary. Without the ``iid`` branch an issue retitle would change the summary
+    and double-persist the same issue."""
+    ev = evidence or {}
+    signal = ev.get("iid") or ev.get("package") or summary or ""
+    return str(signal)
+
+
 async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[str, Any]:
     """Run every registered patrol over the mandate's surface and persist the
     resulting Sightings.
 
-    Dedup: a draft whose ``evidence.package`` already has a sighting from the
-    same patrol on this mandate is skipped — repeated shift triggers must not
+    Dedup: a draft whose dedup signal (``evidence.iid`` for issues,
+    ``evidence.package`` for deps, else the summary) already has a sighting from
+    the same patrol on this mandate is skipped — repeated shift triggers must not
     spam the foreman with identical signals. Returns the NEW sightings only."""
     from pocketpaw_ee.cloud.mandates.patrols import PATROLS
 
@@ -373,7 +401,7 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
     existing = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
-    seen_keys = {(s.patrol, str((s.evidence or {}).get("package") or s.summary)) for s in existing}
+    seen_keys = {(s.patrol, _dedup_signal(s.evidence, s.summary)) for s in existing}
 
     created: list[SightingDoc] = []
     enabled = set(doc.patrols or [])
@@ -384,14 +412,25 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
         if patrol_name not in enabled:
             continue
         try:
-            drafts = await patrol(doc.surface.repo_id)
+            # Patrols take ``repo_id`` positionally; a LIVE patrol (e.g. ``issues``)
+            # also needs the workspace to reach its connector, and the actor to
+            # attribute the connector call to, so pass ``workspace_id`` / ``user_id``
+            # ONLY when the patrol's signature accepts them. This keeps the legacy
+            # ``deps_patrol(repo_id)`` shape working unchanged.
+            kwargs: dict[str, Any] = {}
+            params = inspect.signature(patrol).parameters
+            if "workspace_id" in params:
+                kwargs["workspace_id"] = workspace_id
+            if "user_id" in params:
+                kwargs["user_id"] = user_id
+            drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
             continue
         for draft in drafts:
             key = (
                 str(draft.get("patrol") or patrol_name),
-                str((draft.get("evidence") or {}).get("package") or draft.get("summary") or ""),
+                _dedup_signal(draft.get("evidence"), draft.get("summary")),
             )
             if key in seen_keys:
                 continue
@@ -1325,6 +1364,64 @@ async def list_autopilot_enabled() -> list[dict[str, Any]]:
         }
         for d in docs
     ]
+
+
+# Cadence → due-interval. A "weekly" mandate is due once its last shift is older
+# than this; "manual" mandates are never scheduled (no entry → not due). Kept as a
+# table so a later cadence value ("daily", etc.) only adds a row here.
+_CADENCE_INTERVALS: dict[str, timedelta] = {"weekly": timedelta(days=7)}
+
+# The SYSTEM actor a scheduled shift runs as (no human user_id on a cadence fire).
+_SCHEDULER_ACTOR = "system:scheduler"
+
+
+async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
+    """All ACTIVE mandates whose charter cadence is DUE at ``now`` — the cadence
+    scheduler's read (``scheduler.run_scheduler_tick``).
+
+    A mandate is DUE when its cadence has a scheduling interval (currently only
+    ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
+    that interval before ``now`` (a mandate that has NEVER shifted is always due).
+    ``"manual"`` mandates have no interval, so they are never returned — the demo
+    bar's manual-trigger path is untouched.
+
+    DELIBERATELY cross-workspace: this is a SYSTEM sweeper read (same posture as
+    ``list_autopilot_enabled`` / the stale-run sweeper), not a request-path find.
+    Paused mandates are excluded — a paused mandate is inert. Returns
+    ``[{workspace_id, mandate_id, user_id}]`` (``user_id`` is the SYSTEM actor the
+    scheduler triggers shifts as).
+
+    ``now`` is injected so the scheduler can pass a deterministic clock — tests
+    never depend on wall time."""
+    # no-event: read-only path; emit only on writes.
+    # DEMO-BAR CONCESSION (N+1): one MandateDoc.find + one ShiftDoc.find per active
+    # mandate. Fine at demo-bar mandate counts; at scale this should be a SINGLE
+    # aggregation pipeline ($lookup the latest shift per mandate + a $match on the
+    # cadence window). TODO: single aggregation pipeline before this runs against a
+    # real tenant population.
+    docs = await MandateDoc.find(MandateDoc.status == "active").to_list()
+    due: list[dict[str, Any]] = []
+    for doc in docs:
+        interval = _CADENCE_INTERVALS.get(doc.charter.cadence)
+        if interval is None:
+            continue  # manual (or an unscheduled cadence) — never auto-fired
+        last = (
+            await ShiftDoc.find(
+                ShiftDoc.workspace == doc.workspace, ShiftDoc.mandate_id == str(doc.id)
+            )
+            .sort("-no")
+            .first_or_none()
+        )
+        if last is not None and _aware(last.createdAt) > (now - interval):
+            continue  # shifted inside the cadence window — not due yet
+        due.append(
+            {
+                "workspace_id": doc.workspace,
+                "mandate_id": str(doc.id),
+                "user_id": _SCHEDULER_ACTOR,
+            }
+        )
+    return due
 
 
 async def executor_revalidate(workspace_id: str, mandate_id: str) -> dict[str, Any]:

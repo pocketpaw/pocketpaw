@@ -27,6 +27,22 @@
 #   stats/query consistency invariant (scoped stats["objects"] == scoped query
 #   total — the count mismatch that surfaced the bug), confirms legacy NULL rows
 #   stay visible, and that workspace_id=None keeps the instance-wide behavior.
+# Updated: 2026-06-13 (feat/fabric-multihop) — Added TestMultiHopPath: proves the
+#   2-hop ontology join the code audit flagged is now ONE server-side query.
+#   Reproduces the exact competitive-intel scenario — Deal --deal_for--> Customer
+#   --competes_with--> Competitor, filtered to open deals — that previously
+#   returned [] from a single query() and had to be hand-stitched as two
+#   get_linked_objects calls in app code. Also covers: property filters applied
+#   at the intended hop, terminal object_type constraint, per-hop tenant scoping
+#   (a linked object in another workspace must not leak across a hop), reverse
+#   ("in") and symmetric ("any") hop directions, and backward-compat (single-hop
+#   linked_to and an empty path behave exactly as before).
+# Updated: 2026-06-13 (review fixes #1465) — extended TestMultiHopPath with the
+#   bounds the reviewer asked for: a 3-hop chain (depth beyond the audit's 2), a
+#   walk that collapses mid-path (empty intermediate frontier returns an empty
+#   result, NOT an error), a single-hop fan-out exceeding MAX_FRONTIER (clean
+#   ValueError, never a SQLite bound-variable crash), and a path deeper than
+#   MAX_HOPS rejected at FabricQuery construction.
 
 from __future__ import annotations
 
@@ -36,8 +52,8 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from pocketpaw.fabric.models import FabricQuery, PropertyDef
-from pocketpaw.fabric.store import FabricStore
+from pocketpaw.fabric.models import MAX_HOPS, FabricQuery, PathHop, PropertyDef
+from pocketpaw.fabric.store import MAX_FRONTIER, FabricStore
 
 
 @pytest.fixture
@@ -640,3 +656,352 @@ class TestUpdateObjectWorkspaceScope:
         updated = await store.update_object(legacy.id, {"rent": 175}, workspace_id="ws-a")
         assert updated is not None
         assert updated.properties["rent"] == 175
+
+
+class TestMultiHopPath:
+    """Multi-hop / path traversal — the 2-hop ontology join in ONE query.
+
+    The code audit found that ``FabricStore.query()`` could only do ONE hop, so
+    the competitive-intel question "which open Deals link to a Customer that
+    ``competes_with`` a Competitor" returned [] as a single query and had to be
+    hand-stitched as two separate ``get_linked_objects`` calls in app code.
+    These tests pin the join as a single server-side query. The seed graph:
+
+        Deal(Acme deal, stage=open)   --deal_for-->   Customer(Acme)
+        Deal(Beta deal, stage=open)   --deal_for-->   Customer(Beta)
+        Deal(Won deal,  stage=won)    --deal_for-->   Customer(Acme)
+        Customer(Acme)  --competes_with-->  Competitor(Rival Inc)
+        (Customer(Beta) competes with nobody)
+
+    The 2-hop join from Competitor back to open Deals (or from Deals out to a
+    competing Customer) must return exactly the Acme open deal.
+    """
+
+    async def _seed(self, store: FabricStore, workspace_id: str | None = None):
+        """Build the audit graph. Returns a dict of the key objects/types."""
+        deal_t = await store.define_type(
+            name="Deal",
+            properties=[
+                PropertyDef(name="name", type="string"),
+                PropertyDef(name="stage", type="string"),
+            ],
+        )
+        cust_t = await store.define_type(name="Customer", properties=[])
+        comp_t = await store.define_type(name="Competitor", properties=[])
+
+        acme = await store.create_object(cust_t.id, {"name": "Acme"}, workspace_id=workspace_id)
+        beta = await store.create_object(cust_t.id, {"name": "Beta"}, workspace_id=workspace_id)
+        rival = await store.create_object(
+            comp_t.id, {"name": "Rival Inc"}, workspace_id=workspace_id
+        )
+
+        acme_deal = await store.create_object(
+            deal_t.id, {"name": "Acme deal", "stage": "open"}, workspace_id=workspace_id
+        )
+        beta_deal = await store.create_object(
+            deal_t.id, {"name": "Beta deal", "stage": "open"}, workspace_id=workspace_id
+        )
+        won_deal = await store.create_object(
+            deal_t.id, {"name": "Won deal", "stage": "won"}, workspace_id=workspace_id
+        )
+
+        # Deal --deal_for--> Customer (forward / "out")
+        await store.link(acme_deal.id, acme.id, "deal_for", workspace_id=workspace_id)
+        await store.link(beta_deal.id, beta.id, "deal_for", workspace_id=workspace_id)
+        await store.link(won_deal.id, acme.id, "deal_for", workspace_id=workspace_id)
+        # Customer --competes_with--> Competitor (forward / "out")
+        await store.link(acme.id, rival.id, "competes_with", workspace_id=workspace_id)
+
+        return {
+            "deal_t": deal_t,
+            "cust_t": cust_t,
+            "comp_t": comp_t,
+            "acme": acme,
+            "beta": beta,
+            "rival": rival,
+            "acme_deal": acme_deal,
+            "beta_deal": beta_deal,
+            "won_deal": won_deal,
+        }
+
+    @pytest.mark.asyncio
+    async def test_audit_scenario_two_hop_join_in_one_query(self, store: FabricStore) -> None:
+        """THE audit scenario: start at the Competitor, walk back to the OPEN
+        Deals whose Customer competes_with it — exactly the Acme open deal.
+
+        This is the query that returned [] before multi-hop. It walks:
+          Competitor(Rival) <--competes_with-- Customer <--deal_for-- Deal(open)
+        Each backward edge is a reverse ("in") hop; the terminal hop pins the
+        Deal type + stage=open filter.
+        """
+        g = await self._seed(store)
+
+        result = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[
+                    # Competitor -> the Customers that compete_with it (reverse).
+                    PathHop(link_type="competes_with", object_type="Customer", direction="in"),
+                    # Customer -> the Deals that are deal_for it (reverse), open only.
+                    PathHop(
+                        link_type="deal_for",
+                        object_type="Deal",
+                        direction="in",
+                        filters={"stage": "open"},
+                    ),
+                ],
+            )
+        )
+
+        names = {o.properties["name"] for o in result.objects}
+        assert names == {"Acme deal"}
+        assert result.total == 1
+        # The won deal links to the same Customer but is filtered out by stage.
+        assert "Won deal" not in names
+        # The Beta deal's customer competes with nobody, so it never appears.
+        assert "Beta deal" not in names
+
+    @pytest.mark.asyncio
+    async def test_old_code_single_query_returns_empty(self, store: FabricStore) -> None:
+        """Documents the gap: the single-hop query CANNOT express the join.
+
+        ``linked_to=rival, link_type=competes_with`` reaches the Customer only
+        — never the Deal — so asking for Deals via that one hop is empty. This
+        is the exact shortfall the audit hit before ``path`` existed.
+        """
+        g = await self._seed(store)
+
+        one_hop = await store.query(
+            FabricQuery(
+                type_name="Deal",
+                linked_to=g["rival"].id,
+                link_type="competes_with",
+            )
+        )
+        # One hop from the Competitor lands on the Customer, which is not a Deal.
+        assert one_hop.total == 0
+
+    @pytest.mark.asyncio
+    async def test_forward_direction_from_deals_out(self, store: FabricStore) -> None:
+        """The same join read the other way: start at the open Deals, walk OUT
+        to a Customer, then OUT to a Competitor — keep only deals that reach one.
+
+        Returns the terminal Competitor here (the path's last hop is Competitor).
+        Proves forward ("out") traversal and that the START filter (open deals)
+        plus terminal type both apply.
+        """
+        await self._seed(store)
+
+        result = await store.query(
+            FabricQuery(
+                type_name="Deal",
+                filters={"stage": "open"},
+                # linked_to omitted -> start frontier is every object matching the
+                # top-level type/filters (open Deals), then walk the path out.
+                path=[
+                    PathHop(link_type="deal_for", object_type="Customer", direction="out"),
+                    PathHop(link_type="competes_with", object_type="Competitor", direction="out"),
+                ],
+            )
+        )
+        # Only Acme's open deal reaches a Competitor; terminal objects are the
+        # Competitor(s) reached -> Rival Inc, once.
+        names = {o.properties["name"] for o in result.objects}
+        assert names == {"Rival Inc"}
+
+    @pytest.mark.asyncio
+    async def test_property_filter_applies_at_intended_hop(self, store: FabricStore) -> None:
+        """Dropping the stage=open filter lets the won deal through too — proof
+        the filter is what excludes it, applied at the terminal (Deal) hop."""
+        g = await self._seed(store)
+
+        no_filter = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[
+                    PathHop(link_type="competes_with", object_type="Customer", direction="in"),
+                    PathHop(link_type="deal_for", object_type="Deal", direction="in"),
+                ],
+            )
+        )
+        names = {o.properties["name"] for o in no_filter.objects}
+        assert names == {"Acme deal", "Won deal"}  # both Acme deals, no stage filter
+
+    @pytest.mark.asyncio
+    async def test_terminal_object_type_constrains_result(self, store: FabricStore) -> None:
+        """Without the terminal object_type, a hop returns whatever is on the
+        other end; with it, only matching-type objects survive."""
+        g = await self._seed(store)
+
+        # Hop once from the Competitor back along competes_with — reaches the
+        # Customer. Constrain to Customer: present. Constrain to Deal: empty.
+        as_customer = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[PathHop(link_type="competes_with", object_type="Customer", direction="in")],
+            )
+        )
+        assert {o.properties["name"] for o in as_customer.objects} == {"Acme"}
+
+        as_deal = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[PathHop(link_type="competes_with", object_type="Deal", direction="in")],
+            )
+        )
+        assert as_deal.total == 0
+
+    @pytest.mark.asyncio
+    async def test_tenant_scoping_holds_across_hops(self, store: FabricStore) -> None:
+        """A linked object in another workspace must not leak across a hop.
+
+        ws-a owns the full chain. ws-b owns a Competitor that an A-owned link
+        (mis)points at. An A-scoped 2-hop query must never surface ws-b's
+        objects, and a B-scoped query must not see ws-a's deal.
+        """
+        g = await self._seed(store, workspace_id="ws-a")
+
+        # A cross-tenant Competitor + a link from A's Customer into it. Even
+        # though the LINK is A-owned, the terminal object belongs to ws-b.
+        b_rival = await store.create_object(
+            g["comp_t"].id, {"name": "B Rival"}, workspace_id="ws-b"
+        )
+        await store.link(g["acme"].id, b_rival.id, "competes_with", workspace_id="ws-a")
+
+        # A-scoped: walk Deal(open) --deal_for--> Customer --competes_with-->
+        # Competitor. b_rival must be excluded; only Rival Inc (ws-a) survives.
+        a_result = await store.query(
+            FabricQuery(
+                type_name="Deal",
+                filters={"stage": "open"},
+                path=[
+                    PathHop(link_type="deal_for", object_type="Customer", direction="out"),
+                    PathHop(link_type="competes_with", object_type="Competitor", direction="out"),
+                ],
+            ),
+            workspace_id="ws-a",
+        )
+        assert {o.properties["name"] for o in a_result.objects} == {"Rival Inc"}
+        assert "B Rival" not in {o.properties["name"] for o in a_result.objects}
+
+        # B-scoped: B owns no Deal/Customer, so the same path yields nothing.
+        b_result = await store.query(
+            FabricQuery(
+                type_name="Deal",
+                filters={"stage": "open"},
+                path=[
+                    PathHop(link_type="deal_for", object_type="Customer", direction="out"),
+                    PathHop(link_type="competes_with", object_type="Competitor", direction="out"),
+                ],
+            ),
+            workspace_id="ws-b",
+        )
+        assert b_result.total == 0
+
+    @pytest.mark.asyncio
+    async def test_any_direction_matches_either_way(self, store: FabricStore) -> None:
+        """``direction="any"`` traverses a link regardless of stored direction —
+        the symmetric semantics of the legacy single-hop ``linked_to``."""
+        g = await self._seed(store)
+
+        # competes_with was stored Customer->Competitor. From the Competitor,
+        # an "any" hop still reaches the Customer.
+        result = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[PathHop(link_type="competes_with", object_type="Customer", direction="any")],
+            )
+        )
+        assert {o.properties["name"] for o in result.objects} == {"Acme"}
+
+    @pytest.mark.asyncio
+    async def test_empty_path_is_backward_compatible(self, store: FabricStore) -> None:
+        """An empty ``path`` (default) leaves single-hop behavior untouched."""
+        g = await self._seed(store)
+
+        # Legacy single-hop: customers linked to the rival via competes_with.
+        legacy = await store.query(FabricQuery(linked_to=g["rival"].id, link_type="competes_with"))
+        assert {o.properties["name"] for o in legacy.objects} == {"Acme"}
+
+    @pytest.mark.asyncio
+    async def test_three_hop_path(self, store: FabricStore) -> None:
+        """A 3-hop chain resolves end to end in one query.
+
+        Region <--in_region-- Competitor <--competes_with-- Customer
+        <--deal_for-- Deal(open). Start at the Region, walk back three reverse
+        hops to the open Deal(s). Exercises depth beyond the audit's 2 hops.
+        """
+        g = await self._seed(store)
+        region_t = await store.define_type(name="Region", properties=[])
+        emea = await store.create_object(region_t.id, {"name": "EMEA"})
+        # Competitor(Rival Inc) --in_region--> Region(EMEA)
+        await store.link(g["rival"].id, emea.id, "in_region")
+
+        result = await store.query(
+            FabricQuery(
+                linked_to=emea.id,
+                path=[
+                    PathHop(link_type="in_region", object_type="Competitor", direction="in"),
+                    PathHop(link_type="competes_with", object_type="Customer", direction="in"),
+                    PathHop(
+                        link_type="deal_for",
+                        object_type="Deal",
+                        direction="in",
+                        filters={"stage": "open"},
+                    ),
+                ],
+            )
+        )
+        assert {o.properties["name"] for o in result.objects} == {"Acme deal"}
+
+    @pytest.mark.asyncio
+    async def test_empty_intermediate_frontier_returns_empty_not_error(
+        self, store: FabricStore
+    ) -> None:
+        """A walk that collapses mid-path (a hop reaches nothing) returns an
+        empty result, NOT an error — the dead end is a normal outcome."""
+        g = await self._seed(store)
+
+        # Hop 1 reaches the Customer (Acme). Hop 2 follows a link_type that no
+        # object has -> the frontier empties. Hop 3 must not run / error.
+        result = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[
+                    PathHop(link_type="competes_with", object_type="Customer", direction="in"),
+                    PathHop(link_type="no_such_link", direction="in"),
+                    PathHop(link_type="deal_for", object_type="Deal", direction="in"),
+                ],
+            )
+        )
+        assert result.objects == []
+        assert result.total == 0
+
+    @pytest.mark.asyncio
+    async def test_fan_out_exceeding_max_frontier_raises_clean_value_error(
+        self, store: FabricStore
+    ) -> None:
+        """A single hop that fans out past MAX_FRONTIER raises a clear ValueError
+        rather than crashing SQLite on the bound-variable limit."""
+        hub_t = await store.define_type(name="Hub", properties=[])
+        leaf_t = await store.define_type(name="Leaf", properties=[])
+        hub = await store.create_object(hub_t.id, {"name": "hub"})
+        # Link the hub out to MAX_FRONTIER + 1 leaves on one link_type.
+        for i in range(MAX_FRONTIER + 1):
+            leaf = await store.create_object(leaf_t.id, {"i": i})
+            await store.link(hub.id, leaf.id, "has_leaf")
+
+        with pytest.raises(ValueError, match="exceeding the cap"):
+            await store.query(
+                FabricQuery(
+                    linked_to=hub.id,
+                    path=[PathHop(link_type="has_leaf", object_type="Leaf", direction="out")],
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_path_deeper_than_max_hops_rejected(self) -> None:
+        """FabricQuery rejects a path deeper than MAX_HOPS at construction —
+        before any DB work — with a clear ValueError."""
+        with pytest.raises(ValueError, match="maximum is"):
+            FabricQuery(path=[PathHop(link_type="r") for _ in range(MAX_HOPS + 1)])
