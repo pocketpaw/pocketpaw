@@ -53,8 +53,11 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
+    BulkRevertRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -152,6 +155,20 @@ async def bulk_snooze(
     return await mc_service.agent_bulk_snooze(ctx, body)
 
 
+@router.post("/items/bulk-revert")
+async def bulk_revert(
+    body: BulkRevertRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> dict:
+    """Revert N Tasks from a terminal status back to in_progress.
+
+    Flips task status from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress`` so the operator can resume work. Ids that aren't
+    Tasks land in ``skipped``.
+    """
+    return await mc_service.agent_bulk_revert(ctx, body)
+
+
 @router.get("/outcomes", response_model=OutcomeSummaryResponse)
 async def outcomes(
     window: str = Query("24h", pattern=r"^(1h|24h|7d)$"),
@@ -231,6 +248,24 @@ async def attach_cycle_items(
     so a half-stale selection still partially succeeds.
     """
     return await mc_service.agent_attach_cycle_items(ctx, cycle_id, body)
+
+
+@router.post(
+    "/cycles/{cycle_id}/items/detach",
+    response_model=DetachCycleItemsResponse,
+)
+async def detach_cycle_items(
+    cycle_id: str,
+    body: DetachCycleItemsRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> DetachCycleItemsResponse:
+    """Detach work items from a sprint.
+
+    Removes items from the sprint by clearing their ``cycle_id``.
+    Items the caller can't see are reported back in ``skipped``
+    rather than failing the whole batch.
+    """
+    return await mc_service.agent_detach_cycle_items(ctx, cycle_id, body)
 
 
 @router.get("/analytics", response_model=AnalyticsResponse)

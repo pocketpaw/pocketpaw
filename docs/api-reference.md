@@ -250,6 +250,75 @@ minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
 
+## Pockets — Template Reconcile
+
+A pocket created from a template stores its `template_slug`. Re-running an
+install/deploy script re-applies the template and **clobbers instance edits**.
+Reconcile fixes that: it re-applies only the **template-owned** regions of the
+source template while preserving the **instance-owned** regions.
+
+| Region | Owner | Reconcile behavior |
+|--------|-------|--------------------|
+| `rippleSpec.ui` | template | overwritten from the template |
+| `rippleSpec.actions` | template | overwritten from the template |
+| `rippleSpec.sources` | template | overwritten from the template |
+| `rippleSpec.shape` | template | overwritten from the template |
+| `rippleSpec.state` (rows, `selected_id`, `pending_proposal`, …) | instance | never touched |
+| pocket name / owner / team / visibility | instance | never touched |
+
+Both endpoints accept standard cookie / bearer auth, or the loopback
+internal-token bypass (the same one `GET /pockets/{id}` and `/spec/merge`
+accept) so the `pocketpaw pocket reconcile` CLI can authenticate locally. The
+service re-checks read (preview) / edit (apply) access on the resolved
+identity.
+
+### `POST /pockets/{pocket_id}/reconcile/preview`
+
+Dry-run a reconcile — report what **would** change, write nothing. No
+`PocketUpdated` event is emitted.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "663...",
+  "template_slug": "applications-triage",
+  "template_owned_regions": ["ui", "actions", "sources", "shape"],
+  "changed_regions": ["ui"],
+  "unchanged_regions": ["actions", "sources", "shape"],
+  "preserved_regions": ["state"],
+  "has_changes": true
+}
+```
+
+Returns `422` (`reconcile.no_template`) when the pocket has no `template_slug`,
+`422` (`reconcile.template_unresolved`) when the slug no longer resolves on
+disk, `403` when the caller can't read the pocket, `404` for a missing /
+cross-tenant pocket.
+
+### `POST /pockets/{pocket_id}/reconcile/apply`
+
+Apply the reconcile — re-write the template-owned regions, preserve the
+instance-owned regions, persist through the same spec write path as a normal
+edit (so the spec is normalized + validated and a `PocketUpdated` event fires).
+**Edit access required.**
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "skipped": false,
+  "diff": { "...": "the same diff shape as preview" },
+  "pocket": { "...": "the updated pocket wire dict" }
+}
+```
+
+When the pocket already matches its template the write is **skipped**
+(`"skipped": true`, no `pocket` field, no event). Error codes mirror the
+preview route, plus `403` when the caller lacks edit access — enforced even on
+the skipped no-write path so a non-editor cannot probe sync state.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in

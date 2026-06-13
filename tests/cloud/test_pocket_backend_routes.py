@@ -22,6 +22,14 @@
 # new write-action routes:
 #   POST /pockets/{id}/actions/run        — run a declared write action
 #   PUT  /pockets/{id}/backend/write-policy — set the write allowlist
+#
+# Updated: 2026-06-13 — reconciled the stale `test_run_sources_400_when_no_backend`
+# with the `fix/pocket-sources-run-400` contract (router docstring, 2026-06-08).
+# `POST /sources/run` no longer 400s when no backend is bound: it returns 200
+# with empty `ran`/`errors` when nothing is selected, or a per-source
+# `pocket_backend.not_configured` error (200) when a runnable source IS
+# authored. The single stale test is replaced by two that pin both arms; the
+# selection + error shape run for real (`selected_source_keys` is not mocked).
 
 from __future__ import annotations
 
@@ -284,7 +292,17 @@ def test_run_sources_happy_path(monkeypatch, client):
     assert captured["user_id"] == FAKE_USER
 
 
-def test_run_sources_400_when_no_backend(monkeypatch, client):
+def test_run_sources_noop_when_no_backend_and_nothing_selected(monkeypatch, client):
+    """A blank/starter pocket — no backend, no sources — is a clean no-op.
+
+    The frontend runs declared sources on every ``pocket_open``, so this
+    path is hit on every open of an unconfigured pocket. It returns 200
+    with empty ``ran``/``errors`` — NOT the old 400, which surfaced in the
+    browser as a noisy ``pocket_open sources run failed: HttpError: Bad
+    Request``. See ``fix/pocket-sources-run-400`` (router docstring,
+    2026-06-08) for the contract.
+    """
+
     async def _get_pocket(pocket_id, user_id):
         return {"_id": pocket_id, "rippleSpec": {}}
 
@@ -295,7 +313,44 @@ def test_run_sources_400_when_no_backend(monkeypatch, client):
     monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
 
     res = client.post("/pockets/pocket-1/sources/run", json={})
-    assert res.status_code == 400, res.text
+    assert res.status_code == 200, res.text
+    assert res.json() == {"ran": [], "errors": []}
+
+
+def test_run_sources_per_source_error_when_no_backend_but_source_authored(monkeypatch, client):
+    """A runnable source authored on a pocket with no backend bound is a
+    real misconfiguration — reported as a per-source
+    ``pocket_backend.not_configured`` error with HTTP 200, never a hard 400.
+
+    This mirrors the soft/non-fatal "no backend" handling every other
+    source-run call site uses (agent pocket_router, temporal_dispatcher,
+    bulk_dispatch). ``source_executor.selected_source_keys`` is deliberately
+    NOT monkeypatched, so the real selection logic + error shape are pinned.
+    """
+    spec = {"sources": {"prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"}}}
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _no_creds(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    # An empty body (no trigger, no source) selects every declared source —
+    # here, the single authored ``prs`` source.
+    res = client.post("/pockets/pocket-1/sources/run", json={})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ran"] == []
+    assert body["errors"] == [
+        {
+            "source": "prs",
+            "error": "This pocket has no backend configured",
+            "code": "pocket_backend.not_configured",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +486,124 @@ def test_run_action_happy_path(monkeypatch, client):
     # The route threads `workspace_id` so the executor can tenant-tag its
     # audit-log entries.
     assert captured["workspace_id"]
+
+
+def test_run_action_resolves_path_from_binding_when_client_omits_it(monkeypatch, client):
+    """A `call_binding` handler fires with `{action, params}` and NO `path`
+    — the read-time normalizer rewrites inline write `api` handlers to
+    `call_binding` without a `path`, so the client cannot supply one. The
+    route must resolve the path from the persisted binding (which already
+    carries it, to know the HTTP method) instead of rejecting the request.
+
+    Regression for the live Nerve-demo 422: every relative-URL api button
+    POSTed `{action, params}` to `/actions/run` and hit `RunActionRequest`'s
+    required `path`, failing validation before the route ever ran.
+    """
+    spec = {
+        "actions": {
+            "score_next_20": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leads/score-next",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leads/score-next"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {"scored": 20},
+            "on_success": [],
+            "on_error": [],
+        }
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    # No `path` in the body — exactly what the normalized `call_binding`
+    # handler produces.
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "score_next_20", "params": {"batch": 20}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["response"] == {"scored": 20}
+    # The route fell back to the binding's persisted path.
+    assert captured["path"] == "/leads/score-next"
+    assert captured["params"] == {"batch": 20}
+
+
+def test_run_action_client_path_wins_over_binding_path(monkeypatch, client):
+    """When the client DOES send a resolved path (e.g. a row-scoped binding
+    whose stored path holds an unresolved `{item.id}` template), the
+    client's value is used — the binding path is only a fallback."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leases/*/renew"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    # The client's resolved path, not the binding's templated one.
+    assert captured["path"] == "/leases/42/renew"
 
 
 def test_run_action_404_when_action_not_declared(monkeypatch, client):

@@ -2,9 +2,16 @@
 # Created: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) —
 # pins the OSS Claude SDK backend's acceptance of the threaded per-entity
 # ``skill_names`` kwarg (the keystone that makes SurfaceProfile.skill_names
-# LIVE) and the warm-client bypass invariant: a run that materializes a per-run
-# skill plugin must NOT reuse a warm client, because the persistent-client cache
-# key omits ``plugins=`` and options apply only at first connect.
+# LIVE).
+# Modified: 2026-06-13 (fix/claude-sdk-warm-client-skills) — the warm-client
+# BYPASS invariant is RETIRED. The persistent-client cache key now folds in a
+# digest of the plugin IDENTITY (sorted skill names + bundled flag) via
+# ``_client_cache_key(..., plugin_digest=...)``, so a skill run can REUSE the
+# warm subprocess instead of re-spawning a fresh stateless query every turn
+# (the ~6s/turn latency bug). This test was the one that codified the old gap;
+# it now asserts the inverse — equal skill sets → equal key, different →
+# different. The end-to-end reuse/no-leak/lifecycle behavior lives in
+# tests/test_claude_sdk_skill_warm_reuse.py.
 
 from __future__ import annotations
 
@@ -22,28 +29,33 @@ def test_run_accepts_skill_names_kwarg() -> None:
     )
 
 
-def test_cache_key_omits_plugins_so_warm_client_must_be_bypassed() -> None:
-    """The persistent-client cache key is built from session + model + tools +
-    a prompt-prefix digest — it does NOT fold in ``plugins=``. This is exactly
-    why a skill run (which only changes ``plugins=``) MUST bypass the warm
-    client; this test documents the gap the bypass closes."""
+def test_cache_key_folds_in_plugin_digest_so_warm_client_can_be_reused() -> None:
+    """The persistent-client cache key now folds in the plugin-identity digest,
+    so the warm client CAN tell a skill run apart from a non-skill run — equal
+    skill sets produce an equal key (warm reuse) and different sets produce a
+    different key (rebuild). This is the inverse of the old behavior that forced
+    a bypass. CRITICAL: the digest is keyed on skill IDENTITY, never the
+    materialized ``plugins=`` PATH (a fresh ``mkdtemp`` per run), so reuse is not
+    defeated by path churn."""
+    digest_a = ClaudeSDKBackend._plugin_digest(frozenset({"skillA"}), bundled=False)
+    digest_a_again = ClaudeSDKBackend._plugin_digest(frozenset({"skillA"}), bundled=False)
+    digest_b = ClaudeSDKBackend._plugin_digest(frozenset({"skillB"}), bundled=False)
+
     from types import SimpleNamespace
 
     base = SimpleNamespace(
         system_prompt="IDENTITY",
         model="claude",
         allowed_tools=["Read"],
-        plugins=[],
     )
-    with_plugin = SimpleNamespace(
-        system_prompt="IDENTITY",
-        model="claude",
-        allowed_tools=["Read"],
-        plugins=[{"type": "local", "path": "/tmp/x"}],
+
+    key_a = ClaudeSDKBackend._client_cache_key(base, session_key="s1", plugin_digest=digest_a)
+    key_a2 = ClaudeSDKBackend._client_cache_key(
+        base, session_key="s1", plugin_digest=digest_a_again
     )
-    k1 = ClaudeSDKBackend._client_cache_key(base, session_key="s1")
-    k2 = ClaudeSDKBackend._client_cache_key(with_plugin, session_key="s1")
-    assert k1 == k2, (
-        "cache key ignores plugins= — so the warm client cannot distinguish a "
-        "skill run; the backend bypasses the warm client when skill_names is set"
-    )
+    key_b = ClaudeSDKBackend._client_cache_key(base, session_key="s1", plugin_digest=digest_b)
+    key_none = ClaudeSDKBackend._client_cache_key(base, session_key="s1")
+
+    assert key_a == key_a2, "same skill set → same key, so the warm client is reused"
+    assert key_a != key_b, "different skill set → different key, so the client rebuilds"
+    assert key_a != key_none, "a skill run must not collide with a non-skill run"

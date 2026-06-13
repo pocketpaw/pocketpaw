@@ -1,5 +1,15 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-13 (feat/pocket-template-reconcile, P2.4) — added the
+Template Reconcile REST adapter: ``POST /{id}/reconcile/preview`` (dry-run
+diff) and ``POST /{id}/reconcile/apply`` (re-apply template-owned regions,
+preserve instance state). Both are THIN — they resolve identity and call
+``pockets.reconcile`` (the typed service); all reconcile logic lives there,
+not here. The apply route carries the ``require_pocket_edit`` guard so it
+fails closed at the boundary; the service re-checks too (the canonical
+"primitive = service + thin adapters" reference shape). Additive — no
+existing route touched.
+
 Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
 single-action ``POST /{id}/actions/run`` route now THREADS the pocket's
 RFC 03 v2 template into ``action_executor.run_action`` so the template-
@@ -1010,6 +1020,25 @@ async def run_pocket_action(
             code="bad_binding",
         )
 
+    # Resolve the request path. The read-time normalizer rewrites an inline
+    # write `api` handler into a PATHLESS `call_binding` handler (it has no
+    # request context to carry a path), so the normal client fires with
+    # `{action, params}` and no `path`. The path is author-time data already
+    # persisted on the binding (the spec must carry it to know the HTTP
+    # method), so fall back to it. A client that DID send a resolved path —
+    # a row-scoped binding whose stored path holds an unresolved `{item.id}`
+    # template, resolved client-side — keeps precedence; the binding path is
+    # only the fallback. The executor still matches the final (method, path)
+    # against the owner's allowlist, so the fallback cannot widen blast radius.
+    resolved_path = body.path or raw_action.get("path")
+    if not isinstance(resolved_path, str) or not resolved_path:
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            error=f"action '{body.action}' has no path — send one or declare it on the binding",
+            code="bad_binding",
+        )
+
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
     if creds is None:
         raise CloudError(
@@ -1053,7 +1082,7 @@ async def run_pocket_action(
         user_id=user_id,
         action=body.action,
         raw_action=raw_action,
-        path=body.path,
+        path=resolved_path,
         params=body.params,
         base_url=base_url,
         auth_type=auth_type,
@@ -1489,3 +1518,116 @@ async def list_pocket_sessions(
     ctx = sessions_service.legacy_ctx(user_id)
     items = await sessions_service.list_for_pocket(ctx, pocket_id)
     return [session_to_wire_dict(s) for s in items]
+
+
+# ---------------------------------------------------------------------------
+# Template Reconcile (P2.4) — thin REST adapter over ``pockets.reconcile``.
+#
+# Re-apply a pocket's source-template-owned regions (ui/actions/sources/shape)
+# while preserving instance-owned regions (state, name, owner, sharing).
+# ``preview`` is a dry-run diff; ``apply`` writes through the spec path.
+# Both delegate to the service — no reconcile logic lives in the router.
+#
+# Auth mirrors ``get_pocket`` / ``/spec/merge``: standard cookie/bearer JWT,
+# OR the loopback internal-token bypass (so the ``pocketpaw pocket reconcile``
+# CLI — an operator action run on the same box — can authenticate with the
+# process-local token + workspace/user headers). The service re-checks
+# read/edit access on the resolved identity, so a forged header can't escalate.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_reconcile_identity(
+    request: Request,
+    *,
+    user: Any,
+    internal_header: str | None,
+    internal_token: str | None,
+    workspace_header: str | None,
+    user_header: str | None,
+) -> tuple[str, str]:
+    """Resolve ``(workspace_id, user_id)`` for a reconcile request.
+
+    Tries the loopback internal bypass first (operator CLI / local
+    subprocess), then falls through to the authenticated session user. Raises
+    ``CloudError(401)`` when neither path yields an identity. Shared by the
+    preview + apply routes so the two stay in lockstep.
+    """
+    if _loopback_bypass_active(
+        request,
+        internal_header=internal_header,
+        internal_token=internal_token,
+        workspace_header=workspace_header,
+        user_header=user_header,
+    ):
+        return workspace_header, user_header  # type: ignore[return-value]
+    if user is not None:
+        if not getattr(user, "active_workspace", None):
+            raise CloudError(
+                400,
+                "workspace.not_set",
+                "No active workspace. Create or join a workspace first.",
+            )
+        return user.active_workspace, str(user.id)
+    raise CloudError(401, "auth.required", "Authentication required.")
+
+
+@router.post("/{pocket_id}/reconcile/preview")
+async def preview_pocket_reconcile(
+    pocket_id: str,
+    request: Request,
+    user: Any = Depends(current_optional_user),
+    x_pocketpaw_internal: str | None = Header(default=None, alias="X-PocketPaw-Internal"),
+    x_pocketpaw_internal_token: str | None = Header(default=None, alias=INTERNAL_TOKEN_HEADER),
+    x_pocketpaw_workspace_id: str | None = Header(default=None, alias="X-PocketPaw-Workspace-Id"),
+    x_pocketpaw_user_id: str | None = Header(default=None, alias="X-PocketPaw-User-Id"),
+) -> dict:
+    """Dry-run a template reconcile — report what WOULD change, write nothing.
+
+    Returns the reconcile diff (``changed_regions`` / ``unchanged_regions`` /
+    ``preserved_regions``). A pocket with no ``template_slug`` or an
+    unresolvable template returns 422 via the service's ``ValidationError``;
+    a caller without read access gets a 403.
+    """
+    from pocketpaw_ee.cloud.pockets import reconcile as reconcile_service
+
+    workspace_id, user_id = _resolve_reconcile_identity(
+        request,
+        user=user,
+        internal_header=x_pocketpaw_internal,
+        internal_token=x_pocketpaw_internal_token,
+        workspace_header=x_pocketpaw_workspace_id,
+        user_header=x_pocketpaw_user_id,
+    )
+    return await reconcile_service.preview_reconcile(pocket_id, workspace_id, user_id)
+
+
+@router.post("/{pocket_id}/reconcile/apply")
+async def apply_pocket_reconcile(
+    pocket_id: str,
+    request: Request,
+    user: Any = Depends(current_optional_user),
+    x_pocketpaw_internal: str | None = Header(default=None, alias="X-PocketPaw-Internal"),
+    x_pocketpaw_internal_token: str | None = Header(default=None, alias=INTERNAL_TOKEN_HEADER),
+    x_pocketpaw_workspace_id: str | None = Header(default=None, alias="X-PocketPaw-Workspace-Id"),
+    x_pocketpaw_user_id: str | None = Header(default=None, alias="X-PocketPaw-User-Id"),
+) -> dict:
+    """Apply a template reconcile — re-write template-owned regions, preserve
+    instance state, persist through the existing spec write path.
+
+    Edit access is enforced INSIDE the service (``apply_reconcile`` raises
+    ``Forbidden`` for a non-editor — including on the idempotent no-write
+    path). Returns ``{ok, skipped, diff, pocket?}``; when the pocket already
+    matches its template the write is skipped (``skipped: true``) and no
+    ``PocketUpdated`` event is emitted.
+    """
+    from pocketpaw_ee.cloud.pockets import reconcile as reconcile_service
+
+    workspace_id, user_id = _resolve_reconcile_identity(
+        request,
+        user=user,
+        internal_header=x_pocketpaw_internal,
+        internal_token=x_pocketpaw_internal_token,
+        workspace_header=x_pocketpaw_workspace_id,
+        user_header=x_pocketpaw_user_id,
+    )
+    return await reconcile_service.apply_reconcile(pocket_id, workspace_id, user_id)

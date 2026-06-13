@@ -1,4 +1,9 @@
 # dto.py — Request/response schemas for the member-day digest service.
+# Updated: 2026-06-12 — ``MemberDayDigest.empty`` is now a ``@computed_field``
+#   so it actually SERIALIZES. As a plain @property it never reached JSON, so
+#   API consumers (the intent-of-the-day board) saw ``undefined`` and an
+#   all-empty digest fell through to their loaded branch — rendering only the
+#   auth-error footnote instead of the designed empty state.
 # Created: 2026-06-08 — VIP Onboarding Phase B chunk 5 (the synthesized
 #   "your day" digest + the agent briefing).
 # Per cloud rule §4 (request/response split) and §6 (validate at entry): the
@@ -9,7 +14,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class MemberDayDigestRequest(BaseModel):
@@ -73,6 +78,7 @@ class MemberDayDigest(BaseModel):
     # uses it to emit no block at all rather than an empty heading.
     errors: list[str] = Field(default_factory=list)
 
+    @computed_field  # serializes — API consumers branch on it (intent board)
     @property
     def empty(self) -> bool:
         """True when there is nothing to brief: no events AND no mail."""

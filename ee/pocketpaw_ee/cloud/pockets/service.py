@@ -168,6 +168,13 @@ connector is enabled for the workspace (via
 the source executor can route a connector backend through
 ``connectors_service.execute`` instead of an HTTP GET. The executor tuple
 grew two trailing elements; the write-path consumers ignore them.
+Changes: 2026-06-13 (feat/pocket-template-reconcile, P2.4) — added the
+read helper ``get_pocket_spec_and_slug`` (tenant-scoped single-read of
+``(rippleSpec, template_slug)``, sibling to ``get_pocket_ripple_spec``). The new
+Template Reconcile service (``pockets.reconcile``) resolves a pocket through
+this helper and writes the reconciled spec through ``update`` — so reconcile
+never imports the Pocket Beanie model itself (the "funnel through service.py"
+boundary the import-linter pins). No existing path changed.
 Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``_agent_view_dict``
 now LEADS with a ``_summary`` field (``spec_ops.summarize_ripple_spec`` over
 the doc's rippleSpec: ui node count/types, capped state keys, source
@@ -4128,6 +4135,33 @@ async def get_pocket_ripple_spec(workspace_id: str, pocket_id: str) -> dict | No
         return None
     spec = doc.rippleSpec
     return spec if isinstance(spec, dict) else {}
+
+
+async def get_pocket_spec_and_slug(
+    workspace_id: str, pocket_id: str
+) -> tuple[dict | None, str | None] | None:
+    """Return ``(rippleSpec, template_slug)`` for a pocket, or ``None``.
+
+    Tenant-scoped, single doc read. ``None`` (the outer value) means the
+    pocket is missing OR belongs to another workspace — the same
+    not-an-oracle posture as :func:`get_pocket_ripple_spec`. On success the
+    spec is a dict (``{}`` when unset) and the slug is the stored
+    ``template_slug`` or ``None``.
+
+    Added for the Template Reconcile service (P2.4) so reconcile resolves
+    everything it needs through THIS service in one read and never imports
+    the ``Pocket`` Beanie model itself — the "Beanie writes (and reads)
+    funnel through service.py" boundary the import-linter pins.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    spec = doc.rippleSpec
+    slug = getattr(doc, "template_slug", None)
+    return (spec if isinstance(spec, dict) else {}), (slug or None)
 
 
 async def resolve_webhook_pocket(pocket_id: str, presented_secret: str) -> tuple | None:

@@ -63,6 +63,53 @@ def test_relative_inline_write_api_is_lifted_into_actions():
     assert handler["binding"] == next(iter(actions.keys()))
 
 
+def test_lifted_call_binding_is_pathless_and_path_lives_on_the_binding():
+    """The rewritten `call_binding` handler carries ONLY the binding name —
+    no `path`. The path lives on the persisted `actions` entry, and the
+    `/actions/run` route resolves it server-side from there.
+
+    This pins the contract the path-resolution fix relies on: the read-time
+    normalizer cannot put a path on the handler (it has no request context),
+    so the server must read it off the stored binding. Regression for the
+    live Nerve-demo 422, where the pathless handler hit `RunActionRequest`'s
+    once-required `path`.
+    """
+    spec = {
+        "title": "Lead Scorer",
+        "version": "1.0",
+        "state": {},
+        "ui": {
+            "type": "flex",
+            "children": [
+                {
+                    "type": "button",
+                    "props": {"label": "Score next 20"},
+                    "on_click": {
+                        "action": "api",
+                        "method": "POST",
+                        "url": "/leads/score-next",
+                        "body": {"batch": 20},
+                    },
+                }
+            ],
+        },
+    }
+    normalized = normalize_ripple_spec(spec)
+    assert normalized is not None
+
+    handler = normalized["ui"]["children"][0]["on_click"]
+    assert handler["action"] == "call_binding"
+    # The handler is pathless — the only routing key is the binding name.
+    assert "path" not in handler
+    assert "url" not in handler
+
+    binding_name = handler["binding"]
+    actions = normalized["actions"]
+    # The path the route resolves at run time lives on the persisted binding.
+    assert actions[binding_name]["path"] == "/leads/score-next"
+    assert actions[binding_name]["method"] == "POST"
+
+
 def test_absolute_url_inline_api_is_left_untouched():
     """An ABSOLUTE-url `api` call is a different (third-party) intent and
     must NEVER be redirected onto the pocket's credentialed backend."""
