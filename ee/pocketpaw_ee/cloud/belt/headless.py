@@ -167,9 +167,7 @@ class HeadlessDevelopRunner:
                 "leaving the run queued",
                 action_id,
             )
-            await self._note_failure(
-                store, action_id, "headless develop produced an empty diff"
-            )
+            await self._note_failure(store, action_id, "headless develop produced an empty diff")
             return action_id
 
         base_branch = (result.base_branch or request.base_branch or "").strip()
@@ -179,9 +177,7 @@ class HeadlessDevelopRunner:
                 "leaving the run queued",
                 action_id,
             )
-            await self._note_failure(
-                store, action_id, "headless develop returned no base_branch"
-            )
+            await self._note_failure(store, action_id, "headless develop returned no base_branch")
             return action_id
 
         # Back-write the produced diff onto the SAME action's blob — clearing
