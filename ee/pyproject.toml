@@ -266,6 +266,10 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # P2.4 Template Reconcile — the reconcile service resolves the pocket
+    # (spec + slug) and writes the reconciled spec entirely through
+    # `pockets.service`; it must never import the Pocket Beanie model.
+    "pocketpaw_ee.cloud.pockets.reconcile",
     # RFC 04 M3 — the interval-refresh scheduler + the auto-refresh budget
     # helper. The scheduler scans pockets through `pockets.service` and
     # refreshes through `source_executor`; neither touches Beanie directly.
