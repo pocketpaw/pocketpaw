@@ -156,6 +156,7 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     BulkReassignRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -662,13 +663,18 @@ async def agent_bulk_approve(
 async def agent_bulk_reject(
     ctx: RequestContext, body: BulkActionRequest | dict[str, Any]
 ) -> dict[str, Any]:
-    """Reject N pending Nudges in one call. ``reason`` is required.
+    """Reject N pending items in one call. ``reason`` is required.
 
-    Same tenancy semantics as ``agent_bulk_approve``. The reason text is
-    surfaced on every Action's ``rejected_reason`` AND on every audit
-    row's ``context.reason`` so the soul-bridge correction pipeline can
-    learn from bulk rejects the same way it learns from single-item
-    rejects.
+    Handles both Tasks (``task:`` prefix) and Instinct Nudges (bare or
+    ``nudge:`` prefix) — mirrors the same split that ``agent_bulk_approve``
+    performs. Tasks are blocked with the given reason so they surface in
+    the operator's Snags section; Nudges flow through the Instinct store's
+    native reject path.
+
+    The reason text is surfaced on every Action's ``rejected_reason`` AND
+    on every audit row's ``context.reason`` so the soul-bridge correction
+    pipeline can learn from bulk rejects the same way it learns from
+    single-item rejects.
     """
     body = BulkActionRequest.model_validate(body)
     if not body.reason:
@@ -677,17 +683,63 @@ async def agent_bulk_reject(
             "bulk-reject requires a reason — pass a non-empty string in ``reason``.",
         )
     _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
-    eligible, blocked = await _split_ids_by_tenancy(store, list(body.ids), visible)
-    rejected, missing, bulk_id = await store.bulk_reject(
-        eligible, reason=body.reason, rejector=ctx.user_id
-    )
-    # no-event: per-item approve/reject inside the loop already emits the events
+
+    from uuid import uuid4
+
+    bulk_id = uuid4().hex
+    rejected: list[dict] = []
+    missing: list[str] = []
+
+    # Split IDs by prefix — same pattern as agent_bulk_approve
+    task_ids: list[str] = []
+    nudge_store_ids: list[str] = []
+    nudge_id_map: dict[str, str] = {}
+    for raw_id in body.ids:
+        if raw_id.startswith("task:"):
+            task_ids.append(raw_id)
+            continue
+        bare = raw_id[len("nudge:") :] if raw_id.startswith("nudge:") else raw_id
+        nudge_store_ids.append(bare)
+        nudge_id_map[bare] = raw_id
+
+    # Handle tasks: block each one so it surfaces in Snags
+    if task_ids:
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+        from pocketpaw_ee.cloud.tasks.dto import BlockTaskRequest
+
+        for raw_id in task_ids:
+            task_id = _classify_task_id(raw_id)
+            if task_id is None:
+                missing.append(raw_id)
+                continue
+            try:
+                result = await tasks_service.agent_block_task(
+                    ctx,
+                    task_id,
+                    BlockTaskRequest(reason=body.reason),
+                )
+                rejected.append(result.model_dump(mode="json"))
+            except Exception as e:
+                logger.info("bulk_reject: task %s failed: %s", raw_id, e)
+                missing.append(raw_id)
+
+    # Handle nudges via Instinct store
+    if nudge_store_ids:
+        visible = await _visible_pocket_ids(ctx)
+        store = get_instinct_store()
+        eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
+        nudge_rejected, nudge_missing, _ = await store.bulk_reject(
+            eligible, reason=body.reason, rejector=ctx.user_id
+        )
+        rejected.extend(a.model_dump(mode="json") for a in nudge_rejected)
+        missing.extend(nudge_id_map.get(mid, mid) for mid in nudge_missing)
+        missing.extend(nudge_id_map.get(bid, bid) for bid in blocked)
+
+    # no-event: per-item block/reject inside the loops already emit events
     return {
         "bulk_id": bulk_id,
-        "rejected": [a.model_dump(mode="json") for a in rejected],
-        "missing": [*missing, *blocked],
+        "rejected": rejected,
+        "missing": missing,
     }
 
 
@@ -1197,6 +1249,56 @@ async def agent_attach_cycle_items(
 
     return AttachCycleItemsResponse(
         attached=attached,
+        skipped=skipped,
+        cycle_id=cycle_id,
+    )
+
+
+async def agent_detach_cycle_items(
+    ctx: RequestContext,
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+) -> DetachCycleItemsResponse:
+    """Detach a batch of work items from a sprint.
+
+    Validates the sprint exists in the caller's workspace, then for each
+    item id calls ``tasks.service.agent_set_task_cycle`` with ``None``
+    to clear the cycle pointer. Items the caller can't see are reported
+    back as ``skipped`` rather than failing the whole batch.
+    """
+
+    body = AttachCycleItemsRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    from pocketpaw_ee.cloud.cycles import service as cycles_service
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    # Tenancy check on the cycle itself
+    await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+
+    detached: list[str] = []
+    skipped: list[str] = []
+    for task_id in body.item_ids:
+        try:
+            raw_id = task_id.removeprefix("task:")
+            await tasks_service.agent_set_task_cycle(ctx, raw_id, None)
+            detached.append(task_id)
+        except Exception:
+            skipped.append(task_id)
+
+    # Refresh counters on the cycle so scope/started/completed update
+    tasks = await cycles_service._tasks_for_cycle(ctx, cycle_id)
+    if tasks is not None:
+        scope, started, completed = cycles_service._counters_from_tasks(tasks)
+        doc = await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+        if (doc.scope, doc.started, doc.completed) != (scope, started, completed):
+            doc.scope = scope
+            doc.started = started
+            doc.completed = completed
+            await doc.save()
+
+    return DetachCycleItemsResponse(
+        detached=detached,
         skipped=skipped,
         cycle_id=cycle_id,
     )

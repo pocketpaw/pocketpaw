@@ -199,6 +199,23 @@ class AttachCycleItemsResponse(BaseModel):
     cycle_id: str
 
 
+DetachCycleItemsRequest = AttachCycleItemsRequest
+
+
+class DetachCycleItemsResponse(BaseModel):
+    """Result of a bulk-detach call.
+
+    Same partial-success posture as ``AttachCycleItemsResponse``.
+    ``detached`` lists ids that were successfully removed from the
+    sprint; ``skipped`` lists ids the caller couldn't see or that
+    weren't in this sprint.
+    """
+
+    detached: list[str]
+    skipped: list[str] = Field(default_factory=list)
+    cycle_id: str
+
+
 class CreateCycleRequest(BaseModel):
     """Body for ``POST /mission-control/cycles``.
 
@@ -408,10 +425,14 @@ class AnalyticsResponse(BaseModel):
 __all__ = [
     "ActivityEventResponse",
     "AnalyticsResponse",
+    "AttachCycleItemsRequest",
+    "AttachCycleItemsResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
     "BulkSnoozeRequest",
     "CreateCycleRequest",
+    "DetachCycleItemsRequest",
+    "DetachCycleItemsResponse",
     "ListActivityRequest",
     "ListPlanSessionsRequest",
     "ListWorkItemsRequest",

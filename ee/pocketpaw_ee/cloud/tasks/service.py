@@ -498,8 +498,9 @@ async def agent_block_task(
     body = BlockTaskRequest.model_validate(body)
     doc = await _fetch_task(ctx, task_id)
     if doc.creator_id != ctx.user_id and doc.assignee_id != ctx.user_id:
-        # Only the creator or assignee can flag a task blocked.
-        raise Forbidden("task.block_denied", "Only the creator or assignee can block this task")
+        # Workspace owners can also block tasks (bulk reject from MC feed).
+        if not await _is_workspace_owner(ctx.user_id, doc.workspace_id):
+            raise Forbidden("task.block_denied", "Only the creator or assignee can block this task")
     doc.status = "blocked"
     doc.blocked_reason = body.reason
     await doc.save()
