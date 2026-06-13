@@ -1,10 +1,23 @@
 # Fabric data models — Pydantic models for the ontology layer.
 # Created: 2026-03-28
+# Updated: 2026-06-13 (feat/fabric-multihop) — Added multi-hop / path traversal
+#   to FabricQuery. A new PathHop model expresses ONE traversal step (a
+#   link_type, an optional terminal object_type, an optional property-filter
+#   bag, and a direction); FabricQuery gains an additive ``path: list[PathHop]``
+#   field. When ``path`` is set, the query walks the link chain server-side and
+#   returns the objects at the terminal hop — the 2-hop ontology join (e.g.
+#   "open Deals whose Customer competes_with a Competitor") that previously had
+#   to be hand-stitched as separate get_linked_objects calls in app code. The
+#   existing single-hop ``linked_to``/``link_type`` fields are untouched and
+#   keep working exactly as before (backward compatible). Each hop traverses
+#   the named link in the FORWARD direction by default (from_object_id ->
+#   to_object_id, the direction store.link() records), with an explicit
+#   ``direction="in"`` for reverse traversal.
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -67,14 +80,59 @@ class FabricLink(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
 
 
+class PathHop(BaseModel):
+    """One step in a multi-hop traversal across the Fabric link graph.
+
+    A hop says: from the objects reached so far, follow links of ``link_type``
+    to the objects on the other end, optionally constraining those objects to a
+    given ``object_type`` and/or matching a property ``filters`` bag.
+
+    ``direction`` controls how the named link is read relative to the current
+    frontier:
+
+    - ``"out"`` (default) — follow ``from_object_id -> to_object_id``. This is
+      the direction ``store.link(from_id, to_id, link_type)`` records, so it
+      reads as "the current object HAS this link to the next object" (Deal
+      --deal_for--> Customer).
+    - ``"in"`` — follow ``to_object_id -> from_object_id`` (reverse).
+    - ``"any"`` — match the link in either direction (the symmetric semantics
+      the legacy single-hop ``linked_to`` uses).
+
+    ``filters`` reuses the exact ``FabricQuery.filters`` shape (scalar =
+    equality, operator-map = comparison) so the same parser applies at every
+    hop.
+    """
+
+    link_type: str
+    object_type: str | None = None
+    filters: dict[str, Any] = Field(default_factory=dict)
+    direction: Literal["out", "in", "any"] = "out"
+
+
 class FabricQuery(BaseModel):
-    """Query parameters for finding objects."""
+    """Query parameters for finding objects.
+
+    Single-hop traversal (legacy, unchanged): set ``linked_to`` (+ optional
+    ``link_type``) to find objects linked to a given object id.
+
+    Multi-hop / path traversal (additive): set ``linked_to`` as the START
+    object id and ``path`` to a list of :class:`PathHop` steps. The query walks
+    the chain server-side and returns the objects reached at the FINAL hop (with
+    that hop's ``object_type`` / ``filters`` applied). Top-level ``type_name`` /
+    ``type_id`` / ``filters`` still constrain the terminal result set too, so
+    "open Deals whose Customer competes_with a Competitor" is a single query:
+    start at the Competitor, walk back, or start at the Deals and walk out — see
+    ``FabricStore.query`` for the traversal contract. ``path`` and the legacy
+    single-hop ``link_type`` are mutually exclusive (``path`` wins when both are
+    present, and ``link_type`` is ignored — the per-hop ``link_type`` governs).
+    """
 
     type_name: str | None = None
     type_id: str | None = None
     filters: dict[str, Any] = Field(default_factory=dict)
     linked_to: str | None = None
     link_type: str | None = None
+    path: list[PathHop] = Field(default_factory=list)
     limit: int = 50
     offset: int = 0
 

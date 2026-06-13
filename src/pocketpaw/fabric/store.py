@@ -72,6 +72,23 @@
 #   workspace_id column on fabric_object_types), but which types a tenant sees
 #   is tenant metadata. workspace_id=None keeps the original unscoped behavior
 #   (OSS / registry-tool / single-tenant callers).
+# Updated: 2026-06-13 (feat/fabric-multihop) — query() now supports multi-hop /
+#   path traversal. When FabricQuery.path is non-empty it walks an ontology join
+#   server-side instead of the single linked_to hop: the audit's 2-hop query
+#   ("open Deals whose Customer competes_with a Competitor") that returned [] as
+#   one query and had to be hand-stitched as two get_linked_objects calls is now
+#   ONE call. New _query_path() resolves a START frontier (the linked_to seed, or
+#   every object matching the top-level type/filters when linked_to is absent),
+#   then _advance_hop() steps the frontier one PathHop at a time across
+#   fabric_links — each hop applies its direction (out/in/any), link_type,
+#   terminal object_type, property filters, AND the W4a workspace scope to the
+#   FAR object. Iterative per-hop resolution (one parameterized query per hop)
+#   was chosen over a recursive CTE: per-hop type+property+direction+tenant
+#   filters stay simple and injection-safe as a normal parameterized WHERE, and
+#   paths are shallow (2-3 hops). All link_type / object_type / filter values
+#   remain bound parameters; only fixed SQL fragments are concatenated. The
+#   single-hop linked_to/link_type path is UNTOUCHED (backward compatible) —
+#   path and the legacy single-hop are mutually exclusive (path wins).
 
 
 from __future__ import annotations
@@ -89,6 +106,7 @@ from pocketpaw.fabric.models import (
     FabricQuery,
     FabricQueryResult,
     ObjectType,
+    PathHop,
     PropertyDef,
 )
 
@@ -757,7 +775,41 @@ class FabricStore:
         sets on the query body. When supplied, results are restricted to that
         workspace (plus legacy NULL-workspace rows). When ``None``, the query is
         unscoped, exactly as before W4a (OSS / agent-tool callers).
+
+        Multi-hop / path traversal (feat/fabric-multihop): when ``q.path`` is
+        non-empty the query walks an ontology join server-side instead of doing
+        the single ``linked_to`` hop. This is the 2-hop join the code audit
+        flagged ("open Deals whose Customer competes_with a Competitor") that
+        previously returned [] from one query and had to be hand-stitched in app
+        code. The traversal contract:
+
+        - START frontier: the seed object set the path walks from. If
+          ``linked_to`` is set, the seed is exactly that one object id. Otherwise
+          the seed is every object matching the top-level ``type_name`` /
+          ``type_id`` / ``filters`` (e.g. the open Deals), so a path can read
+          "from these objects, walk out…".
+        - Each :class:`PathHop` advances the frontier one edge across
+          ``fabric_links`` in the hop's ``direction`` (out / in / any), keeping
+          only objects that match the hop's ``object_type`` and ``filters``.
+        - The RESULT is the objects at the terminal hop, constrained by that
+          hop's type/filters. Top-level type/filters constrain the START, not
+          the terminal (the terminal is described by the final hop).
+        - Tenant scope (W4a) is applied at EVERY hop AND on the seed, so a linked
+          object in another workspace can never be reached or returned.
+
+        Implementation note: an ITERATIVE per-hop frontier resolution (one
+        parameterized query per hop, threading the id set forward) was chosen
+        over a recursive CTE. Per-hop type + property + direction + tenant
+        filters are far simpler to express and keep injection-safe as a normal
+        parameterized WHERE per hop than as a single recursive CTE, and the path
+        depth here is small (2-3 hops). All link_type / object_type / filter
+        values remain bound ``?`` parameters; only fixed SQL fragments are
+        concatenated.
         """
+        await self._ensure_schema()
+        if q.path:
+            return await self._query_path(q, workspace_id)
+
         conditions: list[str] = []
         params: list[Any] = []
 
@@ -829,6 +881,139 @@ class FabricStore:
                 objects = [self._row_to_object(row) async for row in cur]
 
         return FabricQueryResult(objects=objects, total=total)
+
+    async def _query_path(self, q: FabricQuery, workspace_id: str | None) -> FabricQueryResult:
+        """Walk ``q.path`` server-side and return the terminal-hop objects.
+
+        See :meth:`query` for the full traversal contract. Iterative per-hop
+        frontier resolution: resolve the START frontier (the seed object ids),
+        then advance it one :class:`PathHop` at a time; the terminal frontier is
+        re-fetched as full objects (newest-first, paginated). Every step is
+        tenant-scoped (W4a) and every value is a bound parameter.
+        """
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+
+            # --- START frontier ---------------------------------------------
+            # linked_to => exactly that one seed object (still tenant-scoped, so
+            # a cross-tenant seed id resolves to nothing). Otherwise the seed is
+            # every object matching the top-level type/filters.
+            if q.linked_to:
+                seed_cond = ["o.id = ?"]
+                seed_params: list[Any] = [q.linked_to]
+            else:
+                seed_cond = []
+                seed_params = []
+                if q.type_id:
+                    seed_cond.append("o.type_id = ?")
+                    seed_params.append(q.type_id)
+                elif q.type_name:
+                    seed_cond.append("LOWER(o.type_name) = LOWER(?)")
+                    seed_params.append(q.type_name)
+                if q.filters:
+                    fconds, fparams = _build_filter_conditions(q.filters)
+                    seed_cond.extend(fconds)
+                    seed_params.extend(fparams)
+            ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
+            if ws_cond:
+                seed_cond.append(ws_cond)
+                seed_params.extend(ws_params)
+            seed_where = f"WHERE {' AND '.join(seed_cond)}" if seed_cond else ""
+            async with db.execute(
+                f"SELECT o.id FROM fabric_objects o {seed_where}", seed_params
+            ) as cur:
+                frontier = {row["id"] async for row in cur}
+
+            # --- Advance one hop at a time ----------------------------------
+            for hop in q.path:
+                if not frontier:
+                    break  # dead end — no path can revive an empty frontier
+                frontier = await self._advance_hop(db, frontier, hop, workspace_id)
+
+            if not frontier:
+                return FabricQueryResult(objects=[], total=0)
+
+            # --- Re-fetch the terminal frontier as full objects -------------
+            # Bound the IN-list with placeholders (ids are server-generated, but
+            # parameterize anyway — never interpolate). Newest-first + paginate
+            # to match the single-hop query()'s ordering contract.
+            terminal_ids = list(frontier)
+            placeholders = ",".join("?" for _ in terminal_ids)
+            total = len(terminal_ids)
+            async with db.execute(
+                f"SELECT o.* FROM fabric_objects o WHERE o.id IN ({placeholders})"
+                " ORDER BY o.created_at DESC LIMIT ? OFFSET ?",
+                [*terminal_ids, q.limit, q.offset],
+            ) as cur:
+                objects = [self._row_to_object(row) async for row in cur]
+
+        return FabricQueryResult(objects=objects, total=total)
+
+    async def _advance_hop(
+        self,
+        db: aiosqlite.Connection,
+        frontier: set[str],
+        hop: PathHop,
+        workspace_id: str | None,
+    ) -> set[str]:
+        """Return the next frontier: objects reached from ``frontier`` via ``hop``.
+
+        One parameterized query. The direction decides which link endpoint is
+        the "near" side (matched against the current frontier) and which is the
+        "far" side (the object reached). ``"any"`` matches the link in either
+        orientation (the legacy single-hop symmetric semantics). Per-hop
+        ``object_type`` / ``filters`` / W4a tenant scope are applied to the FAR
+        object — the one that becomes the new frontier and is eventually
+        returned.
+        """
+        near_ids = list(frontier)
+        near_ph = ",".join("?" for _ in near_ids)
+
+        # near/far endpoint columns by direction. The current frontier is the
+        # NEAR end; the object we step to is the FAR end.
+        #   out: frontier is from_object_id -> step to to_object_id
+        #   in : frontier is to_object_id   -> step to from_object_id
+        #   any: union of both orientations
+        if hop.direction == "out":
+            orientations = [("from_object_id", "to_object_id")]
+        elif hop.direction == "in":
+            orientations = [("to_object_id", "from_object_id")]
+        else:  # "any"
+            orientations = [("from_object_id", "to_object_id"), ("to_object_id", "from_object_id")]
+
+        # Far-object filters (type + property + tenant) are shared across the
+        # orientation union, so build them once.
+        far_conds: list[str] = []
+        far_params: list[Any] = []
+        if hop.object_type:
+            far_conds.append("LOWER(o.type_name) = LOWER(?)")
+            far_params.append(hop.object_type)
+        if hop.filters:
+            fconds, fparams = _build_filter_conditions(hop.filters)
+            far_conds.extend(fconds)
+            far_params.extend(fparams)
+        ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
+        if ws_cond:
+            far_conds.append(ws_cond)
+            far_params.extend(ws_params)
+        far_where = (" AND " + " AND ".join(far_conds)) if far_conds else ""
+
+        next_frontier: set[str] = set()
+        for near_col, far_col in orientations:
+            # Join the link's FAR endpoint to fabric_objects so the far-object
+            # type/property/tenant filters apply. link_type is a bound param.
+            sql = (
+                f"SELECT o.id FROM fabric_links l"
+                f" JOIN fabric_objects o ON o.id = l.{far_col}"
+                f" WHERE l.{near_col} IN ({near_ph})"
+                f" AND l.link_type = ?"
+                f"{far_where}"
+            )
+            params = [*near_ids, hop.link_type, *far_params]
+            async with db.execute(sql, params) as cur:
+                async for row in cur:
+                    next_frontier.add(row["id"])
+        return next_frontier
 
     # --- Stats ---
 
