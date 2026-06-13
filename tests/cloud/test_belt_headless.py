@@ -140,6 +140,13 @@ async def test_headless_runner_produces_pending_diff(store: InstinctStore):
     # CRITICAL — still PENDING. Not auto-approved, not executed.
     assert after.status == ActionStatus.PENDING
 
+    # An operator trail entry was written — the first place LLM-produced content
+    # enters the store without a human typing it.
+    audit = await store.query_audit(event="headless_diff_attached")
+    assert len(audit) == 1
+    assert audit[0].action_id == action_id
+    assert audit[0].context.get("base_branch") == "main"
+
 
 # ---------------------------------------------------------------------------
 # GATE PRESERVED — the produced diff still requires human approval; the belt
@@ -212,6 +219,29 @@ async def test_headless_runner_rejects_empty_diff(store: InstinctStore):
     assert not cc["diff"]
 
 
+async def test_headless_runner_rejects_missing_base_branch(store: InstinctStore):
+    """A DevelopFn that returns a real diff but NO base_branch is not applyable
+    (the belt executor needs a base to worktree off) — leave the run queued via
+    the no_base_branch safety path, not a half-attached applyable run."""
+    action_id = await _queue_station_run(store)
+
+    async def no_base(req: DevelopRequest) -> DevelopResult:
+        return DevelopResult(diff=CANNED_DIFF, base_branch="", summary="")
+
+    runner = HeadlessDevelopRunner(develop_fn=no_base)
+    ref = await runner.run(action_id)
+    assert ref == action_id
+
+    after = await store.get_action(action_id)
+    assert after is not None
+    cc = after.parameters["_code_change"]
+    # The run is left SAFE: still queued, no diff written.
+    assert cc["station_pending"] is True
+    assert cc["diff"] == ""
+    assert after.status == ActionStatus.PENDING
+    assert "base_branch" in (cc.get("headless_error") or "")
+
+
 # ---------------------------------------------------------------------------
 # DISPATCHER WIRING — the HeadlessTaskDispatcher files the queued run AND runs
 # the headless runner, so an approved plan task becomes a real pending diff in
@@ -264,24 +294,24 @@ def test_headless_selection_requires_wired_develop_loop(monkeypatch):
     monkeypatch.setenv("POCKETPAW_MANDATE_DISPATCHER", "headless")
 
     # No develop loop wired → falls back to the queued-run station dispatcher.
-    headless_mod.set_production_develop_fn(None)
+    # monkeypatch.setattr restores the global even if an assertion below raises,
+    # so the wired/unwired state never leaks into another test under
+    # asyncio_mode=auto.
+    monkeypatch.setattr(headless_mod, "_PRODUCTION_DEVELOP_FN", None)
     assert isinstance(ex.resolve_dispatcher(), ex.StationTaskDispatcher)
 
     # Wire a (fake) develop loop → the headless dispatcher is selected.
     async def fake_develop(req: DevelopRequest) -> DevelopResult:
         return DevelopResult(diff=CANNED_DIFF, base_branch="main")
 
-    headless_mod.set_production_develop_fn(fake_develop)
-    try:
-        assert isinstance(ex.resolve_dispatcher(), HeadlessTaskDispatcher)
-    finally:
-        headless_mod.set_production_develop_fn(None)
+    monkeypatch.setattr(headless_mod, "_PRODUCTION_DEVELOP_FN", fake_develop)
+    assert isinstance(ex.resolve_dispatcher(), HeadlessTaskDispatcher)
 
 
-def test_headless_resolve_returns_none_when_unwired():
+def test_headless_resolve_returns_none_when_unwired(monkeypatch):
     import pocketpaw_ee.cloud.belt.headless as headless_mod
 
-    headless_mod.set_production_develop_fn(None)
+    monkeypatch.setattr(headless_mod, "_PRODUCTION_DEVELOP_FN", None)
     assert headless_mod.resolve_headless_dispatcher() is None
 
 

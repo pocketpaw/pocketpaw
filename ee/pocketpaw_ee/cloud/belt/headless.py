@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/cloud/belt/headless.py — the HEADLESS develop runner.
 # Created: 2026-06-13 (feat/belt-headless-exec).
 #
+# Updated: 2026-06-13 (PR #1464 review) — store the produced diff VERBATIM (only
+#   normalizing a single trailing newline) instead of the leading/trailing-
+#   stripped value: stripping a real diff's trailing newline corrupts it for
+#   ``git apply``. Emptiness is still decided on the stripped value, so a
+#   whitespace-only diff stays safely queued. Also: dropped the dead ``_calls``
+#   field, and added a best-effort ``headless_diff_attached`` audit-log entry at
+#   diff attachment — the first point LLM-produced content enters the Instinct
+#   store without a human typing it, so an operator trail is worth keeping.
+#
 # WHAT THIS CLOSES — the mandate→belt path was NOT autonomous. An approved
 # mandate plan task became a QUEUED ``code_change`` Instinct Action
 # (``station_pending=True``, NO diff) filed by ``mandates.executor.
@@ -42,7 +51,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -104,7 +113,6 @@ class HeadlessDevelopRunner:
     per-diff human gate is preserved (the runner never approves or executes)."""
 
     develop_fn: DevelopFn
-    _calls: list[str] = field(default_factory=list)
 
     async def run(self, action_id: str) -> str:
         """Produce a diff for a queued ``code_change`` action and attach it.
@@ -158,10 +166,14 @@ class HeadlessDevelopRunner:
             await self._note_failure(store, action_id, f"headless develop failed: {exc}")
             return action_id
 
-        diff = (result.diff or "").strip()
-        if not diff:
-            # An empty diff is a no-op failure, not an applyable run. Leave the
-            # queued run untouched (a human can still drive the station).
+        raw_diff = result.diff or ""
+        if not raw_diff.strip():
+            # A whitespace-only (or empty) diff is a no-op failure, not an
+            # applyable run. Leave the queued run untouched (a human can still
+            # drive the station). We test EMPTINESS on the stripped value but
+            # never STORE the stripped value — stripping a real diff's trailing
+            # newline corrupts it for ``git apply`` (the executor reads the diff
+            # verbatim into ``git apply <file>``).
             logger.warning(
                 "headless: develop loop produced an empty diff for action %s — "
                 "leaving the run queued",
@@ -169,6 +181,11 @@ class HeadlessDevelopRunner:
             )
             await self._note_failure(store, action_id, "headless develop produced an empty diff")
             return action_id
+
+        # Store the diff VERBATIM, only guaranteeing a single trailing newline so
+        # ``git apply`` can parse the final hunk line. Leading/internal content is
+        # never altered.
+        diff = raw_diff if raw_diff.endswith("\n") else raw_diff + "\n"
 
         base_branch = (result.base_branch or request.base_branch or "").strip()
         if not base_branch:
@@ -187,7 +204,7 @@ class HeadlessDevelopRunner:
         await self._attach_diff(
             store,
             action_id,
-            diff=result.diff,
+            diff=diff,
             base_branch=base_branch,
             summary=result.summary or request.summary,
             files_changed=result.files_changed,
@@ -229,6 +246,9 @@ class HeadlessDevelopRunner:
             if not isinstance(blob, dict):
                 return
             blob = dict(blob)
+            # Provenance for the audit trail below (read before mutating).
+            workspace_id = str(blob.get("workspace_id") or "")
+            mandate_id = str(blob.get("mandate_id") or "")
             blob["diff"] = diff
             blob["base_branch"] = base_branch
             blob["summary"] = summary
@@ -263,6 +283,43 @@ class HeadlessDevelopRunner:
             )
             await self._note_failure(
                 store, action_id, "headless failed to persist the produced diff"
+            )
+            return
+
+        # Audit trail — this is the FIRST place LLM-produced content enters the
+        # Instinct store without a human typing it, so leave an operator trail of
+        # "headless diff attached, awaiting the gate". Written AFTER the attach
+        # commit so the trail never claims an attach that didn't land, and kept
+        # best-effort (the store's ``log`` raises ``AuditChainError`` loudly on a
+        # ledger failure — that must not undo the attach or crash dispatch).
+        try:
+            from pocketpaw.instinct.models import AuditCategory
+
+            await store.log(
+                actor="agent:belt-headless",
+                event="headless_diff_attached",
+                description=(
+                    f"Headless develop attached a diff to {action_id} "
+                    f"(base {base_branch}, {files_changed} file(s)) — awaiting the "
+                    "per-diff Instinct gate"
+                ),
+                action_id=action_id,
+                pocket_id=workspace_id or None,
+                category=AuditCategory.DECISION,
+                workspace_id=workspace_id or None,
+                context={
+                    "mandate_id": mandate_id,
+                    "base_branch": base_branch,
+                    "files_changed": files_changed,
+                    "headless": True,
+                },
+            )
+        except Exception:  # noqa: BLE001 — the audit trail is best-effort here
+            logger.warning(
+                "headless: audit log for headless_diff_attached failed for action %s "
+                "(the diff IS attached) — operator trail missing this entry",
+                action_id,
+                exc_info=True,
             )
 
     async def _note_failure(self, store: Any, action_id: str, reason: str) -> None:
