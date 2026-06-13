@@ -1,6 +1,12 @@
 """PocketPaw entry point.
 
 Changes:
+  - 2026-06-13: Added `pocket reconcile <id> [--apply]` subcommand
+                (P2.4 Template Reconcile). Thin CLI adapter — calls the
+                running dashboard's reconcile REST endpoints over loopback
+                (mirrors `status` / `channels`). New flags: `--apply`,
+                `--workspace`, `--user`. Routed as an early command so it
+                never pays the settings/health boot cost.
   - 2026-05-28: Wave 4b — `template lint` now also enforces Fabric
                 `tier: registered` policy via
                 `validate_template_with_registry`. Defaults to
@@ -121,6 +127,7 @@ _EARLY_COMMANDS = {
     "errors",
     "logs",
     "template",
+    "pocket",
 }
 
 
@@ -220,6 +227,19 @@ def _handle_early_command(args) -> int | None:
             verify_key_path=getattr(args, "verify_key", None),
             no_prompt=getattr(args, "no_prompt", False),
             registry_path=getattr(args, "registry", None),
+        )
+
+    if cmd == "pocket":
+        from pocketpaw.cli.pocket import run_pocket_cmd
+
+        return run_pocket_cmd(
+            subaction=getattr(args, "subaction", None),
+            pocket_id=getattr(args, "query", None),
+            apply=getattr(args, "apply", False),
+            workspace=getattr(args, "workspace", None),
+            user=getattr(args, "user", None),
+            port=getattr(args, "port", 8888),
+            as_json=getattr(args, "json", False),
         )
 
     return None
@@ -357,6 +377,7 @@ Examples:
             "errors",
             "logs",
             "template",
+            "pocket",
         ],
         help="Subcommand to run",
     )
@@ -438,6 +459,24 @@ Examples:
             "registered-tier surfaces errors)."
         ),
     )
+    # ── P2.4 pocket reconcile flags ──
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="For `pocket reconcile`: write the changes (default is a dry-run diff)",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        help="Workspace id for `pocket reconcile` (or set POCKETPAW_WORKSPACE_ID)",
+    )
+    parser.add_argument(
+        "--user",
+        type=str,
+        default=None,
+        help="User id for `pocket reconcile` (or set POCKETPAW_USER_ID)",
+    )
 
     return parser
 
@@ -488,6 +527,11 @@ def _resolve_subargs(args) -> None:
             args.file1 = subargs[1]
         if len(subargs) > 2:
             args.file2 = subargs[2]
+    elif cmd == "pocket" and subargs:
+        # pocketpaw pocket reconcile <pocket_id>
+        args.subaction = subargs[0]
+        if len(subargs) > 1:
+            args.query = subargs[1]
 
     if args.limit is None:
         defaults = {"errors": 20, "logs": 50, "sessions": 20, "memory": 10}
