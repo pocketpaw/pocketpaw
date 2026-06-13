@@ -785,10 +785,12 @@ def mount_cloud(app: FastAPI) -> None:
         # ACTIVE mandate whose charter cadence is DUE (a "weekly" mandate whose
         # last shift is >7 days old; "manual" mandates are never fired). This
         # turns ``Charter.cadence`` from a persisted label into an always-on
-        # trigger — until now shifts were manual-only. Same scheduler gate as the
-        # autopilot/decisions loops so pytest runs never spawn a loop that
-        # outlives the test; reconcile starts with run_immediate=False (a boot
-        # never storms a tick).
+        # trigger — until now shifts were manual-only. INTENTIONALLY nested in the
+        # autopilot block: it deliberately shares the SAME
+        # POCKETPAW_CLOUD_SCHEDULER_ENABLED gate as the autopilot/decisions loops,
+        # so a host that runs background loops runs all of them, and pytest runs
+        # (gate off) never spawn a loop that outlives the test. Reconcile starts
+        # with run_immediate=False (a boot never storms a tick).
         from pocketpaw_ee.cloud.mandates.scheduler import (
             reconcile_scheduler,
             shutdown_scheduler,

@@ -8,6 +8,12 @@
 #   patrol whose signature accepts it (the LIVE ``issues`` patrol needs it to
 #   reach its connector) via signature inspection — the legacy ``deps_patrol``
 #   ``(repo_id)`` shape is unchanged. Additive only.
+# Updated: 2026-06-13 (PR #1463 review) — ``run_patrols`` also threads ``user_id``
+#   to patrols that accept it (audit attribution); the sighting dedup key is
+#   generalized to ``_dedup_signal`` (issues key on ``evidence.iid``, deps on
+#   ``evidence.package``, else summary) so a retitled issue no longer
+#   double-persists; ``list_cadence_due`` carries an explicit N+1 demo-bar
+#   concession note (TODO: single aggregation pipeline).
 #
 # Business logic for the MANDATE primitive — the standing Belt JOB. Sole owner
 # of writes to MandateDoc / ShiftDoc / SightingDoc (the only module that imports
@@ -368,12 +374,25 @@ async def list_sightings(workspace_id: str, user_id: str, mandate_id: str) -> di
     return {"sightings": [_sighting_to_wire(s) for s in docs]}
 
 
+def _dedup_signal(evidence: dict[str, Any] | None, summary: str | None) -> str:
+    """The stable per-patrol dedup signal for a sighting / draft.
+
+    Generalized across patrols: ``issues`` carry ``evidence.iid`` (stable across a
+    retitle), ``deps`` carry ``evidence.package``; anything else falls back to the
+    summary. Without the ``iid`` branch an issue retitle would change the summary
+    and double-persist the same issue."""
+    ev = evidence or {}
+    signal = ev.get("iid") or ev.get("package") or summary or ""
+    return str(signal)
+
+
 async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[str, Any]:
     """Run every registered patrol over the mandate's surface and persist the
     resulting Sightings.
 
-    Dedup: a draft whose ``evidence.package`` already has a sighting from the
-    same patrol on this mandate is skipped — repeated shift triggers must not
+    Dedup: a draft whose dedup signal (``evidence.iid`` for issues,
+    ``evidence.package`` for deps, else the summary) already has a sighting from
+    the same patrol on this mandate is skipped — repeated shift triggers must not
     spam the foreman with identical signals. Returns the NEW sightings only."""
     from pocketpaw_ee.cloud.mandates.patrols import PATROLS
 
@@ -382,7 +401,7 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
     existing = await SightingDoc.find(
         SightingDoc.workspace == workspace_id, SightingDoc.mandate_id == mandate_id
     ).to_list()
-    seen_keys = {(s.patrol, str((s.evidence or {}).get("package") or s.summary)) for s in existing}
+    seen_keys = {(s.patrol, _dedup_signal(s.evidence, s.summary)) for s in existing}
 
     created: list[SightingDoc] = []
     enabled = set(doc.patrols or [])
@@ -394,13 +413,16 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
             continue
         try:
             # Patrols take ``repo_id`` positionally; a LIVE patrol (e.g. ``issues``)
-            # also needs the workspace to reach its connector, so pass
-            # ``workspace_id`` ONLY when the patrol's signature accepts it. This
-            # keeps the legacy ``deps_patrol(repo_id)`` shape working unchanged.
+            # also needs the workspace to reach its connector, and the actor to
+            # attribute the connector call to, so pass ``workspace_id`` / ``user_id``
+            # ONLY when the patrol's signature accepts them. This keeps the legacy
+            # ``deps_patrol(repo_id)`` shape working unchanged.
             kwargs: dict[str, Any] = {}
             params = inspect.signature(patrol).parameters
             if "workspace_id" in params:
                 kwargs["workspace_id"] = workspace_id
+            if "user_id" in params:
+                kwargs["user_id"] = user_id
             drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
@@ -408,7 +430,7 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
         for draft in drafts:
             key = (
                 str(draft.get("patrol") or patrol_name),
-                str((draft.get("evidence") or {}).get("package") or draft.get("summary") or ""),
+                _dedup_signal(draft.get("evidence"), draft.get("summary")),
             )
             if key in seen_keys:
                 continue
@@ -1349,6 +1371,9 @@ async def list_autopilot_enabled() -> list[dict[str, Any]]:
 # table so a later cadence value ("daily", etc.) only adds a row here.
 _CADENCE_INTERVALS: dict[str, timedelta] = {"weekly": timedelta(days=7)}
 
+# The SYSTEM actor a scheduled shift runs as (no human user_id on a cadence fire).
+_SCHEDULER_ACTOR = "system:scheduler"
+
 
 async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     """All ACTIVE mandates whose charter cadence is DUE at ``now`` — the cadence
@@ -1369,6 +1394,11 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
     ``now`` is injected so the scheduler can pass a deterministic clock — tests
     never depend on wall time."""
     # no-event: read-only path; emit only on writes.
+    # DEMO-BAR CONCESSION (N+1): one MandateDoc.find + one ShiftDoc.find per active
+    # mandate. Fine at demo-bar mandate counts; at scale this should be a SINGLE
+    # aggregation pipeline ($lookup the latest shift per mandate + a $match on the
+    # cadence window). TODO: single aggregation pipeline before this runs against a
+    # real tenant population.
     docs = await MandateDoc.find(MandateDoc.status == "active").to_list()
     due: list[dict[str, Any]] = []
     for doc in docs:
@@ -1392,10 +1422,6 @@ async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
             }
         )
     return due
-
-
-# The SYSTEM actor a scheduled shift runs as (no human user_id on a cadence fire).
-_SCHEDULER_ACTOR = "system:scheduler"
 
 
 async def executor_revalidate(workspace_id: str, mandate_id: str) -> dict[str, Any]:

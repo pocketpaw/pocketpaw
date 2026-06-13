@@ -1,5 +1,9 @@
 # ee/pocketpaw_ee/cloud/mandates/scheduler.py
 # Created: 2026-06-13 (feat/patrol-engine).
+# Updated: 2026-06-13 (PR #1463 review) — the run_immediate tick no longer
+#   swallows CancelledError: a cancel mid-tick now propagates and exits the loop
+#   instead of falling through into the long interval sleep (shutdown could hang
+#   for up to an hour). See ``_scheduler_loop``.
 #
 # CADENCE SCHEDULER — the piece that turns ``Charter.cadence`` from a persisted
 # label into an always-on trigger. Until now shifts were MANUAL-ONLY (the
@@ -146,11 +150,16 @@ async def _scheduler_loop(interval: int, *, run_immediate: bool) -> None:
     await cleanly."""
     logger.info("scheduler: loop started (interval=%ds)", interval)
     if run_immediate:
-        with contextlib.suppress(asyncio.CancelledError):
-            try:
-                await run_scheduler_tick()
-            except Exception:  # noqa: BLE001 — already swallowed inside; belt-and-braces
-                logger.warning("scheduler: immediate tick failed", exc_info=True)
+        try:
+            await run_scheduler_tick()
+        except asyncio.CancelledError:
+            # A cancel WHILE the immediate tick is suspended must propagate, not be
+            # swallowed — otherwise the loop falls through into the long
+            # ``asyncio.sleep(interval)`` and shutdown blocks for up to an hour.
+            logger.info("scheduler: immediate tick cancelled — exiting")
+            raise
+        except Exception:  # noqa: BLE001 — already swallowed inside; belt-and-braces
+            logger.warning("scheduler: immediate tick failed", exc_info=True)
 
     while True:
         try:

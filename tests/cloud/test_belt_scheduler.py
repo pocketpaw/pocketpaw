@@ -2,6 +2,9 @@
 # first LIVE-signal patrol (feat/patrol-engine).
 #
 # Created: 2026-06-13.
+# Updated: 2026-06-13 (PR #1463 review) — added a shutdown-during-immediate-tick
+#   regression test (the loop must not hang), an exact-7-day cadence boundary
+#   test, and a user_id-threading assertion on the issues patrol.
 #
 # Two pieces under test:
 #
@@ -26,6 +29,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -112,6 +116,27 @@ async def test_list_cadence_due_recent_shift_not_due(tmp_path, mongo_db):
     assert weekly in due_ids_later, "a weekly mandate becomes due once a week has elapsed"
 
 
+async def test_list_cadence_due_exact_7_day_boundary_is_due(tmp_path, mongo_db):
+    """The window is EXCLUSIVE: a shift EXACTLY 7 days ago is due (a mandate must
+    not slip a beat at the boundary), and a shift a hair under 7 days is not."""
+    from pocketpaw_ee.cloud.mandates.domain import ShiftDoc
+
+    weekly = await _make_mandate("weekly-boundary", cadence="weekly")
+    now = datetime(2026, 6, 13, tzinfo=UTC)
+
+    shift = ShiftDoc(workspace=WS, mandate_id=weekly, no=1, state="done")
+    shift.createdAt = now - timedelta(days=7)  # exactly the interval ago
+    await shift.insert()
+
+    due_ids = {row["mandate_id"] for row in await mandate_service.list_cadence_due(now)}
+    assert weekly in due_ids, "a shift exactly 7 days ago is DUE (exclusive boundary)"
+
+    # A minute short of 7 days is still inside the window → NOT due.
+    just_short = now - timedelta(minutes=1)
+    due_short = {row["mandate_id"] for row in await mandate_service.list_cadence_due(just_short)}
+    assert weekly not in due_short, "a hair under 7 days is not yet due"
+
+
 async def test_list_cadence_due_excludes_paused(tmp_path, mongo_db):
     from bson import ObjectId
     from pocketpaw_ee.cloud.mandates.domain import MandateDoc
@@ -193,6 +218,31 @@ async def test_scheduler_lifecycle_start_and_drain(tmp_path, mongo_db):
     await scheduler_mod.shutdown_scheduler()
 
 
+async def test_shutdown_during_immediate_tick_does_not_hang(tmp_path, mongo_db, monkeypatch):
+    """REGRESSION: a cancel WHILE the run_immediate tick is in flight must abort
+    the loop promptly, NOT fall through into the hour-long ``asyncio.sleep``.
+    Before the fix, ``contextlib.suppress(CancelledError)`` ate the cancel and
+    shutdown blocked until the next interval (up to 3600s)."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_tick(*args, **kwargs):
+        started.set()
+        await release.wait()  # park here until the test cancels us
+        return []
+
+    monkeypatch.setattr(scheduler_mod, "run_scheduler_tick", _slow_tick)
+
+    # Huge interval: if the cancel were swallowed, the loop would park on this
+    # sleep and the drain below would time out.
+    await scheduler_mod.start_scheduler(interval_seconds=10_000, run_immediate=True)
+    await asyncio.wait_for(started.wait(), timeout=1.0)  # the immediate tick is running
+
+    # Drain must complete fast — the cancel propagates out of the immediate tick.
+    await asyncio.wait_for(scheduler_mod.shutdown_scheduler(), timeout=1.0)
+    assert not scheduler_mod.is_running()
+
+
 async def test_scheduler_reconciler_starts_loop(tmp_path, mongo_db):
     """The lifespan startup reconciler starts exactly one sweeper loop."""
     assert not scheduler_mod.is_running()
@@ -222,8 +272,11 @@ async def test_issues_patrol_produces_sightings_from_connector_payload():
 
     from types import SimpleNamespace
 
+    seen_user: list[str | None] = []
+
     async def _fake_execute(workspace_id, name, body, *, user_id=None):
         # Mirror the ExecuteActionResponse shape: success + a data payload.
+        seen_user.append(user_id)
         return SimpleNamespace(
             success=True,
             data=[
@@ -241,10 +294,12 @@ async def test_issues_patrol_produces_sightings_from_connector_payload():
     drafts = await patrols_mod.issues_patrol(
         "/tmp/repo",
         workspace_id=WS,
+        user_id="system:scheduler",
         project="my-group/my-project",
         execute=_fake_execute,
     )
 
+    assert seen_user == ["system:scheduler"], "the actor is threaded to the connector"
     assert len(drafts) == 2, "only OPEN issues become sightings"
     summaries = [d["summary"] for d in drafts]
     assert any("Login button is broken" in s for s in summaries)
@@ -286,9 +341,11 @@ async def test_run_patrols_persists_issue_sightings_via_connector_seam(
 
     # Patch the patrol's DEFAULT connector seam — proves run_patrols reaches the
     # live execute path without injecting ``execute`` at the call site.
-    async def _fake_default_execute(workspace_id, name, body):
+    async def _fake_default_execute(workspace_id, name, body, *, user_id=None):
         assert name == "gitlab"
         assert body["action"] == "list_issues"
+        # The run_patrols actor is threaded to the connector for audit attribution.
+        assert user_id == USER
         return SimpleNamespace(
             success=True,
             data=[

@@ -8,6 +8,11 @@
 #   ``deps`` patrol uses. The external call is injectable so tests mock the
 #   payload instead of hitting the network. The ``deps`` / ``feedback`` patrols
 #   are unchanged.
+# Updated: 2026-06-13 (PR #1463 review) — ``issues_patrol`` + ``_default_execute``
+#   now thread ``user_id`` through to the connector so a scheduler-fired patrol is
+#   attributed to its system actor (not ``None``); and the dir-name project
+#   fallback now logs a warning (a namespaced GitLab project returns zero
+#   sightings silently — bind ``project='group/name'``).
 #
 # The PATROL framework — a patrol is an async callable that senses a mandate's
 # surface and produces Sighting DRAFTS (plain dicts; the service persists them
@@ -203,6 +208,7 @@ async def issues_patrol(
     repo_id: str,
     *,
     workspace_id: str,
+    user_id: str | None = None,
     project: str | None = None,
     connector: str = _ISSUES_CONNECTOR,
     execute: ConnectorExecuteFn | None = None,
@@ -215,14 +221,28 @@ async def issues_patrol(
     hardcoded table — the data is whatever the project's tracker reports right now.
 
     ``project`` is the GitLab project id / URL-encoded path; it defaults to the
-    bound repo's directory name (the common ``repo-dir == project`` convention).
+    bound repo's directory name (the common ``repo-dir == project`` convention),
+    which is WRONG for any namespaced project — a warning fires so the operator
+    knows to bind an explicit ``project='group/name'``. ``user_id`` is the actor
+    the connector call is attributed to (the scheduler passes its system actor).
     ``execute`` is the connector-execute callable, injected so tests mock the
     payload; the live caller leaves it ``None`` to use ``connectors_service``.
 
     Resilience: a connector failure, an unbound connector, a non-success response,
     or a malformed payload all yield ZERO sightings — the patrol NEVER raises into
     the shift trigger (same contract as ``deps``)."""
-    proj = project or Path(repo_id).expanduser().name
+    proj = project
+    if not proj:
+        proj = Path(repo_id).expanduser().name
+        # The dir-name default is a best-effort convenience: a namespaced GitLab
+        # project (``group/name``) won't match a bare dir name and ``list_issues``
+        # returns zero issues with NO error. Tell the operator to bind it.
+        logger.warning(
+            "issues patrol: no explicit project bound — defaulting to repo dir name %r. "
+            "A namespaced GitLab project will return zero sightings silently; "
+            "bind project='group/name' on the mandate surface.",
+            proj,
+        )
     if not proj:
         logger.warning(
             "issues patrol: no project resolvable from repo %r — zero sightings", repo_id
@@ -239,6 +259,7 @@ async def issues_patrol(
                 "params": {"project_id": proj, "state": "opened"},
                 "scope": "workspace",
             },
+            user_id=user_id,
         )
     except Exception:  # noqa: BLE001 — a connector failure must not wedge the shift
         logger.warning(
@@ -293,16 +314,20 @@ async def issues_patrol(
     return drafts
 
 
-async def _default_execute(workspace_id: str, name: str, body: dict[str, Any]) -> Any:
+async def _default_execute(
+    workspace_id: str, name: str, body: dict[str, Any], *, user_id: str | None = None
+) -> Any:
     """The live connector-execute seam — the real ``connectors_service.execute``.
 
     Imported lazily so the patrols module stays importable without the connectors
-    package wired (and so tests that inject ``execute`` never touch it)."""
+    package wired (and so tests that inject ``execute`` never touch it). ``user_id``
+    is threaded to the connector so a scheduler-fired patrol is attributed to its
+    system actor, not ``None``."""
     from pocketpaw_ee.cloud.connectors import service as connectors_service
     from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
 
     return await connectors_service.execute(
-        workspace_id, name, ExecuteActionRequest.model_validate(body)
+        workspace_id, name, ExecuteActionRequest.model_validate(body), user_id=user_id
     )
 
 
