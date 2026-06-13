@@ -22,6 +22,14 @@
 # new write-action routes:
 #   POST /pockets/{id}/actions/run        — run a declared write action
 #   PUT  /pockets/{id}/backend/write-policy — set the write allowlist
+#
+# Updated: 2026-06-13 — reconciled the stale `test_run_sources_400_when_no_backend`
+# with the `fix/pocket-sources-run-400` contract (router docstring, 2026-06-08).
+# `POST /sources/run` no longer 400s when no backend is bound: it returns 200
+# with empty `ran`/`errors` when nothing is selected, or a per-source
+# `pocket_backend.not_configured` error (200) when a runnable source IS
+# authored. The single stale test is replaced by two that pin both arms; the
+# selection + error shape run for real (`selected_source_keys` is not mocked).
 
 from __future__ import annotations
 
@@ -284,7 +292,17 @@ def test_run_sources_happy_path(monkeypatch, client):
     assert captured["user_id"] == FAKE_USER
 
 
-def test_run_sources_400_when_no_backend(monkeypatch, client):
+def test_run_sources_noop_when_no_backend_and_nothing_selected(monkeypatch, client):
+    """A blank/starter pocket — no backend, no sources — is a clean no-op.
+
+    The frontend runs declared sources on every ``pocket_open``, so this
+    path is hit on every open of an unconfigured pocket. It returns 200
+    with empty ``ran``/``errors`` — NOT the old 400, which surfaced in the
+    browser as a noisy ``pocket_open sources run failed: HttpError: Bad
+    Request``. See ``fix/pocket-sources-run-400`` (router docstring,
+    2026-06-08) for the contract.
+    """
+
     async def _get_pocket(pocket_id, user_id):
         return {"_id": pocket_id, "rippleSpec": {}}
 
@@ -295,7 +313,44 @@ def test_run_sources_400_when_no_backend(monkeypatch, client):
     monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
 
     res = client.post("/pockets/pocket-1/sources/run", json={})
-    assert res.status_code == 400, res.text
+    assert res.status_code == 200, res.text
+    assert res.json() == {"ran": [], "errors": []}
+
+
+def test_run_sources_per_source_error_when_no_backend_but_source_authored(monkeypatch, client):
+    """A runnable source authored on a pocket with no backend bound is a
+    real misconfiguration — reported as a per-source
+    ``pocket_backend.not_configured`` error with HTTP 200, never a hard 400.
+
+    This mirrors the soft/non-fatal "no backend" handling every other
+    source-run call site uses (agent pocket_router, temporal_dispatcher,
+    bulk_dispatch). ``source_executor.selected_source_keys`` is deliberately
+    NOT monkeypatched, so the real selection logic + error shape are pinned.
+    """
+    spec = {"sources": {"prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"}}}
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _no_creds(workspace_id, pocket_id):
+        return None
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    # An empty body (no trigger, no source) selects every declared source —
+    # here, the single authored ``prs`` source.
+    res = client.post("/pockets/pocket-1/sources/run", json={})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ran"] == []
+    assert body["errors"] == [
+        {
+            "source": "prs",
+            "error": "This pocket has no backend configured",
+            "code": "pocket_backend.not_configured",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------
