@@ -1,5 +1,11 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-13 (feat/patrol-engine) — Registers the mandate cadence
+    SCHEDULER lifespan pair next to the autopilot pair, under the same
+    POCKETPAW_CLOUD_SCHEDULER_ENABLED gate: ``reconcile_scheduler`` at startup
+    (starts the single sweeper loop, run_immediate=False) and
+    ``shutdown_scheduler`` at shutdown (cancels + awaits it). The loop fires
+    cadence-due shifts so "weekly" mandates run without a manual trigger.
 Modified: 2026-06-11 (feat/belt-autopilot) — Registers the mandate-autopilot
     lifespan pair under the POCKETPAW_CLOUD_SCHEDULER_ENABLED gate:
     ``reconcile_autopilot_tasks`` at startup (re-derives per-mandate autopilot
@@ -773,6 +779,28 @@ def mount_cloud(app: FastAPI) -> None:
         @app.on_event("shutdown")
         async def _stop_mandate_autopilot() -> None:
             await shutdown_all_autopilot_tasks()
+
+        # Mandate cadence scheduler (feat/patrol-engine). A single sweeper loop
+        # that wakes every interval and fires ``service.trigger_shift`` for each
+        # ACTIVE mandate whose charter cadence is DUE (a "weekly" mandate whose
+        # last shift is >7 days old; "manual" mandates are never fired). This
+        # turns ``Charter.cadence`` from a persisted label into an always-on
+        # trigger — until now shifts were manual-only. Same scheduler gate as the
+        # autopilot/decisions loops so pytest runs never spawn a loop that
+        # outlives the test; reconcile starts with run_immediate=False (a boot
+        # never storms a tick).
+        from pocketpaw_ee.cloud.mandates.scheduler import (
+            reconcile_scheduler,
+            shutdown_scheduler,
+        )
+
+        @app.on_event("startup")
+        async def _start_mandate_scheduler() -> None:
+            await reconcile_scheduler()
+
+        @app.on_event("shutdown")
+        async def _stop_mandate_scheduler() -> None:
+            await shutdown_scheduler()
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

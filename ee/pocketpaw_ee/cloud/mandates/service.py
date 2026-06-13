@@ -1,6 +1,14 @@
 # ee/pocketpaw_ee/cloud/mandates/service.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 1 — models + CRUD).
 #
+# Updated: 2026-06-13 (feat/patrol-engine) — added ``list_cadence_due(now)``, the
+#   cadence scheduler's read: all ACTIVE mandates whose charter cadence interval
+#   has elapsed since their last shift (or that never shifted). "manual" mandates
+#   are never returned. Also: ``run_patrols`` now passes ``workspace_id`` to any
+#   patrol whose signature accepts it (the LIVE ``issues`` patrol needs it to
+#   reach its connector) via signature inspection — the legacy ``deps_patrol``
+#   ``(repo_id)`` shape is unchanged. Additive only.
+#
 # Business logic for the MANDATE primitive — the standing Belt JOB. Sole owner
 # of writes to MandateDoc / ShiftDoc / SightingDoc (the only module that imports
 # those Beanie classes, per the 4-file entity rule).
@@ -21,8 +29,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
@@ -384,7 +393,15 @@ async def run_patrols(workspace_id: str, user_id: str, mandate_id: str) -> dict[
         if patrol_name not in enabled:
             continue
         try:
-            drafts = await patrol(doc.surface.repo_id)
+            # Patrols take ``repo_id`` positionally; a LIVE patrol (e.g. ``issues``)
+            # also needs the workspace to reach its connector, so pass
+            # ``workspace_id`` ONLY when the patrol's signature accepts it. This
+            # keeps the legacy ``deps_patrol(repo_id)`` shape working unchanged.
+            kwargs: dict[str, Any] = {}
+            params = inspect.signature(patrol).parameters
+            if "workspace_id" in params:
+                kwargs["workspace_id"] = workspace_id
+            drafts = await patrol(doc.surface.repo_id, **kwargs)
         except Exception:  # noqa: BLE001 — a broken patrol must not wedge the shift
             logger.warning("mandate: patrol %r raised — skipping", patrol_name, exc_info=True)
             continue
@@ -1325,6 +1342,60 @@ async def list_autopilot_enabled() -> list[dict[str, Any]]:
         }
         for d in docs
     ]
+
+
+# Cadence → due-interval. A "weekly" mandate is due once its last shift is older
+# than this; "manual" mandates are never scheduled (no entry → not due). Kept as a
+# table so a later cadence value ("daily", etc.) only adds a row here.
+_CADENCE_INTERVALS: dict[str, timedelta] = {"weekly": timedelta(days=7)}
+
+
+async def list_cadence_due(now: datetime) -> list[dict[str, Any]]:
+    """All ACTIVE mandates whose charter cadence is DUE at ``now`` — the cadence
+    scheduler's read (``scheduler.run_scheduler_tick``).
+
+    A mandate is DUE when its cadence has a scheduling interval (currently only
+    ``"weekly"`` → 7 days) AND its most recent shift's ``createdAt`` is older than
+    that interval before ``now`` (a mandate that has NEVER shifted is always due).
+    ``"manual"`` mandates have no interval, so they are never returned — the demo
+    bar's manual-trigger path is untouched.
+
+    DELIBERATELY cross-workspace: this is a SYSTEM sweeper read (same posture as
+    ``list_autopilot_enabled`` / the stale-run sweeper), not a request-path find.
+    Paused mandates are excluded — a paused mandate is inert. Returns
+    ``[{workspace_id, mandate_id, user_id}]`` (``user_id`` is the SYSTEM actor the
+    scheduler triggers shifts as).
+
+    ``now`` is injected so the scheduler can pass a deterministic clock — tests
+    never depend on wall time."""
+    # no-event: read-only path; emit only on writes.
+    docs = await MandateDoc.find(MandateDoc.status == "active").to_list()
+    due: list[dict[str, Any]] = []
+    for doc in docs:
+        interval = _CADENCE_INTERVALS.get(doc.charter.cadence)
+        if interval is None:
+            continue  # manual (or an unscheduled cadence) — never auto-fired
+        last = (
+            await ShiftDoc.find(
+                ShiftDoc.workspace == doc.workspace, ShiftDoc.mandate_id == str(doc.id)
+            )
+            .sort("-no")
+            .first_or_none()
+        )
+        if last is not None and _aware(last.createdAt) > (now - interval):
+            continue  # shifted inside the cadence window — not due yet
+        due.append(
+            {
+                "workspace_id": doc.workspace,
+                "mandate_id": str(doc.id),
+                "user_id": _SCHEDULER_ACTOR,
+            }
+        )
+    return due
+
+
+# The SYSTEM actor a scheduled shift runs as (no human user_id on a cadence fire).
+_SCHEDULER_ACTOR = "system:scheduler"
 
 
 async def executor_revalidate(workspace_id: str, mandate_id: str) -> dict[str, Any]:
