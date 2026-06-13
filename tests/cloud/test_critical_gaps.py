@@ -8,6 +8,10 @@
 #   new `path` arg into FabricQuery.path so an LLM can issue the 2-hop ontology
 #   join (open Deals -> Customer -> Competitor) as ONE tool call, and must turn a
 #   malformed hop into a readable error string rather than raising.
+# Updated: 2026-06-13 (review fixes #1465) — Added
+#   test_fabric_query_too_deep_path_returns_clean_error: a path deeper than
+#   MAX_HOPS is rejected at FabricQuery construction and surfaces through the
+#   tool as a clean error string (no store call, no raised exception).
 
 from __future__ import annotations
 
@@ -246,6 +250,29 @@ class TestFabricTools:
             )
 
         assert "Invalid path hop at index 0" in result
+        mock_store.query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fabric_query_too_deep_path_returns_clean_error(self):
+        # review fixes #1465: a path deeper than MAX_HOPS is rejected when the
+        # FabricQuery is built (inside the tool's try), so it surfaces as a clean
+        # "Error querying Fabric" string rather than raising out of the tool.
+        from pocketpaw.fabric.models import MAX_HOPS
+        from pocketpaw.tools.builtin.fabric_tools import FabricQueryTool
+
+        mock_store = MagicMock()
+        mock_store.query = AsyncMock()
+
+        tool = FabricQueryTool()
+        with patch(
+            "pocketpaw.tools.builtin.fabric_tools._get_fabric_store", return_value=mock_store
+        ):
+            result = await tool.execute(
+                linked_to="obj-x",
+                path=[{"link_type": "rel"} for _ in range(MAX_HOPS + 1)],
+            )
+
+        assert "Error querying Fabric" in result
         mock_store.query.assert_not_awaited()
 
     @pytest.mark.asyncio

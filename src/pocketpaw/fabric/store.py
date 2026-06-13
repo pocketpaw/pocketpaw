@@ -89,6 +89,16 @@
 #   remain bound parameters; only fixed SQL fragments are concatenated. The
 #   single-hop linked_to/link_type path is UNTOUCHED (backward compatible) —
 #   path and the legacy single-hop are mutually exclusive (path wins).
+# Updated: 2026-06-13 (review fixes #1465) — bounded the traversal so it can't
+#   crash SQLite or run away: (1) MAX_FRONTIER (500) guards _advance_hop on entry
+#   AND the terminal re-fetch, raising a clear ValueError before a frontier IN-
+#   list could exceed SQLite's 999 bound-variable limit (path depth itself is
+#   capped at MAX_HOPS=5 by the FabricQuery validator). (2) the terminal re-fetch
+#   now carries the same (workspace_id = ? OR workspace_id IS NULL) scope as the
+#   single-hop query()'s SELECT — defense-in-depth; the frontier ids are already
+#   tenant-scoped per hop, so this changes no result, it just makes the last read
+#   self-guarding. Walk is iterative, fixed-depth, no cross-hop cycle re-visit
+#   (see the note in _query_path).
 
 
 from __future__ import annotations
@@ -111,6 +121,17 @@ from pocketpaw.fabric.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on the working set during a multi-hop traversal. The per-hop query
+# binds one ``?`` per frontier id in a ``WHERE l.<col> IN (?, ?, …)`` list; left
+# unbounded a frontier of thousands would blow past SQLite's 999-bound-variable
+# limit (SQLITE_MAX_VARIABLE_NUMBER) with an OperationalError, and a wide fan-out
+# is a latency / memory risk regardless. 500 keeps every per-hop and terminal
+# IN-list comfortably under 999 (500 ids + link_type + a few filter params) while
+# covering any realistic ontology join. A frontier that exceeds it raises a clear
+# ValueError, which the agent tool turns into a readable message — much better
+# than a raw SQLite crash.
+MAX_FRONTIER = 500
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS fabric_object_types (
@@ -891,6 +912,15 @@ class FabricStore:
         re-fetched as full objects (newest-first, paginated). Every step is
         tenant-scoped (W4a) and every value is a bound parameter.
         """
+        # Walk properties: the traversal is ITERATIVE (one DB round-trip per
+        # hop, frontier threaded forward), FIXED-DEPTH (len(q.path) hops, capped
+        # at MAX_HOPS by the FabricQuery validator), and does NOT track visited
+        # objects across hops — there is no cycle re-visit suppression, so a
+        # cyclic graph relies on MAX_HOPS + MAX_FRONTIER to stay bounded rather
+        # than on de-duplication. Each hop's frontier is a set, so duplicates
+        # WITHIN a single hop's output collapse; revisiting an object on a LATER
+        # hop is allowed (and meaningful — A may legitimately be both 2 and 4
+        # hops from the seed).
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
 
@@ -933,17 +963,36 @@ class FabricStore:
             if not frontier:
                 return FabricQueryResult(objects=[], total=0)
 
+            # Guard the terminal frontier too: a wide fan-out on the LAST hop is
+            # only checked by _advance_hop on the NEXT hop's entry, which never
+            # comes. Keep the terminal IN-list under SQLite's variable limit.
+            if len(frontier) > MAX_FRONTIER:
+                raise ValueError(
+                    f"multi-hop result reached {len(frontier)} objects, "
+                    f"exceeding the cap of {MAX_FRONTIER}. Narrow the path with a "
+                    "more selective start filter or a terminal object_type."
+                )
+
             # --- Re-fetch the terminal frontier as full objects -------------
             # Bound the IN-list with placeholders (ids are server-generated, but
-            # parameterize anyway — never interpolate). Newest-first + paginate
-            # to match the single-hop query()'s ordering contract.
+            # parameterize anyway — never interpolate). The frontier was already
+            # tenant-scoped at every hop, so the terminal ids cannot belong to
+            # another workspace; the scope clause below is defense-in-depth that
+            # mirrors the single-hop query()'s terminal SELECT exactly. Newest-
+            # first + paginate to match the single-hop ordering contract.
             terminal_ids = list(frontier)
             placeholders = ",".join("?" for _ in terminal_ids)
             total = len(terminal_ids)
+            term_params: list[Any] = [*terminal_ids]
+            ws_cond, ws_params = _workspace_scope(workspace_id, column="o.workspace_id")
+            ws_clause = f" AND {ws_cond}" if ws_cond else ""
+            if ws_cond:
+                term_params.extend(ws_params)
             async with db.execute(
                 f"SELECT o.* FROM fabric_objects o WHERE o.id IN ({placeholders})"
+                f"{ws_clause}"
                 " ORDER BY o.created_at DESC LIMIT ? OFFSET ?",
-                [*terminal_ids, q.limit, q.offset],
+                [*term_params, q.limit, q.offset],
             ) as cur:
                 objects = [self._row_to_object(row) async for row in cur]
 
@@ -965,7 +1014,17 @@ class FabricStore:
         ``object_type`` / ``filters`` / W4a tenant scope are applied to the FAR
         object — the one that becomes the new frontier and is eventually
         returned.
+
+        Raises ``ValueError`` if the incoming frontier exceeds ``MAX_FRONTIER`` —
+        the IN-list would otherwise risk SQLite's bound-variable limit. The
+        caller (the agent tool) renders this as a clean error string.
         """
+        if len(frontier) > MAX_FRONTIER:
+            raise ValueError(
+                f"multi-hop frontier reached {len(frontier)} objects, "
+                f"exceeding the cap of {MAX_FRONTIER}. Narrow the path with a "
+                "more selective start filter or an earlier object_type."
+            )
         near_ids = list(frontier)
         near_ph = ",".join("?" for _ in near_ids)
 

@@ -37,6 +37,12 @@
 #   (a linked object in another workspace must not leak across a hop), reverse
 #   ("in") and symmetric ("any") hop directions, and backward-compat (single-hop
 #   linked_to and an empty path behave exactly as before).
+# Updated: 2026-06-13 (review fixes #1465) — extended TestMultiHopPath with the
+#   bounds the reviewer asked for: a 3-hop chain (depth beyond the audit's 2), a
+#   walk that collapses mid-path (empty intermediate frontier returns an empty
+#   result, NOT an error), a single-hop fan-out exceeding MAX_FRONTIER (clean
+#   ValueError, never a SQLite bound-variable crash), and a path deeper than
+#   MAX_HOPS rejected at FabricQuery construction.
 
 from __future__ import annotations
 
@@ -46,8 +52,8 @@ from pathlib import Path
 import aiosqlite
 import pytest
 
-from pocketpaw.fabric.models import FabricQuery, PathHop, PropertyDef
-from pocketpaw.fabric.store import FabricStore
+from pocketpaw.fabric.models import MAX_HOPS, FabricQuery, PathHop, PropertyDef
+from pocketpaw.fabric.store import MAX_FRONTIER, FabricStore
 
 
 @pytest.fixture
@@ -916,3 +922,86 @@ class TestMultiHopPath:
         # Legacy single-hop: customers linked to the rival via competes_with.
         legacy = await store.query(FabricQuery(linked_to=g["rival"].id, link_type="competes_with"))
         assert {o.properties["name"] for o in legacy.objects} == {"Acme"}
+
+    @pytest.mark.asyncio
+    async def test_three_hop_path(self, store: FabricStore) -> None:
+        """A 3-hop chain resolves end to end in one query.
+
+        Region <--in_region-- Competitor <--competes_with-- Customer
+        <--deal_for-- Deal(open). Start at the Region, walk back three reverse
+        hops to the open Deal(s). Exercises depth beyond the audit's 2 hops.
+        """
+        g = await self._seed(store)
+        region_t = await store.define_type(name="Region", properties=[])
+        emea = await store.create_object(region_t.id, {"name": "EMEA"})
+        # Competitor(Rival Inc) --in_region--> Region(EMEA)
+        await store.link(g["rival"].id, emea.id, "in_region")
+
+        result = await store.query(
+            FabricQuery(
+                linked_to=emea.id,
+                path=[
+                    PathHop(link_type="in_region", object_type="Competitor", direction="in"),
+                    PathHop(link_type="competes_with", object_type="Customer", direction="in"),
+                    PathHop(
+                        link_type="deal_for",
+                        object_type="Deal",
+                        direction="in",
+                        filters={"stage": "open"},
+                    ),
+                ],
+            )
+        )
+        assert {o.properties["name"] for o in result.objects} == {"Acme deal"}
+
+    @pytest.mark.asyncio
+    async def test_empty_intermediate_frontier_returns_empty_not_error(
+        self, store: FabricStore
+    ) -> None:
+        """A walk that collapses mid-path (a hop reaches nothing) returns an
+        empty result, NOT an error — the dead end is a normal outcome."""
+        g = await self._seed(store)
+
+        # Hop 1 reaches the Customer (Acme). Hop 2 follows a link_type that no
+        # object has -> the frontier empties. Hop 3 must not run / error.
+        result = await store.query(
+            FabricQuery(
+                linked_to=g["rival"].id,
+                path=[
+                    PathHop(link_type="competes_with", object_type="Customer", direction="in"),
+                    PathHop(link_type="no_such_link", direction="in"),
+                    PathHop(link_type="deal_for", object_type="Deal", direction="in"),
+                ],
+            )
+        )
+        assert result.objects == []
+        assert result.total == 0
+
+    @pytest.mark.asyncio
+    async def test_fan_out_exceeding_max_frontier_raises_clean_value_error(
+        self, store: FabricStore
+    ) -> None:
+        """A single hop that fans out past MAX_FRONTIER raises a clear ValueError
+        rather than crashing SQLite on the bound-variable limit."""
+        hub_t = await store.define_type(name="Hub", properties=[])
+        leaf_t = await store.define_type(name="Leaf", properties=[])
+        hub = await store.create_object(hub_t.id, {"name": "hub"})
+        # Link the hub out to MAX_FRONTIER + 1 leaves on one link_type.
+        for i in range(MAX_FRONTIER + 1):
+            leaf = await store.create_object(leaf_t.id, {"i": i})
+            await store.link(hub.id, leaf.id, "has_leaf")
+
+        with pytest.raises(ValueError, match="exceeding the cap"):
+            await store.query(
+                FabricQuery(
+                    linked_to=hub.id,
+                    path=[PathHop(link_type="has_leaf", object_type="Leaf", direction="out")],
+                )
+            )
+
+    @pytest.mark.asyncio
+    async def test_path_deeper_than_max_hops_rejected(self) -> None:
+        """FabricQuery rejects a path deeper than MAX_HOPS at construction —
+        before any DB work — with a clear ValueError."""
+        with pytest.raises(ValueError, match="maximum is"):
+            FabricQuery(path=[PathHop(link_type="r") for _ in range(MAX_HOPS + 1)])

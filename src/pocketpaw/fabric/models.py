@@ -13,13 +13,27 @@
 #   the named link in the FORWARD direction by default (from_object_id ->
 #   to_object_id, the direction store.link() records), with an explicit
 #   ``direction="in"`` for reverse traversal.
+# Updated: 2026-06-13 (review fixes #1465) — bounded the path: FabricQuery.path
+#   is capped at MAX_HOPS (5) by a field_validator that rejects a longer path
+#   with a clear ValueError (an unbounded, cycle-blind iterative walk is a
+#   latency / infinite-loop risk); PathHop.link_type carries Field(max_length=200)
+#   as a sanity bound on an LLM-facing string (values are already bound params,
+#   so this is hygiene, not injection defense).
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# Cap on path depth (number of hops) for a multi-hop FabricQuery. A path is
+# resolved iteratively, one DB round-trip per hop, with no cycle de-duplication
+# across hops — so an unbounded path is both a latency risk and a way to walk a
+# cyclic graph forever. Five hops covers every join the ontology layer needs in
+# practice (the audit's hardest case is two); anything deeper is almost
+# certainly a mistake and is rejected up front with a clear error.
+MAX_HOPS = 5
 
 
 def _gen_id(prefix: str) -> str:
@@ -103,7 +117,7 @@ class PathHop(BaseModel):
     hop.
     """
 
-    link_type: str
+    link_type: str = Field(max_length=200)
     object_type: str | None = None
     filters: dict[str, Any] = Field(default_factory=dict)
     direction: Literal["out", "in", "any"] = "out"
@@ -135,6 +149,24 @@ class FabricQuery(BaseModel):
     path: list[PathHop] = Field(default_factory=list)
     limit: int = 50
     offset: int = 0
+
+    @field_validator("path")
+    @classmethod
+    def _cap_path_depth(cls, value: list[PathHop]) -> list[PathHop]:
+        """Reject a path deeper than ``MAX_HOPS``.
+
+        The walk in ``FabricStore.query`` is iterative and does NOT de-duplicate
+        visited objects across hops, so a long (or cyclic-graph) path is a
+        latency / runaway risk. Cap it at the model boundary with a clear error
+        — the agent tool's outer ``except`` turns this ValueError into a readable
+        message the LLM can act on, rather than letting it reach the DB.
+        """
+        if len(value) > MAX_HOPS:
+            raise ValueError(
+                f"path has {len(value)} hops; the maximum is {MAX_HOPS}. "
+                "Express the join with fewer hops."
+            )
+        return value
 
 
 class FabricQueryResult(BaseModel):

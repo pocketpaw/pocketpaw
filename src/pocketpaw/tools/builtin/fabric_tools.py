@@ -15,6 +15,12 @@
 #   server-side query. Hops are validated into PathHop models (a bad hop returns
 #   a clear error string rather than raising). The single-hop params are
 #   unchanged and keep working.
+# Updated: 2026-06-13 (review fixes #1465) — the path bounds added on the store
+#   side (MAX_HOPS path-depth cap on FabricQuery, MAX_FRONTIER fan-out guard in
+#   the walk) both raise ValueError; the FabricQuery construction and store.query
+#   call sit inside this tool's try/except, so a too-deep path or a runaway
+#   fan-out surfaces as a readable "Error querying Fabric: …" string the LLM can
+#   act on — never a raised exception or a raw SQLite crash.
 
 import logging
 from typing import Any
