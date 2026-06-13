@@ -133,6 +133,17 @@ class BulkSnoozeRequest(BaseModel):
     until_iso: str = Field(description="ISO-8601 timestamp to snooze until")
 
 
+class BulkRevertRequest(BaseModel):
+    """Body for ``POST /mission-control/items/bulk-revert``.
+
+    Reverts N Tasks from a terminal status (done, reverted, failed) back
+    to ``in_progress`` via ``tasks.service.agent_update_task``. Ids that
+    aren't Tasks come back in ``skipped``.
+    """
+
+    ids: list[str] = Field(min_length=1)
+
+
 class OutcomesQueryRequest(BaseModel):
     """Query filters for ``GET /mission-control/outcomes``."""
 
@@ -429,6 +440,7 @@ __all__ = [
     "AttachCycleItemsResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
+    "BulkRevertRequest",
     "BulkSnoozeRequest",
     "CreateCycleRequest",
     "DetachCycleItemsRequest",

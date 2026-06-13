@@ -479,6 +479,47 @@ async def agent_close_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse
     return response
 
 
+async def agent_delete_cycle(ctx: RequestContext, cycle_id: str) -> dict[str, Any]:
+    """Delete a completed cycle permanently.
+
+    Only completed cycles can be deleted — active or upcoming cycles must
+    be closed first. This is a destructive operation: the cycle document
+    is removed from the database. Incomplete tasks attached to the cycle
+    have their ``cycle_id`` cleared so they don't orphan.
+
+    Raises:
+        Forbidden: If the cycle is not completed.
+        NotFound: If the cycle does not exist in the caller's workspace.
+    """
+    workspace_id = _require_workspace(ctx)
+    doc = await _fetch_in_workspace(workspace_id, cycle_id)
+
+    if doc.status != "completed":
+        raise Forbidden(
+            "cycle.not_completed",
+            "Only completed cycles can be deleted. Close the cycle first.",
+        )
+
+    # Detach any tasks still pointing at this cycle
+    try:
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+    except ImportError:
+        pass
+    else:
+        tasks = await _tasks_for_cycle(ctx, cycle_id)
+        if tasks:
+            for t in tasks:
+                try:
+                    await tasks_service.agent_set_task_cycle(ctx, str(t.id), None)
+                except Exception:
+                    logger.info("agent_delete_cycle: failed to detach task %s", t.id, exc_info=True)
+
+    await doc.delete()
+
+    logger.info("Cycle %s deleted by user %s", cycle_id, ctx.user_id)
+    return {"deleted": cycle_id}
+
+
 async def _roll_incomplete_tasks(ctx: RequestContext, doc: _CycleDoc) -> int:
     """Reassign incomplete tasks attached to this cycle to the next active
     cycle on the same pocket (or clear ``cycle_id`` if none exists).
@@ -719,6 +760,7 @@ async def list_active_workspace_ids() -> list[str]:
 __all__ = [
     "agent_close_cycle",
     "agent_create_cycle",
+    "agent_delete_cycle",
     "agent_get_cycle",
     "agent_list_cycle_items",
     "agent_list_cycles",

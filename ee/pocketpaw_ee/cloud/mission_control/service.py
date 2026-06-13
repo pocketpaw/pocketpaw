@@ -154,6 +154,7 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
+    BulkRevertRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
     DetachCycleItemsResponse,
@@ -991,6 +992,49 @@ async def agent_bulk_snooze(
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
+async def agent_bulk_revert(
+    ctx: RequestContext, body: BulkRevertRequest | dict[str, Any]
+) -> dict[str, Any]:
+    """Revert N Tasks from a terminal status back to in_progress.
+
+    Fans out per-id to ``tasks.service.agent_revert_task`` to flip the
+    task status from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress``. Ids that aren't Tasks land in ``skipped``.
+
+    This differs from ``agent_bulk_reject`` (which rejects pending
+    Nudges) — revert acts on *already-finished* work to un-mark it
+    as complete so the operator can resume work.
+    """
+    body = BulkRevertRequest.model_validate(body)
+    _require_workspace(ctx)
+
+    from uuid import uuid4
+
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    bulk_id = uuid4().hex
+    affected: list[str] = []
+    skipped: list[str] = []
+
+    for raw_id in body.ids:
+        task_id = _classify_task_id(raw_id)
+        if task_id is None:
+            skipped.append(raw_id)
+            continue
+        try:
+            await tasks_service.agent_revert_task(ctx, task_id)
+            affected.append(raw_id)
+        except Exception:
+            logger.info(
+                "mission_control.bulk_revert: skipped id %s",
+                raw_id,
+                exc_info=True,
+            )
+            skipped.append(raw_id)
+
+    return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
+
+
 # ---------------------------------------------------------------------------
 # Plan sessions — drafts list for the Mission Control Plan tab
 # ---------------------------------------------------------------------------
@@ -1413,6 +1457,7 @@ __all__ = [
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",
+    "agent_bulk_revert",
     "agent_bulk_snooze",
     "agent_create_cycle",
     "agent_list_activity",
