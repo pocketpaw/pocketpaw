@@ -1,5 +1,26 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-13 (fix/claude-sdk-warm-client-skills) — skill/tool-bearing
+  runs now REUSE the warm persistent CLI subprocess instead of re-spawning a
+  fresh stateless query every turn (a ~6s/turn floor on any skill chat). The
+  2026-06-07 entry below BYPASSED the warm client for skill runs because
+  ``_client_cache_key`` did not hash the plugin set, so a warm client could not
+  tell a skill turn from a non-skill one. The cache key now folds in
+  ``_plugin_digest`` — a hash of the skill IDENTITY (sorted ``skill_names`` +
+  whether the bundled-skills plugin is loaded), NEVER the materialized
+  ``plugins=`` PATH (``materialize_run_skills`` mints a fresh ``mkdtemp`` per
+  run, so hashing the path would change the key every turn and defeat reuse).
+  With identity in the key, ``_get_or_create_client`` reuses the subprocess for
+  a same-skill turn and rebuilds it for a changed skill set. Lifecycle: because
+  the warm subprocess keeps the ``plugins=`` path from its first ``connect()``,
+  the materialized dir is cached per digest on the instance
+  (``_skills_dir_by_digest``) and reused across same-skill turns; it is removed
+  only when its warm client is evicted (``_get_or_create_client``) or on
+  ``cleanup()`` — NOT by the per-run ``finally``, which now rmtree's the dir
+  ONLY in the genuine stateless-fallback case (when ``_client_in_use`` forced a
+  stateless query and no warm client adopted the dir). The ``skip_warm_client``
+  bypass is removed. ``prewarm`` is intentionally out of scope (separate
+  follow-up).
 Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``run``
   also accepts ``skill_names: frozenset[str]``, the per-entity skill subset
   (resolved upstream from the entity pocket's ``surface_profile.skill_names``).
@@ -262,6 +283,18 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client = None
         self._client_options_key: str | None = None
         self._client_in_use = False
+        # Plugin-identity digest of the currently-live warm client, and a map of
+        # plugin_digest -> materialized per-run skills dir (fix/claude-sdk-warm-
+        # client-skills). A skill run now REUSES the warm subprocess instead of
+        # re-spawning, so the materialized dir it was connected with must outlive
+        # the per-run finally — the subprocess holds that path from its first
+        # connect(). The dir is keyed on the stable plugin IDENTITY (sorted skill
+        # names + bundled flag), never the throwaway mkdtemp PATH, so two turns
+        # with the same skills find the same cached dir. Ownership: the dir is
+        # removed only when its warm client is evicted (_get_or_create_client) or
+        # on cleanup() — NOT by a normal per-run finally.
+        self._client_plugin_digest: str = ""
+        self._skills_dir_by_digest: dict[str, Path] = {}
 
         # Per-run subprocess env injected by the pocket-specialist
         # runtime via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1).
@@ -859,16 +892,47 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 cut = min(cut, idx)
         return system_prompt[:cut]
 
+    @staticmethod
+    def _plugin_digest(skill_names: frozenset[str], *, bundled: bool) -> str:
+        """Stable digest of the agent's plugin IDENTITY for the cache key.
+
+        Folds the per-entity skill subset (sorted ``skill_names``) and whether
+        the bundled-skills plugin is loaded into one short hash. Empty when no
+        skills and no bundled plugin participate, so a plain run's key is
+        unchanged.
+
+        CRITICAL: this digests the IDENTITY of the skills, never the
+        materialized ``plugins=`` PATH. ``materialize_run_skills`` creates a
+        fresh ``tempfile.mkdtemp`` dir on every run, so hashing the path would
+        change the cache key every turn and defeat warm-client reuse entirely —
+        the exact latency bug this fix removes. Two turns that request the same
+        skills (and the same bundled state) MUST hash identically so the warm
+        subprocess is reused; a changed skill set MUST hash differently so it
+        rebuilds.
+        """
+        if not skill_names and not bundled:
+            return ""
+        payload = ("b1:" if bundled else "b0:") + ",".join(sorted(skill_names))
+        return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
     @classmethod
-    def _client_cache_key(cls, options: Any, *, session_key: str | None = None) -> str:
+    def _client_cache_key(
+        cls, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+    ) -> str:
         """Persistent-client cache key: session + model + tools + a digest of
-        the system prompt's stable behavioral prefix.
+        the system prompt's stable behavioral prefix + the plugin-identity
+        digest.
 
         The prefix digest is what makes a mid-session backend config change
         (configured:false -> configured:true, baked into the static home
         prompt) evict and rebuild the warm subprocess on the next turn, instead
-        of staying frozen until a cold restart. Hashing keeps the key bounded
-        regardless of prompt length.
+        of staying frozen until a cold restart. The ``plugin_digest`` does the
+        same for the agent's skill set (per-entity ``skill_names`` + bundled
+        flag): folding it in lets a warm client tell a skill run apart from a
+        non-skill one, so a skill run can REUSE the subprocess instead of
+        re-spawning every turn. Empty ``plugin_digest`` (the default) leaves the
+        key byte-for-byte identical to the pre-fix behavior for non-skill
+        callers. Hashing keeps the key bounded regardless of prompt length.
         """
         prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
         prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
@@ -876,44 +940,69 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{session_key or ''}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
-            f"{prefix_digest}"
+            f"{prefix_digest}:"
+            f"{plugin_digest}"
         )
 
-    async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
+    async def _get_or_create_client(
+        self, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+    ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
-        Reuses the existing subprocess if model, tools, session, **and the
-        system prompt's behavioral prefix** haven't changed. Different sessions
-        get a fresh subprocess so the CLI's internal conversation context
-        doesn't leak between chats; a changed behavioral prefix (e.g. the home
-        pocket's backend summary flipping to "configured" mid-session) also
-        forces a fresh subprocess so the new prompt actually takes effect — the
-        SDK applies the system prompt only at connect() time.
+        Reuses the existing subprocess if model, tools, session, the system
+        prompt's behavioral prefix, **and the plugin-identity digest** haven't
+        changed. Different sessions get a fresh subprocess so the CLI's internal
+        conversation context doesn't leak between chats; a changed behavioral
+        prefix (e.g. the home pocket's backend summary flipping to "configured"
+        mid-session) or a changed skill set (``plugin_digest``) also forces a
+        fresh subprocess so the new prompt / plugins actually take effect — the
+        SDK applies both only at connect() time.
+
+        When a stale client is evicted, its materialized per-run skills dir
+        (tracked by the old ``plugin_digest``) is removed here: the subprocess
+        that held that path is being torn down, so nothing references it
+        anymore. Re-materializing the dir per turn does NOT work — the warm
+        subprocess keeps the original path from its first connect — so the dir
+        is cached per digest and only dropped on eviction or cleanup().
         """
         import time
 
-        key = self._client_cache_key(options, session_key=session_key)
+        key = self._client_cache_key(options, session_key=session_key, plugin_digest=plugin_digest)
 
         if self._client is not None and self._client_options_key == key:
             logger.debug("Reusing persistent client (key=%s)", key)
             return self._client
 
-        # Disconnect stale client
+        # Disconnect stale client and drop the skills dir it was connected with.
         if self._client is not None:
             try:
                 await self._client.disconnect()
             except Exception as e:
                 logger.debug("Failed to disconnect Claude client: %s", e)
             self._client = None
+            self._drop_skills_dir(self._client_plugin_digest)
 
         # Create and connect new client
         t0 = time.monotonic()
         self._client = self._ClaudeSDKClient(options=options)
         await self._client.connect()
         self._client_options_key = key
+        self._client_plugin_digest = plugin_digest
         t1 = time.monotonic()
         logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
         return self._client
+
+    def _drop_skills_dir(self, plugin_digest: str) -> None:
+        """Remove the materialized per-run skills dir cached under
+        ``plugin_digest`` (if any). Best-effort; never raises. Called when the
+        warm client that referenced the dir is evicted or on cleanup()."""
+        if not plugin_digest:
+            return
+        root = self._skills_dir_by_digest.pop(plugin_digest, None)
+        if root is not None:
+            from pocketpaw.skills import cleanup_run_skills
+
+            cleanup_run_skills(root)
 
     async def cleanup(self) -> None:
         """Disconnect the persistent client and release resources."""
@@ -926,6 +1015,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
             self._client_options_key = None
             self._client_in_use = False
             logger.info("Persistent client disconnected")
+        # Sweep every materialized per-run skills dir adopted by a warm client.
+        # Safe even when no client existed (the map is just empty).
+        if self._skills_dir_by_digest:
+            from pocketpaw.skills import cleanup_run_skills
+
+            for root in self._skills_dir_by_digest.values():
+                cleanup_run_skills(root)
+            self._skills_dir_by_digest.clear()
+        self._client_plugin_digest = ""
 
     async def _resilient_query(self, prompt: str, options):
         """Wrap stateless _query with MessageParseError recovery."""
@@ -1078,6 +1176,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # exception fires before/after materialization. None on every run that
         # doesn't pass a non-empty ``skill_names``.
         run_skills_root: Path | None = None
+
+        # fix/claude-sdk-warm-client-skills: ``skills_dir_adopted`` is True when
+        # ``run_skills_root`` was handed to (or reused by) a WARM client — its
+        # lifetime then belongs to ``self._skills_dir_by_digest`` and the
+        # per-run finally must NOT rmtree it (the live subprocess still holds the
+        # path). It stays False on the genuine stateless-fallback path, where the
+        # dir is this run's alone and the finally is the only thing that removes
+        # it. ``plugin_digest`` is the plugin-identity hash threaded into the
+        # cache key + the dir cache.
+        skills_dir_adopted = False
+        plugin_digest = ""
 
         # Ownership flag — True only if THIS run acquired the shared
         # _client_in_use lease. Declared above the try/except so it is always
@@ -1371,35 +1480,66 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # (CLAUDE.md, output styles). Empirically verified 2026-06-03: the
             # ``skills=`` option is also gated by setting_sources, but
             # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
+            bundled_loaded = False
             if self.settings.sdk_load_bundled_skills:
                 from pocketpaw.bundled_skills import bundled_skills_plugin_dir
 
                 plugin_dir = bundled_skills_plugin_dir()
                 if plugin_dir is not None:
                     options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
+                    bundled_loaded = True
                     logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
 
+            # Plugin-identity digest (fix/claude-sdk-warm-client-skills): folds
+            # the requested skill set + the bundled flag into the cache key so a
+            # skill run can REUSE the warm subprocess instead of re-spawning.
+            # Keyed on identity, never the mkdtemp path (see _plugin_digest).
+            plugin_digest = self._plugin_digest(skill_names, bundled=bundled_loaded)
+
             # Per-entity skill subset (entity-rooms A2). Materialize ONLY the
-            # named skills into a throwaway local plugin and append it to the
-            # ``plugins=`` list (creating the list if the bundled plugin above
-            # was off). It coexists with the bundled entry. ``run_skills_root`` is
-            # cleaned up in the ``finally`` after the stream drains, and its
-            # presence forces the fresh stateless path below (the warm client
-            # would ignore these plugins). Empty ``skill_names`` is a no-op.
+            # named skills into a local plugin and append it to the ``plugins=``
+            # list (creating the list if the bundled plugin above was off). It
+            # coexists with the bundled entry. Empty ``skill_names`` is a no-op.
+            #
+            # The warm client keeps whatever ``plugins=`` path it was connected
+            # with from its first connect(), so the materialized dir must be
+            # STABLE per plugin_digest across turns. When this run will reuse the
+            # warm client and a dir for this digest already exists, reuse it
+            # rather than re-materializing — the live subprocess already points
+            # at it. Otherwise materialize fresh; cache + adopt it on the warm
+            # path (cleaned on eviction/cleanup), or leave it owned by this run
+            # on the stateless path (the per-run finally removes it).
             if skill_names:
                 from pocketpaw.skills import materialize_run_skills
 
-                run_skills_root = materialize_run_skills(skill_names, run_id=session_key)
+                will_reuse_warm = not self._client_in_use
+                cached_dir = self._skills_dir_by_digest.get(plugin_digest)
+                if will_reuse_warm and cached_dir is not None and cached_dir.exists():
+                    run_skills_root = cached_dir
+                    skills_dir_adopted = True
+                    logger.info(
+                        "SDK: reusing cached per-run skill plugin (%d requested) at %s",
+                        len(skill_names),
+                        run_skills_root,
+                    )
+                else:
+                    run_skills_root = materialize_run_skills(skill_names, run_id=session_key)
+                    if run_skills_root is not None and will_reuse_warm:
+                        self._skills_dir_by_digest[plugin_digest] = run_skills_root
+                        skills_dir_adopted = True
+
                 if run_skills_root is not None:
                     options_kwargs.setdefault("plugins", [])
                     options_kwargs["plugins"].append(
                         {"type": "local", "path": str(run_skills_root)}
                     )
-                    logger.info(
-                        "SDK: loading per-run skill plugin (%d requested) from %s",
-                        len(skill_names),
-                        run_skills_root,
-                    )
+                    if not skills_dir_adopted:
+                        logger.info(
+                            "SDK: loading per-run skill plugin (%d requested) from %s "
+                            "(stateless — dir owned by this run)",
+                            len(skill_names),
+                            run_skills_root,
+                        )
 
             # Configure LLM provider for the Claude CLI subprocess.
             # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
@@ -1512,22 +1652,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_key,
             )
             _persistent_client = None
-            # WARM-CLIENT BYPASS (entity-rooms A2): when this run materialized a
-            # per-entity skill plugin, the warm client MUST NOT be reused. The
-            # persistent client applies its options (incl. ``plugins=``) only at
-            # first ``connect()``, and ``_client_cache_key`` does NOT hash
-            # ``plugins=`` — so a warm client connected without these skills would
-            # silently ignore them, and conversely a warm client connected WITH
-            # them would leak them into later non-skill turns. A fresh stateless
-            # query rebuilds the subprocess with this run's exact ``options``, so
-            # the materialized plugin actually takes effect and never persists.
-            skip_warm_client = run_skills_root is not None
-            if not self._client_in_use and not skip_warm_client:
+            # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
+            # runs is REMOVED. ``_client_cache_key`` now folds in
+            # ``plugin_digest`` (the skill-identity hash), so a warm client can
+            # distinguish a skill run from a non-skill one — a same-skill turn
+            # reuses the subprocess and a changed skill set rebuilds it. The
+            # materialized plugin dir was cached + adopted above so the warm
+            # subprocess keeps a valid path across turns. The only fallback to
+            # the stateless path now is the original concurrency guard: a sibling
+            # run already holds the lease (_client_in_use).
+            if not self._client_in_use:
                 try:
                     self._client_in_use = True
                     acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
-                        options, session_key=session_key
+                        options, session_key=session_key, plugin_digest=plugin_digest
                     )
                     logger.info("Persistent client: sending query (%d chars)", len(message))
                     await _persistent_client.query(message)
@@ -1558,14 +1697,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     self._client_in_use = False
                     acquired_lease = False
                     _persistent_client = None
+                    # No warm client adopted the skills dir we cached for this
+                    # digest (connect failed before/at adoption). The stateless
+                    # query below uses ``options`` (which already point at the
+                    # dir) for THIS run only, so transfer ownership back to the
+                    # per-run finally: drop it from the digest cache and clear the
+                    # adopted flag so the finally cleans it up exactly once.
+                    if skills_dir_adopted:
+                        self._skills_dir_by_digest.pop(plugin_digest, None)
+                        self._client_plugin_digest = ""
+                        skills_dir_adopted = False
 
             if event_stream is None:
-                logger.info(
-                    "Starting stateless query (reason: %s)",
-                    "per-run skill plugin (warm-client bypass)"
-                    if skip_warm_client
-                    else "fallback — _client_in_use was True",
-                )
+                logger.info("Starting stateless query (reason: _client_in_use was True)")
                 # final_prompt already carries Mongo history (injected above),
                 # so the stateless path uses the same options as the persistent
                 # path — no separate system prompt swap is needed.
@@ -1861,10 +2005,16 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     content=llm.format_api_error(e, stderr=stderr_text),
                 )
         finally:
-            # Always remove the per-run materialized-skills plugin dir
-            # (entity-rooms A2), whether the run finished cleanly, errored, or
-            # the generator was closed early. Best-effort; never raises.
-            if run_skills_root is not None:
+            # Remove the per-run materialized-skills plugin dir (entity-rooms
+            # A2) ONLY when this run owns it — i.e. the genuine stateless-
+            # fallback case where no warm client adopted the dir
+            # (fix/claude-sdk-warm-client-skills). When ``skills_dir_adopted`` is
+            # True the dir belongs to ``self._skills_dir_by_digest`` and a LIVE
+            # warm subprocess still references its path; deleting it here would
+            # leave the next reuse pointing at a missing dir. Adopted dirs are
+            # instead removed on client eviction (_get_or_create_client) or
+            # cleanup(). Best-effort; never raises.
+            if run_skills_root is not None and not skills_dir_adopted:
                 from pocketpaw.skills import cleanup_run_skills
 
                 cleanup_run_skills(run_skills_root)
