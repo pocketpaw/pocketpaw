@@ -1010,6 +1010,25 @@ async def run_pocket_action(
             code="bad_binding",
         )
 
+    # Resolve the request path. The read-time normalizer rewrites an inline
+    # write `api` handler into a PATHLESS `call_binding` handler (it has no
+    # request context to carry a path), so the normal client fires with
+    # `{action, params}` and no `path`. The path is author-time data already
+    # persisted on the binding (the spec must carry it to know the HTTP
+    # method), so fall back to it. A client that DID send a resolved path —
+    # a row-scoped binding whose stored path holds an unresolved `{item.id}`
+    # template, resolved client-side — keeps precedence; the binding path is
+    # only the fallback. The executor still matches the final (method, path)
+    # against the owner's allowlist, so the fallback cannot widen blast radius.
+    resolved_path = body.path or raw_action.get("path")
+    if not isinstance(resolved_path, str) or not resolved_path:
+        return RunActionResponse(
+            ok=False,
+            action=body.action,
+            error=f"action '{body.action}' has no path — send one or declare it on the binding",
+            code="bad_binding",
+        )
+
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
     if creds is None:
         raise CloudError(
@@ -1053,7 +1072,7 @@ async def run_pocket_action(
         user_id=user_id,
         action=body.action,
         raw_action=raw_action,
-        path=body.path,
+        path=resolved_path,
         params=body.params,
         base_url=base_url,
         auth_type=auth_type,

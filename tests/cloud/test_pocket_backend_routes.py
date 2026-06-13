@@ -433,6 +433,124 @@ def test_run_action_happy_path(monkeypatch, client):
     assert captured["workspace_id"]
 
 
+def test_run_action_resolves_path_from_binding_when_client_omits_it(monkeypatch, client):
+    """A `call_binding` handler fires with `{action, params}` and NO `path`
+    — the read-time normalizer rewrites inline write `api` handlers to
+    `call_binding` without a `path`, so the client cannot supply one. The
+    route must resolve the path from the persisted binding (which already
+    carries it, to know the HTTP method) instead of rejecting the request.
+
+    Regression for the live Nerve-demo 422: every relative-URL api button
+    POSTed `{action, params}` to `/actions/run` and hit `RunActionRequest`'s
+    required `path`, failing validation before the route ever ran.
+    """
+    spec = {
+        "actions": {
+            "score_next_20": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leads/score-next",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leads/score-next"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "action": kwargs["action"],
+            "status": 200,
+            "response": {"scored": 20},
+            "on_success": [],
+            "on_error": [],
+        }
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    # No `path` in the body — exactly what the normalized `call_binding`
+    # handler produces.
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "score_next_20", "params": {"batch": 20}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["response"] == {"scored": 20}
+    # The route fell back to the binding's persisted path.
+    assert captured["path"] == "/leads/score-next"
+    assert captured["params"] == {"batch": 20}
+
+
+def test_run_action_client_path_wins_over_binding_path(monkeypatch, client):
+    """When the client DOES send a resolved path (e.g. a row-scoped binding
+    whose stored path holds an unresolved `{item.id}` template), the
+    client's value is used — the binding path is only a fallback."""
+    spec = {
+        "actions": {
+            "mark_renewed": {
+                "kind": "write_binding",
+                "method": "POST",
+                "path": "/leases/{item.id}/renew",
+            }
+        }
+    }
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id, "rippleSpec": spec}
+
+    async def _get_creds(workspace_id, pocket_id):
+        return (
+            "https://api.example.com",
+            "bearer",
+            None,
+            "tok",
+            [{"method": "POST", "path_pattern": "/leases/*/renew"}],
+            None,
+        )
+
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _get_creds)
+
+    from pocketpaw_ee.cloud.pockets import action_executor
+
+    captured = {}
+
+    async def _run_action(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "action": kwargs["action"], "status": 200, "response": {}}
+
+    monkeypatch.setattr(action_executor, "run_action", _run_action)
+
+    res = client.post(
+        "/pockets/pocket-1/actions/run",
+        json={"action": "mark_renewed", "path": "/leases/42/renew"},
+    )
+    assert res.status_code == 200, res.text
+    # The client's resolved path, not the binding's templated one.
+    assert captured["path"] == "/leases/42/renew"
+
+
 def test_run_action_404_when_action_not_declared(monkeypatch, client):
     """An action name not in the persisted spec returns an `ok:false`
     body with code `action_not_found` — no executor call."""
