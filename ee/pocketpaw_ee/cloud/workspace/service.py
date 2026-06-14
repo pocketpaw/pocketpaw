@@ -39,6 +39,14 @@ locking the invitee out of every workspace read. Both already_accepted
 raise-sites now route through _heal_or_conflict: a rightful invitee missing
 the membership gets it added (idempotent) instead of a 409; a genuine
 duplicate (already a member) still raises invite.already_accepted.
+2026-06-14 (WB-1): update() now accepts an optional branding patch. A
+BrandingPatch merges onto the workspace's existing Branding (partial patches
+don't wipe set fields). logo_asset / favicon_asset are ownership-checked
+against the workspace via _assert_asset_owned (mirrors the uploads
+workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
+Forbidden (workspace.branding_asset_not_owned). accent_color format is
+validated upstream by BrandingPatch (422). _workspace_to_domain now carries
+branding through to the domain object so it serializes onto WorkspaceOut.
 """
 
 from __future__ import annotations
@@ -81,6 +89,7 @@ from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
+from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
@@ -88,12 +97,14 @@ from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
 from pocketpaw_ee.cloud.workspace.domain import (
+    Branding,
     Invite,
     InviteContext,
     Workspace,
     WorkspaceMember,
 )
 from pocketpaw_ee.cloud.workspace.dto import (
+    BrandingPatch,
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
@@ -114,6 +125,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _branding_doc_to_domain(b: _BrandingDoc | None) -> Branding | None:
+    """Map the embedded persistence ``Branding`` to the domain value object.
+
+    ``None`` (no custom branding) passes straight through — the frontend
+    renders the Paw defaults."""
+    if b is None:
+        return None
+    return Branding(
+        logo_asset=b.logo_asset,
+        favicon_asset=b.favicon_asset,
+        display_name=b.display_name,
+        tab_title=b.tab_title,
+        accent_color=b.accent_color,
+        show_paw_mark=b.show_paw_mark,
+    )
+
+
 def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Workspace:
     return Workspace(
         id=str(doc.id),
@@ -125,6 +153,7 @@ def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Worksp
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         member_count=member_count,
         deleted_at=doc.deleted_at,
+        branding=_branding_doc_to_domain(getattr(doc, "branding", None)),
     )
 
 
@@ -331,6 +360,47 @@ async def get(ctx: RequestContext, workspace_id: str) -> Workspace:
     return _workspace_to_domain(doc, member_count=count)
 
 
+async def _assert_asset_owned(workspace_id: str, file_id: str) -> None:
+    """Reject a branding asset ref that doesn't belong to this workspace.
+
+    Mirrors the chat-attachment ownership check (uploads' workspace-scoped
+    lookup): the asset must exist as a non-deleted ``FileUpload`` whose
+    ``workspace`` matches. A cross-workspace ref OR a non-existent id both
+    fail the same way — neither is owned by this workspace. Raises ``Forbidden``
+    so the route returns a 403, consistent with the rest of the workspace
+    authorization surface.
+    """
+    owned = await _FileUploadDoc.find_one(
+        {"file_id": file_id, "workspace": workspace_id, "deleted_at": None}
+    )
+    if owned is None:
+        raise Forbidden(
+            "workspace.branding_asset_not_owned",
+            f"Asset '{file_id}' does not belong to this workspace",
+        )
+
+
+async def _apply_branding_patch(
+    doc: _WorkspaceDoc, workspace_id: str, patch: BrandingPatch
+) -> None:
+    """Validate + merge a branding patch onto the workspace doc.
+
+    Asset refs (``logo_asset`` / ``favicon_asset``) are ownership-checked
+    against this workspace before anything is written. The patch MERGES onto
+    any existing branding so a partial patch (e.g. only ``display_name``)
+    doesn't wipe previously set fields. ``accent_color`` format was already
+    validated by ``BrandingPatch`` at the route boundary (422).
+    """
+    if patch.logo_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.logo_asset)
+    if patch.favicon_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.favicon_asset)
+
+    current = doc.branding or _BrandingDoc()
+    merged = current.model_copy(update=patch.model_dump(exclude_unset=True))
+    doc.branding = merged
+
+
 async def update(
     ctx: RequestContext,
     workspace_id: str,
@@ -343,6 +413,8 @@ async def update(
         doc.name = body.name
     if body.settings is not None:
         doc.settings = WorkspaceSettings(**body.settings)
+    if body.branding is not None:
+        await _apply_branding_patch(doc, workspace_id, body.branding)
     await doc.save()
 
     patched = body.model_dump(exclude_unset=True)
