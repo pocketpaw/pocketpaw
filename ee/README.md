@@ -22,6 +22,22 @@ pip install pocketpaw pocketpaw-ee
 `pocketpaw-ee` pins the exact `pocketpaw` version it ships with — the two are
 released lockstep.
 
+## Compiled distribution (source protection)
+
+The `pocketpaw-ee` **wheel ships compiled**: every module is built to a native
+`.so` via Cython (hatch-cython) and the `.py`/`.c` source is excluded. An
+installed enterprise package — including per-tenant deployments — therefore
+carries no readable enterprise source. The MIT core stays readable source.
+
+- Building the wheel (`uv build`, `pip install ./ee`, or the enterprise Docker
+  stage) compiles automatically — no extra steps.
+- **Development is unaffected:** an editable install (`uv sync --group ee`) uses
+  the readable `.py` source; only the built wheel compiles.
+- Requires a C toolchain at build time (the enterprise Docker image already
+  ships `gcc`; CI runners include it).
+
+See `[tool.hatch.build.targets.wheel.hooks.cython]` in `pyproject.toml`.
+
 ## License
 
 `pocketpaw-ee` is licensed under the **Functional Source License, Version 1.1

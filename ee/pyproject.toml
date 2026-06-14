@@ -6,6 +6,11 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-06-14 (ee-cython): the wheel now Cython-compiles pocketpaw_ee to
+#     native .so and excludes the .py/.c source — installed/per-tenant packages
+#     carry no readable enterprise source. See [build-system] and
+#     [tool.hatch.build.targets.wheel(.hooks.cython)] below; the MIT core is
+#     unchanged and editable dev installs stay readable source.
 #   - 2026-06-12 (connector-store-unification CS-3): registered the
 #     `pocketpaw.connector_state_stores` entry-point
 #     (CloudConnectorStateStoreProvider) so the ConnectorRegistry's durable
@@ -20,7 +25,7 @@
 # (0.5+) so an incompatible core can't be pulled in silently. Bump the floor
 # here when EE starts depending on a feature added in a newer core patch.
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-cython"]
 build-backend = "hatchling.build"
 
 [project]
@@ -244,6 +249,29 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["pocketpaw_ee"]
+# IP protection (feat/ee-cython-compile): ship ONLY the compiled .so for
+# pocketpaw_ee — drop the Python + Cython source so the wheel (and the per-tenant
+# image built from it) carries no readable enterprise source. The cython hook
+# below force-includes the .so artifacts; non-.py data (yaml/sql/md) is kept.
+# The OSS core (pocketpaw) is unaffected — it stays readable MIT source.
+exclude = ["**/*.py", "**/*.c", "**/*.pyx", "**/*.pxd"]
+
+[tool.hatch.build.targets.wheel.hooks.cython]
+dependencies = ["hatch-cython"]
+
+[tool.hatch.build.targets.wheel.hooks.cython.options]
+# hatch-cython otherwise derives the source dir from the PROJECT name
+# (pocketpaw-ee, hyphenated) which doesn't match the package dir pocketpaw_ee
+# (underscore) → it would glob ./pocketpaw-ee/** and compile NOTHING. Pin the
+# real package dir so all of pocketpaw_ee is compiled to .so.
+src = "pocketpaw_ee"
+
+[tool.hatch.build.targets.wheel.hooks.cython.options.directives]
+language_level = 3
+# Don't treat Python annotations as C types — FastAPI/Pydantic use annotations
+# as runtime metadata. Without this, a router arg like `x: str = Depends(...)`
+# makes Cython coerce the arg to str → "Expected str, got Depends" at import.
+annotation_typing = false
 
 # RFC 08 PR 3 — Foresight CAMEL hard-dep promotion. The QBTRIX fork's
 # only change vs upstream camel-ai==0.2.90 is removing the psutil<6 cap

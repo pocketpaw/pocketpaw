@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+# Cython build artifacts — the ee wheel compiles pocketpaw_ee to .so in-place
+# (hatch-cython); the generated .c are intermediate and must never be committed.
+ee/pocketpaw_ee/**/*.c
 .Python
 build/
 develop-eggs/
