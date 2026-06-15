@@ -1,5 +1,21 @@
 # tests/test_flow_descriptor.py
 # Created: 2026-06-15 (feat/chain-flow-v2).
+# Updated: 2026-06-15 (feat/chain-flow-v2 — genesis-style forgiveness):
+#   - Three REJECT tests became REPAIR tests, matching the new forgiveness
+#     passes: `test_repairs_no_terminal_by_making_last_step_terminal`,
+#     `test_repairs_dead_end_select_as_last_step`,
+#     `test_repairs_terminal_with_no_complete_and_no_default` — these sloppy
+#     descriptors now BUILD (repaired) instead of erroring. Added
+#     `test_rejects_dead_end_select_in_the_middle` so the genuine-bug guard (a
+#     select dead-end that ISN'T the last step) stays covered.
+#   - Added a §2.0 forgiveness section: alias coercion (terminal `type:`/`kind:`
+#     → `action:`, action `type:` → `verb:`), explicit-action-wins, no-caller-
+#     mutation, and friendly-parse-error tests (named fix, no Pydantic URL).
+#   - Added skeleton guards: every copy-paste skeleton in the inline prompt
+#     builds clean, and the three action skeletons wire a `call_binding` button.
+#   - The tool-level dead-end test became `test_tool_surfaces_flow_build_error_
+#     for_real_bug` (dangling transition — un-repairable) plus
+#     `test_tool_repairs_dead_end_last_select` (repaired through the tool).
 # Updated: 2026-06-15 (feat/chain-flow-v2 — continuation-not-a-button fix):
 #   - De-papered the two tests that had added dummy `id`/`label` to their
 #     on_success/on_error continuations: `_example_b()` (now verbatim §1.7 with
@@ -194,8 +210,11 @@ def test_rejects_branch_key_not_an_option_id() -> None:
         build_flow_from_descriptor(d)
 
 
-def test_rejects_no_terminal() -> None:
-    # every step transitions onward — the flow never ends.
+def test_repairs_no_terminal_by_making_last_step_terminal() -> None:
+    # GENESIS FORGIVENESS: every step transitions onward (no terminal). The
+    # repair pass makes the LAST-declared step terminal (drops its transition)
+    # and gives it a default complete, so the flow BUILDS instead of erroring.
+    # (Dropping the last transition also breaks the a→b→a cycle.)
     d = {
         "flow": "loopy",
         "entry": "a",
@@ -204,10 +223,10 @@ def test_rejects_no_terminal() -> None:
             {"id": "b", "kind": "info", "title": "B", "next": "a"},
         ],
     }
-    # this also forms a cycle; the no-terminal check fires first in the pipeline.
-    with pytest.raises(FlowBuildError) as exc:
-        build_flow_from_descriptor(d)
-    assert "no terminal step" in str(exc.value) or "cycle detected" in str(exc.value)
+    doc = build_flow_from_descriptor(d)  # must NOT raise
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["flowId"] == "b"  # the last step became the terminal
+    assert term["onComplete"]["kind"] == "chat"  # default complete injected
 
 
 def test_rejects_terminal_with_transition() -> None:
@@ -267,9 +286,10 @@ def test_rejects_cycle() -> None:
         build_flow_from_descriptor(d)
 
 
-def test_rejects_select_with_no_transition() -> None:
-    # THE load-bearing one: a select step that goes nowhere — a hand-authored
-    # dead-end. The whole primitive exists to make this impossible.
+def test_repairs_dead_end_select_as_last_step() -> None:
+    # GENESIS FORGIVENESS: a select that is the LAST step and goes nowhere is no
+    # longer a hard reject — the repair pass converts it to a terminal step with
+    # a default complete (and assemble gives it a Finish button), so it BUILDS.
     d = {
         "flow": "deadend",
         "entry": "pick",
@@ -279,7 +299,38 @@ def test_rejects_select_with_no_transition() -> None:
                 "kind": "select",
                 "title": "Pick (goes nowhere)",
                 "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
-                # NO branch, NO next — dead-end after a pick.
+                # NO branch, NO next — the repair pass ends the flow here.
+            },
+        ],
+    }
+    doc = build_flow_from_descriptor(d)  # must NOT raise
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["flowId"] == "pick"
+    assert term["onComplete"]["kind"] == "chat"
+    # the terminal select carries a Finish (flow.submit) so the pick can complete
+    assert len(_on_clicks(term, "flow.submit")) == 1
+
+
+def test_rejects_dead_end_select_in_the_middle() -> None:
+    # The guard STILL fires for a genuine bug: a select that dead-ends in the
+    # MIDDLE of a flow (not the last step) is unreachable-onward — repair only
+    # rescues a LAST dead-end select, so this is a precise reject.
+    d = {
+        "flow": "middead",
+        "entry": "pick",
+        "steps": [
+            {
+                "id": "pick",
+                "kind": "select",
+                "title": "Pick (goes nowhere)",
+                "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                # NO branch, NO next — but NOT the last step.
+            },
+            {
+                "id": "tail",
+                "kind": "confirm",
+                "title": "Tail",
+                "complete": {"action": "chat", "message": "ok"},
             },
         ],
     }
@@ -324,6 +375,228 @@ def test_rejects_over_step_cap() -> None:
 def test_rejects_empty_steps() -> None:
     with pytest.raises(FlowBuildError, match=r"flow has no steps"):
         build_flow_from_descriptor({"flow": "x", "entry": "a", "steps": []})
+
+
+# ===========================================================================
+# §2.0 — GENESIS FORGIVENESS: alias normalization + friendly parse errors.
+# A model's instinctive key slips (type:/kind:) are coerced; a shape defect
+# that survives names the fix instead of leaking a Pydantic URL.
+# ===========================================================================
+
+
+def test_terminal_complete_type_alias_coerces_to_action() -> None:
+    # Models write `type:` out of node-authoring habit; the builder coerces a
+    # terminal `complete` written with `type:` → `action:` so it BUILDS.
+    d = {
+        "flow": "f",
+        "entry": "a",
+        "steps": [
+            {
+                "id": "a",
+                "kind": "form",
+                "title": "F",
+                "fields": [{"id": "x", "label": "X", "type": "text"}],
+                "next": "b",
+            },
+            {
+                "id": "b",
+                "kind": "confirm",
+                "title": "Done",
+                "review": [{"label": "X", "value": "{a.x}"}],
+                "complete": {"type": "chat", "message": "done via type slip"},
+            },
+        ],
+    }
+    doc = build_flow_from_descriptor(d)  # must NOT raise on the type: slip
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["onComplete"]["kind"] == "chat"
+    assert term["onComplete"]["message"] == "done via type slip"
+
+
+def test_terminal_complete_kind_alias_coerces_to_action() -> None:
+    d = {
+        "flow": "f",
+        "entry": "b",
+        "steps": [
+            {
+                "id": "b",
+                "kind": "confirm",
+                "title": "Done",
+                "complete": {"kind": "navigate", "url": "/somewhere"},
+            },
+        ],
+    }
+    doc = build_flow_from_descriptor(d)
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["onComplete"]["kind"] == "navigate"
+    assert term["onComplete"]["url"] == "/somewhere"
+
+
+def test_step_action_type_alias_coerces_to_verb() -> None:
+    # A mid-flow action written with `type:` instead of `verb:` is coerced.
+    d = {
+        "flow": "f",
+        "entry": "a",
+        "steps": [
+            {
+                "id": "a",
+                "kind": "form",
+                "title": "F",
+                "fields": [{"id": "d", "label": "Domain", "type": "url", "required": True}],
+                "actions": [
+                    {
+                        "id": "verify",
+                        "label": "Verify",
+                        "type": "call_binding",  # should coerce to verb
+                        "binding": "dns",
+                        "path": "/check",
+                    }
+                ],
+                "next": "b",
+            },
+            {
+                "id": "b",
+                "kind": "confirm",
+                "title": "Done",
+                "complete": {"action": "chat", "message": "ok"},
+            },
+        ],
+    }
+    doc = build_flow_from_descriptor(d)  # must NOT raise on the action type: slip
+    details = next(s for s in _iter_steps(doc["ui"]) if s["flowId"] == "a")
+    verify = next(
+        n for n in _walk_nodes(details["ui"]) if n.get("props", {}).get("label") == "Verify"
+    )
+    assert verify["on_click"]["action"] == "call_binding"
+    assert verify["on_click"]["binding"] == "dns"
+
+
+def test_explicit_action_wins_over_alias() -> None:
+    # If BOTH `action` and a `type:`/`kind:` alias are present, the explicit
+    # `action` is authoritative — the alias is not allowed to clobber it.
+    d = {
+        "flow": "f",
+        "entry": "b",
+        "steps": [
+            {
+                "id": "b",
+                "kind": "confirm",
+                "title": "Done",
+                "complete": {"action": "chat", "type": "navigate", "message": "stay chat"},
+            },
+        ],
+    }
+    doc = build_flow_from_descriptor(d)
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["onComplete"]["kind"] == "chat"
+
+
+def test_does_not_mutate_caller_descriptor() -> None:
+    # Normalization deep-copies — the caller's dict is untouched after a build
+    # (so a retry sees the original input).
+    d = {
+        "flow": "f",
+        "entry": "b",
+        "steps": [
+            {
+                "id": "b",
+                "kind": "confirm",
+                "title": "Done",
+                "complete": {"type": "chat", "message": "x"},
+            },
+        ],
+    }
+    build_flow_from_descriptor(d)
+    # the original still carries `type`, not the coerced `action`
+    assert d["steps"][0]["complete"] == {"type": "chat", "message": "x"}
+
+
+def test_friendly_error_for_complete_missing_action() -> None:
+    # A `complete` that is present but missing `action` (and no type:/kind: to
+    # coerce) raises a FRIENDLY error naming the fix — never a Pydantic URL.
+    d = {
+        "flow": "f",
+        "entry": "b",
+        "steps": [
+            {
+                "id": "b",
+                "kind": "confirm",
+                "title": "Done",
+                "complete": {"message": "no action key"},
+            },
+        ],
+    }
+    with pytest.raises(FlowBuildError) as exc:
+        build_flow_from_descriptor(d)
+    msg = str(exc.value)
+    assert "action" in msg
+    assert "chat" in msg and "call_binding" in msg  # names the allowed actions
+    assert "errors.pydantic.dev" not in msg  # no leaked Pydantic URL
+
+
+def test_friendly_error_for_bad_kind() -> None:
+    d = {
+        "flow": "f",
+        "entry": "b",
+        "steps": [
+            {
+                "id": "b",
+                "kind": "wizard",  # not a valid kind
+                "title": "Done",
+                "complete": {"action": "chat", "message": "x"},
+            },
+        ],
+    }
+    with pytest.raises(FlowBuildError) as exc:
+        build_flow_from_descriptor(d)
+    msg = str(exc.value)
+    assert "kind" in msg
+    assert "errors.pydantic.dev" not in msg
+
+
+# ===========================================================================
+# The inline-prompt skeletons (the copy-paste examples the model is taught)
+# all BUILD clean — a guard that the prompt never ships an un-buildable example.
+# ===========================================================================
+
+
+def test_inline_prompt_skeletons_build_clean() -> None:
+    import re
+
+    from pocketpaw.ripple._inline import _MULTI_STEP_FLOW_RULE
+
+    blocks = re.findall(r"```\n(\{.*?\})\n```", _MULTI_STEP_FLOW_RULE, re.DOTALL)
+    # Skeletons A + B (existing) + C/D/E (approve, fulfill, act-on-data) = 5.
+    assert len(blocks) == 5, f"expected 5 skeleton blocks in the rule, found {len(blocks)}"
+    for i, raw in enumerate(blocks):
+        descriptor = json.loads(raw)  # must be valid JSON
+        doc = build_flow_from_descriptor(descriptor)  # must BUILD
+        assert doc["version"] == "1.0", f"skeleton {i} ({descriptor.get('flow')}) bad envelope"
+        assert validate_against_catalog(doc, ALLOWED_TYPES) == [], (
+            f"skeleton {i} ({descriptor.get('flow')}) has catalog violations"
+        )
+        assert validate_action_verbs(doc) == [], (
+            f"skeleton {i} ({descriptor.get('flow')}) has verb violations"
+        )
+
+
+def test_action_flow_skeletons_use_call_binding_not_select() -> None:
+    # The genesis lever: an APPROVE/FULFILL/ACT flow is a call_binding ACTION
+    # BUTTON, never a yes/no select. Assert the three action skeletons carry a
+    # call_binding action button (proving the prompt teaches the right pattern).
+    import re
+
+    from pocketpaw.ripple._inline import _MULTI_STEP_FLOW_RULE
+
+    blocks = re.findall(r"```\n(\{.*?\})\n```", _MULTI_STEP_FLOW_RULE, re.DOTALL)
+    by_flow = {json.loads(b)["flow"]: json.loads(b) for b in blocks}
+    for flow_name in ("approve_request", "fulfill_order", "act_on_item"):
+        assert flow_name in by_flow, f"missing action skeleton {flow_name!r}"
+        descriptor = by_flow[flow_name]
+        verbs = {a.get("verb") for step in descriptor["steps"] for a in (step.get("actions") or [])}
+        assert "call_binding" in verbs, (
+            f"action skeleton {flow_name!r} must wire a call_binding action button"
+        )
 
 
 # ===========================================================================
@@ -718,7 +991,10 @@ def test_general_path_allows_multiple_terminals() -> None:
     assert kinds == {"chat", "navigate"}
 
 
-def test_rejects_terminal_with_no_complete_and_no_default() -> None:
+def test_repairs_terminal_with_no_complete_and_no_default() -> None:
+    # GENESIS FORGIVENESS: a terminal step with no `complete` AND no flow-level
+    # default no longer errors — the repair pass injects a default `chat`
+    # complete so the flow BUILDS with a sensible hand-off.
     d = {
         "flow": "nocomplete",
         "entry": "f",
@@ -733,11 +1009,11 @@ def test_rejects_terminal_with_no_complete_and_no_default() -> None:
             {"id": "end", "kind": "confirm", "title": "End"},  # no complete, no default
         ],
     }
-    with pytest.raises(
-        FlowBuildError,
-        match=r'terminal step "end" has no complete action and no flow-level default',
-    ):
-        build_flow_from_descriptor(d)
+    doc = build_flow_from_descriptor(d)  # must NOT raise
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["flowId"] == "end"
+    assert term["onComplete"]["kind"] == "chat"
+    assert term["onComplete"]["message"]  # a non-empty default message
 
 
 # ===========================================================================
@@ -1186,9 +1462,12 @@ async def test_tool_builds_from_flat_steps_graph(tool: StartFlowTool) -> None:
     assert doc == built
 
 
-async def test_tool_surfaces_flow_build_error_for_dead_end(tool: StartFlowTool) -> None:
-    # a select step that goes nowhere — the tool must return the precise reject
-    # message so the model can fix the graph.
+async def test_tool_surfaces_flow_build_error_for_real_bug(tool: StartFlowTool) -> None:
+    # A GENUINE structural bug (a dangling `next` → an undeclared id) is NOT
+    # repairable, so the tool must return the precise reject message verbatim so
+    # the model can fix the graph and retry. (A dead-end LAST select is repaired
+    # now — see test_repairs_dead_end_select_as_last_step — so the un-repairable
+    # dangling-transition case is the right thing to assert the error path on.)
     result = await tool.execute(
         flow="bad",
         entry="pick",
@@ -1196,13 +1475,36 @@ async def test_tool_surfaces_flow_build_error_for_dead_end(tool: StartFlowTool) 
             {
                 "id": "pick",
                 "kind": "select",
-                "title": "Dead end",
+                "title": "Pick",
                 "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+                "branch": {"a": "ghost", "b": "ghost"},  # → undeclared step
             }
         ],
     )
     assert result.startswith("Error:")
-    assert "dead-end after a pick" in result
+    assert "ghost" in result and "not declared" in result
+
+
+async def test_tool_repairs_dead_end_last_select(tool: StartFlowTool) -> None:
+    # The flip side: a dead-end LAST select is REPAIRED by the builder, so the
+    # tool returns a valid doc, not an Error (genesis forgiveness through the
+    # tool boundary).
+    result = await tool.execute(
+        flow="ok",
+        entry="pick",
+        steps=[
+            {
+                "id": "pick",
+                "kind": "select",
+                "title": "Pick",
+                "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            }
+        ],
+    )
+    assert not result.startswith("Error:")
+    doc = json.loads(result)
+    assert doc["version"] == "1.0"
+    assert doc["ui"]["onComplete"]["kind"] == "chat"
 
 
 async def test_tool_accepts_steps_as_json_string(tool: StartFlowTool) -> None:

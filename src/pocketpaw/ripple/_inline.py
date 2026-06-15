@@ -34,6 +34,17 @@
 #   (a branching intake and an action-rich mini-app). `invoke_tool` is marked as
 #   possibly-unavailable until the tool registry ships; call_binding /
 #   create_pocket / api / emit / navigate are the actions that work now.
+# Modified: 2026-06-15 (feat/chain-flow-v2 — REAL-SCENARIO SKELETONS) — the
+#   genesis "biggest lever": added an ACTION GRAMMAR callout block (a terminal
+#   `complete` uses `action:` not `type:`/`kind:`; approve/reject/fulfill/take-
+#   action means a `call_binding` ACTION BUTTON, never a yes/no select; use
+#   `call_binding` for backend/connector data, not the possibly-unavailable
+#   `invoke_tool`) and three copy-paste skeletons for the captain's real
+#   internal-team scenarios, each ending in a REAL action (not Q&A): APPROVE /
+#   REJECT (call_binding buttons), FULFILL ORDER (collect → confirm with a
+#   call_binding action), and ACT ON CONNECTOR/BACKEND DATA (call_binding
+#   against the pocket's backend, explicitly NOT invoke_tool). Kept the two
+#   existing skeletons (A branching intake, B action-rich mini-app).
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -382,7 +393,18 @@ STATE GRAMMAR — the primitives every flow composes from:
     complete: the terminal state DOES something with the answers.
   Never dead-end a state with text: every non-terminal state has a
   transition, every terminal state has a `complete`. (You can't violate
-  this even if you try — the builder rejects it.)
+  this even if you try — the builder repairs or rejects it.)
+
+ACTION GRAMMAR — the rules that turn a flow into a real tool, not Q&A:
+  - A terminal `complete` uses `action:` (chat | navigate | emit |
+    call_binding | create_pocket) — NEVER `type:`/`kind:`. (If you slip and
+    write `type:`/`kind:`, the builder coerces it, but author `action:`.)
+  - When the user says approve / reject / fulfill / take action / do X —
+    that is a `call_binding` ACTION BUTTON wired to the verb, NOT a yes/no
+    select. Never leave an action flow as plain Q&A.
+  - To act on backend / connector data, use `call_binding` (works today).
+    `invoke_tool` is only for arbitrary named tools and may be unavailable
+    until the tool registry ships — reach for `call_binding` first.
 
 SKELETON A — branching intake (collect, then hand answers to you):
 ```
@@ -424,6 +446,67 @@ SKELETON B — action-rich mini-app (validate mid-flow, create a pocket):
       "complete": { "action": "create_pocket", "name": "{details.company} — Client",
                     "template": "tracker", "seed_from_flow": true,
                     "then": { "action": "navigate", "url": "/pockets/{result.id}" } } }
+  ]
+}
+```
+
+SKELETON C — APPROVE / REJECT (the buttons ARE the action, not a select):
+```
+{
+  "flow": "approve_request", "entry": "decide",
+  "steps": [
+    { "id": "decide", "kind": "confirm", "title": "Approve this request?",
+      "review": [ {"label":"Request","value":"{flow.payload.title}"} ],
+      "actions": [
+        { "id":"approve","label":"Approve","verb":"call_binding",
+          "binding":"requests","path":"/requests/{flow.payload.id}/approve",
+          "on_success":[{"verb":"toast","message":"Approved","variant":"success"}] },
+        { "id":"reject","label":"Reject","verb":"call_binding",
+          "binding":"requests","path":"/requests/{flow.payload.id}/reject",
+          "on_success":[{"verb":"toast","message":"Rejected","variant":"warning"}] }
+      ],
+      "complete": { "action": "chat", "message": "Decision recorded." } }
+  ]
+}
+```
+
+SKELETON D — FULFILL ORDER (collect → confirm with a call_binding action):
+```
+{
+  "flow": "fulfill_order", "entry": "lookup",
+  "steps": [
+    { "id": "lookup", "kind": "form", "title": "Which order?",
+      "fields": [ {"id":"order_id","label":"Order ID","type":"text","required":true} ],
+      "next": "confirm" },
+    { "id": "confirm", "kind": "confirm", "title": "Fulfill this order?",
+      "review": [ {"label":"Order","value":"{lookup.order_id}"} ],
+      "actions": [
+        { "id":"fulfill","label":"Fulfill order","verb":"call_binding",
+          "binding":"orders","path":"/orders/{lookup.order_id}/fulfill",
+          "on_success":[{"verb":"toast","message":"Order fulfilled","variant":"success"}] }
+      ],
+      "complete": { "action": "chat", "message": "Order fulfillment requested." } }
+  ]
+}
+```
+
+SKELETON E — ACT ON CONNECTOR / BACKEND DATA (call_binding, NOT invoke_tool):
+```
+{
+  "flow": "act_on_item", "entry": "pick",
+  "steps": [
+    { "id": "pick", "kind": "form", "title": "Target record",
+      "fields": [ {"id":"record_id","label":"Record ID","type":"text","required":true} ],
+      "next": "act" },
+    { "id": "act", "kind": "confirm", "title": "Take action on this record",
+      "review": [ {"label":"Record","value":"{pick.record_id}"} ],
+      "actions": [
+        { "id":"archive","label":"Archive","verb":"call_binding",
+          "binding":"crm","path":"/records/{pick.record_id}/archive",
+          "params":{"reason":"flow"},
+          "on_success":[{"verb":"toast","message":"Archived","variant":"success"}] }
+      ],
+      "complete": { "action": "chat", "message": "Action applied to the record." } }
   ]
 }
 ```

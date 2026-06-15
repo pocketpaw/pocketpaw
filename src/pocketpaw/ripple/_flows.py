@@ -1,6 +1,31 @@
 # pocketpaw/ripple/_flows.py — Chain Flow builders (RFC 13 §7.1, M3 → CHAIN FLOW v2).
 #
 # Created: 2026-05-31 (RFC 13 M3, feat/m3-flow-authoring-tool).
+# Updated: 2026-06-15 (feat/chain-flow-v2 — GENESIS-STYLE FORGIVENESS / RELIABILITY):
+#   - Front-loaded two FORGIVENESS passes before the strict validators so most
+#     "sloppy" descriptors BUILD (repaired) instead of erroring — genesis's
+#     reliability philosophy (repair imperfect specs, don't reject them):
+#       * `_normalize_descriptor` (§2.0): coerces the model's instinctive key
+#         slips on the raw dict BEFORE parse — a terminal `complete` written with
+#         `type:`/`kind:` → `action:`; a StepAction / continuation written with
+#         `type:` → `verb:` (the rest of ripple uses type/kind for NODES, so the
+#         model reaches for them here too). Deep-copies first; never mutates the
+#         caller's dict.
+#       * `_repair_descriptor` (§2.0): patches recoverable GRAPH defects on the
+#         parsed model — a terminal step (or the whole flow) with no `complete`
+#         gets a default `chat`; a flow where every step transitions has its
+#         last step made terminal; a dead-ending `select`/`info` LAST step is
+#         converted to terminal (was a hard reject).
+#   - `_friendly_parse_error`: any shape defect that survives normalization now
+#     raises a FlowBuildError that NAMES the fix (e.g. "terminal `complete` needs
+#     an `action` key (chat|navigate|emit|call_binding|create_pocket)") instead
+#     of leaking the raw `errors.pydantic.dev` dump.
+#   - `_validate_graph` relaxes the select-must-transition rule for a select the
+#     repair pass made TERMINAL (it carries a `complete`); `_assemble_node` gives
+#     a terminal select a Finish (flow.submit) button so the recorded pick can
+#     run its `complete`. HARD rejects are kept ONLY for genuinely unrenderable
+#     bugs: a transition to an UNDECLARED id, a duplicate step id, a branch key
+#     that is not an option id.
 # Updated: 2026-06-15 (feat/chain-flow-v2 — CONTINUATION-NOT-A-BUTTON FIX):
 #   - Mid-flow `StepAction.on_success` / `.on_error` continuation chains are no
 #     longer typed as `list[StepAction]`. `StepAction` is a BUTTON and requires
@@ -655,29 +680,269 @@ def _declared_fields(step: FlowStep) -> set[str]:
     return set()
 
 
+# ---------------------------------------------------------------------------
+# §2.0 — Forgiveness front-matter (genesis: REPAIR imperfect specs, don't reject).
+#
+# Two passes run BEFORE the strict validators:
+#   _normalize_descriptor  — coerce the model's instinctive key slips
+#                            (type:/kind: → action:/verb:) on the raw dict;
+#   _repair_descriptor     — patch recoverable GRAPH defects on the parsed model
+#                            (missing terminal complete, no terminal, dead-end
+#                            select/info last step).
+# Between them sits the friendly-error wrap (_friendly_parse_error) so a shape
+# defect that survives normalization NAMES the fix instead of leaking Pydantic.
+# ---------------------------------------------------------------------------
+
+# The flow-level terminal default injected when a terminal step (and the flow)
+# declare no `complete` — hand the answers back to the agent, the safest default.
+_DEFAULT_COMPLETE: dict[str, Any] = {"action": "chat", "message": "Done."}
+
+
+def _normalize_complete_aliases(obj: Any) -> None:
+    """Rewrite a terminal `complete` dict's `type:`/`kind:` → `action:`.
+
+    Models instinctively write `type`/`kind` (the rest of ripple uses those for
+    NODES). A terminal hand-off keys on `action:`; coerce the slip in place so
+    the natural authoring just parses. Only fills `action` when it is absent —
+    an explicit `action` always wins. Recurses into a `then` post-action.
+    """
+    if not isinstance(obj, dict):
+        return
+    if "action" not in obj:
+        for alias in ("type", "kind"):
+            if isinstance(obj.get(alias), str) and obj[alias]:
+                obj["action"] = obj.pop(alias)
+                break
+    # a `then` chain is itself a terminal action — normalize it too
+    if isinstance(obj.get("then"), dict):
+        _normalize_complete_aliases(obj["then"])
+
+
+def _normalize_action_aliases(obj: Any) -> None:
+    """Rewrite a StepAction / continuation dict's `type:` → `verb:`.
+
+    A mid-flow action (and its `on_success`/`on_error` continuations) keys on
+    `verb:`; models reach for `type:` out of node-authoring habit. Coerce the
+    slip in place (only when `verb` is absent) and recurse into the
+    continuation chains.
+    """
+    if not isinstance(obj, dict):
+        return
+    if "verb" not in obj and isinstance(obj.get("type"), str) and obj["type"]:
+        obj["verb"] = obj.pop("type")
+    for chain_key in ("on_success", "on_error"):
+        chain = obj.get(chain_key)
+        if isinstance(chain, list):
+            for entry in chain:
+                _normalize_action_aliases(entry)
+
+
+def _normalize_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
+    """Return a DEEP COPY of the raw descriptor with the model's common key
+    slips coerced to the canonical keys, BEFORE Pydantic parse (§2.0).
+
+    Coercions (genesis forgiveness — the model's instinct just works):
+      - terminal `complete` (flow-level + per-step) with `type:`/`kind:` and no
+        `action:` → `action:`;
+      - StepAction + continuation with `type:` and no `verb:` → `verb:`.
+
+    The caller's dict is never mutated — a fresh structure is built so a retry
+    or a second build sees the original input.
+    """
+    import copy
+
+    if not isinstance(descriptor, dict):
+        return descriptor
+    out = copy.deepcopy(descriptor)
+
+    # flow-level default complete
+    _normalize_complete_aliases(out.get("complete"))
+
+    for step in out.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        _normalize_complete_aliases(step.get("complete"))
+        for action in step.get("actions") or []:
+            _normalize_action_aliases(action)
+    return out
+
+
+def _friendly_parse_error(exc: Exception) -> str:
+    """Turn a Pydantic ValidationError (or any parse failure) into a friendly,
+    agent-readable :class:`FlowBuildError` message that NAMES the fix instead of
+    leaking the `errors.pydantic.dev` URL and the raw error dump.
+
+    Recognizes the highest-signal slips:
+      - a terminal `complete` missing its `action` key (the #1 slip after the
+        type:/kind: alias path, e.g. a `complete` written as a bare message);
+      - a step missing its `kind`, or an unknown `kind`.
+    Falls back to a clean one-line summary of the first error for anything else.
+    """
+    try:
+        from pydantic import ValidationError
+    except Exception:  # pragma: no cover - pydantic always present here
+        return f"descriptor is malformed: {exc}"
+
+    if not isinstance(exc, ValidationError):
+        return f"descriptor is malformed: {exc}"
+
+    errors = exc.errors()
+    for err in errors:
+        loc = err.get("loc", ())
+        loc_str = ".".join(str(p) for p in loc)
+        # a terminal `complete` (or flow default) missing `action`
+        if "complete" in loc and loc and loc[-1] == "action":
+            return (
+                f"terminal `complete` (at {loc_str or 'complete'}) needs an `action` key "
+                "(chat | navigate | emit | call_binding | create_pocket) — "
+                'e.g. {"action": "chat", "message": "Done."}'
+            )
+        # a step missing / mis-typing `kind`
+        if "kind" in loc:
+            return f"step field `kind` (at {loc_str}) must be one of select | form | confirm | info"
+        # a mid-flow action missing `verb`
+        if "actions" in loc and loc and loc[-1] == "verb":
+            return (
+                f"mid-flow action (at {loc_str}) needs a `verb` key "
+                "(call_binding | api | invoke_tool | emit | navigate | set | toast)"
+            )
+
+    # generic fallback — name the first offending field, drop the URL noise.
+    if errors:
+        first = errors[0]
+        loc_str = ".".join(str(p) for p in first.get("loc", ())) or "<root>"
+        msg = first.get("msg", "invalid value")
+        return f"descriptor is malformed at `{loc_str}`: {msg}"
+    return f"descriptor is malformed: {exc}"
+
+
+def _repair_descriptor(model: FlowDescriptor) -> None:
+    """PATCH recoverable graph defects on the parsed model IN PLACE, before the
+    strict validate-graph pass (§2.0 — genesis stays bulletproof by repairing
+    imperfect specs, not rejecting them).
+
+    Repairs (each turns a silent dead-end into a completable flow), kept
+    SURGICAL so they never MASK a genuine bug:
+      1. A terminal step of kind confirm/info/form (no `next`/`branch`) with no
+         `complete` AND no flow-level `complete` → inject a default `chat`
+         complete. (A bare dead-end SELECT is NOT auto-rescued here — only as a
+         LAST step, via repair 3 — so a mid-flow dead-end select still rejects.)
+      2. A flow where EVERY step transitions (no terminal at all) AND the
+         last-declared step's transition targets are all DECLARED → make that
+         step terminal (drop its transition) + give it a default `complete`.
+         (Guarded on declared targets so a DANGLING transition is left for the
+         validator to reject precisely, not silently erased.)
+      3. A `select`/`info` step that dead-ends (no next/branch/complete) AND is
+         the LAST declared step → convert to terminal with a default `complete`
+         (instead of the historical hard reject).
+
+    Genuinely unrenderable bugs (dangling transition, duplicate id, bad branch
+    key, a mid-flow dead-end select) are LEFT for the strict validators to
+    reject precisely — repair only touches the recoverable dead-end class.
+    """
+    steps = model.steps
+    if not steps:
+        return
+    last = steps[-1]
+    declared = {s.id for s in steps}
+
+    # Repair 3: a select/info LAST step with no transition and no complete
+    # becomes terminal with a default complete. (A select normally must
+    # transition; as the last step with nowhere to go, the forgiving move is to
+    # end the flow rather than reject the whole build.)
+    if (
+        last.kind in ("select", "info")
+        and not last.next
+        and not last.branch
+        and last.complete is None
+        and model.complete is None
+    ):
+        last.complete = TerminalAction.model_validate(dict(_DEFAULT_COMPLETE))
+
+    # Repair 2: NO terminal anywhere (every step transitions) → make the last
+    # step terminal by dropping its transition. GUARD: only when the last step's
+    # transition targets are all declared — a dangling transition is a real bug
+    # the validator must surface, not something repair should silently erase.
+    has_terminal = any(_is_terminal_step(s) for s in steps)
+    if not has_terminal and _transition_targets_declared(last, declared):
+        last.next = None
+        last.branch = None
+        if last.complete is None and model.complete is None:
+            last.complete = TerminalAction.model_validate(dict(_DEFAULT_COMPLETE))
+
+    # Repair 1: a terminal confirm/info/form step lacking a complete (no
+    # flow-level default) → inject the default so the terminal has a hand-off.
+    # Selects are excluded: a bare dead-end select is only ever rescued as a
+    # LAST step (repair 3); a mid-flow one must reject. When a flow-level default
+    # exists, attach-terminal inherits it — leave those steps alone.
+    if model.complete is None:
+        for step in steps:
+            if (
+                step.kind in ("confirm", "info", "form")
+                and _is_terminal_step(step)
+                and step.complete is None
+            ):
+                step.complete = TerminalAction.model_validate(dict(_DEFAULT_COMPLETE))
+
+
+def _transition_targets_declared(step: FlowStep, declared: set[str]) -> bool:
+    """True if every id `step` transitions to (`next` / `branch` values) is a
+    declared step id. Used to GUARD repair 2 so it never erases a dangling
+    transition (a real bug the validator should reject)."""
+    if step.next is not None and step.next not in declared:
+        return False
+    if step.branch:
+        return all(target in declared for target in step.branch.values())
+    return True
+
+
 def build_flow_from_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
     """Flat FlowDescriptor → {version, ui} nested Chain Flow doc.
 
-    Implements the §2.1 ordered pipeline:
-        parse → index → validate-graph → validate-refs → validate-actions
-        → assemble-nodes → resolve-transitions → wire-prefills
-        → attach-actions → attach-terminal → final deep-validate → envelope
+    Implements the §2.1 ordered pipeline (genesis forgiveness front-loaded):
+        normalize-aliases → parse → repair → index → validate-graph
+        → validate-refs → validate-actions → assemble-nodes
+        → resolve-transitions → wire-prefills → attach-actions
+        → attach-terminal → final deep-validate → envelope
 
-    Raises :class:`FlowBuildError` (with a precise, agent-readable message) on
-    any structural defect: missing entry, dangling transition, unreachable step,
-    no terminal, terminal-with-transition, unknown action verb, dangling prefill
-    ref. The tool layer surfaces the message so the model can fix and retry.
+    Forgiveness, NOT rejection, for recoverable author slips (genesis's
+    reliability philosophy):
+      - `normalize-aliases` (§2.0) rewrites the model's instinctive key slips
+        before parse — a terminal `complete` written with `type:`/`kind:` →
+        `action:`, a StepAction/continuation written with `type:` → `verb:`
+        (the rest of ripple uses `type`/`kind` for NODES, so the model reaches
+        for them here too). The model's instinct just works.
+      - `repair` (§2.0) PATCHES recoverable graph defects instead of raising:
+        a terminal step with no `complete` gets a default `chat`; a flow whose
+        every step transitions has its last-declared step made terminal; a
+        dead-ending `select`/`info` last step is converted to terminal.
 
-    A flat graph cannot mis-nest — that is the whole point. The
-    "renders step 1 and silently dead-ends" failure (a select step with no
-    transition, an unreachable continuation) is structurally impossible to
-    express: each is a hard build-time reject.
+    Raises :class:`FlowBuildError` (with a precise, agent-readable message) ONLY
+    for genuinely unrenderable authoring bugs the repair pass leaves untouched:
+    a `next`/`branch` to an UNDECLARED id (dangling transition), a duplicate
+    step id, a branch key that is not an option id, an unknown action verb, a
+    dangling prefill ref. The tool layer surfaces the message so the model can
+    fix and retry. A friendly :class:`FlowBuildError` (not a raw Pydantic dump)
+    wraps any shape defect that survives normalization — it NAMES the likely fix.
+
+    A flat graph cannot mis-nest — that is the whole point. Most "sloppy"
+    descriptors now BUILD (repaired) and render something polished; only real
+    structural bugs error.
     """
-    # 1. parse -------------------------------------------------------------
+    # 0. normalize-aliases (§2.0) — rewrite type:/kind: slips to action:/verb:
+    #    on a deep copy so the caller's dict is never mutated.
+    descriptor = _normalize_descriptor(descriptor)
+
+    # 1. parse — wrap any surviving shape defect in a FRIENDLY FlowBuildError
+    #    that names the likely fix instead of leaking a raw Pydantic error URL.
     try:
         model = FlowDescriptor.model_validate(descriptor)
     except Exception as exc:  # pydantic.ValidationError + anything malformed
-        raise FlowBuildError(f"descriptor is malformed: {exc}") from exc
+        raise FlowBuildError(_friendly_parse_error(exc)) from exc
+
+    # 2. repair (§2.0) — PATCH recoverable graph defects before the strict
+    #    validate-graph pass (genesis: repair imperfect specs, don't reject).
+    _repair_descriptor(model)
 
     if not model.steps:
         raise FlowBuildError("flow has no steps; a flow needs at least one step")
@@ -687,14 +952,14 @@ def build_flow_from_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
             "split the flow into smaller flows"
         )
 
-    # 2. index -------------------------------------------------------------
+    # 3. index -------------------------------------------------------------
     by_id: dict[str, FlowStep] = {}
     for step in model.steps:
         if step.id in by_id:
             raise FlowBuildError(f'duplicate step id "{step.id}"; step ids must be unique')
         by_id[step.id] = step
 
-    # 3. validate-graph (§2.3) --------------------------------------------
+    # 4. validate-graph (§2.3) --------------------------------------------
     _validate_graph(model, by_id)
 
     # Build the slot→(flowId, suffix) map for ref resolution/rewrite. A token is
@@ -709,13 +974,13 @@ def build_flow_from_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
         if step.slot:
             slot_kind[step.slot] = f"{fid}|{suffix}"
 
-    # 4. validate-refs (§2.5) ---------------------------------------------
+    # 5. validate-refs (§2.5) ---------------------------------------------
     warnings = _validate_refs(model, by_id)
 
-    # 5. validate-actions (§2.4) ------------------------------------------
+    # 6. validate-actions (§2.4) ------------------------------------------
     _validate_actions(model)
 
-    # 6. assemble-nodes ----------------------------------------------------
+    # 7. assemble-nodes ----------------------------------------------------
     reachable = _reachable_ids(model, by_id)
     nodes: dict[str, dict[str, Any]] = {
         step.id: _assemble_node(step, is_entry=(step.id == model.entry))
@@ -723,7 +988,7 @@ def build_flow_from_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
         if step.id in reachable
     }
 
-    # 7. resolve-transitions (§2.2) — flat pointers → nested object refs ---
+    # 8. resolve-transitions (§2.2) — flat pointers → nested object refs ---
     for step in model.steps:
         if step.id not in reachable:
             continue
@@ -734,7 +999,7 @@ def build_flow_from_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
             node["chain"] = nodes[step.next]
         # else: terminal — no chain/chain_map; onComplete attached in step 10.
 
-    # 8. wire-prefills — rewrite {stepId.field} sugar into namespaced keys --
+    # 9. wire-prefills — rewrite {stepId.field} sugar into namespaced keys --
     for step in model.steps:
         if step.id not in reachable:
             continue
@@ -743,7 +1008,7 @@ def build_flow_from_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
             node["review_rows"] = _rewrite_in_obj(node["review_rows"], slot_kind)
         # info body copy lives in the ui text; rewritten via the ui pass below.
         node["ui"] = _rewrite_in_obj(node["ui"], slot_kind)
-        # 9. attach-actions — already lowered in assemble; rewrite their refs.
+        # attach-actions — already lowered in assemble; rewrite their refs.
         # (assemble appended action buttons to ui, so the ui rewrite covers them)
 
     # 10. attach-terminal --------------------------------------------------
@@ -855,8 +1120,10 @@ def _validate_graph(model: FlowDescriptor, by_id: dict[str, FlowStep]) -> None:
                         f"option ids {sorted(option_ids)}"
                     )
 
-        # a select step must transition (branch or next) — else it dead-ends
-        if step.kind == "select" and not has_next and not has_branch:
+        # a select step must transition (branch or next) — else it dead-ends.
+        # EXCEPTION: a select the repair pass converted to TERMINAL carries a
+        # `complete` (it is the last step and ends the flow); that is allowed.
+        if step.kind == "select" and not has_next and not has_branch and step.complete is None:
             raise FlowBuildError(
                 f'select step "{step.id}" has no branch/next; it would dead-end after a pick'
             )
@@ -1205,6 +1472,13 @@ def _assemble_node(step: FlowStep, *, is_entry: bool) -> dict[str, Any]:
             oid = str(opt.get("id"))
             olabel = str(opt.get("label") or oid)
             children.append(_select_button(olabel, oid))
+        # A select is normally non-terminal (it branches). When the repair pass
+        # made a dead-ending LAST select terminal, it carries no transition — add
+        # a Finish (flow.submit) so the recorded pick can run the `complete`,
+        # rather than leaving option buttons that emit flow.next with nowhere to
+        # go. The common branching select never reaches this (it has a chain_map).
+        if _is_terminal_step(step):
+            children.append(_submit_button("Finish"))
 
     elif step.kind == "form":
         binds: list[str] = []
