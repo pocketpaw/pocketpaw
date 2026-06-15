@@ -34,6 +34,15 @@
 #   `"connector"`, `connector_name` names a workspace-bound connector and the
 #   `base_url`/`auth_*` fields are unused — source execution routes each source
 #   through `connectors_service.execute(...)` instead of an HTTP GET.
+# Updated: 2026-06-15 (feat/invoke-tool-v1) — added the per-pocket TOOL
+#   ALLOWLIST. `ToolGrant` is one allowed tool name; `allowed_tools` is the
+#   list a click-driven `invoke_tool` must match before the tool executor
+#   dispatches. Parallel to `allowed_writes`: it lives HERE — outside the
+#   spec, in the same human-configured store as the auth credential — so a
+#   compromised or hallucinated spec cannot grant itself a tool. The default
+#   is an EMPTY list: fail-closed, no tool can fire until a human allow-lists
+#   it via `PUT /pockets/{id}/backend/tool-policy`. A grant's `tool` is either
+#   a built-in tool name or a connector action `connector:<name>:<action>`.
 
 from __future__ import annotations
 
@@ -57,6 +66,28 @@ class AllowedWrite(BaseModel):
 
     method: Literal["POST", "PUT", "PATCH", "DELETE"]
     path_pattern: str
+
+
+class ToolGrant(BaseModel):
+    """One tool-allowlist entry (feat/invoke-tool-v1). Two forms:
+
+    * a built-in / registry tool name, e.g. ``"web_fetch"``
+    * a connector action, ``"connector:<name>:<action>"``, e.g.
+      ``"connector:github:list_issues"``
+
+    The tool executor matches an invoked tool name EXACTLY against the
+    ``tool`` field of every grant. No grant for a name → that name can
+    never fire (fail-closed). A connector grant additionally tells the
+    executor to route through ``connectors.service.execute`` and which
+    ``(connector, action)`` to call.
+
+    A ``connector:`` grant resolves the connector by name (via the bind
+    check) independent of the pocket's ``backend_type`` — the grant names
+    the connector explicitly, so a pocket with an http ``base_url`` backend
+    can still hold connector grants.
+    """
+
+    tool: str = Field(min_length=1)
 
 
 class ApprovalRoute(BaseModel):
@@ -87,8 +118,8 @@ class PocketBackendCredential(TimestampedDocument):
 
     Every read path returns only the non-secret summary (``backend_type`` /
     ``connector_name`` / ``base_url`` / ``auth_type`` / ``configured`` /
-    ``allowed_writes`` / ``approval_route``) — the secret never leaves this
-    collection.
+    ``allowed_writes`` / ``allowed_tools`` / ``approval_route``) — the secret
+    never leaves this collection.
     """
 
     pocket_id: Indexed(str)  # type: ignore[valid-type]
@@ -116,6 +147,12 @@ class PocketBackendCredential(TimestampedDocument):
     # with no policy can fire no write actions. A human widens it via
     # `PUT /pockets/{id}/backend/write-policy`.
     allowed_writes: list[AllowedWrite] = Field(default_factory=list)
+    # feat/invoke-tool-v1 tool allowlist. EMPTY by default — fail-closed: a
+    # pocket with no policy can fire no `invoke_tool` calls. A human widens it
+    # via `PUT /pockets/{id}/backend/tool-policy`. Legacy rows read as `[]`
+    # via this field default, so the fail-closed posture holds with no
+    # migration.
+    allowed_tools: list[ToolGrant] = Field(default_factory=list)
     # RFC 05 M2b.1 approval route. None means the default — `requires_instinct`
     # writes route to the pocket owner. An owner sets a named approver via
     # `PUT /pockets/{id}/backend/approval-route`.
