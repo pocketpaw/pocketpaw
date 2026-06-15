@@ -323,13 +323,16 @@ async def _propose_connector_write(
     )
     # Pending-shaped success: the human gates the write. The home-grid
     # `on_success` handler branches on code == "instinct_pending" to show a
-    # "sent for approval — in your Tray" badge. `action_id` lets the client
-    # correlate the originating click with the pending Action it can watch.
+    # "sent for approval — in your Tray" badge. `proposed_action_id` is surfaced
+    # at the top level (mirroring RunActionResponse) AND echoed inside `response`
+    # so the client can correlate the originating click with the pending Action
+    # it watches in The Tray, however it reads it.
     return {
         "ok": True,
         "tool": tool,
         "status": 202,  # Accepted-but-pending.
         "code": "instinct_pending",
+        "proposed_action_id": action_id,
         "response": {
             "action_id": action_id,
             "proposed_action_id": action_id,

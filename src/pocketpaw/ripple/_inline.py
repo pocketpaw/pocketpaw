@@ -45,6 +45,13 @@
 #   call_binding action), and ACT ON CONNECTOR/BACKEND DATA (call_binding
 #   against the pocket's backend, explicitly NOT invoke_tool). Kept the two
 #   existing skeletons (A branching intake, B action-rich mini-app).
+# Modified: 2026-06-15 (feat/invoke-tool-v1, v2) — refreshed the two
+#   `invoke_tool` notes now that the verb is live. It is no longer
+#   "possibly-unavailable until the tool registry ships": a connector READ
+#   grant fires immediately; a connector WRITE grant is PROPOSED for the user's
+#   approval (it lands in their Instinct Tray and fires on approve) rather than
+#   running inline. `call_binding` remains the first reach for backend/connector
+#   data; `invoke_tool` is for a named tool/connector grant the owner allow-listed.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -363,8 +370,9 @@ HOW TO AUTHOR (think in states, not screens):
         call_binding→ write to the backend
         create_pocket → materialize a permanent pocket from the answers
         navigate / emit → go somewhere / raise an event
-        invoke_tool → run a tool with the answers
-                      (may be unavailable until the tool registry ships)
+        invoke_tool → run a named tool with the answers
+                      (connector reads fire; connector writes are
+                       proposed for the user's approval — the Tray)
 
   Reference earlier answers with `{stepId.field}` (e.g.
   `{pick_goal.label}`, `{enter_details.company}`) in review rows and
@@ -403,8 +411,11 @@ ACTION GRAMMAR — the rules that turn a flow into a real tool, not Q&A:
     that is a `call_binding` ACTION BUTTON wired to the verb, NOT a yes/no
     select. Never leave an action flow as plain Q&A.
   - To act on backend / connector data, use `call_binding` (works today).
-    `invoke_tool` is only for arbitrary named tools and may be unavailable
-    until the tool registry ships — reach for `call_binding` first.
+    `invoke_tool` runs a named tool the owner allow-listed on the pocket:
+    a connector READ fires immediately; a connector WRITE is proposed for
+    the user's approval (it lands in their Instinct Tray, fires on approve)
+    rather than running inline. Reach for `call_binding` first; use
+    `invoke_tool` when the action is a named tool/connector grant.
 
 SKELETON A — branching intake (collect, then hand answers to you):
 ```

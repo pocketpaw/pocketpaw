@@ -605,6 +605,16 @@ class RunToolResponse(BaseModel):
     client runs after — the same shape ``call_binding`` returns, so the
     home grid's ``onEvent`` plumbing handles both with one branch.
 
+    ``proposed_action_id`` carries the pending Instinct Action id when a
+    WRITE grant is invoked (feat/invoke-tool-v1 v2): the WRITE is proposed
+    for human approval rather than fired inline, so ``ok`` is true,
+    ``code`` is ``"instinct_pending"``, and this id lets the client
+    correlate the click with the pending Action it can watch in The Tray.
+    It mirrors :class:`RunActionResponse.proposed_action_id` so a single
+    client branch services gated tool-writes and gated ``call_binding``
+    writes. ``None`` for reads / blocked / not-allowed responses. The id
+    is ALSO echoed inside ``response`` for callers that read it there.
+
     ``extra="forbid"`` matches :class:`RunActionResponse`: any
     executor-internal key the route fails to strip raises on
     construction instead of leaking onto the wire.
@@ -618,6 +628,7 @@ class RunToolResponse(BaseModel):
     response: Any = None
     error: str | None = None
     code: str | None = None
+    proposed_action_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 
