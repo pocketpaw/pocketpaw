@@ -21,10 +21,14 @@ from fastapi.responses import FileResponse, Response
 from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.files import (
     BrowseResponse,
+    CreateFileRequest,
+    FileActionResponse,
     FileEntry,
+    MkdirRequest,
     OpenPathRequest,
     OpenPathResponse,
     RecentFilesResponse,
+    RenameRequest,
     WriteFileRequest,
 )
 
@@ -229,6 +233,151 @@ async def download_file(path: str):
     )
 
 
+@router.post("/files/create", dependencies=[Depends(require_scope("files:write"))])
+async def create_file(req: CreateFileRequest):
+    """Create a new file with optional initial content. Returns 409 if the path
+    already exists (use /files/write to overwrite existing files)."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(req.path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if resolved.exists():
+        raise HTTPException(status_code=409, detail="File or directory already exists")
+
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(req.content, encoding="utf-8")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Create failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=str(resolved))
+
+
+@router.post("/files/mkdir", dependencies=[Depends(require_scope("files:write"))])
+async def create_directory(req: MkdirRequest):
+    """Create a new directory. When ``parents`` is true, creates intermediate
+    directories as needed (like ``mkdir -p``)."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(req.path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if resolved.exists() and resolved.is_dir():
+        raise HTTPException(status_code=409, detail="Directory already exists")
+    if resolved.exists() and not resolved.is_dir():
+        raise HTTPException(status_code=409, detail="A file exists at this path")
+
+    try:
+        if req.parents:
+            resolved.mkdir(parents=True, exist_ok=True)
+        else:
+            resolved.mkdir(parents=False, exist_ok=False)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=400,
+            detail="Parent directory does not exist — set parents=true to create intermediates",
+        ) from None
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mkdir failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=str(resolved))
+
+
+@router.patch("/files/rename", dependencies=[Depends(require_scope("files:write"))])
+async def rename_file_or_directory(req: RenameRequest):
+    """Rename or move a file or directory within the jail.
+
+    Both ``path`` and ``new_path`` must resolve inside the file jail.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved_old = _resolve_path(req.path)
+    resolved_new = _resolve_path(req.new_path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved_old, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: source path outside allowed directory",
+        )
+    if not is_safe_path(resolved_new, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: target path outside allowed directory",
+        )
+    if not resolved_old.exists():
+        raise HTTPException(status_code=404, detail="Source path does not exist")
+    if resolved_new.exists():
+        raise HTTPException(status_code=409, detail="Target path already exists")
+
+    try:
+        resolved_new.parent.mkdir(parents=True, exist_ok=True)
+        resolved_old.rename(resolved_new)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Rename failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=str(resolved_new))
+
+
+@router.delete("/files/delete", dependencies=[Depends(require_scope("files:write"))])
+async def delete_file_or_directory(
+    path: str,
+    recursive: bool = False,
+):
+    """Delete a file or directory. For non-empty directories, ``recursive``
+    must be true."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Path does not exist")
+
+    try:
+        if resolved.is_dir():
+            if recursive:
+                import shutil
+
+                shutil.rmtree(resolved)
+            else:
+                resolved.rmdir()
+        else:
+            resolved.unlink()
+    except OSError as exc:
+        if "Directory not empty" in str(exc):
+            raise HTTPException(
+                status_code=400,
+                detail="Directory not empty — set recursive=true to delete",
+            ) from exc
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    return FileActionResponse(ok=True)
+
+
 @router.get("/files/download-zip")
 async def download_dir_as_zip(path: str):
     """Download a directory (recursively) as a zip archive."""
@@ -315,7 +464,12 @@ async def download_dir_as_zip(path: str):
 
 @router.post("/files/write", dependencies=[Depends(require_scope("files:write"))])
 async def write_file(req: WriteFileRequest):
-    """Overwrite a file's content. Only text files within the jail are permitted."""
+    """Create or overwrite a file's content. Only text files within the jail are permitted.
+
+    Unlike the original endpoint (which required the file to exist), this version
+    also creates new files — the /code IDE needs to write brand-new files the
+    assistant creates through the Write tool.
+    """
     from pocketpaw.config import get_settings
     from pocketpaw.tools.fetch import is_safe_path
 
@@ -328,21 +482,22 @@ async def write_file(req: WriteFileRequest):
             status_code=403,
             detail="Access denied: path outside allowed directory",
         )
-    if not resolved.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="File not found — this endpoint only edits existing files",
-        )
+
+    # Guard: refuse to write over an existing directory.
     if resolved.is_dir():
         raise HTTPException(status_code=400, detail="Cannot write to a directory")
-    if resolved.stat().st_size > _MAX_VIEWABLE_BYTES:
+
+    # For existing files, enforce the size limit.
+    if resolved.exists() and resolved.stat().st_size > _MAX_VIEWABLE_BYTES:
         raise HTTPException(status_code=413, detail="File too large to edit via the browser")
 
     try:
+        # Ensure parent directory exists (may be creating files in new dirs).
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(req.content, encoding="utf-8")
     except PermissionError:
         raise HTTPException(status_code=403, detail="Permission denied")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Write failed: {exc}") from exc
 
-    return {"ok": True}
+    return {"ok": True, "path": str(resolved)}

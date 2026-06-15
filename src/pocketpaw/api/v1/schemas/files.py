@@ -54,7 +54,43 @@ class RecentFilesResponse(BaseModel):
 
 
 class WriteFileRequest(BaseModel):
-    """Request to overwrite a file's content."""
+    """Request to overwrite (or create) a file's content."""
 
     path: str
     content: str
+
+
+class CreateFileRequest(BaseModel):
+    """Request to create a new file with optional initial content."""
+
+    path: str
+    content: str = ""
+
+
+class MkdirRequest(BaseModel):
+    """Request to create a directory."""
+
+    path: str
+    parents: bool = False
+
+
+class RenameRequest(BaseModel):
+    """Request to rename or move a file or directory."""
+
+    path: str
+    new_path: str
+
+
+class DeleteRequest(BaseModel):
+    """Request to delete a file or directory."""
+
+    path: str
+    recursive: bool = False
+
+
+class FileActionResponse(BaseModel):
+    """Generic response for file mutation operations."""
+
+    ok: bool
+    path: str | None = None
+    error: str | None = None
