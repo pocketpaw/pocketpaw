@@ -184,6 +184,15 @@ rippleSpec). Fixes the agent-view misread where ``get_pocket`` returned the
 empty legacy ``widgets: []`` alongside the full rippleSpec and agents
 concluded a fully composed template pocket was "an empty shell". The
 ``widgets`` field itself is NOT removed — other consumers may rely on it.
+Changes: 2026-06-15 (feat/invoke-tool-v1) — added the per-pocket TOOL
+allowlist half (the tool analog of the RFC 05 M2a write allowlist):
+``set_pocket_tool_policy`` (owner-only setter, audit-logged, rejects when no
+backend is configured); ``_allowed_tools_wire`` renders the grants for the
+wire; ``_backend_summary_wire`` / ``get_pocket_backend`` /
+``get_pocket_backend_for_executor`` now carry ``allowed_tools`` so the
+run-tool route can read the allowlist off the credential row.
+``get_pocket_backend_for_executor`` APPENDS ``allowed_tools`` as the 9th tuple
+element (back-compatible — every existing positional destructure uses ``*_``).
 """
 
 from __future__ import annotations
@@ -213,6 +222,7 @@ from pocketpaw_ee.cloud.models.pocket_backend import ApprovalRoute as _ApprovalR
 from pocketpaw_ee.cloud.models.pocket_backend import (
     PocketBackendCredential as _BackendCredentialDoc,
 )
+from pocketpaw_ee.cloud.models.pocket_backend import ToolGrant as _ToolGrantDoc
 from pocketpaw_ee.cloud.pockets import (
     actions_ops,
     backend_crypto,
@@ -3817,6 +3827,17 @@ def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
     return out
 
 
+def _allowed_tools_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
+    """Render a backend doc's ``allowed_tools`` as plain wire dicts.
+
+    Each grant is ``{tool}``. A row written before feat/invoke-tool-v1 has no
+    ``allowed_tools`` attribute — ``getattr`` defaults it to an empty list
+    (fail-closed: no ``invoke_tool`` fires). Parallel to ``_allowed_writes_wire``.
+    """
+    grants = getattr(doc, "allowed_tools", None) or []
+    return [{"tool": g.tool} for g in grants]
+
+
 def _approval_route_wire(doc: _BackendCredentialDoc) -> dict[str, str | None] | None:
     """Render a backend doc's ``approval_route`` as a plain wire dict.
 
@@ -3835,9 +3856,10 @@ def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
     """Render the full NON-SECRET backend summary for a credential row.
 
     The ONE place the wire summary is shaped so ``get_pocket_backend`` and the
-    write-policy / approval-route setters never drift. NEVER includes the
-    token. ``backend_type`` / ``connector_name`` come via ``getattr`` defaults
-    so a legacy row reads as an http backend — back-compatible.
+    write-policy / tool-policy / approval-route setters never drift. NEVER
+    includes the token. ``backend_type`` / ``connector_name`` / ``allowed_tools``
+    come via ``getattr`` defaults so a legacy row reads as an http backend with
+    no tool grants — back-compatible.
     """
     return {
         "backend_type": getattr(doc, "backend_type", "http"),
@@ -3846,6 +3868,7 @@ def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
         "auth_type": doc.auth_type,
         "configured": True,
         "allowed_writes": _allowed_writes_wire(doc),
+        "allowed_tools": _allowed_tools_wire(doc),
         "approval_route": _approval_route_wire(doc),
     }
 
@@ -3855,8 +3878,9 @@ async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
 
     NEVER returns the token — only ``backend_type`` / ``connector_name`` /
     ``base_url`` / ``auth_type`` / ``configured`` / ``allowed_writes`` (the
-    write allowlist) / ``approval_route`` (the gated-write approver routing;
-    ``None`` when unset). All owner/editor-facing non-secrets.
+    write allowlist) / ``allowed_tools`` (the tool allowlist) /
+    ``approval_route`` (the gated-write approver routing; ``None`` when unset).
+    All owner/editor-facing non-secrets.
 
     ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
     row written before this feature reads as ``backend_type="http"`` /
@@ -3883,23 +3907,29 @@ async def get_pocket_backend_for_executor(
         dict[str, str | None] | None,
         str,
         str | None,
+        list[dict[str, str]],
     ]
     | None
 ):
     """Internal — return ``(base_url, auth_type, auth_header, token,
-    allowed_writes, approval_route, backend_type, connector_name)``.
+    allowed_writes, approval_route, backend_type, connector_name,
+    allowed_tools)``.
 
     Decrypts the stored token (http backends only; a connector backend has no
-    token). Used by the run-sources route handler (which now also reads the
-    trailing ``backend_type`` / ``connector_name`` to route the run), the
-    run-action route handler (it needs ``allowed_writes`` / ``approval_route``),
-    and ``instinct_bridge`` / ``temporal_dispatcher`` / ``bulk_dispatch`` (which
-    ignore the trailing elements). Returns ``None`` when the pocket has no
-    backend configured. The plaintext token must never be logged or returned to
-    a client.
+    token). Used by the run-sources route handler (which reads
+    ``backend_type`` / ``connector_name`` to route the run), the run-action
+    route handler (it needs ``allowed_writes`` / ``approval_route``), the
+    run-tool route handler (it needs ``allowed_tools`` / ``backend_type`` /
+    ``connector_name``), and ``instinct_bridge`` / ``temporal_dispatcher`` /
+    ``bulk_dispatch`` (which ignore the trailing elements via ``*_``). Returns
+    ``None`` when the pocket has no backend configured. The plaintext token
+    must never be logged or returned to a client.
 
-    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
-    legacy row reads as ``"http"`` / ``None`` — back-compatible.
+    ``allowed_tools`` is appended LAST (the 9th element, feat/invoke-tool-v1)
+    so every existing positional destructure that uses ``*_`` / fixed slices
+    is byte-identical — appending a trailing element is back-compatible.
+    ``backend_type`` / ``connector_name`` / ``allowed_tools`` come via
+    ``getattr`` defaults so a legacy row reads as ``"http"`` / ``None`` / ``[]``.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -3920,6 +3950,7 @@ async def get_pocket_backend_for_executor(
         _approval_route_wire(doc),
         getattr(doc, "backend_type", "http"),
         getattr(doc, "connector_name", None),
+        _allowed_tools_wire(doc),
     )
 
 
@@ -3967,6 +3998,56 @@ async def set_pocket_write_policy(
         auth_type=doc.auth_type,
     )
     # no-event: backend credentials (and the write policy on them) are a
+    # separate collection, not pocket state — no downstream handler keys
+    # off a PocketUpdated for them.
+    return _backend_summary_wire(doc)
+
+
+async def set_pocket_tool_policy(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    allowed_tools: list[dict[str, str]],
+) -> dict:
+    """Replace the pocket's tool allowlist (feat/invoke-tool-v1). Owner-only.
+
+    ``allowed_tools`` is a list of ``{tool}`` grants — each ``tool`` is a
+    built-in tool name or a connector action ``connector:<name>:<action>``.
+    The list lives on the backend-credential row — OUTSIDE the spec — so the
+    agent (which authors the spec) cannot grant itself a tool. An empty list
+    is valid and revokes every tool (fail-closed). Mirrors
+    ``set_pocket_write_policy`` exactly.
+
+    Rejects with ``pocket_backend.not_configured`` if the pocket has no
+    backend configured: a tool policy with no backend to apply it to is
+    meaningless, and silently storing one would mask the misconfiguration.
+    The mutation is audit-logged via the ``_audit_backend_config`` path.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a tool policy",
+        )
+
+    # `model_validate` re-checks each grant at runtime — the router already
+    # validated through `ToolGrantDTO`, but internal callers (bus handlers,
+    # jobs) re-parse here, matching the entry-point validation rule.
+    doc.allowed_tools = [_ToolGrantDoc.model_validate(grant) for grant in allowed_tools]
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.tool_policy",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: backend credentials (and the tool policy on them) are a
     # separate collection, not pocket state — no downstream handler keys
     # off a PocketUpdated for them.
     return _backend_summary_wire(doc)

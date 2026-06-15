@@ -266,6 +266,12 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # feat/invoke-tool-v1 — the click-driven tool executor. It dispatches a
+    # connector-action grant through ``connectors.service.execute`` and
+    # receives the per-pocket allowlist by parameter from the router. It must
+    # NEVER import a Beanie document class directly (no ``models.pocket_backend``):
+    # the router/service own Beanie access.
+    "pocketpaw_ee.cloud.pockets.tool_executor",
     # P2.4 Template Reconcile — the reconcile service resolves the pocket
     # (spec + slug) and writes the reconciled spec entirely through
     # `pockets.service`; it must never import the Pocket Beanie model.
