@@ -1,6 +1,19 @@
 # pocketpaw/ripple/_flows.py — Chain Flow builders (RFC 13 §7.1, M3 → CHAIN FLOW v2).
 #
 # Created: 2026-05-31 (RFC 13 M3, feat/m3-flow-authoring-tool).
+# Updated: 2026-06-15 (feat/chain-flow-v2 — CONTINUATION-NOT-A-BUTTON FIX):
+#   - Mid-flow `StepAction.on_success` / `.on_error` continuation chains are no
+#     longer typed as `list[StepAction]`. `StepAction` is a BUTTON and requires
+#     `id` + `label`; a continuation is NOT a button (design §1.3 / §1.7 write
+#     them as bare `{"verb":"toast","message":…}` / `{"verb":"set","key":…,
+#     "value":…}` with NO id/label). A new `StepContinuation` model carries the
+#     same payload fields + its own nested `on_success`/`on_error` but drops
+#     id/label, so a naturally-authored continuation chain builds instead of
+#     raising FlowBuildError demanding button fields. `_validate_actions` now
+#     recurses the per-verb required-key table INTO continuations (without
+#     requiring id/label), and the on_success/on_error lowering accepts a
+#     `StepContinuation` — output is unchanged (id/label were already discarded
+#     in lowering, so the emitted bare handler dict is byte-identical).
 # Updated: 2026-06-15 (feat/chain-flow-v2 — GENERALIZATION):
 #   - The headline change: the flow primitive is no longer "pick 1 of 2
 #     hardcoded Python templates." A new entry point
@@ -188,6 +201,38 @@ class FlowBuildError(ValueError):
 # ---------------------------------------------------------------------------
 
 
+class StepContinuation(BaseModel):
+    """A continuation in a StepAction's `on_success` / `on_error` chain (§1.3).
+
+    A continuation is NOT a button — it carries no `id` and no `label`. The
+    design authors them bare (`{"verb":"toast","message":…,"variant":…}` /
+    `{"verb":"set","key":…,"value":…}`), so requiring button fields here would
+    reject every naturally-authored chain. It mirrors `StepAction`'s verb +
+    payload fields and nests its OWN `on_success`/`on_error`, validated per-verb
+    by `_validate_actions` (same required-key table, minus id/label).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    verb: str
+    # verb-specific payload (validated per verb in `_validate_actions`)
+    tool: str | None = None
+    args: dict[str, Any] | None = None
+    binding: str | None = None
+    path: str | None = None
+    params: dict[str, Any] | None = None
+    url: str | None = None
+    method: str | None = None
+    body: dict[str, Any] | None = None
+    key: str | None = None
+    value: Any = None
+    message: str | None = None
+    variant: str | None = None
+    # nested continuations — a continuation may itself chain on_success/on_error
+    on_success: list[StepContinuation] | None = None
+    on_error: list[StepContinuation] | None = None
+
+
 class StepAction(BaseModel):
     """A mid-flow button: runs a tool/API/binding without leaving the step (§1.3)."""
 
@@ -209,9 +254,10 @@ class StepAction(BaseModel):
     value: Any = None
     message: str | None = None
     variant: str | None = None
-    # continuations — standard ripple on_success / on_error action chains
-    on_success: list[StepAction] | None = None
-    on_error: list[StepAction] | None = None
+    # continuations — standard ripple on_success / on_error action chains. These
+    # are NOT buttons (no id/label) — see StepContinuation above.
+    on_success: list[StepContinuation] | None = None
+    on_error: list[StepContinuation] | None = None
 
 
 class TerminalAction(BaseModel):
@@ -278,7 +324,9 @@ class FlowDescriptor(BaseModel):
     complete: TerminalAction | None = None
 
 
-# StepAction / TerminalAction are self-referential; rebuild so forward refs bind.
+# StepContinuation / StepAction / TerminalAction are self-referential; rebuild so
+# forward refs bind. StepContinuation first — StepAction references it.
+StepContinuation.model_rebuild()
 StepAction.model_rebuild()
 TerminalAction.model_rebuild()
 
@@ -454,10 +502,12 @@ def _action_button(action: StepAction) -> dict[str, Any]:
     return {"type": "button", "props": {"label": action.label}, "on_click": handler}
 
 
-def _action_handler_only(action: StepAction) -> dict[str, Any]:
-    """Lower a continuation StepAction (on_success/on_error entry) into a bare
-    action handler dict (no surrounding button) — the shape ripple's action
-    chain expects."""
+def _action_handler_only(action: StepContinuation) -> dict[str, Any]:
+    """Lower a continuation (on_success/on_error entry) into a bare action
+    handler dict (no surrounding button) — the shape ripple's action chain
+    expects. A continuation carries no id/label, so the emitted handler is the
+    same bare `{action:<verb>, …payload, on_success?, on_error?}` shape it was
+    before (id/label were never copied into the handler)."""
     handler: dict[str, Any] = {"action": action.verb}
     for key in ("tool", "args", "binding", "path", "params", "url", "method", "body", "key"):
         val = getattr(action, key, None)
@@ -974,7 +1024,20 @@ def _collect_action_refs(action: StepAction, out: list[str]) -> None:
         if payload:
             _collect_ref_strings(payload, out)
     for cont in (action.on_success or []) + (action.on_error or []):
-        _collect_action_refs(cont, out)
+        _collect_continuation_refs(cont, out)
+
+
+def _collect_continuation_refs(cont: StepContinuation, out: list[str]) -> None:
+    """Collect ref-bearing strings from a continuation's payloads (recursively
+    into its own on_success / on_error). Mirrors `_collect_action_refs`; a
+    continuation has the same payload fields, just no id/label."""
+    for payload in (cont.args, cont.params, cont.body):
+        if payload:
+            _collect_ref_strings(payload, out)
+    if cont.value is not None and isinstance(cont.value, str):
+        out.append(cont.value)
+    for nested in (cont.on_success or []) + (cont.on_error or []):
+        _collect_continuation_refs(nested, out)
 
 
 def _branch_membership(model: FlowDescriptor, by_id: dict[str, FlowStep]) -> dict[str, str | None]:
@@ -1048,8 +1111,36 @@ def _validate_step_action(action: StepAction, step_id: str, depth: int = 0) -> N
         raise FlowBuildError(
             f'step "{step_id}" action "{action.id}" nests continuations too deeply'
         )
+    # Continuations are NOT buttons — recurse the SAME per-verb required-key
+    # checks (no id/label demanded). The action's id is carried into the message
+    # so a defective continuation still names the button it hangs off.
     for cont in (action.on_success or []) + (action.on_error or []):
-        _validate_step_action(cont, step_id, depth + 1)
+        _validate_continuation(cont, step_id, action.id, depth + 1)
+
+
+def _validate_continuation(
+    cont: StepContinuation, step_id: str, action_id: str, depth: int = 1
+) -> None:
+    """Validate one `on_success` / `on_error` continuation — same verb-allow-set
+    and per-verb required-key table as a StepAction, but without requiring the
+    button-only `id` / `label`. Recurses into nested continuations."""
+    if cont.verb not in _STEP_ACTION_VERBS:
+        raise FlowBuildError(
+            f'step "{step_id}" action "{action_id}" continuation uses unknown verb '
+            f'"{cont.verb}"; allowed: {sorted(_STEP_ACTION_VERBS)}'
+        )
+    for key in _STEP_VERB_REQUIRED.get(cont.verb, ()):  # required payload keys
+        if getattr(cont, key, None) in (None, ""):
+            raise FlowBuildError(
+                f'step "{step_id}" action "{action_id}" continuation (verb "{cont.verb}") '
+                f'is missing required key "{key}"'
+            )
+    if depth >= _MAX_THEN_DEPTH + 2:
+        raise FlowBuildError(
+            f'step "{step_id}" action "{action_id}" nests continuations too deeply'
+        )
+    for nested in (cont.on_success or []) + (cont.on_error or []):
+        _validate_continuation(nested, step_id, action_id, depth + 1)
 
 
 def _validate_terminal_action(terminal: TerminalAction, step_id: str, depth: int = 1) -> None:
@@ -1538,6 +1629,7 @@ __all__ = [
     "FlowDescriptor",
     "FlowStep",
     "StepAction",
+    "StepContinuation",
     "TerminalAction",
     "build_due_diligence_intake",
     "build_flow",

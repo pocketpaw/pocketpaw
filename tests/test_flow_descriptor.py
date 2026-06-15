@@ -1,5 +1,16 @@
 # tests/test_flow_descriptor.py
 # Created: 2026-06-15 (feat/chain-flow-v2).
+# Updated: 2026-06-15 (feat/chain-flow-v2 — continuation-not-a-button fix):
+#   - De-papered the two tests that had added dummy `id`/`label` to their
+#     on_success/on_error continuations: `_example_b()` (now verbatim §1.7 with
+#     BARE continuations) and `test_step_action_lowers_to_button_with_verb_on_click`.
+#     These now build with the natural `{verb, …payload}` continuation shape.
+#   - Strengthened `test_worked_example_b_builds_clean` to assert the lowered
+#     invoke_tool button carries its bare on_success/on_error handlers and the
+#     terminal onComplete is the create_pocket-with-then.
+#   - Added `test_continuation_actions_need_no_button_id_or_label` — the explicit
+#     regression guard that the §1.3/§1.7 bare-continuation shape builds without
+#     FlowBuildError.
 #
 # Tests for the CHAIN FLOW v2 GENERAL builder — `build_flow_from_descriptor`
 # (`pocketpaw.ripple._flows`). Where `test_flow_authoring.py` proves the two
@@ -441,10 +452,10 @@ def test_step_action_lowers_to_button_with_verb_on_click() -> None:
                         "binding": "dns_check",
                         "path": "/dns/check",
                         "params": {"domain": "{f.domain}"},
+                        # Bare continuations (no id/label) — the §1.3 shape the
+                        # builder accepts after the continuation-not-a-button fix.
                         "on_success": [
                             {
-                                "id": "ok",
-                                "label": "",
                                 "verb": "toast",
                                 "message": "Reachable",
                                 "variant": "success",
@@ -452,8 +463,6 @@ def test_step_action_lowers_to_button_with_verb_on_click() -> None:
                         ],
                         "on_error": [
                             {
-                                "id": "no",
-                                "label": "",
                                 "verb": "toast",
                                 "message": "Unreachable",
                                 "variant": "warning",
@@ -866,6 +875,12 @@ def _example_b() -> dict[str, Any]:
                     {"id": "seats", "label": "Seats", "type": "number", "required": True},
                 ],
                 "actions": [
+                    # Verbatim from design §1.7: the continuations are BARE
+                    # (verb + payload, NO id/label) — they are NOT buttons. This
+                    # is the regression guard for the continuation-not-a-button
+                    # fix; before it, the required id/label on StepAction made
+                    # the build raise FlowBuildError on this naturally-authored
+                    # shape.
                     {
                         "id": "verify_domain",
                         "label": "Verify domain",
@@ -874,15 +889,11 @@ def _example_b() -> dict[str, Any]:
                         "args": {"domain": "{details.domain}"},
                         "on_success": [
                             {
-                                "id": "t1",
-                                "label": "",
                                 "verb": "toast",
                                 "message": "Domain reachable",
                                 "variant": "success",
                             },
                             {
-                                "id": "s1",
-                                "label": "",
                                 "verb": "set",
                                 "key": "details.domain_ok",
                                 "value": True,
@@ -890,8 +901,6 @@ def _example_b() -> dict[str, Any]:
                         ],
                         "on_error": [
                             {
-                                "id": "t2",
-                                "label": "",
                                 "verb": "toast",
                                 "message": "Domain not reachable",
                                 "variant": "warning",
@@ -938,25 +947,87 @@ def test_worked_example_a_builds_clean() -> None:
 
 
 def test_worked_example_b_builds_clean() -> None:
+    # Builds clean — no FlowBuildError — even though the verify_domain action's
+    # on_success/on_error continuations are bare (no id/label). This is the
+    # literal §1.7 example B copied verbatim from the design doc; it is the
+    # regression guard for the continuation-not-a-button fix.
     doc = build_flow_from_descriptor(_example_b())
     assert isinstance(doc["ui"], dict)
     assert validate_against_catalog(doc, ALLOWED_TYPES) == []
     assert validate_action_verbs(doc) == []
-    # terminal create_pocket + then navigate
-    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
-    assert term["onComplete"]["kind"] == "create_pocket"
-    assert term["onComplete"]["then"]["kind"] == "navigate"
-    # the mid-flow verify_domain button is present with the right verb
+
+    # The form step carries the lowered invoke_tool button with its handlers.
     details = next(s for s in _iter_steps(doc["ui"]) if s["flowId"] == "details")
     verify = [
         n for n in _walk_nodes(details["ui"]) if n.get("props", {}).get("label") == "Verify domain"
     ]
     assert len(verify) == 1
-    assert verify[0]["on_click"]["action"] == "invoke_tool"
-    assert verify[0]["on_click"]["tool"] == "dns_domain_check"
+    oc = verify[0]["on_click"]
+    assert oc["action"] == "invoke_tool"
+    assert oc["tool"] == "dns_domain_check"
+    # the {details.domain} arg ref rewrote to the namespaced formData key
+    assert oc["args"]["domain"] == "{state.details_formData.domain}"
+    # on_success / on_error lowered to bare handler dicts (no id/label, no button
+    # wrapper) — exactly two success continuations, one error continuation.
+    assert [h["action"] for h in oc["on_success"]] == ["toast", "set"]
+    assert oc["on_success"][0]["variant"] == "success"
+    assert oc["on_success"][0]["message"] == "Domain reachable"
+    # no id/label leaked into the lowered handler
+    assert "id" not in oc["on_success"][0] and "label" not in oc["on_success"][0]
     # the set continuation preserves its falsy-safe boolean value
-    set_conts = [h for h in verify[0]["on_click"]["on_success"] if h["action"] == "set"]
+    set_conts = [h for h in oc["on_success"] if h["action"] == "set"]
     assert set_conts[0]["value"] is True
+    assert set_conts[0]["key"] == "details.domain_ok"
+    assert [h["action"] for h in oc["on_error"]] == ["toast"]
+    assert oc["on_error"][0]["variant"] == "warning"
+
+    # The terminal onComplete is the create_pocket-with-then.
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["onComplete"]["kind"] == "create_pocket"
+    assert term["onComplete"]["name"] == "{state.details_formData.company} — Client"
+    assert term["onComplete"]["seed_from_flow"] is True
+    assert term["onComplete"]["then"]["kind"] == "navigate"
+    assert term["onComplete"]["then"]["url"] == "/pockets/{result.id}"
+
+
+def test_continuation_actions_need_no_button_id_or_label() -> None:
+    """Regression: the §1.3/§1.7 continuation shape (bare `{verb, …payload}`
+    with NO id/label) must BUILD, not raise.
+
+    Continuations are NOT buttons. Before the fix, `StepAction.on_success` /
+    `.on_error` were typed `list[StepAction]`, and `StepAction` requires
+    `id` + `label`; the real chat agent — following the prompt + design — authors
+    continuations WITHOUT id/label, so every naturally-authored chain hit
+    `FlowBuildError`. This builds the LITERAL §1.7 example B (verbatim, bare
+    continuations) and proves it materializes a clean tree.
+    """
+    # The descriptor's verify_domain continuations carry no id/label at all.
+    desc = _example_b()
+    verify = desc["steps"][1]["actions"][0]
+    for cont in verify["on_success"] + verify["on_error"]:
+        assert "id" not in cont, f"continuation should be authored bare: {cont}"
+        assert "label" not in cont, f"continuation should be authored bare: {cont}"
+
+    # Must build with no FlowBuildError (the bug raised here).
+    doc = build_flow_from_descriptor(desc)
+    assert doc["version"] == "1.0"
+    assert validate_action_verbs(doc) == []
+
+    # The lowered invoke_tool button carries its on_success/on_error handlers,
+    # each a bare action dict (verb + payload, no id/label survived lowering).
+    details = next(s for s in _iter_steps(doc["ui"]) if s["flowId"] == "details")
+    btn = next(
+        n for n in _walk_nodes(details["ui"]) if n.get("props", {}).get("label") == "Verify domain"
+    )
+    handlers = btn["on_click"]["on_success"] + btn["on_click"]["on_error"]
+    assert len(handlers) == 3
+    for h in handlers:
+        assert "action" in h and "id" not in h and "label" not in h
+
+    # And the terminal is the create_pocket-with-then hand-off.
+    term = next(s for s in _iter_steps(doc["ui"]) if _is_terminal(s))
+    assert term["onComplete"]["kind"] == "create_pocket"
+    assert term["onComplete"]["then"]["kind"] == "navigate"
 
 
 # ===========================================================================
