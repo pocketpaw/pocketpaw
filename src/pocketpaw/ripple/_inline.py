@@ -57,6 +57,12 @@
 #   data-grid, timeline, kv-table, status-dot, pricing-table) so chat reaches
 #   for the typed widget instead of rebuilding shapes from table/text/flex;
 #   reframed the core-catalog opening and added a self-check line.
+# Modified: 2026-06-15 - inlined funnel + gauge into _INLINE_TYPED_WIDGET_RULE
+#   (two shape->widget map rows, prop shapes, and worked examples) so
+#   conversion/drop-off funnels and metric-vs-target dials reach for the
+#   typed widget with no tool-call friction. Props sourced from the ripple
+#   manifest (funnel: data[{label,value}]/title/sort/colors/height;
+#   gauge: value/max/label/title/color/height).
 # Modified: 2026-06-16 (feat/invoke-tool-v1 — close the in-chat approval loop)
 #   — added `_INSTINCT_TRAY_RULE`: when the agent renders the pending-Instinct-
 #   approvals view (the items `instinct_pending` returns), the Approve / Reject
@@ -661,6 +667,8 @@ right here, so NO `get_inline_widget_help` call is needed.
   service / system / job status                -> status-dot (one per item)
   plans / tiers / pricing                      -> pricing-table
   a single KPI with a trend                    -> metric (NOT a bare stat)
+  conversion / drop-off / pipeline funnel      -> funnel
+  a single metric vs a target/threshold (dial) -> gauge
   a cited source / link                        -> source-card
   a 1-2 line takeaway / warning                -> callout
   term : definition pairs                      -> definition-list
@@ -698,6 +706,8 @@ source-card    — { source, title, url?, color? }
 callout        — { variant:"info|insight|warning", title, text }
 definition-list— { items:[{term,definition}], layout?:"inline|stacked" }
 metric         — { label, value, trend?, description? }
+funnel         — { data:[{label,value}], title?, sort?:"descending|ascending|none", colors?, height? }
+gauge          — { value, max?, label?, title?, color?, height? }
 
 Worked examples — the typed-widget choice in action (data already in hand):
 
@@ -707,6 +717,8 @@ Worked examples — the typed-widget choice in action (data already in hand):
   "deployment status of services"  -> flex(column) of [text + status-dot] rows, or a kv-table
                                       with a status-dot per value  (NOT prose, NOT a plain table)
   "our pricing"                    -> ONE pricing-table
+  "sales funnel leads to closed"   -> ONE funnel  (data:[{label,value}] per stage, NOT a plain table)
+  "capacity at 75 of 100"          -> ONE gauge  (value + max, NOT a bare stat tile)
 
 Keep it tight: ONE typed widget is the answer most of the time. Wrap it in
 at most a heading + a chat.send follow-up — never surround it with
