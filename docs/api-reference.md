@@ -35,8 +35,12 @@ Updated: 2026-06-15 (feat/invoke-tool-v1) — documented the now-live
 POST /pockets/{id}/tools/run (was a fail-closed stub) and the new
 owner-only PUT /pockets/{id}/backend/tool-policy. The backend summary now
 carries `allowed_tools` (the per-pocket tool allowlist) alongside
-`allowed_writes`. v1: connector READ tools fire; WRITE tools return
-`code: blocked` (approval lands in v2 via Instinct).
+`allowed_writes`.
+Updated: 2026-06-15 (feat/invoke-tool-v1, v2) — the WRITE path is now live.
+A connector READ tool still fires immediately; a WRITE tool is no longer
+refused with `code: blocked` — it is PROPOSED for human approval through the
+Instinct gate and returns `code: instinct_pending` with a `proposed_action_id`
+(the write fires only when a human approves it in The Tray).
 -->
 
 # Cloud REST API Reference
@@ -280,13 +284,18 @@ A grant's `tool` is one of:
   dispatch is a v1.x follow-up, so a built-in grant currently returns
   `code: unknown_tool`.
 
-**v1 read/write split.** A connector grant is dispatched through the shared
+**Read/write split.** A connector grant is dispatched through the shared
 connector executor (`connectors.service.execute`). A **read** action
 (`trust=auto`) fires immediately and returns its data. A **write** action
-(`trust=confirm`/`restricted`) **never** runs in v1 — it returns
-`code: blocked` with the message "write actions need approval — coming in v2
-(Instinct)". v2 routes writes through the Instinct approval gate (propose →
-human approves → execute-on-approve).
+(`trust=confirm`/`restricted`) **never** runs inline — it is **proposed for
+human approval** through the Instinct gate. The route files a pending Instinct
+Action (via `propose_external_action`) and returns `code: instinct_pending`
+with a `proposed_action_id`; the connector write fires only when a human
+approves the Action in The Tray, at which point the instinct router runs the
+existing execute-on-approve path (`execute_approved_external_action` →
+`connectors.service.execute`, re-validated for workspace + params + idempotency).
+The client's `on_success` handler branches on `code == "instinct_pending"` to
+show a "sent for approval" state and can watch the `proposed_action_id`.
 
 ### `PUT /pockets/{pocket_id}/backend/tool-policy`
 
@@ -338,24 +347,36 @@ Response `200` (connector read fired):
 }
 ```
 
-Response `200` (write blocked in v1):
+Response `202` (write proposed for approval):
 
 ```json
 {
-  "ok": false,
+  "ok": true,
   "tool": "connector:github:create_issue",
-  "status": 200,
-  "code": "blocked",
-  "error": "write actions need approval — coming in v2 (Instinct)",
-  "response": { "executed": false, "blocked": true }
+  "status": 202,
+  "code": "instinct_pending",
+  "proposed_action_id": "act-7f3c…",
+  "response": {
+    "action_id": "act-7f3c…",
+    "proposed_action_id": "act-7f3c…",
+    "status": "pending_approval",
+    "connector": "github",
+    "action": "create_issue"
+  }
 }
 ```
+
+The write does **not** run at this point. The pending Action appears in The
+Tray; on approve, the instinct router fires the connector write through the
+existing execute-on-approve path. On reject, the write never runs.
 
 Other rejection codes (`ok: false`): `not_allowed` (tool not on the
 allowlist / no backend), `not_reachable` (connector not bound to this
 pocket), `unknown_tool` (the connector has no such action, or a built-in
 grant has no registry implementation yet), `bad_grant` (malformed
-`connector:` grant), plus any connector-side `CloudError` code. The result
+`connector:` grant), `propose_failed` (the write could not be filed for
+approval — e.g. the Instinct store was unavailable; the write is **not** run
+inline as a fallback), plus any connector-side `CloudError` code. The result
 is delivered **in this response body** — there is no `pocket_mutation` SSE
 emit; the client applies the `on_success` / `on_error` reconcile handlers.
 
