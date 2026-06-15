@@ -30,6 +30,13 @@ Outcome Metering section: the binding-level `outcome` / `outcome_value` /
 and the new `GET /outcomes/meter` aggregation surface that sums billable
 value by unit per workspace over a since/until window. Invoicing /
 payment / pricing-rules / clawback remain deferred.
+
+Updated: 2026-06-15 (feat/invoke-tool-v1) — documented the now-live
+POST /pockets/{id}/tools/run (was a fail-closed stub) and the new
+owner-only PUT /pockets/{id}/backend/tool-policy. The backend summary now
+carries `allowed_tools` (the per-pocket tool allowlist) alongside
+`allowed_writes`. v1: connector READ tools fire; WRITE tools return
+`code: blocked` (approval lands in v2 via Instinct).
 -->
 
 # Cloud REST API Reference
@@ -68,14 +75,18 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": []
+  "allowed_writes": [],
+  "allowed_tools": []
 }
 ```
 
 The token is never echoed back. A non-https or internal `base_url` yields
 a `400`. `allowed_writes` is the per-pocket write allowlist (RFC 05 M2a) —
 empty by default, so no write action can fire until an owner sets a policy
-via `PUT /pockets/{id}/backend/write-policy`.
+via `PUT /pockets/{id}/backend/write-policy`. `allowed_tools` is the
+per-pocket tool allowlist (feat/invoke-tool-v1) — also empty by default, so
+no `invoke_tool` can fire until an owner sets a policy via
+`PUT /pockets/{id}/backend/tool-policy`.
 
 For `basic` auth, send `auth_token` as the raw `user:pass` credential —
 the server base64-encodes it into the `Authorization: Basic` header. Do
@@ -94,13 +105,15 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }]
+  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }],
+  "allowed_tools": [{ "tool": "connector:github:list_issues" }]
 }
 ```
 
 Returns `404` when the pocket has no backend configured. The token is
 never included in the response. `allowed_writes` carries the current
-write allowlist (RFC 05 M2a).
+write allowlist (RFC 05 M2a); `allowed_tools` carries the current tool
+allowlist (feat/invoke-tool-v1).
 
 ### `DELETE /pockets/{pocket_id}/backend`
 
@@ -249,6 +262,112 @@ and a write-specific rate limit — 20 writes per `(pocket, user)` per
 minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
+
+## Pockets — Tool Invocations (`invoke_tool`)
+
+feat/invoke-tool-v1. `invoke_tool` is the click-driven tool verb for pocket
+FLOW-BUTTONs. A button fires `{action: "invoke_tool", tool, args}`; Ripple
+resolves the `args` client-side and the host POSTs to the route below. Like
+write actions, it carries a per-pocket allowlist that lives **outside**
+`rippleSpec` — a human authorizes which tools a pocket may run, so a
+compromised or hallucinated spec cannot grant itself a tool.
+
+A grant's `tool` is one of:
+
+- a connector action, `connector:<name>:<action>` (e.g.
+  `connector:github:list_issues`), or
+- a built-in tool name (e.g. `web_fetch`) — reserved; the built-in registry
+  dispatch is a v1.x follow-up, so a built-in grant currently returns
+  `code: unknown_tool`.
+
+**v1 read/write split.** A connector grant is dispatched through the shared
+connector executor (`connectors.service.execute`). A **read** action
+(`trust=auto`) fires immediately and returns its data. A **write** action
+(`trust=confirm`/`restricted`) **never** runs in v1 — it returns
+`code: blocked` with the message "write actions need approval — coming in v2
+(Instinct)". v2 routes writes through the Instinct approval gate (propose →
+human approves → execute-on-approve).
+
+### `PUT /pockets/{pocket_id}/backend/tool-policy`
+
+Set the pocket's tool allowlist. Requires pocket **owner** access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `allowed_tools` | array | List of `{tool}` grants. Replaces the whole list. An empty list is valid — it revokes every tool (fail-closed). |
+
+Each grant: `tool` is a built-in tool name or a connector action
+`connector:<name>:<action>` (`min_length=1`). Omitting a tool means that
+tool can never fire.
+
+Response `200`: the backend summary, including the updated `allowed_tools`.
+
+Returns `400` when the pocket has no backend configured — a tool policy with
+no backend to apply it to is meaningless. The change is audit-logged
+(`pocket.backend.tool_policy`).
+
+### `POST /pockets/{pocket_id}/tools/run`
+
+Invoke a named tool with the resolved args. Access is **owner or explicit
+`shared_with` only** — a tool invocation has the same blast radius as a write
+binding, so a workspace-visible pocket does **not** grant run access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `tool` | string | Required (`min_length=1`). The tool name — a built-in name or `connector:<name>:<action>`. |
+| `args` | object | Optional. The resolved tool arguments (Ripple's `{...}` resolver runs client-side at click time). |
+
+The allowlist is read server-side off the backend-credential row, never from
+the spec. A pocket with no backend, no grants, or a tool not on the list
+returns `code: not_allowed` — fail-closed.
+
+Response `200` (connector read fired):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:list_issues",
+  "status": 200,
+  "response": [{ "number": 1, "title": "first issue" }],
+  "on_success": [],
+  "on_error": []
+}
+```
+
+Response `200` (write blocked in v1):
+
+```json
+{
+  "ok": false,
+  "tool": "connector:github:create_issue",
+  "status": 200,
+  "code": "blocked",
+  "error": "write actions need approval — coming in v2 (Instinct)",
+  "response": { "executed": false, "blocked": true }
+}
+```
+
+Other rejection codes (`ok: false`): `not_allowed` (tool not on the
+allowlist / no backend), `not_reachable` (connector not bound to this
+pocket), `unknown_tool` (the connector has no such action, or a built-in
+grant has no registry implementation yet), `bad_grant` (malformed
+`connector:` grant), plus any connector-side `CloudError` code. The result
+is delivered **in this response body** — there is no `pocket_mutation` SSE
+emit; the client applies the `on_success` / `on_error` reconcile handlers.
+
+Returns `403` when the caller is neither the owner nor in `shared_with`;
+`404` when the pocket is not in the caller's scope.
+
+**Security.** A connector grant re-checks the pocket/workspace bind
+(`is_connector_bound_to_pocket`, the tenant boundary) and the action's trust
+level before any call leaves PocketPaw; the connector path's outbound URL is
+bounded by the connector definition, not by a spec-supplied URL. A
+URL-taking built-in tool, when that path lands, must route through the same
+`_http_guard` SSRF boundary the read/write executors use.
 
 ## Pockets — Template Reconcile
 
