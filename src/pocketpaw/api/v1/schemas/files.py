@@ -112,3 +112,19 @@ class GitStatusResponse(BaseModel):
     entries: list[GitStatusEntry] = []
     is_git_repo: bool = False
     error: str | None = None
+
+
+class GitDiffLineChange(BaseModel):
+    """A single line-level change in a git diff."""
+
+    type: str  # "added" | "modified"
+
+
+class GitDiffResponse(BaseModel):
+    """Response for git diff queries — per-file line-level changes."""
+
+    file_path: str
+    branch: str | None = None
+    line_changes: dict[str, str] = {}  # line_number → "added" | "modified"
+    is_git_repo: bool = False
+    error: str | None = None

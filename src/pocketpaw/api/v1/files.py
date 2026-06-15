@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import logging
 import mimetypes
+import re
 import subprocess
 import urllib.parse
 import zipfile
@@ -25,6 +26,7 @@ from pocketpaw.api.v1.schemas.files import (
     CreateFileRequest,
     FileActionResponse,
     FileEntry,
+    GitDiffResponse,
     GitStatusEntry,
     GitStatusResponse,
     MkdirRequest,
@@ -166,9 +168,11 @@ async def get_file_content(path: str):
     if mime is None:
         mime = "application/octet-stream"
 
-    # For text files requested with ?mode=text, return plain text
-    # (allows JS to fetch content for the code viewer)
-    return FileResponse(str(resolved), media_type=mime)
+    return FileResponse(
+        str(resolved),
+        media_type=mime,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @router.get("/files/recent", response_model=RecentFilesResponse)
@@ -607,5 +611,145 @@ async def git_status(
         logger.warning("git status failed: %s", exc)
         return GitStatusResponse(
             is_git_repo=True,
+            error=str(exc),
+        )
+
+
+# ── Git diff (per-file line-level changes for gutter indicators) ──────────
+
+
+@router.get("/git/diff")
+async def git_diff(
+    path: str = Query("~", description="File path to get diff for"),
+):
+    """Return per-line change types for a file compared to HEAD.
+
+    Returns a ``line_changes`` dict keyed by 1-based line number in the
+    current (working tree) version of the file. Each value is either
+    ``"added"`` (green gutter) or ``"modified"`` (amber gutter).
+    Lines not present in the dict are unchanged.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: path outside allowed directory",
+        )
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File does not exist")
+    if resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Cannot diff a directory")
+
+    # Find the git root by walking up
+    git_root = resolved.parent
+    while git_root != git_root.parent:
+        if (git_root / ".git").exists():
+            break
+        git_root = git_root.parent
+    else:
+        return GitDiffResponse(file_path=path, is_git_repo=False, line_changes={})
+
+    try:
+        relative_path = resolved.relative_to(git_root)
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(git_root),
+                "diff",
+                "HEAD",
+                "--",
+                str(relative_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            return GitDiffResponse(
+                file_path=path,
+                is_git_repo=True,
+                line_changes={},
+                error="git diff returned non-zero",
+            )
+
+        line_changes: dict[str, str] = {}
+        hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+        current_new_line: int | None = None
+        hunk_has_minus = False
+
+        for line in result.stdout.splitlines():
+            hunk_match = hunk_re.match(line)
+            if hunk_match:
+                # Previous hunk: mark all context lines as modified if it had deletions
+                current_new_line = int(hunk_match.group(3))
+                hunk_has_minus = False
+                continue
+
+            if current_new_line is None:
+                continue
+
+            if line.startswith("\\"):  # \ No newline at end of file
+                continue
+
+            prefix = line[:1] if line else " "
+
+            if prefix == "-":
+                hunk_has_minus = True
+                # No corresponding line in the new file
+                continue
+            elif prefix == "+":
+                line_changes[str(current_new_line)] = "added"
+                current_new_line += 1
+            else:  # context line (space prefix)
+                if hunk_has_minus:
+                    line_changes[str(current_new_line)] = "modified"
+                # If no deletions, context lines in an addition-only hunk are unchanged
+                current_new_line += 1
+
+        # Get branch name for display
+        branch_result = subprocess.run(
+            ["git", "-C", str(git_root), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+
+        return GitDiffResponse(
+            file_path=path,
+            branch=branch,
+            line_changes=line_changes,
+            is_git_repo=True,
+        )
+
+    except subprocess.TimeoutExpired:
+        return GitDiffResponse(
+            file_path=path,
+            is_git_repo=True,
+            line_changes={},
+            error="Git operation timed out",
+        )
+    except FileNotFoundError:
+        return GitDiffResponse(
+            file_path=path,
+            is_git_repo=True,
+            line_changes={},
+            error="Git executable not found on server",
+        )
+    except Exception as exc:
+        logger.warning("git diff failed: %s", exc)
+        return GitDiffResponse(
+            file_path=path,
+            is_git_repo=True,
+            line_changes={},
             error=str(exc),
         )
