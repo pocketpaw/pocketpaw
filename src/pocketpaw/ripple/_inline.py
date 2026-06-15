@@ -22,6 +22,18 @@
 #   chain_map trees and do NOT fake a flow with a single `set`-stepped spec
 #   — that anti-pattern renders step 1 and never advances. Wired into the
 #   assembled prompt + the final self-check.
+# Modified: 2026-06-15 (feat/chain-flow-v2) — rewrote `_MULTI_STEP_FLOW_RULE`
+#   for CHAIN FLOW v2. The rule now teaches STATE-TRANSITION authoring ("think
+#   in states, not screens"): the agent describes a FLAT step-graph to
+#   `start_flow` (a `flow` id, an `entry`, and a `steps` list where each step
+#   points at the next by id via `next` / `branch`), and the builder owns the
+#   nesting + deep-validation. Dropped the 2-template ceiling and the
+#   "no-template-fit → ask-user-questions" fallback (there is no fixed template
+#   list anymore — describe the graph the request needs). Appended a
+#   state-grammar primitives block and two copy-paste flat-descriptor skeletons
+#   (a branching intake and an action-rich mini-app). `invoke_tool` is marked as
+#   possibly-unavailable until the tool registry ships; call_binding /
+#   create_pocket / api / emit / navigate are the actions that work now.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -313,35 +325,108 @@ true), `nextLabel`, `layout` ("inline" | "stacked", default inline).
 
 
 _MULTI_STEP_FLOW_RULE = """\
-# MULTI-STEP FLOWS — CALL start_flow, DO NOT HAND-AUTHOR
+# MULTI-STEP FLOWS & MINI-APPS — DESCRIBE A STEP-GRAPH via start_flow
 
-For ANY multi-step flow — a wizard, an intake form, a survey, an
-onboarding sequence, a step-by-step or collect-then-act flow where the
-user moves through more than one screen before you act — call the
-`start_flow` tool. Pass ONLY a tiny descriptor: a `flow_type` template
-(plus optional `domain` / `config`). The tool returns the ENTIRE nested
-flow as a `{version, ui}` doc; drop that doc VERBATIM into your `ui-spec`
-fence. The flow then advances entirely client-side — no further model
-calls between steps.
+For ANY multi-step flow OR interactive mini-app — a wizard, an intake, a
+survey, an onboarding sequence, a "collect details then DO something"
+flow, or a small app that calls a tool / API and finishes by creating a
+pocket — call `start_flow`. You describe the flow as a FLAT step-graph;
+the tool materializes the nested, validated tree and returns a
+{version, ui} doc. Drop that doc VERBATIM into your `ui-spec` fence. The
+flow then advances entirely client-side — no model calls between steps.
 
-DO NOT hand-author the flow yourself. Specifically, NEVER:
-- write a nested `chain` / `chain_map` step tree by hand — these are
-  recursively nested and fragile to author; a single misplaced key and
-  the flow renders step 1 and silently never advances.
-- fake a multi-step flow with ONE `set`-stepped single spec (a spec that
-  tries to swap its own content via `set` actions). That is the exact
-  anti-pattern `start_flow` exists to prevent: it renders the first step
-  and dead-ends.
+HOW TO AUTHOR (think in states, not screens):
+  steps: a list. Each step has an `id`, a `kind`
+    (select | form | confirm | info), a title, its content
+    (options / fields / review rows), and where it goes next:
+      - `next: "<id>"`        → linear next step
+      - `branch: { "<optId>": "<id>" }` → branch on the picked option
+    A step with neither `next` nor `branch` is the TERMINAL step and
+    carries `complete` (what to do with the answers).
 
-`ask-user-questions` (above) is for a SHORT stepped Q&A that gathers a
-few answers in one bubble. `start_flow` is for a real branching,
-multi-screen flow with its own step tree. When in doubt for anything
-wizard-shaped, reach for `start_flow` — the descriptor is ~3 fields and
-Python owns the tree, so it renders correctly on the first try.
+  Actions make it a real mini-app, not just Q&A:
+    - per-step `actions`: buttons that call a tool/API mid-flow
+      (verb: call_binding | api | invoke_tool) without leaving the step.
+    - terminal `complete.action`:
+        chat        → hand the collected answers back to you (default)
+        call_binding→ write to the backend
+        create_pocket → materialize a permanent pocket from the answers
+        navigate / emit → go somewhere / raise an event
+        invoke_tool → run a tool with the answers
+                      (may be unavailable until the tool registry ships)
 
-If no `flow_type` template fits the request, say so plainly and gather
-the requirements with `ask-user-questions` instead — do NOT fall back to
-hand-authoring a chain tree.
+  Reference earlier answers with `{stepId.field}` (e.g.
+  `{pick_goal.label}`, `{enter_details.company}`) in review rows and
+  action args. The tool rewrites them correctly — you never write the
+  raw `{state.…_selection/_formData}` form.
+
+DO NOT hand-write a nested `chain` / `chain_map` tree, and do NOT fake a
+flow with a single `set`-stepped spec (that anti-pattern renders step 1
+and dead-ends). You describe the FLAT graph; Python owns the nesting and
+DEEP-VALIDATES it (it rejects dead-ends, dangling transitions, missing
+terminals, and unknown verbs with a precise error you can fix and retry).
+A flat graph cannot mis-nest — that is the whole point.
+
+`ask-user-questions` is ONLY for a trivial one-bubble Q&A (one or two
+quick questions, no branching, no actions, no DOING anything with the
+answers beyond reading them). The MOMENT the request has more than one
+screen, branches, an action, or a "then do X" — use `start_flow`.
+There is no longer a fixed template list to fit; describe the graph the
+request needs.
+
+STATE GRAMMAR — the primitives every flow composes from:
+  browse → select → collect → review → complete
+    select  : the user picks one option; branch the next state on it.
+    collect : a form gathers fields into the flow's accumulated answers.
+    review  : a confirm step plays the answers back before the hand-off.
+    complete: the terminal state DOES something with the answers.
+  Never dead-end a state with text: every non-terminal state has a
+  transition, every terminal state has a `complete`. (You can't violate
+  this even if you try — the builder rejects it.)
+
+SKELETON A — branching intake (collect, then hand answers to you):
+```
+{
+  "flow": "intake", "entry": "stage",
+  "steps": [
+    { "id": "stage", "kind": "select", "title": "Pick the stage",
+      "options": [ {"id":"early","label":"Early"}, {"id":"growth","label":"Growth"} ],
+      "branch": { "early": "fin", "growth": "fin" } },
+    { "id": "fin", "kind": "form", "slot": "financials", "title": "Snapshot",
+      "fields": [ {"id":"headline","label":"Headline metric","type":"text","required":true} ],
+      "next": "review" },
+    { "id": "review", "kind": "confirm", "title": "Review",
+      "review": [ {"label":"Stage","value":"{stage.label}"},
+                  {"label":"Metric","value":"{financials.headline}"} ],
+      "complete": { "action": "chat",
+                    "message": "Intake complete — please summarize." } }
+  ]
+}
+```
+
+SKELETON B — action-rich mini-app (validate mid-flow, create a pocket):
+```
+{
+  "flow": "client_setup", "entry": "plan",
+  "steps": [
+    { "id": "plan", "kind": "select", "title": "Plan",
+      "options": [ {"id":"starter","label":"Starter"}, {"id":"pro","label":"Pro"} ],
+      "next": "details" },
+    { "id": "details", "kind": "form", "title": "Company details",
+      "fields": [ {"id":"company","label":"Company","type":"text","required":true},
+                  {"id":"domain","label":"Domain","type":"url","required":true} ],
+      "actions": [ { "id":"verify","label":"Verify domain","verb":"call_binding",
+                     "binding":"dns_check","path":"/dns/check",
+                     "params":{"domain":"{details.domain}"} } ],
+      "next": "review" },
+    { "id": "review", "kind": "confirm", "title": "Confirm",
+      "review": [ {"label":"Company","value":"{details.company}"} ],
+      "complete": { "action": "create_pocket", "name": "{details.company} — Client",
+                    "template": "tracker", "seed_from_flow": true,
+                    "then": { "action": "navigate", "url": "/pockets/{result.id}" } } }
+  ]
+}
+```
 
 ---
 """
