@@ -94,3 +94,21 @@ class FileActionResponse(BaseModel):
     ok: bool
     path: str | None = None
     error: str | None = None
+
+
+class GitStatusEntry(BaseModel):
+    """A single file entry in git status output."""
+
+    path: str
+    status: str  # ' M' = modified unstaged, 'M ' = staged, '?? ' = untracked, etc.
+    # "modified", "staged", "untracked", "added", "deleted", "renamed"
+    label: str = "modified"
+
+
+class GitStatusResponse(BaseModel):
+    """Response for git status queries."""
+
+    branch: str | None = None
+    entries: list[GitStatusEntry] = []
+    is_git_repo: bool = False
+    error: str | None = None

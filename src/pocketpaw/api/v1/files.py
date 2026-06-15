@@ -11,11 +11,12 @@ from __future__ import annotations
 import io
 import logging
 import mimetypes
+import subprocess
 import urllib.parse
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
 from pocketpaw.api.deps import require_scope
@@ -24,6 +25,8 @@ from pocketpaw.api.v1.schemas.files import (
     CreateFileRequest,
     FileActionResponse,
     FileEntry,
+    GitStatusEntry,
+    GitStatusResponse,
     MkdirRequest,
     OpenPathRequest,
     OpenPathResponse,
@@ -501,3 +504,108 @@ async def write_file(req: WriteFileRequest):
         raise HTTPException(status_code=500, detail=f"Write failed: {exc}") from exc
 
     return {"ok": True, "path": str(resolved)}
+
+
+# ── Label mapping for git status porcelain codes ──────────────────────────
+_GIT_STATUS_LABELS: dict[str, str] = {
+    "M ": "staged",
+    " M": "modified",
+    "A ": "added",
+    " D": "deleted",
+    "D ": "deleted",
+    "R ": "renamed",
+    "??": "untracked",
+    "!!": "ignored",
+}
+
+
+@router.get("/git/status", response_model=GitStatusResponse)
+async def git_status(
+    path: str = Query("~", description="Directory to check git status in"),
+):
+    """Return git status (branch + changed files) for a workspace directory.
+
+    If the directory is not a git repository, returns ``is_git_repo=False``
+    with no error — the frontend shows a helpful message instead.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: path outside allowed directory",
+        )
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Path does not exist")
+
+    # Check if this is a git repository by looking for a .git directory
+    # walking up the tree from the requested path.
+    git_dir = resolved / ".git"
+    if not git_dir.exists():
+        # Walk up to find .git
+        parent = resolved.parent
+        while parent != parent.parent:
+            if (parent / ".git").exists():
+                git_dir = parent / ".git"
+                break
+            parent = parent.parent
+        else:
+            return GitStatusResponse(is_git_repo=False, branch=None, entries=[])
+
+    try:
+        # Get the current branch name
+        branch_result = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+
+        # Get the status in porcelain format
+        status_result = subprocess.run(
+            ["git", "-C", str(resolved), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        entries: list[GitStatusEntry] = []
+        if status_result.returncode == 0:
+            for line in status_result.stdout.splitlines():
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                code = line[:2]
+                file_path = line[3:].strip()
+                label = _GIT_STATUS_LABELS.get(code, "modified")
+                entries.append(GitStatusEntry(path=file_path, status=code, label=label))
+
+        return GitStatusResponse(
+            branch=branch,
+            entries=entries,
+            is_git_repo=True,
+        )
+
+    except subprocess.TimeoutExpired:
+        return GitStatusResponse(
+            is_git_repo=True,
+            error="Git operation timed out",
+        )
+    except FileNotFoundError:
+        return GitStatusResponse(
+            is_git_repo=True,
+            error="Git executable not found on server",
+        )
+    except Exception as exc:
+        logger.warning("git status failed: %s", exc)
+        return GitStatusResponse(
+            is_git_repo=True,
+            error=str(exc),
+        )
