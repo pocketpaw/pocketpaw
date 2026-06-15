@@ -1,19 +1,29 @@
 # tests/cloud/pockets/test_tool_executor.py — feat/invoke-tool-v1.
 # Created: 2026-06-15 — unit coverage for the UNLOCKED `tool_executor.run_tool`.
+# Updated: 2026-06-15 (v2) — the WRITE path now PROPOSES via Instinct instead of
+#   refusing. The old "write → code=blocked, execute never called" test is
+#   replaced by the v2 security rule: a WRITE-trust grant calls
+#   `propose_external_action` (right kwargs), does NOT call
+#   `connectors.service.execute` inline, and returns code="instinct_pending"
+#   with a proposed action_id. (risk R1 — the human still gates the write.)
 #
 # These tests exercise `run_tool` directly (no FastAPI / Mongo) and spy on the
-# connector service so they pin the load-bearing v1 security contract:
+# connector service + the external-action propose helper so they pin the
+# load-bearing security contract:
 #
-#   * THE security rule — a WRITE-trust connector grant NEVER calls
-#     `connectors.service.execute` and returns code="blocked". (risk R1.)
+#   * THE v2 security rule — a WRITE-trust connector grant PROPOSES (Instinct)
+#     and NEVER calls `connectors.service.execute` inline. (risk R1.)
 #   * a READ-trust grant fires `execute` and returns its data.
 #   * a tool name not on the allowlist → code="not_allowed" (fail-closed).
 #   * Gate 1 (bound), Gate 2 (trust lookup), malformed-grant, and CloudError
 #     mapping are all asserted.
 #
-# `run_tool` lazy-imports `connectors.service` inside `_run_connector_tool`, so
-# the patch target is `pocketpaw_ee.cloud.connectors.service.*` (the canonical
-# module object the import resolves to), matching the MCP server's test layout.
+# `run_tool` lazy-imports `connectors.service` inside `_run_connector_tool` and
+# `propose_external_action` inside `_propose_connector_write`, so the patch
+# targets are the canonical source modules the imports resolve to
+# (`pocketpaw_ee.cloud.connectors.service.*`,
+# `pocketpaw_ee.cloud.external_actions.propose.propose_external_action`),
+# matching the MCP server's test layout.
 
 from __future__ import annotations
 
@@ -53,19 +63,87 @@ def _write_trust(action: str = "create_issue") -> ConnectorActionInfo:
 
 
 # ---------------------------------------------------------------------------
-# THE security rule — a WRITE grant must NEVER reach execute()
+# THE v2 security rule — a WRITE grant PROPOSES via Instinct, NEVER fires inline
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_write_grant_never_calls_execute_and_is_blocked() -> None:
-    """RISK #1 — an unapproved write must be impossible in v1.
+async def test_write_grant_proposes_via_instinct_and_never_executes_inline() -> None:
+    """RISK #1 (v2) — an unapproved write must be impossible to fire inline.
 
-    A pocket allow-lists a WRITE connector action and the button fires it.
-    `connectors.service.execute` must be called ZERO times and the response
-    must carry code="blocked". This is the load-bearing invariant: because
-    execute() is trust-agnostic, a missing Gate 3 would silently run the write.
+    A pocket allow-lists a WRITE connector action and the button fires it. The
+    executor must:
+      * call `propose_external_action` with the right kwargs (the connector
+        name, the action, the resolved params, the clicking user, the pocket
+        scope) — filing a PENDING Instinct Action;
+      * call `connectors.service.execute` ZERO times (the human gates the write,
+        so it must NOT run inline);
+      * return code="instinct_pending" with the proposed action_id.
+
+    This is the load-bearing v2 invariant: because execute() is trust-agnostic,
+    a WRITE that reached it inline would run WITHOUT approval. Gate 3 routes it
+    to the propose-and-suspend path instead — the write only fires later, when a
+    human approves and the instinct router re-enters execute (covered by the
+    approve→execute integration test below + test_external_action_gate.py).
     """
+    tool = "connector:github:create_issue"
+    proposed_id = "act-pending-123"
+    with (
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.is_connector_bound_to_pocket",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.get_action_trust",
+            new=AsyncMock(return_value=_write_trust()),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.execute",
+            new=AsyncMock(),
+        ) as mock_execute,
+        patch(
+            "pocketpaw_ee.cloud.external_actions.propose.propose_external_action",
+            new=AsyncMock(return_value=proposed_id),
+        ) as mock_propose,
+    ):
+        result = await tool_executor.run_tool(
+            workspace_id=WS,
+            pocket_id=POCKET,
+            user_id=USER,
+            tool=tool,
+            args={"title": "needs a human to approve"},
+            allowed_tools=[tool],
+        )
+
+    # THE assertion #1: the write was PROPOSED, not fired.
+    mock_propose.assert_awaited_once()
+    kw = mock_propose.await_args.kwargs
+    assert kw["workspace_id"] == WS
+    assert kw["connector_name"] == "github"
+    assert kw["action"] == "create_issue"
+    assert kw["params"] == {"title": "needs a human to approve"}
+    assert kw["requested_by"] == USER
+    assert kw["scope"] == "pocket"
+    assert kw["pocket_id"] == POCKET
+
+    # THE assertion #2: execute was NEVER awaited inline — the human gates it.
+    mock_execute.assert_not_awaited()
+
+    # THE assertion #3: the pending wire shape carries the proposed action_id.
+    assert result["ok"] is True
+    assert result["code"] == "instinct_pending"
+    assert result["status"] == 202
+    assert result["tool"] == tool
+    assert result["proposed_action_id"] == proposed_id
+    assert result["response"]["action_id"] == proposed_id
+    assert result["response"]["status"] == "pending_approval"
+
+
+@pytest.mark.asyncio
+async def test_write_grant_propose_failure_maps_to_clean_wire_error() -> None:
+    """If `propose_external_action` raises (store down, etc.) the executor maps
+    it to a structured wire error (code="propose_failed") and STILL never fires
+    execute — a propose failure must not fall through to an inline write."""
     tool = "connector:github:create_issue"
     with (
         patch(
@@ -80,26 +158,23 @@ async def test_write_grant_never_calls_execute_and_is_blocked() -> None:
             "pocketpaw_ee.cloud.connectors.service.execute",
             new=AsyncMock(),
         ) as mock_execute,
+        patch(
+            "pocketpaw_ee.cloud.external_actions.propose.propose_external_action",
+            new=AsyncMock(side_effect=RuntimeError("instinct store unavailable")),
+        ),
     ):
         result = await tool_executor.run_tool(
             workspace_id=WS,
             pocket_id=POCKET,
             user_id=USER,
             tool=tool,
-            args={"title": "should never be created"},
+            args={"title": "x"},
             allowed_tools=[tool],
         )
 
-    # THE assertion: execute was never awaited.
-    mock_execute.assert_not_awaited()
     assert result["ok"] is False
-    assert result["code"] == "blocked"
-    assert result["tool"] == tool
-    assert "v2" in result["error"]
-    # The success-shaped response carries the blocked marker for the
-    # client's on_success handler to branch on.
-    assert result["response"]["blocked"] is True
-    assert result["response"]["executed"] is False
+    assert result["code"] == "propose_failed"
+    mock_execute.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
