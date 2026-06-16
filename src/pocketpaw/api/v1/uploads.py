@@ -22,12 +22,13 @@ from fastapi.responses import StreamingResponse
 
 from pocketpaw.api.deps import require_scope
 from pocketpaw.dashboard_auth import get_access_token
-from pocketpaw.uploads.config import INLINE_MIMES, UploadSettings
+from pocketpaw.uploads.config import INLINE_MIMES, SVG_MIME, UploadSettings
 from pocketpaw.uploads.errors import NotFound
 from pocketpaw.uploads.factory import build_adapter
 from pocketpaw.uploads.file_store import JSONLFileStore
 from pocketpaw.uploads.service import UploadService
 from pocketpaw.uploads.signing import DEFAULT_TTL_SECONDS, sign_grant
+from pocketpaw.uploads.svg_safety import svg_response_headers
 
 _OWNER = "local"  # OSS is single-user; all uploads are "owned" by the local user.
 
@@ -165,15 +166,18 @@ async def download(
         rec, it = await _SVC.stream(file_id, requester_id=_OWNER)
     except NotFound as e:
         raise HTTPException(status_code=404, detail="not found") from e
-    disposition = "inline" if rec.mime in INLINE_MIMES else "attachment"
-    return StreamingResponse(
-        it,
-        media_type=rec.mime,
-        headers={
+    # SVG is active content: force a download + a script-blocking CSP so a
+    # direct navigation to this URL can't execute embedded script. The logo
+    # still renders via <img src> (script-safe). See svg_response_headers.
+    if rec.mime == SVG_MIME:
+        headers = svg_response_headers(rec.filename)
+    else:
+        disposition = "inline" if rec.mime in INLINE_MIMES else "attachment"
+        headers = {
             "Content-Disposition": f'{disposition}; filename="{rec.filename}"',
             "X-Content-Type-Options": "nosniff",
-        },
-    )
+        }
+    return StreamingResponse(it, media_type=rec.mime, headers=headers)
 
 
 @router.delete("/{file_id}", status_code=204)

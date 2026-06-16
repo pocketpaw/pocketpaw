@@ -56,11 +56,12 @@ def test_upload_single_roundtrip(client: TestClient):
 
 
 def test_bulk_upload_partial_success(client: TestClient):
+    # image/tiff is a real image type that is NOT on the allow-list.
     r = client.post(
         "/api/v1/uploads",
         files=[
             ("files", ("good.png", PNG, "image/png")),
-            ("files", ("bad.svg", b"<svg/>", "image/svg+xml")),
+            ("files", ("bad.tiff", b"II*\x00rest", "image/tiff")),
         ],
     )
     assert r.status_code == 200
@@ -68,6 +69,49 @@ def test_bulk_upload_partial_success(client: TestClient):
     assert len(data["uploaded"]) == 1
     assert len(data["failed"]) == 1
     assert data["failed"][0]["code"] == "unsupported_mime"
+
+
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+
+
+def test_svg_roundtrip_is_served_safely(client: TestClient):
+    # Upload an SVG logo and confirm it (a) is accepted and (b) comes back
+    # with the XSS-safe headers: a download disposition, no sniffing, and a
+    # script-blocking CSP. An SVG must NEVER be served inline.
+    r = client.post(
+        "/api/v1/uploads",
+        files=[("files", ("logo.svg", SVG, "image/svg+xml"))],
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert len(data["uploaded"]) == 1
+    assert data["uploaded"][0]["mime"] == "image/svg+xml"
+    fid = data["uploaded"][0]["id"]
+
+    r2 = client.get(f"/api/v1/uploads/{fid}")
+    assert r2.status_code == 200
+    assert "attachment" in r2.headers["content-disposition"]
+    assert "inline" not in r2.headers["content-disposition"]
+    assert r2.headers["x-content-type-options"] == "nosniff"
+    csp = r2.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    assert "sandbox" in csp
+
+
+def test_svg_with_script_is_sanitized_on_serve(client: TestClient):
+    dirty = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">'
+        b"<script>alert(document.cookie)</script><rect/></svg>"
+    )
+    r = client.post(
+        "/api/v1/uploads",
+        files=[("files", ("evil.svg", dirty, "image/svg+xml"))],
+    )
+    fid = r.json()["uploaded"][0]["id"]
+    r2 = client.get(f"/api/v1/uploads/{fid}")
+    body = r2.content.lower()
+    assert b"<script" not in body
+    assert b"onload" not in body
 
 
 def test_delete_then_get_not_found(client: TestClient):
