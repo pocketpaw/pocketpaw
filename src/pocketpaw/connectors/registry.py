@@ -109,7 +109,7 @@ _NATIVE_COMM_CONNECTORS: set[str] = {
     "gmail",
     "gcalendar",
     "gdocs",
-    "drive",
+    "google_drive",
     "reddit",
     "spotify",
 }  # PR-3..7
@@ -156,7 +156,7 @@ def _create_native_adapter(connector_name: str) -> AnyAdapter | None:
                 from pocketpaw.connectors.adapters.gdocs import GoogleDocsConnector
 
                 return GoogleDocsConnector()
-            if connector_name == "drive":
+            if connector_name == "google_drive":
                 from pocketpaw.connectors.adapters.gdrive import GoogleDriveConnector
 
                 return GoogleDriveConnector()
