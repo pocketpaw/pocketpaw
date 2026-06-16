@@ -12,6 +12,8 @@
 #   - 2026-03-28: Added Fabric + Instinct enterprise tools (guarded by ee/ availability)
 #   - 2026-05-31: Added StartFlowTool — the RFC 13 M3 Chain Flow authoring tool
 #   - 2026-05-31: Added zero-config WeatherTool, WikiTool, CurrencyTool (no API key)
+#   - 2026-06-16: Added CodeModeTool — Programmatic Tool Calling v1 (read-only):
+#     the agent scripts N read-safe tool calls; only final stdout returns.
 
 import importlib as _importlib
 
@@ -90,6 +92,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "WeatherTool": (".weather", "WeatherTool"),
     "WikiTool": (".wiki", "WikiTool"),
     "CurrencyTool": (".currency", "CurrencyTool"),
+    # Code Mode — Programmatic Tool Calling v1 (read-only). Lives one package
+    # up in ``pocketpaw.tools.code_mode``; the ``..code_mode`` relative path
+    # resolves against this package's ``pocketpaw.tools.builtin`` anchor.
+    "CodeModeTool": ("..code_mode", "CodeModeTool"),
 }
 
 # Enterprise tools (require ee/ module) — guarded so community installs don't break.
