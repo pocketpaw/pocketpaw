@@ -52,6 +52,19 @@
 #   approval (it lands in their Instinct Tray and fires on approve) rather than
 #   running inline. `call_binding` remains the first reach for backend/connector
 #   data; `invoke_tool` is for a named tool/connector grant the owner allow-listed.
+# Modified: 2026-06-16 (feat/invoke-tool-v1 — close the in-chat approval loop)
+#   — added `_INSTINCT_TRAY_RULE`: when the agent renders the pending-Instinct-
+#   approvals view (the items `instinct_pending` returns), the Approve / Reject
+#   buttons MUST be bound to the backend Instinct decision routes as `api`
+#   actions — POST /api/v1/instinct/actions/{id}/approve and .../reject — so the
+#   HUMAN's click finalizes the decision directly (the backend re-validates
+#   workspace + params_hash + idempotency and fires the connector write via
+#   execute_approved_external_action). Explicitly NOT an `emit`/`chat.send`
+#   round-trip and NOT an autonomous agent verb — the user's click IS the
+#   approval, which is the whole point of the gate. Also teaches the Tray route:
+#   the pending-approvals list is at /deep-work, surfaced via a `navigate`
+#   button + referenced in the text guidance. Spliced into the assembled prompt
+#   after `_MULTI_STEP_FLOW_RULE` and added to the final self-check.
 
 from pocketpaw.ripple._design import USE_THE_WIDGET_RULE, WIDGET_CATALOG
 
@@ -526,6 +539,67 @@ SKELETON E — ACT ON CONNECTOR / BACKEND DATA (call_binding, NOT invoke_tool):
 """
 
 
+_INSTINCT_TRAY_RULE = """\
+# PENDING INSTINCT APPROVALS — BIND THE APPROVE BUTTON TO THE APPROVE ROUTE
+
+When you render the pending-approvals view (the items `instinct_pending`
+returns — connector writes and other actions awaiting the user's
+decision in the Instinct gate, a.k.a. The Tray), the Approve / Reject
+buttons MUST fire the decision DIRECTLY when the HUMAN clicks them. Do
+NOT wire them to `emit` / `chat.send` — a chat round-trip does not
+finalize anything (it just sends you a message), and there is NO agent
+verb that approves on its own. The user's click IS the approval; that is
+the whole point of the gate. You render the button; the human fires it.
+
+Each pending action has an `id`. Render its buttons as `api` actions to
+the backend Instinct routes (backend-relative paths — the `api` verb
+prepends the host + mints CSRF, so a `/api/v1/...` path is correct and an
+external URL would NOT work):
+
+  - Approve → POST `/api/v1/instinct/actions/{id}/approve`
+  - Reject  → POST `/api/v1/instinct/actions/{id}/reject`
+
+On approve, the backend re-validates the action (workspace + params_hash
++ idempotency) and fires the connector write itself — so a single human
+click finalizes it. Approve button shape (substitute the real action id):
+
+```
+{
+  "type": "button",
+  "props": { "label": "Approve", "variant": "primary" },
+  "on_click": {
+    "action": "api",
+    "url": "/api/v1/instinct/actions/{id}/approve",
+    "method": "POST",
+    "on_success": [
+      { "action": "toast", "message": "Approved — firing now", "variant": "success" }
+    ]
+  }
+}
+```
+
+Reject is the same with `url` ending `/reject` and a `warning` toast
+(e.g. "Rejected"). Render one Approve + one Reject per pending action
+(e.g. a row per item in a `flex`), each carrying that item's own id.
+
+THE TRAY LIVES AT /deep-work. When you offer an "Open Tray" / "see the
+full list" affordance, render it as a navigate button — NOT chat.send —
+and mention the route in your text so the user knows where the queue is:
+
+```
+{ "type": "button", "props": { "label": "Open Tray", "variant": "outline" },
+  "on_click": { "action": "navigate", "url": "/deep-work" } }
+```
+
+So the stance is: render an Approve button bound to the approve route so
+the user clicks to finalize, and point them to the Tray at /deep-work for
+the full list. Never tell the user you "can't approve from chat" and
+never approve on their behalf — bind the button and let them click.
+
+---
+"""
+
+
 _INLINE_RULES = """\
 # RULES
 
@@ -549,6 +623,8 @@ Final self-check before sending:
 ✔ flex/grid `gap` is tight for inline — numeric 2 or 4, not 10/12+
 ✔ Used a core widget, or called `get_inline_widget_help` BEFORE emitting the type
 ✔ Multi-step / wizard / intake flow → called `start_flow`, not a hand-authored or `set`-stepped spec
+✔ Pending Instinct approvals → Approve/Reject buttons `api`-POST the route, NOT chat.send
+✔ Open Tray affordance navigates to /deep-work (not a chat.send)
 ✔ Leads to a clear next step
 ✔ No static lists for open-ended queries
 ✔ Valid JSON, concrete values, one fence
@@ -565,6 +641,8 @@ INLINE_RIPPLE_SYSTEM_PROMPT = (
     + _INLINE_CORE_CATALOG
     + "\n"
     + _MULTI_STEP_FLOW_RULE
+    + "\n"
+    + _INSTINCT_TRAY_RULE
     + "\n"
     + _INLINE_RULES
 )
