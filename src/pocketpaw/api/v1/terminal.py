@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import logging
 import os
 import pty
+import re
 import select
 import signal
 import struct
+import subprocess
 import termios
 
 from fastapi import APIRouter
@@ -58,6 +61,9 @@ class ShellProcess:
         self._buf: list[bytes] = []
         self._buf_max = 256
         self._buf_size = 0
+        # Current working directory of the shell, tracked via PROMPT_COMMAND.
+        # Updated every prompt so the frontend can sync the file tree on cd.
+        self._cwd: str | None = None
 
     async def ensure_running(self) -> None:
         """Start the shell if not already running."""
@@ -117,6 +123,30 @@ class ShellProcess:
 
         logger.info("Terminal shell started (pid=%s)", self._proc.pid)
 
+        # Seed the initial CWD by reading /proc/<pid>/cwd (Linux) or
+        # using lsof (macOS). Fall back to $HOME.
+        try:
+            result = subprocess.run(
+                ["lsof", "-p", str(self._proc.pid), "-d", "cwd", "-Fn"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in result.stdout.split("\n"):
+                if line.startswith("fcwd") and line[5:].strip():
+                    self._cwd = line[5:].strip()
+                    break
+        except Exception:
+            pass
+        if not self._cwd:
+            self._cwd = os.environ.get("HOME", "/")
+
+        # Set PROMPT_COMMAND so every prompt outputs the CWD wrapped in
+        # \x1e (Record Separator, ASCII 30) markers. These are invisible
+        # in the terminal and stripped by _reader_loop before broadcast.
+        prompt_cmd = b'PROMPT_COMMAND=\'printf "\\x1ePAW_CWD:%s\\x1e" "$PWD"\'\n'
+        os.write(self._master_fd, prompt_cmd)
+
         # Start the reader task that pumps PTY output to subscribers.
         self._task = asyncio.create_task(self._reader_loop())
 
@@ -162,7 +192,22 @@ class ShellProcess:
                         text = None
 
                 if text:
-                    self._broadcast(text.encode("utf-8"))
+                    # Scan for CWD markers: \x1ePAW_CWD:/path\x1e
+                    # These are emitted by PROMPT_COMMAND on every prompt.
+                    # Strip them from output and update self._cwd.
+                    cwd_pattern = re.compile(r"\x1ePAW_CWD:([^\x1e]+)\x1e")
+                    cleaned_parts = []
+                    pos = 0
+                    for m in cwd_pattern.finditer(text):
+                        path = m.group(1)
+                        self._cwd = path
+                        self._broadcast_cwd(path)
+                        cleaned_parts.append(text[pos : m.start()])
+                        pos = m.end()
+                    cleaned_parts.append(text[pos:])
+                    cleaned = "".join(cleaned_parts)
+                    if cleaned:
+                        self._broadcast(cleaned.encode("utf-8"))
 
         except asyncio.CancelledError:
             pass
@@ -186,6 +231,21 @@ class ShellProcess:
                 dead.append(q)
         for q in dead:
             self._subscribers.remove(q)
+
+    def _broadcast_cwd(self, path: str) -> None:
+        """Push a CWD-change notification to all subscriber queues.
+
+        Uses a \x00 sentinel that the SSE generator detects and converts
+        to an ``event: cwd`` SSE frame. Sentinels are NOT buffered for
+        replay since they would be stale; the current ``_cwd`` is sent
+        to new subscribers on subscribe instead.
+        """
+        sentinel = f"\x00CWD:{path}\x00".encode()
+        for q in self._subscribers:
+            try:
+                q.put_nowait(sentinel)
+            except asyncio.QueueFull:
+                pass
 
     async def write(self, data: str | bytes) -> None:
         """Write data to the PTY master (the shell's stdin)."""
@@ -292,6 +352,15 @@ async def _sse_generator():
         # is live. The shell's prompt will follow as data events.
         yield "event: connected\ndata: {}\n\n"
 
+        # If the shell already has a CWD (previous session or initialised
+        # after bash started), send it immediately so the frontend can
+        # set the file tree root without waiting for the first prompt.
+        if _shell._cwd:
+            yield f"event: cwd\ndata: {json.dumps({'path': _shell._cwd})}\n\n"
+
+        # Pre-compile the CWD sentinel pattern for fast matching.
+        cwd_pattern = re.compile(r"\x00CWD:([^\x00]+)\x00")
+
         while True:
             try:
                 data = await asyncio.wait_for(queue.get(), timeout=30.0)
@@ -304,19 +373,15 @@ async def _sse_generator():
             if not data:
                 break
 
-            # Decode to text. Errors already handled in the reader loop,
-            # but guard here too.
-            try:
-                text = data.decode("utf-8")
-            except UnicodeDecodeError:
-                text = data.decode("utf-8", errors="replace")
+            # Check for CWD sentinel: \x00CWD:/path\x00
+            text = data.decode("utf-8", errors="replace")
+            cwd_match = cwd_pattern.match(text)
+            if cwd_match:
+                path = cwd_match.group(1)
+                yield f"event: cwd\ndata: {json.dumps({'path': path})}\n\n"
+                continue
 
-            # Send the raw data as a single SSE event so ANSI sequences and
-            # cursor positioning arrive intact. Do NOT split on newlines —
-            # xterm.js reassembles partial writes correctly.
-            #
-            # Escape the data field per the SSE spec: replace \n with
-            # \ndata: so multi-line output is valid SSE.
+            # Regular terminal output — send as unnamed data events.
             for line in text.split("\n"):
                 if line:
                     yield f"data: {line}\n"
