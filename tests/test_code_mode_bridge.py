@@ -42,7 +42,17 @@ class _EchoArgsTool(BaseTool):
 
     @property
     def parameters(self) -> dict[str, Any]:
-        return {"type": "object", "properties": {}, "required": []}
+        # Declares the tenancy params so the bridge will inject the resolved
+        # values — represents a tenancy-aware read tool (a future Fabric/KB read).
+        return {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "workspace_id": {"type": "string"},
+                "user_id": {"type": "string"},
+            },
+            "required": [],
+        }
 
     async def execute(self, **params: Any) -> str:
         return json.dumps(params, sort_keys=True, default=str)
@@ -133,6 +143,46 @@ async def test_tenancy_override_from_script_is_ignored():
     # The bridge forced the resolved tenancy; the script's value is discarded.
     assert echoed["workspace_id"] == "real-ws"
     assert echoed["user_id"] == "real-user"
+
+
+class _TenancyBlindTool(BaseTool):
+    """A read-safe tool that declares NO tenancy params (system_info-shaped)."""
+
+    @property
+    def name(self) -> str:
+        return "read_file"
+
+    @property
+    def description(self) -> str:
+        return "blind"
+
+    @property
+    def trust_level(self) -> str:
+        return "standard"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"path": {"type": "string"}}, "required": []}
+
+    async def execute(self, path: str = "") -> str:
+        # No **kwargs — an injected workspace_id would raise TypeError here.
+        return json.dumps({"path": path}, sort_keys=True)
+
+
+async def test_tenancy_not_injected_into_blind_tool():
+    # The bridge must NOT force-feed tenancy to a tool that doesn't declare it —
+    # the strict-signature tool would otherwise raise on an unexpected kwarg.
+    reg = ToolRegistry()
+    reg.register(_TenancyBlindTool())
+    cfg = BridgeConfig(workspace_id="real-ws", user_id="real-user", max_calls=10)
+    sock = _sock_path()
+    async with CodeModeBridge(reg, cfg, sock):
+        # Even a script-supplied workspace_id is stripped (never reaches the tool).
+        reply = await _rpc(sock, "read_file", {"path": "/x", "workspace_id": "EVIL"})
+    assert reply["ok"] is True, reply.get("error")
+    echoed = json.loads(reply["result"])
+    assert echoed == {"path": "/x"}
+    assert "workspace_id" not in echoed
 
 
 async def test_instinct_pending_result_rejected():

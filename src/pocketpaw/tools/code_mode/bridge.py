@@ -36,21 +36,41 @@ from pocketpaw.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
-# Tenancy keys a script must never set — the bridge owns these and re-injects
-# the runner-resolved values, ignoring whatever the script passed.
-_TENANCY_OVERRIDE_KEYS = ("workspace_id", "user_id")
+# Tenancy keys a script must never set — the bridge strips these and (for
+# workspace_id / user_id) re-injects the runner-resolved values, ignoring
+# whatever the script passed. ``pocket_id`` is stripped as a first-class tenancy
+# key too: no current read-safe tool takes it, but stripping it now means a
+# future allowlist addition can never accept a script-supplied pocket scope.
+_TENANCY_OVERRIDE_KEYS = ("workspace_id", "user_id", "pocket_id")
 
 # A single RPC frame ceiling (matches the stub's client-side guard).
 _MAX_FRAME = 8 * 1024 * 1024
+
+
+def _declared_param_names(tool: object) -> frozenset[str]:
+    """The param names a tool's JSON-schema definition declares.
+
+    Used to decide whether to inject a resolved tenancy key: a tool that doesn't
+    declare ``workspace_id`` would raise on an unexpected kwarg, so the bridge
+    only force-injects a key the tool actually accepts. Returns an empty set on
+    any malformed definition (fail safe — inject nothing)."""
+    try:
+        schema = tool.definition.parameters or {}  # type: ignore[attr-defined]
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        return frozenset(props.keys())
+    except Exception:  # noqa: BLE001 — a broken definition shouldn't break dispatch
+        return frozenset()
 
 
 @dataclass
 class BridgeConfig:
     """Per-run bridge configuration resolved by the runner.
 
-    ``workspace_id`` / ``user_id`` are the RESOLVED tenancy the bridge forces
-    onto every call — the script's own values are discarded. ``max_calls`` caps
-    the number of in-script tool calls per run.
+    ``workspace_id`` / ``user_id`` are the RESOLVED tenancy. The bridge ALWAYS
+    strips any script-supplied tenancy key, and re-injects a resolved value only
+    for a key the target tool's schema declares — so a tenancy-blind read-safe
+    tool never receives an unexpected kwarg. ``max_calls`` caps the number of
+    in-script tool calls per run.
     """
 
     workspace_id: str = ""
@@ -171,13 +191,18 @@ class CodeModeBridge:
             self._state.rejected.append(name)
             return {"ok": False, "error": f"tool '{name}' is not read-safe (blocked in code mode)"}
 
-        # GATE 4 — tenancy lock. Strip any script-supplied tenancy override and
-        # force the runner-resolved values. A script can NEVER widen its own
-        # tenancy by passing workspace_id/user_id.
+        # GATE 4 — tenancy lock. ALWAYS strip any script-supplied tenancy key
+        # (the security guarantee — a script can never widen its own scope). Then
+        # re-inject the runner-resolved value ONLY for a key the tool's schema
+        # actually DECLARES — most read-safe builtins (system_info, weather, …)
+        # take no tenancy param and would raise on an unexpected kwarg, so we
+        # never force-feed one. A tenancy-aware tool (a future Fabric/KB read)
+        # gets the resolved value; the script's own value is discarded either way.
         safe_args = {k: v for k, v in args.items() if k not in _TENANCY_OVERRIDE_KEYS}
-        if self._config.workspace_id:
+        declared = _declared_param_names(tool)
+        if self._config.workspace_id and "workspace_id" in declared:
             safe_args["workspace_id"] = self._config.workspace_id
-        if self._config.user_id:
+        if self._config.user_id and "user_id" in declared:
             safe_args["user_id"] = self._config.user_id
 
         # Dispatch through the EXISTING registry chokepoint — policy + audit +

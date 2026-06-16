@@ -38,11 +38,16 @@ _READ_SAFE_TRUST = frozenset({"standard"})
 # no state mutation, no human-approval gating. An entry must ALSO pass the
 # trust ceiling to be exposed; the two gates are AND-ed.
 #
-# Deliberately conservative for v1. fabric_query / kb_search are NOT here:
-# fabric_query carries trust_level "high" (fails the ceiling) and there is no
-# registered standard-trust kb_search tool. Exposing a true read-only Fabric/KB
-# surface in code mode is a v2 item that needs an action-level read classifier
-# (the connectors ``is_read`` flag) — out of scope for this gate.
+# v1 SURFACE = generic read-safe builtins ONLY. Deliberately conservative.
+# fabric_query / kb_search / connector reads are NOT here and are a v2 item:
+#   * fabric_query carries trust_level "high" BY DESIGN — it emits message-bus
+#     trace events (a real side effect), so it correctly fails the ceiling.
+#   * there is no registered standard-trust kb_search tool (KB search is a
+#     KnowledgeBase method, not a registered ToolProtocol tool).
+#   * connector reads are classified at the ACTION level (the connectors
+#     ``is_read`` flag), not the tool level — code mode can't see that yet.
+# Exposing a true read-only Fabric/KB/connector surface in code mode needs an
+# action-level read classifier — out of scope for this tool-level gate.
 READ_SAFE_TOOL_NAMES = frozenset(
     {
         # Filesystem reads (jailed by the tools themselves).

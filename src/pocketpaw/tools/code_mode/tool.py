@@ -44,6 +44,14 @@ def _build_read_safe_registry() -> ToolRegistry:
     NEVER in the builtin lazy map's read-safe survivors (it isn't on the
     allowlist), so a nested code_mode is structurally impossible — the stub for
     it is never generated and the bridge would reject it anyway.
+
+    v1 SURFACE: this candidate pool is ``_LAZY_IMPORTS`` — the generic OSS
+    builtins only. EE tools (fabric_query, instinct_*, …) live in a SEPARATE map
+    (``_EE_NAMES``), which we deliberately do NOT iterate, so they never enter
+    the pool. The read-safe gate's trust ceiling is the second layer that would
+    reject them anyway (fabric_query is trust "high" by design — it emits bus
+    trace events, a real side effect). Fabric/KB/connector reads in code mode are
+    a v2 item: they need an action-level read classifier, not a tool-level trust.
     """
     from pocketpaw.tools.builtin import _LAZY_IMPORTS
 
@@ -125,6 +133,8 @@ class CodeModeTool(BaseTool):
         script: str,
         timeout_s: int = DEFAULT_TIMEOUT_S,
         max_calls: int = DEFAULT_MAX_CALLS,
+        workspace_id: str | None = None,
+        user_id: str | None = None,
         **_extra: Any,
     ) -> str:
         if not script or not script.strip():
@@ -134,10 +144,21 @@ class CodeModeTool(BaseTool):
         timeout = min(int(timeout_s) if timeout_s else DEFAULT_TIMEOUT_S, _TIMEOUT_CEILING_S)
         calls = min(int(max_calls) if max_calls else DEFAULT_MAX_CALLS, _MAX_CALLS_CEILING)
 
-        # Resolve tenancy from the runner-injected env (the bridge forces these
-        # onto every tool call; a script can never override them). NON-secret.
-        workspace_id = os.environ.get("POCKETPAW_WORKSPACE_ID", "")
-        user_id = os.environ.get("POCKETPAW_USER_ID", "")
+        # Resolve tenancy: explicit caller-supplied values win (a web-request
+        # context that has the workspace/user in hand passes them directly),
+        # falling back to the runner-injected env (set when the agent runs as a
+        # subprocess). The bridge forces whatever resolves here onto every tool
+        # call; a script can never override it. These are NON-secret identifiers.
+        workspace_id = workspace_id or os.environ.get("POCKETPAW_WORKSPACE_ID", "")
+        user_id = user_id or os.environ.get("POCKETPAW_USER_ID", "")
+        if not workspace_id and not user_id:
+            # Blank tenancy is legitimate for local/OSS single-tenant runs, but
+            # in a multi-tenant context it means the bridge will pass empty
+            # scope — make that visible so a mis-wired call surfaces in logs.
+            logger.debug(
+                "code_mode: running with blank tenancy (no workspace_id/user_id "
+                "from caller or env) — read-safe tools will scope to the default tenant"
+            )
 
         registry = _build_read_safe_registry()
 

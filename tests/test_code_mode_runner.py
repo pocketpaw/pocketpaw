@@ -137,8 +137,20 @@ for i in range(5):
 
 async def test_tenancy_threaded_to_bridge():
     # The runner-resolved workspace_id reaches the tool, not anything the script
-    # passes. _ReadTool ignores it, so use a tool that echoes tenancy.
+    # passes. The tool must DECLARE workspace_id for the bridge to inject it
+    # (a tenancy-blind tool never gets force-fed one).
     class _EchoTenancy(_ReadTool):
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "workspace_id": {"type": "string"},
+                },
+                "required": ["path"],
+            }
+
         async def execute(self, path: str = "", workspace_id: str = "", **_e: Any) -> str:
             return f"WS={workspace_id}"
 
@@ -166,3 +178,60 @@ print("LEAKED:" + ",".join(sorted(leaked)))
     result = await run_code_mode(registry=_registry(), script=script, timeout_s=15)
     assert result.exit_code == 0, result.stderr
     assert result.stdout.strip() == "LEAKED:"
+
+
+async def test_secret_scrub_covers_fernet_jwt_bearer(monkeypatch):
+    monkeypatch.setenv("FERNET_KEYS", "x")  # also matches KEY, belt-and-braces
+    monkeypatch.setenv("MY_JWT_THING", "y")
+    monkeypatch.setenv("BEARER_HEADER", "z")
+    script = """
+import os
+leaked = [k for k in os.environ if k in ("FERNET_KEYS", "MY_JWT_THING", "BEARER_HEADER")]
+print("LEAKED:" + ",".join(sorted(leaked)))
+"""
+    result = await run_code_mode(registry=_registry(), script=script, timeout_s=15)
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.strip() == "LEAKED:"
+
+
+async def test_home_redirected_to_throwaway_dir():
+    # HOME must NOT be the host user's home — it points at the run's work_dir.
+    import os
+
+    host_home = os.environ.get("HOME", "")
+    script = """
+import os
+print("HOME=" + os.environ.get("HOME", ""))
+"""
+    result = await run_code_mode(registry=_registry(), script=script, timeout_s=15)
+    assert result.exit_code == 0, result.stderr
+    child_home = result.stdout.strip().removeprefix("HOME=")
+    assert child_home != host_home
+    assert "pocketpaw-code-mode" in child_home
+
+
+async def test_fallback_socket_is_cleaned_up(monkeypatch):
+    # Force the pathological-path branch in _socket_path so the socket lands
+    # OUTSIDE work_dir (under the temp root), then assert the finally block
+    # unlinks it — no stale socket leaks. Use a SHORT temp-root path so the
+    # AF_UNIX length limit (~104 chars) isn't hit by the test itself.
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    from pocketpaw.tools.code_mode import runner as runner_mod
+
+    captured: dict[str, str] = {}
+    fallback = str(Path(tempfile.gettempdir()) / f"pcm-test-{uuid.uuid4().hex[:8]}.sock")
+
+    def _force_fallback(work_dir: Path) -> str:
+        captured["path"] = fallback
+        return fallback
+
+    monkeypatch.setattr(runner_mod, "_socket_path", _force_fallback)
+    script = "print('done')"
+    result = await run_code_mode(registry=_registry(), script=script, timeout_s=15)
+    assert result.exit_code == 0, result.stderr
+    # The fallback socket must be gone after the run.
+    assert "path" in captured
+    assert not Path(captured["path"]).exists()

@@ -44,13 +44,16 @@ DEFAULT_STDOUT_CAP = 12_000
 # the child only needs the tenancy vars + the socket path we add back.
 _SECRET_PATTERNS = re.compile(
     r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|PRIVATE|SESSION|COOKIE|"
-    r"API|DSN|CONN|DATABASE_URL|MONGO|REDIS|SLACK|STRIPE|OPENAI|ANTHROPIC|GITHUB)",
+    r"API|DSN|CONN|DATABASE_URL|MONGO|REDIS|SLACK|STRIPE|OPENAI|ANTHROPIC|GITHUB|"
+    r"FERNET|JWT|BEARER)",
     re.IGNORECASE,
 )
 
 # A minimal env allowlist the child keeps regardless of the secret scrub — the
-# bare-minimum to run a Python interpreter on a clean PATH.
-_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PYTHONHASHSEED")
+# bare-minimum to run a Python interpreter on a clean PATH. HOME is deliberately
+# NOT inherited: it's replaced with the throwaway work_dir below so the child
+# can't read the host user's home (dotfiles, caches, credential stores).
+_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PYTHONHASHSEED")
 
 # Env var the stub reads to find the bridge socket.
 _SOCKET_ENV = "PAW_CODE_MODE_SOCKET"
@@ -68,7 +71,7 @@ class CodeModeResult:
     rejected_calls: list[str]
 
 
-def _scrub_env(workspace_id: str, user_id: str) -> dict[str, str]:
+def _scrub_env(workspace_id: str, user_id: str, work_dir: Path) -> dict[str, str]:
     """Build the SECRET-SCRUBBED child env.
 
     Start from the keep-list (PATH etc.), then add the runner-resolved tenancy.
@@ -81,6 +84,9 @@ def _scrub_env(workspace_id: str, user_id: str) -> dict[str, str]:
         val = os.environ.get(key)
         if val is not None and not _SECRET_PATTERNS.search(key):
             base[key] = val
+    # HOME points at the throwaway work_dir, never the host user's home — so a
+    # script can't read ~/.aws, ~/.config, credential stores, or shell history.
+    base["HOME"] = str(work_dir)
     # Thread tenancy so any in-process store the bridge dispatches to scopes
     # correctly. These are NON-secret identifiers.
     if workspace_id:
@@ -145,7 +151,7 @@ async def run_code_mode(
         script_path = work_dir / "script.py"
         script_path.write_text(script, encoding="utf-8")
 
-        child_env = _scrub_env(workspace_id, user_id)
+        child_env = _scrub_env(workspace_id, user_id, work_dir)
         child_env[_SOCKET_ENV] = sock_path
         # The child imports ``paw_tools`` — work_dir must be on its path. cwd is
         # work_dir so a bare ``import paw_tools`` resolves without PYTHONPATH
@@ -200,7 +206,12 @@ async def run_code_mode(
                 rejected_calls=bridge.rejected_calls,
             )
     finally:
-        # ALWAYS clean up the throwaway dir (and the socket inside it).
+        # ALWAYS clean up. The socket usually lives inside work_dir (removed by
+        # the rmtree below), but the pathological-path fallback in _socket_path
+        # puts it under the temp root, OUTSIDE work_dir — unlink it explicitly so
+        # that branch never leaks a stale socket.
+        with _suppress():
+            Path(sock_path).unlink(missing_ok=True)
         with _suppress():
             shutil.rmtree(work_dir, ignore_errors=True)
 
