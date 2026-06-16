@@ -35,7 +35,7 @@ class GoogleDriveConnector:
 
     @property
     def name(self) -> str:
-        return "drive"
+        return "google_drive"
 
     @property
     def display_name(self) -> str:

@@ -5,6 +5,9 @@
 #   ``state`` (provider:service:user_id); the callback parses it back out and
 #   stores tokens in that user's bucket (VIP Onboarding Phase B). Omitting
 #   user_id keeps the shared single-user flow (state stays provider:service).
+# 2026-06-16: callback now auto-connects the corresponding connector in the
+#   registry so the connector shows up as "connected" after OAuth completes.
+#   Also added OAUTH_TO_CONNECTOR mapping so the correct connector_name is used.
 
 from __future__ import annotations
 
@@ -33,6 +36,17 @@ OAUTH_SCOPES: dict[str, list[str]] = {
         "playlist-modify-public",
         "playlist-modify-private",
     ],
+}
+
+# Map OAuth service names to connector names in the registry.
+# When OAuth completes for a service, the corresponding connector is
+# auto-connected so the registry knows it's active.
+OAUTH_TO_CONNECTOR: dict[str, str] = {
+    "google_gmail": "gmail",
+    "google_calendar": "gcalendar",
+    "google_drive": "google_drive",
+    "google_docs": "gdocs",
+    "spotify": "spotify",
 }
 
 
@@ -99,7 +113,12 @@ async def oauth_callback(
     state: str = Query(""),
     error: str = Query(""),
 ):
-    """OAuth callback — exchanges auth code for tokens."""
+    """OAuth callback — exchanges auth code for tokens and auto-connects the connector.
+
+    After saving tokens, the corresponding connector is registered in the
+    connector registry (via ``registry.connect()``) so it shows as "connected"
+    in the UI and the agent can use it without a separate connect step.
+    """
     from fastapi.responses import HTMLResponse
 
     if error:
@@ -142,6 +161,25 @@ async def oauth_callback(
             scopes=scopes,
             user_id=user_id,
         )
+
+        # Auto-connect the corresponding connector in the registry so the
+        # connector shows as "connected" without a separate /connectors/connect
+        # call. This bridges the gap between the OAuth token store and the
+        # connector registry's state store.
+        connector_name = OAUTH_TO_CONNECTOR.get(service)
+        if connector_name:
+            try:
+                from pocketpaw.api.v1.connectors import _get_registry
+
+                reg = _get_registry()
+                await reg.connect("default", connector_name, {"scope": " ".join(scopes)})
+            except Exception as exc:
+                logger.warning(
+                    "Auto-connect failed for %s (connector %s): %s",
+                    service,
+                    connector_name,
+                    exc,
+                )
 
         return HTMLResponse(
             "<h2>Authorization Successful</h2>"
