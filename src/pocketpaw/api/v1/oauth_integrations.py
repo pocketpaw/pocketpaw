@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -190,3 +191,48 @@ async def oauth_callback(
     except Exception as e:
         logger.error("OAuth callback error: %s", e)
         return HTMLResponse(f"<h2>OAuth Error</h2><p>{e}</p>")
+
+
+class OAuthDisconnectRequest(BaseModel):
+    """Request to disconnect an OAuth service."""
+
+    service: str
+    pocket_id: str = "default"
+
+
+@router.post("/oauth/integrations/disconnect")
+async def oauth_disconnect(req: OAuthDisconnectRequest):
+    """Disconnect an OAuth service — delete tokens + disconnect the connector.
+
+    Returns the oauth_status dict so the frontend can update immediately.
+    """
+    if req.service not in OAUTH_SCOPES:
+        raise HTTPException(status_code=400, detail=f"Unknown service: {req.service}")
+
+    try:
+        from pocketpaw.clients.token_store import TokenStore
+
+        # Delete OAuth tokens.
+        store = TokenStore()
+        store.delete(req.service)
+
+        # Disconnect the corresponding connector from the registry.
+        connector_name = OAUTH_TO_CONNECTOR.get(req.service)
+        if connector_name:
+            try:
+                from pocketpaw.api.v1.connectors import _get_registry
+
+                reg = _get_registry()
+                await reg.disconnect(req.pocket_id, connector_name)
+            except Exception as exc:
+                logger.warning(
+                    "OAuth disconnect: failed to disconnect connector %s: %s",
+                    connector_name,
+                    exc,
+                )
+
+        logger.info("Disconnected OAuth service %s", req.service)
+        return {"success": True, "service": req.service}
+    except Exception as e:
+        logger.error("OAuth disconnect error: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
