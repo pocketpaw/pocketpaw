@@ -41,6 +41,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, field_validator
 
+from pocketpaw.instinct.store import AuditChainError
+
 logger = logging.getLogger(__name__)
 
 # Subprocess timeout for the claude CLI call (seconds). A hung CLI must never
@@ -59,7 +61,16 @@ _MIN_CONFIDENCE = 0.75
 
 
 class TriageVerdict(StrEnum):
-    """The classifier's verdict on a single proposed action."""
+    """The classifier's verdict on a single proposed action.
+
+    v1 has NO auto-reject: only ``APPROVE`` auto-approves; every other verdict
+    routes the action to the human. ``DENY`` is retained in the enum (and parsed
+    if a model still emits it) but is treated exactly like ``ESCALATE`` — the
+    orchestration only acts on ``APPROVE``, so a ``DENY`` action still reaches
+    the human, never silently killed. The prompt (``build_prompt``) only offers
+    APPROVE / ESCALATE so the model's vocabulary matches this behaviour; a future
+    slice that adds a real auto-reject path can give ``DENY`` distinct semantics.
+    """
 
     APPROVE = "APPROVE"
     DENY = "DENY"
@@ -72,12 +83,13 @@ class ApprovalLevel(StrEnum):
     Modelled on Claude Code permission modes:
 
     * ``ASK`` — triager OFF. Every action → human. Byte-for-byte today's
-      behaviour; the triager is never invoked.
-    * ``TRIAGE`` — the default. Auto-approve routine actions the classifier is
-      confident about; escalate everything else.
+      behaviour; the triager is never invoked. THIS IS THE DEFAULT — the
+      feature is off until a workspace explicitly opts in (PRD: off-by-default).
+    * ``TRIAGE`` — auto-approve routine actions the classifier is confident
+      about; escalate everything else. Opt-in.
     * ``TRUSTED`` — a wider auto-approve appetite (the prompt tells the model to
       lean approve on borderline-but-safe actions). Rule-flagged actions are
-      STILL never auto-approvable, exactly as at ``TRIAGE``.
+      STILL never auto-approvable, exactly as at ``TRIAGE``. Opt-in.
     """
 
     ASK = "ASK"
@@ -88,7 +100,10 @@ class ApprovalLevel(StrEnum):
 # Env override for the default workspace approval level (a real per-workspace
 # setting store is a later slice; this keeps v1 configurable + testable).
 _LEVEL_ENV = "POCKETPAW_INSTINCT_APPROVAL_LEVEL"
-_DEFAULT_LEVEL = ApprovalLevel.TRIAGE
+# OFF BY DEFAULT (PRD): with no explicit workspace / pocket / env setting the
+# triager is NOT invoked and every action goes to the human — today's behaviour.
+# A workspace must opt in to TRIAGE / TRUSTED to turn auto-approval on.
+_DEFAULT_LEVEL = ApprovalLevel.ASK
 
 
 def resolve_approval_level(
@@ -99,11 +114,11 @@ def resolve_approval_level(
     """Resolve the effective approval level for an action.
 
     Precedence (most specific wins): per-pocket override → per-workspace
-    setting → ``POCKETPAW_INSTINCT_APPROVAL_LEVEL`` env → ``TRIAGE`` default.
-    An unrecognised value anywhere falls through to the next source rather than
-    raising — a misconfiguration must never crash the propose path, and the
-    safe direction is "less auto-approval", so a bad value never silently
-    escalates trust.
+    setting → ``POCKETPAW_INSTINCT_APPROVAL_LEVEL`` env → ``ASK`` default
+    (off — the triager is not invoked). An unrecognised value anywhere falls
+    through to the next source rather than raising — a misconfiguration must
+    never crash the propose path, and the safe direction is "less
+    auto-approval", so a bad value never silently escalates trust.
     """
     for candidate in (pocket_level, workspace_level, os.environ.get(_LEVEL_ENV)):
         level = _coerce_level(candidate)
@@ -120,6 +135,14 @@ def _coerce_level(value: str | ApprovalLevel | None) -> ApprovalLevel | None:
     try:
         return ApprovalLevel(str(value).strip().upper())
     except ValueError:
+        # An unrecognised level is ignored (we fall through to the next, safer
+        # source). Log it so a typo'd setting doesn't silently disable the
+        # feature with no trace.
+        logger.warning(
+            "ignoring unrecognised instinct approval level %r — falling through "
+            "to the next configured source",
+            value,
+        )
         return None
 
 
@@ -253,6 +276,29 @@ class _DemoMockTriagerLlm:
 # Prompt
 # ---------------------------------------------------------------------------
 
+# Per-field cap on the prose / JSON blobs interpolated into the prompt. These
+# fields are agent- and (transitively) end-user-controlled, so they are a
+# prompt-injection surface — truncating each one bounds how much untrusted text
+# can try to steer the classifier. The deterministic gates (ASK / rule_flagged /
+# confidence floor) and the fail-safe ESCALATE remain the real guarantees; this
+# just shrinks the attack surface.
+_PROSE_CAP = 500
+
+
+def _truncate(value: Any, cap: int = _PROSE_CAP) -> str:
+    """Render ``value`` as a string and cap its length for prompt interpolation.
+
+    Dicts / lists are JSON-serialized first (so a parked blob / trace stays
+    readable); everything else is ``str()``-ed. Over-cap text is clipped with a
+    visible ``…[truncated]`` marker so the model knows it isn't the whole thing."""
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, indent=2, default=str)
+    else:
+        text = str(value)
+    if len(text) > cap:
+        return text[:cap] + " …[truncated]"
+    return text
+
 
 def build_prompt(context: TriageContext, level: ApprovalLevel) -> str:
     """Assemble the single classification prompt.
@@ -261,7 +307,11 @@ def build_prompt(context: TriageContext, level: ApprovalLevel) -> str:
     policy. The approval level tunes the appetite. The model is told that a
     rule-flagged action is never approvable (defence in depth — the
     deterministic gate already short-circuits those before this prompt is
-    built, but stating it keeps the model aligned)."""
+    built, but stating it keeps the model aligned).
+
+    The agent-controlled prose fields (title / description / recommendation /
+    parked blob / reasoning trace / fabric snapshots) are each truncated via
+    ``_truncate`` before interpolation to bound the prompt-injection surface."""
     appetite = {
         ApprovalLevel.TRIAGE: (
             "Auto-approve ONLY routine, low-risk, clearly-within-policy actions you are "
@@ -276,7 +326,7 @@ def build_prompt(context: TriageContext, level: ApprovalLevel) -> str:
 
     return f"""You are the TRIAGER — a fast approval classifier that sits between an AI agent's \
 proposed action and a human reviewer. You decide whether a proposed action is safe to \
-auto-approve, must be denied, or must be escalated to the human.
+auto-approve, or must be escalated to the human.
 
 You are judged on SAFETY, not throughput. A wrong auto-approval is far worse than an \
 unnecessary escalation. When uncertain, ESCALATE.
@@ -285,32 +335,33 @@ unnecessary escalation. When uncertain, ESCALATE.
 {appetite}
 
 == ABSOLUTE RULE ==
-If the action matches any standing rule whose action is "require_approval" (escalate) or \
-"block", you MUST NOT auto-approve it — return ESCALATE (or DENY for a blocked action). \
-This is non-negotiable regardless of appetite.
+If the action matches any standing rule whose action is "require_approval" or "block", \
+you MUST NOT auto-approve it — return ESCALATE. This is non-negotiable regardless of \
+appetite.
 
 == STANDING INSTINCT RULES (the pocket's policy, verbatim) ==
-{json.dumps(context.instinct_rules, indent=2) or "(none)"}
+{_truncate(context.instinct_rules) if context.instinct_rules else "(none)"}
 
 == PROPOSED ACTION ==
-title: {context.title}
-description: {context.description}
-recommendation: {context.recommendation}
-parked operation: {json.dumps(context.parked_blob, indent=2) or "(none)"}
+title: {_truncate(context.title)}
+description: {_truncate(context.description)}
+recommendation: {_truncate(context.recommendation)}
+parked operation: {_truncate(context.parked_blob) if context.parked_blob else "(none)"}
 
 == AGENT REASONING TRACE ==
-{json.dumps(context.reasoning_trace, indent=2) or "(none)"}
+{_truncate(context.reasoning_trace) if context.reasoning_trace else "(none)"}
 
 == FABRIC SNAPSHOTS (decision-time state) ==
-{json.dumps(context.fabric_snapshots, indent=2) or "(none)"}
+{_truncate(context.fabric_snapshots) if context.fabric_snapshots else "(none)"}
 
 == OUTPUT (STRICT) ==
 Reply with STRICT JSON only — no prose, no markdown fences, no commentary:
-{{"verdict": "APPROVE" | "DENY" | "ESCALATE", "reasoning": "<one or two sentences>", \
+{{"verdict": "APPROVE" | "ESCALATE", "reasoning": "<one or two sentences>", \
 "confidence": <0.0-1.0>}}
-Use APPROVE only when you are confident the action is routine and within policy. Use DENY \
-when the action clearly violates policy and should not even reach the human as a live \
-option. Use ESCALATE for anything novel, risky, uncertain, or rule-flagged."""
+Use APPROVE only when you are confident the action is routine and within policy. Use \
+ESCALATE for anything novel, risky, uncertain, or rule-flagged — the human reviews it. \
+(This v1 has no auto-reject: even a clearly-bad action is ESCALATE'd, never silently \
+killed, so the human always sees it.)"""
 
 
 # ---------------------------------------------------------------------------
@@ -455,12 +506,36 @@ async def maybe_auto_approve(
     if decision.verdict != TriageVerdict.APPROVE:
         return TriageOutcome(auto_approved=False, action=action, decision=decision)
 
-    approved = await store.auto_approve(
-        str(getattr(action, "id", "")),
-        verdict=decision.verdict.value,
-        reasoning=decision.reasoning,
-        confidence=decision.confidence,
-    )
+    try:
+        approved = await store.auto_approve(
+            str(getattr(action, "id", "")),
+            verdict=decision.verdict.value,
+            reasoning=decision.reasoning,
+            confidence=decision.confidence,
+        )
+    except AuditChainError:
+        # The tamper-evident ledger append failed — the store rolled the status
+        # flip back, so the action is still PENDING. This is NOT a routine
+        # fail-safe (an LLM timeout): the audit ledger is the governance
+        # guarantee, and a chain write that fails is a ledger-integrity event.
+        # Log LOUD at ERROR (distinct from the LLM-failure WARNING) and fall
+        # through to the human path with the original action — we never claim an
+        # auto-approval that wasn't audited.
+        logger.error(
+            "auto-approve ABORTED for action=%s (workspace=%s): the audit ledger "
+            "append failed — action left PENDING for the human. This is a "
+            "ledger-integrity event, not an LLM failure.",
+            context.action_id,
+            context.workspace_id,
+            exc_info=True,
+        )
+        return TriageOutcome(
+            auto_approved=False,
+            action=action,
+            decision=_escalate(
+                "Auto-approve aborted: audit ledger append failed — escalating to the human."
+            ),
+        )
     if approved is None:
         # The action was not in PENDING (a concurrent path already resolved it)
         # — do not claim an auto-approval. Fall through to the human path with

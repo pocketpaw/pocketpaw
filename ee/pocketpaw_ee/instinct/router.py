@@ -8,14 +8,21 @@
 #   hash-chained ``action_auto_approved`` ledger row with the triager's verdict +
 #   reasoning, ``actor="system:triager"``) and emits the same Decision-Graph
 #   chain events a human approval emits, then returns the auto-approved Action so
-#   the human is not notified. On ESCALATE / DENY — and at the ``ASK`` approval
-#   level, where the classifier is never invoked — the original proposal is
-#   returned unchanged and the route falls through to the existing human path
-#   byte-for-byte. The hook is fail-safe (any triager error → ESCALATE) and
-#   best-effort (a wiring failure can never break the propose response). The
-#   classifier reuses the mandate-foreman ``ClaudeCliLlm`` shell-out pattern
-#   (``claude -p --output-format json``) — agent mode has NO ANTHROPIC_API_KEY,
-#   so ``AsyncAnthropic`` is deliberately NOT used.
+#   the human is not notified. Otherwise the original proposal is returned
+#   unchanged and the route falls through to the existing human path
+#   byte-for-byte. The feature is OFF BY DEFAULT: the approval level defaults to
+#   ``ASK`` (triager not invoked) until a workspace opts in to TRIAGE / TRUSTED.
+#   The hook is fail-safe (any triager error / low confidence → ESCALATE; v1 has
+#   no auto-reject, so a bad action is escalated, never silently killed) and
+#   best-effort — a wiring failure can never break the propose response, and an
+#   audit-ledger failure (``AuditChainError``) is logged LOUD at ERROR and leaves
+#   the proposal PENDING. The classifier reuses the mandate-foreman
+#   ``ClaudeCliLlm`` shell-out pattern (``claude -p --output-format json``) —
+#   agent mode has NO ANTHROPIC_API_KEY, so ``AsyncAnthropic`` is deliberately
+#   NOT used. KNOWN LIMITATION (v1): the ``rule_flagged`` safety signal is read
+#   from a caller-supplied ``Action.parameters._triage`` hint (an internal-caller
+#   trust input), not re-resolved from the pocket's standing rules here — see the
+#   ``_run_auto_triage`` docstring for the rationale + the v2 TODO.
 # Updated: 2026-06-11 (feat/external-action-proposal) — added the THIRD gated
 #   proposal kind: a gated external-action connector call. ``_external_action_blob``
 #   + ``_assert_external_action_workspace`` are the peers of the ``_code_change``
@@ -241,6 +248,7 @@ from pocketpaw.instinct.models import (
     ActionTrigger,
     AuditEntry,
 )
+from pocketpaw.instinct.store import AuditChainError
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 from pocketpaw_ee.cloud._core.deps import (
     current_user,
@@ -280,6 +288,9 @@ async def _run_auto_triage(action: Any, workspace_id: str) -> Any:
 
     SAFETY:
       * ``ASK`` level → the triager is never invoked; today's behaviour exactly.
+        ASK is the DEFAULT (off-by-default per the PRD): with no workspace /
+        pocket / env opt-in ``resolve_approval_level`` returns ASK, so this hook
+        returns the original proposal untouched until a workspace turns it on.
       * A ``_triage`` hint carrying ``rule_flagged=true`` (a template
         ESCALATE_APPROVAL / BLOCK match) is NEVER auto-approved.
       * Any triager failure fails SAFE to ESCALATE (handled inside the module).
@@ -289,7 +300,28 @@ async def _run_auto_triage(action: Any, workspace_id: str) -> Any:
 
     The hint object the caller may attach under ``Action.parameters._triage``:
       ``{"rule_flagged": bool, "instinct_rules": [...], "approval_level":
-      "ASK"|"TRIAGE"|"TRUSTED" (per-pocket override)}``. All optional.
+      "ASK"|"TRIAGE"|"TRUSTED" (per-pocket override), "reasoning_trace": {...},
+      "fabric_snapshots": [...]}``. All optional.
+
+    KNOWN LIMITATION (v1) — the ``rule_flagged`` safety signal is HINT-DEPENDENT:
+    it is read from the caller-supplied ``_triage`` hint, not resolved here from
+    the pocket's standing rules. The generic ``propose_action`` endpoint receives
+    a free-form Action (title / description / recommendation / parameters) and
+    does NOT carry the template ``action_name`` + per-row ``row_context`` that
+    ``bundled_templates.resolve_instinct`` needs, so the router cannot cheaply
+    re-derive the verdict at this seam. The correct owner of the flag is the
+    PROPOSING path that already holds the template + verdict (e.g.
+    ``ee.cloud.pockets.instinct_dispatch.gate_action``), which should stamp
+    ``rule_flagged`` (and the matched ``instinct_rules``) onto the hint. This is
+    sound as long as that path is the only one that turns the level above ASK —
+    and ASK-by-default means an un-stamped proposal is never auto-approved
+    anyway. The hint is therefore a trust input from an INTERNAL caller, not from
+    the wire.
+    TODO(instinct-triage v2): resolve ``rule_flagged`` + ``instinct_rules``
+    directly from the store via ``action.pocket_id`` (load the pocket's template,
+    map the Action back to its template ``action_name`` + ``row_context``, call
+    ``resolve_instinct``) so the gate no longer trusts the caller. Tracked as the
+    follow-up to this slice.
     """
     try:
         from pocketpaw_ee.instinct.auto_triage import (
@@ -351,6 +383,21 @@ async def _run_auto_triage(action: Any, workspace_id: str) -> Any:
                 level.value,
             )
         return outcome.action
+    except AuditChainError:
+        # The tamper-evident ledger append failed (``maybe_auto_approve`` already
+        # catches this in the common path, but a chain failure in a chain-emit
+        # import or a future store seam could still surface here). This is a
+        # ledger-integrity event, NOT a routine triager wiring failure — log
+        # LOUD at ERROR with a distinct message. Still fail-safe: return the
+        # original PENDING proposal so the human reviews it.
+        logger.error(
+            "instinct auto-triage hit an audit-ledger failure for action=%s — "
+            "ledger-integrity event (distinct from an LLM failure); leaving the "
+            "proposal PENDING for the human",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
     except Exception:  # noqa: BLE001 — the hook must NEVER break propose
         logger.warning(
             "instinct auto-triage hook failed for action=%s — falling back to "
