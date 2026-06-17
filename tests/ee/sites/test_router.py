@@ -11,6 +11,11 @@
 # require_license, and stubs get_workspace_plan -> "business" so the plan gate
 # passes (fabric is a business+ feature). add_error_handler maps the service's
 # NotFound (cross-tenant) to a 404.
+#
+# Updated 2026-06-17 (feat/sites-local-reserve): adds coverage for POST
+# /sites/reserve — the manual "re-serve local sites" endpoint that (re)starts
+# the local static server and returns the workspace's reconciled site list with
+# fresh, valid urls. Gated like the other authed sites writes (fabric.write).
 
 from __future__ import annotations
 
@@ -217,3 +222,62 @@ async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
     assert body["pocket_id"] == "pk1"
     assert body["status"] == "published"
     assert body["is_live"] is True
+@pytest.mark.asyncio
+async def test_post_reserve_returns_reconciled_list(beanie_test_db, monkeypatch):
+    """POST /sites/reserve (re)starts the local server and returns the caller's
+    workspace site list with fresh urls. The handler delegates to
+    reserve_local_sites(ctx.workspace_id) then list_for_workspace, so the response
+    carries every site's refreshed url."""
+    from pocketpaw_ee.sites import local_server
+
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    monkeypatch.setenv("PAW_SITES_LOCAL_DIR", str(__import__("tempfile").mkdtemp()))
+    monkeypatch.delenv("PAW_SITES_LOCAL_PORT", raising=False)
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+
+    # Reset the singleton so this test gets a fresh ephemeral port.
+    if local_server._server is not None:
+        local_server._server.shutdown()
+        local_server._server.server_close()
+        local_server._server = None
+
+    def fake_local_deploy(site_id: str, project_dir: str) -> str:
+        dest = local_server.sites_home() / site_id
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+        return local_server.local_url_for(site_id)
+
+    site = await sites_service.publish(
+        workspace_id="ws_owner",
+        user_id="u1",
+        pocket_id="pk1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="Reserve Me",
+        _generator=_FakeGenerator(),
+        _bundle_reader=lambda d: b"x",
+        _local_deploy=fake_local_deploy,
+    )
+
+    # Simulate a restart: the server publish started is gone.
+    if local_server._server is not None:
+        local_server._server.shutdown()
+        local_server._server.server_close()
+        local_server._server = None
+
+    app = _build_app("ws_owner", monkeypatch)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post("/api/v1/sites/reserve")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["id"] == str(site.id)
+        # The url was re-served against the now-live local server.
+        live_base = local_server.ensure_server()
+        assert body[0]["url"] == f"{live_base}/{site.id}/"
+    finally:
+        if local_server._server is not None:
+            local_server._server.shutdown()
+            local_server._server.server_close()
+            local_server._server = None

@@ -33,6 +33,13 @@
 # sites_service.preview_pocket (pockets_service.get raises NotFound → 404 itself);
 # status delegates to sites_service.pocket_status (tenant-scoped Site lookup, no
 # 404 — an unpublished pocket simply reads draft / not live).
+# Updated 2026-06-17 (feat/sites-local-reserve): added POST /sites/reserve — the
+# explicit "re-serve local sites" action. Locally-deployed sites die after a
+# backend restart (the per-process static server binds an ephemeral port and is
+# only started during publish), so this (re)starts the server and rewrites the
+# workspace's site urls to the fresh live base via sites_service
+# .reserve_local_sites(ctx.workspace_id), then returns the reconciled list. Gated
+# like the other authed sites writes (fabric.write). No-op outside local mode.
 
 from __future__ import annotations
 
@@ -73,6 +80,22 @@ async def publish_site(
         pocket_id=body.pocket_id,
     )
     return sites_service._to_response(doc)
+
+
+@router.post("/sites/reserve", response_model=list[SiteResponse])
+async def reserve_sites(
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> list[SiteResponse]:
+    """Re-serve this workspace's locally-deployed sites and return the refreshed
+    list. Locally-deployed sites stop responding after a backend restart (the
+    static server binds an ephemeral port and is only started at publish time);
+    this (re)starts the server and rewrites each site's url to the live base, so
+    previously-deployed sites become openable again. A no-op outside local mode
+    (the real Cloudflare path owns its own URLs), in which case the list comes
+    back unchanged."""
+    await sites_service.reserve_local_sites(ctx.workspace_id)
+    return await sites_service.list_for_workspace(ctx.workspace_id)
 
 
 @router.get("/sites", response_model=list[SiteResponse])
