@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-17 (fix/sites-plan-gate-asymmetry): added require_sites_plan()
+# and call it at the top of publish(). Sites is the "fabric" plan feature; the
+# REST router gates it with require_plan_feature("fabric"), but the chat agent
+# created + published sites IN-PROCESS via the sites_manager MCP tools, which
+# bypass the HTTP router. A team-plan workspace could therefore deploy a live
+# site that GET /sites then 403'd (write path ungated, read path gated). The
+# guard reads the plan from workspace_service.get_workspace_plan against
+# guards.abac.PLAN_FEATURES (same source of truth as the HTTP gate) and raises
+# Forbidden('plan.feature_denied') before any pocket read / generate / deploy.
+# Every publish path (REST + MCP publish + direct callers) funnels through
+# publish(), so this one call covers them all; the create MCP handlers call
+# require_sites_plan() directly (they reach agent_create, not this service).
+#
 # Updated 2026-06-01 (Phase 4 — chat→create-site): added publish_pocket(), the
 # shared "publish a pocket by id" path. It reads the pocket's rippleSpec + theme
 # via pockets_service (logic lifted verbatim from the router) and delegates to
@@ -92,7 +105,7 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
@@ -101,6 +114,16 @@ from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
 _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
+
+# Sites is a plan-gated feature: it unlocks with the "fabric" plan feature
+# (business+). The REST router (sites/router.py) gates every endpoint with
+# require_plan_feature("fabric"), but the chat agent creates + publishes sites
+# IN-PROCESS via the sites_manager MCP tools, which never pass through that HTTP
+# router. Without a service-level gate a team-plan workspace could create and
+# deploy a live site that GET /sites then 403'd — a created-but-invisible
+# resource. _require_sites_plan() closes that asymmetry at the service chokepoint
+# so the in-process write paths are gated identically to HTTP.
+_SITES_PLAN_FEATURE = "fabric"
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -188,6 +211,42 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
     )
 
 
+async def require_sites_plan(workspace_id: str) -> None:
+    """Raise cloud Forbidden('plan.feature_denied') unless the workspace's plan
+    includes the Sites ("fabric") feature.
+
+    The shared plan gate for the in-process site write paths (publish + the
+    create MCP handlers). Reads the plan with the SAME source of truth
+    (``workspace_service.get_workspace_plan``) and the SAME feature table
+    (``guards.abac.PLAN_FEATURES``) as the HTTP ``require_plan_feature("fabric")``
+    dependency, so a team-plan caller is denied identically whether it arrives
+    over REST or through the chat agent. A missing workspace surfaces as NotFound
+    (mirroring the HTTP gate), and the error message names the minimum plan that
+    unlocks Sites. Imports are local to keep the sites service importable without
+    eagerly pulling the cloud workspace/guards modules."""
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+    from pocketpaw_ee.guards.abac import PLAN_FEATURES
+
+    plan = await workspace_service.get_workspace_plan(workspace_id)
+    if plan is None:
+        raise NotFound("workspace", workspace_id)
+    if _SITES_PLAN_FEATURE not in PLAN_FEATURES.get(plan, set()):
+        # Name the minimum plan that unlocks the feature, like the HTTP gate.
+        needed = next(
+            (
+                p
+                for p in ("team", "business", "enterprise")
+                if _SITES_PLAN_FEATURE in PLAN_FEATURES.get(p, set())
+            ),
+            "business",
+        )
+        raise Forbidden(
+            "plan.feature_denied",
+            f"Sites requires the {needed.capitalize()} plan — upgrade, or switch "
+            "to a workspace that has it.",
+        )
+
+
 async def publish(
     *,
     workspace_id: str,
@@ -221,7 +280,15 @@ async def publish(
     respecting entity isolation) and uses its ``name`` field; only when the pocket
     has no name does it fall back to "Untitled site". Callers that pre-resolve the
     name (e.g. ``publish_pocket``, which already holds the wire dict) pass it in,
-    so the common path does not re-fetch."""
+    so the common path does not re-fetch.
+
+    Gated on the workspace's plan: Sites is the "fabric" feature, so a team-plan
+    workspace is rejected with Forbidden('plan.feature_denied') here — BEFORE any
+    pocket read, generation, or deploy. Both ``publish_pocket`` (REST + MCP) and
+    direct service callers funnel through ``publish``, so this one gate covers
+    every in-process publish path."""
+    await require_sites_plan(workspace_id)
+
     generator = _generator or GeneratorClient()
 
     # Default a blank name to the source pocket's own display name so the schema's
@@ -392,6 +459,12 @@ async def publish_pocket(
     straight through to ``publish`` so the shared path is unit-testable without
     Bun / workerd / Cloudflare (the same injection contract ``publish`` exposes).
     """
+    # Plan gate FIRST — before reading the pocket — so a team-plan caller gets
+    # plan.feature_denied regardless of whether the pocket exists, rather than a
+    # misleading pocket.not_found. ``publish`` re-checks for direct callers; the
+    # repeat read is a single cheap workspace lookup.
+    await require_sites_plan(workspace_id)
+
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
@@ -443,6 +516,7 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
 __all__ = [
     "publish",
     "publish_pocket",
+    "require_sites_plan",
     "add_domain",
     "domain_status",
     "list_domains",
