@@ -2,6 +2,17 @@
 # Created: 2026-05-31 (RFC 13 M3, feat/m3-flow-authoring-tool).
 #
 # Changes:
+#   - 2026-06-15 (feat/chain-flow-v2): this file is now the BACK-COMPAT proof
+#     for CHAIN FLOW v2. The two builders (`build_onboarding_wizard` /
+#     `build_due_diligence_intake`) now emit a flat descriptor and delegate to
+#     the generalized `build_flow_from_descriptor`, so every assertion here (one
+#     terminal with onComplete.kind=="chat", flowId on every step, chain_map
+#     keyed on option ids, intermediate Back buttons, deep-validator descent)
+#     proves the preset path still produces the exact pre-v2 tree. The one tool
+#     test that snapshotted the OLD `{flow_type}` schema was updated to assert
+#     the NEW flat-graph descriptor schema (flow/entry/steps + optional
+#     flow_type shorthand) — the only intentional spec-driven change here. The
+#     GENERAL builder's new behavior lives in tests/test_flow_descriptor.py.
 #   - 2026-06-07 (polish/rfc13-flow-nav-validation): added (a) Back-navigation
 #     tests asserting both templates' intermediate (non-first, non-terminal)
 #     steps render a `flow.back` button while root/terminal steps do not, and
@@ -602,15 +613,24 @@ def tool() -> StartFlowTool:
     return StartFlowTool()
 
 
-def test_tool_definition_schema_is_a_tiny_descriptor(tool: StartFlowTool) -> None:
-    """The LLM-facing schema is the descriptor — flow_type (enum) plus optional
-    domain/config — NOT the tree."""
+def test_tool_definition_schema_is_a_flat_graph_descriptor(tool: StartFlowTool) -> None:
+    """CHAIN FLOW v2: the LLM-facing schema describes a FLAT step-graph —
+    `flow` / `entry` / `steps` (+ optional `title` / `complete`) for the general
+    path, plus `flow_type` as OPTIONAL preset shorthand. The `flow_type` enum is
+    no longer required, and `steps` is the general authoring surface (the agent
+    still never emits the nested tree itself)."""
     defn = tool.definition
     assert defn.name == "start_flow"
     props = defn.parameters["properties"]
-    assert set(props) == {"flow_type", "domain", "config"}
-    assert defn.parameters["required"] == ["flow_type"]
+    # the flat-graph params plus the preset-shorthand params
+    assert {"flow", "entry", "steps", "title", "complete"} <= set(props)
+    assert {"flow_type", "domain", "config"} <= set(props)
+    # nothing is hard-required at the schema level — execute() validates the
+    # combination (general needs flow+entry+steps; preset needs flow_type).
+    assert defn.parameters["required"] == []
+    # flow_type stays an enum of the known presets, but as optional shorthand.
     assert props["flow_type"]["enum"] == list(FLOW_TYPES)
+    assert props["steps"]["type"] == "array"
 
 
 async def test_tool_returns_version_ui_doc(tool: StartFlowTool) -> None:
