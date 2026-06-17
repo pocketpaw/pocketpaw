@@ -329,7 +329,8 @@ class TestHeadlessChannelToolAccess:
         """
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
-        source = inspect.getsource(ClaudeSDKBackend.run)
+        # Assignment lives in _build_options (run delegates to it) since #1461.
+        source = inspect.getsource(ClaudeSDKBackend._build_options)
         lines = source.split("\n")
 
         # Find the permission_mode assignment line
@@ -377,7 +378,8 @@ class TestHeadlessChannelToolAccess:
 
         # Construct with bypass=False (the default / the bug scenario)
         backend = ClaudeSDKBackend(_make_settings(bypass=False))
-        source = inspect.getsource(backend.run)
+        # Assignment lives in _build_options (run delegates to it) since #1461.
+        source = inspect.getsource(backend._build_options)
 
         # The source must not have the old conditional pattern
         assert "if self.settings.bypass_permissions:" not in source, (

@@ -52,10 +52,12 @@ class TestHeadlessPermissionMode:
         backend = ClaudeSDKBackend(self._make_settings(bypass=False))
 
         # We can't easily run the full .run() method without the SDK installed,
-        # but we can inspect the source to verify the fix is present.
+        # but we can inspect the source to verify the fix is present. The
+        # unconditional assignment lives in ``_build_options`` (the options
+        # builder ``run`` delegates to) since the #1461 prewarm refactor.
         import inspect
 
-        source = inspect.getsource(backend.run)
+        source = inspect.getsource(backend._build_options)
 
         # The fix: permission_mode should be set unconditionally (no if statement)
         # Old broken code: 'if self.settings.bypass_permissions:'
@@ -76,7 +78,7 @@ class TestHeadlessPermissionMode:
 
         import inspect
 
-        source = inspect.getsource(backend.run)
+        source = inspect.getsource(backend._build_options)
         assert '"bypassPermissions"' in source
 
     def test_no_conditional_bypass_in_options_build(self):
@@ -86,7 +88,8 @@ class TestHeadlessPermissionMode:
 
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
-        source = inspect.getsource(ClaudeSDKBackend.run)
+        # Assignment lives in _build_options (run delegates to it) since #1461.
+        source = inspect.getsource(ClaudeSDKBackend._build_options)
 
         # Count occurrences of permission_mode assignment
         lines = source.split("\n")
