@@ -6,14 +6,40 @@
 # The bug: commit 24f16e2 gated permission bypass behind a setting that defaults
 #   to false, breaking ALL Bash-based tools (memory, web search, gmail, etc.)
 #   on every messaging channel since v0.3.0.
+#
+# Updated: 2026-06-17 — the option-building (including the unconditional
+#   permission_mode assignment) was extracted from run() into the shared
+#   _build_options() helper (feat/claude-sdk-prewarm). The source-inspection
+#   guards now read both methods via _sdk_options_source() so they follow the
+#   assignment wherever it lives instead of going stale on the refactor.
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 from unittest.mock import MagicMock
 
 import pytest
+
+
+def _sdk_options_source() -> str:
+    """Combined source of the SDK backend methods that build agent options.
+
+    The unconditional ``permission_mode = "bypassPermissions"`` assignment was
+    refactored out of ``run()`` into the shared ``_build_options()`` helper
+    (feat/claude-sdk-prewarm), which ``run()`` calls. The invariant these guards
+    protect is "permission_mode is set, and never gated on a setting" — not "set
+    inside run() specifically" — so inspecting both methods keeps the guard valid
+    wherever the assignment lands.
+    """
+    from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+    return (
+        inspect.getsource(ClaudeSDKBackend.run)
+        + "\n"
+        + inspect.getsource(ClaudeSDKBackend._build_options)
+    )
 
 
 class TestHeadlessPermissionMode:
@@ -49,13 +75,12 @@ class TestHeadlessPermissionMode:
         """
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
-        backend = ClaudeSDKBackend(self._make_settings(bypass=False))
-
-        # We can't easily run the full .run() method without the SDK installed,
-        # but we can inspect the source to verify the fix is present.
-        import inspect
-
-        source = inspect.getsource(backend.run)
+        # Constructing with bypass=False is the original bug scenario; the fix
+        # must hold regardless of the setting. We can't easily run the full
+        # .run() method without the SDK installed, so we inspect the source of
+        # the option-building methods to verify the fix is present.
+        _ = ClaudeSDKBackend(self._make_settings(bypass=False))
+        source = _sdk_options_source()
 
         # The fix: permission_mode should be set unconditionally (no if statement)
         # Old broken code: 'if self.settings.bypass_permissions:'
@@ -65,28 +90,21 @@ class TestHeadlessPermissionMode:
             "This causes tool calls to hang on messaging channels."
         )
         assert '"bypassPermissions"' in source, (
-            "bypassPermissions not found in run() — permission mode must be set"
+            "bypassPermissions not found in run()/_build_options — permission mode must be set"
         )
 
     def test_permission_mode_set_when_bypass_true(self):
         """Verify bypass_permissions=True also works (should be same behavior now)."""
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
-        backend = ClaudeSDKBackend(self._make_settings(bypass=True))
-
-        import inspect
-
-        source = inspect.getsource(backend.run)
+        _ = ClaudeSDKBackend(self._make_settings(bypass=True))
+        source = _sdk_options_source()
         assert '"bypassPermissions"' in source
 
     def test_no_conditional_bypass_in_options_build(self):
         """Verify the options_kwargs assignment is unconditional by checking
-        that 'permission_mode' appears exactly once and not inside an if block."""
-        import inspect
-
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        source = inspect.getsource(ClaudeSDKBackend.run)
+        that 'permission_mode' appears and is not inside an if block."""
+        source = _sdk_options_source()
 
         # Count occurrences of permission_mode assignment
         lines = source.split("\n")
