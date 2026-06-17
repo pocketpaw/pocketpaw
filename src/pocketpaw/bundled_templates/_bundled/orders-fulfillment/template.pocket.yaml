@@ -1,0 +1,88 @@
+# src/pocketpaw/bundled_templates/_bundled/orders-fulfillment/template.pocket.yaml
+# Created: 2026-06-11 (feat/demo-template-suite) — RFC 03 v2 Pocket Template
+# Schema metadata for the generic orders-fulfillment pocket. DEMO-GRADE from
+# the start, mirroring the applications-triage redesign (#1435) but with a
+# distinct layout so it never reads like the other queue pockets: a
+# fulfillment stat strip across the top (count cards per stage + headline
+# stats: orders to ship, units in flight, refunds open), a real `kanban`
+# widget showing every order as a card moving across the fulfillment stages
+# (to-ship / shipped / delivered / refund-requested), and below it a
+# queue+detail pair — a left order list and a right detail panel (order
+# header + stage/payment pills, a fulfillment stat row, the line items as a
+# record grid, the shipping facts as a key-value table, and a fulfillment
+# timeline). The detail binds to a denormalized flat `state.selected` object
+# kept in sync by the queue cards' on_click (the on_click `set` value is a
+# method chain that ENDS in `)`, the only chain form the renderer resolves)
+# so every detail binding is a plain `{state.selected.X}` path.
+# `state.selected` is also SEEDED to the first order so the panel renders
+# before any click. `shape: kanban` because the focal organising widget IS
+# the stage board (the RFC 03 shape enum has a kanban value, unlike the
+# composite triage canvas) and the pattern is `app` in the sibling
+# index.json. `needs: [paw.db.v1]` declares the generic data-source
+# capability a tenant wires so the board hydrates from a real orders
+# endpoint; without one the seeded sample orders render. The two fulfillment
+# actions declare `instinct_policy: require_approval` so each surfaces as a
+# PENDING gated proposal in The Tray rather than executing inline — the
+# deployment wires the action row to external_actions.propose at the
+# documented binding point (see the ripple_spec _placeholder_note).
+schema_version: "2"
+name: orders-fulfillment
+version: 1.0.0
+pattern: app
+vertical: operations
+display_name: Orders Fulfillment
+shape: kanban
+description: |
+  A fulfillment console for the order queue. A color-banded strip across the
+  top counts orders by stage — to ship, shipped, delivered, refund requested —
+  and adds the headline numbers: orders waiting to ship, units in flight, and
+  open refunds. A stage board shows every order as a card moving across the
+  fulfillment pipeline. Below it, a queue and detail pair: a left order list
+  and a right panel where the fulfillment picture is the loudest thing on the
+  canvas — the order header with stage and payment pills, a values and units
+  stat row, the line items as a record grid, the shipping address and carrier
+  as a key-value table, and a fulfillment timeline. Ship and refund actions
+  propose the next step, surfaced as pending proposals for a human to confirm
+  rather than acting on their own. Ships a placeholder live-data source so a
+  connected backend hydrates the board from a real orders endpoint; with no
+  backend it renders the seeded sample orders.
+icon: package
+color: "#5b8e99"
+state:
+  entity_type: Order
+  id_field: id
+  columns:
+    - { field: ref, label: Order, widget: text }
+    - { field: customer, label: Customer, widget: text }
+    - { field: stage, label: Stage, widget: badge }
+    - { field: total, label: Total, widget: text }
+    - { field: units, label: Units, widget: number }
+data_sources:
+  - name: orders
+    method: GET
+    path: /orders?open=true
+    bind: state.orders
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions:
+  - name: mark_shipped
+    label: Mark shipped
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [order_shipped]
+    description: Proposes marking the selected order as shipped. Gated — a human confirms in The Tray.
+  - name: process_refund
+    label: Refund
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [order_refunded]
+    confirm:
+      message: "Propose refunding this order?"
+      destructive: false
+    description: Proposes refunding the selected order. Gated — a human confirms in The Tray.
+outcomes:
+  - order_shipped
+  - order_refunded
+connectors: []
+skill_refs: []

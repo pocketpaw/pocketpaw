@@ -1,5 +1,44 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
+  ``connect()`` the warm CLI subprocess for a session BEFORE its first turn so
+  the first real ``run`` reuses it instead of paying the ~12s cold connect. To
+  make the prewarmed client's cache key MATCH the first turn's (else turn 1
+  evicts it — a net loss), the whole ``options_kwargs`` -> ``options`` assembly
+  was extracted from ``run`` into a shared ``_build_options`` helper that both
+  call; ``run``'s behavior is byte-identical (the only behavioral fix: ``llm`` is
+  now declared above the ``try`` so the error handler is safe if option assembly
+  itself raises). ``prewarm`` is fire-and-forget: it swallows ALL errors, never
+  raises, no-ops when a run holds the lease or the SDK/CLI is unavailable, and on
+  failure tears down only a client no run owns. A new ``_client_lock`` serializes
+  the reuse-or-connect critical section in ``_get_or_create_client`` so a prewarm
+  racing the first ``run`` (the trigger fires prewarm as a background task)
+  cannot double-connect — the loser of the lock reuses the winner's client. The
+  EE trigger lives in ``run_core._prewarm_session`` (gated to smart-routing-OFF,
+  where the model is message-independent so a message-less prewarm matches the
+  turn's key). Skill sessions on smart-routing-ON deployments still cold-start
+  turn 1 (documented limitation). Supersedes the prior "prewarm out of scope" note.
+Updated: 2026-06-13 (fix/claude-sdk-warm-client-skills) — skill/tool-bearing
+  runs now REUSE the warm persistent CLI subprocess instead of re-spawning a
+  fresh stateless query every turn (a ~6s/turn floor on any skill chat). The
+  2026-06-07 entry below BYPASSED the warm client for skill runs because
+  ``_client_cache_key`` did not hash the plugin set, so a warm client could not
+  tell a skill turn from a non-skill one. The cache key now folds in
+  ``_plugin_digest`` — a hash of the skill IDENTITY (sorted ``skill_names`` +
+  whether the bundled-skills plugin is loaded), NEVER the materialized
+  ``plugins=`` PATH (``materialize_run_skills`` mints a fresh ``mkdtemp`` per
+  run, so hashing the path would change the key every turn and defeat reuse).
+  With identity in the key, ``_get_or_create_client`` reuses the subprocess for
+  a same-skill turn and rebuilds it for a changed skill set. Lifecycle: because
+  the warm subprocess keeps the ``plugins=`` path from its first ``connect()``,
+  the materialized dir is cached per digest on the instance
+  (``_skills_dir_by_digest``) and reused across same-skill turns; it is removed
+  only when its warm client is evicted (``_get_or_create_client``) or on
+  ``cleanup()`` — NOT by the per-run ``finally``, which now rmtree's the dir
+  ONLY in the genuine stateless-fallback case (when ``_client_in_use`` forced a
+  stateless query and no warm client adopted the dir). The ``skip_warm_client``
+  bypass is removed. (``prewarm`` was deferred here and shipped in the
+  feat/claude-sdk-prewarm follow-up above.)
 Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) — ``run``
   also accepts ``skill_names: frozenset[str]``, the per-entity skill subset
   (resolved upstream from the entity pocket's ``surface_profile.skill_names``).
@@ -74,6 +113,13 @@ Updated: 2026-05-25 (PR #1222 R1 Blocker 1) — added
   cannot accidentally clobber the auth key. Each isolated backend
   instance carries its own stash, so one request's tenancy can never
   leak into another's subprocess.
+Updated: 2026-06-12 — ``_collect_mcp_tool_ids`` now also allowlists EXTERNAL
+  MCP servers from ``load_mcp_config`` (``~/.pocketpaw/mcp_servers.json``) with
+  a bare ``mcp__<server>`` entry. They are registered with the SDK in
+  ``_get_mcp_servers`` but, lacking an in-process ``tool_ids()`` provider, their
+  tools never reached the allowlist and were uncallable (a deployment's
+  ``fabric`` server was registered yet the agent could not call
+  ``fabric_query`` / ``fabric_stats``).
 Updated: 2026-05-22 (#1174) — extracted the in-process MCP tool-id allowlist
   collection into ``_collect_mcp_tool_ids``. The cloud ``pocketpaw_pocket``
   server now carries a writable ``add_widget`` tool alongside the read tools;
@@ -115,7 +161,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from pocketpaw.agents.backend import BackendInfo, BaseAgentBackend, Capability
 from pocketpaw.agents.protocol import AgentEvent
@@ -124,6 +170,34 @@ from pocketpaw.security.rails import is_substring_blocked
 from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class _BuiltOptions(NamedTuple):
+    """The product of ``ClaudeSDKBackend._build_options`` (feat/claude-sdk-prewarm).
+
+    Bundles the assembled ``ClaudeAgentOptions`` plus everything ``run``'s
+    dispatch + finally still need after option assembly was extracted into a
+    shared helper so ``prewarm`` can build the IDENTICAL options the first turn
+    will (same cache key → the prewarmed warm client is reused, not evicted):
+
+      * ``options`` — the ``ClaudeAgentOptions`` instance to connect / query with.
+      * ``options_kwargs`` — the raw kwargs dict; the token-usage event reads
+        ``model`` off it.
+      * ``llm`` — the resolved LLM client; ``run`` uses it to format API errors.
+      * ``run_skills_root`` / ``skills_dir_adopted`` / ``plugin_digest`` — the
+        per-run materialized-skills-plugin lifecycle triple (entity-rooms A2 +
+        the warm-reuse fix): the dir path (or None), whether a warm client
+        adopted it (so the per-run finally must NOT rmtree it), and the
+        plugin-identity hash threaded into the cache key + the dir cache.
+    """
+
+    options: Any
+    options_kwargs: dict[str, Any]
+    llm: Any
+    run_skills_root: Path | None
+    skills_dir_adopted: bool
+    plugin_digest: str
+
 
 # Default identity fallback (used when AgentContextBuilder prompt is not available)
 _DEFAULT_IDENTITY = (
@@ -255,6 +329,29 @@ class ClaudeSDKBackend(BaseAgentBackend):
         self._client = None
         self._client_options_key: str | None = None
         self._client_in_use = False
+        # Serializes the connect-or-reuse critical section in
+        # ``_get_or_create_client`` (feat/claude-sdk-prewarm). ``prewarm`` runs
+        # CONCURRENTLY with the first ``run`` (fired as a background task before
+        # the turn), and ``_get_or_create_client`` ``await``s ``disconnect()`` /
+        # ``connect()`` — without this lock the run could enter the section while
+        # prewarm is mid-connect and the two would race to create / evict the
+        # subprocess (double connect, or the run throwing away the half-built
+        # prewarmed client). With the lock, whichever arrives second sees the
+        # other's finished client under a MATCHING key and reuses it — which is
+        # exactly the win. Lazily created so a backend built off-loop is safe.
+        self._client_lock: asyncio.Lock | None = None
+        # Plugin-identity digest of the currently-live warm client, and a map of
+        # plugin_digest -> materialized per-run skills dir (fix/claude-sdk-warm-
+        # client-skills). A skill run now REUSES the warm subprocess instead of
+        # re-spawning, so the materialized dir it was connected with must outlive
+        # the per-run finally — the subprocess holds that path from its first
+        # connect(). The dir is keyed on the stable plugin IDENTITY (sorted skill
+        # names + bundled flag), never the throwaway mkdtemp PATH, so two turns
+        # with the same skills find the same cached dir. Ownership: the dir is
+        # removed only when its warm client is evicted (_get_or_create_client) or
+        # on cleanup() — NOT by a normal per-run finally.
+        self._client_plugin_digest: str = ""
+        self._skills_dir_by_digest: dict[str, Path] = {}
 
         # Per-run subprocess env injected by the pocket-specialist
         # runtime via ``attach_subprocess_env`` (PR #1222 R1 Blocker 1).
@@ -790,6 +887,31 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 ):
                     continue
                 ids.append(tool_id)
+
+        # External stdio/http MCP servers (``~/.pocketpaw/mcp_servers.json`` via
+        # ``load_mcp_config``) are registered with the SDK in ``_get_mcp_servers``
+        # but have no in-process ``tool_ids()`` provider — their tool names are
+        # only known after the SDK connects to the server. Without an allowlist
+        # entry the SDK refuses every call (e.g. a deployment's ``fabric`` server
+        # exposing ``fabric_query`` / ``fabric_stats`` was registered yet
+        # uncallable). Allow each enabled external server wholesale with a bare
+        # ``mcp__<server>`` entry — the Claude Code permission convention that
+        # admits all of a server's tools — gated by the same tool policy that
+        # gates registration.
+        try:
+            from pocketpaw.mcp.config import load_mcp_config
+
+            for cfg in load_mcp_config():
+                if not cfg.enabled:
+                    continue
+                if cfg.name in self._BUILTIN_SEARCH_MCP_NAMES:
+                    continue
+                if not self._policy.is_mcp_server_allowed(cfg.name):
+                    continue
+                ids.append(f"mcp__{cfg.name}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("External MCP server allowlist not added: %s", exc)
+
         return ids
 
     # Section markers that ``AgentPool.run`` appends to the system prompt
@@ -827,16 +949,47 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 cut = min(cut, idx)
         return system_prompt[:cut]
 
+    @staticmethod
+    def _plugin_digest(skill_names: frozenset[str], *, bundled: bool) -> str:
+        """Stable digest of the agent's plugin IDENTITY for the cache key.
+
+        Folds the per-entity skill subset (sorted ``skill_names``) and whether
+        the bundled-skills plugin is loaded into one short hash. Empty when no
+        skills and no bundled plugin participate, so a plain run's key is
+        unchanged.
+
+        CRITICAL: this digests the IDENTITY of the skills, never the
+        materialized ``plugins=`` PATH. ``materialize_run_skills`` creates a
+        fresh ``tempfile.mkdtemp`` dir on every run, so hashing the path would
+        change the cache key every turn and defeat warm-client reuse entirely —
+        the exact latency bug this fix removes. Two turns that request the same
+        skills (and the same bundled state) MUST hash identically so the warm
+        subprocess is reused; a changed skill set MUST hash differently so it
+        rebuilds.
+        """
+        if not skill_names and not bundled:
+            return ""
+        payload = ("b1:" if bundled else "b0:") + ",".join(sorted(skill_names))
+        return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()[:16]
+
     @classmethod
-    def _client_cache_key(cls, options: Any, *, session_key: str | None = None) -> str:
+    def _client_cache_key(
+        cls, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+    ) -> str:
         """Persistent-client cache key: session + model + tools + a digest of
-        the system prompt's stable behavioral prefix.
+        the system prompt's stable behavioral prefix + the plugin-identity
+        digest.
 
         The prefix digest is what makes a mid-session backend config change
         (configured:false -> configured:true, baked into the static home
         prompt) evict and rebuild the warm subprocess on the next turn, instead
-        of staying frozen until a cold restart. Hashing keeps the key bounded
-        regardless of prompt length.
+        of staying frozen until a cold restart. The ``plugin_digest`` does the
+        same for the agent's skill set (per-entity ``skill_names`` + bundled
+        flag): folding it in lets a warm client tell a skill run apart from a
+        non-skill one, so a skill run can REUSE the subprocess instead of
+        re-spawning every turn. Empty ``plugin_digest`` (the default) leaves the
+        key byte-for-byte identical to the pre-fix behavior for non-skill
+        callers. Hashing keeps the key bounded regardless of prompt length.
         """
         prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
         prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
@@ -844,44 +997,80 @@ class ClaudeSDKBackend(BaseAgentBackend):
             f"{session_key or ''}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
-            f"{prefix_digest}"
+            f"{prefix_digest}:"
+            f"{plugin_digest}"
         )
 
-    async def _get_or_create_client(self, options: Any, *, session_key: str | None = None) -> Any:
+    async def _get_or_create_client(
+        self, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
+    ) -> Any:
         """Get or create a persistent ClaudeSDKClient.
 
-        Reuses the existing subprocess if model, tools, session, **and the
-        system prompt's behavioral prefix** haven't changed. Different sessions
-        get a fresh subprocess so the CLI's internal conversation context
-        doesn't leak between chats; a changed behavioral prefix (e.g. the home
-        pocket's backend summary flipping to "configured" mid-session) also
-        forces a fresh subprocess so the new prompt actually takes effect — the
-        SDK applies the system prompt only at connect() time.
+        Reuses the existing subprocess if model, tools, session, the system
+        prompt's behavioral prefix, **and the plugin-identity digest** haven't
+        changed. Different sessions get a fresh subprocess so the CLI's internal
+        conversation context doesn't leak between chats; a changed behavioral
+        prefix (e.g. the home pocket's backend summary flipping to "configured"
+        mid-session) or a changed skill set (``plugin_digest``) also forces a
+        fresh subprocess so the new prompt / plugins actually take effect — the
+        SDK applies both only at connect() time.
+
+        When a stale client is evicted, its materialized per-run skills dir
+        (tracked by the old ``plugin_digest``) is removed here: the subprocess
+        that held that path is being torn down, so nothing references it
+        anymore. Re-materializing the dir per turn does NOT work — the warm
+        subprocess keeps the original path from its first connect — so the dir
+        is cached per digest and only dropped on eviction or cleanup().
         """
         import time
 
-        key = self._client_cache_key(options, session_key=session_key)
+        # Serialize the whole reuse-or-connect section so a concurrent prewarm +
+        # first run (feat/claude-sdk-prewarm) cannot both create / evict the
+        # client across the ``connect()`` await. Whichever wins the lock first
+        # connects; the other then re-reads ``_client`` / ``_client_options_key``
+        # under the SAME key and reuses it. Lazily created on the running loop.
+        if self._client_lock is None:
+            self._client_lock = asyncio.Lock()
 
-        if self._client is not None and self._client_options_key == key:
-            logger.debug("Reusing persistent client (key=%s)", key)
+        key = self._client_cache_key(options, session_key=session_key, plugin_digest=plugin_digest)
+
+        async with self._client_lock:
+            # Re-check INSIDE the lock: a prewarm (or sibling) may have connected
+            # a matching client while we awaited the lock — reuse it, don't churn.
+            if self._client is not None and self._client_options_key == key:
+                logger.debug("Reusing persistent client (key=%s)", key)
+                return self._client
+
+            # Disconnect stale client and drop the skills dir it was connected with.
+            if self._client is not None:
+                try:
+                    await self._client.disconnect()
+                except Exception as e:
+                    logger.debug("Failed to disconnect Claude client: %s", e)
+                self._client = None
+                self._drop_skills_dir(self._client_plugin_digest)
+
+            # Create and connect new client
+            t0 = time.monotonic()
+            self._client = self._ClaudeSDKClient(options=options)
+            await self._client.connect()
+            self._client_options_key = key
+            self._client_plugin_digest = plugin_digest
+            t1 = time.monotonic()
+            logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
             return self._client
 
-        # Disconnect stale client
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception as e:
-                logger.debug("Failed to disconnect Claude client: %s", e)
-            self._client = None
+    def _drop_skills_dir(self, plugin_digest: str) -> None:
+        """Remove the materialized per-run skills dir cached under
+        ``plugin_digest`` (if any). Best-effort; never raises. Called when the
+        warm client that referenced the dir is evicted or on cleanup()."""
+        if not plugin_digest:
+            return
+        root = self._skills_dir_by_digest.pop(plugin_digest, None)
+        if root is not None:
+            from pocketpaw.skills import cleanup_run_skills
 
-        # Create and connect new client
-        t0 = time.monotonic()
-        self._client = self._ClaudeSDKClient(options=options)
-        await self._client.connect()
-        self._client_options_key = key
-        t1 = time.monotonic()
-        logger.info("Persistent client connected in %.0fms (key=%s)", (t1 - t0) * 1000, key)
-        return self._client
+            cleanup_run_skills(root)
 
     async def cleanup(self) -> None:
         """Disconnect the persistent client and release resources."""
@@ -894,6 +1083,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
             self._client_options_key = None
             self._client_in_use = False
             logger.info("Persistent client disconnected")
+        # Sweep every materialized per-run skills dir adopted by a warm client.
+        # Safe even when no client existed (the map is just empty).
+        if self._skills_dir_by_digest:
+            from pocketpaw.skills import cleanup_run_skills
+
+            for root in self._skills_dir_by_digest.values():
+                cleanup_run_skills(root)
+            self._skills_dir_by_digest.clear()
+        self._client_plugin_digest = ""
 
     async def _resilient_query(self, prompt: str, options):
         """Wrap stateless _query with MessageParseError recovery."""
@@ -947,6 +1145,578 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     continue
                 raise  # re-raise non-parse errors
         logger.error("Too many consecutive MessageParseErrors — aborting stream")
+
+    async def _build_options(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None,
+        history: list[dict] | None,
+        session_key: str | None,
+        deny_mcp_tool_ids: frozenset[str],
+        allow_sdk_tools: frozenset[str],
+        allow_mcp_tool_ids: frozenset[str] | None,
+        skill_names: frozenset[str],
+        stderr_sink: list[str],
+    ) -> _BuiltOptions:
+        """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
+
+        Extracted from ``run`` (feat/claude-sdk-prewarm) so ``prewarm`` can build
+        the EXACT same options the first real turn will, and therefore compute
+        the same ``_client_cache_key`` — model + tools + system-prompt behavioral
+        prefix + ``plugin_digest``. If the keys diverged, the prewarmed warm
+        client would be EVICTED on the first turn (a net loss: prewarm paid a
+        connect the run then threw away), which is the whole hazard this
+        extraction removes.
+
+        Returns a ``_BuiltOptions`` carrying everything ``run``'s dispatch +
+        finally still need: the ``options`` object, the raw ``options_kwargs``
+        (the token-usage event reads ``model`` off it), the resolved ``llm`` (for
+        error formatting), and the per-run skills-plugin lifecycle triple
+        (``run_skills_root`` / ``skills_dir_adopted`` / ``plugin_digest``).
+
+        Pure assembly — no ``yield``, no streaming, no client creation. Reads the
+        warm-client state (``self._client_in_use`` / ``self._skills_dir_by_digest``)
+        only to decide whether to reuse a cached materialized skills dir, exactly
+        as the inline block did. ``stderr_sink`` is the caller's list that the
+        ``stderr`` callback appends to (so ``run`` keeps capturing CLI stderr for
+        diagnostics; ``prewarm`` passes a throwaway list).
+        """
+        import os
+
+        run_skills_root: Path | None = None
+        skills_dir_adopted = False
+        plugin_digest = ""
+
+        # Resolve LLM provider early -- needed for routing + env.
+        # Use per-backend provider setting (defaults to "anthropic").
+        # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
+        # Claude Free/Pro/Max plans are not permitted for third-party use.
+        # See: https://code.claude.com/docs/en/legal-and-compliance
+        from pocketpaw.llm.client import resolve_llm_client
+
+        provider = self.settings.claude_sdk_provider or "anthropic"
+        llm = resolve_llm_client(self.settings, force_provider=provider)
+
+        # ── API key check for Anthropic provider ──────────────
+        # Skip if using a non-Anthropic provider, or if the active
+        # provider is claude_code (it handles OAuth auth via its CLI).
+        is_non_anthropic = (
+            llm.is_ollama
+            or llm.is_openai_compatible
+            or llm.is_gemini
+            or llm.is_litellm
+            or llm.is_openrouter
+        )
+
+        # Smart model routing — classify complexity to pick the model tier.
+        # All messages go through the Claude Code CLI subprocess, which
+        # handles conversation compaction automatically (PreCompact hook).
+        if self.settings.smart_routing_enabled and not is_non_anthropic:
+            from pocketpaw.agents.model_router import ModelRouter
+
+            model_router = ModelRouter(self.settings)
+            selection = model_router.classify(message)
+            logger.info(
+                "Smart routing: %s -> %s (%s)",
+                selection.complexity.value,
+                selection.model,
+                selection.reason,
+            )
+
+        # System prompt — instructions are now part of identity
+        # (injected by BootstrapContext.to_system_prompt() via INSTRUCTIONS.md)
+        identity = system_prompt or _DEFAULT_IDENTITY
+
+        # Inject connector instructions so the agent can use data sources
+        try:
+            from pocketpaw.connectors.registry import ConnectorRegistry
+
+            reg = ConnectorRegistry()
+            if reg.available:
+                names = ", ".join(c["name"] for c in reg.available)
+                identity += (
+                    "\n\n# Data Connectors\n"
+                    f"Available connectors: {names}\n"
+                    "To manage connectors, use Bash to call the local API:\n"
+                    "- List: curl -s http://localhost:8888/api/v1/connectors\n"
+                    "- Detail: curl -s http://localhost:8888/api/v1/connectors/<name>\n"
+                    "- Connect: curl -s -X POST "
+                    "http://localhost:8888/api/v1/connectors/connect "
+                    "-H 'Content-Type: application/json' "
+                    '-d \'{"connector_name":"<name>","config":{...}}\'\n'
+                    "- Execute: curl -s -X POST "
+                    "http://localhost:8888/api/v1/connectors/execute "
+                    "-H 'Content-Type: application/json' "
+                    '-d \'{"connector_name":"<name>","action":"<action>"'
+                    ',"params":{...}}\'\n'
+                    "- Disconnect: curl -s -X POST "
+                    "http://localhost:8888/api/v1/connectors/disconnect "
+                    "-H 'Content-Type: application/json' "
+                    '-d \'{"connector_name":"<name>"}\'\n'
+                )
+        except Exception:
+            pass  # Don't break agent if connector registry fails
+
+        # Inject prior turns into the system prompt at connect time. The
+        # persistent ClaudeSDKClient accumulates new turns natively after
+        # connect, but a fresh subprocess (after eviction, restart, or
+        # session switch) has empty native history — without this, those
+        # cold-start runs lose all conversation context. Reused clients
+        # keep the prompt set at first connect and ignore later option
+        # changes, so there's no duplication on the warm path.
+        final_prompt = identity
+        if history:
+            lines = ["# Recent Conversation"]
+            for msg in history:
+                role = msg.get("role", "user").capitalize()
+                content = msg.get("content", "")
+                if len(content) > 2000:
+                    content = content[:2000] + "..."
+                lines.append(f"**{role}**: {content}")
+            final_prompt += "\n\n" + "\n".join(lines)
+
+        # Pocket sessions don't need shell or filesystem access — the
+        # MCP pocket tools (get_pocket / list_pockets / set_state /
+        # set_node_prop / add_node / etc.) are the complete interface.
+        # Detect via the <pocket-scope> marker every pocket prompt
+        # carries; lock tools down to delegation + web + pocket MCP.
+        #
+        # Without this gate, the agent has been observed reaching for
+        # shell introspection (e.g. `env | grep pocket; curl localhost`)
+        # to "figure out" pocket state, which trips the security rails
+        # AND is the wrong path — the MCP tools already expose
+        # everything the agent needs.
+        is_pocket_session = "<pocket-scope>" in (final_prompt or "")
+
+        if is_pocket_session:
+            all_sdk_tools = ["Agent", "WebSearch", "WebFetch"]
+            logger.info(
+                "Pocket session detected — tool surface locked to %s",
+                all_sdk_tools,
+            )
+        else:
+            all_sdk_tools = [
+                "Agent",
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "WebSearch",
+                "WebFetch",
+                "Skill",
+            ]
+        allowed_tools = [
+            t
+            for t in all_sdk_tools
+            if self._policy.is_tool_allowed(self._TOOL_POLICY_MAP.get(t, t))
+        ]
+        if len(allowed_tools) < len(all_sdk_tools):
+            blocked = set(all_sdk_tools) - set(allowed_tools)
+            logger.info("Tool policy blocked SDK tools: %s", blocked)
+
+        # In-process MCP tool ids must be on the allowlist to be
+        # callable. The ripple widget-spec tools are core; the cloud
+        # pocket / Mission Control tasks / planner / pocket-specialist
+        # ids come from the ``pocketpaw.mcp_servers`` providers (none on
+        # an OSS install). The cloud ``pocketpaw_pocket`` server carries
+        # both read tools (get_pocket / list_pockets) and the writable
+        # ``add_widget`` tool — they all flow through the loop below.
+        allowed_tools.extend(self._collect_mcp_tool_ids())
+
+        # Per-entity ADDITIVE allowlist (entity-rooms chunk ①). UNION the
+        # entity's ``allowed_sdk_tools`` into the allowlist BEFORE the deny
+        # subtraction below, so the precedence is
+        # ``effective = (agent_tools ∪ allow) − deny``. Dedup-preserve order:
+        # only append ids not already present. Empty for legacy / non-entity
+        # runs, so this is a no-op there. The deny set (subtracted next) is
+        # the hard cap — an id in BOTH allow and deny stays denied.
+        if allow_sdk_tools:
+            existing = set(allowed_tools)
+            for tool_id in allow_sdk_tools:
+                if tool_id not in existing:
+                    allowed_tools.append(tool_id)
+                    existing.add(tool_id)
+            logger.info("Surface tool-allow: unioned %s into allowlist", sorted(allow_sdk_tools))
+
+        # Per-surface MCP-tool deny set (threaded from the chat loop's
+        # resolved ``SurfaceProfile``). Any denied id is subtracted from the
+        # allowlist BEFORE the SDK launches, so the agent is physically
+        # unable to call it. On the /sites svelte-create surface this forbids
+        # the two ripple-create tools (``create_landing_site`` +
+        # ``pocket_specialist__create``) so the agent CANNOT fall back to
+        # building a rippleSpec landing page — prose-only "do not call the
+        # ripple tool" routing was proven to fail. Empty for every other
+        # surface (a no-op), so ``create_svelte_site`` / ``publish`` /
+        # ``pocket_specialist__edit`` and the ripple-engine / refine /
+        # non-sites flows are untouched. This is the typed replacement for
+        # the old prompt-sniffing ``engine="svelte"`` marker gate.
+        if deny_mcp_tool_ids:
+            before_count = len(allowed_tools)
+            allowed_tools = [t for t in allowed_tools if t not in deny_mcp_tool_ids]
+            if len(allowed_tools) < before_count:
+                logger.info(
+                    "Surface tool-deny: excluded %s from allowlist",
+                    sorted(deny_mcp_tool_ids),
+                )
+
+        # Per-MODE restrictive MCP allow-list (distinct from the additive
+        # ``allow_sdk_tools`` above). ``None`` keeps every MCP tool (broad
+        # surfaces like /chat). When set, keep only MCP tools that are in the
+        # mode's set, in the pocket-creation grant, a ripple widget tool, OR
+        # from an always-allowed server (connectors + pocket lifecycle).
+        # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
+        # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
+        # Applied AFTER deny so a denied id can't sneak back via the grant.
+        if allow_mcp_tool_ids is not None:
+            from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
+
+            grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | frozenset(WIDGET_TOOL_IDS)
+            before_count = len(allowed_tools)
+            allowed_tools = [
+                t
+                for t in allowed_tools
+                if not t.startswith("mcp__")
+                or t in grant
+                or _mcp_server_of(t) in ALWAYS_ALLOWED_MCP_SERVERS
+            ]
+            if len(allowed_tools) < before_count:
+                logger.info(
+                    "Mode MCP-allow: scoped to %s (+ general grant)",
+                    sorted(allow_mcp_tool_ids),
+                )
+
+        # Build hooks for security
+        hooks = {
+            "PreToolUse": [
+                self._HookMatcher(
+                    matcher="Bash",  # Only hook Bash commands
+                    hooks=[self._block_dangerous_hook],
+                )
+            ]
+        }
+
+        # Build options
+        #
+        # Windows note: CreateProcess caps the entire command line at
+        # ~32,767 chars. The SDK passes string ``system_prompt`` inline
+        # via ``--system-prompt``; long KB/identity blobs blow that limit
+        # and surface as a misleading ``CLINotFoundError``. Since SDK
+        # 0.1.72 we can pass a ``SystemPromptFile`` dict instead, which
+        # the CLI reads via ``--system-prompt-file <path>``.
+        system_prompt_arg: Any = final_prompt
+        if os.name == "nt" and len(final_prompt) > 24_000:
+            runtime_dir = Path.home() / ".pocketpaw" / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            prompt_path = runtime_dir / "system_prompt.md"
+            prompt_path.write_text(final_prompt, encoding="utf-8")
+            system_prompt_arg = {"type": "file", "path": str(prompt_path)}
+            logger.info(
+                "System prompt %d chars exceeds Windows CLI safe limit; "
+                "passing via --system-prompt-file %s",
+                len(final_prompt),
+                prompt_path,
+            )
+
+        # ``setting_sources=[]`` keeps the agent on its OWN persona.
+        # PocketPaw is not Claude Code: we pass a custom ``system_prompt``
+        # string (never the ``claude_code`` preset), and an empty
+        # setting-source list stops the SDK from injecting CLAUDE.md,
+        # output styles, or filesystem settings as context. The repo
+        # CLAUDE.md literally opens with "guidance to Claude Code
+        # (claude.ai/code)" — loading it bled that identity into the
+        # agent. Hooks, MCP servers, allowed_tools and permissions are
+        # all passed explicitly below, so none of them depend on
+        # setting sources. See
+        # https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts
+        options_kwargs = {
+            "system_prompt": system_prompt_arg,
+            "allowed_tools": allowed_tools,
+            "setting_sources": [],
+            "hooks": hooks,
+            "cwd": str(self._cwd),
+            "max_turns": self.settings.claude_sdk_max_turns or None,
+        }
+
+        # Load PocketPaw's bundled skills as a Claude Code *local plugin*.
+        # ``setting_sources=[]`` above disables the SDK's ~/.claude/skills
+        # discovery, so the boot-time ~/.claude/skills mirror is invisible
+        # to this backend and a local plugin is the ONLY way the bundled
+        # skills reach it. Persona isolation is preserved — a plugin loads
+        # only its own ``skills/`` directory, never the rest of ~/.claude
+        # (CLAUDE.md, output styles). Empirically verified 2026-06-03: the
+        # ``skills=`` option is also gated by setting_sources, but
+        # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
+        bundled_loaded = False
+        if self.settings.sdk_load_bundled_skills:
+            from pocketpaw.bundled_skills import bundled_skills_plugin_dir
+
+            plugin_dir = bundled_skills_plugin_dir()
+            if plugin_dir is not None:
+                options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
+                bundled_loaded = True
+                logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
+
+        # Plugin-identity digest (fix/claude-sdk-warm-client-skills): folds
+        # the requested skill set + the bundled flag into the cache key so a
+        # skill run can REUSE the warm subprocess instead of re-spawning.
+        # Keyed on identity, never the mkdtemp path (see _plugin_digest).
+        plugin_digest = self._plugin_digest(skill_names, bundled=bundled_loaded)
+
+        # Per-entity skill subset (entity-rooms A2). Materialize ONLY the
+        # named skills into a local plugin and append it to the ``plugins=``
+        # list (creating the list if the bundled plugin above was off). It
+        # coexists with the bundled entry. Empty ``skill_names`` is a no-op.
+        #
+        # The warm client keeps whatever ``plugins=`` path it was connected
+        # with from its first connect(), so the materialized dir must be
+        # STABLE per plugin_digest across turns. When this run will reuse the
+        # warm client and a dir for this digest already exists, reuse it
+        # rather than re-materializing — the live subprocess already points
+        # at it. Otherwise materialize fresh; cache + adopt it on the warm
+        # path (cleaned on eviction/cleanup), or leave it owned by this run
+        # on the stateless path (the per-run finally removes it).
+        if skill_names:
+            from pocketpaw.skills import materialize_run_skills
+
+            will_reuse_warm = not self._client_in_use
+            cached_dir = self._skills_dir_by_digest.get(plugin_digest)
+            if will_reuse_warm and cached_dir is not None and cached_dir.exists():
+                run_skills_root = cached_dir
+                skills_dir_adopted = True
+                logger.info(
+                    "SDK: reusing cached per-run skill plugin (%d requested) at %s",
+                    len(skill_names),
+                    run_skills_root,
+                )
+            else:
+                run_skills_root = materialize_run_skills(skill_names, run_id=session_key)
+                if run_skills_root is not None and will_reuse_warm:
+                    self._skills_dir_by_digest[plugin_digest] = run_skills_root
+                    skills_dir_adopted = True
+
+            if run_skills_root is not None:
+                options_kwargs.setdefault("plugins", [])
+                options_kwargs["plugins"].append({"type": "local", "path": str(run_skills_root)})
+                if not skills_dir_adopted:
+                    logger.info(
+                        "SDK: loading per-run skill plugin (%d requested) from %s "
+                        "(stateless — dir owned by this run)",
+                        len(skill_names),
+                        run_skills_root,
+                    )
+
+        # Configure LLM provider for the Claude CLI subprocess.
+        # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
+        sdk_env = llm.to_sdk_env()
+        if not sdk_env:
+            env_key = os.environ.get("ANTHROPIC_API_KEY")
+            if env_key:
+                sdk_env = {"ANTHROPIC_API_KEY": env_key}
+
+        # Pass Claude Code OAuth token (Max/Pro subscription in Docker/headless)
+        oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        if oauth_token:
+            sdk_env = sdk_env or {}
+            sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
+
+        # Strip nesting-detection env vars (set when launched from
+        # a Claude Code terminal) so the subprocess starts cleanly.
+        # These should already be removed by main(), but do it here
+        # too as a safety net.
+        for _strip_key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+            os.environ.pop(_strip_key, None)
+        # Merge per-run subprocess env (PR #1222 R1 Blocker 1) —
+        # e.g. the pocket-specialist runtime attaches
+        # ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
+        # ``POCKETPAW_INTERNAL_TOKEN`` here instead of writing to
+        # the parent process's ``os.environ``. LLM-auth env wins:
+        # we lay extras DOWN FIRST so anything the caller attaches
+        # cannot accidentally clobber the auth key. An isolated
+        # backend has its own ``_extra_subprocess_env`` so the
+        # tenancy of one request cannot leak into another.
+        if self._extra_subprocess_env:
+            merged_env = dict(self._extra_subprocess_env)
+            if sdk_env:
+                merged_env.update(sdk_env)
+            sdk_env = merged_env
+        if sdk_env:
+            options_kwargs["env"] = sdk_env
+        if is_non_anthropic:
+            options_kwargs["model"] = llm.model
+
+        # ── Debug logging for troubleshooting SDK startup ──
+        import shutil as _shutil
+
+        logger.info(
+            "SDK launch: provider=%s, has_api_key=%s, "
+            "CLAUDECODE=%s, CLAUDE_CODE_ENTRYPOINT=%s, "
+            "ANTHROPIC_API_KEY=%s, sdk_env_keys=%s, "
+            "cli_path=%s, cwd=%s",
+            provider,
+            bool(llm.api_key),
+            os.environ.get("CLAUDECODE", "<unset>"),
+            os.environ.get("CLAUDE_CODE_ENTRYPOINT", "<unset>"),
+            "set" if os.environ.get("ANTHROPIC_API_KEY") else "<unset>",
+            list(sdk_env.keys()) if sdk_env else "none",
+            _shutil.which("claude") or "<not found>",
+            self._cwd,
+        )
+
+        # Wire in MCP servers (policy-filtered)
+        mcp_servers = self._get_mcp_servers()
+        if mcp_servers:
+            options_kwargs["mcp_servers"] = mcp_servers
+            logger.info("MCP: passing %d servers to Claude SDK", len(mcp_servers))
+
+        # Enable token-by-token streaming if StreamEvent is available
+        if self._StreamEvent is not None:
+            options_kwargs["include_partial_messages"] = True
+
+        # Permission handling — PocketPaw always runs headless (web dashboard,
+        # Telegram, Discord, Slack, etc.) with no terminal for interactive
+        # permission prompts. Without bypassPermissions, tool calls that need
+        # approval (like Bash — used by memory save, web search, etc.) hang
+        # indefinitely on messaging channels.
+        # Dangerous Bash commands are still caught by the PreToolUse hook.
+        options_kwargs["permission_mode"] = "bypassPermissions"
+
+        # Model selection for Anthropic providers:
+        # 1. Smart routing (opt-in) — overrides with complexity-based model
+        # 2. Explicit claude_sdk_model — user-chosen fixed model
+        # 3. Neither set — let Claude Code CLI auto-select (recommended)
+        if not is_non_anthropic:
+            if self.settings.smart_routing_enabled:
+                from pocketpaw.agents.model_router import ModelRouter
+
+                model_router = ModelRouter(self.settings)
+                selection = model_router.classify(message)
+                options_kwargs["model"] = selection.model
+            elif self.settings.claude_sdk_model:
+                options_kwargs["model"] = self.settings.claude_sdk_model
+
+        # Capture stderr for better error diagnostics
+        def _on_stderr(line: str) -> None:
+            stderr_sink.append(line)
+            logger.debug("Claude CLI stderr: %s", line)
+
+        options_kwargs["stderr"] = _on_stderr
+
+        # Create options (after all kwargs are set, including model)
+        options = self._ClaudeAgentOptions(**options_kwargs)
+
+        return _BuiltOptions(
+            options=options,
+            options_kwargs=options_kwargs,
+            llm=llm,
+            run_skills_root=run_skills_root,
+            skills_dir_adopted=skills_dir_adopted,
+            plugin_digest=plugin_digest,
+        )
+
+    async def prewarm(
+        self,
+        *,
+        session_key: str,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_sdk_tools: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        skill_names: frozenset[str] = frozenset(),
+    ) -> None:
+        """Eagerly ``connect()`` the warm CLI subprocess for a session before its
+        first turn, so the first real ``run`` reuses it instead of paying the
+        ~12s cold ``connect()`` (feat/claude-sdk-prewarm).
+
+        Builds the SAME options the first turn will (via ``_build_options``) and
+        hands them to ``_get_or_create_client`` with the SAME ``session_key`` +
+        ``plugin_digest`` — so the cache key matches and the first turn finds the
+        client already live. If the keys diverged the first turn would EVICT the
+        prewarmed client (a net loss), which is why the caller must prewarm with
+        the same model/tools/prefix/skills the first turn will use.
+
+        FIRE-AND-FORGET, never-break-a-turn semantics:
+          * ALL exceptions are logged and SWALLOWED — a failed prewarm must never
+            propagate to (or poison) a later turn. On failure the half-built
+            client is torn down and the lease released, so the next ``run`` starts
+            clean and simply pays the cold connect it would have paid anyway (no
+            regression).
+          * If a run is already active (``_client_in_use``) prewarm is a NO-OP —
+            it must not contend for the lease or disturb an in-flight stream.
+          * If the SDK / CLI is unavailable it is a no-op (nothing to warm).
+
+        The skills-dir lifecycle is identical to ``run``'s warm path: when
+        ``skill_names`` is non-empty ``_build_options`` materializes + adopts the
+        plugin dir into ``self._skills_dir_by_digest`` keyed on ``plugin_digest``,
+        and the warm client created here owns it until eviction / ``cleanup()``.
+        On a prewarm failure that adopted dir is dropped so it doesn't leak.
+        """
+        if not self._sdk_available or not self._cli_available:
+            return
+        # A run holds the lease — never contend. The in-flight turn will create
+        # (or already created) the warm client itself.
+        if self._client_in_use:
+            logger.debug("prewarm skipped: a run is active (_client_in_use)")
+            return
+
+        adopted_digest = ""
+        try:
+            built = await self._build_options(
+                "",  # no real message yet — safe only when the model is
+                # message-independent (smart routing OFF). The trigger gates on
+                # this; see prewarm_session in run_core.
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+                deny_mcp_tool_ids=deny_mcp_tool_ids,
+                allow_sdk_tools=allow_sdk_tools,
+                allow_mcp_tool_ids=allow_mcp_tool_ids,
+                skill_names=skill_names,
+                stderr_sink=[],
+            )
+            # Remember the digest we may have adopted a dir under, so a failed
+            # connect can release it instead of leaking.
+            if built.skills_dir_adopted:
+                adopted_digest = built.plugin_digest
+            await self._get_or_create_client(
+                built.options,
+                session_key=session_key,
+                plugin_digest=built.plugin_digest,
+            )
+            logger.info(
+                "Prewarmed Claude client for session_key=%s (skills=%d)",
+                session_key,
+                len(skill_names),
+            )
+        except Exception as exc:  # noqa: BLE001 — prewarm must NEVER raise
+            logger.warning("Prewarm failed (swallowed, turn unaffected): %s", exc)
+            # Tear down any half-built client so the next run starts on a clean
+            # slate (and just pays the cold connect). CRITICAL: prewarm never
+            # acquired the ``_client_in_use`` lease, so it must NEVER clear it —
+            # a run firing concurrently may legitimately own it, and stealing it
+            # would corrupt that run. Do the teardown UNDER the client lock and
+            # only when no run holds the lease, so we can't disconnect a client a
+            # sibling run is actively using.
+            if self._client_lock is None:
+                self._client_lock = asyncio.Lock()
+            async with self._client_lock:
+                if not self._client_in_use:
+                    try:
+                        if self._client is not None:
+                            await self._client.disconnect()
+                    except Exception as disc_exc:  # noqa: BLE001
+                        logger.debug("prewarm cleanup disconnect error (ignored): %s", disc_exc)
+                    self._client = None
+                    self._client_options_key = None
+                    # If _build_options adopted a materialized skills dir for this
+                    # digest but no live client now references it, drop it so it
+                    # doesn't leak.
+                    if adopted_digest:
+                        self._drop_skills_dir(adopted_digest)
+                        self._client_plugin_digest = ""
 
     async def run(
         self,
@@ -1047,6 +1817,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # doesn't pass a non-empty ``skill_names``.
         run_skills_root: Path | None = None
 
+        # fix/claude-sdk-warm-client-skills: ``skills_dir_adopted`` is True when
+        # ``run_skills_root`` was handed to (or reused by) a WARM client — its
+        # lifetime then belongs to ``self._skills_dir_by_digest`` and the
+        # per-run finally must NOT rmtree it (the live subprocess still holds the
+        # path). It stays False on the genuine stateless-fallback path, where the
+        # dir is this run's alone and the finally is the only thing that removes
+        # it. ``plugin_digest`` is the plugin-identity hash threaded into the
+        # cache key + the dir cache.
+        skills_dir_adopted = False
+        plugin_digest = ""
+
         # Ownership flag — True only if THIS run acquired the shared
         # _client_in_use lease. Declared above the try/except so it is always
         # in scope in the except handler (an exception can fire before the
@@ -1055,418 +1836,41 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # non-owning run (stateless fallback, or a failure before acquisition)
         # can never release a sibling's lease or destroy its subprocess.
         acquired_lease = False
+        # Resolved LLM client — bound by ``_build_options`` below. Declared above
+        # the try (feat/claude-sdk-prewarm) so the ``except`` handler's
+        # ``llm.format_api_error`` call is safe even when ``_build_options`` itself
+        # raises before returning (e.g. the provider resolves but options
+        # construction fails); the handler guards ``llm is None`` for that case.
+        llm: Any = None
         try:
-            # Resolve LLM provider early -- needed for routing + env.
-            # Use per-backend provider setting (defaults to "anthropic").
-            # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
-            # Claude Free/Pro/Max plans are not permitted for third-party use.
-            # See: https://code.claude.com/docs/en/legal-and-compliance
-            from pocketpaw.llm.client import resolve_llm_client
-
-            provider = self.settings.claude_sdk_provider or "anthropic"
-            llm = resolve_llm_client(self.settings, force_provider=provider)
-
-            # ── API key check for Anthropic provider ──────────────
-            # Skip if using a non-Anthropic provider, or if the active
-            # provider is claude_code (it handles OAuth auth via its CLI).
-            _is_claude_code_provider = provider in ("claude_code", "claude_agent_sdk")
-            is_non_anthropic = (
-                llm.is_ollama
-                or llm.is_openai_compatible
-                or llm.is_gemini
-                or llm.is_litellm
-                or llm.is_openrouter
+            # Assemble the SDK options (feat/claude-sdk-prewarm). The whole
+            # block that built ``options_kwargs`` -> ``options`` (LLM resolve,
+            # model routing, system-prompt assembly, tool allow/deny, bundled +
+            # per-run skills materialization, subprocess env, MCP wiring) now
+            # lives in the shared ``_build_options`` helper so ``prewarm`` can
+            # build the IDENTICAL options the first turn will — same cache key,
+            # so a prewarmed warm client is REUSED here, not evicted. The
+            # returned triple (run_skills_root / skills_dir_adopted /
+            # plugin_digest) drives the dispatch + finally exactly as before; the
+            # stderr sink is this run's ``_stderr_lines`` so CLI diagnostics still
+            # flow to the error handlers below.
+            _built = await self._build_options(
+                message,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+                deny_mcp_tool_ids=deny_mcp_tool_ids,
+                allow_sdk_tools=allow_sdk_tools,
+                allow_mcp_tool_ids=allow_mcp_tool_ids,
+                skill_names=skill_names,
+                stderr_sink=_stderr_lines,
             )
-            # if not is_non_anthropic:
-            #     has_api_key = bool(llm.api_key or os.environ.get("ANTHROPIC_API_KEY"))
-            #     if not has_api_key and not is_claude_code_provider:
-            #         yield AgentEvent(
-            #             type="error",
-            #             content=(
-            #                 "**API key required** -- The Claude SDK backend needs "
-            #                 "an Anthropic API key.\n\n"
-            #                 "**How to fix:**\n"
-            #                 "1. Get an API key at "
-            #                 "[console.anthropic.com](https://console.anthropic.com/settings/keys)\n"
-            #                 "2. Add it in **Settings > API Keys > Anthropic API Key**\n"
-            #                 "3. Or set the `ANTHROPIC_API_KEY` environment variable\n\n"
-            #                 "*Alternatively, switch to **Ollama (Local)** in Settings "
-            #                 "> General for free local inference.*"
-            #             ),
-            #         )
-            #         return
-
-            # Smart model routing — classify complexity to pick the model tier.
-            # All messages go through the Claude Code CLI subprocess, which
-            # handles conversation compaction automatically (PreCompact hook).
-            selection = None
-            if self.settings.smart_routing_enabled and not is_non_anthropic:
-                from pocketpaw.agents.model_router import ModelRouter
-
-                model_router = ModelRouter(self.settings)
-                selection = model_router.classify(message)
-                logger.info(
-                    "Smart routing: %s -> %s (%s)",
-                    selection.complexity.value,
-                    selection.model,
-                    selection.reason,
-                )
-
-            # System prompt — instructions are now part of identity
-            # (injected by BootstrapContext.to_system_prompt() via INSTRUCTIONS.md)
-            identity = system_prompt or _DEFAULT_IDENTITY
-
-            # Inject connector instructions so the agent can use data sources
-            try:
-                from pocketpaw.connectors.registry import ConnectorRegistry
-
-                reg = ConnectorRegistry()
-                if reg.available:
-                    names = ", ".join(c["name"] for c in reg.available)
-                    identity += (
-                        "\n\n# Data Connectors\n"
-                        f"Available connectors: {names}\n"
-                        "To manage connectors, use Bash to call the local API:\n"
-                        "- List: curl -s http://localhost:8888/api/v1/connectors\n"
-                        "- Detail: curl -s http://localhost:8888/api/v1/connectors/<name>\n"
-                        "- Connect: curl -s -X POST "
-                        "http://localhost:8888/api/v1/connectors/connect "
-                        "-H 'Content-Type: application/json' "
-                        '-d \'{"connector_name":"<name>","config":{...}}\'\n'
-                        "- Execute: curl -s -X POST "
-                        "http://localhost:8888/api/v1/connectors/execute "
-                        "-H 'Content-Type: application/json' "
-                        '-d \'{"connector_name":"<name>","action":"<action>"'
-                        ',"params":{...}}\'\n'
-                        "- Disconnect: curl -s -X POST "
-                        "http://localhost:8888/api/v1/connectors/disconnect "
-                        "-H 'Content-Type: application/json' "
-                        '-d \'{"connector_name":"<name>"}\'\n'
-                    )
-            except Exception:
-                pass  # Don't break agent if connector registry fails
-
-            # Inject prior turns into the system prompt at connect time. The
-            # persistent ClaudeSDKClient accumulates new turns natively after
-            # connect, but a fresh subprocess (after eviction, restart, or
-            # session switch) has empty native history — without this, those
-            # cold-start runs lose all conversation context. Reused clients
-            # keep the prompt set at first connect and ignore later option
-            # changes, so there's no duplication on the warm path.
-            final_prompt = identity
-            if history:
-                lines = ["# Recent Conversation"]
-                for msg in history:
-                    role = msg.get("role", "user").capitalize()
-                    content = msg.get("content", "")
-                    if len(content) > 2000:
-                        content = content[:2000] + "..."
-                    lines.append(f"**{role}**: {content}")
-                final_prompt += "\n\n" + "\n".join(lines)
-
-            # Pocket sessions don't need shell or filesystem access — the
-            # MCP pocket tools (get_pocket / list_pockets / set_state /
-            # set_node_prop / add_node / etc.) are the complete interface.
-            # Detect via the <pocket-scope> marker every pocket prompt
-            # carries; lock tools down to delegation + web + pocket MCP.
-            #
-            # Without this gate, the agent has been observed reaching for
-            # shell introspection (e.g. `env | grep pocket; curl localhost`)
-            # to "figure out" pocket state, which trips the security rails
-            # AND is the wrong path — the MCP tools already expose
-            # everything the agent needs.
-            is_pocket_session = "<pocket-scope>" in (final_prompt or "")
-
-            if is_pocket_session:
-                all_sdk_tools = ["Agent", "WebSearch", "WebFetch"]
-                logger.info(
-                    "Pocket session detected — tool surface locked to %s",
-                    all_sdk_tools,
-                )
-            else:
-                all_sdk_tools = [
-                    "Agent",
-                    "Bash",
-                    "Read",
-                    "Write",
-                    "Edit",
-                    "Glob",
-                    "Grep",
-                    "WebSearch",
-                    "WebFetch",
-                    "Skill",
-                ]
-            allowed_tools = [
-                t
-                for t in all_sdk_tools
-                if self._policy.is_tool_allowed(self._TOOL_POLICY_MAP.get(t, t))
-            ]
-            if len(allowed_tools) < len(all_sdk_tools):
-                blocked = set(all_sdk_tools) - set(allowed_tools)
-                logger.info("Tool policy blocked SDK tools: %s", blocked)
-
-            # In-process MCP tool ids must be on the allowlist to be
-            # callable. The ripple widget-spec tools are core; the cloud
-            # pocket / Mission Control tasks / planner / pocket-specialist
-            # ids come from the ``pocketpaw.mcp_servers`` providers (none on
-            # an OSS install). The cloud ``pocketpaw_pocket`` server carries
-            # both read tools (get_pocket / list_pockets) and the writable
-            # ``add_widget`` tool — they all flow through the loop below.
-            allowed_tools.extend(self._collect_mcp_tool_ids())
-
-            # Per-entity ADDITIVE allowlist (entity-rooms chunk ①). UNION the
-            # entity's ``allowed_sdk_tools`` into the allowlist BEFORE the deny
-            # subtraction below, so the precedence is
-            # ``effective = (agent_tools ∪ allow) − deny``. Dedup-preserve order:
-            # only append ids not already present. Empty for legacy / non-entity
-            # runs, so this is a no-op there. The deny set (subtracted next) is
-            # the hard cap — an id in BOTH allow and deny stays denied.
-            if allow_sdk_tools:
-                existing = set(allowed_tools)
-                for tool_id in allow_sdk_tools:
-                    if tool_id not in existing:
-                        allowed_tools.append(tool_id)
-                        existing.add(tool_id)
-                logger.info(
-                    "Surface tool-allow: unioned %s into allowlist", sorted(allow_sdk_tools)
-                )
-
-            # Per-surface MCP-tool deny set (threaded from the chat loop's
-            # resolved ``SurfaceProfile``). Any denied id is subtracted from the
-            # allowlist BEFORE the SDK launches, so the agent is physically
-            # unable to call it. On the /sites svelte-create surface this forbids
-            # the two ripple-create tools (``create_landing_site`` +
-            # ``pocket_specialist__create``) so the agent CANNOT fall back to
-            # building a rippleSpec landing page — prose-only "do not call the
-            # ripple tool" routing was proven to fail. Empty for every other
-            # surface (a no-op), so ``create_svelte_site`` / ``publish`` /
-            # ``pocket_specialist__edit`` and the ripple-engine / refine /
-            # non-sites flows are untouched. This is the typed replacement for
-            # the old prompt-sniffing ``engine="svelte"`` marker gate.
-            if deny_mcp_tool_ids:
-                before_count = len(allowed_tools)
-                allowed_tools = [t for t in allowed_tools if t not in deny_mcp_tool_ids]
-                if len(allowed_tools) < before_count:
-                    logger.info(
-                        "Surface tool-deny: excluded %s from allowlist",
-                        sorted(deny_mcp_tool_ids),
-                    )
-
-            # Per-MODE restrictive MCP allow-list (distinct from the additive
-            # ``allow_sdk_tools`` above). ``None`` keeps every MCP tool (broad
-            # surfaces like /chat). When set, keep only MCP tools that are in the
-            # mode's set, in the pocket-creation grant, a ripple widget tool, OR
-            # from an always-allowed server (connectors + pocket lifecycle).
-            # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
-            # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
-            # Applied AFTER deny so a denied id can't sneak back via the grant.
-            if allow_mcp_tool_ids is not None:
-                from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
-
-                grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | frozenset(WIDGET_TOOL_IDS)
-                before_count = len(allowed_tools)
-                allowed_tools = [
-                    t
-                    for t in allowed_tools
-                    if not t.startswith("mcp__")
-                    or t in grant
-                    or _mcp_server_of(t) in ALWAYS_ALLOWED_MCP_SERVERS
-                ]
-                if len(allowed_tools) < before_count:
-                    logger.info(
-                        "Mode MCP-allow: scoped to %s (+ general grant)",
-                        sorted(allow_mcp_tool_ids),
-                    )
-
-            # Build hooks for security
-            hooks = {
-                "PreToolUse": [
-                    self._HookMatcher(
-                        matcher="Bash",  # Only hook Bash commands
-                        hooks=[self._block_dangerous_hook],
-                    )
-                ]
-            }
-
-            # Build options
-            #
-            # Windows note: CreateProcess caps the entire command line at
-            # ~32,767 chars. The SDK passes string ``system_prompt`` inline
-            # via ``--system-prompt``; long KB/identity blobs blow that limit
-            # and surface as a misleading ``CLINotFoundError``. Since SDK
-            # 0.1.72 we can pass a ``SystemPromptFile`` dict instead, which
-            # the CLI reads via ``--system-prompt-file <path>``.
-            system_prompt_arg: Any = final_prompt
-            if os.name == "nt" and len(final_prompt) > 24_000:
-                runtime_dir = Path.home() / ".pocketpaw" / "runtime"
-                runtime_dir.mkdir(parents=True, exist_ok=True)
-                prompt_path = runtime_dir / "system_prompt.md"
-                prompt_path.write_text(final_prompt, encoding="utf-8")
-                system_prompt_arg = {"type": "file", "path": str(prompt_path)}
-                logger.info(
-                    "System prompt %d chars exceeds Windows CLI safe limit; "
-                    "passing via --system-prompt-file %s",
-                    len(final_prompt),
-                    prompt_path,
-                )
-
-            # ``setting_sources=[]`` keeps the agent on its OWN persona.
-            # PocketPaw is not Claude Code: we pass a custom ``system_prompt``
-            # string (never the ``claude_code`` preset), and an empty
-            # setting-source list stops the SDK from injecting CLAUDE.md,
-            # output styles, or filesystem settings as context. The repo
-            # CLAUDE.md literally opens with "guidance to Claude Code
-            # (claude.ai/code)" — loading it bled that identity into the
-            # agent. Hooks, MCP servers, allowed_tools and permissions are
-            # all passed explicitly below, so none of them depend on
-            # setting sources. See
-            # https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts
-            options_kwargs = {
-                "system_prompt": system_prompt_arg,
-                "allowed_tools": allowed_tools,
-                "setting_sources": [],
-                "hooks": hooks,
-                "cwd": str(self._cwd),
-                "max_turns": self.settings.claude_sdk_max_turns or None,
-            }
-
-            # Load PocketPaw's bundled skills as a Claude Code *local plugin*.
-            # ``setting_sources=[]`` above disables the SDK's ~/.claude/skills
-            # discovery, so the boot-time ~/.claude/skills mirror is invisible
-            # to this backend and a local plugin is the ONLY way the bundled
-            # skills reach it. Persona isolation is preserved — a plugin loads
-            # only its own ``skills/`` directory, never the rest of ~/.claude
-            # (CLAUDE.md, output styles). Empirically verified 2026-06-03: the
-            # ``skills=`` option is also gated by setting_sources, but
-            # ``plugins=`` is not. Toggle via ``sdk_load_bundled_skills``.
-            if self.settings.sdk_load_bundled_skills:
-                from pocketpaw.bundled_skills import bundled_skills_plugin_dir
-
-                plugin_dir = bundled_skills_plugin_dir()
-                if plugin_dir is not None:
-                    options_kwargs["plugins"] = [{"type": "local", "path": str(plugin_dir)}]
-                    logger.info("SDK: loading bundled-skills plugin from %s", plugin_dir)
-
-            # Per-entity skill subset (entity-rooms A2). Materialize ONLY the
-            # named skills into a throwaway local plugin and append it to the
-            # ``plugins=`` list (creating the list if the bundled plugin above
-            # was off). It coexists with the bundled entry. ``run_skills_root`` is
-            # cleaned up in the ``finally`` after the stream drains, and its
-            # presence forces the fresh stateless path below (the warm client
-            # would ignore these plugins). Empty ``skill_names`` is a no-op.
-            if skill_names:
-                from pocketpaw.skills import materialize_run_skills
-
-                run_skills_root = materialize_run_skills(skill_names, run_id=session_key)
-                if run_skills_root is not None:
-                    options_kwargs.setdefault("plugins", [])
-                    options_kwargs["plugins"].append(
-                        {"type": "local", "path": str(run_skills_root)}
-                    )
-                    logger.info(
-                        "SDK: loading per-run skill plugin (%d requested) from %s",
-                        len(skill_names),
-                        run_skills_root,
-                    )
-
-            # Configure LLM provider for the Claude CLI subprocess.
-            # Ollama/OpenAI-compat providers set their own env vars via to_sdk_env().
-            sdk_env = llm.to_sdk_env()
-            if not sdk_env:
-                env_key = os.environ.get("ANTHROPIC_API_KEY")
-                if env_key:
-                    sdk_env = {"ANTHROPIC_API_KEY": env_key}
-
-            # Pass Claude Code OAuth token (Max/Pro subscription in Docker/headless)
-            oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
-            if oauth_token:
-                sdk_env = sdk_env or {}
-                sdk_env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_token
-
-            # Strip nesting-detection env vars (set when launched from
-            # a Claude Code terminal) so the subprocess starts cleanly.
-            # These should already be removed by main(), but do it here
-            # too as a safety net.
-            for _strip_key in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
-                os.environ.pop(_strip_key, None)
-            # Merge per-run subprocess env (PR #1222 R1 Blocker 1) —
-            # e.g. the pocket-specialist runtime attaches
-            # ``POCKETPAW_WORKSPACE_ID`` / ``POCKETPAW_USER_ID`` /
-            # ``POCKETPAW_INTERNAL_TOKEN`` here instead of writing to
-            # the parent process's ``os.environ``. LLM-auth env wins:
-            # we lay extras DOWN FIRST so anything the caller attaches
-            # cannot accidentally clobber the auth key. An isolated
-            # backend has its own ``_extra_subprocess_env`` so the
-            # tenancy of one request cannot leak into another.
-            if self._extra_subprocess_env:
-                merged_env = dict(self._extra_subprocess_env)
-                if sdk_env:
-                    merged_env.update(sdk_env)
-                sdk_env = merged_env
-            if sdk_env:
-                options_kwargs["env"] = sdk_env
-            if is_non_anthropic:
-                options_kwargs["model"] = llm.model
-
-            # ── Debug logging for troubleshooting SDK startup ──
-            import shutil as _shutil
-
-            logger.info(
-                "SDK launch: provider=%s, has_api_key=%s, "
-                "CLAUDECODE=%s, CLAUDE_CODE_ENTRYPOINT=%s, "
-                "ANTHROPIC_API_KEY=%s, sdk_env_keys=%s, "
-                "cli_path=%s, cwd=%s",
-                provider,
-                bool(llm.api_key),
-                os.environ.get("CLAUDECODE", "<unset>"),
-                os.environ.get("CLAUDE_CODE_ENTRYPOINT", "<unset>"),
-                "set" if os.environ.get("ANTHROPIC_API_KEY") else "<unset>",
-                list(sdk_env.keys()) if sdk_env else "none",
-                _shutil.which("claude") or "<not found>",
-                self._cwd,
-            )
-
-            # Wire in MCP servers (policy-filtered)
-            mcp_servers = self._get_mcp_servers()
-            if mcp_servers:
-                options_kwargs["mcp_servers"] = mcp_servers
-                logger.info("MCP: passing %d servers to Claude SDK", len(mcp_servers))
-
-            # Enable token-by-token streaming if StreamEvent is available
-            if self._StreamEvent is not None:
-                options_kwargs["include_partial_messages"] = True
-
-            # Permission handling — PocketPaw always runs headless (web dashboard,
-            # Telegram, Discord, Slack, etc.) with no terminal for interactive
-            # permission prompts. Without bypassPermissions, tool calls that need
-            # approval (like Bash — used by memory save, web search, etc.) hang
-            # indefinitely on messaging channels.
-            # Dangerous Bash commands are still caught by the PreToolUse hook.
-            options_kwargs["permission_mode"] = "bypassPermissions"
-
-            # Model selection for Anthropic providers:
-            # 1. Smart routing (opt-in) — overrides with complexity-based model
-            # 2. Explicit claude_sdk_model — user-chosen fixed model
-            # 3. Neither set — let Claude Code CLI auto-select (recommended)
-            if not is_non_anthropic:
-                if self.settings.smart_routing_enabled:
-                    from pocketpaw.agents.model_router import ModelRouter
-
-                    model_router = ModelRouter(self.settings)
-                    selection = model_router.classify(message)
-                    options_kwargs["model"] = selection.model
-                elif self.settings.claude_sdk_model:
-                    options_kwargs["model"] = self.settings.claude_sdk_model
-
-            # Capture stderr for better error diagnostics
-            def _on_stderr(line: str) -> None:
-                _stderr_lines.append(line)
-                logger.debug("Claude CLI stderr: %s", line)
-
-            options_kwargs["stderr"] = _on_stderr
-
-            # Create options (after all kwargs are set, including model)
-            options = self._ClaudeAgentOptions(**options_kwargs)
+            options = _built.options
+            options_kwargs = _built.options_kwargs
+            llm = _built.llm
+            run_skills_root = _built.run_skills_root
+            skills_dir_adopted = _built.skills_dir_adopted
+            plugin_digest = _built.plugin_digest
 
             logger.debug(f"🚀 Starting Claude Agent SDK query: {message[:100]}...")
 
@@ -1480,22 +1884,21 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_key,
             )
             _persistent_client = None
-            # WARM-CLIENT BYPASS (entity-rooms A2): when this run materialized a
-            # per-entity skill plugin, the warm client MUST NOT be reused. The
-            # persistent client applies its options (incl. ``plugins=``) only at
-            # first ``connect()``, and ``_client_cache_key`` does NOT hash
-            # ``plugins=`` — so a warm client connected without these skills would
-            # silently ignore them, and conversely a warm client connected WITH
-            # them would leak them into later non-skill turns. A fresh stateless
-            # query rebuilds the subprocess with this run's exact ``options``, so
-            # the materialized plugin actually takes effect and never persists.
-            skip_warm_client = run_skills_root is not None
-            if not self._client_in_use and not skip_warm_client:
+            # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
+            # runs is REMOVED. ``_client_cache_key`` now folds in
+            # ``plugin_digest`` (the skill-identity hash), so a warm client can
+            # distinguish a skill run from a non-skill one — a same-skill turn
+            # reuses the subprocess and a changed skill set rebuilds it. The
+            # materialized plugin dir was cached + adopted above so the warm
+            # subprocess keeps a valid path across turns. The only fallback to
+            # the stateless path now is the original concurrency guard: a sibling
+            # run already holds the lease (_client_in_use).
+            if not self._client_in_use:
                 try:
                     self._client_in_use = True
                     acquired_lease = True
                     _persistent_client = await self._get_or_create_client(
-                        options, session_key=session_key
+                        options, session_key=session_key, plugin_digest=plugin_digest
                     )
                     logger.info("Persistent client: sending query (%d chars)", len(message))
                     await _persistent_client.query(message)
@@ -1526,17 +1929,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     self._client_in_use = False
                     acquired_lease = False
                     _persistent_client = None
+                    # No warm client adopted the skills dir we cached for this
+                    # digest (connect failed before/at adoption). The stateless
+                    # query below uses ``options`` (which already point at the
+                    # dir) for THIS run only, so transfer ownership back to the
+                    # per-run finally: drop it from the digest cache and clear the
+                    # adopted flag so the finally cleans it up exactly once.
+                    if skills_dir_adopted:
+                        self._skills_dir_by_digest.pop(plugin_digest, None)
+                        self._client_plugin_digest = ""
+                        skills_dir_adopted = False
 
             if event_stream is None:
-                logger.info(
-                    "Starting stateless query (reason: %s)",
-                    "per-run skill plugin (warm-client bypass)"
-                    if skip_warm_client
-                    else "fallback — _client_in_use was True",
-                )
-                # final_prompt already carries Mongo history (injected above),
-                # so the stateless path uses the same options as the persistent
-                # path — no separate system prompt swap is needed.
+                logger.info("Starting stateless query (reason: _client_in_use was True)")
+                # ``_build_options`` already baked Mongo history into the system
+                # prompt inside ``options``, so the stateless path uses the same
+                # options as the persistent path — no separate prompt swap needed.
                 event_stream = self._resilient_query(prompt=message, options=options)
 
             # State tracking for StreamEvent deduplication
@@ -1823,16 +2231,29 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         "(OpenAI Agents, Google ADK, Codex, etc.)."
                     ),
                 )
-            else:
+            elif llm is not None:
                 yield AgentEvent(
                     type="error",
                     content=llm.format_api_error(e, stderr=stderr_text),
                 )
+            else:
+                # ``_build_options`` raised before binding ``llm`` — fall back to
+                # a plain message so the error still surfaces (no UnboundLocalError).
+                yield AgentEvent(
+                    type="error",
+                    content=f"❌ Claude Agent SDK error: {error_msg}",
+                )
         finally:
-            # Always remove the per-run materialized-skills plugin dir
-            # (entity-rooms A2), whether the run finished cleanly, errored, or
-            # the generator was closed early. Best-effort; never raises.
-            if run_skills_root is not None:
+            # Remove the per-run materialized-skills plugin dir (entity-rooms
+            # A2) ONLY when this run owns it — i.e. the genuine stateless-
+            # fallback case where no warm client adopted the dir
+            # (fix/claude-sdk-warm-client-skills). When ``skills_dir_adopted`` is
+            # True the dir belongs to ``self._skills_dir_by_digest`` and a LIVE
+            # warm subprocess still references its path; deleting it here would
+            # leave the next reuse pointing at a missing dir. Adopted dirs are
+            # instead removed on client eviction (_get_or_create_client) or
+            # cleanup(). Best-effort; never raises.
+            if run_skills_root is not None and not skills_dir_adopted:
                 from pocketpaw.skills import cleanup_run_skills
 
                 cleanup_run_skills(run_skills_root)

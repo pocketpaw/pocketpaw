@@ -93,6 +93,7 @@ class WorkItem:
     pocket_name: str = ""  # display name
     fabric_refs: tuple[str, ...] = field(default_factory=tuple)
     blocked_by: tuple[str, ...] = field(default_factory=tuple)
+    due_at: datetime | None = None
 
 
 __all__ = [

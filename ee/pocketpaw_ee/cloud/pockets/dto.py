@@ -95,6 +95,26 @@ Updated: 2026-06-07 (feat/entity-pocket-profile-field) — import
 importing ``models.*``; the class is a plain value object, not a Beanie doc,
 so sharing it via the leaf domain module keeps one shape without crossing the
 boundary.
+Updated: 2026-06-12 (feat/connector-as-pocket-backend) — a pocket backend
+can be an existing CONNECTOR, not only an http base_url.
+PocketBackendConfigRequest gained ``backend_type`` ("http" default |
+"connector") + ``connector_name`` and made ``base_url`` optional (a
+connector backend needs none; the service still requires a valid URL for an
+http backend). PocketBackendConfigResponse echoes ``backend_type`` /
+``connector_name`` back (never the token).
+Updated: 2026-06-13 (fix/ripple-normalizer-path-drop, native gated actions
+step 1) — ``RunActionRequest.path`` is now OPTIONAL (``str | None``, default
+``None``). The read-time ripple normalizer rewrites an inline write ``api``
+handler into a PATHLESS ``call_binding`` handler (it has no request context to
+carry a path), so the client fires ``/actions/run`` with only ``{action,
+params}``. The path is author-time data the server already persists on the
+``rippleSpec.actions`` binding (it must, to read the HTTP method), so the route
+resolves it from there when the client omits it. A required ``path`` 422'd
+every relative-URL api button (caught live on the Nerve demo's "Score next 20").
+Client-sent ``path`` (a row-scoped binding whose stored path holds an unresolved
+``{item.id}`` template, resolved client-side) still wins — the binding path is
+only the fallback. The server still reads the verb from the binding, so a
+compromised client cannot pick method OR a path the allowlist would reject.
 """
 
 from __future__ import annotations
@@ -329,21 +349,31 @@ class AllowedWriteDTO(BaseModel):
 class PocketBackendConfigRequest(BaseModel):
     """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
 
-    ``auth_token`` carries the secret only on the way IN; it is encrypted
-    server-side and never returned. Its meaning depends on ``auth_type``:
+    ``backend_type`` selects the shape:
 
-    * ``bearer`` — the bearer token, sent as ``Authorization: Bearer <token>``.
-    * ``api_key`` — the API key value, sent in the ``auth_header`` header.
-    * ``basic`` — the raw ``user:pass`` credential. The server base64-encodes
-      it to form a valid ``Authorization: Basic`` header — do NOT pre-encode.
-    * ``none`` — unused.
+    * ``"http"`` (the default) — ``base_url`` + optional auth. ``auth_token``
+      carries the secret only on the way IN; it is encrypted server-side and
+      never returned. Its meaning depends on ``auth_type``:
+        - ``bearer`` — the bearer token (``Authorization: Bearer <token>``).
+        - ``api_key`` — the API key value, sent in the ``auth_header`` header.
+        - ``basic`` — the raw ``user:pass`` credential. The server
+          base64-encodes it — do NOT pre-encode.
+        - ``none`` — unused.
+      ``auth_header`` names the custom header for the ``api_key`` auth type
+      (defaults to ``X-Api-Key`` when omitted).
+    * ``"connector"`` — ``connector_name`` names a workspace-bound connector.
+      ``base_url``/``auth_*`` are unused (and not required); the service
+      validates the connector is enabled for the workspace.
 
-    ``auth_header`` names the custom header for the ``api_key`` auth type
-    (defaults to ``X-Api-Key`` when omitted).
+    ``base_url`` is OPTIONAL here (defaults to ``""``) so a connector backend
+    needn't send one; the service still requires a valid URL for an http
+    backend.
     """
 
-    base_url: str = Field(min_length=1)
-    auth_type: Literal["bearer", "api_key", "basic", "none"]
+    backend_type: Literal["http", "connector"] = "http"
+    connector_name: str | None = None
+    base_url: str = ""
+    auth_type: Literal["bearer", "api_key", "basic", "none"] = "none"
     auth_token: str = ""
     auth_header: str | None = None
 
@@ -369,6 +399,12 @@ class ApprovalRouteDTO(BaseModel):
 class PocketBackendConfigResponse(BaseModel):
     """Backend binding as returned to clients — never carries the token.
 
+    ``backend_type`` is ``"http"`` (the default / legacy) or ``"connector"``;
+    ``connector_name`` names the bound connector when ``backend_type`` is
+    ``"connector"`` (``None`` for http). For an http backend ``base_url`` /
+    ``auth_type`` describe the endpoint; for a connector backend ``base_url``
+    is ``""`` and ``auth_type`` is ``"none"``.
+
     ``allowed_writes`` is the per-pocket write allowlist (RFC 05 M2a) —
     an owner/editor-facing non-secret. Empty by default (fail-closed: no
     write fires until a human allow-lists it).
@@ -378,6 +414,8 @@ class PocketBackendConfigResponse(BaseModel):
     default — the pocket owner approves.
     """
 
+    backend_type: str = "http"
+    connector_name: str | None = None
     base_url: str
     auth_type: str
     configured: bool
@@ -415,17 +453,29 @@ class RunActionRequest(BaseModel):
     """Body for ``POST /pockets/{id}/actions/run``.
 
     The client sends the action's NAME (``action``) plus the *resolved*
-    ``path`` and ``params`` — Ripple's ``{...}`` expression resolver runs
-    client-side at click time. The server loads the named action from the
-    persisted ``rippleSpec.actions`` block to read the HTTP ``method`` —
-    the client never picks the verb.
+    ``params`` — Ripple's ``{...}`` expression resolver runs client-side at
+    click time. The server loads the named action from the persisted
+    ``rippleSpec.actions`` block to read the HTTP ``method`` — the client
+    never picks the verb.
+
+    ``path`` is OPTIONAL. The read-time ripple normalizer rewrites an inline
+    write ``api`` handler into a PATHLESS ``call_binding`` handler, so the
+    normal client fires with no ``path`` and the route resolves it from the
+    persisted binding's ``path`` (which the spec already carries — see
+    :class:`~pocketpaw_ee.cloud.pockets.action_executor.ActionBinding`). A
+    client MAY still send a ``path`` — a row-scoped binding whose stored path
+    holds an unresolved ``{item.id}`` template gets resolved client-side, and
+    that resolved value takes precedence over the binding's templated one.
+    Either way the server reads the verb from the binding and the executor
+    matches the final ``(method, path)`` against the owner's allowlist, so a
+    client cannot pick a path the allowlist would reject.
 
     ``idempotency_key`` is optional: when omitted the server generates one
     so a write retried after a timeout cannot double-submit.
     """
 
     action: str = Field(min_length=1)
-    path: str = Field(min_length=1)
+    path: str | None = Field(default=None, min_length=1)
     params: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
 

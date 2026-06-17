@@ -6,6 +6,11 @@
 #   and persists it via ``pockets.service.apply_derived_surface_profile`` (the
 #   Beanie-write boundary — this service never imports the Pocket doc). Derivation
 #   itself is the pure ``derivation.derive_surface_profile``.
+# Updated: 2026-06-08 (Phase B chunk 7 — purge path) — added
+#   ``disconnect_member``: the member-facing "disconnect my accounts" path. It
+#   delegates to member_ingest.purge.purge_member_data to delete the caller's
+#   own per-user KB scope, OAuth tokens, connector rows, and ingest-state.
+#   Bound to the authenticated caller at the router (member_id == caller).
 # Updated: 2026-06-08 (connector-mcp-execution / keystone) — added
 #   ``list_pocket_connectors`` so the cloud chat agent's in-process MCP server
 #   (``ee/pocketpaw_ee/agent/mcp_servers/connectors.py``) can enumerate a
@@ -14,6 +19,32 @@
 #   doc (OSS-EE boundary §2). The MCP ``connector_execute`` tool reuses the
 #   existing ``execute(...)`` for read (auto-trust) actions and blocks
 #   write/confirm-trust actions in v1.
+# Updated: 2026-06-12 (feat/connector-as-pocket-backend) — added
+#   ``is_connector_enabled_for_workspace``: the validation gate
+#   ``pockets.service.set_pocket_backend`` calls before binding a pocket to a
+#   ``backend_type="connector"`` backend. Keeps the WorkspaceConnector Beanie
+#   read in THIS service (the owner of the connector docs) so the pockets
+#   service never imports the connector model.
+# Updated: 2026-06-12 (workspace-scope visibility) — ``list_pocket_connectors``
+#   and ``is_connector_bound_to_pocket`` now ALSO match ``scope="workspace"``
+#   rows: a workspace-enabled connector is visible/usable from every pocket in
+#   that workspace, not only pockets with an explicit pocket-scoped row. Fixes
+#   the UI-says-connected / agent-says-no-connectors split (the connectors page
+#   reads the workspace catalog; the agent MCP tool read only pocket-scoped
+#   rows). Cross-tenant posture unchanged — workspace scope IS the tenant; the
+#   read/write trust gate still applies per action.
+# Updated: 2026-06-12 (connector-store-unification CS-3) — the cloud
+#   ``execute()`` path now goes through ``registry.ensure_connected`` (scope
+#   keys ``pocket:<pocket_id>`` / ``ws:<workspace_id>``) backed by the
+#   WorkspaceConnector state store, so a fresh process executes from a seeded
+#   doc with NO prior /connect; the inline ``adapter._connected`` check is
+#   gone. ``enable_connector`` / ``update_config`` / ``disable_connector``
+#   drop any live registry adapter for the touched row so the next execute
+#   rehydrates with current config instead of serving a stale connection.
+# Updated: 2026-06-12 (PR #1449 review fix) — the legacy one-shot fallback in
+#   ``execute()`` filters its doc read on ``enabled == True``, so a disabled
+#   row's credentials can never connect through the fallback: disable now
+#   revokes on every execute path, not just the durable seam.
 # Module-level async API. Sole owner of writes to the
 # ``WorkspaceConnector`` Beanie document. Reads merge the static
 # registry catalog from src/pocketpaw/connectors/registry.py with the
@@ -31,6 +62,8 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+
+from beanie.operators import And, Or
 
 from pocketpaw.connectors.protocol import ExecutionMode
 from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
@@ -161,6 +194,27 @@ async def _rederive_pocket_surface_profile(workspace_id: str, pocket_id: str) ->
     await apply_derived_surface_profile(workspace_id, pocket_id, profile)
 
 
+async def _drop_live_adapter(doc: _WCDoc) -> None:
+    """Drop any live registry adapter for this row's scope keys.
+
+    Called after enable/disable/config writes so the next execute rehydrates
+    through ``ensure_connected`` with the row's CURRENT state instead of
+    serving an adapter connected with stale config (or one for a row that was
+    just disabled). ``registry.disconnect`` closes the adapter's held handles;
+    the durable row itself is untouched — the cloud state store's delete is a
+    deliberate no-op for namespaced keys (see ``state_provider.py``).
+    """
+    reg = _get_registry()
+    keys = [f"ws:{doc.workspace}"]
+    if doc.pocket_id:
+        keys.append(f"pocket:{doc.pocket_id}")
+    for key in keys:
+        try:
+            await reg.disconnect(key, doc.name)
+        except Exception as exc:  # noqa: BLE001 — best-effort cache drop
+            logger.warning("live adapter drop failed for %s (%s): %s", doc.name, key, exc)
+
+
 # ---------------------------------------------------------------------------
 # Mapping helpers
 # ---------------------------------------------------------------------------
@@ -287,6 +341,9 @@ async def enable_connector(
         if body.config:
             doc.config = body.config
         await doc.save()
+        # Re-enable may have changed config/scope — a live adapter from a
+        # previous execute must not keep serving the old connection.
+        await _drop_live_adapter(doc)
 
     a = available[name]
     await event_bus.emit(
@@ -332,6 +389,9 @@ async def disable_connector(workspace_id: str, name: str) -> ConnectorResponse:
     pocket_id_for_rederive = doc.pocket_id
     doc.enabled = False
     await doc.save()
+    # A disabled connector must stop executing immediately — drop any live
+    # adapter so the next execute can't reuse the old connection.
+    await _drop_live_adapter(doc)
     await event_bus.emit(
         "connector.disabled",
         {"workspace_id": workspace_id, "name": name},
@@ -368,6 +428,9 @@ async def update_config(
         raise NotFound("connector", name)
     doc.config = {**doc.config, **body.config}
     await doc.save()
+    # Config changed — drop any live adapter so the next execute reconnects
+    # with the patched config instead of the one it was built with.
+    await _drop_live_adapter(doc)
     await event_bus.emit(
         "connector.config_updated",
         {"workspace_id": workspace_id, "name": name},
@@ -488,10 +551,12 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     classified by trust level so the agent MCP server can show read actions as
     callable and write actions as "needs approval (v2)".
 
-    Tenant-filtered on ``workspace`` AND ``pocket_id`` (cloud rule §7) and
-    further on ``scope == "pocket"`` + ``enabled``. The Beanie read lives here
-    (not in the MCP layer) so the OSS-EE boundary holds: the MCP server imports
-    this service, never the ``WorkspaceConnector`` doc.
+    Tenant-filtered on ``workspace`` (cloud rule §7); matches rows enabled for
+    THIS pocket (``scope == "pocket"`` + ``pocket_id``) OR workspace-wide
+    (``scope == "workspace"`` — available from every pocket in the tenant).
+    The Beanie read lives here (not in the MCP layer) so the OSS-EE boundary
+    holds: the MCP server imports this service, never the
+    ``WorkspaceConnector`` doc.
 
     Trust gating: ``auto``-trust actions are read-first (``is_read=True``);
     ``confirm`` / ``restricted`` actions are write-shaped and marked
@@ -499,8 +564,10 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     """
     enabled_docs = await _WCDoc.find(
         _WCDoc.workspace == workspace_id,
-        _WCDoc.pocket_id == pocket_id,
-        _WCDoc.scope == "pocket",
+        Or(
+            _WCDoc.scope == "workspace",
+            And(_WCDoc.scope == "pocket", _WCDoc.pocket_id == pocket_id),
+        ),
         _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
     ).to_list()
     if not enabled_docs:
@@ -509,7 +576,11 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     reg = _get_registry()
     available = {a.name: a for a in _available_from_registry()}
     out: list[PocketConnectorInfo] = []
+    seen: set[str] = set()
     for doc in enabled_docs:
+        if doc.name in seen:
+            continue
+        seen.add(doc.name)
         a = available.get(doc.name)
         defn = reg.get_definition(doc.name)
         if a is None or defn is None:
@@ -569,16 +640,44 @@ async def get_action_trust(name: str, action: str) -> ConnectorActionInfo | None
 
 
 async def is_connector_bound_to_pocket(workspace_id: str, pocket_id: str, name: str) -> bool:
-    """True when ``name`` is enabled at ``scope=pocket`` for this exact pocket.
+    """True when ``name`` is enabled for this pocket or workspace-wide.
 
     The tenant gate the MCP ``connector_execute`` tool checks first: an agent in
-    pocket A must not run a connector only bound to pocket B (or workspace-wide
-    only). Tenant-filtered (cloud rule §7).
+    pocket A must not run a connector only bound to pocket B. Workspace-scoped
+    rows pass for every pocket in the tenant — workspace scope IS the tenant
+    boundary, so there is no cross-pocket leak. Tenant-filtered (cloud rule §7).
     """
     doc = await _WCDoc.find_one(
         _WCDoc.workspace == workspace_id,
-        _WCDoc.pocket_id == pocket_id,
-        _WCDoc.scope == "pocket",
+        Or(
+            _WCDoc.scope == "workspace",
+            And(_WCDoc.scope == "pocket", _WCDoc.pocket_id == pocket_id),
+        ),
+        _WCDoc.name == name,
+        _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+    )
+    return doc is not None
+
+
+async def is_connector_enabled_for_workspace(workspace_id: str, name: str) -> bool:
+    """True when ``name`` is a real registry connector AND enabled for the workspace.
+
+    The validation gate ``pockets.service.set_pocket_backend`` uses before it
+    binds a pocket to ``backend_type="connector"``: a connector backend must
+    name a connector the registry knows and that this workspace has actually
+    enabled (any scope). Keeping the ``WorkspaceConnector`` Beanie read HERE
+    (not in the pockets service) holds the boundary — the pockets service owns
+    the pocket/backend docs, this service owns the connector docs. Both stay
+    sole writers/readers of their own collection.
+
+    Tenant-filtered on ``workspace`` (cloud rule §7). An unknown registry name
+    or a workspace with no enabled row for it returns ``False``.
+    """
+    available = {a.name for a in _available_from_registry()}
+    if name not in available:
+        return False
+    doc = await _WCDoc.find_one(
+        _WCDoc.workspace == workspace_id,
         _WCDoc.name == name,
         _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
     )
@@ -672,15 +771,37 @@ async def execute(
             "which isn't connected. Open your local app and retry.",
         )
 
-    # CLOUD path — run in-process. Connect first if needed, using the
-    # workspace's saved config from the connector entity.
-    doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
-    config = dict(doc.config) if doc else {}
-    pocket_key = body.pocket_id or workspace_id
-    if not adapter._connected:  # noqa: SLF001 — adapter API doesn't expose is_connected
-        await adapter.connect(pocket_key, config)
+    # CLOUD path — run in-process through the registry's durable seam (CS-3).
+    # ``ensure_connected`` rehydrates the adapter from the WorkspaceConnector
+    # row's config on a fresh process, so execute works with no prior
+    # /connect call. Pocket-keyed lookup is gated on the tenant bind check —
+    # ``pocket:<pocket_id>`` alone carries no workspace filter, so an
+    # unverified foreign pocket_id must never select another tenant's config.
+    exec_adapter = None
+    if body.pocket_id and await is_connector_bound_to_pocket(workspace_id, body.pocket_id, name):
+        exec_adapter = await reg.ensure_connected(name, f"pocket:{body.pocket_id}")
+    if exec_adapter is None:
+        exec_adapter = await reg.ensure_connected(name, f"ws:{workspace_id}")
+    if exec_adapter is None:
+        # Legacy fallback — no enabled row with usable config (or the
+        # reconnect failed). Preserve the pre-CS-3 shape (one-shot adapter,
+        # best-effort connect, the adapter surfaces its own failure on
+        # execute) for ENABLED rows only: the enabled filter below is what
+        # makes disable actually revoke on this path — a disabled row's
+        # credentials must never reach connect(), so a disabled (or
+        # never-enabled) connector gets {} config and real adapters fail
+        # to connect.
+        doc = await _WCDoc.find_one(
+            _WCDoc.workspace == workspace_id,
+            _WCDoc.name == name,
+            _WCDoc.enabled == True,  # noqa: E712 — Beanie expects ==
+        )
+        config = dict(doc.config) if doc else {}
+        pocket_key = body.pocket_id or workspace_id
+        exec_adapter = adapter
+        await exec_adapter.connect(pocket_key, config)
 
-    result = await adapter.execute(body.action, body.params)
+    result = await exec_adapter.execute(body.action, body.params)
     return ExecuteActionResponse(
         success=result.success,
         data=result.data,
@@ -690,13 +811,43 @@ async def execute(
     )
 
 
+async def disconnect_member(workspace_id: str, member_id: str) -> dict:
+    """Disconnect a member's own per-user connectors and purge their data.
+
+    The member-facing "disconnect my accounts" path (Phase B chunk 7). A
+    member connected their PERSONAL Gmail/calendar as a per-user connector and
+    we ingested it into their private ``user:{member_id}`` KB scope; when they
+    disconnect, all of that — KB scope, per-user OAuth tokens, connector rows,
+    ingest-state — must be deleted. It's their personal data.
+
+    ``member_id`` is bound to the authenticated caller at the router (a member
+    only ever disconnects THEIR OWN accounts), so the scope this touches is a
+    pure function of the caller's id — no member can purge another's data.
+
+    Idempotent: ``purge_member_data`` is safe to call when nothing exists, so a
+    double-tap or a re-disconnect is a clean no-op. Returns the purge summary.
+    """
+    # Lazy import — keeps the connectors service free of a member_ingest
+    # dependency at module load (member_ingest already reads WorkspaceConnector
+    # cross-entity, so a top-level import here would risk a cycle).
+    from pocketpaw_ee.cloud.member_ingest.purge import purge_member_data
+
+    # purge_member_data deletes the member's user-scoped connector rows along
+    # with their tokens, KB scope, and ingest-state — so a self-disconnect is
+    # exactly "purge everything keyed on this member". The MemberDataPurged
+    # event it emits is the canonical signal the home surface reacts to.
+    return await purge_member_data(workspace_id, member_id)
+
+
 __all__ = [
     "disable_connector",
+    "disconnect_member",
     "enable_connector",
     "execute",
     "get_action_trust",
     "get_connector",
     "is_connector_bound_to_pocket",
+    "is_connector_enabled_for_workspace",
     "list_connectors",
     "list_pocket_connectors",
     "list_widget_recipes",

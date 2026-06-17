@@ -2,6 +2,11 @@
 # Created: 2026-03-30
 # Supports: PostgreSQL, MySQL, MariaDB, SQLite, MSSQL, CockroachDB, etc.
 # Uses sqlalchemy async engine under the hood — single dependency for all databases.
+# Updated: 2026-06-12 (connector-store-unification CS-5) — reconnect-safe
+#   connect(): a second connect() disposes the previous engine before building
+#   a new one (no leaked pool on double-connect / config change), and a failed
+#   connect resets ``_connected`` so the adapter never reports a connection it
+#   no longer has.
 
 from __future__ import annotations
 
@@ -140,6 +145,14 @@ class DatabaseAdapter:
         # Check the async driver is installed
         pip_pkg = self._dialect.get("pip", "")
         try:
+            # Reconnect-safety (CS-5): a second connect() — config change,
+            # post-restart recovery race — must not leak the previous
+            # engine's connection pool.
+            if self._engine is not None:
+                await self._engine.dispose()
+                self._engine = None
+                self._connected = False
+
             url = self._build_url(normalized)
             ssl_args: dict[str, Any] = {}
             if normalized.get("DB_SSL", "").lower() == "true":
@@ -169,6 +182,7 @@ class DatabaseAdapter:
                 message=f"Connected to {db_name}@{host}",
             )
         except ImportError:
+            self._connected = False
             return ConnectionResult(
                 success=False,
                 connector_name=self.name,
@@ -177,6 +191,7 @@ class DatabaseAdapter:
             )
         except Exception as e:
             self._engine = None
+            self._connected = False
             return ConnectionResult(
                 success=False,
                 connector_name=self.name,

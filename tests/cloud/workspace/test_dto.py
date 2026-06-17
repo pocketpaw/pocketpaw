@@ -1,4 +1,8 @@
-"""Tests for ee.cloud.workspace.dto."""
+"""Tests for ee.cloud.workspace.dto.
+
+2026-06-14 (WB-1): WorkspaceOut now serializes a ``branding`` key — the
+wire-keys test includes it and a new test asserts it's null when unset.
+"""
 
 from __future__ import annotations
 
@@ -68,7 +72,15 @@ def test_workspace_dto_wire_keys() -> None:
         "seats",
         "createdAt",
         "memberCount",
+        "branding",  # WB-1: per-tenant white-label branding (None when unset)
     }
+
+
+def test_workspace_dto_branding_null_when_unset() -> None:
+    # A workspace with no custom branding serializes branding as null; the
+    # frontend then applies the Paw defaults.
+    dump = workspace_to_dto(_ws()).model_dump(by_alias=True)
+    assert dump["branding"] is None
 
 
 def test_workspace_dto_values() -> None:
@@ -102,7 +114,10 @@ def test_invite_dto_wire_keys() -> None:
         "revoked",
         "expired",
         "expiresAt",
+        "context",
     }
+    # No admin context on a plain invite — the key is present but null.
+    assert dump["context"] is None
 
 
 def test_invite_dto_values() -> None:

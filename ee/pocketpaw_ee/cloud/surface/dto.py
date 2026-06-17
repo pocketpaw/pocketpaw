@@ -19,6 +19,10 @@
 # ``engine`` hint so the /sites create UI's "Use Svelte pages" toggle can stamp
 # ``engine="svelte"`` on the wire and the sites handler routes the create
 # preamble to the svelte-track skill instead of the ripple/default one.
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — mirror ``SurfaceMeta``'s
+# new ``repo`` + ``base_branch`` Belt console hints so the /belt page can stamp
+# the bound repo + branch on the wire and the belt handler injects them into the
+# preamble (agent stops asking for the repo).
 
 from __future__ import annotations
 
@@ -51,6 +55,11 @@ class SurfaceMetaRequest(BaseModel):
     # "Use Svelte pages" toggle: "ripple" (default) | "svelte". Selects which
     # create-site authoring skill the preamble prefers. Optional.
     engine: str | None = None
+    # Belt console hints — mirror SurfaceMeta. Set by the /belt page once the
+    # user has bound a repo + branch for the run. ``repo`` is the absolute repo
+    # path; ``base_branch`` is the branch to base the change off. Optional.
+    repo: str | None = None
+    base_branch: str | None = None
 
 
 class SurfaceRequest(BaseModel):

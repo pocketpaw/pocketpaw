@@ -1,5 +1,8 @@
 # Connectors — request / response schemas.
 # Created: 2026-05-03 — PR-1 of Phase 1 connector consolidation.
+# Updated: 2026-06-08 (Phase B chunk 7) — added DisconnectMemberResponse, the
+#   wire shape for the member self-disconnect endpoint (POST /cloud/connectors/
+#   me/disconnect): it reports what the per-user data purge removed.
 # Every request schema is distinct from every response schema (cloud
 # rule §4). The wire shape mirrors the existing
 # src/pocketpaw/api/v1/connectors.py ``ConnectorInfo`` so the frontend
@@ -123,3 +126,25 @@ class ExecuteActionResponse(BaseModel):
     error: str | None = None
     records_affected: int = 0
     execution_mode: str = "cloud"
+
+
+# ---------------------------------------------------------------------------
+# Phase B chunk 7 — member self-disconnect (the purge path's disconnect door)
+# ---------------------------------------------------------------------------
+
+
+class DisconnectMemberResponse(BaseModel):
+    """Result envelope for POST /cloud/connectors/me/disconnect.
+
+    Reports what the per-user data purge removed so the client can confirm the
+    member's personal data is gone. ``status`` is ``ok`` unless a store delete
+    failed (the purge is best-effort and idempotent; a partial failure still
+    deletes what it can and surfaces here).
+    """
+
+    status: str  # "ok" | "error"
+    scope: str  # the member's own "user:{id}" scope that was cleared
+    kb_cleared: bool = False
+    tokens_deleted: int = 0
+    connectors_deleted: int = 0
+    ingest_state_deleted: bool = False

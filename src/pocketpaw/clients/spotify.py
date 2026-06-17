@@ -1,6 +1,8 @@
 # Spotify Client — HTTP client for Spotify Web API using OAuth tokens.
 # Created: 2026-02-09
 # Part of Phase 4 Media Integrations
+# 2026-06-08: SpotifyClient takes an optional user_id so each member can use
+#   their OWN Spotify token (per-user token store). Default None = shared bucket.
 
 from __future__ import annotations
 
@@ -27,17 +29,19 @@ class SpotifyClient:
     Uses OAuth bearer tokens from the token store.
     """
 
-    def __init__(self):
+    def __init__(self, user_id: str | None = None):
         self._oauth = OAuthManager(TokenStore())
+        self._user_id = user_id
 
     async def _get_token(self) -> str:
-        """Get a valid OAuth access token for Spotify."""
+        """Get a valid OAuth access token for Spotify (scoped to this client's user)."""
         settings = get_settings()
         token = await self._oauth.get_valid_token(
             service="spotify",
             client_id=settings.spotify_client_id or "",
             client_secret=settings.spotify_client_secret or "",
             provider="spotify",
+            user_id=self._user_id,
         )
         if not token:
             raise RuntimeError(

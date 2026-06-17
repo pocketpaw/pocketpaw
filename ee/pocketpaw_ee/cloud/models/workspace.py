@@ -1,4 +1,12 @@
-"""Workspace document — one per deployment/org."""
+"""Workspace document — one per deployment/org.
+
+2026-06-14 (WB-1): added the ``Branding`` sub-model and a top-level
+``Workspace.branding`` field for white-label theming (logo, display name,
+tab title, accent color, favicon, paw-mark toggle). Branding is a per-tenant
+IDENTITY field — kept separate from ``WorkspaceSettings`` (operational config)
+on purpose. Every sub-field is optional; an unset field falls back to the Paw
+default at render time (a frontend concern, not stored here).
+"""
 
 from __future__ import annotations
 
@@ -14,6 +22,23 @@ class WorkspaceSettings(BaseModel):
     default_agent: str | None = None  # Agent ID
     allow_invites: bool = True
     retention_days: int | None = None  # None = keep forever
+
+
+class Branding(BaseModel):
+    """Per-tenant white-label branding (WB-1).
+
+    All fields optional; each unset field falls back to the Paw default at
+    render time (a frontend concern). Asset fields hold an uploaded
+    ``FileUpload.file_id`` that must belong to the same workspace — the
+    service enforces that ownership before persisting.
+    """
+
+    logo_asset: str | None = None  # uploaded asset id — top-bar mark
+    favicon_asset: str | None = None  # uploaded asset id — browser favicon
+    display_name: str | None = None  # replaces the "PocketPaw" wordmark
+    tab_title: str | None = None  # browser tab title
+    accent_color: str | None = None  # hex "#RRGGBB" — tints the UI theme
+    show_paw_mark: bool = True  # keep/hide our paw icon
 
 
 class SsoConfig(BaseModel):
@@ -53,6 +78,10 @@ class Workspace(TimestampedDocument):
     plan: str = "team"  # from license: team | business | enterprise
     seats: int = 5
     settings: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
+    # Per-tenant white-label branding (WB-1). Top-level identity field, NOT
+    # nested under settings (which holds operational config). None = no
+    # custom branding; the frontend renders the Paw defaults.
+    branding: Branding | None = None
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None

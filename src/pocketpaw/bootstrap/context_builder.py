@@ -1,6 +1,15 @@
 """
 Builder for assembling the full agent context.
 Created: 2026-02-02
+Updated: 2026-06-08 (VIP Onboarding Phase B — session-gated per-user KB scope)
+— ``KbContext`` gains an optional ``user_id``; ``_resolve_kb_scopes`` emits a
+member-private ``user:{user_id}`` scope at the HEAD of the list (highest
+priority, ahead of pocket/agent/workspace) ONLY when ``user_id`` is set. This
+is the read-side of the VIP isolation gate: a member's private Gmail/calendar
+KB is injected into the agent context only in that member's own session. The
+caller (the EE cloud chat gate) decides whether to set ``user_id`` based on
+room membership; this resolver only honors the field. ``user_id`` absent →
+legacy ordering is byte-identical.
 Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A2) —
 ``build_system_prompt`` accepts an optional ``skill_names: frozenset[str]``.
 When non-empty, the "Available Skills" block (#8) advertises ONLY those skills —
@@ -59,24 +68,48 @@ class KbContext:
     ``ScopeContext`` and threads it into the system-prompt builder so KB
     queries hit the most-specific scope available. Channels and CLI keep
     using the static ``settings.kb_scopes`` fallback.
+
+    ``user_id`` (VIP Onboarding Phase B) carries a MEMBER-PRIVATE scope id —
+    the cloud user id (opaque Mongo ObjectId / uuid, never an email, so
+    kb-go's on-disk ``:``→``_`` sanitize can't alias two members). When set,
+    ``_resolve_kb_scopes`` emits ``user:{user_id}`` at the HEAD of the scope
+    list so a member's private mail/calendar KB outranks every shared scope.
+    The CALLER is solely responsible for the isolation decision: it must set
+    ``user_id`` ONLY in that member's own solo session and NEVER in a shared /
+    multi-member room (see the EE gate ``_member_private_user_scope`` /
+    ``_kb_scopes_for_context`` in ``cloud/chat/agent_service.py``). This
+    resolver does not — and cannot — know room membership; it just honors the
+    field. Leaving ``user_id`` unset keeps the legacy pocket/agent/workspace
+    ordering byte-identical.
     """
 
     pocket_id: str | None = None
     agent_id: str | None = None
     workspace_id: str | None = None
+    user_id: str | None = None
 
 
 def _resolve_kb_scopes(ctx: KbContext | None, settings) -> list[str]:
     """Build the prioritised scope list for a request.
 
-    Priority: pocket > agent > workspace > whatever's in ``settings.kb_scopes``.
-    Most-specific wins. The static settings list is the fallback for runtime
-    paths that don't carry a context (CLI, channels without ee/cloud) and for
-    requests that arrive with an empty ``KbContext``.
+    Priority: user > pocket > agent > workspace > whatever's in
+    ``settings.kb_scopes``. Most-specific wins, and a member-private
+    ``user:`` scope (when present) outranks every shared scope. The static
+    settings list is the fallback for runtime paths that don't carry a
+    context (CLI, channels without ee/cloud) and for requests that arrive
+    with an empty ``KbContext``.
+
+    The ``user:`` tier is emitted ONLY when ``ctx.user_id`` is set. The
+    caller (the EE cloud chat gate) is responsible for setting it ONLY in a
+    member's own solo session — never a shared room — so one member's private
+    data never lands in another member's context. This function trusts the
+    field; it has no visibility into room membership.
     """
     if ctx is None:
         return list(settings.kb_scopes or [])
     scopes: list[str] = []
+    if ctx.user_id:
+        scopes.append(f"user:{ctx.user_id}")
     if ctx.pocket_id:
         scopes.append(f"pocket:{ctx.pocket_id}")
     if ctx.agent_id:
@@ -497,8 +530,10 @@ class AgentContextBuilder:
         scope cannot break the prompt build.
 
         When ``kb_ctx`` is provided (Stage 3.E), scope priority is
-        ``pocket:{id} > agent:{id} > workspace:{id}`` — most-specific wins.
-        Without a ``kb_ctx`` (channel paths, CLI), the static
+        ``user:{id} > pocket:{id} > agent:{id} > workspace:{id}`` —
+        most-specific wins, and a member-private ``user:`` scope (set by the
+        cloud chat gate only in a member's own session) outranks every shared
+        scope. Without a ``kb_ctx`` (channel paths, CLI), the static
         ``settings.kb_scopes`` list is used unchanged.
 
         When ``image_bytes`` is set and a multimodal embedder is configured,

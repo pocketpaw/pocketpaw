@@ -1,0 +1,97 @@
+# src/pocketpaw/bundled_templates/_bundled/applications-triage/template.pocket.yaml
+# Created: 2026-06-11 (feat/triage-member-templates) — RFC 03 v2 Pocket
+# Template Schema metadata for the generic application/queue triage
+# pocket.
+# Modified 2026-06-11 (feat/triage-redesign): DEMO-GRADE redesign of the
+# ripple_spec. The canvas is now a decisions console — a color-banded
+# burndown strip (per-status count cards + queue-total + oldest-waiting),
+# a scannable score-banded queue (name, one-line summary, status pill,
+# score badge + color progress, waiting-days, no name truncation), and a
+# loud detail panel (header + status/recommendation pills + a score RING,
+# the agent's recommendation reasoning in a colored callout, a risk-flag
+# chip row, the FULL question-and-answer set, then the gated action row).
+# The detail panel binds to a denormalized flat ``state.selected`` object
+# kept in sync by the queue cards' on_click, fixing the empty-detail bug
+# (the old spec bound through an unsupported method-chain-then-property
+# expression — see the ripple_spec _placeholder_note BINDING CONTRACT).
+# ``shape: custom`` because the canvas is a composite (queue + detail +
+# burndown + action row) — RFC 03's shape enum has no value for it, so the
+# pattern is recorded in the sibling index.json (``pattern: app``) and the
+# shape stays ``custom`` (the same choice crm-record-list made).
+# ``needs: [paw.db.v1]`` declares the generic data-source capability a
+# tenant must wire so the queue hydrates from a real backend; without one
+# the seeded sample applications render. The three review actions declare
+# ``instinct_policy: require_approval`` so each surfaces as a PENDING gated
+# proposal in The Tray rather than executing inline — the deployment wires
+# the action row to external_actions.propose at the documented binding
+# point (see the ripple_spec _placeholder_note).
+schema_version: "2"
+name: applications-triage
+version: 1.0.0
+pattern: app
+vertical: operations
+display_name: Applications Triage
+shape: custom
+description: |
+  A decisions console for incoming applications. A color-banded burndown
+  strip across the top counts the queue by status and adds the headline
+  stats — how many are waiting and how long the oldest has sat. A scannable
+  queue on the left shows each applicant's name, a one-line summary, a
+  status pill, the agent's score as a color-banded badge and bar, and how
+  long the item has waited. Selecting a row opens a detail panel where the
+  agent's work is the loudest thing on the canvas: the score as a ring, the
+  recommendation — approve, reject, or interview — with the reasoning behind
+  it, a row of risk-check chips, and the applicant's full question-and-answer
+  set. The approve / reject / interview row surfaces each decision as a
+  pending proposal for a human to confirm rather than acting on its own.
+  Ships a placeholder live-data source so a connected backend hydrates the
+  queue from a real applications endpoint; with no backend it renders the
+  seeded sample applications.
+icon: inbox
+color: "#5b7c99"
+state:
+  entity_type: Application
+  id_field: id
+  columns:
+    - { field: applicant, label: Applicant, widget: text }
+    - { field: summary, label: Summary, widget: text }
+    - { field: status, label: Status, widget: badge }
+    - { field: score, label: Score, widget: number }
+    - { field: recommendation, label: Recommendation, widget: badge }
+    - { field: age_days, label: Waiting, widget: number }
+data_sources:
+  - name: applications
+    method: GET
+    path: /applications?status=open
+    bind: state.applications
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions:
+  - name: approve_application
+    label: Approve
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [application_approved]
+    description: Proposes approving the selected application. Gated — a human confirms in The Tray.
+  - name: reject_application
+    label: Reject
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [application_rejected]
+    confirm:
+      message: "Propose rejecting this application?"
+      destructive: false
+    description: Proposes rejecting the selected application. Gated — a human confirms in The Tray.
+  - name: flag_for_review
+    label: Needs review
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [application_flagged]
+    description: Proposes flagging the selected application for a second look. Gated.
+outcomes:
+  - application_approved
+  - application_rejected
+  - application_flagged
+connectors: []
+skill_refs: []

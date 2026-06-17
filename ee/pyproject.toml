@@ -5,6 +5,15 @@
 # specialist). It is a thin wheel that contains only `pocketpaw_ee/` and
 # depends on the OSS core package `pocketpaw`.
 #
+# Changes:
+#   - 2026-06-12 (connector-store-unification CS-3): registered the
+#     `pocketpaw.connector_state_stores` entry-point
+#     (CloudConnectorStateStoreProvider) so the ConnectorRegistry's durable
+#     state defaults to the WorkspaceConnector-backed cloud store.
+#   - 2026-06-10 (sov/w0a-license): added the `pocketpaw-ee-license`
+#     console script (operator license MINTING / keypair / verify) — see
+#     `[project.scripts]` and `pocketpaw_ee/cloud/mint.py`.
+#
 # Versioning: `pocketpaw-ee` tracks `pocketpaw` within the same minor series.
 # The `pocketpaw~=` pin below is a compatible-release constraint — it accepts
 # any `pocketpaw` patch (0.4.x) without a hand-edit, but blocks a minor bump
@@ -124,6 +133,21 @@ extraction = [
     "python-docx>=1.1.0",
     "pytesseract>=0.3.10",
 ]
+# Firestore→Fabric ingest worker (ee/pocketpaw_ee/cloud/fabric_ingest). The
+# reader lazy-imports google-cloud-firestore behind a Protocol, so it stays
+# optional — a deployment that doesn't mirror Firestore never installs it, and
+# the worker raises a clear install error if a config references Firestore
+# without the extra present. Floor 2.27.0 (released 2026-04-13, well past the
+# workspace's 7-day supply-chain minimum-age rule).
+firestore = [
+    "google-cloud-firestore>=2.27.0",
+]
+
+[project.scripts]
+# Operator tool — mint / inspect enterprise license keys. Lives in EE
+# because it imports `cryptography` (Ed25519) and signs with the operator's
+# private key; the OSS core only ever VERIFIES. See pocketpaw_ee/cloud/mint.py.
+pocketpaw-ee-license = "pocketpaw_ee.cloud.mint:main"
 
 [project.urls]
 Homepage = "https://pocketpaw.xyz"
@@ -177,12 +201,21 @@ foresight = "pocketpaw_ee.extensions:CloudForesightMcpProvider"
 composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
+media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
+loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
+belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
+external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
+fabric = "pocketpaw_ee.extensions:CloudFabricMcpProvider"
+instinct = "pocketpaw_ee.extensions:CloudInstinctMcpProvider"
 
 [project.entry-points."pocketpaw.agent_extensions"]
 cloud = "pocketpaw_ee.extensions:CloudAgentExtension"
 
 [project.entry-points."pocketpaw.composio_tools"]
 cloud = "pocketpaw_ee.extensions:CloudComposioToolProvider"
+
+[project.entry-points."pocketpaw.connector_state_stores"]
+cloud = "pocketpaw_ee.extensions:CloudConnectorStateStoreProvider"
 
 [tool.hatch.metadata]
 # Allow git+ direct references in dependencies (PEP 440 disallows them
@@ -235,6 +268,10 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # P2.4 Template Reconcile — the reconcile service resolves the pocket
+    # (spec + slug) and writes the reconciled spec entirely through
+    # `pockets.service`; it must never import the Pocket Beanie model.
+    "pocketpaw_ee.cloud.pockets.reconcile",
     # RFC 04 M3 — the interval-refresh scheduler + the auto-refresh budget
     # helper. The scheduler scans pockets through `pockets.service` and
     # refreshes through `source_executor`; neither touches Beanie directly.
@@ -267,6 +304,12 @@ source_modules = [
     # pure. Both go through ``pockets.service`` only.
     "pocketpaw_ee.cloud.connectors.service",
     "pocketpaw_ee.cloud.connectors.derivation",
+    # RFC 05 Saga Compensate — the multi-step write-sequence rollback
+    # runtime. Orchestrates ``action_executor.run_action`` per step and
+    # fires compensations in reverse on failure; emits outcomes through
+    # ``outcomes.service``. Receives backend creds + bindings by
+    # parameter — never imports a Beanie document class directly.
+    "pocketpaw_ee.cloud.pockets.saga",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
@@ -310,6 +353,17 @@ source_modules = [
     "pocketpaw_ee.cloud.notifications.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+
+[[tool.importlinter.contracts]]
+name = "FabricIngest — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.fabric_ingest.dto",
+    "pocketpaw_ee.cloud.fabric_ingest.scheduler",
+    "pocketpaw_ee.cloud.fabric_ingest.firestore_reader",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.fabric_ingest_state"]
 
 [[tool.importlinter.contracts]]
 name = "Sessions — Beanie writes only from service.py"

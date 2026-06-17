@@ -1,5 +1,38 @@
 # tests/test_ee_instinct.py — Comprehensive tests for ee/instinct (store + router).
 # Created: 2026-03-28 — Initial store tests.
+# Updated: 2026-06-11 (merge origin/dev — Belt code-change union) — kept BOTH
+#   the sovereignty governance suites (workspace-scope + audit-chain) and dev's
+#   Belt router-seam suite; the chain-emit helpers now live in
+#   ``ee.instinct.chain_emitters`` (imported by the router) but the router's
+#   ``ee.instinct.router._emit_*`` / ``_pocket_write_blob`` names still resolve
+#   (re-imported), so the existing monkeypatch call sites are unchanged.
+# Updated: 2026-06-10 (W4a — workspace-scope instinct reads) — added
+#   TestWorkspaceScoping (store) and TestWorkspaceScopingRoutes (router) proving
+#   the cross-tenant decision leak is closed: workspace A's pending/list/audit
+#   reads exclude workspace B's actions and audit rows, while legacy
+#   NULL-workspace rows stay visible and unscoped (workspace_id=None) reads keep
+#   full backward-compat. Critically, TestWorkspaceScoping also re-asserts that
+#   ``verify_audit_chain`` stays intact after mixed-workspace appends — the
+#   tenancy column is a READ FILTER and is NOT folded into the W2b hash, so the
+#   global chain linkage is unchanged. The existing TestAuditHashChain class is
+#   the W2b regression proof.
+# Updated: 2026-06-10 (sov/w2-instinct — tamper-evident audit) — W2b: added
+#   TestAuditHashChain (store) and TestAuditVerifyEndpoint (router) covering
+#   the audit hash chain — appends build a valid chain; verify detects an
+#   edited row (entry_hash mismatch) and a deleted row (prev_hash break); the
+#   legacy/genesis boundary (pre-W2b NULL-hash rows) verifies intact; the
+#   export endpoint stamps X-Audit-Chain-Intact. Added ``import sqlite3`` for
+#   the direct-tamper writes that bypass the store's loud append path.
+# Updated: 2026-06-10 (feat/belt-gate, BS-3) — added TestBeltCodeChangeRouterSeam:
+#   proves the approve/bulk-approve/reject routes dispatch the Belt
+#   apply-on-approve executor ONLY for a ``_code_change`` Action and NEVER for a
+#   plain (non-code-change) one — the kind-gated dispatch seam the spec security
+#   checklist requires ("the executor cannot be reached for non-code_change
+#   kinds"). The executor itself is patched (its real git behaviour is covered
+#   in test_belt_gate.py); these tests pin the router's routing decision, not
+#   the apply. The cross-workspace code-change 403 lives in
+#   test_instinct_approval_security.py beside its pocket-write peer (that app
+#   registers the CloudError → 403 handler).
 # Updated: 2026-05-21 (feat/instinct-outcome-verification) — issue #1162:
 #   added the outcome-verification e2e — an Action runs, the deterministic
 #   verifier checks the result against captured success_criteria, and the
@@ -12,7 +45,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -792,6 +827,150 @@ class TestExportAudit:
         assert all(e["pocket_id"] == "pocket-A" for e in parsed)
 
 
+class TestAuditHashChain:
+    """test_audit_hash_chain — the tamper-evident audit ledger (W2b).
+
+    Covers: appends build a valid chain; verify detects an edited row and a
+    deleted row; the legacy/genesis boundary verifies intact; the chain spans
+    the real lifecycle (propose → approve → reject) writes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_appends_build_valid_chain(self, store: InstinctStore) -> None:
+        for i in range(5):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="chain-p")
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["hashed"] == 5
+        assert verdict["checked"] == 5
+        assert verdict["legacy_unhashed"] == 0
+        assert verdict["broken_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_each_row_links_to_previous(self, store: InstinctStore) -> None:
+        await store.log(actor="system", event="first", description="d", pocket_id="p")
+        await store.log(actor="system", event="second", description="d", pocket_id="p")
+
+        # Inspect the raw rows: row 2's prev_hash must equal row 1's entry_hash,
+        # and the genesis row's prev_hash is empty.
+        await store._ensure_schema()
+        con = sqlite3.connect(store._db_path)
+        rows = con.execute(
+            "SELECT event, prev_hash, entry_hash FROM instinct_audit ORDER BY rowid ASC"
+        ).fetchall()
+        con.close()
+        assert rows[0][1] == ""  # genesis prev_hash
+        assert rows[0][2]  # genesis has an entry_hash
+        assert rows[1][1] == rows[0][2]  # row 2 links to row 1
+
+    @pytest.mark.asyncio
+    async def test_empty_ledger_is_intact(self, store: InstinctStore) -> None:
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["total"] == 0
+        assert verdict["hashed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_edited_row_is_detected(self, store: InstinctStore) -> None:
+        for i in range(4):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="p")
+
+        # Tamper directly via raw SQLite, bypassing the store's loud append.
+        con = sqlite3.connect(store._db_path)
+        con.execute("UPDATE instinct_audit SET description = 'FORGED' WHERE event = 'e1'")
+        con.commit()
+        con.close()
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is False
+        assert verdict["broken_at"] is not None
+        assert "entry_hash mismatch" in verdict["broken_at"]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_deleted_row_is_detected(self, store: InstinctStore) -> None:
+        for i in range(4):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="p")
+
+        con = sqlite3.connect(store._db_path)
+        con.execute("DELETE FROM instinct_audit WHERE event = 'e1'")
+        con.commit()
+        con.close()
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is False
+        assert verdict["broken_at"] is not None
+        # Deleting a row breaks the running prev-link of the row that followed it.
+        assert "prev_hash mismatch" in verdict["broken_at"]["reason"]
+
+    @pytest.mark.asyncio
+    async def test_inserted_row_is_detected(self, store: InstinctStore) -> None:
+        for i in range(3):
+            await store.log(actor="system", event=f"e{i}", description=f"d{i}", pocket_id="p")
+
+        # Forge a row with a plausible-but-unchained entry_hash spliced in.
+        con = sqlite3.connect(store._db_path)
+        con.execute(
+            "INSERT INTO instinct_audit"
+            " (id, actor, event, category, description, context, prev_hash, entry_hash)"
+            " VALUES ('aud-forged', 'attacker', 'forged', 'decision', 'sneaky',"
+            " '{}', 'deadbeef', 'cafebabe')"
+        )
+        con.commit()
+        con.close()
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is False
+        assert verdict["broken_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_legacy_unhashed_rows_verify_intact(self, store: InstinctStore) -> None:
+        # Simulate a pre-W2b ledger: a row with NULL hashes inserted directly,
+        # then new hashed appends through the store.
+        await store._ensure_schema()
+        con = sqlite3.connect(store._db_path)
+        con.execute(
+            "INSERT INTO instinct_audit (id, actor, event, description)"
+            " VALUES ('aud-legacy-1', 'system', 'legacy', 'pre-W2b row')"
+        )
+        con.commit()
+        con.close()
+
+        await store.log(actor="system", event="new-1", description="d", pocket_id="p")
+        await store.log(actor="system", event="new-2", description="d", pocket_id="p")
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["legacy_unhashed"] == 1
+        assert verdict["hashed"] == 2
+        assert verdict["total"] == 3
+
+    @pytest.mark.asyncio
+    async def test_full_lifecycle_chain_verifies(self, store: InstinctStore) -> None:
+        # The chain must hold across the real write paths, not just store.log.
+        a = await store.propose(
+            pocket_id="lc",
+            title="Action",
+            description="d",
+            recommendation="r",
+            trigger=make_trigger(),
+        )
+        await store.approve(a.id, approver="user:test")
+        b = await store.propose(
+            pocket_id="lc",
+            title="Action 2",
+            description="d",
+            recommendation="r",
+            trigger=make_trigger(),
+        )
+        await store.reject(b.id, reason="no", rejector="user:test")
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        # propose, approve, propose, reject == 4 hashed audit rows.
+        assert verdict["hashed"] == 4
+
+
 # ---------------------------------------------------------------------------
 # Integration Tests: Router (FastAPI endpoints)
 # ---------------------------------------------------------------------------
@@ -1077,6 +1256,93 @@ class TestAuditExportEndpoint:
         parsed = resp.json()
         assert all(e["pocket_id"] == "export-A" for e in parsed)
 
+    def test_export_stamps_chain_intact_header(self, client: TestClient) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+
+        resp = client.get("/instinct/audit/export")
+        assert resp.status_code == 200
+        assert resp.headers["x-audit-chain-intact"] == "true"
+
+    def test_export_header_false_after_tamper(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+
+        con = sqlite3.connect(router_store._db_path)
+        con.execute("UPDATE instinct_audit SET description = 'FORGED'")
+        con.commit()
+        con.close()
+
+        resp = client.get("/instinct/audit/export")
+        assert resp.status_code == 200
+        assert resp.headers["x-audit-chain-intact"] == "false"
+
+
+class TestAuditVerifyEndpoint:
+    """test_audit_verify_endpoint — GET /instinct/audit/verify (W2b)."""
+
+    def test_verify_intact_on_clean_ledger(self, client: TestClient) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Second"})
+
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is True
+        assert data["hashed"] == 2
+        assert data["broken_at"] is None
+
+    def test_verify_empty_ledger_is_intact(self, client: TestClient) -> None:
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is True
+        assert data["total"] == 0
+
+    def test_verify_detects_edited_row(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Second"})
+
+        # Tamper with the first row's content via raw SQLite.
+        con = sqlite3.connect(router_store._db_path)
+        con.execute(
+            "UPDATE instinct_audit SET description = 'TAMPERED'"
+            " WHERE rowid = (SELECT MIN(rowid) FROM instinct_audit)"
+        )
+        con.commit()
+        con.close()
+
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is False
+        assert data["broken_at"] is not None
+        assert "entry_hash mismatch" in data["broken_at"]["reason"]
+
+    def test_verify_detects_deleted_row(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        client.post("/instinct/actions", json=PROPOSE_PAYLOAD)
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Second"})
+        client.post("/instinct/actions", json={**PROPOSE_PAYLOAD, "title": "Third"})
+
+        # Delete a middle row.
+        con = sqlite3.connect(router_store._db_path)
+        con.execute(
+            "DELETE FROM instinct_audit WHERE rowid ="
+            " (SELECT rowid FROM instinct_audit ORDER BY rowid ASC LIMIT 1 OFFSET 1)"
+        )
+        con.commit()
+        con.close()
+
+        resp = client.get("/instinct/audit/verify")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["intact"] is False
+        assert data["broken_at"] is not None
+
 
 class TestApproveNonexistentEndpoint:
     """test_approve_nonexistent_endpoint — approve unknown id should return 404."""
@@ -1305,3 +1571,406 @@ class TestOutcomeVerificationE2E:
         assert "action_proposed" in events
         assert "action_approved" in events
         assert "action_executed" in events
+
+
+# ---------------------------------------------------------------------------
+# W4a — workspace tenancy: cross-tenant decision-leak closure
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceScoping:
+    """W4a — workspace A cannot read workspace B's actions or audit rows.
+
+    The instinct store is a single global DB on a shared deployment. Before
+    W4a, list/pending/audit reads passed no workspace, so any tenant saw every
+    tenant's decisions. These tests pin the closure at the store layer (the
+    router tests below pin it at the API layer).
+    """
+
+    @pytest.mark.asyncio
+    async def test_pending_isolated_by_workspace(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+
+        a_pending = await store.pending(workspace_id="ws-a")
+        assert {a.title for a in a_pending} == {"A-task"}
+
+        b_pending = await store.pending(workspace_id="ws-b")
+        assert {a.title for a in b_pending} == {"B-task"}
+
+    @pytest.mark.asyncio
+    async def test_pending_count_isolated(self, store: InstinctStore) -> None:
+        for _ in range(2):
+            await store.propose(
+                pocket_id="p",
+                title="A",
+                description="",
+                recommendation="",
+                trigger=make_trigger(),
+                workspace_id="ws-a",
+            )
+        await store.propose(
+            pocket_id="p",
+            title="B",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        assert await store.pending_count(workspace_id="ws-a") == 2
+        assert await store.pending_count(workspace_id="ws-b") == 1
+
+    @pytest.mark.asyncio
+    async def test_list_actions_isolated(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        a_list = await store.list_actions(workspace_id="ws-a")
+        assert {a.title for a in a_list} == {"A"}
+
+    @pytest.mark.asyncio
+    async def test_query_audit_isolated(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B-task",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        a_audit = await store.query_audit(workspace_id="ws-a")
+        a_descriptions = {e.description for e in a_audit}
+        assert "Proposed: A-task" in a_descriptions
+        assert "Proposed: B-task" not in a_descriptions
+
+    @pytest.mark.asyncio
+    async def test_legacy_null_workspace_visible(self, store: InstinctStore) -> None:
+        # A pre-tenancy action (no workspace_id) stays visible to a scoped read.
+        await store.propose(
+            pocket_id="p",
+            title="legacy",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+        )
+        a_pending = await store.pending(workspace_id="ws-a")
+        assert {a.title for a in a_pending} == {"legacy"}
+
+    @pytest.mark.asyncio
+    async def test_unscoped_read_sees_all(self, store: InstinctStore) -> None:
+        await store.propose(
+            pocket_id="p",
+            title="A",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-a",
+        )
+        await store.propose(
+            pocket_id="p",
+            title="B",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            workspace_id="ws-b",
+        )
+        all_pending = await store.pending()  # workspace_id=None
+        assert {a.title for a in all_pending} == {"A", "B"}
+
+    @pytest.mark.asyncio
+    async def test_audit_chain_intact_across_workspaces(self, store: InstinctStore) -> None:
+        # CRITICAL W2b regression: the tenancy column is a read filter only and
+        # is NOT part of the canonical hash, so a ledger built from interleaved
+        # workspaces must still verify as one intact global chain.
+        for i in range(3):
+            ws = "ws-a" if i % 2 == 0 else "ws-b"
+            action = await store.propose(
+                pocket_id="p",
+                title=f"t{i}",
+                description="",
+                recommendation="",
+                trigger=make_trigger(),
+                workspace_id=ws,
+            )
+            await store.approve(action.id)
+
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["hashed"] == verdict["checked"]
+        assert verdict["hashed"] > 0
+        assert verdict["broken_at"] is None
+
+
+class TestWorkspaceScopingRoutes:
+    """W4a — the instinct API endpoints scope reads to the caller's workspace.
+
+    Uses a mutable ``active_ws`` holder so a single TestClient can act as
+    different tenants across requests (the ``current_workspace_id`` /
+    ``current_active_user`` overrides read the live holder value).
+    """
+
+    @pytest.fixture
+    def tenant_client(self, tmp_path: Path, monkeypatch):
+        from pocketpaw_ee.cloud.auth import current_active_user
+
+        router_store = InstinctStore(tmp_path / "tenancy_router.db")
+        # Mutable holder — flip ``["ws"]`` between requests to switch tenants.
+        active = {"ws": "ws-a"}
+
+        class _SwitchUser:
+            def __init__(self, holder: dict) -> None:
+                self._holder = holder
+                self.id = "user-switch"
+
+            @property
+            def active_workspace(self) -> str:
+                return self._holder["ws"]
+
+            @property
+            def workspaces(self):
+                return [_FakeMembership(workspace=self._holder["ws"], role="admin")]
+
+        import pocketpaw_ee.cloud.workspace.service as ws_svc
+
+        monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
+
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_license] = lambda: None
+        app.dependency_overrides[current_active_user] = lambda: _SwitchUser(active)
+        app.dependency_overrides[current_workspace_id] = lambda: active["ws"]
+
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            yield TestClient(app), active
+
+    def test_pending_excludes_other_tenant(self, tenant_client) -> None:
+        client, active = tenant_client
+        trigger = make_trigger().model_dump(mode="json")
+
+        active["ws"] = "ws-a"
+        r = client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "A-task", "trigger": trigger},
+        )
+        assert r.status_code == 201
+
+        active["ws"] = "ws-b"
+        r = client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "B-task", "trigger": trigger},
+        )
+        assert r.status_code == 201
+
+        # Workspace A's pending list excludes B's decision.
+        active["ws"] = "ws-a"
+        r = client.get("/instinct/actions/pending")
+        assert r.status_code == 200
+        titles = {a["title"] for a in r.json()}
+        assert titles == {"A-task"}
+
+        # And B's excludes A's.
+        active["ws"] = "ws-b"
+        r = client.get("/instinct/actions/pending")
+        assert {a["title"] for a in r.json()} == {"B-task"}
+
+    def test_list_and_audit_exclude_other_tenant(self, tenant_client) -> None:
+        client, active = tenant_client
+        trigger = make_trigger().model_dump(mode="json")
+
+        active["ws"] = "ws-a"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "A-only", "trigger": trigger},
+        )
+        active["ws"] = "ws-b"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "B-only", "trigger": trigger},
+        )
+
+        active["ws"] = "ws-a"
+        r = client.get("/instinct/actions")
+        assert {a["title"] for a in r.json()["actions"]} == {"A-only"}
+
+        # Audit (ADMIN-tier) — A's trail excludes B's proposal.
+        r = client.get("/instinct/audit")
+        assert r.status_code == 200
+        descriptions = {e["description"] for e in r.json()["entries"]}
+        assert "Proposed: A-only" in descriptions
+        assert "Proposed: B-only" not in descriptions
+
+    def test_audit_verify_stays_global(self, tenant_client) -> None:
+        # verify is whole-ledger — tenancy must NOT scope it (chain integrity is
+        # a property of the complete trail, not one tenant's slice).
+        client, active = tenant_client
+        trigger = make_trigger().model_dump(mode="json")
+        active["ws"] = "ws-a"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "A", "trigger": trigger},
+        )
+        active["ws"] = "ws-b"
+        client.post(
+            "/instinct/actions",
+            json={"pocket_id": "p", "title": "B", "trigger": trigger},
+        )
+        r = client.get("/instinct/audit/verify")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["intact"] is True
+        # Two proposals across two tenants — the global chain counts BOTH.
+        assert body["hashed"] == 2
+
+
+class TestAuditChainConcurrency:
+    """REVIEW-1: concurrent _log calls on one store must keep the chain linear.
+    Without the per-instance lock, two coroutines can read the same prev_hash
+    before either inserts, forking the chain and breaking verify_audit_chain."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_log_keeps_chain_linear(self, tmp_path):
+        store = InstinctStore(tmp_path / "instinct.db")
+        n = 30
+        await asyncio.gather(
+            *(store._log(actor="sys", event=f"e{i}", description=f"d{i}") for i in range(n))
+        )
+        verdict = await store.verify_audit_chain()
+        assert verdict["intact"] is True
+        assert verdict["hashed"] == n
+        assert verdict["broken_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# BS-3 — Belt code-change router dispatch seam
+# ---------------------------------------------------------------------------
+
+
+class TestBeltCodeChangeRouterSeam:
+    """The approve / reject routes must dispatch the Belt apply-on-approve
+    executor ONLY when the Action carries a ``_code_change`` blob — and never
+    for a plain Action. This pins the kind-gated seam the spec's security
+    checklist requires; the executor's real git work is covered end-to-end in
+    test_belt_gate.py, so here it is patched to a recorder."""
+
+    async def _seed(self, store: InstinctStore, *, parameters: dict) -> str:
+        action = await store.propose(
+            pocket_id="ws-test",  # the approver's active workspace (see _FakeUser)
+            title="seam test",
+            description="",
+            recommendation="",
+            trigger=make_trigger(),
+            parameters=parameters,
+        )
+        return action.id
+
+    @pytest.mark.asyncio
+    async def test_approve_code_change_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """Approving a ``_code_change`` Action through the route fires
+        ``execute_approved_change`` exactly once with the approved Action."""
+        blob = {"kind": "code_change", "schema": 1, "workspace_id": "ws-test", "diff": "x"}
+        action_id = await self._seed(router_store, parameters={"_code_change": blob})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+
+        assert resp.status_code == 200
+        assert mock_exec.await_count == 1
+        dispatched = mock_exec.await_args.args[0]
+        assert dispatched.id == action_id
+        assert dispatched.status == ActionStatus.APPROVED
+
+    @pytest.mark.asyncio
+    async def test_approve_plain_action_never_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """A plain (non-code-change) Action must NEVER reach the Belt executor."""
+        action_id = await self._seed(router_store, parameters={"note": "ordinary action"})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+
+        assert resp.status_code == 200
+        mock_exec.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bulk_approve_code_change_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """Bulk-approve mirrors the single-approve seam: a ``_code_change`` item
+        fires the executor; a plain item in the same batch does not."""
+        blob = {"kind": "code_change", "schema": 1, "workspace_id": "ws-test", "diff": "x"}
+        code_id = await self._seed(router_store, parameters={"_code_change": blob})
+        plain_id = await self._seed(router_store, parameters={"note": "ordinary"})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post("/instinct/actions/bulk-approve", json={"ids": [code_id, plain_id]})
+
+        assert resp.status_code == 200
+        # Exactly one dispatch — the code-change item, not the plain one.
+        assert mock_exec.await_count == 1
+        assert mock_exec.await_args.args[0].id == code_id
+
+    @pytest.mark.asyncio
+    async def test_reject_code_change_never_dispatches_executor(
+        self, client: TestClient, router_store: InstinctStore
+    ) -> None:
+        """Rejecting a ``_code_change`` Action round-trips to REJECTED without
+        ever reaching the executor — the reject path applies nothing."""
+        blob = {"kind": "code_change", "schema": 1, "workspace_id": "ws-test", "diff": "x"}
+        action_id = await self._seed(router_store, parameters={"_code_change": blob})
+
+        with patch(
+            "pocketpaw_ee.cloud.belt.executor.execute_approved_change",
+            new_callable=AsyncMock,
+        ) as mock_exec:
+            resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "not now"})
+
+        assert resp.status_code == 200
+        mock_exec.assert_not_awaited()
+        assert resp.json()["status"] == ActionStatus.REJECTED.value

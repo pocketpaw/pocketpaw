@@ -1,12 +1,26 @@
+# EE auth bridge middleware tests.
+#
+# Updated 2026-06-10 (W4b — privilege-escalation fix): the bridge now grants
+# OSS full_access only to genuine PLATFORM admins (User.is_superuser), not to
+# every owner/admin of their own workspace. These tests were rewritten to
+# assert the corrected, deny-by-default model:
+#   * platform admin (is_superuser=True)  → full_access → OSS routes 200
+#   * workspace owner / admin (role only) → NO full_access → OSS routes 403
+#   * member / viewer / no-workspace / unauth / bad JWT → 403
+#   * OSS API keys (pp_*) and OAuth tokens (ppat_*) → bridge ignores them.
+
 """EE auth bridge middleware tests.
 
 Verifies the middleware that bridges fastapi-users JWT auth into the OSS
-``require_scope`` system. Concretely:
+``require_scope`` system. After the W4b escalation fix:
 
-* admin/owner of the active workspace → ``request.state.full_access``
+* a genuine *platform* admin (``is_superuser``) → ``request.state.full_access``
   becomes True → OSS scope-gated routes return 200.
-* member / viewer → ``full_access`` stays False → 403.
-* unauthenticated / bad JWT → ``full_access`` stays False → 403.
+* a workspace owner / admin (role on their own workspace, but not a platform
+  admin) → ``full_access`` stays False → 403. This is the escalation that W4b
+  closes: a self-service tenant owner must NOT bypass OSS guards.
+* member / viewer → 403.
+* unauthenticated / bad JWT → 403.
 * OSS API keys (pp_*) and OAuth tokens (ppat_*) → the bridge ignores them
   so the existing OSS AuthMiddleware cascade owns those paths.
 """
@@ -37,7 +51,7 @@ pytestmark = pytest.mark.enforce_scope
 
 
 # ---------------------------------------------------------------------------
-# Test app — a single route gated by require_scope("settings:read")
+# Test app — routes gated by require_scope (settings + channels)
 # ---------------------------------------------------------------------------
 
 
@@ -59,22 +73,32 @@ def _build_app() -> FastAPI:
     async def _channels() -> dict[str, Any]:
         return {"channels": []}
 
+    # A budget-style route guarded the same way the real one is
+    # (src/pocketpaw/api/v1/budget.py): require_scope("settings:write", "admin").
+    @app.get(
+        "/api/v1/budget",
+        dependencies=[Depends(require_scope("settings:write", "admin"))],
+    )
+    async def _budget() -> dict[str, Any]:
+        return {"budget": {}}
+
     return app
 
 
 # ---------------------------------------------------------------------------
-# Test users — one per role on the same active workspace
+# Test users
 # ---------------------------------------------------------------------------
 
 _WS_ID = "w-bridge-test"
 
 
-async def _seed_user(email: str, role: str) -> User:
+async def _seed_user(email: str, role: str, *, is_superuser: bool = False) -> User:
     user = User(
         email=email,
         hashed_password="x",  # not used; we mint JWTs directly
         is_active=True,
         is_verified=True,
+        is_superuser=is_superuser,
         active_workspace=_WS_ID,
         workspaces=[WorkspaceMembership(workspace=_WS_ID, role=role)],
     )
@@ -90,8 +114,13 @@ async def _mint_jwt(user: User) -> str:
 
 @pytest_asyncio.fixture
 async def env(mongo_db):  # noqa: ARG001 — fixture forces Beanie init
-    owner = await _seed_user("owner@bridge.test", "owner")
-    admin = await _seed_user("admin@bridge.test", "admin")
+    # A genuine platform admin: is_superuser=True (the seeded operator).
+    # Note: also carries owner role, proving the grant is driven by
+    # is_superuser, not the workspace role.
+    platform_admin = await _seed_user("root@bridge.test", "owner", is_superuser=True)
+    # Self-service tenant owner — owns their OWN workspace, NOT a platform admin.
+    ws_owner = await _seed_user("owner@bridge.test", "owner")
+    ws_admin = await _seed_user("admin@bridge.test", "admin")
     member = await _seed_user("member@bridge.test", "member")
     no_ws = User(
         email="lonely@bridge.test",
@@ -104,8 +133,9 @@ async def env(mongo_db):  # noqa: ARG001 — fixture forces Beanie init
     await no_ws.insert()
 
     tokens = {
-        "owner": await _mint_jwt(owner),
-        "admin": await _mint_jwt(admin),
+        "platform_admin": await _mint_jwt(platform_admin),
+        "ws_owner": await _mint_jwt(ws_owner),
+        "ws_admin": await _mint_jwt(ws_admin),
         "member": await _mint_jwt(member),
         "no_ws": await _mint_jwt(no_ws),
     }
@@ -117,43 +147,77 @@ async def env(mongo_db):  # noqa: ARG001 — fixture forces Beanie init
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Platform admin (is_superuser) — the only role that gets full_access
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_owner_via_cookie_passes_settings_scope(env) -> None:
+async def test_platform_admin_via_cookie_passes_settings_scope(env) -> None:
     client, tokens = env
-    res = await client.get("/api/v1/settings", cookies={"paw_auth": tokens["owner"]})
+    res = await client.get("/api/v1/settings", cookies={"paw_auth": tokens["platform_admin"]})
     assert res.status_code == 200, res.text
     assert res.json() == {"ok": True}
 
 
 @pytest.mark.asyncio
-async def test_admin_via_cookie_passes_settings_scope(env) -> None:
-    client, tokens = env
-    res = await client.get("/api/v1/settings", cookies={"paw_auth": tokens["admin"]})
-    assert res.status_code == 200, res.text
-
-
-@pytest.mark.asyncio
-async def test_admin_via_bearer_passes_channels_scope(env) -> None:
+async def test_platform_admin_via_bearer_passes_channels_scope(env) -> None:
     client, tokens = env
     res = await client.get(
         "/api/v1/channels",
-        headers={"Authorization": f"Bearer {tokens['admin']}"},
+        headers={"Authorization": f"Bearer {tokens['platform_admin']}"},
     )
     assert res.status_code == 200, res.text
 
 
 @pytest.mark.asyncio
-async def test_owner_via_bearer_passes_settings_scope(env) -> None:
+async def test_platform_admin_passes_budget_scope(env) -> None:
+    client, tokens = env
+    res = await client.get("/api/v1/budget", cookies={"paw_auth": tokens["platform_admin"]})
+    assert res.status_code == 200, res.text
+
+
+# ---------------------------------------------------------------------------
+# Escalation guard — workspace owner/admin must NOT bypass OSS require_scope
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_workspace_owner_is_denied_settings_scope(env) -> None:
+    """A self-created-workspace owner is NOT a platform admin and must be
+    denied on OSS scope-gated routes. This is the W4b escalation fix."""
+    client, tokens = env
+    res = await client.get("/api/v1/settings", cookies={"paw_auth": tokens["ws_owner"]})
+    assert res.status_code == 403, res.text
+    assert "Missing required scope" in res.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_owner_is_denied_budget_scope(env) -> None:
+    client, tokens = env
+    res = await client.get("/api/v1/budget", cookies={"paw_auth": tokens["ws_owner"]})
+    assert res.status_code == 403, res.text
+
+
+@pytest.mark.asyncio
+async def test_workspace_admin_is_denied_settings_scope(env) -> None:
+    client, tokens = env
+    res = await client.get("/api/v1/settings", cookies={"paw_auth": tokens["ws_admin"]})
+    assert res.status_code == 403, res.text
+
+
+@pytest.mark.asyncio
+async def test_workspace_owner_via_bearer_is_denied_channels_scope(env) -> None:
     client, tokens = env
     res = await client.get(
-        "/api/v1/settings",
-        headers={"Authorization": f"Bearer {tokens['owner']}"},
+        "/api/v1/channels",
+        headers={"Authorization": f"Bearer {tokens['ws_owner']}"},
     )
-    assert res.status_code == 200, res.text
+    assert res.status_code == 403, res.text
+
+
+# ---------------------------------------------------------------------------
+# Lower roles + unauthenticated — all rejected
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio

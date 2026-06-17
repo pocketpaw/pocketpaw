@@ -3,11 +3,26 @@
 # (text / image / list / button / form / divider). No raw HTML, no script
 # injection paths. The widget.js bundle consumes PawPrintSpec; the backend
 # consumes PawPrintEvent on the ingest side.
+# Updated: 2026-06-10 (W0b security fix) — Added PawPrintWidgetPublic, a
+# token-free projection of PawPrintWidget used as the response model for
+# list/read endpoints so the per-widget access_token never leaves the server
+# in those payloads. The token is now only returned by the explicit,
+# authenticated create + rotate-token paths.
+# Updated: 2026-06-11 (gap2 — close the customer decision loop) — Added
+# DecisionStatus + DecisionState. An inbound customer event no longer dead-ends
+# at a Fabric object: it can raise an Instinct proposal, and the human's
+# decision (reply text + state) is recorded here as the deliverable the
+# customer surface polls back. DecisionStatus is keyed by (widget_id,
+# customer_ref) so a rendered widget can fetch "what did the owner decide about
+# my request?" without any owner credential. State machine: pending → delivered
+# (approved) | declined (rejected). This is the back-half of the loop the
+# module docstring promised since 2026-04-13 but never wired.
 
 from __future__ import annotations
 
 import secrets
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -159,6 +174,38 @@ class PawPrintWidget(BaseModel):
         return value
 
 
+class PawPrintWidgetPublic(BaseModel):
+    """Token-free projection of :class:`PawPrintWidget`.
+
+    Used as the response model for list/read endpoints. It carries every
+    widget field EXCEPT ``access_token`` — the per-widget owner credential
+    that authorizes mutating + event-read operations. That secret must never
+    leave the server in a list/read payload; it is returned only by the
+    explicit, authenticated create and rotate-token paths.
+
+    Build one with :meth:`from_widget` so the projection stays in lockstep
+    with the source model.
+    """
+
+    id: str
+    pocket_id: str
+    owner: str
+    name: str = ""
+    spec: PawPrintSpec
+    allowed_domains: list[str] = Field(default_factory=list)
+    rate_limit_per_min: int
+    per_customer_limit_per_min: int
+    event_mapping: dict[str, PawPrintEventMapping] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_widget(cls, widget: PawPrintWidget) -> PawPrintWidgetPublic:
+        data = widget.model_dump()
+        data.pop("access_token", None)
+        return cls(**data)
+
+
 class PawPrintEvent(BaseModel):
     """One inbound signal from a rendered widget."""
 
@@ -182,6 +229,50 @@ class PawPrintEvent(BaseModel):
         if not value.strip():
             raise ValueError("event type is required")
         return value.strip()
+
+
+# ---------------------------------------------------------------------------
+# Decision delivery — the back-half of the customer decision loop (gap2)
+# ---------------------------------------------------------------------------
+
+
+class DecisionState(StrEnum):
+    """Where a customer's request sits in the decision loop.
+
+    ``PENDING``   — the event raised an Instinct proposal; a human has not yet
+                    decided. The customer surface shows "we're looking into it".
+    ``DELIVERED`` — the human approved; ``reply`` carries the answer the
+                    customer can read.
+    ``DECLINED``  — the human rejected; ``reply`` carries the (optional) reason.
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    DECLINED = "declined"
+
+
+class DecisionStatus(BaseModel):
+    """A decision made (or pending) for one inbound customer event.
+
+    This is the deliverable the customer surface polls back: the widget posted
+    an event, a human decided, and the answer lands here keyed by
+    ``(widget_id, customer_ref)`` so the rendered widget can retrieve it with no
+    owner credential. ``instinct_action_id`` ties the row to the Instinct
+    proposal that drove the decision, so the audit trail is reconstructable.
+    ``workspace_id`` scopes the row to the owning tenant.
+    """
+
+    id: str = Field(default_factory=lambda: _gen_id("ppd"))
+    widget_id: str
+    customer_ref: str
+    event_type: str = ""
+    instinct_action_id: str = ""
+    workspace_id: str = ""
+    state: DecisionState = DecisionState.PENDING
+    reply: str = ""
+    decided_by: str = ""
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime = Field(default_factory=datetime.now)
 
 
 # ---------------------------------------------------------------------------

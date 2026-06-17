@@ -1,0 +1,79 @@
+# src/pocketpaw/bundled_templates/_bundled/events-board/template.pocket.yaml
+# Created: 2026-06-11 (feat/demo-template-suite) — RFC 03 v2 Pocket Template
+# Schema metadata for the generic events-board pocket. DEMO-GRADE from the
+# start, mirroring the applications-triage redesign (#1435): a color-banded
+# sell-through strip across the top (capacity vs sold per status + headline
+# stats), a scannable left queue of events (name, sell-through bar
+# color-banded by how full it is, status pill, date), and a loud detail
+# panel (header + status/sell-through pills + a sell-through RING, a
+# revenue / attendee / check-in stat row, the ticket-tier breakdown as a
+# record grid, and a run-of-show timeline). The detail panel binds to a
+# denormalized flat `state.selected` object kept in sync by the queue cards'
+# on_click (the on_click `set` value is a method chain that ENDS in `)`, the
+# only chain form the renderer resolves) so every detail binding is a plain
+# `{state.selected.X}` path — no method-chain-then-property access, the bug
+# that left the old triage detail panel empty. `state.selected` is also
+# SEEDED to the first event so the panel renders before any click.
+# `shape: custom` because the canvas is a composite (sell-through strip +
+# queue + detail + run-of-show) — RFC 03's shape enum has no value for it,
+# so the pattern is recorded in the sibling index.json (`pattern: app`) and
+# the shape stays `custom` (the same choice applications-triage made).
+# `needs: [paw.db.v1]` declares the generic data-source capability a tenant
+# wires so the queue hydrates from a real events endpoint; without one the
+# seeded sample events render. The one promote action declares
+# `instinct_policy: require_approval` so it surfaces as a PENDING gated
+# proposal in The Tray rather than executing inline — the deployment wires
+# the action row to external_actions.propose at the documented binding point
+# (see the ripple_spec _placeholder_note).
+schema_version: "2"
+name: events-board
+version: 1.0.0
+pattern: app
+vertical: operations
+display_name: Events Board
+shape: custom
+description: |
+  A sell-through console for upcoming events. A color-banded strip across the
+  top counts events by status — on sale, sold out, draft — and adds the
+  headline numbers: total events, total tickets sold, and total revenue. A
+  scannable queue on the left shows each event's name, date, a sell-through
+  bar color-banded by how full it is, and a status pill. Selecting an event
+  opens a detail panel where the booking picture is the loudest thing on the
+  canvas: the sell-through as a ring, a revenue / attendees / checked-in stat
+  row, the ticket tiers as a record grid with price, sold, and capacity, and
+  a run-of-show timeline. A promote action proposes a push for events selling
+  slowly, surfaced as a pending proposal for a human to confirm rather than
+  acting on its own. Ships a placeholder live-data source so a connected
+  backend hydrates the queue from a real events endpoint; with no backend it
+  renders the seeded sample events.
+icon: calendar
+color: "#7c5b99"
+state:
+  entity_type: Event
+  id_field: id
+  columns:
+    - { field: name, label: Event, widget: text }
+    - { field: date, label: Date, widget: text }
+    - { field: status, label: Status, widget: badge }
+    - { field: sold_pct, label: Sell-through, widget: number }
+    - { field: revenue, label: Revenue, widget: text }
+    - { field: sold, label: Sold, widget: number }
+data_sources:
+  - name: events
+    method: GET
+    path: /events?status=upcoming
+    bind: state.events
+    refresh: [pocket_open, manual]
+needs:
+  - paw.db.v1
+actions:
+  - name: promote_event
+    label: Promote
+    kind: single-row
+    instinct_policy: require_approval
+    outcomes_emitted: [event_promoted]
+    description: Proposes a promotional push for the selected event. Gated — a human confirms in The Tray.
+outcomes:
+  - event_promoted
+connectors: []
+skill_refs: []

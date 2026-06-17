@@ -71,6 +71,16 @@ class AudienceResolver:
 
         # --- Groups -------------------------------------------------------------
         if t == "group.created":
+            # Public channels and public groups should be visible to every
+            # workspace member so the new channel appears in their channel
+            # browser / sidebar without a manual refresh. Private channels,
+            # private groups, and DMs are restricted to the explicit member
+            # list (the creator + any invited members).
+            gtype = d.get("type", "")
+            vis = d.get("visibility", "public")
+            is_public = gtype == "public" or (gtype == "channel" and vis != "private")
+            if is_public and (wid := d.get("workspace")):
+                return await self._workspace(wid)
             return list(d.get("member_ids", []))
         if t in {
             "group.updated",
@@ -280,6 +290,26 @@ class AudienceResolver:
         # --- Pocket outcomes (named business events from write actions) ---------
         # Workspace-scoped: the outcomes ledger dashboard watches every write.
         if t == "pocket.outcome":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Belt & Pulley station runs (develop-station lifecycle) -------------
+        # Workspace-scoped: the /belt console is a per-workspace view, and a run
+        # status change (propose / approve / reject / landed / failed) fires
+        # asynchronously relative to the chat turn, so it must fan out to every
+        # workspace member with the page open — not just the proposing session.
+        if t == "belt_run_updated":
+            if wid := d.get("workspace_id"):
+                return await self._workspace(wid)
+            return []
+
+        # --- Belt mandates (shift plan proposals) --------------------------------
+        # Workspace-scoped, same rationale as belt_run_updated: a plan lands at
+        # the gate asynchronously and must reach every member with the mandates
+        # page open. The UI subscribes to the ``belt_plan`` topic and reads
+        # {mandate_id, proposal} off the payload.
+        if t == "belt_plan":
             if wid := d.get("workspace_id"):
                 return await self._workspace(wid)
             return []

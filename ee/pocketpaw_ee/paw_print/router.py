@@ -10,6 +10,27 @@
 # screened and dropped on a HIGH-or-higher threat. Renamed the helper to
 # _screen_event_for_injection and the rejection reason to
 # "injection_rejected".
+# Updated: 2026-06-10 (W0b security fix) — Closed an unauthenticated
+# access-token leak on the widget-management surface. (1) Widget CRUD
+# (create / list / update-spec / delete) now requires a fully-authenticated
+# dashboard caller via Depends(require_scope("admin")); previously these
+# routes had NO route-level auth, and the /api/v1/* mount is auth-OPTIONAL at
+# the middleware level, so an unauthenticated caller could reach them. (2) The
+# list and read responses now serialize PawPrintWidgetPublic, which omits
+# access_token — the per-widget owner credential no longer leaves the server
+# in a list/read payload. The token is still returned by the explicit,
+# authenticated create + rotate-token paths so an owner can capture it once.
+# The public spec-serving and event-ingest endpoints stay unauthenticated by
+# design (origin/CORS-gated for the embedded widget bundle).
+# Updated: 2026-06-11 (gap2 — close the customer decision loop) — An accepted,
+# mapped customer event no longer dead-ends at a Fabric object: ingest now also
+# raises an Instinct proposal via decision_loop.propose_customer_decision and
+# parks a PENDING DecisionStatus row (best-effort — a loop failure never fails
+# the ingest response). Added a public, CORS-gated poll endpoint
+# (GET /paw-print/events/{widget_id}/decision/{customer_ref}) so the rendered
+# widget can read the owner's decision back out — the back-half of the loop. The
+# approve/reject delivery hook lives in the instinct router (it owns the human
+# decision); see decision_loop.deliver_customer_decision.
 
 from __future__ import annotations
 
@@ -18,16 +39,18 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from pocketpaw.api.deps import require_scope
 from pocketpaw.paw_print.models import (
     MAX_PAYLOAD_BYTES,
     PawPrintEvent,
     PawPrintEventMapping,
     PawPrintSpec,
     PawPrintWidget,
+    PawPrintWidgetPublic,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +107,9 @@ class CreateWidgetRequest(BaseModel):
 
 
 class WidgetListResponse(BaseModel):
-    widgets: list[PawPrintWidget]
+    # PawPrintWidgetPublic (not PawPrintWidget) — list payloads must never
+    # carry access_token (W0b).
+    widgets: list[PawPrintWidgetPublic]
     total: int
 
 
@@ -92,7 +117,26 @@ class EventIngestResponse(BaseModel):
     accepted: bool
     event: PawPrintEvent | None = None
     fabric_object_id: str | None = None
+    # gap2 — the Instinct proposal raised for this event (when the widget maps
+    # the event type). The customer surface can poll the decision endpoint to
+    # read the owner's eventual decision; None when no proposal was raised.
+    instinct_action_id: str | None = None
     reason: str | None = None
+
+
+class DecisionStatusResponse(BaseModel):
+    """The customer-facing view of a decision (gap2).
+
+    Deliberately omits internal-only fields (the Instinct action id, the
+    workspace) — the customer surface only needs the state + the reply.
+    ``found`` is False when no decision exists yet for this (widget, customer).
+    """
+
+    found: bool
+    state: str | None = None
+    reply: str | None = None
+    decided_by: str | None = None
+    updated_at: str | None = None
 
 
 class EventsListResponse(BaseModel):
@@ -101,11 +145,26 @@ class EventsListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Owner-authed CRUD
+# Widget management (CRUD)
+#
+# Auth model (W0b): these routes are mounted under /api/v1, which the
+# dashboard AuthMiddleware treats as auth-OPTIONAL — it populates request.state
+# but does NOT 401. So management routes MUST gate themselves at the route
+# level. require_scope("admin") is fail-closed: it accepts a full-access
+# dashboard session (master/session-cookie/localhost) or an admin-scoped
+# API-key / OAuth token, and 403s everyone else (including unauthenticated
+# callers). The per-widget access_token (X-Paw-Print-Token) is a SECOND factor
+# on read/mutate of a specific widget — it is not a substitute for being a
+# signed-in dashboard user, which is why create/list need this guard.
 # ---------------------------------------------------------------------------
 
 
-@router.post("/paw-print/widgets", response_model=PawPrintWidget, status_code=201)
+@router.post(
+    "/paw-print/widgets",
+    response_model=PawPrintWidget,
+    status_code=201,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def create_widget(req: CreateWidgetRequest) -> PawPrintWidget:
     widget = PawPrintWidget(
         pocket_id=req.pocket_id,
@@ -120,34 +179,48 @@ async def create_widget(req: CreateWidgetRequest) -> PawPrintWidget:
     return await _store().create_widget(widget)
 
 
-@router.get("/paw-print/widgets", response_model=WidgetListResponse)
+@router.get(
+    "/paw-print/widgets",
+    response_model=WidgetListResponse,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def list_widgets(
     pocket_id: str | None = Query(None),
     owner: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ) -> WidgetListResponse:
     widgets = await _store().list_widgets(pocket_id=pocket_id, owner=owner, limit=limit)
-    return WidgetListResponse(widgets=widgets, total=len(widgets))
+    # Project to the token-free model — a list payload must never carry the
+    # per-widget access_token (W0b).
+    public = [PawPrintWidgetPublic.from_widget(w) for w in widgets]
+    return WidgetListResponse(widgets=public, total=len(public))
 
 
-@router.get("/paw-print/widgets/{widget_id}", response_model=PawPrintWidget)
+@router.get("/paw-print/widgets/{widget_id}", response_model=PawPrintWidgetPublic)
 async def get_widget(
     widget_id: str,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidget:
+) -> PawPrintWidgetPublic:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
     _require_owner_token(widget, x_paw_print_token)
-    return widget
+    # Read responses omit access_token — the caller already holds it (they had
+    # to present it to pass _require_owner_token), so echoing it back only
+    # widens the blast radius if a read response is logged/cached (W0b).
+    return PawPrintWidgetPublic.from_widget(widget)
 
 
-@router.patch("/paw-print/widgets/{widget_id}/spec", response_model=PawPrintWidget)
+@router.patch(
+    "/paw-print/widgets/{widget_id}/spec",
+    response_model=PawPrintWidgetPublic,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def update_spec(
     widget_id: str,
     spec: PawPrintSpec,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
-) -> PawPrintWidget:
+) -> PawPrintWidgetPublic:
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
@@ -155,14 +228,22 @@ async def update_spec(
     updated = await _store().update_spec(widget_id, spec)
     if updated is None:
         raise HTTPException(404, "Widget not found")
-    return updated
+    return PawPrintWidgetPublic.from_widget(updated)
 
 
-@router.post("/paw-print/widgets/{widget_id}/rotate-token", response_model=PawPrintWidget)
+@router.post(
+    "/paw-print/widgets/{widget_id}/rotate-token",
+    response_model=PawPrintWidget,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def rotate_token(
     widget_id: str,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
 ) -> PawPrintWidget:
+    # Returns the FULL widget (with the new access_token) on purpose: this is
+    # the explicit, authenticated reveal path so the owner can capture the
+    # rotated secret. Still requires the old token AND an admin dashboard
+    # session (W0b).
     widget = await _store().get_widget(widget_id)
     if widget is None:
         raise HTTPException(404, "Widget not found")
@@ -173,7 +254,11 @@ async def rotate_token(
     return rotated
 
 
-@router.delete("/paw-print/widgets/{widget_id}", status_code=204)
+@router.delete(
+    "/paw-print/widgets/{widget_id}",
+    status_code=204,
+    dependencies=[Depends(require_scope("admin"))],
+)
 async def delete_widget(
     widget_id: str,
     x_paw_print_token: str | None = Header(default=None, alias="X-Paw-Print-Token"),
@@ -261,6 +346,12 @@ async def ingest_event(
        (degrades cleanly to accept when the security stack is absent).
     After that, the event is persisted and — if the widget has a matching
     `event_mapping` — a Fabric object is created.
+
+    gap2 — when the event maps to a Fabric object, ingest ALSO raises an
+    Instinct proposal carrying the event context (best-effort) so a human can
+    decide and the decision is delivered back via the poll endpoint. This is the
+    open-the-loop half; the human decides on the existing Instinct surface and
+    deliver_customer_decision closes it.
     """
     store = _store()
     widget = await store.get_widget(widget_id)
@@ -296,11 +387,72 @@ async def ingest_event(
     await store.record_event(event)
     fabric_object_id = await _apply_event_mapping(widget, event)
 
+    # gap2 — open the customer decision loop. Only events the widget actually
+    # maps (a real, recognized customer request, not arbitrary telemetry) raise
+    # a proposal, so we don't flood The Tray with noise. Best-effort: a loop
+    # failure never fails this ingest response — the event + Fabric object have
+    # already persisted.
+    instinct_action_id: str | None = None
+    if widget.event_mapping.get(event.type) is not None:
+        instinct_action_id = await _open_decision_loop(widget, event, store)
+
     return EventIngestResponse(
         accepted=True,
         event=event,
         fabric_object_id=fabric_object_id,
+        instinct_action_id=instinct_action_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Customer decision poll (public, CORS-enforced) — the back-half of the loop
+# ---------------------------------------------------------------------------
+
+
+@router.get("/paw-print/events/{widget_id}/decision/{customer_ref}")
+async def get_decision(
+    widget_id: str,
+    customer_ref: str,
+    request: Request,
+) -> JSONResponse:
+    """Public endpoint the rendered widget polls to read the owner's decision.
+
+    The widget posted an event (which may have raised an Instinct proposal);
+    this returns the latest decision for ``(widget_id, customer_ref)``:
+    ``pending`` while a human hasn't decided, then ``delivered`` (with the reply)
+    on approval or ``declined`` on rejection.
+
+    Auth model matches the public spec/ingest endpoints: no owner credential —
+    the row is scoped to the customer's own ``customer_ref`` on a specific
+    widget, which is all the embedded widget knows. CORS is enforced per-widget
+    exactly as on the spec endpoint so only allowlisted origins can read it.
+    """
+    store = _store()
+    widget = await store.get_widget(widget_id)
+    if widget is None:
+        raise HTTPException(404, "Widget not found")
+
+    origin = request.headers.get("origin")
+    if not _origin_allowed(widget, origin):
+        raise HTTPException(403, "Origin not allowed for this widget")
+
+    decision = await store.get_latest_decision(widget_id, customer_ref)
+    headers: dict[str, str] = {}
+    if origin:
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Vary"] = "Origin"
+
+    if decision is None:
+        body = DecisionStatusResponse(found=False)
+    else:
+        body = DecisionStatusResponse(
+            found=True,
+            state=decision.state.value,
+            reply=decision.reply,
+            decided_by=decision.decided_by,
+            updated_at=decision.updated_at.isoformat(),
+        )
+    return JSONResponse(body.model_dump(), headers=headers)
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +503,36 @@ async def _screen_event_for_injection(event: PawPrintEvent) -> bool:
         )
         return False
     return True
+
+
+async def _open_decision_loop(
+    widget: PawPrintWidget,
+    event: PawPrintEvent,
+    store: Any,
+) -> str | None:
+    """Raise an Instinct proposal for a mapped customer event (gap2).
+
+    Thin wrapper over ``decision_loop.propose_customer_decision`` — keeps the
+    import lazy (the OSS paw_print store never reaches into the EE decision-loop
+    module) and the failure best-effort: any error is swallowed by the called
+    function, and a defensive guard here ensures even an import failure can't
+    break the ingest response. Returns the proposed Instinct action id, or None.
+    """
+    try:
+        from pocketpaw_ee.paw_print.decision_loop import propose_customer_decision
+
+        return await propose_customer_decision(
+            widget=widget,
+            event=event,
+            paw_print_store=store,
+        )
+    except Exception:
+        logger.warning(
+            "decision-loop proposal failed for widget %s (non-fatal)",
+            widget.id,
+            exc_info=True,
+        )
+        return None
 
 
 async def _apply_event_mapping(widget: PawPrintWidget, event: PawPrintEvent) -> str | None:

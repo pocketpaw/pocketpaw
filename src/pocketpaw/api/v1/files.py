@@ -2,6 +2,9 @@
 # Created: 2026-02-20
 # 2026-04-16: Router-level files:read scope guard + symlink filter in
 # /files/download-zip. Closes #884 and #886.
+# 2026-06-10: expanduser() in browse + _resolve_path so "~/foo" paths resolve
+# to home — the /code IDE roots its tree at "~" and addresses children that
+# way. Jail checks unchanged.
 
 from __future__ import annotations
 
@@ -41,13 +44,14 @@ async def browse_files(path: str = "~"):
 
     settings = get_settings()
 
-    # Resolve path
+    # Resolve path. "~"-prefixed paths expand to home so the /code IDE (whose
+    # tree roots at "~") can address children as ~/foo — see _resolve_path.
     if path in ("~", ""):
         resolved_path = Path.home()
-    elif not path.startswith("/"):
-        resolved_path = Path.home() / path
     else:
-        resolved_path = Path(path)
+        resolved_path = Path(path).expanduser()
+        if not resolved_path.is_absolute():
+            resolved_path = Path.home() / resolved_path
 
     resolved_path = resolved_path.resolve()
     jail = settings.file_jail_path.resolve()
@@ -171,11 +175,12 @@ async def get_recent_files(limit: int = 20):
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve a path string to an absolute Path."""
-    candidate = Path(path)
+    """Resolve a path string to an absolute Path. Expands a leading ``~``
+    (the /code IDE addresses workspace files as ``~/foo``)."""
+    candidate = Path(path).expanduser()
     if candidate.is_absolute():
         return candidate.resolve()
-    return (Path.home() / path).resolve()
+    return (Path.home() / candidate).resolve()
 
 
 def _content_disposition(filename: str) -> str:

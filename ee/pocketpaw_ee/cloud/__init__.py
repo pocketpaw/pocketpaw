@@ -1,5 +1,21 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-13 (feat/patrol-engine) — Registers the mandate cadence
+    SCHEDULER lifespan pair next to the autopilot pair, under the same
+    POCKETPAW_CLOUD_SCHEDULER_ENABLED gate: ``reconcile_scheduler`` at startup
+    (starts the single sweeper loop, run_immediate=False) and
+    ``shutdown_scheduler`` at shutdown (cancels + awaits it). The loop fires
+    cadence-due shifts so "weekly" mandates run without a manual trigger.
+Modified: 2026-06-11 (feat/belt-autopilot) — Registers the mandate-autopilot
+    lifespan pair under the POCKETPAW_CLOUD_SCHEDULER_ENABLED gate:
+    ``reconcile_autopilot_tasks`` at startup (re-derives per-mandate autopilot
+    loops from the persisted ``MandateDoc.autopilot.on`` flags,
+    run_immediate=False) and ``shutdown_all_autopilot_tasks`` at shutdown
+    (cancels + awaits every registered loop).
+Modified: 2026-06-10 (W4b — privilege-escalation fix) — Updated the inline
+    note on the EEAuthBridge middleware: the bridge now grants OSS
+    ``full_access`` only to genuine platform admins (``is_superuser``), not
+    to every workspace owner/admin. See ``_core/ee_auth_bridge.py``.
 Modified: 2026-05-25 (feat/foresight-v07-cloud-mount) — RFC 08 PR 7.
     Mounts the Foresight router at ``/api/v1/foresight/*`` alongside the
     other domain routers. Routes delegate to ``ee.cloud.foresight.service``
@@ -136,9 +152,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
     #   CSRF → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
-    # The bridge marks admin/owner cloud users as ``full_access`` before
-    # the OSS AuthMiddleware reads it, so OSS routes (settings/channels/...)
-    # accept EE JWT auth without 403'ing on missing scopes.
+    # The bridge marks genuine *platform admins* (``is_superuser``) as
+    # ``full_access`` before the OSS AuthMiddleware reads it, so platform
+    # admins reach OSS routes (settings/channels/...) without 403'ing on
+    # missing scopes. Workspace owners/admins are NOT granted full_access —
+    # they stay subject to OSS require_scope (W4b escalation fix).
     # A CSRF 403 short-circuits before Timing observes the request, so perf
     # data won't include rejected POSTs. That's a deliberate tradeoff: the
     # CSRF gate exists to be fast and predictable, not measured. Reorder
@@ -251,6 +269,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.kb.router import router as kb_router
     from pocketpaw_ee.cloud.leads.router import router as leads_router
     from pocketpaw_ee.cloud.livekit.router import router as livekit_router
+    from pocketpaw_ee.cloud.member_day_digest.router import router as member_day_digest_router
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
@@ -282,6 +301,12 @@ def mount_cloud(app: FastAPI) -> None:
     # exposes the operator-facing read + decision surface.
     app.include_router(instinct_approvals_router, prefix="/api/v1")
 
+    # Member-day digest — VIP Onboarding Phase B chunk 6. Gated GET
+    # /api/v1/member-day-digest returns the AUTHENTICATED caller's OWN
+    # structured "your day" digest (the chunk-5 service) for the intent
+    # board. No member_id param — a caller can only fetch their own.
+    app.include_router(member_day_digest_router, prefix="/api/v1")
+
     # Paw Sites — RFC 12 capture surface. Public POST /sites/{id}/capture
     # (origin-pinned + per-site signed key, no user auth — the edge Queue
     # drains here) and authed GET /sites/{id}/leads (plan-gated + RBAC +
@@ -301,6 +326,24 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.temporal_sweeps.router import router as temporal_sweeps_router
 
     app.include_router(temporal_sweeps_router, prefix="/api/v1")
+
+    # Belt & Pulley console — the /belt develop-station read + repo-admin
+    # surface (feat/belt-console-backend SC-1 + SC-2). GET/POST /belt/repos for
+    # repo discovery + admin-gated add, GET /belt/runs + /belt/runs/{id} for the
+    # runs read model. The apply-on-approve executor + the propose MCP server
+    # live elsewhere; this is the page's read/bind surface.
+    from pocketpaw_ee.cloud.belt.router import router as belt_console_router
+
+    app.include_router(belt_console_router, prefix="/api/v1")
+
+    # Belt MANDATES — the standing-JOB primitive (feat/belt-mandates). The
+    # /belt/mandates surface: charter CRUD, patrol intake (feedback), sightings
+    # read, manual shift trigger (foreman → plan gate), and the pawprints feed.
+    # The plan-gate apply-on-approve executor lives in ee.cloud.mandates.executor
+    # and is fired from the Instinct router's approve path on a ``belt_plan`` blob.
+    from pocketpaw_ee.cloud.mandates.router import router as belt_mandates_router
+
+    app.include_router(belt_mandates_router, prefix="/api/v1")
 
     # Files Tab v2 — /api/v1/files/tree + /api/v1/files/browse. Mounted
     # inline (instead of via build_router's ctx_factory) so the routes can
@@ -368,7 +411,8 @@ def mount_cloud(app: FastAPI) -> None:
 
     @_files_v2.get("/browse")
     async def _files_get_browse(
-        mount: str = _Query(...),
+        mount: str | None = _Query(None),
+        path: str | None = _Query(None),
         cursor: str | None = _Query(None),
         limit: int = _Query(50, ge=1, le=500),
         workspace_id: str | None = _Query(None),
@@ -377,6 +421,16 @@ def mount_cloud(app: FastAPI) -> None:
         ctx = _files_ctx_from_user(user)
         if workspace_id is not None and workspace_id != ctx.workspace_id:
             raise _HTTPException(status_code=403, detail="files.workspace_mismatch")
+        # OSS path-shape fallback (2026-06-10). This route shadows the OSS
+        # GET /files/browse?path=…, which the localFs web bridge — and through
+        # it the /code IDE file tree — depends on. When no mount is given,
+        # delegate to the OSS handler so both call shapes serve from one path.
+        # The caller is already authenticated via current_active_user above.
+        if mount is None:
+            from pocketpaw.api.v1.files import browse_files as _oss_browse_files
+
+            oss_resp = await _oss_browse_files(path=path if path is not None else "~")
+            return oss_resp.model_dump()
         variables = {"workspace_id": ctx.workspace_id or ""}
         try:
             page = await _browse_mount(
@@ -664,6 +718,95 @@ def mount_cloud(app: FastAPI) -> None:
             from pocketpaw_ee.cloud.cycles.scheduler import stop_in_process_scheduler
 
             await stop_in_process_scheduler(app)
+
+    # Per-user member-ingest sweep (VIP Onboarding Phase B). Every 5 minutes
+    # (POCKETPAW_MEMBER_INGEST_INTERVAL_SECONDS override) it backfills/
+    # incrementally syncs each consented member's Gmail + Calendar into their
+    # private ``user:{member_id}`` KB scope. Same scheduler gate as the
+    # cycle/decisions loops so pytest runs never spawn a background loop that
+    # outlives the test; production sets POCKETPAW_CLOUD_SCHEDULER_ENABLED=true.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.member_ingest.scheduler import (
+            start_member_ingest,
+            stop_member_ingest,
+        )
+
+        @app.on_event("startup")
+        async def _start_member_ingest() -> None:
+            await start_member_ingest(app)
+
+        @app.on_event("shutdown")
+        async def _stop_member_ingest() -> None:
+            await stop_member_ingest(app)
+
+    # Generic Firestore→Fabric ingest sweep. Every 5 minutes
+    # (POCKETPAW_FABRIC_INGEST_INTERVAL_SECONDS override) it mirrors each
+    # workspace's configured Firestore collections into Fabric objects (backfill
+    # on first sight of a source, incremental thereafter). The per-deployment
+    # mapping lives in FabricIngestConfig; nothing domain-specific is in code.
+    # Same scheduler gate as the cycle/decisions/member-ingest loops so pytest
+    # runs never spawn a background loop that outlives the test; production sets
+    # POCKETPAW_CLOUD_SCHEDULER_ENABLED=true.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.fabric_ingest.scheduler import (
+            start_fabric_ingest,
+            stop_fabric_ingest,
+        )
+
+        @app.on_event("startup")
+        async def _start_fabric_ingest() -> None:
+            await start_fabric_ingest(app)
+
+        @app.on_event("shutdown")
+        async def _stop_fabric_ingest() -> None:
+            await stop_fabric_ingest(app)
+
+    # Mandate autopilot reconciler (feat/belt-autopilot). The persisted
+    # ``MandateDoc.autopilot.on`` flag is the source of truth for whether a
+    # mandate's autopilot SHOULD run; the background loop itself is
+    # process-local. At startup the reconciler re-derives the loops from the
+    # persisted flags (run_immediate=False — a boot never storms a cycle per
+    # mandate; the first cycle lands after the normal interval). At shutdown
+    # every registered loop is cancelled + awaited so the process exits without
+    # orphaned tasks. Same scheduler gate as the cycle/decisions loops so pytest
+    # runs never spawn a background loop that outlives the test.
+    if _os.environ.get("POCKETPAW_CLOUD_SCHEDULER_ENABLED", "").lower() == "true":
+        from pocketpaw_ee.cloud.mandates.autopilot import (
+            reconcile_autopilot_tasks,
+            shutdown_all_autopilot_tasks,
+        )
+
+        @app.on_event("startup")
+        async def _start_mandate_autopilot() -> None:
+            await reconcile_autopilot_tasks()
+
+        @app.on_event("shutdown")
+        async def _stop_mandate_autopilot() -> None:
+            await shutdown_all_autopilot_tasks()
+
+        # Mandate cadence scheduler (feat/patrol-engine). A single sweeper loop
+        # that wakes every interval and fires ``service.trigger_shift`` for each
+        # ACTIVE mandate whose charter cadence is DUE (a "weekly" mandate whose
+        # last shift is >7 days old; "manual" mandates are never fired). This
+        # turns ``Charter.cadence`` from a persisted label into an always-on
+        # trigger — until now shifts were manual-only. INTENTIONALLY nested in the
+        # autopilot block: it deliberately shares the SAME
+        # POCKETPAW_CLOUD_SCHEDULER_ENABLED gate as the autopilot/decisions loops,
+        # so a host that runs background loops runs all of them, and pytest runs
+        # (gate off) never spawn a loop that outlives the test. Reconcile starts
+        # with run_immediate=False (a boot never storms a tick).
+        from pocketpaw_ee.cloud.mandates.scheduler import (
+            reconcile_scheduler,
+            shutdown_scheduler,
+        )
+
+        @app.on_event("startup")
+        async def _start_mandate_scheduler() -> None:
+            await reconcile_scheduler()
+
+        @app.on_event("shutdown")
+        async def _stop_mandate_scheduler() -> None:
+            await shutdown_scheduler()
 
     # Mission Control activity buffer — per-workspace ring buffer fed by
     # agent.* bus events. Same constraint as the upload listeners: subscribe

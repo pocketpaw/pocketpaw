@@ -20,12 +20,13 @@ Endpoints:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.tasks import service as tasks_service
 from pocketpaw_ee.cloud.tasks.dto import (
+    AttachFilesRequest,
     BlockTaskRequest,
     ClaimTaskRequest,
     CompleteTaskRequest,
@@ -33,6 +34,7 @@ from pocketpaw_ee.cloud.tasks.dto import (
     CreateTaskRequest,
     ListTasksRequest,
     ReassignTaskRequest,
+    TaskAttachmentResponse,
     TaskEventResponse,
     TaskResponse,
     UpdateTaskRequest,
@@ -131,6 +133,46 @@ async def reassign_task(
     ctx: RequestContext = Depends(request_context),
 ) -> TaskResponse:
     return await tasks_service.agent_reassign_task(ctx, task_id, body)
+
+
+@router.post(
+    "/{task_id}/attachments",
+    response_model=list[TaskAttachmentResponse],
+    status_code=201,
+)
+async def attach_files(
+    task_id: str,
+    body: AttachFilesRequest,
+    ctx: RequestContext = Depends(request_context),
+) -> list[TaskAttachmentResponse]:
+    """Link previously-uploaded files to a task."""
+    return await tasks_service.agent_attach_files(ctx, task_id, body)
+
+
+@router.get(
+    "/{task_id}/attachments",
+    response_model=list[TaskAttachmentResponse],
+)
+async def list_attachments(
+    task_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> list[TaskAttachmentResponse]:
+    """List all files attached to a task."""
+    return await tasks_service.agent_list_attachments(ctx, task_id)
+
+
+@router.delete(
+    "/{task_id}/attachments/{attachment_id}",
+    status_code=204,
+)
+async def delete_attachment(
+    task_id: str,
+    attachment_id: str,
+    ctx: RequestContext = Depends(request_context),
+) -> Response:
+    """Remove a file attachment from a task."""
+    await tasks_service.agent_delete_attachment(ctx, task_id, attachment_id)
+    return Response(status_code=204)
 
 
 @router.post("/{task_id}/events", response_model=TaskEventResponse, status_code=201)

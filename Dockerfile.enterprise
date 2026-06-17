@@ -1,0 +1,162 @@
+# Dockerfile.enterprise — sovereign per-tenant PocketPaw Enterprise image.
+# Created: 2026-06-10 (sov/w1a-deploy).
+#
+# WHY a separate Dockerfile (vs the root Dockerfile): the root image is the
+# OSS-default single-user build. This one ships the FSL enterprise layer
+# (POCKETPAW_EDITION=enterprise) AND bundles the `kb` binary the cloud
+# knowledge-base features expect (POCKETPAW_KB_BIN) — neither of which belongs
+# in the lean OSS image. Everything the root Dockerfile hardened is PRESERVED:
+#   * POCKETPAW_ENV=production (W0e fail-fast on the default AUTH_SECRET / the
+#     legacy admin123 password),
+#   * POCKETPAW_LOCALHOST_AUTH_BYPASS=false,
+#   * non-root pocketpaw user, 0.0.0.0:8888 bind, healthcheck.
+#
+# Changes:
+#   - 2026-06-10 (sov/w1a-deploy): Added an ENTRYPOINT
+#     (docker-entrypoint.enterprise.sh) that generates + persists a stable
+#     AUTH_SECRET on first run, so the production-posture auth gate (W0e) is
+#     satisfied by a plain `docker compose up` with no hand-crafted secrets.
+#     CMD stays `pocketpaw` so the command is still overridable. Bundled the kb
+#     binary + POCKETPAW_KB_BIN, and the FSL enterprise layer.
+# Build:
+#   docker compose -f docker-compose.enterprise.yml build
+#   # or directly:
+#   docker build -f Dockerfile.enterprise -t pocketpaw-ee .
+
+# ---- kb-go binary stage ----
+# The cloud KB / member-ingest features shell out to the `kb` binary
+# (ee/cloud/agents/knowledge.py::_resolve_kb_bin). Build it here from the
+# pinned kb-go release so the runtime image has it on PATH without a manual
+# `go install` on the host. Pinned (not @latest) for reproducible builds; bump
+# KB_GO_VERSION to upgrade.
+FROM golang:1.25-bookworm AS kb
+ARG KB_GO_VERSION=v0.1.0
+# Produces /go/bin/kb-go; we expose it as `kb` (the name the resolver prefers).
+RUN go install github.com/qbtrix/kb-go@${KB_GO_VERSION} && \
+    cp /go/bin/kb-go /usr/local/bin/kb
+
+# ---- Node.js stage ----
+# Copy Node.js from the official image instead of curl|bash from NodeSource
+FROM node:22.14.0-slim AS node
+
+# Pre-install CLI-based agent backends so they're cached in this layer
+RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
+    npm cache clean --force
+
+# ---- Builder stage ----
+FROM python:3.12-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc python3-dev git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy only what's needed for the build
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ src/
+
+# Create venv and install all extras
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip install --no-cache-dir '.[all]'
+
+# Enterprise edition: ALWAYS install the FSL enterprise layer here (this is the
+# enterprise image — unlike the root Dockerfile, there is no oss/enterprise
+# build-arg switch).
+COPY ee/ ee/
+RUN pip install --no-cache-dir ./ee
+
+# Install Playwright Chromium browser
+RUN playwright install chromium
+
+# ---- Runtime stage ----
+FROM python:3.12-slim
+
+# Runtime system deps: tesseract for OCR, curl for healthcheck,
+# shared libs required by Playwright Chromium
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    curl \
+    # Playwright Chromium shared libs
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libasound2 \
+    libxshmfence1 \
+    libx11-xcb1 \
+    fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the kb binary from the kb-go stage. The resolver finds it on PATH as
+# `kb`; we also pin POCKETPAW_KB_BIN below so it's unambiguous.
+COPY --from=kb /usr/local/bin/kb /usr/local/bin/kb
+
+# Copy Node.js + globally-installed CLI backends from the official node image
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    ln -s /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js /usr/local/bin/claude && \
+    ln -s /usr/local/lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+
+# Copy venv from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy Playwright browsers from builder
+COPY --from=builder /root/.cache/ms-playwright /home/pocketpaw/.cache/ms-playwright
+
+# First-run secret bootstrap. Generates + persists a stable AUTH_SECRET on
+# first boot (W0e refuses to start in production posture without one), so the
+# deploy is a plain `docker compose up` with no hand-crafted secrets. See the
+# script header for the full rationale. Copied before the USER switch so it
+# lands root-owned + world-executable.
+COPY docker-entrypoint.enterprise.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
+
+# Create non-root user
+RUN groupadd --system pocketpaw && \
+    useradd --system --gid pocketpaw --create-home pocketpaw && \
+    mkdir -p /home/pocketpaw/.pocketpaw /home/pocketpaw/workspace && \
+    chown -R pocketpaw:pocketpaw /home/pocketpaw
+
+USER pocketpaw
+WORKDIR /home/pocketpaw
+
+# Bind to 0.0.0.0 so the container port is reachable from the host
+ENV POCKETPAW_WEB_HOST=0.0.0.0
+ENV POCKETPAW_WEB_PORT=8888
+# Disable localhost auth bypass — Docker bridge networking means requests
+# arrive from 172.x.x.x, not 127.0.0.1, so the bypass would never trigger.
+ENV POCKETPAW_LOCALHOST_AUTH_BYPASS=false
+# Production posture (security W0e): PRESERVED from the root image. With this
+# set, the cloud auth boot REFUSES to start unless AUTH_SECRET is a real value,
+# the initial admin password is generated/operator-supplied (never admin123),
+# AND (W1a) the license layer refuses to verify against the bypassable DEV
+# public key — set POCKETPAW_LICENSE_PUBLIC_KEY to your own key.
+ENV POCKETPAW_ENV=production
+# Point the cloud KB features at the bundled binary explicitly.
+ENV POCKETPAW_KB_BIN=/usr/local/bin/kb
+# Agent-created files land here — bind-mount to access them on the host
+ENV POCKETPAW_FILE_JAIL_PATH=/home/pocketpaw/workspace
+
+EXPOSE 8888
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8888/ || exit 1
+
+# ENTRYPOINT bootstraps the AUTH_SECRET (and surfaces the license-key warning)
+# before exec'ing the app. CMD stays `pocketpaw` so operators can still override
+# the command (e.g. run the arq worker) while keeping the secret bootstrap.
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["pocketpaw"]

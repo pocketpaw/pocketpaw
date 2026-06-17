@@ -144,6 +144,46 @@ stamps both onto the persisted ``Pocket``. The marketing-site brain
 ``type_="custom"`` and never carried ``pattern``, so site intent was
 dropped (pockets persisted as type="custom", pattern=None). Both keep
 today's defaults when unset — additive, no Mongo migration.
+Changes: 2026-06-11 (fix/template-ui-compile) — the template merge now
+carries the template's authored canvas through. Found on a live deploy:
+pockets created via ``create(template_slug=...)`` rendered an empty
+canvas because the compile pass translates YAML metadata only and the
+merge treated ``ui`` as user-authored-only, so a fresh create never
+adopted the template's ``ui`` tree. ``_merge_compile_into_ripple_spec``
+gains a ``template_ripple_spec`` kwarg and an ownership rule: an
+empty/absent existing ``ui`` is template-owned (adopt the template's
+``ui`` + merge its seed ``state`` / placeholder ``sources`` under the
+compiled values); a non-empty ``ui`` is user-owned (machinery-only
+merge, exactly the prior recompile semantics). Both ``create`` and
+``update`` pass the loader's ``ripple_spec`` sibling through.
+Changes: 2026-06-12 (feat/connector-as-pocket-backend) — a pocket backend
+can now be an existing CONNECTOR, not only an HTTP base_url.
+``set_pocket_backend`` gained ``backend_type`` (``"http"`` default |
+``"connector"``) + ``connector_name``: a connector backend validates the
+connector is enabled for the workspace (via
+``connectors.service.is_connector_enabled_for_workspace``), needs no
+``base_url``, and clears any stale http credential. ``get_pocket_backend``
++ ``get_pocket_backend_for_executor`` now carry ``backend_type`` /
+``connector_name`` (``getattr`` defaults so a legacy row reads as http) so
+the source executor can route a connector backend through
+``connectors_service.execute`` instead of an HTTP GET. The executor tuple
+grew two trailing elements; the write-path consumers ignore them.
+Changes: 2026-06-13 (feat/pocket-template-reconcile, P2.4) — added the
+read helper ``get_pocket_spec_and_slug`` (tenant-scoped single-read of
+``(rippleSpec, template_slug)``, sibling to ``get_pocket_ripple_spec``). The new
+Template Reconcile service (``pockets.reconcile``) resolves a pocket through
+this helper and writes the reconciled spec through ``update`` — so reconcile
+never imports the Pocket Beanie model itself (the "funnel through service.py"
+boundary the import-linter pins). No existing path changed.
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``_agent_view_dict``
+now LEADS with a ``_summary`` field (``spec_ops.summarize_ripple_spec`` over
+the doc's rippleSpec: ui node count/types, capped state keys, source
+summaries, action keys, legacy ``widgets_count``, plus a note that the
+top-level ``widgets[]`` array is legacy and the real layout lives in
+rippleSpec). Fixes the agent-view misread where ``get_pocket`` returned the
+empty legacy ``widgets: []`` alongside the full rippleSpec and agents
+concluded a fully composed template pocket was "an empty shell". The
+``widgets`` field itself is NOT removed — other consumers may rely on it.
 """
 
 from __future__ import annotations
@@ -802,10 +842,21 @@ async def _gate_widget_spec_for_agent(
 # template off disk, the OSS compile pass translates it into a runtime-
 # shaped dict, and the EE service MERGES that dict into the pocket's
 # ``rippleSpec`` (option B — keep user-customized fields, replace the
-# compile-output keys). The merge strategy is intentional: a user can
-# tweak ``rippleSpec.ui`` after instantiation and a subsequent
-# template-recompile (template upgraded out-of-band) won't blow those
-# tweaks away — only the fields the compile pass produced get replaced.
+# compile-output keys).
+#
+# Canvas ownership rule (extends option B; fix for the empty-canvas bug
+# found when templates were deployed to a live instance): the compile
+# pass translates the template's YAML metadata only — the render tree
+# lives in the hand-authored sibling ``ripple_spec.json``. The merge
+# decides who owns the canvas by looking at the pocket's EXISTING ``ui``:
+#
+#   * empty/absent ``ui``  → template-owned. The template's ``ui`` is
+#     adopted, and its seed ``state`` / placeholder ``sources`` merge
+#     UNDER the compiled values so the canvas renders non-empty.
+#   * non-empty ``ui``     → user-owned. A recompile (template upgraded
+#     out-of-band) refreshes the machinery only and never touches the
+#     canvas — a user can tweak ``rippleSpec.ui`` after instantiation
+#     and a re-apply won't blow those tweaks away.
 #
 # Tolerance posture: ``load_template(slug, strict=False)`` never raises;
 # a stale / missing / malformed template returns ``None``. The pocket
@@ -847,28 +898,78 @@ def _compile_template_to_runtime_dict(loaded: dict[str, Any] | None) -> dict[str
         return None
 
 
+def _ui_is_empty(ui: Any) -> bool:
+    """True when a rippleSpec ``ui`` value counts as "no authored canvas".
+
+    Absent, ``None``, a non-dict, or an empty dict are all empty. A dict
+    with ANY content (even just ``{"type": "stack"}``) is a real canvas —
+    we never second-guess a node the user (or an agent) authored.
+    """
+    return not isinstance(ui, dict) or not ui
+
+
 def _merge_compile_into_ripple_spec(
     existing: dict[str, Any] | None,
     compiled: dict[str, Any],
+    *,
+    template_ripple_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Merge a ``compile_template`` result into an existing rippleSpec.
 
     Merge strategy (option B in the Wave 3e brief): keys produced by
     the compile pass (``sources``, ``state``, ``actions``, ``agents``,
     ``triggers``, ``outcomes``, etc.) REPLACE matching keys in the
-    existing spec. Keys the compile pass does NOT produce
-    (e.g. ``ui`` — a user-authored render tree) survive unchanged.
-    The result is a NEW dict; neither input is mutated.
+    existing spec. The result is a NEW dict; no input is mutated.
 
-    Rationale: a pocket created from a template carries the template's
-    sources / state / actions verbatim, but the user may have edited
-    ``rippleSpec.ui`` to rearrange the canvas. A subsequent template
-    re-apply (template upgraded out-of-band) should refresh the
-    machinery without nuking the user's layout.
+    The ``ui`` tree follows an ownership rule keyed on the EXISTING
+    spec's canvas (fix for the empty-canvas bug found on a live deploy —
+    pockets created from a template rendered ``ui.children: 0``):
+
+    * **Existing ``ui`` empty/absent → template-owned.** The pocket has
+      no authored canvas, so the template's hand-authored sibling
+      ``ripple_spec.json`` supplies it: its ``ui`` tree is adopted, and
+      its seed ``state`` / placeholder ``sources`` are merged UNDER the
+      compiled values (compiled wins per key) so the adopted canvas has
+      the bindings it references and renders non-empty on first install.
+    * **Existing ``ui`` non-empty → user-owned.** A re-apply (template
+      upgraded out-of-band, recompile-on-update) refreshes the machinery
+      without touching the canvas — exactly the pre-fix behaviour.
+
+    ``template_ripple_spec`` is the loader's ``loaded["ripple_spec"]``
+    sibling dict; pass ``None`` to skip canvas adoption entirely (the
+    pre-fix machinery-only merge). The authoring-only
+    ``_placeholder_note`` key is never copied — only ``ui`` / ``state``
+    / ``sources`` participate in adoption. Adopted blocks are
+    deep-copied so the merged spec never aliases the loader's dicts.
     """
     out: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    canvas_is_template_owned = _ui_is_empty(out.get("ui"))
+
     for key, value in compiled.items():
         out[key] = value
+
+    if canvas_is_template_owned and isinstance(template_ripple_spec, dict):
+        template_ui = template_ripple_spec.get("ui")
+        if isinstance(template_ui, dict) and template_ui:
+            out["ui"] = copy.deepcopy(template_ui)
+            # The adopted canvas binds against the template's seed state
+            # ({state.records}, {state.draft}, ...) and its placeholder
+            # sources. Merge them under the compiled values: compiled
+            # keys (the validated schema output) win every collision.
+            template_state = template_ripple_spec.get("state")
+            if isinstance(template_state, dict):
+                compiled_state = out.get("state")
+                out["state"] = {
+                    **copy.deepcopy(template_state),
+                    **(compiled_state if isinstance(compiled_state, dict) else {}),
+                }
+            template_sources = template_ripple_spec.get("sources")
+            if isinstance(template_sources, dict):
+                compiled_sources = out.get("sources")
+                out["sources"] = {
+                    **copy.deepcopy(template_sources),
+                    **(compiled_sources if isinstance(compiled_sources, dict) else {}),
+                }
     return out
 
 
@@ -1005,7 +1106,11 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         loaded = load_template(body.template_slug, strict=False)
         compiled = _compile_template_to_runtime_dict(loaded)
         if compiled is not None:
-            normalized_spec = _merge_compile_into_ripple_spec(normalized_spec, compiled)
+            normalized_spec = _merge_compile_into_ripple_spec(
+                normalized_spec,
+                compiled,
+                template_ripple_spec=loaded.get("ripple_spec") if loaded else None,
+            )
 
     if normalized_spec:
         validate_ripple_spec_logged(normalized_spec, workspace_id=workspace_id)
@@ -1233,7 +1338,11 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
         compiled = _compile_template_to_runtime_dict(loaded)
         if compiled is not None:
             merge_base = normalized_spec if normalized_spec is not None else doc.rippleSpec
-            normalized_spec = _merge_compile_into_ripple_spec(merge_base, compiled)
+            normalized_spec = _merge_compile_into_ripple_spec(
+                merge_base,
+                compiled,
+                template_ripple_spec=loaded.get("ripple_spec") if loaded else None,
+            )
 
     if normalized_spec:
         validate_ripple_spec_logged(
@@ -1843,13 +1952,29 @@ def _agent_view_dict(doc: _PocketDoc) -> dict:
 
     Used by the in-process MCP tool channel — same shape every
     ``agent_*`` helper returns on success.
+
+    LEADS with a ``_summary`` field (``spec_ops.summarize_ripple_spec``)
+    so the agent reads the truth first: the dump's legacy top-level
+    ``widgets[]`` array is empty on template-instantiated pockets, and
+    agents that read it before ``rippleSpec`` concluded a fully composed
+    pocket was "an empty shell". ``widgets`` itself stays in the view —
+    other consumers may rely on it — but the summary names it legacy.
     """
     import json
 
     raw = doc.model_dump(mode="json", by_alias=True, exclude_none=True)
     for k in _AGENT_INVISIBLE_FIELDS:
         raw.pop(k, None)
-    return json.loads(json.dumps(raw, default=str))
+    summary = spec_ops.summarize_ripple_spec(doc.rippleSpec, widgets_count=len(doc.widgets or []))
+    if summary["has_ripple_spec"]:
+        summary["note"] = (
+            "The authoritative layout lives in rippleSpec.ui — the top-level "
+            "widgets[] array is a legacy field"
+            + (" and is empty for this pocket." if not summary["widgets_count"] else ".")
+        )
+    view: dict = {"_summary": summary}
+    view.update(raw)
+    return json.loads(json.dumps(view, default=str))
 
 
 async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None]:
@@ -2046,7 +2171,11 @@ async def _agent_backend_summary(doc: _PocketDoc) -> dict[str, Any]:
     # so the edit specialist can see which write methods+paths the owner
     # has authorized before it authors a write action; ``approval_route``
     # so it knows who approves a `requires_instinct` write.
+    # ``backend_type`` / ``connector_name`` so the specialist knows whether to
+    # author http-path sources or connector-action sources.
     return {
+        "backend_type": summary.get("backend_type", "http"),
+        "connector_name": summary.get("connector_name"),
         "base_url": summary.get("base_url"),
         "auth_type": summary.get("auth_type"),
         "configured": True,
@@ -3554,38 +3683,86 @@ async def set_pocket_backend(
     auth_type: str,
     auth_token: str,
     auth_header: str | None = None,
+    *,
+    backend_type: str = "http",
+    connector_name: str | None = None,
 ) -> dict:
     """Bind a pocket to one backend — upsert its credential row.
 
-    ``base_url`` is validated strictly (https-only, no internal hosts). The
-    token is encrypted via ``backend_crypto`` before it touches the DB; the
-    plaintext is never persisted or logged. Returns the non-secret summary.
+    Two backend shapes:
+
+    * ``backend_type="http"`` (the default) — ``base_url`` is validated
+      strictly (https-only, no internal hosts), the token is encrypted via
+      ``backend_crypto`` before it touches the DB, and the plaintext is never
+      persisted or logged.
+    * ``backend_type="connector"`` — ``connector_name`` names a
+      workspace-bound connector. ``base_url``/``auth_*`` are ignored (and NOT
+      required); the connector is validated to actually exist + be enabled for
+      this workspace via ``connectors.service.is_connector_enabled_for_workspace``
+      (rejected with ``pocket_backend.unknown_connector`` otherwise).
+
+    Returns the non-secret summary (carries ``backend_type`` +
+    ``connector_name``, never the token).
     """
-    from pocketpaw.security.url_validators import validate_external_url_strict
-
-    # Raises ValueError on a bad URL — surfaces as a 400 via the router.
-    try:
-        base_url = validate_external_url_strict(base_url)
-    except ValueError as exc:
-        raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
-
-    if auth_type != "none" and not auth_token:
+    if backend_type not in ("http", "connector"):
         raise ValidationError(
-            "pocket_backend.missing_token",
-            f"auth_type '{auth_type}' requires a non-empty auth_token",
+            "pocket_backend.invalid_backend_type",
+            f"backend_type must be 'http' or 'connector', got {backend_type!r}",
         )
 
-    encrypted_token: bytes | None = None
-    nonce: bytes | None = None
-    salt: bytes | None = None
-    if auth_type != "none":
-        encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+    if backend_type == "connector":
+        if not connector_name:
+            raise ValidationError(
+                "pocket_backend.missing_connector",
+                "backend_type 'connector' requires a connector_name",
+            )
+        # The connector must be a real registry connector AND enabled for this
+        # workspace. The Beanie read lives in the connectors service (the owner
+        # of the connector docs) — imported lazily to keep the static import
+        # graph free of a cycle (the connectors service imports this service).
+        from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+        if not await connectors_service.is_connector_enabled_for_workspace(
+            workspace_id, connector_name
+        ):
+            raise ValidationError(
+                "pocket_backend.unknown_connector",
+                f"connector {connector_name!r} is not enabled for this workspace — "
+                "enable it before binding it as a pocket backend",
+            )
+        # A connector backend carries no base_url / auth — clear them so a
+        # row that switched http -> connector never keeps a stale credential.
+        base_url = ""
+        auth_type = "none"
+        auth_header = None
+        encrypted_token = nonce = salt = None
+    else:
+        from pocketpaw.security.url_validators import validate_external_url_strict
+
+        # Raises ValueError on a bad URL — surfaces as a 400 via the router.
+        try:
+            base_url = validate_external_url_strict(base_url)
+        except ValueError as exc:
+            raise ValidationError("pocket_backend.invalid_url", str(exc)) from exc
+
+        if auth_type != "none" and not auth_token:
+            raise ValidationError(
+                "pocket_backend.missing_token",
+                f"auth_type '{auth_type}' requires a non-empty auth_token",
+            )
+
+        encrypted_token = nonce = salt = None
+        if auth_type != "none":
+            encrypted_token, nonce, salt = backend_crypto.encrypt_token(auth_token)
+        connector_name = None
 
     existing = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
         _BackendCredentialDoc.workspace_id == workspace_id,
     )
     if existing is not None:
+        existing.backend_type = backend_type
+        existing.connector_name = connector_name
         existing.base_url = base_url
         existing.auth_type = auth_type
         existing.auth_header = auth_header
@@ -3597,6 +3774,8 @@ async def set_pocket_backend(
         await _BackendCredentialDoc(
             pocket_id=pocket_id,
             workspace_id=workspace_id,
+            backend_type=backend_type,
+            connector_name=connector_name,
             base_url=base_url,
             auth_type=auth_type,
             auth_header=auth_header,
@@ -3615,7 +3794,13 @@ async def set_pocket_backend(
     )
     # no-event: backend credentials are a separate collection, not pocket
     # state — no downstream handler keys off a PocketUpdated for them.
-    return {"base_url": base_url, "auth_type": auth_type, "configured": True}
+    return {
+        "backend_type": backend_type,
+        "connector_name": connector_name,
+        "base_url": base_url,
+        "auth_type": auth_type,
+        "configured": True,
+    }
 
 
 def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
@@ -3646,21 +3831,17 @@ def _approval_route_wire(doc: _BackendCredentialDoc) -> dict[str, str | None] | 
     return {"mode": route.mode, "user_id": route.user_id}
 
 
-async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
-    """Return the pocket's backend binding summary, or ``None`` if unset.
+def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
+    """Render the full NON-SECRET backend summary for a credential row.
 
-    NEVER returns the token — only ``base_url`` / ``auth_type`` /
-    ``configured`` / ``allowed_writes`` (the write allowlist) /
-    ``approval_route`` (the gated-write approver routing; ``None`` when
-    unset). All owner/editor-facing non-secrets.
+    The ONE place the wire summary is shaped so ``get_pocket_backend`` and the
+    write-policy / approval-route setters never drift. NEVER includes the
+    token. ``backend_type`` / ``connector_name`` come via ``getattr`` defaults
+    so a legacy row reads as an http backend — back-compatible.
     """
-    doc = await _BackendCredentialDoc.find_one(
-        _BackendCredentialDoc.pocket_id == pocket_id,
-        _BackendCredentialDoc.workspace_id == workspace_id,
-    )
-    if doc is None:
-        return None
     return {
+        "backend_type": getattr(doc, "backend_type", "http"),
+        "connector_name": getattr(doc, "connector_name", None),
         "base_url": doc.base_url,
         "auth_type": doc.auth_type,
         "configured": True,
@@ -3669,18 +3850,56 @@ async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
     }
 
 
+async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
+    """Return the pocket's backend binding summary, or ``None`` if unset.
+
+    NEVER returns the token — only ``backend_type`` / ``connector_name`` /
+    ``base_url`` / ``auth_type`` / ``configured`` / ``allowed_writes`` (the
+    write allowlist) / ``approval_route`` (the gated-write approver routing;
+    ``None`` when unset). All owner/editor-facing non-secrets.
+
+    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
+    row written before this feature reads as ``backend_type="http"`` /
+    ``connector_name=None`` — back-compatible.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        return None
+    return _backend_summary_wire(doc)
+
+
 async def get_pocket_backend_for_executor(
     workspace_id: str, pocket_id: str
-) -> tuple[str, str, str | None, str, list[dict[str, str]], dict[str, str | None] | None] | None:
+) -> (
+    tuple[
+        str,
+        str,
+        str | None,
+        str,
+        list[dict[str, str]],
+        dict[str, str | None] | None,
+        str,
+        str | None,
+    ]
+    | None
+):
     """Internal — return ``(base_url, auth_type, auth_header, token,
-    allowed_writes, approval_route)``.
+    allowed_writes, approval_route, backend_type, connector_name)``.
 
-    Decrypts the stored token. Used by the run-sources route handler (it
-    ignores the trailing elements), the run-action route handler (it needs
-    ``allowed_writes`` and ``approval_route``), and ``instinct_bridge``.
-    Returns ``None`` when the pocket has no backend configured. The
-    plaintext token returned here must never be logged or returned to a
-    client. ``approval_route`` is ``None`` when no route is set.
+    Decrypts the stored token (http backends only; a connector backend has no
+    token). Used by the run-sources route handler (which now also reads the
+    trailing ``backend_type`` / ``connector_name`` to route the run), the
+    run-action route handler (it needs ``allowed_writes`` / ``approval_route``),
+    and ``instinct_bridge`` / ``temporal_dispatcher`` / ``bulk_dispatch`` (which
+    ignore the trailing elements). Returns ``None`` when the pocket has no
+    backend configured. The plaintext token must never be logged or returned to
+    a client.
+
+    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
+    legacy row reads as ``"http"`` / ``None`` — back-compatible.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -3699,6 +3918,8 @@ async def get_pocket_backend_for_executor(
         token,
         _allowed_writes_wire(doc),
         _approval_route_wire(doc),
+        getattr(doc, "backend_type", "http"),
+        getattr(doc, "connector_name", None),
     )
 
 
@@ -3748,13 +3969,7 @@ async def set_pocket_write_policy(
     # no-event: backend credentials (and the write policy on them) are a
     # separate collection, not pocket state — no downstream handler keys
     # off a PocketUpdated for them.
-    return {
-        "base_url": doc.base_url,
-        "auth_type": doc.auth_type,
-        "configured": True,
-        "allowed_writes": _allowed_writes_wire(doc),
-        "approval_route": _approval_route_wire(doc),
-    }
+    return _backend_summary_wire(doc)
 
 
 async def set_pocket_approval_route(
@@ -3820,13 +4035,7 @@ async def set_pocket_approval_route(
         auth_type=doc.auth_type,
     )
     # no-event: see set_pocket_write_policy — credential rows aren't pocket state.
-    return {
-        "base_url": doc.base_url,
-        "auth_type": doc.auth_type,
-        "configured": True,
-        "allowed_writes": _allowed_writes_wire(doc),
-        "approval_route": _approval_route_wire(doc),
-    }
+    return _backend_summary_wire(doc)
 
 
 async def remove_pocket_backend(workspace_id: str, user_id: str, pocket_id: str) -> None:
@@ -3926,6 +4135,33 @@ async def get_pocket_ripple_spec(workspace_id: str, pocket_id: str) -> dict | No
         return None
     spec = doc.rippleSpec
     return spec if isinstance(spec, dict) else {}
+
+
+async def get_pocket_spec_and_slug(
+    workspace_id: str, pocket_id: str
+) -> tuple[dict | None, str | None] | None:
+    """Return ``(rippleSpec, template_slug)`` for a pocket, or ``None``.
+
+    Tenant-scoped, single doc read. ``None`` (the outer value) means the
+    pocket is missing OR belongs to another workspace — the same
+    not-an-oracle posture as :func:`get_pocket_ripple_spec`. On success the
+    spec is a dict (``{}`` when unset) and the slug is the stored
+    ``template_slug`` or ``None``.
+
+    Added for the Template Reconcile service (P2.4) so reconcile resolves
+    everything it needs through THIS service in one read and never imports
+    the ``Pocket`` Beanie model itself — the "Beanie writes (and reads)
+    funnel through service.py" boundary the import-linter pins.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if doc is None or doc.workspace != workspace_id:
+        return None
+    spec = doc.rippleSpec
+    slug = getattr(doc, "template_slug", None)
+    return (spec if isinstance(spec, dict) else {}), (slug or None)
 
 
 async def resolve_webhook_pocket(pocket_id: str, presented_secret: str) -> tuple | None:

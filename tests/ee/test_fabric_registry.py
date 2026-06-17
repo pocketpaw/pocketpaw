@@ -112,6 +112,21 @@ def test_get_entity_properties_for_unknown_returns_empty(
     assert reg.get_entity_properties("Ghost") == set()
 
 
+def test_list_entity_types_returns_workspace_ontology(
+    populated_store: WorkspaceFabricStore,
+) -> None:
+    reg = WorkspaceFabricRegistry(store=populated_store, workspace_id="ws-b")
+    assert sorted(reg.list_entity_types()) == ["Customer", "Invoice"]
+
+
+def test_list_entity_types_is_workspace_isolated(
+    populated_store: WorkspaceFabricStore,
+) -> None:
+    reg_a = WorkspaceFabricRegistry(store=populated_store, workspace_id="ws-a")
+    assert sorted(reg_a.list_entity_types()) == ["Lease", "Property", "Tenant"]
+    assert "Customer" not in reg_a.list_entity_types()
+
+
 # ---------------------------------------------------------------------------
 # Empty store
 # ---------------------------------------------------------------------------

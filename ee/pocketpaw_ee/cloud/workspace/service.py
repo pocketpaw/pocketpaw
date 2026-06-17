@@ -27,6 +27,26 @@ slug-available check, and create() now also rejects reserved slugs.
 a ConflictError (409) instead of letting it escape as an unhandled 500 — the
 leftover unique index on the nullable legacy ``token`` column made every
 second invite collide on ``token=null``.
+2026-06-08 (Phase B chunk 7): remove_member now runs a 4th best-effort cascade
+— purge_member_data — so an offboarded member's personal Gmail/calendar (their
+private ``user:{id}`` KB scope), per-user OAuth tokens, connector rows, and
+ingest-state are deleted. The purge counts land in the audit row's cascade
+metadata.
+2026-06-09: accept_invite is now self-healing. The atomic claim and the
+membership write aren't transactional, so an accept interrupted mid-flight
+(backend restart) could leave an invite accepted=True with no membership,
+locking the invitee out of every workspace read. Both already_accepted
+raise-sites now route through _heal_or_conflict: a rightful invitee missing
+the membership gets it added (idempotent) instead of a 409; a genuine
+duplicate (already a member) still raises invite.already_accepted.
+2026-06-14 (WB-1): update() now accepts an optional branding patch. A
+BrandingPatch merges onto the workspace's existing Branding (partial patches
+don't wipe set fields). logo_asset / favicon_asset are ownership-checked
+against the workspace via _assert_asset_owned (mirrors the uploads
+workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
+Forbidden (workspace.branding_asset_not_owned). accent_color format is
+validated upstream by BrandingPatch (422). _workspace_to_domain now carries
+branding through to the domain object so it serializes onto WorkspaceOut.
 """
 
 from __future__ import annotations
@@ -65,20 +85,31 @@ from pocketpaw_ee.cloud.mail import send_invite_email
 from pocketpaw_ee.cloud.models.agent import Agent as _AgentDoc
 from pocketpaw_ee.cloud.models.group import Group as _GroupDoc
 from pocketpaw_ee.cloud.models.invite import Invite as _InviteDoc
+from pocketpaw_ee.cloud.models.invite import InviteContext as _InviteContextDoc
 from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
+from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
+from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
-from pocketpaw_ee.cloud.workspace.domain import Invite, Workspace, WorkspaceMember
+from pocketpaw_ee.cloud.workspace.domain import (
+    Branding,
+    Invite,
+    InviteContext,
+    Workspace,
+    WorkspaceMember,
+)
 from pocketpaw_ee.cloud.workspace.dto import (
+    BrandingPatch,
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
+    InviteContextDTO,
     UpdateWorkspaceRequest,
 )
 from pocketpaw_ee.cloud.workspace.slug import SlugReason, static_slug_reason
@@ -95,6 +126,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _branding_doc_to_domain(b: _BrandingDoc | None) -> Branding | None:
+    """Map the embedded persistence ``Branding`` to the domain value object.
+
+    ``None`` (no custom branding) passes straight through — the frontend
+    renders the Paw defaults."""
+    if b is None:
+        return None
+    return Branding(
+        logo_asset=b.logo_asset,
+        favicon_asset=b.favicon_asset,
+        display_name=b.display_name,
+        tab_title=b.tab_title,
+        accent_color=b.accent_color,
+        show_paw_mark=b.show_paw_mark,
+    )
+
+
 def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Workspace:
     return Workspace(
         id=str(doc.id),
@@ -106,7 +154,14 @@ def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Worksp
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         member_count=member_count,
         deleted_at=doc.deleted_at,
+        branding=_branding_doc_to_domain(getattr(doc, "branding", None)),
     )
+
+
+def _context_doc_to_domain(ctx: _InviteContextDoc | None) -> InviteContext | None:
+    if ctx is None:
+        return None
+    return InviteContext(focus=ctx.focus, profile_pic=ctx.profile_pic)
 
 
 def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) -> Invite:
@@ -122,6 +177,7 @@ def _invite_to_domain(doc: _InviteDoc, *, plaintext_token: str | None = None) ->
         revoked=doc.revoked,
         expired=doc.expired,
         expires_at=doc.expires_at,
+        context=_context_doc_to_domain(doc.context),
     )
 
 
@@ -305,6 +361,47 @@ async def get(ctx: RequestContext, workspace_id: str) -> Workspace:
     return _workspace_to_domain(doc, member_count=count)
 
 
+async def _assert_asset_owned(workspace_id: str, file_id: str) -> None:
+    """Reject a branding asset ref that doesn't belong to this workspace.
+
+    Mirrors the chat-attachment ownership check (uploads' workspace-scoped
+    lookup): the asset must exist as a non-deleted ``FileUpload`` whose
+    ``workspace`` matches. A cross-workspace ref OR a non-existent id both
+    fail the same way — neither is owned by this workspace. Raises ``Forbidden``
+    so the route returns a 403, consistent with the rest of the workspace
+    authorization surface.
+    """
+    owned = await _FileUploadDoc.find_one(
+        {"file_id": file_id, "workspace": workspace_id, "deleted_at": None}
+    )
+    if owned is None:
+        raise Forbidden(
+            "workspace.branding_asset_not_owned",
+            f"Asset '{file_id}' does not belong to this workspace",
+        )
+
+
+async def _apply_branding_patch(
+    doc: _WorkspaceDoc, workspace_id: str, patch: BrandingPatch
+) -> None:
+    """Validate + merge a branding patch onto the workspace doc.
+
+    Asset refs (``logo_asset`` / ``favicon_asset``) are ownership-checked
+    against this workspace before anything is written. The patch MERGES onto
+    any existing branding so a partial patch (e.g. only ``display_name``)
+    doesn't wipe previously set fields. ``accent_color`` format was already
+    validated by ``BrandingPatch`` at the route boundary (422).
+    """
+    if patch.logo_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.logo_asset)
+    if patch.favicon_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.favicon_asset)
+
+    current = doc.branding or _BrandingDoc()
+    merged = current.model_copy(update=patch.model_dump(exclude_unset=True))
+    doc.branding = merged
+
+
 async def update(
     ctx: RequestContext,
     workspace_id: str,
@@ -317,6 +414,8 @@ async def update(
         doc.name = body.name
     if body.settings is not None:
         doc.settings = WorkspaceSettings(**body.settings)
+    if body.branding is not None:
+        await _apply_branding_patch(doc, workspace_id, body.branding)
     await doc.save()
 
     patched = body.model_dump(exclude_unset=True)
@@ -614,6 +713,27 @@ async def remove_member(
             exc_info=True,
         )
 
+    # Phase B per-user data purge — an offboarded member's PERSONAL Gmail/
+    # calendar (ingested into their private ``user:{id}`` KB scope), their
+    # per-user OAuth tokens, connector rows, and ingest-state must be deleted:
+    # it's their personal data; leaving the workspace must purge it. Lazy
+    # import keeps the workspace service free of a member_ingest dependency at
+    # module load. Best-effort like the cascades above — purge_member_data is
+    # itself idempotent and isolates per-store failures, so a worst case here
+    # is one logged warning, never a blocked offboard.
+    member_data_purged: dict | None = None
+    try:
+        from pocketpaw_ee.cloud.member_ingest.purge import purge_member_data
+
+        member_data_purged = await purge_member_data(workspace_id, target_user_id)
+    except Exception:
+        logger.warning(
+            "remove_member: member-data purge failed for user=%s ws=%s",
+            target_user_id,
+            workspace_id,
+            exc_info=True,
+        )
+
     await event_bus.emit(
         "member.removed",
         {
@@ -648,6 +768,9 @@ async def remove_member(
                 "api_keys_revoked": api_keys_revoked,
                 "sessions_revoked": sessions_revoked,
                 "invites_revoked": invites_revoked,
+                # Phase B: what the per-user data purge removed (None if the
+                # purge step itself raised — the warning above has the detail).
+                "member_data_purged": member_data_purged,
             },
         },
     )
@@ -671,11 +794,15 @@ async def _mint_invite_for_email(
     email: str,
     role: str,
     group_id: str | None,
+    context: InviteContextDTO | None = None,
 ) -> Invite:
     """Pre-clean expired/stale rows, reject duplicate pending, insert the
     hashed invite. Shared between ``create_invite`` (single) and
     ``bulk_create_invites`` (batch) so token hashing + pre-cleanup stay
     in lockstep. Does NOT emit or notify — the caller handles side-effects.
+
+    ``context`` is the optional admin onboarding payload (pp#1365); persisted
+    verbatim on the invite document and None when omitted.
     """
     # Mongo TTL is the long-term GC; this pre-cleanup makes the
     # collision check below honest about what's "still pending."
@@ -716,6 +843,11 @@ async def _mint_invite_for_email(
         token=None,  # plaintext never persisted for new invites
         token_hash=hash_token(plaintext),
         group=group_id,
+        context=(
+            _InviteContextDoc(focus=context.focus, profile_pic=context.profile_pic)
+            if context is not None
+            else None
+        ),
     )
     try:
         await invite_doc.insert()
@@ -763,7 +895,9 @@ async def create_invite(
     if member_count >= doc.seats:
         raise SeatLimitError(doc.seats)
 
-    invite = await _mint_invite_for_email(ctx, workspace_id, body.email, body.role, body.group_id)
+    invite = await _mint_invite_for_email(
+        ctx, workspace_id, body.email, body.role, body.group_id, body.context
+    )
 
     invited_user_id = await _find_user_id_by_email(body.email)
 
@@ -958,6 +1092,18 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
             else:
                 state = "ready_wrong_user"
 
+    # Surface the admin onboarding context (pp#1365) so the member-facing
+    # accept UI can carry the invitee's focus + profile_pic into the
+    # downstream VIP-onboarding welcome. None when the invite has no context.
+    context_domain = _context_doc_to_domain(invite_doc.context)
+    context_wire = (
+        InviteContextDTO(
+            focus=context_domain.focus, profile_pic=context_domain.profile_pic
+        ).model_dump()
+        if context_domain is not None
+        else None
+    )
+
     return {
         "state": state,
         "email": invite_doc.email,
@@ -966,10 +1112,41 @@ async def preview_invite(token: str, viewer_user_id: str | None) -> dict:
         "group": invite_doc.group,
         "group_name": None,
         "viewer_email": viewer_email,
+        "context": context_wire,
     }
 
 
+async def _heal_or_conflict(ctx: RequestContext, existing: _InviteDoc) -> None:
+    """Self-heal an accepted invite whose membership never landed.
+
+    Reached only after the identity check passed, so ``ctx.user_id`` is the
+    rightful, email-matched invitee. The accept flow is non-atomic: it
+    atomically claims the invite (accepted=True), then several awaits later
+    writes the membership. If the request dies between those steps (backend
+    restart, handler abort), the invite is burned with no membership and the
+    user is locked out of every workspace read with no recovery path.
+
+    Converge instead of raising: if the invitee has no membership, add it
+    (``_add_member`` is idempotent) and treat it as success. Only a genuine
+    duplicate — the invitee is already a member — still raises 409.
+    """
+    workspace_id = existing.workspace
+    already = await _get_member_role(workspace_id, ctx.user_id) is not None
+    if not already:
+        await _add_member(workspace_id, ctx.user_id, role=existing.role, set_active=True)
+        return
+    raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+
+
 async def accept_invite(ctx: RequestContext, token: str) -> None:
+    """Accept a workspace invite for the logged-in user.
+
+    Self-healing: the claim (accepted=True) and the membership write are not
+    wrapped in a transaction, so a backend restart between them can burn an
+    invite with no membership. Re-accepting by the rightful invitee adds the
+    missing membership instead of raising — see ``_heal_or_conflict``. A
+    genuine duplicate (already a member) still raises ``invite.already_accepted``.
+    """
     th = hash_token(token)
 
     # Identity check: the logged-in user's email must match the invitee's.
@@ -1009,7 +1186,10 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
         if existing is None:
             raise NotFound("invite")
         if existing.accepted:
-            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+            # Already claimed. Either a genuine duplicate accept, or the
+            # claim landed but the membership write never did (non-atomic
+            # accept interrupted mid-flight). Self-heal the latter.
+            return await _heal_or_conflict(ctx, existing)
         if existing.revoked:
             raise Forbidden("invite.revoked", "This invite has been revoked")
         if existing.expired:
@@ -1024,7 +1204,10 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             return_document=False,
         )
         if claimed is None:
-            raise ConflictError("invite.already_accepted", "This invite has already been accepted")
+            # Backfilled row was already accepted (duplicate or a burned
+            # accept that never wrote the membership). Self-heal the burn;
+            # ``existing`` carries the stable workspace + role for it.
+            return await _heal_or_conflict(ctx, existing)
 
     # Rebuild the domain object from the BEFORE doc so downstream emit/
     # membership logic has the data it needs.
@@ -1053,6 +1236,33 @@ async def accept_invite(ctx: RequestContext, token: str) -> None:
             ctx.user_id,
             role=invite.role,
             set_active=True,
+        )
+
+    # Materialize the member as a standalone Fabric ``Person`` — the
+    # identity spine a later VIP-onboarding flow reads (pp#1366). Built
+    # from the member's own profile + the invite's admin context, with
+    # provenance (invited_by + source=admin_context). Idempotent on the
+    # member's user id, so re-accepting updates rather than duplicating.
+    # The journal ``fabric.object.*`` event is the emit-on-write here.
+    # Wrapped defensively: membership is the source of truth, the Person
+    # is a derived projection — a Fabric/journal hiccup must not roll back
+    # an accepted invite.
+    try:
+        await people_service.materialize_person_from_invite(
+            workspace_id=invite.workspace_id,
+            user_id=ctx.user_id,
+            name=viewer.full_name,
+            email=viewer.email or invite.email,
+            avatar=viewer.avatar,
+            invite=invite,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Fabric Person materialization skipped for user=%s workspace=%s — "
+            "invite accept proceeds; the Person can be re-materialized later",
+            ctx.user_id,
+            invite.workspace_id,
+            exc_info=True,
         )
 
     await event_bus.emit(

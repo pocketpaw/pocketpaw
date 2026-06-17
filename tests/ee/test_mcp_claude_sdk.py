@@ -1,5 +1,25 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) —
+  ``_strip_builtin_servers`` now also drops ``pocketpaw_fabric`` (fabric_query /
+  fabric_stats) and ``pocketpaw_instinct`` (instinct_pending / instinct_audit),
+  the two new always-on read-only servers, so the external-config assertions
+  stay focused. Same regime as pocketpaw_external_actions / pocketpaw_belt.
+Updated: 2026-06-11 (feat/external-action-mcp-tool) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_external_actions`` (the new always-on gated
+  external-action proposal server: propose_external_action), so the
+  external-config assertions stay focused after that MCP server became
+  ambient. Same regime as pocketpaw_belt / pocketpaw_media.
+Updated: 2026-06-10 (integration/belt-thin-slice) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_belt`` (the always-on Belt gate server:
+  belt_propose_change — the bundled `belt` skill calls it without an explicit
+  opt-in) and, defensively, ``loom`` (settings-gated, but a developer's
+  POCKETPAW_LOOM_MODEL_PATH env would leak into Settings and register it).
+Updated: 2026-06-10 (feat/studio-code-migration) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_media`` (the new always-on STUDIO media-generation
+  server: image_generate / video_generate), so the external-config assertions
+  stay focused after the media MCP server became ambient. Same regime as
+  pocketpaw_sites_manager / pocketpaw_connectors.
 Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) —
   ``_strip_builtin_servers`` now also drops ``pocketpaw_connectors`` (the new
   always-on connector-execution server: list_connector_actions /
@@ -39,9 +59,17 @@ All SDK imports are mocked.
 import logging
 from unittest.mock import patch
 
+from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.external_actions import (
+    SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
+)
+from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
     POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
@@ -87,6 +115,26 @@ def _strip_builtin_servers(result: dict) -> dict:
     # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
     # (gmail/github) call connector_execute without an explicit opt-in.
     out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_media`` is always-on too — the bundled `studio` skill calls
+    # image_generate / video_generate without an explicit opt-in.
+    out.pop(_MEDIA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
+    # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
+    # (loom_model_path unset -> not registered) but stripped defensively: a
+    # developer's POCKETPAW_LOOM_MODEL_PATH env leaks into Settings() and would
+    # otherwise register it in these tests.
+    out.pop(_BELT_MCP_SERVER_NAME, None)
+    out.pop(_LOOM_MCP_SERVER_NAME, None)
+    # ``pocketpaw_external_actions`` is always-on too — a chat agent proposes a
+    # gated connector call (propose_external_action) without an explicit
+    # opt-in; the connector only fires after human approval.
+    out.pop(_EXTERNAL_ACTIONS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_fabric`` + ``pocketpaw_instinct`` are always-on too — the
+    # cloud chat agent's only path to the Fabric ontology and Instinct gate
+    # visibility on this backend (registry BaseTools never reach it). Both are
+    # read-only.
+    out.pop(_FABRIC_MCP_SERVER_NAME, None)
+    out.pop(_INSTINCT_MCP_SERVER_NAME, None)
     return out
 
 

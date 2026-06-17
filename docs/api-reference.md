@@ -23,6 +23,13 @@ the authoring agent stops hallucinating endpoints.
 Updated: 2026-05-22 (feat/catalog-allowlist, Increment 5) — documented
 the catalog-as-allowlist ingest gate, the two escape-hatch widgets
 (`model-viewer` + `embed`), and the `embed` URL/host policy.
+
+Updated: 2026-06-11 (gap-3 outcome VALUE metering) — documented the
+Outcome Metering section: the binding-level `outcome` / `outcome_value` /
+`outcome_unit` declaration, the existing `GET /outcomes` count surface,
+and the new `GET /outcomes/meter` aggregation surface that sums billable
+value by unit per workspace over a since/until window. Invoicing /
+payment / pricing-rules / clawback remain deferred.
 -->
 
 # Cloud REST API Reference
@@ -242,6 +249,75 @@ and a write-specific rate limit — 20 writes per `(pocket, user)` per
 minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
+
+## Pockets — Template Reconcile
+
+A pocket created from a template stores its `template_slug`. Re-running an
+install/deploy script re-applies the template and **clobbers instance edits**.
+Reconcile fixes that: it re-applies only the **template-owned** regions of the
+source template while preserving the **instance-owned** regions.
+
+| Region | Owner | Reconcile behavior |
+|--------|-------|--------------------|
+| `rippleSpec.ui` | template | overwritten from the template |
+| `rippleSpec.actions` | template | overwritten from the template |
+| `rippleSpec.sources` | template | overwritten from the template |
+| `rippleSpec.shape` | template | overwritten from the template |
+| `rippleSpec.state` (rows, `selected_id`, `pending_proposal`, …) | instance | never touched |
+| pocket name / owner / team / visibility | instance | never touched |
+
+Both endpoints accept standard cookie / bearer auth, or the loopback
+internal-token bypass (the same one `GET /pockets/{id}` and `/spec/merge`
+accept) so the `pocketpaw pocket reconcile` CLI can authenticate locally. The
+service re-checks read (preview) / edit (apply) access on the resolved
+identity.
+
+### `POST /pockets/{pocket_id}/reconcile/preview`
+
+Dry-run a reconcile — report what **would** change, write nothing. No
+`PocketUpdated` event is emitted.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "663...",
+  "template_slug": "applications-triage",
+  "template_owned_regions": ["ui", "actions", "sources", "shape"],
+  "changed_regions": ["ui"],
+  "unchanged_regions": ["actions", "sources", "shape"],
+  "preserved_regions": ["state"],
+  "has_changes": true
+}
+```
+
+Returns `422` (`reconcile.no_template`) when the pocket has no `template_slug`,
+`422` (`reconcile.template_unresolved`) when the slug no longer resolves on
+disk, `403` when the caller can't read the pocket, `404` for a missing /
+cross-tenant pocket.
+
+### `POST /pockets/{pocket_id}/reconcile/apply`
+
+Apply the reconcile — re-write the template-owned regions, preserve the
+instance-owned regions, persist through the same spec write path as a normal
+edit (so the spec is normalized + validated and a `PocketUpdated` event fires).
+**Edit access required.**
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "skipped": false,
+  "diff": { "...": "the same diff shape as preview" },
+  "pocket": { "...": "the updated pocket wire dict" }
+}
+```
+
+When the pocket already matches its template the write is **skipped**
+(`"skipped": true`, no `pocket` field, no event). Error codes mirror the
+preview route, plus `403` when the caller lacks edit access — enforced even on
+the skipped no-write path so a non-editor cannot probe sync state.
 
 ## Skills — Per-Backend API Skills
 
@@ -556,3 +632,70 @@ enforces:
 Every ingested spec that contains an `embed` node is audit-logged
 (category `pocket_embed`) with the embed count and URLs — never the
 iframe contents.
+
+## Outcome Metering
+
+RFC 05 M2b.2 + gap-3. When a governed write action succeeds, the pocket's
+binding can declare a named `outcome` and an optional billable value/unit.
+Each one appends a row to a workspace-scoped, append-only JSONL ledger.
+Two read surfaces sit over the ledger; both take tenancy from the auth
+context and **reject** a `workspace_id` query param (a caller cannot read
+another workspace's ledger).
+
+### Declaring an outcome on a binding
+
+A write binding in `rippleSpec.actions` declares the metering fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `outcome` | string \| null | The named business event (`meeting_booked`, `ticket_resolved`, …). `null` → the write is not metered. |
+| `outcome_value` | number \| null | The billable value the operator assigns this outcome. Requires `outcome_unit` AND a non-null `outcome` — a half-declared pair is rejected at parse time. |
+| `outcome_unit` | string \| null | The unit the value is denominated in (`usd`, `ticket_resolved`, …). Requires `outcome_value`. |
+
+Declaring `outcome` with no value/unit is the **count-only** binding (the
+prior behaviour). Declaring all three turns the count into a billable
+figure.
+
+### `GET /outcomes`
+
+Count this workspace's recorded outcomes, grouped by name and pocket.
+Requires the `outcomes.read` action.
+
+Query params: `pocket_id` (narrow to one pocket), `since` (inclusive
+ISO-8601 lower bound on `occurred_at`). Both optional.
+
+Response `200`:
+
+```json
+{ "total": 12, "by_outcome": { "ticket_resolved": 9, "meeting_booked": 3 },
+  "by_pocket": { "p_support": 9, "p_sales": 3 } }
+```
+
+### `GET /outcomes/meter`
+
+Aggregate this workspace's **billable** outcomes into a queryable figure —
+the "pay for governed outcomes" read primitive. Requires the
+`outcomes.read` action.
+
+Query params: `pocket_id`, `since` (inclusive lower bound), `until`
+(**exclusive** upper bound, so adjacent periods never double-count a
+boundary outcome). All optional.
+
+Response `200`:
+
+```json
+{ "total_outcomes": 12, "metered_count": 9,
+  "by_unit": {
+    "usd": { "unit": "usd", "count": 6, "total_value": 7200.0 },
+    "ticket_resolved": { "unit": "ticket_resolved", "count": 3, "total_value": 3.0 }
+  } }
+```
+
+`total_outcomes` counts every matching row (including count-only ones);
+`metered_count` counts only the rows carrying a whole value/unit pair;
+`by_unit` sums `outcome_value` per unit over the window.
+
+**Deferred (not in this surface):** invoicing, payment, currency
+conversion, a pricing-rules engine, and disputes / clawback. This endpoint
+returns a raw sum of declared values — the queryable figure those layers
+will build on later (see `outcome-spec.md`).

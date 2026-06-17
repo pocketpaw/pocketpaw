@@ -3,6 +3,13 @@
 # Updated: 2026-04-19 (Cluster C / PR2) — Added GET /connectors/{kind}/status
 #   returning a structured {connected, last_sync, cred_state, scope} payload
 #   for the ConnectorCard UI. Gap C5 in docs/plans/FEATURE-HARDENING-PLAN.md.
+# Updated: 2026-06-12 (connector-store-unification CS-6) — Endpoints stop
+#   lying after a restart. /status and the list/detail status fields derive
+#   "connected" from the registry's durable state (definition + persisted
+#   config) instead of the in-process adapter map; /execute calls
+#   registry.ensure_connected() so a configured connector works without a
+#   prior /connect in the same process; the list endpoint surfaces orphaned
+#   state rows (config persisted, definition gone) as "definition_missing".
 
 from __future__ import annotations
 
@@ -15,6 +22,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from pocketpaw.api.deps import require_scope
+from pocketpaw.connectors.protocol import ConnectorStatus
 from pocketpaw.connectors.registry import ConnectorRegistry
 
 logger = logging.getLogger(__name__)
@@ -178,8 +186,13 @@ async def get_connector_status(
 
         raise HTTPException(status_code=404, detail=f"Connector '{connector_name}' not found")
 
-    adapter = reg.get_adapter(pocket_id, connector_name)
-    connected = adapter is not None
+    # Derive "connected" from the registry's durable state (definition +
+    # persisted config), not from the in-process adapter map — a configured
+    # connector stays connected across restarts (CS-6).
+    connected = any(
+        s["name"] == connector_name and s["status"] == ConnectorStatus.CONNECTED
+        for s in reg.status(pocket_id)
+    )
 
     extras = _STATUS_EXTRAS.get(_extras_key(pocket_id, connector_name), {})
     cred_state = extras.get("cred_state") or ("valid" if connected else "missing")
@@ -198,11 +211,18 @@ async def get_connector_status(
 
 @router.get("/connectors", response_model=list[ConnectorInfo])
 async def list_connectors(pocket_id: str = "default"):
-    """List all available connectors with their connection status."""
-    reg = _get_registry()
-    status_map = {s["name"]: s["status"].value for s in reg.status(pocket_id)}
+    """List all available connectors with their connection status.
 
-    return [
+    Status comes from ``registry.status()``, which derives "connected" from
+    durable state, so the list is truthful after a restart. Orphaned state
+    rows (config persisted but the YAML definition is gone) are appended
+    with status ``definition_missing`` rather than silently dropped.
+    """
+    reg = _get_registry()
+    reg_status = reg.status(pocket_id)
+    status_map = {s["name"]: s["status"].value for s in reg_status}
+
+    infos = [
         ConnectorInfo(
             name=c["name"],
             display_name=c["display_name"],
@@ -212,6 +232,19 @@ async def list_connectors(pocket_id: str = "default"):
         )
         for c in reg.available
     ]
+    known = {c["name"] for c in reg.available}
+    infos.extend(
+        ConnectorInfo(
+            name=s["name"],
+            display_name=s["display_name"],
+            type="unknown",
+            icon=s.get("icon", "plug"),
+            status=s["status"].value,
+        )
+        for s in reg_status
+        if s["name"] not in known and s["status"] == ConnectorStatus.DEFINITION_MISSING
+    )
+    return infos
 
 
 @router.get("/connectors/{connector_name}", response_model=ConnectorDetailResponse)
@@ -307,11 +340,17 @@ async def disconnect_connector(req: DisconnectRequest):
 
 @router.post("/connectors/execute", response_model=ExecuteResponse)
 async def execute_connector_action(req: ExecuteRequest):
-    """Execute an action on a connected data source."""
+    """Execute an action on a connected data source.
+
+    Uses ``registry.ensure_connected()`` instead of assuming a prior
+    /connect in the same process: if the adapter isn't live but config is
+    persisted in the state store (e.g. after a restart), the registry
+    reconnects on the fly (CS-6).
+    """
     from datetime import datetime
 
     reg = _get_registry()
-    adapter = reg.get_adapter(req.pocket_id, req.connector_name)
+    adapter = await reg.ensure_connected(req.connector_name, req.pocket_id)
     if not adapter:
         return ExecuteResponse(
             success=False,

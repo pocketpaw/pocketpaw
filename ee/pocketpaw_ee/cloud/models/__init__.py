@@ -25,6 +25,17 @@ Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 follow-up item 3) — added
 ``SiteRateCounter`` (the atomic per-minute capture rate-limit counter) to the
 imports, ``__all__``, and ``get_all_documents()`` so the counter collection is
 wired into ``init_beanie``.
+Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added
+``BeltWorkspaceConfig`` (the per-workspace Belt console allowlist-extension doc)
+to the imports, ``__all__``, and ``get_all_documents()`` so the console's
+add-repo route persistence is wired into ``init_beanie``. Only
+``ee.cloud.belt.service`` imports the doc class directly.
+Updated: 2026-06-11 (feat/firestore-fabric-ingest) — added
+``FabricIngestConfig`` (the per-workspace Firestore→Fabric mapping) and
+``FabricIngestState`` (the per-(workspace, collection) sync bookkeeping) to the
+imports, ``__all__``, and ``get_all_documents()`` so the ingestion worker's
+collections are wired into ``init_beanie``. Only
+``ee.cloud.fabric_ingest.service`` imports the doc classes directly.
 """
 
 from __future__ import annotations
@@ -34,11 +45,16 @@ from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
 from pocketpaw_ee.cloud.models.auth_session import AuthSession
+from pocketpaw_ee.cloud.models.belt_workspace_config import BeltWorkspaceConfig
 from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
+from pocketpaw_ee.cloud.models.fabric_ingest_state import (
+    FabricIngestConfig,
+    FabricIngestState,
+)
 from pocketpaw_ee.cloud.models.file import FileObj
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
@@ -64,6 +80,7 @@ from pocketpaw_ee.cloud.models.meeting import (
     MeetingsSettings,
     MeetingTranscript,
 )
+from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
@@ -76,6 +93,7 @@ from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
+from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
 from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
@@ -86,6 +104,13 @@ FileUpload: type = None  # type: ignore[assignment]
 FileFolder: type = None  # type: ignore[assignment]
 _CalendarDoc: type = None  # type: ignore[assignment]
 _EventDoc: type = None  # type: ignore[assignment]
+# The Belt MANDATE docs live in ee.cloud.mandates.domain (4-file entity, sole
+# importer = its own service). Lazy-loaded here so init_beanie registers them
+# without ee.cloud.models taking a hard import on the mandates package (same
+# out-of-models discipline the calendar docs use).
+_MandateDoc: type = None  # type: ignore[assignment]
+_ShiftDoc: type = None  # type: ignore[assignment]
+_SightingDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
@@ -113,6 +138,22 @@ def _ensure_calendar_docs():
     return _CalendarDoc, _EventDoc
 
 
+def _ensure_mandate_docs():
+    # Why: the mandates package's __init__ imports its router (→ deps → auth),
+    # so registering the docs via the package would pull the auth chain in
+    # during cloud.models init. Import the doc module directly + deferred.
+    global _MandateDoc, _ShiftDoc, _SightingDoc
+    if _MandateDoc is None:
+        from pocketpaw_ee.cloud.mandates.domain import MandateDoc as _MD
+        from pocketpaw_ee.cloud.mandates.domain import ShiftDoc as _SD
+        from pocketpaw_ee.cloud.mandates.domain import SightingDoc as _SG
+
+        _MandateDoc = _MD
+        _ShiftDoc = _SD
+        _SightingDoc = _SG
+    return _MandateDoc, _ShiftDoc, _SightingDoc
+
+
 __all__ = [
     "APIKey",
     "Agent",
@@ -121,6 +162,7 @@ __all__ = [
     "AuditEvent",
     "AuditWebhook",
     "AuthSession",
+    "BeltWorkspaceConfig",
     "ChatRunDoc",
     "Comment",
     "CommentAuthor",
@@ -128,6 +170,8 @@ __all__ = [
     "ComposioConnection",
     "Cycle",
     "CycleDailyPoint",
+    "FabricIngestConfig",
+    "FabricIngestState",
     "FileFolder",
     "FileObj",
     "FileUpload",
@@ -147,6 +191,7 @@ __all__ = [
     "MeetingProviderCredentials",
     "MeetingsSettings",
     "MeetingTranscript",
+    "MemberIngestState",
     "Mention",
     "Message",
     "Notification",
@@ -165,6 +210,7 @@ __all__ = [
     "WorkspaceSensePreference",
     "Task",
     "TaskAssignee",
+    "TaskAttachment",
     "TaskSource",
     "TaskEvent",
     "TemporalSweepStateDoc",
@@ -182,6 +228,7 @@ def get_all_documents():
     """Get all Beanie documents, with lazy FileUpload loading."""
     _ensure_file_upload()
     cal_doc, evt_doc = _ensure_calendar_docs()
+    mandate_doc, shift_doc, sighting_doc = _ensure_mandate_docs()
     return [
         User,
         Agent,
@@ -202,6 +249,7 @@ def get_all_documents():
         Message,
         ReadState,
         Task,
+        TaskAttachment,
         TemporalSweepStateDoc,
         Cycle,
         Project,
@@ -210,6 +258,9 @@ def get_all_documents():
         MeetingTranscript,
         MeetingProviderCredentials,
         MeetingsSettings,
+        MemberIngestState,
+        FabricIngestConfig,
+        FabricIngestState,
         # Calendar — sibling enterprise package.
         _CalendarDoc,
         _EventDoc,
@@ -228,9 +279,13 @@ def get_all_documents():
         AuditWebhook,
         AuthSession,
         APIKey,
+        BeltWorkspaceConfig,
         TaskEvent,
         cal_doc,
         evt_doc,
+        mandate_doc,
+        shift_doc,
+        sighting_doc,
     ]
 
 

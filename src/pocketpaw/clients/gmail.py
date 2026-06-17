@@ -1,6 +1,10 @@
 # Gmail Client — HTTP client for Gmail API using OAuth tokens.
 # Created: 2026-02-07
 # Part of Phase 2 Integration Ecosystem
+# 2026-06-08: GmailClient takes an optional user_id so each member uses their
+#   OWN Gmail token (VIP Onboarding Phase B). Pass it to the constructor;
+#   _get_token resolves the token from that user's bucket. Default None keeps
+#   the shared single-user behavior.
 
 from __future__ import annotations
 
@@ -27,16 +31,18 @@ class GmailClient:
     beyond httpx (already a core dep).
     """
 
-    def __init__(self):
+    def __init__(self, user_id: str | None = None):
         self._oauth = OAuthManager(TokenStore())
+        self._user_id = user_id
 
     async def _get_token(self) -> str:
-        """Get a valid OAuth access token for Gmail."""
+        """Get a valid OAuth access token for Gmail (scoped to this client's user)."""
         settings = get_settings()
         token = await self._oauth.get_valid_token(
             service="google_gmail",
             client_id=settings.google_oauth_client_id or "",
             client_secret=settings.google_oauth_client_secret or "",
+            user_id=self._user_id,
         )
         if not token:
             raise RuntimeError(

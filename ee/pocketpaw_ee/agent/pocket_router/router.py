@@ -1,4 +1,26 @@
 # router.py — The pocket execution router.
+# Updated: 2026-06-10 (W2c — surface Tier-0 agent-parked writes for approval)
+#   — the Tier-0 ``run_action`` path now ROUTES the executor's
+#   ``instinct_pending`` park into the Instinct approval queue via
+#   ``instinct_bridge.propose_pocket_write`` (the same surface the REST
+#   ``/actions/run`` route uses), so a deny-by-default agent write lands as a
+#   PENDING Instinct Action a human sees in the Tray — closing W2a's gap
+#   where the park was reported honestly but never reached a human. The new
+#   ``_route_tier0_park`` helper fetches the pocket wire dict (owner /
+#   approver resolution) and threads the creds' ``approval_route``; the
+#   threaded creds field (formerly discarded as ``_approval_route``) now
+#   carries the pocket's configured approver. ``_run_tier0`` returns a
+#   three-state ``_Tier0Result`` (fired / parked / failed): a parked write is
+#   HANDLED (no escalation, no re-fire) and surfaced as an
+#   ``instinct_pending`` output, not a false fired-success.
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) — the
+#   Tier-0 ``run_action`` path recognizes the executor's
+#   ``instinct_pending`` sentinel. Under W2a ``ActionBinding.requires_instinct``
+#   defaults True, so an agent-authored write that omits the field PARKS at
+#   the executor gate even though the classifier (which reads the raw spec
+#   dict, not the parsed binding) waved it through as a Tier-0 auto-fire.
+#   (W2a reported the park honestly; W2c above wires it to the approval
+#   queue.)
 # Created: 2026-05-22 (Increment 3) — ``classify_and_route`` sits in front
 #   of ``pocket_specialist__edit``. It runs the pure classifier
 #   (classifier.py) and dispatches to the CHEAPEST capable tier:
@@ -30,6 +52,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from pocketpaw_ee.agent.pocket_router.classifier import Classification, classify
@@ -186,6 +209,95 @@ async def _resolve_ripple_spec(input: Any) -> dict[str, Any]:
     return {}
 
 
+@dataclass(frozen=True)
+class _Tier0Result:
+    """The three-state outcome of a Tier-0 declarative run (W2c).
+
+    ``ok`` — the source ran / the write fired.
+    ``parked`` — a deny-by-default write was parked into the Instinct
+    approval queue; ``proposed_action_id`` carries the pending Action id.
+    ``error`` — a clean failure message (caller escalates to specialist).
+
+    Exactly one of ``ok`` / ``parked`` is True on a non-error outcome; a
+    failure sets neither and carries ``error``.
+    """
+
+    ok: bool = False
+    parked: bool = False
+    proposed_action_id: str | None = None
+    error: str | None = None
+
+
+async def _route_tier0_park(
+    pocket_id: str,
+    park: dict[str, Any],
+    *,
+    workspace_id: str,
+    user_id: str,
+    base_url: str,
+    auth_type: str,
+    allowed_writes: Any,
+    approval_route: Any,
+) -> _Tier0Result:
+    """Route a deny-by-default parked Tier-0 write into the Instinct queue.
+
+    Mirrors the REST ``/actions/run`` route's binding-level park handling:
+    fetch the pocket wire dict (for owner / approver resolution + name) and
+    hand the executor's ``_park`` blob to
+    ``instinct_bridge.propose_pocket_write`` so it lands as a PENDING
+    Instinct Action a human sees in the Tray. The credential token is NOT
+    forwarded — ``propose_pocket_write`` re-loads it at execution time.
+
+    A failure to fetch the pocket or build the proposal is a clean
+    ``error`` outcome (the caller escalates), never a crash and never a
+    silent fire — the deny-by-default no-bypass guarantee holds either way.
+    """
+    from pocketpaw_ee.cloud.pockets import instinct_bridge
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        pocket = await pockets_service.get(pocket_id, user_id)
+    except Exception:
+        logger.warning(
+            "[pocket-router] could not fetch pocket %s to route a parked Tier-0 write",
+            pocket_id,
+            exc_info=True,
+        )
+        return _Tier0Result(
+            error=(
+                "this write requires Instinct approval but the pocket "
+                "could not be loaded to queue it"
+            )
+        )
+
+    try:
+        proposed_id = await instinct_bridge.propose_pocket_write(
+            pocket=pocket,
+            backend_config={
+                "base_url": base_url,
+                "auth_type": auth_type,
+                "allowed_writes": allowed_writes,
+                "approval_route": approval_route,
+            },
+            parked_write=park,
+            requested_by=user_id,
+        )
+    except Exception:
+        logger.warning(
+            "[pocket-router] failed to propose a parked Tier-0 write on pocket %s",
+            pocket_id,
+            exc_info=True,
+        )
+        return _Tier0Result(error="this write requires Instinct approval but could not be queued")
+
+    logger.info(
+        "[pocket-router] Tier-0 write on pocket %s parked for approval → Instinct action %s",
+        pocket_id,
+        proposed_id,
+    )
+    return _Tier0Result(parked=True, proposed_action_id=proposed_id)
+
+
 async def _run_tier0(
     classification: Classification,
     input: Any,
@@ -193,26 +305,56 @@ async def _run_tier0(
     workspace_id: str,
     user_id: str,
     ripple_spec: dict[str, Any],
-) -> tuple[bool, str | None]:
+) -> _Tier0Result:
     """Execute a Tier-0 declarative verdict — fire the declared source or
     action through the EXISTING executor.
 
-    Returns ``(ok, error)``. The executors are invoked with every guard
-    they normally enforce — the router supplies the arguments, it does
-    not reach past any gate. A pocket with no backend configured, or a
-    user without run access, is a clean failure (``ok=False``), not a
-    crash.
+    Returns a ``_Tier0Result`` with THREE outcomes (W2c):
+
+    * ``ok=True`` — the source ran / the write fired. The caller returns a
+      Tier-0 ``applied`` output.
+    * ``parked=True`` — a deny-by-default write was PARKED at the executor's
+      gate and routed into the Instinct approval queue
+      (``proposed_action_id`` carries the pending Action id). The caller
+      treats this as HANDLED (it does NOT escalate to the specialist — the
+      write was governed correctly), but the output is marked pending, not
+      applied. No re-plan, no re-fire.
+    * ``ok=False`` (and not parked) — a clean failure (no backend, no run
+      access, executor error). The caller escalates to the specialist so it
+      can still satisfy the intent.
+
+    The executors are invoked with every guard they normally enforce — the
+    router supplies the arguments, it does not reach past any gate. A pocket
+    with no backend configured, or a user without run access, is a clean
+    failure (``ok=False``), not a crash.
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, input.pocket_id)
     if creds is None:
-        return False, "pocket has no backend configured — cannot run a declarative tier"
-    # RFC 05 M2b.1 — the executor-creds tuple is a 6-tuple; the trailing
-    # `approval_route` is unused on the Tier-0 path (the classifier
-    # escalates a `requires_instinct` action to the specialist tier, so a
-    # gated write never reaches this declarative run).
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+        return _Tier0Result(
+            error="pocket has no backend configured — cannot run a declarative tier"
+        )
+    # RFC 05 M2b.1 / W2c — the executor-creds tuple is a 6-tuple. The
+    # trailing `approval_route` is now THREADED into the binding-level park
+    # routing below: under W2a deny-by-default a binding that omits
+    # `requires_instinct` still parks at the executor gate, and that parked
+    # write must reach the approval surface with the pocket's configured
+    # approver route — exactly as the REST `/actions/run` path passes it to
+    # `propose_pocket_write`.
+    # The connector-backend feature appended `backend_type` / `connector_name`
+    # to the executor tuple — threaded into `run_sources` below so a connector
+    # backend routes correctly; the write-action branch ignores them.
+    (
+        base_url,
+        auth_type,
+        auth_header,
+        token,
+        allowed_writes,
+        approval_route,
+        backend_type,
+        connector_name,
+    ) = creds
 
     if classification.op == "run_source":
         # A source run mirrors ``POST /pockets/{id}/sources/run`` — read
@@ -230,22 +372,26 @@ async def _run_tier0(
             token=token,
             only_source=classification.op_args.get("source"),
             workspace_id=workspace_id,
+            backend_type=backend_type,
+            connector_name=connector_name,
         )
         errors = result.get("errors") or []
         if errors:
-            return False, f"source run reported {len(errors)} error(s)"
-        return True, None
+            return _Tier0Result(error=f"source run reported {len(errors)} error(s)")
+        return _Tier0Result(ok=True)
 
     if classification.op == "run_action":
         # A write action — gate run-access exactly like the REST route
         # (``has_action_run_access``: owner or explicit shared_with).
         if not await pockets_service.has_action_run_access(input.pocket_id, user_id):
-            return False, "caller lacks run access for this write action"
+            return _Tier0Result(error="caller lacks run access for this write action")
         action_key = classification.op_args.get("action", "")
         actions = ripple_spec.get("actions")
         raw_action = actions.get(action_key) if isinstance(actions, dict) else None
         if not isinstance(raw_action, dict):
-            return False, f"action '{action_key}' is missing or malformed on the pocket"
+            return _Tier0Result(
+                error=f"action '{action_key}' is missing or malformed on the pocket"
+            )
 
         from pocketpaw_ee.cloud.pockets import action_executor
 
@@ -265,11 +411,45 @@ async def _run_tier0(
             token=token,
             allowed_writes=allowed_writes,
         )
+        # W2c — DENY-BY-DEFAULT, fully wired. `ActionBinding.requires_instinct`
+        # now defaults True (W2a), so a binding the agent authored WITHOUT
+        # setting the field PARKS at the executor's gate even though the
+        # classifier (which reads the raw dict's `requires_instinct` key,
+        # sees it unset, and so does not escalate to the specialist tier)
+        # routed it here as a Tier-0 auto-fire. The executor returns
+        # `{ok:True, code:"instinct_pending"}` carrying the resolved write
+        # under `_park` — the write was NOT fired.
+        #
+        # W2a reported that honestly but stopped short: the parked write
+        # never reached the approval queue, so a human never saw it in the
+        # Tray. W2c closes that gap by routing the park into
+        # `instinct_bridge.propose_pocket_write` — the SAME surface the REST
+        # `/actions/run` route uses — so the write lands as a PENDING
+        # Instinct Action a human can approve or reject.
+        #
+        # The Tier-0 declarative run threads NO template (a `rippleSpec`
+        # action binding need not be a template action), so the executor's
+        # only park shape here is the gate-7 binding-level park: it carries
+        # `_park` and never an `approval_id` (that is the template-CEL
+        # escalation shape, which only the REST route can produce). We route
+        # the `_park` blob with the pocket's configured approver route and
+        # report the action as parked-for-approval, not fired.
+        if result.get("code") == "instinct_pending":
+            return await _route_tier0_park(
+                input.pocket_id,
+                result.get("_park") or {},
+                workspace_id=workspace_id,
+                user_id=user_id,
+                base_url=base_url,
+                auth_type=auth_type,
+                allowed_writes=allowed_writes,
+                approval_route=approval_route,
+            )
         if not result.get("ok"):
-            return False, result.get("error") or "action run failed"
-        return True, None
+            return _Tier0Result(error=result.get("error") or "action run failed")
+        return _Tier0Result(ok=True)
 
-    return False, f"unknown Tier-0 op '{classification.op}'"
+    return _Tier0Result(error=f"unknown Tier-0 op '{classification.op}'")
 
 
 async def _run_tier1(
@@ -323,6 +503,33 @@ def _tier0_output(classification: Classification, *, pocket_id: str, ok: bool, e
     )
 
 
+def _tier0_pending_output(
+    classification: Classification, *, pocket_id: str, proposed_action_id: str | None
+):
+    """Shape a PARKED Tier-0 write (W2c) as a ``PocketSpecialistEditOutput``.
+
+    A deny-by-default write that the executor parked and the router routed
+    into the Instinct approval queue is HANDLED (not escalated) but did NOT
+    apply: ``ok=False``, ``action="instinct_pending"``, no ops, and a clear
+    message naming the pending Action id so the agent tells the human the
+    write is waiting for approval rather than claiming it landed. The
+    ``backend_used`` carries the proposed id so a caller that surfaces the
+    raw output can deep-link the Tray entry.
+    """
+    from pocketpaw_ee.agent.pocket_specialist.runtime import PocketSpecialistEditOutput
+
+    return PocketSpecialistEditOutput(
+        ok=False,
+        action="instinct_pending",
+        pocket_id=pocket_id,
+        ops=[],
+        duration_ms=0,
+        backend_used=f"pocket_router:tier0:instinct_pending:{proposed_action_id or ''}",
+        error="this write requires Instinct approval — proposed for review, not auto-fired",
+        warnings=[],
+    )
+
+
 async def classify_and_route(
     input: Any,
     *,
@@ -334,9 +541,13 @@ async def classify_and_route(
 
     Returns ``(handled, output)``:
 
-    * ``handled is True`` — a cheap tier (0 or 1) ran the request. The
-      caller uses ``output`` (a ``PocketSpecialistEditOutput``) directly
-      and does NOT fall through to the specialist.
+    * ``handled is True`` — a cheap tier (0 or 1) ran the request, OR a
+      Tier-0 write was PARKED into the Instinct approval queue (W2c
+      deny-by-default). The caller uses ``output`` (a
+      ``PocketSpecialistEditOutput``) directly and does NOT fall through to
+      the specialist. A parked write returns ``output.ok=False`` with
+      ``action="instinct_pending"`` so the agent reports it as needing
+      approval, not as applied — but it is HANDLED (no re-plan, no re-fire).
     * ``handled is False`` — the router escalated. ``output`` is ``None``;
       the caller invokes ``run_edit_specialist`` itself (the existing
       flow, unchanged). The router emits its observability frame + audit
@@ -429,7 +640,7 @@ async def classify_and_route(
     # ── Tier 0 — declarative ───────────────────────────────────────────
     if classification.tier == 0:
         timeline.start("apply")
-        ok, error = await _run_tier0(
+        tier0 = await _run_tier0(
             classification,
             input,
             workspace_id=workspace_id,
@@ -438,9 +649,46 @@ async def classify_and_route(
         )
         timeline.finish("apply", detail=f"{classification.op} -> {classification.target}")
         _add_skipped_layout_stages(timeline)
-        if not ok:
+
+        # ── W2c — DENY-BY-DEFAULT park ─────────────────────────────────
+        # The write was PARKED at the executor's gate and routed into the
+        # Instinct approval queue. This is HANDLED — the router must NOT
+        # escalate (escalating would hand the parked write to the specialist
+        # to re-plan / re-fire, defeating the gate) and must NOT report a
+        # fired success. Surface a pending output and audit it as parked.
+        if tier0.parked:
+            _emit_execution_frame(
+                request_id=request_id,
+                intent=intent,
+                tier=0,
+                timeline=timeline,
+                started=started,
+                tokens=TokenSpend(),
+            )
+            _audit_router_decision(
+                actor=user_id,
+                workspace_id=workspace_id,
+                pocket_id=getattr(input, "pocket_id", ""),
+                tier=0,
+                intent=intent,
+                classification=classification,
+                status="parked-instinct-pending",
+            )
+            logger.info(
+                "[pocket-router] %s Tier-0 write parked for approval (%s, action=%s)",
+                request_id,
+                classification.op,
+                tier0.proposed_action_id,
+            )
+            return True, _tier0_pending_output(
+                classification,
+                pocket_id=input.pocket_id,
+                proposed_action_id=tier0.proposed_action_id,
+            )
+
+        if not tier0.ok:
             # A failed cheap tier escalates: the specialist can still try.
-            timeline.skipped("classify", f"Tier-0 attempt failed: {error}")
+            timeline.skipped("classify", f"Tier-0 attempt failed: {tier0.error}")
             _emit_execution_frame(
                 request_id=request_id,
                 intent=intent,
@@ -458,7 +706,9 @@ async def classify_and_route(
                 classification=classification,
                 status="escalated-tier0-failed",
             )
-            logger.info("[pocket-router] %s Tier-0 failed (%s) — escalating", request_id, error)
+            logger.info(
+                "[pocket-router] %s Tier-0 failed (%s) — escalating", request_id, tier0.error
+            )
             return False, None
         _emit_execution_frame(
             request_id=request_id,

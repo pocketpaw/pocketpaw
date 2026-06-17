@@ -1,6 +1,30 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-13 (feat/claude-sdk-prewarm) — ``execute_run`` now fires
+  ``_prewarm_session(ctx)`` as a fire-and-forget ``asyncio.create_task`` right
+  after the entity-aware profile is resolved, so the agent's Claude CLI
+  subprocess warms CONCURRENTLY with the remaining pre-turn work (knowledge
+  context, soul recall, SSE setup, prompt assembly) and turn 1 reuses it instead
+  of paying the ~12s cold ``connect()``. ``_prewarm_session`` resolves the SAME
+  inputs ``_drive_agent_loop`` will (instructions, the entity-aware
+  deny/allow/skills/override, session_key) and calls ``AgentPool.prewarm`` so the
+  prewarmed client's cache key matches the first turn's. It is gated to
+  smart-routing-OFF (the model is message-derived when routing is on, so a
+  message-less prewarm could warm the wrong tier and churn) and swallows every
+  error. Skill sessions on smart-routing-ON deployments keep today's cold turn-1.
+- 2026-06-10 (sov/w3a-igw — per-run token metering) — real token usage is now
+  threaded through the run instead of being dropped. Every backend emits a
+  ``token_usage`` ``AgentEvent`` (input / output / cached token counts +
+  total_cost_usd + model + backend), but ``_drive_agent_loop`` had no handler for
+  it, so it was silently discarded and the ``stream_end`` frame's ``usage`` was a
+  hardcoded ``{}``. ``_drive_agent_loop`` now surfaces ``token_usage`` as a
+  ``("token_usage", {...})`` tuple; ``execute_run`` keeps the LATEST one, writes it
+  to the stream, folds it into BOTH ``stream_end`` frames (success + cancelled /
+  empty-text), and persists it onto ``ChatRunDoc.usage`` via
+  ``mark_completed`` / ``mark_terminal`` (the durable metering sink for
+  outcome-based pricing). Empty for backends / runs that report nothing, so
+  existing runs are unchanged.
 - 2026-06-08 (feat/connector-mcp-execution / keystone) — the per-stream
   identity binding now also passes ``pocket_id=ctx.pocket_id`` into
   ``attach_agent_identity``, publishing the room's ``Pocket._id`` on the new
@@ -574,14 +598,22 @@ async def _persist_and_complete(
     ctx: ScopeContext,
     full_text: str,
     attachments: list[dict[str, Any]],
+    usage: dict[str, Any] | None = None,
 ) -> str:
-    """Persist the assistant message, mark the run completed, broadcast."""
+    """Persist the assistant message, mark the run completed, broadcast.
+
+    ``usage`` (W3a) is the per-run token-metering dict assembled from the
+    backend's ``token_usage`` event; it is persisted onto the run doc so each
+    completed run carries its real prompt / completion / cached token counts.
+    ``None`` / empty leaves the stored usage untouched (legacy / no-usage runs).
+    """
     msg = await _persist_assistant_message(ctx, full_text, attachments)
     assistant_id = str(msg.id)
     await run_service.mark_completed(
         spec.run_id,
         assistant_message_id=assistant_id,
         partial_text=full_text,
+        usage=usage or None,
     )
     await _broadcast_message_new(
         ctx, assistant_id, full_text, attachments, created_at=msg.createdAt
@@ -630,6 +662,82 @@ def _agent_skill_set(instance: Any) -> frozenset[str]:
             plugin_skills = frozenset()
 
     return direct | plugin_skills
+
+
+async def _prewarm_session(ctx: ScopeContext) -> None:
+    """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
+    first model turn (feat/claude-sdk-prewarm).
+
+    The warm-client fix (#1456) made skill-bearing turns REUSE the warm CLI
+    subprocess across turns, but the FIRST send of every new session still paid a
+    cold ~12s ``connect()`` because the warm client was created lazily inside the
+    first ``run``. This fires concurrently with the remaining pre-turn work
+    (knowledge-context build, soul recall, SSE setup, prompt assembly) so the
+    subprocess is already live by the time ``pool.run`` calls
+    ``_get_or_create_client`` — turn 1 then reuses it.
+
+    It resolves the SAME inputs ``_drive_agent_loop`` will (instructions, the
+    entity-aware deny/allow/skills/override, session_key) so the prewarmed
+    client's cache key MATCHES the first turn's — a mismatch would make turn 1
+    EVICT the prewarmed client (a net loss).
+
+    FIRE-AND-FORGET, never-break-a-turn: meant to be wrapped in
+    ``asyncio.create_task``. Every failure path is swallowed (this guard +
+    ``AgentPool.prewarm`` + the backend's ``prewarm``), so a failed prewarm just
+    leaves turn 1 to pay the cold connect it would have paid anyway.
+
+    LIMITATION: skipped when smart routing is ON, because the model is then
+    classified from the message (which we don't have yet) — prewarming a guessed
+    tier could warm the wrong subprocess and cause evict-churn. Those deployments
+    keep today's cold turn-1.
+    """
+    try:
+        from pocketpaw.config import Settings
+
+        # Smart routing makes the model message-dependent → can't match the
+        # turn-1 cache key from a message-less prewarm. Skip to avoid churn.
+        if Settings.load().smart_routing_enabled:
+            return
+
+        pool = get_agent_pool()
+        instance = await pool.get(ctx.target_agent_id)
+
+        backend_name = (
+            instance.config.get("backend", "claude_agent_sdk")
+            if hasattr(instance, "config")
+            else None
+        )
+        # Only the Claude SDK backend has a warm subprocess to prewarm.
+        if backend_name is not None and "claude" not in backend_name:
+            return
+
+        # Mirror _drive_agent_loop's resolution EXACTLY so the cache key matches.
+        behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+        surface_deny: frozenset[str] = frozenset()
+        surface_allow: frozenset[str] = frozenset()
+        surface_allow_mcp: frozenset[str] | None = None
+        surface_sys_override: str | None = None
+        surface_skills: frozenset[str] = frozenset()
+        if ctx.resolved_profile is not None:
+            surface_deny = ctx.resolved_profile.deny_mcp_tool_ids
+            surface_allow = ctx.resolved_profile.allowed_sdk_tools or frozenset()
+            surface_allow_mcp = ctx.resolved_profile.allow_mcp_tool_ids
+            surface_sys_override = ctx.resolved_profile.system_message_override
+            surface_skills = ctx.resolved_profile.skill_names or frozenset()
+        surface_skills = surface_skills | _agent_skill_set(instance)
+
+        await pool.prewarm(
+            ctx.target_agent_id,
+            session_key_for(ctx),
+            instructions=behavior_instructions,
+            deny_mcp_tool_ids=surface_deny,
+            allow_sdk_tools=surface_allow,
+            allow_mcp_tool_ids=surface_allow_mcp,
+            system_message_override=surface_sys_override,
+            skill_names=surface_skills,
+        )
+    except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
+        logger.debug("prewarm_session skipped (swallowed): %s", exc)
 
 
 async def _drive_agent_loop(
@@ -837,6 +945,19 @@ async def _drive_agent_loop(
                     handled_pocket_ids=handled_pocket_ids,
                 )
                 yield ("tool_result", {"tool": name, "output": output})
+            elif etype == "token_usage":
+                # Real per-run token metering (W3a). The backend (claude_sdk and
+                # every other backend) emits a ``token_usage`` AgentEvent whose
+                # ``metadata`` carries input / output / cached token counts +
+                # total_cost_usd + model + backend. This branch used to be
+                # missing, so the whole event was silently dropped and the run's
+                # ``usage`` stayed ``{}`` (tokens were not metered). Surface the
+                # metadata as a plain dict; ``execute_run`` keeps the latest one
+                # and folds it into the ``stream_end`` frame + the persisted run
+                # doc. Mirrors the native ``agents/loop.py`` token_usage handler.
+                meta = getattr(event, "metadata", None) or {}
+                usage_payload = dict(meta) if isinstance(meta, dict) else {}
+                yield ("token_usage", usage_payload)
             elif etype == "error":
                 # Surface backend-yielded errors instead of silently dropping
                 # them — a misconfigured backend (codex_cli without
@@ -979,6 +1100,16 @@ async def execute_run(spec: RunSpec) -> None:
     # to the surface base (today's behavior).
     ctx.resolved_profile = await _resolve_entity_profile(ctx)
 
+    # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
+    # subprocess for this session NOW — concurrently with the remaining pre-turn
+    # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
+    # knowledge-context build, soul recall, SSE setup, prompt assembly). By the
+    # time pool.run reaches the first connect(), the subprocess is already live
+    # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
+    # forget: _prewarm_session swallows every error, so it can never delay or
+    # break this run; the task is intentionally not awaited.
+    asyncio.create_task(_prewarm_session(ctx))
+
     await _mark_running(spec.run_id)
     await _broadcast_agent_typing(ctx, active=True)
 
@@ -986,6 +1117,13 @@ async def execute_run(spec: RunSpec) -> None:
     cancelled = False
     error: Exception | None = None
     backend_error_message: str | None = None
+    # Per-run token metering (W3a). The backend yields a ``token_usage`` event
+    # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
+    # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
+    # multi-turn agent loop can report usage more than once) so the final
+    # ``stream_end`` frame and the persisted run doc carry actual counts instead
+    # of the old hardcoded ``{}``.
+    usage: dict[str, Any] = {}
     try:
         async for event_name, event_data in _iter_agent_events(spec, ctx):
             if await transport.is_cancelled(spec.run_id):
@@ -995,6 +1133,9 @@ async def execute_run(spec: RunSpec) -> None:
                 content = event_data.get("content", "")
                 if isinstance(content, str):
                     full_text += content
+            elif event_name == "token_usage":
+                if isinstance(event_data, dict) and event_data:
+                    usage = event_data
             await transport.append_event(spec.run_id, event_name, event_data)
             if event_name == "error":
                 # ``_drive_agent_loop`` already broke out after yielding this.
@@ -1064,12 +1205,14 @@ async def execute_run(spec: RunSpec) -> None:
                     spec.run_id,
                     status="cancelled",
                     partial_text=full_text,
+                    usage=usage or None,
                 )
             else:
                 await run_service.mark_completed(
                     spec.run_id,
                     assistant_message_id=None,
                     partial_text=full_text,
+                    usage=usage or None,
                 )
         except Exception:
             logger.exception(
@@ -1080,7 +1223,7 @@ async def execute_run(spec: RunSpec) -> None:
         await transport.append_event(
             spec.run_id,
             "stream_end",
-            {"assistant_message_id": None, "usage": {}, "cancelled": cancelled},
+            {"assistant_message_id": None, "usage": usage, "cancelled": cancelled},
         )
         await transport.set_ttl(spec.run_id, _stream_ttl())
         return
@@ -1092,10 +1235,10 @@ async def execute_run(spec: RunSpec) -> None:
         full_text = remaining_text
         await transport.append_event(spec.run_id, "ripple", {"spec": ripple_spec})
 
-    assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments)
+    assistant_id = await _persist_and_complete(spec, ctx, full_text, attachments, usage=usage)
     await transport.append_event(
         spec.run_id,
         "stream_end",
-        {"assistant_message_id": assistant_id, "usage": {}, "cancelled": False},
+        {"assistant_message_id": assistant_id, "usage": usage, "cancelled": False},
     )
     await transport.set_ttl(spec.run_id, _stream_ttl())

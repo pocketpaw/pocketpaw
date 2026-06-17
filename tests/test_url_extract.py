@@ -1,5 +1,7 @@
 # Tests for UrlExtractTool
 # Created: 2026-02-06
+# Updated: 2026-06-10 — SSRF-safe fetch primitives moved to
+#   pocketpaw.security.safe_fetch; patch targets repointed there.
 
 import socket
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -206,7 +208,7 @@ class TestUrlExtractTool:
 
         with (
             patch(
-                "pocketpaw.tools.builtin.url_extract._resolve_public_ip",
+                "pocketpaw.security.safe_fetch._resolve_public_ip",
                 AsyncMock(return_value="93.184.216.34"),
             ),
             patch("httpx.AsyncClient") as mock_client_cls,
@@ -241,7 +243,7 @@ class TestUrlExtractTool:
 
         with (
             patch(
-                "pocketpaw.tools.builtin.url_extract._resolve_public_ip",
+                "pocketpaw.security.safe_fetch._resolve_public_ip",
                 AsyncMock(return_value="93.184.216.34"),
             ),
             patch("httpx.AsyncClient") as mock_client_cls,
@@ -314,7 +316,7 @@ class TestUrlExtractTool:
 
         with (
             patch(
-                "pocketpaw.tools.builtin.url_extract._resolve_public_ip",
+                "pocketpaw.security.safe_fetch._resolve_public_ip",
                 AsyncMock(side_effect=["93.184.216.34", "93.184.216.35"]),
             ),
             patch("httpx.AsyncClient") as mock_client_cls,
@@ -376,7 +378,7 @@ class TestUrlExtractTool:
         loop.getaddrinfo = AsyncMock(return_value=_addrinfo("127.0.0.1"))
 
         with (
-            patch("pocketpaw.tools.builtin.url_extract._get_running_loop", return_value=loop),
+            patch("pocketpaw.security.safe_fetch._get_running_loop", return_value=loop),
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
         ):
@@ -405,7 +407,7 @@ class TestUrlExtractTool:
         loop.getaddrinfo = AsyncMock(return_value=_addrinfo("::ffff:127.0.0.1", socket.AF_INET6))
 
         with (
-            patch("pocketpaw.tools.builtin.url_extract._get_running_loop", return_value=loop),
+            patch("pocketpaw.security.safe_fetch._get_running_loop", return_value=loop),
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
         ):
@@ -449,7 +451,7 @@ class TestUrlExtractTool:
         redirect_resp.is_redirect = True
 
         with (
-            patch("pocketpaw.tools.builtin.url_extract._get_running_loop", return_value=loop),
+            patch("pocketpaw.security.safe_fetch._get_running_loop", return_value=loop),
             patch("httpx.AsyncClient") as mock_client_cls,
             patch.dict("sys.modules", {"html2text": mock_html2text}),
         ):
@@ -484,7 +486,7 @@ class TestUrlExtractTool:
 
         with (
             patch(
-                "pocketpaw.tools.builtin.url_extract._resolve_public_ip",
+                "pocketpaw.security.safe_fetch._resolve_public_ip",
                 AsyncMock(
                     side_effect=[
                         "93.184.216.34",
@@ -530,9 +532,9 @@ class TestUrlExtractTool:
         mock_transport.aclose = AsyncMock()
 
         with (
-            patch("pocketpaw.tools.builtin.url_extract._get_running_loop", return_value=loop),
+            patch("pocketpaw.security.safe_fetch._get_running_loop", return_value=loop),
             patch(
-                "pocketpaw.tools.builtin.url_extract.httpx.AsyncHTTPTransport",
+                "pocketpaw.security.safe_fetch.httpx.AsyncHTTPTransport",
                 return_value=mock_transport,
             ),
         ):

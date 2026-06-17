@@ -740,6 +740,34 @@ class ConnectorSyncRecorded(Event):
     EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
 
 
+# Member ingest — VIP Onboarding Phase B. Fired when the per-user ingest
+# worker finishes a member's Gmail/Calendar → private-KB sync (backfill or
+# incremental). data: workspace_id, member_id, scope, mode, status, documents.
+@dataclass
+class MemberIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.completed"
+
+
+# member_ingest.purged — fan-out when a member's Phase B per-user data is
+# deleted (member disconnected their accounts, or was offboarded from the
+# workspace). data: workspace_id, member_id, scope, status, and the per-store
+# delete counts (kb_cleared, tokens_deleted, connectors_deleted,
+# ingest_state_deleted). Downstream consumers (soul memory, the member's home
+# surface, search index) react by dropping anything keyed on that scope.
+@dataclass
+class MemberDataPurged(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.purged"
+
+
+# Fabric ingest — generic Firestore→Fabric mirror worker. Fired when the
+# per-source ingest worker finishes mirroring one Firestore collection into
+# Fabric objects (backfill or incremental). data: workspace_id, source_id,
+# object_type_id, mode, status, objects_ingested, cursor.
+@dataclass
+class FabricIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "fabric_ingest.completed"
+
+
 # Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
 # are defined above with the rest of the LiveKit group-call types; this is the
 # post-call notes fan-out, audience = the group's members.
@@ -845,3 +873,25 @@ class OutcomeEmitted(Event):
 @dataclass
 class TemporalSweepCompleted(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.temporal_sweep_completed"
+
+
+# Belt & Pulley station run lifecycle (feat/belt-console-backend, SC-2).
+# Fired on every Belt code-change run state transition so the /belt console
+# refreshes a run's status / stage / PR link WITHOUT polling. The transitions
+# happen ASYNCHRONOUSLY relative to the chat turn — propose lands during the
+# turn, but approve (in the Tray) and the executed / failed terminals fire long
+# after the turn's per-session SSE drain is gone — so this MUST ride the
+# workspace realtime bus (the same path Tray / Mission Control events take) to
+# reach the page. Workspace-scoped: the audience resolver fans it out to every
+# workspace member (the /belt console is a per-workspace view).
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id  — tenancy (drives the workspace fan-out).
+#   action_id     — the Instinct code-change Action id (the run id).
+#   status        — proposed | approved | rejected | landed | failed.
+#   stage         — gate | done.
+#   pr_url        — the opened PR url (only on the landed terminal); omitted
+#                   otherwise so the wire stays minimal.
+@dataclass
+class BeltRunUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_run_updated"
