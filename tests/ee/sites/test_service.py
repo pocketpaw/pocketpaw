@@ -605,9 +605,7 @@ async def test_preview_pocket_ripple_returns_ripple_spec():
         "pocketpaw_ee.cloud.pockets.service.get",
         new=AsyncMock(return_value=wire),
     ) as mock_get:
-        res = await sites_service.preview_pocket(
-            workspace_id="ws1", user_id="u1", pocket_id="pk1"
-        )
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
 
     mock_get.assert_awaited_once_with("pk1", "u1")
     assert res.pocket_id == "pk1"
@@ -626,9 +624,7 @@ async def test_preview_pocket_defaults_engine_to_ripple():
         "pocketpaw_ee.cloud.pockets.service.get",
         new=AsyncMock(return_value=wire),
     ):
-        res = await sites_service.preview_pocket(
-            workspace_id="ws1", user_id="u1", pocket_id="pk1"
-        )
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
 
     assert res.engine == "ripple"
     assert res.content == spec
@@ -648,9 +644,7 @@ async def test_preview_pocket_svelte_returns_source_map():
         "pocketpaw_ee.cloud.pockets.service.get",
         new=AsyncMock(return_value=wire),
     ):
-        res = await sites_service.preview_pocket(
-            workspace_id="ws1", user_id="u1", pocket_id="pk1"
-        )
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
 
     assert res.engine == "svelte"
     assert res.content == source
