@@ -81,6 +81,18 @@
 # source-of-truth layer, so sites no longer land unnamed when the caller omits a
 # name. The resolved name flows into BOTH the generated site ``title`` and the
 # stored ``Site.name``.
+#
+# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
+# added preview_pocket() and pocket_status(), the two by-pocket reads the #432
+# frontend already calls (the backend half of #1345 never landed on dev, so every
+# Preview-tab fetch 404'd and the builder showed "Nothing to preview yet").
+# preview_pocket() reads the source pocket via the pockets service and returns its
+# DRAFT content — the rippleSpec for a ripple pocket, the {path: contents} source
+# map for a svelte pocket — reusing publish_pocket()'s pocket-read + engine logic
+# so the preview matches what publish would build. pocket_status() derives
+# draft/published + is_live from the Site deployment doc for the pocket
+# (tenant-scoped on ``workspace``, via the model's compound index): no Site doc =
+# draft / not live; a Site doc = published with is_live following ``deployed``.
 
 from __future__ import annotations
 
@@ -96,7 +108,12 @@ from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
-from pocketpaw_ee.sites.dto import DomainStatusResponse, SiteResponse
+from pocketpaw_ee.sites.dto import (
+    DomainStatusResponse,
+    SitePreviewResponse,
+    SiteResponse,
+    SiteStatusResponse,
+)
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
@@ -422,6 +439,63 @@ async def publish_pocket(
     )
 
 
+async def preview_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+) -> SitePreviewResponse:
+    """Read a pocket's DRAFT content for the in-app builder Preview tab.
+
+    Loads the source pocket through the pockets service's PUBLIC ``get`` (the wire
+    dict — no Beanie import, respecting entity isolation; it raises NotFound /
+    Forbidden itself when the pocket is missing or access-denied, which the router
+    maps to 404 / 403). Mirrors ``publish_pocket``'s pocket-read + engine logic so
+    the preview matches what publish would build:
+      * ``engine="ripple"`` (the default) → ``content`` is the pocket's rippleSpec.
+      * ``engine="svelte"`` → ``content`` is the {path: contents} source map.
+    ``content`` is None when the pocket carries nothing to render on that track.
+
+    ``workspace_id`` is unused for the pocket read itself (the pockets service
+    scopes on ``user_id``), but it is required on every Sites service function so
+    the surface stays uniform and tenant-aware as the read paths converge.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    engine = pocket.get("engine") or "ripple"
+    if engine == "svelte":
+        source = pocket.get("source")
+        content = source if isinstance(source, dict) else None
+    else:
+        ripple_spec = pocket.get("rippleSpec")
+        content = ripple_spec if isinstance(ripple_spec, dict) else None
+    return SitePreviewResponse(pocket_id=pocket_id, engine=engine, content=content)
+
+
+async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusResponse:
+    """Derive a pocket's draft/published + is_live state from its Site deployment
+    doc, tenant-scoped on ``workspace``.
+
+    Looks up the Site for this (workspace, pocket_id) — the compound index the
+    model declares serves this read directly. With no Site doc the pocket has
+    never been published, so it reads ``draft`` / not live. With a Site doc it
+    reads ``published``; ``is_live`` follows the doc's ``deployed`` flag (the only
+    signal that earns a "Live" badge), and ``site_id`` carries the deployed id.
+    This is the authoritative state the builder uses to label a pocket even before
+    it surfaces in the gallery list. No Cloudflare call — just persisted state.
+    """
+    doc = await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+    if doc is None:
+        return SiteStatusResponse(pocket_id=pocket_id, status="draft", is_live=False)
+    return SiteStatusResponse(
+        pocket_id=pocket_id,
+        status="published",
+        is_live=doc.deployed,
+        site_id=str(doc.id),
+    )
+
+
 async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     cursor = _SiteDoc.find({"workspace": workspace_id}).sort(-_SiteDoc.createdAt)  # type: ignore[operator]
     return [_to_response(doc) async for doc in cursor]
@@ -443,6 +517,8 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
 __all__ = [
     "publish",
     "publish_pocket",
+    "preview_pocket",
+    "pocket_status",
     "add_domain",
     "domain_status",
     "list_domains",

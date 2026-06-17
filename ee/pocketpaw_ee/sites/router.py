@@ -21,6 +21,18 @@
 # require_plan_feature("fabric") router gate + require_action_any_workspace
 # scoping as the other authed sites reads) so the Domains tab can rehydrate on
 # reload. A site in another workspace surfaces as a 404 (via the service _load).
+#
+# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
+# added GET /sites/by-pocket/{pocket_id}/preview and
+# GET /sites/by-pocket/{pocket_id}/status — the two by-pocket reads the #432
+# frontend already calls (getSitePreviewByPocket / getSiteStatusByPocket). The
+# backend half of #1345 never landed on dev, so every Preview-tab fetch 404'd and
+# the builder showed "Nothing to preview yet". Both are authed fabric.read reads
+# under the router-level fabric plan gate, scoped on ctx.workspace_id /
+# ctx.user_id, matching the other authed sites reads. preview delegates to
+# sites_service.preview_pocket (pockets_service.get raises NotFound → 404 itself);
+# status delegates to sites_service.pocket_status (tenant-scoped Site lookup, no
+# 404 — an unpublished pocket simply reads draft / not live).
 
 from __future__ import annotations
 
@@ -33,7 +45,9 @@ from pocketpaw_ee.sites.dto import (
     DomainRequest,
     DomainStatusResponse,
     PublishRequest,
+    SitePreviewResponse,
     SiteResponse,
+    SiteStatusResponse,
 )
 
 router = APIRouter(
@@ -64,6 +78,33 @@ async def publish_site(
 @router.get("/sites", response_model=list[SiteResponse])
 async def list_sites(ctx: RequestContext = Depends(request_context)) -> list[SiteResponse]:
     return await sites_service.list_for_workspace(ctx.workspace_id)
+
+
+@router.get("/sites/by-pocket/{pocket_id}/preview", response_model=SitePreviewResponse)
+async def preview_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SitePreviewResponse:
+    """Draft content for the in-app builder Preview tab: {pocket_id, engine,
+    content}. ``content`` is the pocket's rippleSpec for a ripple pocket, or the
+    {path: contents} source map for a svelte pocket. A missing / access-denied
+    pocket surfaces as a 404 (the pockets service raises NotFound itself)."""
+    return await sites_service.preview_pocket(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+
+
+@router.get("/sites/by-pocket/{pocket_id}/status", response_model=SiteStatusResponse)
+async def status_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteStatusResponse:
+    """Authoritative draft/published + is_live state for a pocket: {pocket_id,
+    status, is_live}. Derived from the tenant-scoped Site deployment doc — an
+    unpublished pocket (no Site) reads draft / not live (NOT a 404)."""
+    return await sites_service.pocket_status(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
 
 
 @router.post("/sites/{site_id}/domains", response_model=DomainStatusResponse)
