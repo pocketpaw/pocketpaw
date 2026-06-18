@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-18 (feat/sites-smoke-at-publish, PERF-4): publish() now threads
+# ``smoke=not preview`` into generator.build(), so the workerd SMOKE render runs
+# ONLY for a LIVE publish (preview=False) and is SKIPPED for a preview/edit/arm
+# build (preview=True). The render is per-edit overhead only needed before a
+# deploy; skipping it cuts the remaining per-edit cost left after PERF-3 cached
+# `bun install`. The live publish keeps the gate AND the edit_svelte_component
+# rollback-on-SmokeGateFailed behaviour unchanged. A preview that would fail smoke
+# is no longer blocked — acceptable, because the live publish still gates + rolls
+# back, so a broken edit can never reach the live deploy.
+#
 # Updated 2026-06-18 (feat/sites-cached-build, PERF-3): publish() now forwards the
 # source pocket_id to generator.build() so the build runs in the STABLE per-pocket
 # working dir (persistent node_modules + cached `bun install`), cutting the dominant
@@ -470,6 +480,13 @@ async def publish(
         # cutting the dominant per-edit cost. A fresh site_id is minted per publish,
         # but a pocket's working dir is reused across its publishes/previews.
         pocket_id=pocket_id,
+        # PERF-4: run the workerd SMOKE render ONLY for a LIVE publish. The render
+        # is per-edit overhead only needed before a deploy, so a preview/edit/arm
+        # build (preview=True) skips it (smoke=False); a live publish (preview=False)
+        # keeps it (smoke=True) so the gate + the rollback below are unchanged. A
+        # preview that would fail smoke is no longer blocked — the live publish still
+        # gates + rolls back, so a broken edit never reaches the live deploy.
+        smoke=not preview,
     )
 
     # PREVIEW MODE (Branch primitive — EDIT/arm path): the build above already ran
