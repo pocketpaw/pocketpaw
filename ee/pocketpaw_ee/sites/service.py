@@ -93,6 +93,18 @@
 # draft/published + is_live from the Site deployment doc for the pocket
 # (tenant-scoped on ``workspace``, via the model's compound index): no Site doc =
 # draft / not live; a Site doc = published with is_live following ``deployed``.
+# Updated 2026-06-17 (feat/sites-local-reserve — local sites die on restart):
+# added reserve_local_sites(). LOCAL deploy mode (Phase 3) serves sites from a
+# per-process static server bound to an EPHEMERAL port that is only started
+# during publish(). After a backend restart the server is gone and every stored
+# ``url`` (http://127.0.0.1:<old-port>/<id>/) is dead, even though the built
+# files survive under sites_home()/<id>/. reserve_local_sites() (re)starts the
+# shared server via local_server.ensure_server() and rewrites every deployed
+# site's ``url`` to the fresh live base, so prior local sites become openable
+# again. It is a no-op outside local mode (the real CF path owns its own URLs)
+# and skips sites whose files are not on disk. The cloud boot hook calls it
+# unscoped so a restart auto-re-serves all sites; POST /sites/reserve calls it
+# workspace-scoped for an explicit "re-serve" action.
 
 from __future__ import annotations
 
@@ -514,6 +526,58 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     return {doc.pocket_id async for doc in cursor}
 
 
+async def reserve_local_sites(workspace_id: str | None = None) -> int:
+    """Re-serve locally-deployed Paw Sites after a backend restart.
+
+    In LOCAL deploy mode (Phase 3) a published site is served from a per-process
+    static server on an EPHEMERAL OS-assigned port that is only started inside
+    ``publish``. The built files survive a restart under
+    ``local_server.sites_home()/<site_id>/``, but the server does not — so every
+    stored ``Site.url`` (``http://127.0.0.1:<old-port>/<site_id>/``) is dead and
+    re-publishing one site starts a server on a NEW port, leaving the rest stale.
+
+    This (re)starts the shared static server via ``local_server.ensure_server()``
+    and, for each deployed site whose files exist on disk, rewrites the stored
+    ``url`` to ``f"{base}/{site_id}/"`` against the now-live base, then saves.
+    Returns the count of sites reconciled.
+
+    Scope: ``workspace_id is None`` reconciles ALL workspaces' sites (the boot
+    hook path — a restart re-serves everything); a non-None id is tenant-scoped
+    to that workspace (the manual POST /sites/reserve path).
+
+    No-op outside local mode: the real Cloudflare path owns its own URLs, so when
+    ``_local_mode()`` is False this returns 0 without starting a server. Sites
+    with no persisted dir are skipped (nothing to serve)."""
+    if not _local_mode():
+        return 0
+
+    from pocketpaw_ee.sites import local_server
+
+    base = local_server.ensure_server()
+    home = local_server.sites_home()
+
+    # workspace=None → reconcile every tenant's sites (boot hook). A non-None id
+    # tenant-filters the read. Both paths only touch deployed sites.
+    query: dict[str, Any] = {"deployed": True}
+    if workspace_id is not None:
+        query["workspace"] = workspace_id
+
+    reconciled = 0
+    cursor = _SiteDoc.find(query)
+    async for doc in cursor:
+        site_id = str(doc.id)
+        # Skip sites whose built files are gone — there is nothing to serve, so
+        # rewriting the url to a 404-ing path would be worse than leaving it.
+        if not (home / site_id).is_dir():
+            continue
+        fresh_url = f"{base}/{site_id}/"
+        if doc.url != fresh_url:
+            doc.url = fresh_url
+            await doc.save()  # no-event: local-mode URL reconciliation, not a domain mutation
+        reconciled += 1
+    return reconciled
+
+
 __all__ = [
     "publish",
     "publish_pocket",
@@ -524,4 +588,5 @@ __all__ = [
     "list_domains",
     "list_for_workspace",
     "site_pocket_ids",
+    "reserve_local_sites",
 ]
