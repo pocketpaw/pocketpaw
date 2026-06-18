@@ -24,6 +24,15 @@
 # ``pocketpaw_sites_manager`` server as create + publish (see sites.py) so the
 # create → publish → edit hops sit side by side for the chat agent.
 #
+# Updated: 2026-06-18 (fix/sites-edit-draft-not-publish, BUG 2) — an edit now
+# stages a DRAFT PREVIEW, not a live publish, so the success result no longer
+# narrates "published"/"republished"/"live at". ``_edit_svelte_component_handler``
+# returns ``{ok, status:"draft", is_live:false, site:{..., preview_url, deployed},
+# component_path, message}`` with a message that says the change is a draft preview
+# (not live), the url is a PREVIEW (not the published site), and the user must click
+# "Submit for review" to publish. The tool docstring the agent reads was reworded to
+# match. The create + publish tools are unchanged (publish is a real live deploy).
+#
 # This is the decisive bypass of the dashboard-built ``pocket_specialist``
 # create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
 # subagent delegation + the validate-redraft loop) kept downgrading landing
@@ -580,8 +589,8 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
         # back and the live site stays on the prior deploy. Tell the agent so it
         # can fix the component and retry, NOT report a successful edit.
         return _error_response(
-            f"the edit did not pass the build smoke test, so the live site was not "
-            f"changed (the previous version is still deployed): {exc}"
+            f"the edit did not pass the build smoke test, so it was not staged "
+            f"(the previous version is unchanged): {exc}"
         )
     except CloudError as exc:
         # NotFound / ValidationError from the pockets service (missing pocket,
@@ -591,17 +600,32 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
         logger.warning("edit_svelte_component failed", exc_info=True)
         return _error_response(f"edit failed: {exc}")
 
+    # An edit stages a DRAFT PREVIEW — it does NOT publish or go live. The chat
+    # agent narrates this payload, so it must make the draft-not-live state
+    # unambiguous: ``status="draft"`` / ``is_live=False``, the url is a PREVIEW (not
+    # the live site), and the user must Submit for review to publish. The wording
+    # deliberately avoids "published"/"republished"/"live at" so the agent does not
+    # tell the user the change is live.
     return _success_response(
         {
             "ok": True,
+            "status": "draft",
+            "is_live": False,
             "component_path": component_path,
             "site": {
                 "id": str(doc.id),
                 "pocket_id": doc.pocket_id,
                 "name": doc.name,
-                "url": doc.url,
+                # The preview URL — a draft preview of the edit, NOT the live site.
+                "preview_url": doc.url,
                 "deployed": doc.deployed,
             },
+            "message": (
+                "Your change is staged as a draft preview — it is NOT live yet. "
+                "The preview_url shows a preview of the edit, not the live site. "
+                "To take it live, the user clicks 'Submit for review' (which sends "
+                "the draft for approval)."
+            ),
         }
     )
 
@@ -617,12 +641,13 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     @tool(
         "edit_svelte_component",
         (
-            "Rewrite ONE component of an EXISTING svelte Paw Site and republish "
-            "it. Use this when the user asks to change a section of a published "
+            "Rewrite ONE component of an EXISTING svelte Paw Site and stage it as a "
+            "DRAFT PREVIEW. Use this when the user asks to change a section of a "
             "svelte site — 'make the hero headline bolder', 'change the pricing "
             "copy', 'restyle the FAQ'. You provide the FULL new file contents for "
-            "ONE file in the site's source map; the tool persists it and "
-            "republishes. Args: `pocket_id` (the svelte site pocket), "
+            "ONE file in the site's source map; the tool persists it as a draft and "
+            "builds a preview. The edit is NOT published and does NOT go live — it "
+            "is staged for review. Args: `pocket_id` (the svelte site pocket), "
             "`component_path` (the relative path of the file to rewrite — it must "
             "already exist in the source map, e.g. "
             "'src/lib/components/Hero.svelte'), `new_source` (the whole new file "
@@ -630,10 +655,14 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
             "and optional `name`. CRITICAL authoring rule (same as "
             "create_svelte_site): the component must render its resting/final "
             "state in MARKUP — never set it only in onMount — because the page is "
-            "PRERENDERED. Returns {ok, site: {id, name, url, deployed, pocket_id}, "
-            "component_path} — show the user the `url`. ok=false with an error "
-            "means the edit did NOT go live: a smoke-test failure leaves the "
-            "PREVIOUS version deployed (fix the component and retry), and a "
+            "PRERENDERED. Returns {ok, status:'draft', is_live:false, site: {id, "
+            "name, preview_url, deployed:false, pocket_id}, component_path, "
+            "message}. Relay the `message` to the user: the change is a DRAFT "
+            "PREVIEW (not live), `preview_url` is a PREVIEW (not the published "
+            "site), and to publish it the user clicks 'Submit for review'. Do NOT "
+            "tell the user the change is published or live. ok=false with an error "
+            "means the edit was NOT staged: a smoke-test failure leaves the "
+            "previous version unchanged (fix the component and retry), and a "
             "not-found / not-a-svelte-site error means relay the reason. Do NOT "
             "report a successful edit when ok=false."
         ),

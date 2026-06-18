@@ -156,10 +156,12 @@ async def test_edit_component_republishes_with_new_source(beanie_test_db):
     )
 
     # An edit is a PREVIEW, not a live deploy: no CF worker put, not deployed,
-    # but it returns the preview URL the builder iframe frames.
+    # but it returns the STABLE per-pocket preview URL the builder iframe frames
+    # (preview-<pocket_id>, NOT the minted site id — so repeated builds don't churn
+    # the url).
     assert cf.put_calls == []
     assert site.deployed is False
-    assert site.url.endswith(f"/{site.script_name}/")
+    assert site.url.endswith(f"/preview-{pocket_id}/")
     assert site.pocket_id == pocket_id
     # The regenerated build materialized the EDITED component, not the original.
     assert gen.built is not None

@@ -208,6 +208,19 @@ def _default_bundle_reader(project_dir: str) -> bytes:
     return Path(project_dir, _WORKER_BUNDLE_REL).read_bytes()
 
 
+def _preview_id(pocket_id: str) -> str:
+    """A STABLE per-pocket id for serving a preview build (the EDIT/arm path).
+
+    A live publish mints a fresh ObjectId per site, but a preview must serve at the
+    SAME URL across repeated builds so the builder iframe can frame it once and just
+    reload — otherwise every edit/arm builds at a new ``/<minted-id>/`` and the user
+    never sees the change (the churn bug). ``local_server.persist_site`` overwrites
+    ``<home>/<id>/`` in place, so a deterministic id derived from the pocket gives
+    the same URL with fresh content on each preview build. Prefixed ``preview-`` so a
+    preview dir never collides with a live site's minted-ObjectId dir."""
+    return f"preview-{pocket_id}"
+
+
 def _capture_base() -> str:
     import os
 
@@ -452,8 +465,14 @@ async def publish(
     if preview:
         from pocketpaw_ee.sites import local_server
 
+        # Serve at a STABLE per-pocket preview id (NOT the freshly-minted ObjectId)
+        # so repeated preview builds overwrite the same dir and serve at the SAME
+        # url — the builder iframe frames it once and just reloads. The transient
+        # doc still carries the minted ObjectId in its ``id``/``script_name`` (it is
+        # never persisted), but the served path + url use the stable preview id.
+        preview_id = _preview_id(pocket_id)
         deploy = _local_deploy or local_server.deploy_local
-        preview_url = deploy(site_id, build.project_dir)
+        preview_url = deploy(preview_id, build.project_dir)
         return _SiteDoc(
             id=ObjectId(site_id),
             workspace=workspace_id,

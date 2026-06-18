@@ -238,6 +238,59 @@ async def test_make_editable_does_not_promote_or_go_live(beanie_test_db):
     assert preview.deployed is False, "a preview must not claim a live deploy"
 
 
+async def test_consecutive_previews_serve_at_a_stable_url(beanie_test_db):
+    """BUG 1: a preview must serve at a STABLE per-pocket URL so repeated builds
+    overwrite in place and the FE can frame it once and just reload.
+
+    Before the fix each preview build (arm, then edit, then a second edit) served
+    at ``deploy_local(<freshly-minted-ObjectId>, ...)`` → a NEW url every time, so
+    the iframe (framing the first url) never showed the change. This asserts the
+    two consecutive preview builds for the SAME pocket serve at the SAME url.
+    """
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+
+    # Record the site_id each preview serve is asked to deploy at; the returned
+    # url is f"<base>/{site_id}/" (matching local_server.local_url_for), so a
+    # stable site_id ⇒ a stable url.
+    served_ids: list[str] = []
+
+    def _recording_local_deploy(site_id: str, project_dir: str) -> str:
+        served_ids.append(site_id)
+        return f"http://127.0.0.1:9999/{site_id}/"
+
+    arm = await sites_service.make_site_editable(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        _generator=_FakeGenerator(),
+        _cloudflare=_FakeCF(),
+        _bundle_reader=lambda d: b"export default {}",
+        _local_deploy=_recording_local_deploy,
+    )
+    edit = await sites_service.edit_svelte_component(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id=pocket_id,
+        component_path="src/lib/components/Hero.svelte",
+        new_source=_HERO_V2,
+        _generator=_FakeGenerator(),
+        _cloudflare=_FakeCF(),
+        _bundle_reader=lambda d: b"export default {}",
+        _local_deploy=_recording_local_deploy,
+    )
+
+    # Both preview builds served at the SAME stable per-pocket id (NOT a minted
+    # ObjectId per call), so the preview URL does not churn.
+    assert len(served_ids) == 2
+    assert served_ids[0] == served_ids[1], (
+        "consecutive preview builds for one pocket must serve at the SAME url"
+    )
+    # The returned preview urls match (so the iframe can frame once + reload).
+    assert arm.url == edit.url
+    # The stable id is derived from the pocket, not a random ObjectId.
+    assert pocket_id in served_ids[0]
+
+
 async def test_chat_create_publish_still_goes_live(beanie_test_db):
     """Backward-compat guard: a normal publish (no builder_origin — the chat-create
     / approve path) MUST still deploy live and promote the draft to published. The
