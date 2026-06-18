@@ -10,16 +10,22 @@ existing wire shape consumed by paw-enterprise:
 Changes: added the slug rule single-source-of-truth (``SLUG_RE`` +
 ``RESERVED_SLUGS``) and the ``SlugAvailabilityOut`` response so the create
 UI can check a slug live; ``validate_slug`` now reuses ``SLUG_RE``.
+2026-06-14 (WB-1): added ``BrandingPatch`` (request, with ``accent_color``
+format validation) + ``BrandingOut`` (response), an optional ``branding``
+field on ``UpdateWorkspaceRequest``, a ``branding`` field on ``WorkspaceOut``,
+and the ``Branding`` -> ``BrandingOut`` mapping in ``workspace_to_dto``.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.workspace.domain import (
+    Branding,
     Invite,
     InviteContext,
     VerifiedDomain,
@@ -27,6 +33,10 @@ from pocketpaw_ee.cloud.workspace.domain import (
     WorkspaceMember,
 )
 from pocketpaw_ee.cloud.workspace.slug import SLUG_RE
+
+# Hex accent color, e.g. "#1A2B3C". Anchored — rejects "blue", "#ZZZ",
+# short/long hex, and a missing leading "#".
+ACCENT_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 # ---------------------------------------------------------------------------
 # Requests (preserved from schemas.py)
@@ -45,9 +55,37 @@ class CreateWorkspaceRequest(BaseModel):
         return v
 
 
+class BrandingPatch(BaseModel):
+    """Per-tenant white-label branding patch (WB-1), carried on
+    ``UpdateWorkspaceRequest.branding``.
+
+    All fields optional. ``accent_color`` is format-validated here (must be
+    ``#RRGGBB``) so a malformed value is a 422 at the route boundary, before
+    the service runs. Asset ownership (``logo_asset`` / ``favicon_asset``
+    must belong to the target workspace) is a DB-backed check enforced in the
+    service, not here."""
+
+    logo_asset: str | None = None
+    favicon_asset: str | None = None
+    display_name: str | None = None
+    tab_title: str | None = None
+    accent_color: str | None = None
+    show_paw_mark: bool = True
+
+    @field_validator("accent_color")
+    @classmethod
+    def validate_accent_color(cls, v: str | None) -> str | None:
+        if v is not None and not ACCENT_COLOR_RE.match(v):
+            raise ValueError("accent_color must be a hex color like #RRGGBB")
+        return v
+
+
 class UpdateWorkspaceRequest(BaseModel):
     name: str | None = None
     settings: dict | None = None
+    # Per-tenant white-label branding (WB-1). Owner/admin-gated at the route
+    # via the same ``workspace.update`` action as the rename path.
+    branding: BrandingPatch | None = None
 
 
 class InviteContextDTO(BaseModel):
@@ -98,8 +136,27 @@ class BulkInviteSkip(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class BrandingOut(BaseModel):
+    """Per-tenant white-label branding on the workspace read (WB-1).
+
+    Mirrors ``BrandingPatch`` minus the validators — it's a read shape. The
+    frontend applies the Paw default for any field that's ``None``."""
+
+    logo_asset: str | None = None
+    favicon_asset: str | None = None
+    display_name: str | None = None
+    tab_title: str | None = None
+    accent_color: str | None = None
+    show_paw_mark: bool = True
+
+
 class WorkspaceOut(BaseModel):
-    """GET /workspaces/{id} response."""
+    """GET /workspaces/{id} response.
+
+    Also the shape the shell reads at load for the active workspace (there is
+    no separate ``/workspaces/active`` route — the shell fetches the active
+    workspace via ``GET /workspaces/{id}`` using the id from the profile), so
+    ``branding`` here is enough for the shell to theme on first paint."""
 
     id: str = Field(serialization_alias="_id")
     name: str
@@ -109,6 +166,7 @@ class WorkspaceOut(BaseModel):
     seats: int
     createdAt: str | None  # noqa: N815 - camelCase wire key
     memberCount: int  # noqa: N815 - camelCase wire key
+    branding: BrandingOut | None = None  # per-tenant white-label branding (WB-1)
 
     model_config = {"populate_by_name": True}
 
@@ -247,6 +305,19 @@ class InvitePreviewResponse(BaseModel):
     context: InviteContextDTO | None = None
 
 
+def _branding_to_dto(b: Branding | None) -> BrandingOut | None:
+    if b is None:
+        return None
+    return BrandingOut(
+        logo_asset=b.logo_asset,
+        favicon_asset=b.favicon_asset,
+        display_name=b.display_name,
+        tab_title=b.tab_title,
+        accent_color=b.accent_color,
+        show_paw_mark=b.show_paw_mark,
+    )
+
+
 def workspace_to_dto(ws: Workspace) -> WorkspaceOut:
     return WorkspaceOut(
         id=ws.id,
@@ -257,6 +328,7 @@ def workspace_to_dto(ws: Workspace) -> WorkspaceOut:
         seats=ws.seats,
         createdAt=iso_utc(ws.created_at),
         memberCount=ws.member_count,
+        branding=_branding_to_dto(ws.branding),
     )
 
 
@@ -322,6 +394,8 @@ def invite_to_validate_dto(inv: Invite, workspace_name: str) -> ValidateInviteOu
 
 __all__ = [
     "AddDomainRequest",
+    "BrandingOut",
+    "BrandingPatch",
     "BulkInviteRequest",
     "BulkInviteResponse",
     "BulkInviteSkip",

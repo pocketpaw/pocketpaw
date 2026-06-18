@@ -6,6 +6,14 @@
 # without Bun/workerd present.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): build() takes an
+# optional ``builder_origin`` and, when set, sends it on
+# ``siteConfig.builderOrigin``. The paw-sites generator (SE-1) gates the editable
+# section anchors + the postMessage edit-bridge on that field, so a site is
+# editable only when it carries a builderOrigin. The key is OMITTED when
+# ``builder_origin`` is None, so a normal (non-editable) publish's wire payload is
+# byte-identical to before this change.
+#
 # Updated 2026-06-04 (feat/sites-svelte-engine — Paw Sites "Svelte track"):
 #   * FIX: BuildResult.ripple_version is now optional and build() reads it with
 #     gen.get("rippleVersion") (was gen["rippleVersion"]). The svelte
@@ -202,6 +210,7 @@ class GeneratorClient:
         capture_signed_key: str,
         engine: str = "ripple",
         source: dict[str, str] | None = None,
+        builder_origin: str | None = None,
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -213,20 +222,32 @@ class GeneratorClient:
         carries ``rippleSpec`` and OMITS ``source`` (gaining only the
         ``engine: "ripple"`` tag). ``siteConfig`` + ``theme`` are sent on both
         tracks unchanged. Stages 1, 3-8 (install/smoke/...) are track-agnostic.
+
+        ``builder_origin`` (SE-2b) makes the site EDITABLE: when set, it rides
+        ``siteConfig.builderOrigin`` and the paw-sites generator (SE-1) injects
+        the gated section anchors + the postMessage edit-bridge keyed on it. It
+        is OMITTED from the payload when ``None`` so a normal (non-editable)
+        publish keeps the exact prior wire bytes and the generator does not inject
+        the bridge.
         """
         out_dir = tempfile.mkdtemp(prefix=f"paw-site-{site_id}-")
         # §4.2: ``engine`` is always present; the STAGE-2 payload key forks on
         # it. svelte → ``source`` (no rippleSpec); ripple → ``rippleSpec`` (no
         # source). siteConfig + theme ride both tracks unchanged.
+        site_config: dict[str, Any] = {
+            "siteId": site_id,
+            "title": title,
+            "captureApiBase": capture_api_base,
+            "captureSignedKey": capture_signed_key,
+        }
+        # SE-2b: only present when the site is being published as editable, so a
+        # non-editable publish's payload is byte-identical to before this change.
+        if builder_origin:
+            site_config["builderOrigin"] = builder_origin
         input_json: dict[str, Any] = {
             "engine": engine,
             "theme": theme,
-            "siteConfig": {
-                "siteId": site_id,
-                "title": title,
-                "captureApiBase": capture_api_base,
-                "captureSignedKey": capture_signed_key,
-            },
+            "siteConfig": site_config,
         }
         if engine == "svelte":
             input_json["source"] = source or {}
