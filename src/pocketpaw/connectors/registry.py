@@ -204,6 +204,12 @@ def _provider_state_store() -> ConnectorStateStore | None:
         return None
 
 
+# Connectors that were renamed on disk. An existing user's persisted state row
+# is keyed by the OLD name, so without a migration a rename silently orphans
+# their connection (it surfaces as ``definition_missing``). Map old -> new.
+_RENAMED_CONNECTORS: dict[str, str] = {"drive": "google_drive"}
+
+
 class ConnectorRegistry:
     """Discovers available connectors and manages instances per pocket."""
 
@@ -224,6 +230,7 @@ class ConnectorRegistry:
         # Per-key locks serializing the connect paths — see _lock_for().
         self._connect_locks: dict[str, asyncio.Lock] = {}
         self._scan()
+        self._migrate_renamed_connectors()
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         """Per-(pocket, connector) lock for connect()/ensure_connected().
@@ -255,6 +262,47 @@ class ConnectorRegistry:
                     self._definitions[defn.name] = defn
                 except Exception:
                     pass  # Skip malformed YAMLs
+
+    def _migrate_renamed_connectors(self) -> None:
+        """One-time, idempotent migration of state rows for renamed connectors.
+
+        A rename (e.g. ``drive`` -> ``google_drive``) would otherwise orphan an
+        existing user's persisted state, which is keyed by the old name. For each
+        ``(old, scope)`` row whose new name is a known definition and has no row
+        yet, copy the config across and delete the old row. After it runs once no
+        legacy row remains, so re-running is a no-op.
+
+        Sync-only: the OSS ``FileConnectorStateStore`` is synchronous. If an
+        async state provider returns awaitables we skip — a multi-tenant cloud
+        provider scopes/handles its own rows separately.
+        """
+        try:
+            rows = self._state_store.list()
+        except Exception:
+            return
+        if inspect.isawaitable(rows):
+            return  # async state provider — not migrated here
+        for name, scope in list(rows):
+            new_name = _RENAMED_CONNECTORS.get(name)
+            if not new_name or new_name not in self._definitions:
+                continue
+            try:
+                existing = self._state_store.get(new_name, scope)
+                if inspect.isawaitable(existing):
+                    return
+                if existing is not None:
+                    # New row already present — drop the stale legacy row.
+                    self._state_store.delete(name, scope)
+                    continue
+                config = self._state_store.get(name, scope)
+                if config is not None:
+                    self._state_store.set(new_name, scope, config)
+                    self._state_store.delete(name, scope)
+                    logger.info(
+                        "Migrated connector state %s -> %s (scope %s)", name, new_name, scope
+                    )
+            except Exception as exc:
+                logger.debug("rename migration failed for %s (scope %s): %s", name, scope, exc)
 
     @property
     def available(self) -> list[dict[str, str]]:

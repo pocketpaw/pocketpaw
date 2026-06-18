@@ -2,8 +2,8 @@
 # Created during review of PR #1481 (connectors-oauth reconciliation) to verify
 # the new behaviour with running code: (1) the auto-connect happy path works,
 # (2) it avoids the fail-delete loop on a revoked token, and (3) the
-# drive->google_drive rename ORPHANS an existing 'drive' connection (migration
-# gap). Tests 1-2 are expected to PASS (prove the fix); test 3 documents the gap.
+# drive->google_drive rename MIGRATES an existing 'drive' connection instead of
+# orphaning it (the registry runs a one-time rename migration on construction).
 from __future__ import annotations
 
 from pathlib import Path
@@ -68,10 +68,25 @@ def _patch_oauth(monkeypatch, *, token, live_token):
 
 
 async def test_auto_connect_registers_google_drive_with_valid_token(reg, store, monkeypatch):
-    """Happy path: a live OAuth token reconciles into the registry as connected."""
+    """Happy path: a live OAuth token reconciles into the registry as connected.
+
+    The adapter's own ``connect()`` (a real token/network handshake) is tested
+    elsewhere and is env-dependent; here we verify the reconciliation LOGIC, so
+    ``reg.connect`` is stubbed to the success it returns once the token is live.
+    """
     from pocketpaw.api.v1.connectors import _auto_connect_if_oauth
 
     _patch_oauth(monkeypatch, token=_FakeToken(), live_token="live-access-token")
+
+    class _Result:
+        success = True
+
+    async def _fake_connect(pocket_id, name, config):
+        store.set(name, pocket_id, config)  # mirror what a real connect persists
+        return _Result()
+
+    monkeypatch.setattr(reg, "connect", _fake_connect)
+
     newly = await _auto_connect_if_oauth(reg, "google_drive", "default")
 
     assert newly is True
@@ -94,19 +109,27 @@ async def test_auto_connect_no_fail_delete_on_revoked_token(reg, store, monkeypa
     assert statuses.get("google_drive") == ConnectorStatus.DISCONNECTED
 
 
-def test_rename_orphans_existing_drive_connection(reg, store):
-    """GAP: a user connected as 'drive' before the rename is now orphaned, not migrated.
+def test_rename_migrates_existing_drive_connection(tmp_path, store):
+    """A user connected as 'drive' before the rename is MIGRATED, not orphaned.
 
-    Documents the migration gap — there is no rename of existing state rows, so the
-    pre-rename connection surfaces as definition_missing and google_drive shows
-    disconnected until the user re-authorises.
+    The registry runs a one-time, idempotent rename migration on construction:
+    an existing ``drive`` state row is moved to ``google_drive`` so the
+    connection survives the rename instead of surfacing as definition_missing.
     """
-    # Simulate an existing connection persisted under the OLD name.
+    # Simulate an existing connection persisted under the OLD name, BEFORE the
+    # registry is built (mirrors a real on-disk row from a prior release).
     store.set("drive", "default", {"scope": "https://www.googleapis.com/auth/drive"})
+
+    # Building the registry triggers the migration.
+    reg = ConnectorRegistry(
+        REPO_CONNECTORS, state_store=store, home_connectors_dir=tmp_path / "home"
+    )
 
     statuses = {s["name"]: s["status"] for s in reg.status("default")}
 
-    # The old connection is orphaned (definition gone after the rename)...
-    assert statuses.get("drive") == ConnectorStatus.DEFINITION_MISSING
-    # ...and the renamed connector has no state -> appears disconnected.
-    assert statuses.get("google_drive") == ConnectorStatus.DISCONNECTED
+    # The connection survived the rename, carried over to the new name...
+    assert statuses.get("google_drive") == ConnectorStatus.CONNECTED
+    # ...and the legacy 'drive' row is gone (no orphan, no definition_missing).
+    assert "drive" not in statuses
+    assert store.get("drive", "default") is None
+    assert store.get("google_drive", "default") is not None
