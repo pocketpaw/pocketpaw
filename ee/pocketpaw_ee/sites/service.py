@@ -176,6 +176,24 @@
 # finding carries a ``fix_prompt`` the UI feeds to the EXISTING edit path
 # (edit_svelte_component / refine) so a fix lands as a reviewable draft in the
 # Tray — BP-7 adds NO apply endpoint.
+#
+# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): a LIVE publish now has a
+# STABLE per-(workspace, pocket_id) identity instead of minting a fresh ObjectId per
+# call (which inserted a NEW Site doc at a NEW folder/URL every publish — one pocket
+# had 14 docs, the gallery showed dupes, and pocket_status returned an arbitrary
+# stale doc with url=None: the stale-live-link bug). Mirroring the preview path's
+# _preview_id:
+#   * _live_object_id(workspace, pocket) derives a deterministic ObjectId from the
+#     pair, used for the deploy folder/URL, the CF Worker script_name (overwrite the
+#     worker, no orphan), and the Site doc _id. publish()'s preview branch is
+#     unchanged (it already serves at the stable preview-<pocket> path).
+#   * publish() UPSERTS ONE canonical Site doc keyed on the stable _id (find-then-
+#     save/insert) — re-publish refreshes the deploy fields in place and PRESERVES
+#     domain/allowed_origins/signed_key, instead of inserting a second row.
+#   * pocket_status() reads the CANONICAL doc via _canonical_site_doc (the stable-id
+#     doc, else the newest with a real url) and returns its non-null url + is_live,
+#     dropping the arbitrary find_one. PERF-1 does NOT migrate pre-existing dupes
+#     (that is PERF-2) — _canonical_site_doc just resolves the live one among them.
 
 from __future__ import annotations
 
@@ -220,14 +238,43 @@ def _default_bundle_reader(project_dir: str) -> bytes:
 def _preview_id(pocket_id: str) -> str:
     """A STABLE per-pocket id for serving a preview build (the EDIT/arm path).
 
-    A live publish mints a fresh ObjectId per site, but a preview must serve at the
-    SAME URL across repeated builds so the builder iframe can frame it once and just
-    reload — otherwise every edit/arm builds at a new ``/<minted-id>/`` and the user
-    never sees the change (the churn bug). ``local_server.persist_site`` overwrites
-    ``<home>/<id>/`` in place, so a deterministic id derived from the pocket gives
-    the same URL with fresh content on each preview build. Prefixed ``preview-`` so a
-    preview dir never collides with a live site's minted-ObjectId dir."""
+    A live publish derives a stable per-pocket ObjectId (``_live_object_id``); a
+    preview must likewise serve at the SAME URL across repeated builds so the
+    builder iframe can frame it once and just reload — otherwise every edit/arm
+    builds at a new ``/<minted-id>/`` and the user never sees the change (the churn
+    bug). ``local_server.persist_site`` overwrites ``<home>/<id>/`` in place, so a
+    deterministic id derived from the pocket gives the same URL with fresh content
+    on each preview build. Prefixed ``preview-`` so a preview dir never collides
+    with a live site's dir."""
     return f"preview-{pocket_id}"
+
+
+def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
+    """A STABLE per-(workspace, pocket) ObjectId for the LIVE published site (PERF-1).
+
+    Before PERF-1 ``publish`` minted ``ObjectId()`` per call, so every publish
+    inserted a NEW Site doc at a NEW deploy folder / URL — one pocket accumulated 14
+    Site docs, the gallery showed dupes, and ``pocket_status`` did an arbitrary
+    ``find_one`` across them (the stale-live-link bug). Mirroring ``_preview_id``,
+    the live site now has a STABLE identity derived deterministically from
+    ``(workspace_id, pocket_id)``: the SAME 12-byte ObjectId every publish, so:
+
+      * the deploy folder / URL is stable (``local_server.persist_site`` overwrites
+        ``<home>/<id>/`` in place ⇒ same URL, fresh content);
+      * the CF Worker ``script_name`` (== this id) is stable ⇒ ``put_worker``
+        OVERWRITES the worker per pocket instead of orphaning the old one;
+      * the Site doc ``_id`` is stable ⇒ publish UPSERTS ONE canonical doc per
+        ``(workspace, pocket_id)`` rather than inserting a fresh row each time, and
+        ``script_name == str(site.id)`` still holds.
+
+    The id is the first 12 bytes of ``sha1(workspace_id:pocket_id)`` — a pure
+    function of the pair, collision-resistant across the id space the same way a
+    minted ObjectId is, and never colliding with a ``preview-<pocket>`` dir (those
+    are strings, not ObjectId hex)."""
+    import hashlib
+
+    digest = hashlib.sha1(f"{workspace_id}:{pocket_id}".encode()).digest()
+    return ObjectId(digest[:12])
 
 
 def _capture_base() -> str:
@@ -446,7 +493,12 @@ async def publish(
     if not site_name:
         site_name = "Untitled site"
 
-    site_id = str(ObjectId())
+    # PERF-1: the LIVE site has a STABLE per-(workspace, pocket) id (mirroring the
+    # preview path's _preview_id), so re-publishing a pocket overwrites the SAME
+    # deploy folder / URL / CF worker / Site doc in place instead of minting a fresh
+    # one each call. A PREVIEW build still uses the freshly-minted ObjectId for its
+    # transient (never-persisted) doc id and serves at the stable preview path.
+    site_id = str(ObjectId()) if preview else str(_live_object_id(workspace_id, pocket_id))
     signed_key = f"site_key_{secrets.token_urlsafe(24)}"
 
     build = await generator.build(
@@ -528,27 +580,47 @@ async def publish(
         bundle = _bundle_reader(build.project_dir)
         await cf.put_worker(script_name=site_id, bundle=bundle)
 
-    doc = _SiteDoc(
-        id=ObjectId(site_id),
-        workspace=workspace_id,
-        pocket_id=pocket_id,
-        owner=user_id,
-        name=site_name,
-        script_name=site_id,
-        deployed=True,
-        signed_key=signed_key,
-        url=url,
-        # SE-2b: persist the builder origin (or "") so a component-edit republish
-        # can re-apply it and the site stays editable across edits.
-        builder_origin=builder_origin or "",
-        # Seed capture config so a lead lands with no manual Mongo edit: a default
-        # mapping keyed on the form_type the generated endpoint sends, and the
-        # local dev origins so the local smoke works. add_domain() appends the
-        # production hostname when a custom domain is connected.
-        allowed_origins=_default_allowed_origins(),
-        event_mapping=_DEFAULT_EVENT_MAPPING,
-    )
-    await doc.insert()
+    # PERF-1: UPSERT ONE canonical Site doc per (workspace, pocket_id) keyed on the
+    # stable ``_id`` (== site_id), rather than inserting a fresh row every publish.
+    # The stable id means the existing doc (if any) is found by ``_id`` directly; we
+    # refresh the deploy-facing fields in place (a re-publish ships fresh content at
+    # the same URL/worker). Fields a domain connect mutates later (``domains``,
+    # ``allowed_origins``) are PRESERVED on update so connecting a domain survives a
+    # re-publish; only a first insert seeds the defaults. ``signed_key`` is likewise
+    # kept stable across re-publishes (the capture endpoint verifies against it).
+    oid = ObjectId(site_id)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=True,
+            signed_key=signed_key,
+            url=url,
+            # SE-2b: persist the builder origin (or "") so a component-edit republish
+            # can re-apply it and the site stays editable across edits.
+            builder_origin=builder_origin or "",
+            # Seed capture config so a lead lands with no manual Mongo edit: a default
+            # mapping keyed on the form_type the generated endpoint sends, and the
+            # local dev origins so the local smoke works. add_domain() appends the
+            # production hostname when a custom domain is connected.
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        doc.deployed = True
+        doc.url = url
+        doc.builder_origin = builder_origin or ""
+        await doc.save()
     return doc
 
 
@@ -563,6 +635,41 @@ async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     if doc is None:
         raise NotFound("site", site_id)
     return doc
+
+
+async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The ONE canonical Site doc for (workspace, pocket_id), or None (PERF-1).
+
+    Stable identity (``_live_object_id``) means a pocket published after PERF-1 has
+    exactly one doc — the stable-id one. But PERF-1 does NOT migrate the dupes the
+    old per-publish minting left behind (PERF-2 does), so a pocket may still have
+    several Site docs, one of which the old arbitrary ``find_one`` could return with
+    a stale ``url`` (the stale-live-link bug). This resolves the canonical doc
+    deterministically:
+
+      1. the STABLE-id doc (``_live_object_id``) when it exists — every post-PERF-1
+         publish writes here, so it is the live one;
+      2. otherwise the newest doc (by ``createdAt``) that actually carries a url —
+         the freshest live build among legacy dupes;
+      3. otherwise the newest doc at all (so a pre-url-era doc still resolves).
+
+    Tenant-scoped on ``workspace``. Returns None when the pocket has no Site doc.
+    """
+    stable = await _SiteDoc.find_one(
+        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+    )
+    if stable is not None:
+        return stable
+    docs = (
+        await _SiteDoc.find({"workspace": workspace_id, "pocket_id": pocket_id})
+        .sort(-_SiteDoc.createdAt)  # type: ignore[operator]
+        .to_list()
+    )
+    if not docs:
+        return None
+    # Prefer the newest doc that carries a real url (the freshest live build);
+    # fall back to the newest doc overall when none has one.
+    return next((d for d in docs if d.url), docs[0])
 
 
 async def add_domain(
@@ -1068,8 +1175,16 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     it). No Cloudflare call — just persisted state. Versioning is an additive
     layer, so a versions read failure degrades to the Site-doc signal rather than
     breaking the status read.
+
+    PERF-1: the read is now the CANONICAL Site doc for (workspace, pocket_id), not
+    an arbitrary ``find_one`` across dupes. With stable identity a pocket has ONE
+    doc; but PERF-1 does NOT migrate the dupes the old minting left behind (that's
+    PERF-2), so to fix the stale-live-link bug today we pick the canonical doc
+    deterministically — the stable-id doc when present, else the newest doc that
+    actually carries a url — and surface its (non-null, latest) ``url`` so the live
+    link no longer points at a stale ``url=None`` row.
     """
-    doc = await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
 
     published_no: int | None = None
     draft_no: int | None = None
@@ -1122,6 +1237,10 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         is_live=is_live,
         has_unpublished_changes=has_unpublished_changes,
         site_id=str(doc.id) if doc is not None else None,
+        # PERF-1: surface the canonical doc's live url so the builder/gallery link to
+        # the address the latest build actually serves at, not a stale ``url=None``
+        # dupe. None when the pocket has no deployed site.
+        url=(doc.url or None) if doc is not None else None,
     )
 
 

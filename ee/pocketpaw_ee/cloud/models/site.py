@@ -22,6 +22,14 @@
 # a normal (non-editable) site. When set, the generated page carries the gated
 # edit-bridge keyed on it. Persisted so a component-edit republish re-applies it
 # and the site stays editable across edits.
+#
+# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): a published Paw Site now
+# has a STABLE per-(workspace, pocket_id) identity — its ``_id`` is derived
+# deterministically from the pair (``service._live_object_id``), so a re-publish
+# UPSERTS the SAME Site doc (one canonical row per pocket) instead of inserting a
+# fresh one each time. No schema change: the upsert keys on the primary ``_id``
+# (already unique), so the existing compound (workspace, pocket_id) index — which
+# still serves the per-pocket reads — is sufficient and no new unique key is added.
 
 from __future__ import annotations
 

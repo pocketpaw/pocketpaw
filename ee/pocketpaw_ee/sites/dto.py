@@ -28,6 +28,12 @@
 # This flag (default False, backward-compatible) lets the builder badge "has
 # unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
 # semantics are unchanged in shape; only their derivation moves onto versions.
+# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): SiteStatusResponse gains
+# ``url`` — the canonical live address of the pocket's deployed site. With stable
+# per-pocket identity (one Site doc per pocket) pocket_status reads the ONE
+# canonical doc and surfaces its non-null url, so the builder/gallery link to the
+# address the latest build actually serves at instead of a stale dupe's url=None.
+# Optional (default None, backward-compatible) — None when no deployed site exists.
 # Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two DTOs
 # for the Branch-primitive surfaces — SiteVersionResponse + VersionHistoryResponse
 # (the ordered version timeline GET /sites/by-pocket/{pocket_id}/versions returns)
@@ -101,6 +107,9 @@ class SiteStatusResponse(BaseModel):
     is_live: bool
     has_unpublished_changes: bool = False
     site_id: str | None = None
+    # PERF-1: the canonical live url of the pocket's deployed site (the address the
+    # latest build serves at). None when no deployed site exists.
+    url: str | None = None
 
 
 class SiteVersionResponse(BaseModel):
