@@ -28,8 +28,18 @@
 #   * artifact.version.branched — on branch
 # We do NOT build a read projection here — that is BP-4.
 #
-# TODO(BP-3): a merge gate will set status="merged" on an accepted branch
-#             candidate and may emit artifact.version.merged.
+# Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — the merge
+# gate state transitions land here so the Instinct executor stays thin:
+#   * mark_merged(version_id)  — flip an ACCEPTED candidate to status="merged"
+#                                (the merge gate's approve path calls publish()
+#                                on the target first, then marks the candidate
+#                                merged). Emits artifact.version.merged.
+#   * discard(version_id)      — flip a REJECTED candidate to status="reverted"
+#                                so it leaves the draft pointer; the published
+#                                pointer is untouched. Emits artifact.version.
+#                                discarded.
+# Both are minimal + idempotent-friendly (a missing row raises ValueError, same
+# defensive contract as publish()). TODO(BP-4) still owns full revert()/history.
 # TODO(BP-4): revert() reverts to a prior snapshot (status="reverted") and a
 #             Journal VersionProjection folds these events into a history view.
 from __future__ import annotations
@@ -46,9 +56,11 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "branch",
+    "discard",
     "get_draft",
     "get_published",
     "list_versions",
+    "mark_merged",
     "publish",
     "revert",
     "write_draft",
@@ -285,6 +297,26 @@ async def publish(
     Raises ``ValueError`` if the version does not exist or belongs to a
     different artifact/workspace (defensive scope check).
     """
+    row = await _scoped_row(
+        scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
+    )
+    row.status = "published"
+    await row.save()
+    return row
+
+
+async def _scoped_row(
+    *, scope_type: str, scope_id: str, workspace_id: str, version_id: str
+) -> ArtifactVersion:
+    """Load a version by id and assert it belongs to (scope, workspace).
+
+    The shared defensive scope check used by ``publish`` / ``mark_merged`` /
+    ``discard``: a version mutation must never cross to another artifact or
+    tenant. Raises ``ValueError`` on a missing row or a scope/workspace
+    mismatch (the caller surfaces it). This is a SERVICE-level belt-and-braces
+    check; the Instinct router's ``_assert_artifact_change_workspace`` is the
+    primary tenant gate (it 403s before any state mutation).
+    """
     row = await ArtifactVersion.get(version_id)
     if row is None:
         raise ValueError(f"artifact version not found: {version_id}")
@@ -293,9 +325,95 @@ async def publish(
             f"version {version_id} does not belong to "
             f"{scope_type}:{scope_id} in workspace {workspace_id}"
         )
+    return row
 
-    row.status = "published"
+
+async def mark_merged(
+    *,
+    scope_type: str,
+    scope_id: str,
+    workspace_id: str,
+    version_id: str,
+) -> ArtifactVersion:
+    """Flip an ACCEPTED branch candidate to ``status="merged"`` (BP-3).
+
+    The merge gate's APPROVE path calls :func:`publish` on the merge target
+    first (that moves the published pointer), then marks the candidate row
+    ``merged`` so the version log records that this candidate was accepted into
+    the published lineage. Pure state transition + audit echo — it does NOT move
+    the published pointer (publish already did).
+
+    Raises ``ValueError`` if the version does not exist or belongs to a
+    different artifact/workspace (same defensive scope check as ``publish``).
+
+    Emits ``artifact.version.merged``.
+    """
+    row = await _scoped_row(
+        scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
+    )
+    row.status = "merged"
     await row.save()
+    _emit_version_event(
+        action="artifact.version.merged",
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        author=row.author,
+        payload={
+            "version_id": str(row.id),
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "branch": row.branch,
+            "version_no": row.version_no,
+            "status": "merged",
+        },
+    )
+    return row
+
+
+async def discard(
+    *,
+    scope_type: str,
+    scope_id: str,
+    workspace_id: str,
+    version_id: str,
+) -> ArtifactVersion:
+    """Discard a REJECTED branch candidate (BP-3).
+
+    The merge gate's REJECT path calls this: it flips the candidate row to
+    ``status="reverted"`` so it no longer reads as the working draft, and leaves
+    the PUBLISHED pointer entirely untouched (a rejection must never move what is
+    live). This is the minimal, correct discard for BP-3.
+
+    TODO(BP-4): revert/discard semantics deepen here — BP-4 owns reverting the
+    published pointer to a prior snapshot and the Journal history projection.
+    BP-3 only abandons the candidate draft.
+
+    Raises ``ValueError`` if the version does not exist or belongs to a
+    different artifact/workspace (same defensive scope check as ``publish``).
+
+    Emits ``artifact.version.discarded``.
+    """
+    row = await _scoped_row(
+        scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
+    )
+    row.status = "reverted"
+    await row.save()
+    _emit_version_event(
+        action="artifact.version.discarded",
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        author=row.author,
+        payload={
+            "version_id": str(row.id),
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "branch": row.branch,
+            "version_no": row.version_no,
+            "status": "reverted",
+        },
+    )
     return row
 
 
