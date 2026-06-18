@@ -229,6 +229,7 @@ from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
     AuditFinding,
     AuditResponse,
+    DevPreviewResponse,
     DomainStatusResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -1109,6 +1110,36 @@ async def preview_pocket(
 
     content = draft_content if draft_content is not None else current
     return SitePreviewResponse(pocket_id=pocket_id, engine=engine, content=content)
+
+
+async def dev_preview_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+) -> DevPreviewResponse:
+    """Ensure a live Vite dev-server is running for the pocket and return its URL
+    (Phase 2 / P2a — the EDITING preview).
+
+    Delegates to the DevServerManager singleton: a running server for the pocket is
+    touched + reused (its URL returned); otherwise the manager materializes the
+    pocket's current source into the persistent per-pocket build dir (PERF-3 —
+    cached node_modules) and starts ``vite dev`` on an ephemeral port, so subsequent
+    edits hot-reload over Vite HMR in ~ms instead of rebuilding the whole site. The
+    workerd smoke render is NOT run for the dev server (it is a publish-only gate,
+    PERF-4); publish() is unchanged and still does the full prod build + smoke.
+
+    ``user_id`` is threaded through so the manager reads the pocket via the pockets
+    service under the caller's scope (it raises NotFound / Forbidden itself, mapped
+    by the router to 404 / 403). ``workspace_id`` keeps the surface uniform and
+    tenant-aware with the other by-pocket reads.
+    """
+    from pocketpaw_ee.sites.dev_server import get_manager
+
+    url = await get_manager().ensure_dev_server(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    return DevPreviewResponse(pocket_id=pocket_id, url=url)
 
 
 async def audit_pocket(

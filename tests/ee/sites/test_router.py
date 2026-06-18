@@ -239,6 +239,74 @@ async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dev_preview_by_pocket_returns_url(beanie_test_db, monkeypatch):
+    """POST /sites/by-pocket/{id}/dev-preview returns {pocket_id, url} — the live
+    Vite dev-server URL for the editing preview (P2a). The route delegates to
+    sites_service.dev_preview_pocket → the DevServerManager singleton; we inject a
+    manager built with fake spawn/port/materialize seams so no real vite is spawned,
+    exercising the real service→manager→endpoint path end to end."""
+    import pocketpaw_ee.sites.dev_server as dev_server_mod
+    from pocketpaw_ee.sites.dev_server import DevServerManager
+
+    async def _fake_materialize(*, workspace_id, user_id, pocket_id):
+        return f"/tmp/site-builds/{pocket_id}"
+
+    async def _fake_spawn(cmd, cwd, port):
+        class _P:
+            returncode = None
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return 0
+
+        return _P()
+
+    mgr = DevServerManager(
+        _spawn=_fake_spawn, _free_port=lambda: 41234, _materialize=_fake_materialize
+    )
+    monkeypatch.setattr(dev_server_mod, "_MANAGER", mgr)
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk1/dev-preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {"pocket_id": "pk1", "url": "http://127.0.0.1:41234/"}
+    # The endpoint actually started a server in the singleton.
+    assert mgr.live_pocket_ids() == ["pk1"]
+    await mgr.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_dev_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch):
+    """A missing / access-denied pocket surfaces as a 404: the DEFAULT materialize
+    reads the pocket via the pockets service, whose NotFound flows through the
+    standard error handler."""
+    from unittest.mock import AsyncMock
+
+    import pocketpaw_ee.sites.dev_server as dev_server_mod
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.sites.dev_server import DevServerManager
+
+    # Fresh singleton with the REAL materialize so it hits the pockets service.
+    monkeypatch.setattr(dev_server_mod, "_MANAGER", DevServerManager())
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    )
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk_missing/dev-preview")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_post_reserve_returns_reconciled_list(beanie_test_db, monkeypatch):
     """POST /sites/reserve (re)starts the local server and returns the caller's
     workspace site list with fresh urls. The handler delegates to

@@ -66,6 +66,13 @@
 # apply endpoint). It's a read of the pocket's content, so it carries fabric.read
 # (the same gate as preview/status). Tenant-scoped on ctx; the pockets service
 # raises NotFound → 404 itself.
+# Updated 2026-06-18 (feat/sites-devserver, Phase 2 / P2a): added POST
+# /sites/by-pocket/{pocket_id}/dev-preview — start (or reuse) a live Vite dev-server
+# for the pocket's EDITING preview and return its localhost url. Delegates to
+# sites_service.dev_preview_pocket → the DevServerManager singleton (long-lived
+# `vite dev` per pocket, HMR in ~ms vs a per-edit rebuild). Carries fabric.write (it
+# spawns a process / mutates server state); a missing pocket is a 404 (the pockets
+# service raises NotFound during materialize). Publish/editable are unchanged.
 
 from __future__ import annotations
 
@@ -76,6 +83,7 @@ from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
+    DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
     MakeEditableRequest,
@@ -177,6 +185,29 @@ async def preview_by_pocket(
     {path: contents} source map for a svelte pocket. A missing / access-denied
     pocket surfaces as a 404 (the pockets service raises NotFound itself)."""
     return await sites_service.preview_pocket(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+
+
+@router.post("/sites/by-pocket/{pocket_id}/dev-preview", response_model=DevPreviewResponse)
+async def dev_preview_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> DevPreviewResponse:
+    """Start (or reuse) a live Vite dev-server for the pocket's EDITING preview and
+    return its localhost URL (Phase 2 / P2a): {pocket_id, url}.
+
+    The editor frames this URL so edits hot-reload over Vite HMR in ~ms instead of
+    rebuilding the whole site per edit. A running server for the pocket is reused
+    (touched); otherwise one is materialized from the pocket's current source
+    (PERF-3 persistent dir, cached node_modules) and started on an ephemeral port.
+    Publish / make_site_editable are unchanged — this is the editing preview only.
+
+    Carries fabric.write (it spawns a process / mutates server state), matching the
+    other by-pocket write actions. A missing / access-denied pocket surfaces as a
+    404 (the pockets service raises NotFound itself during materialize)."""
+    return await sites_service.dev_preview_pocket(
         workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
     )
 

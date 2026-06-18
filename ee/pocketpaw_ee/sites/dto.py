@@ -90,6 +90,17 @@ class SitePreviewResponse(BaseModel):
     content: dict[str, Any] | None = None
 
 
+class DevPreviewResponse(BaseModel):
+    """The live Vite dev-server URL for a pocket's EDITING preview (Phase 2 / P2a).
+    ``url`` is a localhost address (http://127.0.0.1:<port>/) the builder iframe
+    frames so edits hot-reload over Vite HMR in ~ms, instead of a full per-edit
+    rebuild. This is the editing preview only — publish still does the full prod
+    build + workerd smoke."""
+
+    pocket_id: str
+    url: str
+
+
 class SiteStatusResponse(BaseModel):
     """Authoritative draft/published + is_live state for a pocket, so the builder
     labels accurately even before the site appears in the gallery list. ``status``
