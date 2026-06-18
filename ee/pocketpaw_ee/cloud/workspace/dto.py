@@ -319,6 +319,25 @@ class SetMemberRoutePermissionsRequest(BaseModel):
         return v
 
 
+class ConnectorPermissionsOut(BaseModel):
+    """GET /workspaces/{id}/connector-permissions response.
+
+    A map of user_id → list of allowed connector names. An empty list or
+    missing entry means the user has full access (no connector restrictions).
+    """
+
+    permissions: dict[str, list[str]]
+
+
+class SetMemberConnectorPermissionsRequest(BaseModel):
+    """PUT /workspaces/{id}/connector-permissions/{user_id} request.
+
+    An empty connectors list grants full access (clears restrictions).
+    """
+
+    connectors: list[str] = Field(default_factory=list)
+
+
 class InvitePreviewResponse(BaseModel):
     """Typed preview of an invite token for the accept UI.
 
@@ -447,6 +466,7 @@ __all__ = [
     "BulkInviteRequest",
     "BulkInviteResponse",
     "BulkInviteSkip",
+    "ConnectorPermissionsOut",
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
     "InviteContextDTO",
@@ -454,6 +474,7 @@ __all__ = [
     "InvitePreviewResponse",
     "MemberOut",
     "RoutePermissionsOut",
+    "SetMemberConnectorPermissionsRequest",
     "SetMemberRoutePermissionsRequest",
     "SlugAvailabilityOut",
     "UpdateDomainRequest",

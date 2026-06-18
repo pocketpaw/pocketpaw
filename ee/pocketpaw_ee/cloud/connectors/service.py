@@ -66,7 +66,7 @@ from pathlib import Path
 from beanie.operators import And, Or
 
 from pocketpaw.connectors.protocol import ExecutionMode
-from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import CloudError, Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     ConnectorConfigUpdated,
@@ -91,6 +91,7 @@ from pocketpaw_ee.cloud.connectors.dto import (
     WidgetRecipeResponse,
 )
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector as _WCDoc
+from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.shared.events import event_bus
 
 logger = logging.getLogger(__name__)
@@ -275,26 +276,106 @@ def _row_response(d: AvailableConnector, doc: _WCDoc | None) -> ConnectorRespons
 # ---------------------------------------------------------------------------
 
 
-async def list_connectors(workspace_id: str) -> list[ConnectorResponse]:
+# ---------------------------------------------------------------------------
+# Connector permission helpers
+# ---------------------------------------------------------------------------
+
+
+async def _get_workspace_connector_permissions(
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Read the connector_permissions map from the workspace.
+
+    Returns dict of user_id → allowed connector names. Empty / missing =
+    full access.
+    """
+    from beanie import PydanticObjectId
+
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return {}
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None:
+        return {}
+    return dict(doc.connector_permissions or {})
+
+
+async def assert_connector_allowed(
+    workspace_id: str,
+    user_id: str | None,
+    connector_name: str,
+) -> None:
+    """Raise Forbidden if the user has connector restrictions and this
+    connector is not in their allowed list."""
+    if user_id is None:
+        return  # system call — always allowed
+    perms = await _get_workspace_connector_permissions(workspace_id)
+    user_connectors = perms.get(user_id)
+    if user_connectors is None or len(user_connectors) == 0:
+        return  # full access — no restrictions
+    if connector_name not in user_connectors:
+        raise Forbidden(
+            "connector.not_allowed",
+            f"You do not have permission to access the '{connector_name}' connector",
+        )
+
+
+async def filter_allowed_connectors(
+    workspace_id: str,
+    user_id: str | None,
+    connector_names: list[str],
+) -> list[str]:
+    """Filter a list of connector names to only those the user is allowed to
+    access. If user has full access (no restrictions), returns the full list."""
+    if user_id is None:
+        return connector_names
+    perms = await _get_workspace_connector_permissions(workspace_id)
+    user_connectors = perms.get(user_id)
+    if user_connectors is None or len(user_connectors) == 0:
+        return connector_names  # full access
+    allowed_set = set(user_connectors)
+    return [n for n in connector_names if n in allowed_set]
+
+
+async def list_connectors(
+    workspace_id: str,
+    *,
+    user_id: str | None = None,
+) -> list[ConnectorResponse]:
     """List all available connectors with this workspace's enabled state.
 
     Read-only. Tenant filter on the Beanie query (cloud rule §7); the
-    registry catalog is global by design.
+    registry catalog is global by design. Filters results based on the
+    user's connector permissions when user_id is provided.
     """
     available = _available_from_registry()
     docs = await _WCDoc.find(_WCDoc.workspace == workspace_id).to_list()
     by_name = {d.name: d for d in docs}
-    return [_row_response(a, by_name.get(a.name)) for a in available]
+
+    # Filter connector names based on user's connector permissions
+    all_names = [a.name for a in available]
+    allowed_names = await filter_allowed_connectors(workspace_id, user_id, all_names)
+    allowed_set = set(allowed_names)
+
+    return [_row_response(a, by_name.get(a.name)) for a in available if a.name in allowed_set]
 
 
-async def get_connector(workspace_id: str, name: str) -> ConnectorDetailResponse:
+async def get_connector(
+    workspace_id: str,
+    name: str,
+    *,
+    user_id: str | None = None,
+) -> ConnectorDetailResponse:
     """One connector's detail row + actions + saved config.
 
     Raises ``NotFound`` if the registry doesn't know the name.
+    Gated by connector-level permissions.
     """
     available = {a.name: a for a in _available_from_registry()}
     if name not in available:
         raise NotFound("connector", name)
+    await assert_connector_allowed(workspace_id, user_id, name)
     a = available[name]
     doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
     base = _row_response(a, doc).model_dump()
@@ -492,12 +573,16 @@ async def record_sync(
 # ---------------------------------------------------------------------------
 
 
-async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
+async def list_widget_recipes(
+    workspace_id: str,
+    *,
+    user_id: str | None = None,
+) -> list[WidgetRecipeResponse]:
     """Flatten widget recipes across every connector enabled for this workspace.
 
     Read-only, tenant-filtered. Frontend AddWidgetPicker calls this to
     populate the "From connectors" rail. Disabled connectors contribute
-    zero recipes.
+    zero recipes. Filtered by connector permissions.
     """
     enabled_docs = await _WCDoc.find(
         _WCDoc.workspace == workspace_id,
@@ -508,8 +593,16 @@ async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
 
     reg = _get_registry()
     available = {a.name: a for a in _available_from_registry()}
+
+    # Filter enabled connectors by user's connector permissions
+    enabled_names = [d.name for d in enabled_docs]
+    allowed_names = await filter_allowed_connectors(workspace_id, user_id, enabled_names)
+    allowed_set = set(allowed_names)
+
     recipes: list[WidgetRecipeResponse] = []
     for doc in enabled_docs:
+        if doc.name not in allowed_set:
+            continue
         a = available.get(doc.name)
         if a is None:
             continue
@@ -542,7 +635,12 @@ async def list_widget_recipes(workspace_id: str) -> list[WidgetRecipeResponse]:
     return recipes
 
 
-async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[PocketConnectorInfo]:
+async def list_pocket_connectors(
+    workspace_id: str,
+    pocket_id: str,
+    *,
+    user_id: str | None = None,
+) -> list[PocketConnectorInfo]:
     """List the connectors enabled + bound to ONE pocket, with their actions.
 
     The agent-facing companion to ``list_connectors``: where that returns the
@@ -561,6 +659,8 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
     Trust gating: ``auto``-trust actions are read-first (``is_read=True``);
     ``confirm`` / ``restricted`` actions are write-shaped and marked
     ``is_read=False`` so the caller blocks them in v1.
+
+    Filtered by connector-level permissions when user_id is provided.
     """
     enabled_docs = await _WCDoc.find(
         _WCDoc.workspace == workspace_id,
@@ -575,10 +675,18 @@ async def list_pocket_connectors(workspace_id: str, pocket_id: str) -> list[Pock
 
     reg = _get_registry()
     available = {a.name: a for a in _available_from_registry()}
+
+    # Filter by connector permissions
+    enabled_names = [d.name for d in enabled_docs]
+    allowed_names = await filter_allowed_connectors(workspace_id, user_id, enabled_names)
+    allowed_set = set(allowed_names)
+
     out: list[PocketConnectorInfo] = []
     seen: set[str] = set()
     for doc in enabled_docs:
         if doc.name in seen:
+            continue
+        if doc.name not in allowed_set:
             continue
         seen.add(doc.name)
         a = available.get(doc.name)
@@ -726,6 +834,8 @@ async def execute(
     available = {a.name: a for a in _available_from_registry()}
     if name not in available:
         raise NotFound("connector", name)
+
+    await assert_connector_allowed(workspace_id, user_id, name)
 
     reg = _get_registry()
     defn = reg.get_definition(name)

@@ -31,12 +31,14 @@ from pocketpaw_ee.cloud.workspace.dto import (
     BulkInviteRequest,
     BulkInviteResponse,
     BulkInviteSkip,
+    ConnectorPermissionsOut,
     CreateInviteRequest,
     CreateWorkspaceRequest,
     InviteOut,
     InvitePreviewResponse,
     MemberOut,
     RoutePermissionsOut,
+    SetMemberConnectorPermissionsRequest,
     SetMemberRoutePermissionsRequest,
     SlugAvailabilityOut,
     UpdateDomainRequest,
@@ -245,6 +247,70 @@ async def clear_member_route_permissions(
 ) -> Response:
     """Remove all route restrictions for a member (grants full access)."""
     await workspace_service.clear_member_route_permissions(ctx, workspace_id, user_id)
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Connector Permissions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{workspace_id}/connector-permissions", response_model=ConnectorPermissionsOut)
+async def get_connector_permissions(
+    workspace_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_membership),
+) -> ConnectorPermissionsOut:
+    """Get the connector-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed connector names. A missing
+    or empty list means the user has full access (no restrictions).
+    Admin/owner can see everyone's restrictions; members can only see their own.
+    """
+    result = await workspace_service.get_connector_permissions(ctx, workspace_id)
+    viewer_id = str(user.id)
+    members = await workspace_service.list_members(ctx, workspace_id)
+    viewer_role = next(
+        (m.role for m in members if m.user_id == viewer_id),
+        "member",
+    )
+    if viewer_role not in ("owner", "admin"):
+        filtered = {k: v for k, v in result.items() if k == viewer_id}
+        return ConnectorPermissionsOut(permissions=filtered)
+    return ConnectorPermissionsOut(permissions=result)
+
+
+@router.put("/{workspace_id}/connector-permissions/{user_id}")
+async def set_member_connector_permissions(
+    workspace_id: str,
+    user_id: str,
+    body: SetMemberConnectorPermissionsRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.member.role_change")),
+) -> dict:
+    """Set which connectors a specific member can access.
+
+    An empty ``connectors`` list grants full access (clears all restrictions).
+    Gated by the same ``workspace.member.role_change`` action as role changes.
+    """
+    await workspace_service.set_member_connector_permissions(
+        ctx,
+        workspace_id,
+        user_id,
+        body.connectors,
+    )
+    return {"ok": True}
+
+
+@router.delete("/{workspace_id}/connector-permissions/{user_id}", status_code=204)
+async def clear_member_connector_permissions(
+    workspace_id: str,
+    user_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.member.role_change")),
+) -> Response:
+    """Remove all connector restrictions for a member (grants full access)."""
+    await workspace_service.clear_member_connector_permissions(ctx, workspace_id, user_id)
     return Response(status_code=204)
 
 
