@@ -222,6 +222,8 @@ async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
     assert body["pocket_id"] == "pk1"
     assert body["status"] == "published"
     assert body["is_live"] is True
+
+
 @pytest.mark.asyncio
 async def test_post_reserve_returns_reconciled_list(beanie_test_db, monkeypatch):
     """POST /sites/reserve (re)starts the local server and returns the caller's
