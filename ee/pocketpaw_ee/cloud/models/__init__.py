@@ -36,6 +36,13 @@ Updated: 2026-06-11 (feat/firestore-fabric-ingest) — added
 imports, ``__all__``, and ``get_all_documents()`` so the ingestion worker's
 collections are wired into ``init_beanie``. Only
 ``ee.cloud.fabric_ingest.service`` imports the doc classes directly.
+Updated: 2026-06-18 (feat/branch-primitive-versions, BP-1) — registered the
+``ArtifactVersion`` doc (the universal Branch-primitive version log) in
+``get_all_documents()`` via the lazy ``_ensure_version_docs()`` helper. The doc
+lives in the ``pocketpaw_ee.versions`` package (its own entity), so it is
+imported lazily here — the same out-of-models discipline the belt/mandates docs
+use — to keep ``cloud.models`` from hard-importing the versions package. Only
+``pocketpaw_ee.versions.service`` imports the doc class directly.
 """
 
 from __future__ import annotations
@@ -111,6 +118,11 @@ _EventDoc: type = None  # type: ignore[assignment]
 _MandateDoc: type = None  # type: ignore[assignment]
 _ShiftDoc: type = None  # type: ignore[assignment]
 _SightingDoc: type = None  # type: ignore[assignment]
+# The ArtifactVersion doc lives in pocketpaw_ee.versions (its own Branch-
+# primitive entity, sole importer = its own service). Lazy-loaded here so
+# init_beanie registers it without ee.cloud.models taking a hard import on the
+# versions package (same out-of-models discipline as belt/mandates).
+_ArtifactVersionDoc: type = None  # type: ignore[assignment]
 
 
 def _ensure_file_upload():
@@ -152,6 +164,18 @@ def _ensure_mandate_docs():
         _ShiftDoc = _SD
         _SightingDoc = _SG
     return _MandateDoc, _ShiftDoc, _SightingDoc
+
+
+def _ensure_version_docs():
+    # Why: the versions package is its own Branch-primitive entity whose sole
+    # importer is its own service. Import the doc class directly + deferred so
+    # cloud.models doesn't take a hard import on pocketpaw_ee.versions.
+    global _ArtifactVersionDoc
+    if _ArtifactVersionDoc is None:
+        from pocketpaw_ee.versions.models import ArtifactVersion as _AV
+
+        _ArtifactVersionDoc = _AV
+    return _ArtifactVersionDoc
 
 
 __all__ = [
@@ -229,6 +253,7 @@ def get_all_documents():
     _ensure_file_upload()
     cal_doc, evt_doc = _ensure_calendar_docs()
     mandate_doc, shift_doc, sighting_doc = _ensure_mandate_docs()
+    artifact_version_doc = _ensure_version_docs()
     return [
         User,
         Agent,
@@ -286,6 +311,8 @@ def get_all_documents():
         mandate_doc,
         shift_doc,
         sighting_doc,
+        # Branch primitive — universal artifact version log (BP-1).
+        artifact_version_doc,
     ]
 
 
