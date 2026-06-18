@@ -11,8 +11,15 @@
 # wired value today is ``"pocket"`` and other scope types slot in with no
 # model change.
 #
-# What lives elsewhere (later BP tasks — do NOT add here in BP-1):
-#   * BP-3 — the Instinct review/merge gate over a version candidate.
+# BP-3 additions (feat/branch-primitive-instinct-gate):
+#   * service.mark_merged / service.discard — the merge-gate state transitions
+#     (accept → status="merged", reject → status="reverted") the executor calls.
+#   * instinct_executor — the apply-on-approve (MERGE = publish + deploy) /
+#     discard-on-reject executor the Instinct router dispatches to for an
+#     ``_artifact_change`` Action. Kept in this package (not the router) so the
+#     versions spine owns its merge logic; the router only gates (403) + emits.
+#
+# What lives elsewhere (later BP tasks — do NOT add here):
 #   * BP-4 — revert + a Journal read projection (version history view).
 #   * BP-5/6 — the site editor + the review/merge UI.
 #

@@ -1,5 +1,25 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — added the
+#   FIFTH gated proposal kind: the Branch-primitive artifact-change MERGE GATE.
+#   ``_artifact_change_blob`` + ``_assert_artifact_change_workspace`` are the
+#   peers of the four existing blob accessors + tenancy guards. The blob
+#   (``Action.parameters._artifact_change``) carries {scope_type, scope_id,
+#   branch, from_version_id, to_version_id, workspace, user_id}. On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``versions.instinct_executor.execute_approved_change`` (MERGE = publish the
+#   candidate version via versions.publish + mark it merged + deploy via BP-2's
+#   sites.publish_pocket for pocket/site scope; the executor owns the
+#   executed/failed terminal). On REJECT the router emits ``human.corrected`` +
+#   ``decision.completed(rejected)`` itself then fires
+#   ``versions.instinct_executor.discard_rejected_change`` (DISCARD = flip the
+#   candidate to reverted; the PUBLISHED pointer is left untouched). The
+#   ``_assert_artifact_change_workspace`` 403 runs in ALL FOUR locations
+#   (approve / bulk-approve / reject / bulk-reject) BEFORE any mutation —
+#   asymmetric tenant scope is no tenant scope (pocketpaw#1183 / #1250). Part A
+#   of BP-3 also added an additive ``scope_type`` to ``ProposeRequest`` /
+#   ``propose_action`` so an Action can be scoped to a generic artifact.
+#   TODO(BP-4): revert/discard semantics deepen in the executor + a history view.
 # Updated: 2026-06-11 (feat/external-action-proposal) — added the THIRD gated
 #   proposal kind: a gated external-action connector call. ``_external_action_blob``
 #   + ``_assert_external_action_workspace`` are the peers of the ``_code_change``
@@ -289,6 +309,50 @@ def _external_action_blob(action: Any) -> dict[str, Any] | None:
     return blob if isinstance(blob, dict) else None
 
 
+def _artifact_change_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_artifact_change`` blob on an Action, or ``None``.
+
+    The blob is the Branch-primitive merge-gate payload a producer stores under
+    ``Action.parameters._artifact_change``:
+    ``{scope_type, scope_id, branch, from_version_id, to_version_id, workspace,
+    user_id}``. This is the FIFTH gated proposal kind (BP-3) — the peer of
+    ``_pocket_write`` / ``_code_change`` / ``_external_action`` / ``_belt_plan``.
+    On APPROVE the router dispatches the merge executor (publish the target
+    version + deploy); on REJECT it dispatches the discard. Anything not a dict
+    is treated as "no artifact change".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_artifact_change")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_artifact_change_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting an artifact change from another workspace.
+
+    SECURITY (BP-3) — the merge gate is the human REVIEW/MERGE gate over a
+    version candidate; approving it MOVES THE PUBLISHED POINTER and triggers a
+    DEPLOY. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the artifact-change Action to the
+    caller's active workspace. The artifact's tenancy lives on the blob's
+    ``workspace`` (with ``workspace_id`` accepted as an alias). A blob whose
+    workspace differs from the caller's active workspace → 403, BEFORE any state
+    mutation, on BOTH the approve and the reject side (asymmetric tenant scope is
+    no tenant scope — pocketpaw#1183 / #1250). A non-artifact-change Action (no
+    blob) is unaffected.
+    """
+    blob = _artifact_change_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace") or blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This artifact change belongs to a different workspace",
+        )
+
+
 def _belt_plan_blob(action: Any) -> dict[str, Any] | None:
     """Return the ``_belt_plan`` blob on an Action, or ``None``.
 
@@ -461,6 +525,10 @@ def _store():
 
 class ProposeRequest(BaseModel):
     pocket_id: str
+    # BP-3 — optional generic scope. ``None`` (the default) is the legacy
+    # pocket scope; set it (e.g. "site") to scope the Action to another
+    # artifact type, with ``pocket_id`` carrying the scope id within it.
+    scope_type: str | None = None
     title: str
     description: str = ""
     recommendation: str = ""
@@ -620,6 +688,7 @@ async def propose_action(
         reasoning_trace=req.reasoning_trace,
         fabric_snapshots=list(req.fabric_snapshots) if req.fabric_snapshots else None,
         workspace_id=workspace_id,
+        scope_type=req.scope_type,
     )
 
 
@@ -728,6 +797,7 @@ async def bulk_approve_actions(
             _assert_code_change_workspace(action, workspace_id)
             _assert_external_action_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
+            _assert_artifact_change_workspace(action, workspace_id)
 
     approved, missing, bulk_id = await store.bulk_approve(
         list(req.ids), approver=approver_id, note=req.note
@@ -842,6 +912,35 @@ async def bulk_approve_actions(
                 )
             continue
 
+        # BP-3 — a bulk-approved ``_artifact_change`` Action MERGES its candidate
+        # (publish + deploy), exactly like the single-approve hook. Disposition
+        # is always ``accepted`` (bulk-approve has no edit surface). The executor
+        # marks the Action executed/failed; matched BEFORE the pocket-write
+        # fallthrough and ``continue``d so the kinds never cross.
+        artifact_change_blob = _artifact_change_blob(action)
+        if artifact_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=artifact_change_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(artifact_change_blob),
+            )
+            try:
+                from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+                await artifact_executor.execute_approved_change(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve artifact-change merge failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
         action_blob = _pocket_write_blob(action)
         if action_blob is None:
             continue
@@ -919,6 +1018,7 @@ async def bulk_reject_actions(
             _assert_code_change_workspace(action, workspace_id)
             _assert_external_action_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
+            _assert_artifact_change_workspace(action, workspace_id)
 
     rejected, missing, bulk_id = await store.bulk_reject(
         list(req.ids), reason=req.reason, rejector=rejector_id
@@ -1027,6 +1127,40 @@ async def bulk_reject_actions(
                 causation_override=human_event_id,
             )
             await _mark_plan_rejected_safe(action, req.reason)
+            continue
+
+        # BP-3 — a bulk-rejected ``_artifact_change`` Action DISCARDS its
+        # candidate and closes its chain HERE (the merge executor never runs on
+        # reject). The published pointer is left untouched. Mirrors the
+        # code-change reject branch.
+        artifact_change_blob = _artifact_change_blob(action)
+        if artifact_change_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=artifact_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(artifact_change_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=artifact_change_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            try:
+                from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+                await artifact_executor.discard_rejected_change(action)
+            except Exception:
+                logger.exception(
+                    "bulk-reject artifact-change discard failed for %s (non-fatal)",
+                    action.id,
+                )
 
     return BulkActionResponse(bulk_id=bulk_id, affected=rejected, missing=missing)
 
@@ -1073,6 +1207,10 @@ async def approve_action(
     # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
     # ``_belt_plan`` blob carries the workspace.
     _assert_belt_plan_workspace(before, workspace_id)
+    # BP-3 — same tenancy gate for an artifact-change merge (its
+    # ``_artifact_change`` blob carries the workspace). Approving it moves the
+    # published pointer + deploys, so the cross-workspace gate is mandatory here.
+    _assert_artifact_change_workspace(before, workspace_id)
 
     req = req or ApproveRequest()
     # SHOULD-FIX 1 — the audit actor is the authenticated identity, not
@@ -1258,6 +1396,34 @@ async def approve_action(
         except Exception:
             logger.exception("belt_plan execution after approval failed (non-fatal)")
 
+    # BP-3 — when the approved Action carries an ``_artifact_change`` blob, MERGE
+    # the branch: promote the candidate version to published + (for pocket/site
+    # scope) trigger the deploy. The executor owns the merge state transitions +
+    # marks the Action executed/failed; the router owns the ``human.corrected``
+    # emit (citing ``agent.proposed`` as causation, same as the code-change /
+    # external-action paths — a merge proposal IS the chain origin). Same
+    # best-effort, lazy-import, never-break-the-approve-response shape as the
+    # hooks above. A non-artifact-change Action skips this.
+    artifact_change_blob = _artifact_change_blob(approved)
+    if artifact_change_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=artifact_change_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(artifact_change_blob),
+        )
+        try:
+            from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+            await artifact_executor.execute_approved_change(approved, human_event_id=human_event_id)
+        except Exception:
+            logger.exception("artifact-change merge after approval failed (non-fatal)")
+
     # gap2 — when the approved Action carries a ``_customer_reply`` blob (a
     # paw-print customer event awaiting a decision), deliver the owner's reply
     # back to the customer surface. Same best-effort, lazy-import,
@@ -1339,6 +1505,11 @@ async def reject_action(
     # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
     # ``_belt_plan`` blob carries the workspace.
     _assert_belt_plan_workspace(before, workspace_id)
+    # BP-3 — same tenancy gate for an artifact-change merge on the REJECT side.
+    # Asymmetric tenant scope is no tenant scope: a cross-workspace reject (which
+    # would discard another tenant's candidate) must 403 before any mutation,
+    # exactly like the approve side (pocketpaw#1183 / #1250).
+    _assert_artifact_change_workspace(before, workspace_id)
 
     reason = req.reason if req else ""
     rejector_id = str(user.id)
@@ -1451,6 +1622,39 @@ async def reject_action(
             causation_override=human_event_id,
         )
         await _mark_plan_rejected_safe(action, reason)
+
+    # BP-3 — a rejected ``_artifact_change`` Action DISCARDS its candidate (flips
+    # the candidate version to reverted) and closes its chain HERE (the merge
+    # executor never runs on reject — the router owns the close, mirroring the
+    # code-change reject path). The PUBLISHED pointer is left untouched: a
+    # rejection must never move what is live. ``human.corrected(rejected)`` cites
+    # ``agent.proposed``; the terminal cites the human event. The discard is a
+    # best-effort store nudge.
+    artifact_change_blob = _artifact_change_blob(action)
+    if artifact_change_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=artifact_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(artifact_change_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=artifact_change_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+        try:
+            from pocketpaw_ee.versions import instinct_executor as artifact_executor
+
+            await artifact_executor.discard_rejected_change(action)
+        except Exception:
+            logger.exception("artifact-change discard after rejection failed (non-fatal)")
 
     # gap2 — a rejected ``_customer_reply`` Action delivers a DECLINED decision
     # (carrying the rejection reason) back to the customer surface. Same
