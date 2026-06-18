@@ -36,6 +36,8 @@ from pocketpaw_ee.cloud.workspace.dto import (
     InviteOut,
     InvitePreviewResponse,
     MemberOut,
+    RoutePermissionsOut,
+    SetMemberRoutePermissionsRequest,
     SlugAvailabilityOut,
     UpdateDomainRequest,
     UpdateMemberRoleRequest,
@@ -177,6 +179,72 @@ async def remove_member(
     user: User = Depends(require_action("workspace.member.remove")),
 ) -> Response:
     await workspace_service.remove_member(workspace_id, user_id, str(user.id))
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Route Permissions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{workspace_id}/route-permissions", response_model=RoutePermissionsOut)
+async def get_route_permissions(
+    workspace_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_membership),
+) -> RoutePermissionsOut:
+    """Get the route-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed route keys. A missing or
+    empty list means the user has full access (no restrictions).
+    Admin/owner can see everyone's restrictions; members can only see their own.
+    """
+    result = await workspace_service.get_route_permissions(ctx, workspace_id)
+    # Non-admin members can only see their own permissions
+    viewer_id = str(user.id)
+    members = await workspace_service.list_members(ctx, workspace_id)
+    viewer_role = next(
+        (m.role for m in members if m.user_id == viewer_id),
+        "member",
+    )
+    if viewer_role not in ("owner", "admin"):
+        # Filter to only the viewer's own permissions
+        filtered = {k: v for k, v in result.items() if k == viewer_id}
+        return RoutePermissionsOut(permissions=filtered)
+    return RoutePermissionsOut(permissions=result)
+
+
+@router.put("/{workspace_id}/route-permissions/{user_id}")
+async def set_member_route_permissions(
+    workspace_id: str,
+    user_id: str,
+    body: SetMemberRoutePermissionsRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.member.role_change")),
+) -> dict:
+    """Set which routes a specific member can access.
+
+    An empty ``routes`` list grants full access (clears all restrictions).
+    Gated by the same ``workspace.member.role_change`` action as role changes.
+    """
+    await workspace_service.set_member_route_permissions(
+        ctx,
+        workspace_id,
+        user_id,
+        body.routes,
+    )
+    return {"ok": True}
+
+
+@router.delete("/{workspace_id}/route-permissions/{user_id}", status_code=204)
+async def clear_member_route_permissions(
+    workspace_id: str,
+    user_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("workspace.member.role_change")),
+) -> Response:
+    """Remove all route restrictions for a member (grants full access)."""
+    await workspace_service.clear_member_route_permissions(ctx, workspace_id, user_id)
     return Response(status_code=204)
 
 

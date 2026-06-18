@@ -85,6 +85,9 @@ class Workspace(TimestampedDocument):
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None
+    # Per-member route-level permissions: user_id → list of allowed route keys.
+    # An empty list or missing entry means the user has full access (no restrictions).
+    route_permissions: dict[str, list[str]] = Field(default_factory=dict)
 
     class Settings:
         name = "workspaces"

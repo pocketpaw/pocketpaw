@@ -1528,15 +1528,91 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     return doc.plan
 
 
+# ---------------------------------------------------------------------------
+# Route Permissions
+# ---------------------------------------------------------------------------
+
+
+async def get_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Return the full route-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed route keys. An empty list
+    or missing entry means full access (no restrictions).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+    return dict(doc.route_permissions or {})
+
+
+async def set_member_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+    routes: list[str],
+) -> None:
+    """Set route permissions for a single member.
+
+    An empty ``routes`` list clears restrictions (full access).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.route_permissions or {})
+    if routes:
+        perms[user_id] = routes
+    else:
+        # Empty list = full access; remove the entry entirely
+        perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"route_permissions": perms}},
+    )
+
+    logger.info(
+        "route_permissions.set",
+        extra={"workspace_id": workspace_id, "user_id": user_id, "routes": routes},
+    )
+
+
+async def clear_member_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+) -> None:
+    """Remove all route restrictions for a member (grants full access)."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.route_permissions or {})
+    perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"route_permissions": perms}},
+    )
+
+    logger.info(
+        "route_permissions.clear",
+        extra={"workspace_id": workspace_id, "user_id": user_id},
+    )
+
+
 __all__ = [
     "accept_invite",
     "bulk_create_invites",
+    "clear_member_route_permissions",
     "create",
     "create_invite",
     "decline_invite",
     "delete",
     "get",
     "get_delete_preview",
+    "get_route_permissions",
     "get_workspace_plan",
     "legacy_ctx",
     "list_admin_ids",
@@ -1550,6 +1626,7 @@ __all__ = [
     "resend_invite",
     "revoke_invite",
     "seed_default_workspace",
+    "set_member_route_permissions",
     "update",
     "update_member_role",
     "validate_invite",
