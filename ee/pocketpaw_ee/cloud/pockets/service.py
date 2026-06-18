@@ -4529,6 +4529,41 @@ async def get_pocket_connector_permissions(
     return doc.allowed_connectors
 
 
+async def _auto_enable_pocket_connectors(
+    workspace_id: str,
+    pocket_id: str,
+    connector_names: list[str],
+) -> None:
+    """Ensure each named connector has a WorkspaceConnector row at pocket scope.
+
+    When a connector is granted to a pocket via ``allowed_connectors``, it must
+    also be enabled in the workspace's connector store (``_WCDoc``) so the MCP
+    tool ``list_pocket_connectors`` can find it. For any connector that is NOT
+    already enabled at workspace scope, we create a pocket-scoped row so the
+    connector is usable from this pocket's chat.
+
+    Imported lazily to keep the OSS-EE boundary (this service never imports the
+    connector model at module level).
+    """
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    for name in connector_names:
+        try:
+            await connectors_service.ensure_connector_enabled_for_pocket(
+                workspace_id,
+                name,
+                pocket_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "auto-enable failed for connector=%s pocket=%s workspace=%s",
+                name,
+                pocket_id,
+                workspace_id,
+                exc_info=True,
+            )
+
+
 async def set_pocket_connector_permissions(
     pocket_id: str,
     allowed_connectors: list[str] | None,
@@ -4537,6 +4572,10 @@ async def set_pocket_connector_permissions(
 
     Pass ``None`` to inherit all workspace connectors.
     Pass ``[]`` to revoke all (pocket sees nothing).
+
+    When non-None, each connector in the list is auto-enabled at pocket scope
+    if not already enabled, so the MCP tool ``list_pocket_connectors`` can
+    find it.
     """
     doc = await _fetch_pocket(pocket_id)
     if allowed_connectors is not None:
@@ -4552,13 +4591,20 @@ async def set_pocket_connector_permissions(
             "allowed_connectors": allowed_connectors,
         },
     )
+    # Auto-enable each newly granted connector at pocket scope.
+    if allowed_connectors is not None and allowed_connectors:
+        await _auto_enable_pocket_connectors(doc.workspace, pocket_id, allowed_connectors)
 
 
 async def grant_pocket_connector(
     pocket_id: str,
     connector_name: str,
 ) -> None:
-    """Grant a connector to a pocket (additive)."""
+    """Grant a connector to a pocket (additive).
+
+    Also auto-enables the connector at pocket scope if not already enabled,
+    so the MCP tool ``list_pocket_connectors`` can find it.
+    """
     doc = await _fetch_pocket(pocket_id)
     current = doc.allowed_connectors
     if current is None:
@@ -4577,6 +4623,8 @@ async def grant_pocket_connector(
             "connector_name": connector_name,
         },
     )
+    # Auto-enable the connector at pocket scope so it's usable in chat.
+    await _auto_enable_pocket_connectors(doc.workspace, pocket_id, [connector_name])
 
 
 async def revoke_pocket_connector(

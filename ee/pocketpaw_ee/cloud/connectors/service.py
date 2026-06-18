@@ -321,6 +321,52 @@ async def assert_connector_allowed(
         )
 
 
+async def ensure_connector_enabled_for_pocket(
+    workspace_id: str,
+    name: str,
+    pocket_id: str,
+) -> None:
+    """Ensure a connector is enabled and reachable from the given pocket.
+
+    If the connector already has a workspace row that is enabled, its scope
+    is left unchanged (workspace-wide connectors stay workspace-wide). If
+    no row exists, a pocket-scoped row is created so ``list_pocket_connectors``
+    can find it. If a row exists but is disabled, it is enabled.
+
+    Re-derives the pocket's surface_profile when a new row is created or an
+    existing disabled row is enabled.
+    """
+    available = {a.name: a for a in _available_from_registry()}
+    if name not in available:
+        return  # unknown connector, nothing to enable
+
+    doc = await _WCDoc.find_one(_WCDoc.workspace == workspace_id, _WCDoc.name == name)
+    if doc is None:
+        doc = _WCDoc(
+            workspace=workspace_id,
+            name=name,
+            enabled=True,
+            scope="pocket",
+            pocket_id=pocket_id,
+        )
+        await doc.insert()
+        logger.info(
+            "connector.ensure_pocket_created",
+            extra={"workspace_id": workspace_id, "name": name, "pocket_id": pocket_id},
+        )
+        await _rederive_pocket_surface_profile(workspace_id, pocket_id)
+    elif not doc.enabled:
+        doc.enabled = True
+        await doc.save()
+        logger.info(
+            "connector.ensure_pocket_enabled",
+            extra={"workspace_id": workspace_id, "name": name, "pocket_id": pocket_id},
+        )
+        await _rederive_pocket_surface_profile(workspace_id, pocket_id)
+    # If doc already exists and is enabled, leave scope as-is — a workspace-scoped
+    # connector stays workspace-scoped (visible to all pockets).
+
+
 async def filter_allowed_connectors(
     workspace_id: str,
     user_id: str | None,
@@ -970,6 +1016,7 @@ __all__ = [
     "disable_connector",
     "disconnect_member",
     "enable_connector",
+    "ensure_connector_enabled_for_pocket",
     "execute",
     "get_action_trust",
     "get_connector",
