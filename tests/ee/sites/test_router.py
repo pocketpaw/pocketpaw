@@ -144,3 +144,76 @@ async def test_get_domains_cross_tenant_is_404(_seeded_site, monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get(f"/api/v1/sites/{site.script_name}/domains")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# by-pocket reads (pocketpaw#1345 backend half): the builder Preview tab calls
+# GET /sites/by-pocket/{pocket_id}/preview (draft content to render) and
+# GET /sites/by-pocket/{pocket_id}/status (draft/published + is_live). Both are
+# authed fabric.read reads under the router-level fabric plan gate. The frontend
+# (#432) already ships these calls; this exercises the missing backend half.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_by_pocket_returns_ripple_content(beanie_test_db, monkeypatch):
+    """GET /sites/by-pocket/{id}/preview returns {pocket_id, engine, content} with
+    the pocket's rippleSpec for a ripple pocket."""
+    from unittest.mock import AsyncMock
+
+    spec = {"type": "container", "ui": {"children": []}}
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value={"name": "x", "engine": "ripple", "rippleSpec": spec}),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk1/preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {"pocket_id": "pk1", "engine": "ripple", "content": spec}
+
+
+@pytest.mark.asyncio
+async def test_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch):
+    """A missing / access-denied pocket surfaces as a 404 (the pockets service's
+    NotFound flows through the standard error handler)."""
+    from unittest.mock import AsyncMock
+
+    from pocketpaw_ee.cloud._core.errors import NotFound
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_missing/preview")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_status_by_pocket_unpublished_is_draft(beanie_test_db, monkeypatch):
+    """An unpublished pocket (no Site doc) reads {status: draft, is_live: false}."""
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_unpublished/status")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pocket_id"] == "pk_unpublished"
+    assert body["status"] == "draft"
+    assert body["is_live"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
+    """A published pocket (the seeded site is under pk1 / ws_owner) reads
+    {status: published, is_live: true}."""
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk1/status")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pocket_id"] == "pk1"
+    assert body["status"] == "published"
+    assert body["is_live"] is True
