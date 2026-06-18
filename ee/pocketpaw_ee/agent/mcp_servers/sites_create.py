@@ -15,6 +15,15 @@
 # (the catalog walk only runs on a non-null spec), so the source files pass
 # straight through to persistence and the generator materializes them at publish.
 #
+# Updated: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added a THIRD
+# tool ``edit_svelte_component`` for targeted edits of a PUBLISHED svelte site.
+# It takes ``pocket_id`` + ``component_path`` + the FULL ``new_source`` for one
+# file, and delegates to ``sites_service.edit_svelte_component`` (persist the one
+# file via the pockets service, then republish; roll back + leave the prior
+# deploy if the rebuild's smoke gate fails). It registers on the SAME
+# ``pocketpaw_sites_manager`` server as create + publish (see sites.py) so the
+# create → publish → edit hops sit side by side for the chat agent.
+#
 # This is the decisive bypass of the dashboard-built ``pocket_specialist``
 # create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
 # subagent delegation + the validate-redraft loop) kept downgrading landing
@@ -73,8 +82,16 @@ CREATE_LANDING_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_landing_site"
 # server in sites.py). The skill flow is: author the source map → create_svelte_site
 # → publish.
 CREATE_SVELTE_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_svelte_site"
+# The targeted svelte-component edit tool — rewrites ONE file of a published
+# svelte site's source map and safely republishes. Registers on the SAME server
+# (see sites.py) so the create → publish → edit hops sit side by side.
+EDIT_SVELTE_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_svelte_component"
 
-SITES_CREATE_TOOL_IDS = (CREATE_LANDING_SITE_TOOL_ID, CREATE_SVELTE_SITE_TOOL_ID)
+SITES_CREATE_TOOL_IDS = (
+    CREATE_LANDING_SITE_TOOL_ID,
+    CREATE_SVELTE_SITE_TOOL_ID,
+    EDIT_SVELTE_COMPONENT_TOOL_ID,
+)
 
 
 def _error_response(message: str) -> dict[str, Any]:
@@ -503,13 +520,174 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
     return create_svelte_site
 
 
+async def _edit_svelte_component_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__edit_svelte_component``.
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``pocket_id`` / ``component_path`` / ``new_source`` inputs, and delegates to
+    ``sites_service.edit_svelte_component`` — which rewrites the one file in the
+    pocket's svelte source map and republishes, rolling the edit back if the
+    republish fails its smoke gate. Returns ``{ok, site, component_path}`` on
+    success; sets ``is_error`` when identity is missing, the inputs are
+    malformed, the pocket / component is not found or not a svelte site, or the
+    rebuild's smoke gate rejects the edit (the live site stays on the prior
+    deploy and the source is rolled back).
+    """
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "edit_svelte_component requires workspace and user context (call from "
+            "a cloud chat session)."
+        )
+
+    pocket_id = args.get("pocket_id")
+    if not isinstance(pocket_id, str) or not pocket_id:
+        return _error_response(
+            "edit_svelte_component requires a `pocket_id` — the id of the svelte "
+            "site pocket whose component you are editing."
+        )
+    component_path = args.get("component_path")
+    if not isinstance(component_path, str) or not component_path:
+        return _error_response(
+            "edit_svelte_component requires a `component_path` — the relative path "
+            "of the file to rewrite (e.g. 'src/lib/components/Hero.svelte'). It "
+            "must already exist in the site's source map."
+        )
+    new_source = args.get("new_source")
+    if not isinstance(new_source, str):
+        return _error_response(
+            "edit_svelte_component requires `new_source` — the FULL new contents of "
+            "the file as a string (the tool replaces the whole file, not a patch)."
+        )
+    name_raw = args.get("name")
+    name = name_raw if isinstance(name_raw, str) else ""
+
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.sites import service as sites_service
+    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    try:
+        doc = await sites_service.edit_svelte_component(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            component_path=component_path,
+            new_source=new_source,
+            name=name,
+        )
+    except SmokeGateFailed as exc:
+        # The rebuilt site failed the workerd smoke render — the edit was rolled
+        # back and the live site stays on the prior deploy. Tell the agent so it
+        # can fix the component and retry, NOT report a successful edit.
+        return _error_response(
+            f"the edit did not pass the build smoke test, so the live site was not "
+            f"changed (the previous version is still deployed): {exc}"
+        )
+    except CloudError as exc:
+        # NotFound / ValidationError from the pockets service (missing pocket,
+        # not a svelte site, no such component) — relay the code + message.
+        return _error_response(f"{exc.code}: {exc.message}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("edit_svelte_component failed", exc_info=True)
+        return _error_response(f"edit failed: {exc}")
+
+    return _success_response(
+        {
+            "ok": True,
+            "component_path": component_path,
+            "site": {
+                "id": str(doc.id),
+                "pocket_id": doc.pocket_id,
+                "name": doc.name,
+                "url": doc.url,
+                "deployed": doc.deployed,
+            },
+        }
+    )
+
+
+def make_edit_svelte_component_tool(tool: Any) -> Any:
+    """Build the ``edit_svelte_component`` SDK tool object using the SDK's
+    ``tool`` decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site (see
+    ``make_create_landing_site_tool`` for why one server)."""
+
+    @tool(
+        "edit_svelte_component",
+        (
+            "Rewrite ONE component of an EXISTING svelte Paw Site and republish "
+            "it. Use this when the user asks to change a section of a published "
+            "svelte site — 'make the hero headline bolder', 'change the pricing "
+            "copy', 'restyle the FAQ'. You provide the FULL new file contents for "
+            "ONE file in the site's source map; the tool persists it and "
+            "republishes. Args: `pocket_id` (the svelte site pocket), "
+            "`component_path` (the relative path of the file to rewrite — it must "
+            "already exist in the source map, e.g. "
+            "'src/lib/components/Hero.svelte'), `new_source` (the whole new file "
+            "contents as a string — this REPLACES the file, it is not a patch), "
+            "and optional `name`. CRITICAL authoring rule (same as "
+            "create_svelte_site): the component must render its resting/final "
+            "state in MARKUP — never set it only in onMount — because the page is "
+            "PRERENDERED. Returns {ok, site: {id, name, url, deployed, pocket_id}, "
+            "component_path} — show the user the `url`. ok=false with an error "
+            "means the edit did NOT go live: a smoke-test failure leaves the "
+            "PREVIOUS version deployed (fix the component and retry), and a "
+            "not-found / not-a-svelte-site error means relay the reason. Do NOT "
+            "report a successful edit when ok=false."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "pocket_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Id of the svelte site pocket to edit.",
+                },
+                "component_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Relative path of the file to rewrite — must already exist "
+                        "in the site's source map (e.g. "
+                        "'src/lib/components/Hero.svelte')."
+                    ),
+                },
+                "new_source": {
+                    "type": "string",
+                    "description": (
+                        "The FULL new contents of the file as a string. This "
+                        "replaces the whole file — it is not a diff/patch."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "Optional site name override on republish. Defaults to the "
+                        "pocket's own name."
+                    ),
+                },
+            },
+            "required": ["pocket_id", "component_path", "new_source"],
+            "additionalProperties": False,
+        },
+    )
+    async def edit_svelte_component(args):  # type: ignore[no-untyped-def]
+        return await _edit_svelte_component_handler(args)
+
+    return edit_svelte_component
+
+
 __all__ = [
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
+    "EDIT_SVELTE_COMPONENT_TOOL_ID",
     "SERVER_NAME",
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
     "SVELTE_REQUIRED_PREFIXES",
     "make_create_landing_site_tool",
     "make_create_svelte_site_tool",
+    "make_edit_svelte_component_tool",
 ]
