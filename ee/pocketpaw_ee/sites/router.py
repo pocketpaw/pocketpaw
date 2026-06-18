@@ -59,6 +59,13 @@
 #     needs this). Returns the created Action (id/status) so the client shows
 #     "submitted for review". fabric.write — it creates a gate item that, on
 #     approve, publishes + deploys. A 400 when there is no draft to publish.
+# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7 — producer 2): added
+# POST /sites/by-pocket/{pocket_id}/audit — run the deterministic site audit over
+# the pocket's content and return findings, each with a ``fix_prompt`` the UI
+# feeds to the EXISTING edit path so a fix lands as a reviewable draft (no new
+# apply endpoint). It's a read of the pocket's content, so it carries fabric.read
+# (the same gate as preview/status). Tenant-scoped on ctx; the pockets service
+# raises NotFound → 404 itself.
 
 from __future__ import annotations
 
@@ -68,6 +75,7 @@ from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
+    AuditResponse,
     DomainRequest,
     DomainStatusResponse,
     MakeEditableRequest,
@@ -183,6 +191,30 @@ async def status_by_pocket(
     status, is_live}. Derived from the tenant-scoped Site deployment doc — an
     unpublished pocket (no Site) reads draft / not live (NOT a 404)."""
     return await sites_service.pocket_status(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/audit", response_model=AuditResponse)
+async def audit_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> AuditResponse:
+    """Audit a pocket's published-site source and return findings (BP-7, the first
+    non-editor producer): a11y (missing alt, unnamed button/link, h1 structure,
+    unlabeled inputs), broken/placeholder links, and SEO head tags (title, meta
+    description, Open Graph). Each finding carries a ``fix_prompt`` the UI sends to
+    the EXISTING edit path (edit_svelte_component / refine) so the fix lands as a
+    reviewable draft in the Tray — there is NO separate apply endpoint.
+
+    A POST because it is an explicit, on-demand pass over the source (potentially
+    a model-backed judgment tier later), not a cheap idempotent read; it still
+    carries fabric.read since it only READS the pocket. A missing / access-denied
+    pocket surfaces as a 404 (the pockets service raises NotFound itself). Reads
+    the same draft-or-current content preview_pocket serves, so the audit matches
+    what publish would build. A clean site returns an empty ``findings`` list."""
+    return await sites_service.audit_pocket(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
 
 
 @router.get("/sites/by-pocket/{pocket_id}/versions", response_model=VersionHistoryResponse)

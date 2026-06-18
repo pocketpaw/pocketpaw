@@ -23,6 +23,13 @@
 # /sites/reserve — the manual "re-serve local sites" endpoint that (re)starts
 # the local static server and returns the workspace's reconciled site list with
 # fresh, valid urls. Gated like the other authed sites writes (fabric.write).
+#
+# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7): adds coverage for POST
+# /sites/by-pocket/{pocket_id}/audit — the deterministic site audit. The handler
+# delegates to sites_service.audit_pocket, which reads the pocket via the pockets
+# service (mocked here, as the preview/status tests do) and runs the pure audit
+# engine. Asserts a site with known issues surfaces findings (each with a
+# fix_prompt), a clean site returns an empty list, and a missing pocket is a 404.
 
 from __future__ import annotations
 
@@ -434,3 +441,96 @@ async def test_make_editable_route_body_beats_origin_header(beanie_test_db, monk
         )
     assert resp.status_code == 200, resp.text
     assert captured["builder_origin"] == "https://explicit.paw.example"
+
+
+# ---------------------------------------------------------------------------
+# audit (BP-7): POST /sites/by-pocket/{pocket_id}/audit runs the deterministic
+# site audit and returns findings, each with a fix_prompt the UI feeds to the
+# existing edit path. fabric.read; tenant-scoped; a missing pocket is a 404.
+# ---------------------------------------------------------------------------
+
+# A svelte source with three known issues: an <img> without alt, an empty href,
+# and a head that lacks <title> / meta description / Open Graph.
+_AUDIT_DIRTY_SOURCE = {
+    "src/app.html": "<!doctype html><html><head></head><body></body></html>",
+    "src/lib/components/Hero.svelte": (
+        "<section><h1>Hi</h1><img src='/hero.jpg'/><a href=''>Dead link</a></section>"
+    ),
+}
+
+
+@pytest.mark.asyncio
+async def test_audit_by_pocket_surfaces_known_issues(beanie_test_db, monkeypatch):
+    """A site with an img-without-alt, an empty href, and a missing title surfaces
+    a finding for each — each carrying a non-empty fix_prompt the UI can feed to
+    the existing edit path."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value={"name": "x", "engine": "svelte", "source": _AUDIT_DIRTY_SOURCE}),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk_dirty/audit")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pocket_id"] == "pk_dirty"
+    assert body["engine"] == "svelte"
+    checks = {f["check"] for f in body["findings"]}
+    assert "a11y.img_alt" in checks
+    assert "links.placeholder" in checks
+    assert "seo.title" in checks
+    # Every finding carries a usable fix_prompt + a location file.
+    for f in body["findings"]:
+        assert f["fix_prompt"].strip()
+        assert f["location"]["file"]
+
+
+@pytest.mark.asyncio
+async def test_audit_by_pocket_clean_site_has_no_findings(beanie_test_db, monkeypatch):
+    """A clean site returns an empty findings list."""
+    from unittest.mock import AsyncMock
+
+    clean = {
+        "src/app.html": (
+            "<!doctype html><html><head>"
+            "<title>Bright Smile Dental</title>"
+            "<meta name='description' content='A whiter, healthier smile with modern dentistry.'>"
+            "<meta property='og:title' content='Bright Smile'>"
+            "<meta property='og:image' content='https://x.example/og.png'>"
+            "</head><body></body></html>"
+        ),
+        "src/lib/components/Hero.svelte": (
+            "<section><h1>Brighter Smiles</h1>"
+            "<img src='/hero.jpg' alt='A patient smiling'/>"
+            "<a href='/book'>Book a consult</a></section>"
+        ),
+    }
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value={"name": "x", "engine": "svelte", "source": clean}),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk_clean/audit")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["findings"] == []
+
+
+@pytest.mark.asyncio
+async def test_audit_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch):
+    """A missing / access-denied pocket surfaces as a 404 (the pockets service's
+    NotFound flows through the standard error handler)."""
+    from unittest.mock import AsyncMock
+
+    from pocketpaw_ee.cloud._core.errors import NotFound
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk_missing/audit")
+    assert resp.status_code == 404
