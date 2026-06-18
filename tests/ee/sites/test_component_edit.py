@@ -2,6 +2,13 @@
 # edit + republish path (sites_service.edit_svelte_component). Created:
 # 2026-06-17 (feat/sites-svelte-component-edit, SE-2).
 #
+# Updated 2026-06-18 (fix/sites-edit-draft-not-publish): a component edit now
+# builds a PREVIEW (local serve, draft kept) instead of a live CF deploy +
+# promote-to-published. test_edit_component_republishes_with_new_source asserts the
+# new contract: preview built (deployed=False, no CF put, preview URL returned), the
+# pocket source persisted, and a reviewable draft left behind. The smoke-gate
+# rollback test is unchanged (the gate fires before any deploy, preview or live).
+#
 # The flow under test: one component file of a svelte Paw Site pocket is
 # rewritten and the site is safely republished. These tests use the shared
 # ``beanie_test_db`` fixture (an in-memory Mongo) so the pockets service persists
@@ -73,6 +80,12 @@ class _FakeCF:
         return True
 
 
+def _fake_local_deploy(site_id: str, project_dir: str) -> str:
+    """Stand in for local_server.deploy_local so the PREVIEW serve (the edit path)
+    does not need a real built dir on disk — returns the localhost preview URL."""
+    return f"http://127.0.0.1:9999/{site_id}/"
+
+
 @pytest.fixture(autouse=True)
 def recording_bus():
     """Install a recording EventBus so the pockets service's ``emit`` calls
@@ -122,7 +135,11 @@ async def _make_svelte_pocket(workspace_id: str, user_id: str) -> str:
 @pytest.mark.asyncio
 async def test_edit_component_republishes_with_new_source(beanie_test_db):
     """A component edit is persisted on the pocket AND reaches the regenerated
-    build: the generator materializes the NEW Hero source, not the old one."""
+    PREVIEW build: the generator materializes the NEW Hero source, not the old one.
+
+    Branch primitive (fix/sites-edit-draft-not-publish): an edit now builds a
+    PREVIEW (local serve) — it is NOT a live deploy, so ``deployed`` is False and no
+    CF worker is put. The live deploy only happens on an approved review."""
     pocket_id = await _make_svelte_pocket("ws1", "u1")
     gen, cf = _FakeGenerator(), _FakeCF()
 
@@ -135,9 +152,14 @@ async def test_edit_component_republishes_with_new_source(beanie_test_db):
         _generator=gen,
         _cloudflare=cf,
         _bundle_reader=lambda d: b"export default {}",
+        _local_deploy=_fake_local_deploy,
     )
 
-    assert site.deployed is True
+    # An edit is a PREVIEW, not a live deploy: no CF worker put, not deployed,
+    # but it returns the preview URL the builder iframe frames.
+    assert cf.put_calls == []
+    assert site.deployed is False
+    assert site.url.endswith(f"/{site.script_name}/")
     assert site.pocket_id == pocket_id
     # The regenerated build materialized the EDITED component, not the original.
     assert gen.built is not None
@@ -149,6 +171,13 @@ async def test_edit_component_republishes_with_new_source(beanie_test_db):
     # The edit persisted on the pocket — a re-read shows the new source.
     wire = await pockets_service.get(pocket_id, "u1")
     assert wire["source"]["src/lib/components/Hero.svelte"] == _HERO_V2
+
+    # And it left a reviewable DRAFT — not promoted to published (the bug).
+    from pocketpaw_ee.versions import service as versions
+
+    draft = await versions.get_draft(scope_type="pocket", scope_id=pocket_id)
+    assert draft is not None
+    assert draft.content["src/lib/components/Hero.svelte"] == _HERO_V2
 
 
 @pytest.mark.asyncio

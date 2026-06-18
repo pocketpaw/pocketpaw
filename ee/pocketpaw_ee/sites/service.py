@@ -128,6 +128,23 @@
 # unscoped so a restart auto-re-serves all sites; POST /sites/reserve calls it
 # workspace-scoped for an explicit "re-serve" action.
 #
+# Updated 2026-06-18 (fix/sites-edit-draft-not-publish): EDITING a site no longer
+# auto-publishes it. ``publish()`` gained a ``preview`` flag (forwarded through
+# ``publish_pocket``); ``edit_svelte_component`` and ``make_site_editable`` now
+# call it with ``preview=True``. A preview build still smoke-gates + locally serves
+# the working copy (so a broken edit is caught), but it does NOT promote the
+# pocket's draft to ``published`` and does NOT overwrite the canonical live Site
+# doc/url — it returns a TRANSIENT preview Site (``deployed=False``). Before this
+# fix both edit-path callers routed through ``publish`` → promote+deploy, so after
+# any edit the pocket had only published versions and NO draft; ``get_draft``
+# returned None and ``request_publish_pocket`` (Submit-for-review) raised → the UI
+# got a 400. Now the draft survives, the published pointer is unchanged, and only
+# an approved review (the real ``publish``, ``preview=False``) deploys live +
+# promotes. ``make_site_editable`` also ensures a draft snapshot exists on arm
+# (``_ensure_pocket_draft``) so a never-edited armed site still has a working copy
+# to frame + submit. The chat-CREATE publish and the approve→publish executor are
+# unchanged (they stay ``preview=False`` real publishes).
+#
 # Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
 # sites publish/preview/status are now branch-aware over the BP-1 versions spine,
 # fixing the "Live badge lies" bug — a site was stamped ``deployed`` the instant a
@@ -347,6 +364,7 @@ async def publish(
     engine: str = "ripple",
     source: dict[str, str] | None = None,
     builder_origin: str | None = None,
+    preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -355,6 +373,20 @@ async def publish(
     """Generate, smoke-gate, deploy, and persist a site. Raises SmokeGateFailed
     (from generator_client) if the workerd smoke render fails — the site is not
     deployed and not persisted as deployed.
+
+    PREVIEW MODE (Branch primitive — the EDIT/arm path). When ``preview=True``,
+    this builds + smoke-gates + locally serves a DRAFT preview but does NOT take
+    the edit live: it does NOT promote the pocket's draft version to ``published``
+    and it does NOT claim/overwrite the canonical live Site doc. It returns a
+    transient Site-shaped object whose ``url`` is the preview URL (with
+    ``deployed=False``) so the builder iframe can frame the working copy, while the
+    pocket's draft survives for review (``get_draft`` stays non-None, the
+    ``published`` pointer is unchanged) and ``request_publish_pocket`` can submit
+    it. Only an approved review (the real ``publish``, ``preview=False``) deploys
+    live + promotes. ``preview=True`` requires ``_local_mode()`` / no injected CF
+    deploy claim — the preview build is served from localhost (never the CF live
+    deploy); a CF-only preview build is still generated and smoke-gated but is not
+    PUT into the dispatch namespace.
 
     Deploy has two branches:
       * REAL Cloudflare (default when creds are present, or when a CF client is
@@ -406,6 +438,37 @@ async def publish(
         source=source,
         builder_origin=builder_origin,
     )
+
+    # PREVIEW MODE (Branch primitive — EDIT/arm path): the build above already ran
+    # the smoke gate (a broken edit is still caught BEFORE it can be served), but a
+    # preview must NOT take the edit live. Serve the built dir from localhost so the
+    # builder iframe can frame the working copy, then return a TRANSIENT Site-shaped
+    # object (NOT persisted, ``deployed=False``) carrying that preview URL. The
+    # pocket's draft version is left untouched (no promote → ``get_draft`` stays
+    # non-None, the ``published`` pointer does not move), so the draft is reviewable
+    # and ``request_publish_pocket`` can submit it. The canonical live Site doc and
+    # its URL are not claimed or overwritten — only an approved review (the real
+    # ``publish``, ``preview=False``) deploys live + promotes.
+    if preview:
+        from pocketpaw_ee.sites import local_server
+
+        deploy = _local_deploy or local_server.deploy_local
+        preview_url = deploy(site_id, build.project_dir)
+        return _SiteDoc(
+            id=ObjectId(site_id),
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=False,  # a preview is NOT a live deploy
+            signed_key=signed_key,
+            url=preview_url,
+            # Editable preview carries the bridge origin so the iframe can edit it.
+            builder_origin=builder_origin or "",
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
 
     # BP-2 / #1345: promote the pocket's current draft version to ``published``
     # BEFORE deploy. The build (which runs the smoke gate) has succeeded, so the
@@ -545,6 +608,7 @@ async def publish_pocket(
     pocket_id: str,
     name: str = "",
     builder_origin: str | None = None,
+    preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -552,6 +616,12 @@ async def publish_pocket(
 ) -> _SiteDoc:
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
+
+    ``preview`` (Branch primitive — EDIT/arm path) is forwarded straight to
+    ``publish``: ``True`` builds + smoke-gates + locally serves a DRAFT preview
+    WITHOUT promoting the draft to published or claiming the live deploy (it
+    returns a transient preview Site doc); ``False`` (the default) is a real live
+    publish + promote.
 
     Reads the pocket's rippleSpec + theme via the pockets service (the source of
     truth, which returns the resolved wire dict and raises NotFound / Forbidden
@@ -596,6 +666,7 @@ async def publish_pocket(
         source=source,
         name=name or pocket.get("name", ""),
         builder_origin=builder_origin,
+        preview=preview,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
@@ -664,10 +735,17 @@ async def edit_svelte_component(
         new_source=new_source,
     )
 
-    # 2. Republish. 3. On a smoke-gate failure, restore the prior source so the
-    #    pocket never carries a component the renderer rejects — then re-raise so
-    #    the caller surfaces the reason. The prior deploy is untouched because the
-    #    gate fires before publish deploys.
+    # 2. Build a PREVIEW of the edit (Branch primitive). The persist above already
+    #    wrote a fresh DRAFT ArtifactVersion (set_svelte_source_file hooks it); the
+    #    preview build smoke-gates + locally serves the working copy but does NOT
+    #    promote that draft to published and does NOT overwrite the canonical live
+    #    deploy. So an edit stays a reviewable draft (the prior live URL is
+    #    untouched, get_draft is non-None, request_publish_pocket can submit it) —
+    #    only an approved review (the real publish) takes the edit live.
+    # 3. On a smoke-gate failure, restore the prior source so the pocket never
+    #    carries a component the renderer rejects — then re-raise so the caller
+    #    surfaces the reason. The prior deploy is untouched because the gate fires
+    #    before publish deploys.
     try:
         return await publish_pocket(
             workspace_id=workspace_id,
@@ -675,6 +753,7 @@ async def edit_svelte_component(
             pocket_id=pocket_id,
             name=name,
             builder_origin=builder_origin or None,
+            preview=True,
             _generator=_generator,
             _cloudflare=_cloudflare,
             _bundle_reader=_bundle_reader,
@@ -716,30 +795,93 @@ async def make_site_editable(
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
 ) -> _SiteDoc:
-    """Republish a pocket's site as EDITABLE (SE-2b).
+    """Arm a pocket's site for editing — build an editable PREVIEW (SE-2b + the
+    Branch primitive).
 
-    Backs ``POST /sites/by-pocket/{pocket_id}/editable``: it republishes the
-    pocket with ``builder_origin`` set so the generated page carries the gated
-    edit-bridge, and persists that origin on the Site doc. ``builder_origin``
-    defaults to the configured dashboard origin (``PAW_SITES_BUILDER_ORIGIN``)
-    when the caller does not pass one, so the endpoint works with no body.
+    Backs ``POST /sites/by-pocket/{pocket_id}/editable``: it builds the pocket with
+    ``builder_origin`` set so the generated page carries the gated edit-bridge, and
+    returns the PREVIEW url the iframe frames. ``builder_origin`` defaults to the
+    configured dashboard origin (``PAW_SITES_BUILDER_ORIGIN``) when the caller does
+    not pass one, so the endpoint works with no body.
 
-    Delegates to ``publish_pocket`` (reads the pocket, regenerates, smoke-gates,
-    redeploys), so it inherits the same NotFound / Forbidden propagation and the
-    smoke gate — a build that fails the gate raises ``SmokeGateFailed`` and the
-    prior deploy is untouched.
+    Branch primitive: arming for editing is a PREVIEW, NOT a live publish. It
+    delegates to ``publish_pocket`` with ``preview=True``, so it builds +
+    smoke-gates + locally serves the working copy but does NOT promote the draft to
+    published and does NOT overwrite the canonical live deploy/url. The pocket's
+    draft survives (so a subsequent edit + ``request_publish_pocket`` works); only
+    an approved review takes the edit live. It first ensures a draft snapshot
+    exists (a pocket armed for editing that has never been edited would otherwise
+    have no draft for the builder to frame / submit) via the same best-effort
+    versions hook publish uses.
+
+    It inherits ``publish``'s NotFound / Forbidden propagation and the smoke gate —
+    a build that fails the gate raises ``SmokeGateFailed`` and the prior live
+    deploy is untouched.
     """
     origin = (builder_origin or "").strip() or _builder_origin()
+
+    # Ensure a draft snapshot exists so the armed-for-editing pocket has a working
+    # copy to frame and submit, even before the first component edit. Snapshots the
+    # pocket's current engine content (rippleSpec / svelte source map). Best-effort
+    # — versioning is an additive layer, never a gate on arming.
+    await _ensure_pocket_draft(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+
     return await publish_pocket(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
         builder_origin=origin,
+        preview=True,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
         _local_deploy=_local_deploy,
     )
+
+
+async def _ensure_pocket_draft(*, workspace_id: str, user_id: str, pocket_id: str) -> None:
+    """Ensure the pocket has a current DRAFT version (Branch primitive).
+
+    Arming a site for editing must leave a draft for the builder to frame and for
+    ``request_publish_pocket`` to submit. A pocket that was published but never
+    edited has only a ``published`` version (no draft), so this writes a draft
+    snapshot of the pocket's current engine content when none exists. It is a
+    no-op when a draft is already present (the common path — an edit already wrote
+    one). Reads the pocket through the pockets service (wire dict — entity
+    isolation) to resolve the engine + content.
+
+    Best-effort: versioning is an additive history/Branch layer, never a gate on
+    arming, so a missing module / read failure is logged and swallowed.
+    """
+    try:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+        from pocketpaw_ee.versions import service as versions_service
+
+        existing = await versions_service.get_draft(
+            scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id
+        )
+        if existing is not None:
+            return
+        pocket = await pockets_service.get(pocket_id, user_id)
+        engine = pocket.get("engine") or "ripple"
+        if engine == "svelte":
+            content = pocket.get("source") if isinstance(pocket.get("source"), dict) else {}
+        else:
+            content = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
+        await versions_service.write_draft(
+            scope_type=_VERSION_SCOPE_TYPE,
+            scope_id=pocket_id,
+            workspace_id=workspace_id,
+            content=content or {},
+            author=user_id,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break arming for edit
+        logger.warning(
+            "versions: failed to ensure a draft for pocket %s on arm-for-edit — "
+            "preview proceeds, draft snapshot skipped",
+            pocket_id,
+            exc_info=True,
+        )
 
 
 async def preview_pocket(
