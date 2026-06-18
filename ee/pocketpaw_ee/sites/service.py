@@ -152,6 +152,13 @@
 #     has_unpublished_changes; is_live requires published AND the Site doc's real
 #     ``deployed``. The artifact is the source pocket: scope_type="pocket",
 #     scope_id=<pocket_id>.
+# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7 — producer 2): added
+# audit_pocket(). It reads the pocket's content the SAME way preview_pocket does
+# (draft-version snapshot, falling back to current rippleSpec/source) and runs the
+# pure deterministic audit engine (sites.audit.audit_pocket_site) over it. Each
+# finding carries a ``fix_prompt`` the UI feeds to the EXISTING edit path
+# (edit_svelte_component / refine) so a fix lands as a reviewable draft in the
+# Tray — BP-7 adds NO apply endpoint.
 
 from __future__ import annotations
 
@@ -169,6 +176,8 @@ from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
+    AuditFinding,
+    AuditResponse,
     DomainStatusResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -804,6 +813,70 @@ async def preview_pocket(
 
     content = draft_content if draft_content is not None else current
     return SitePreviewResponse(pocket_id=pocket_id, engine=engine, content=content)
+
+
+async def audit_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+) -> AuditResponse:
+    """Run the deterministic site audit over a pocket's content (BP-7, producer 2).
+
+    Reads the pocket's content the SAME way ``preview_pocket`` does — the BP-1
+    DRAFT-version snapshot (what publish WOULD build), falling back to the pocket's
+    current rippleSpec / source map when there is no draft row — then runs the pure
+    deterministic audit engine (``sites.audit.audit_pocket_site``) over it. The
+    audit itself is side-effect free; this function only resolves the content.
+
+    Each finding carries a ``fix_prompt`` the UI feeds to the EXISTING edit path
+    (``edit_svelte_component`` / refine), which lands the fix as a reviewable draft
+    in the Tray — BP-7 adds NO apply endpoint. A clean site returns an empty
+    ``findings`` list.
+
+    The pockets service's PUBLIC ``get`` raises NotFound / Forbidden itself when
+    the pocket is missing or access-denied (mapped to 404 / 403 by the router), so
+    no extra existence check is needed. ``workspace_id`` keeps the surface uniform
+    and tenant-aware (the pockets read scopes on ``user_id``)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites.audit import audit_pocket_site
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    engine = pocket.get("engine") or "ripple"
+
+    # The pocket's CURRENT content for the engine — the fallback when the Branch
+    # primitive has no draft row for this pocket yet (mirrors preview_pocket).
+    if engine == "svelte":
+        source = pocket.get("source")
+        current: dict[str, Any] | None = source if isinstance(source, dict) else None
+    else:
+        ripple_spec = pocket.get("rippleSpec")
+        current = ripple_spec if isinstance(ripple_spec, dict) else None
+
+    # Prefer the DRAFT version's snapshot (the working copy publish would build).
+    # Versioning is an additive layer — a missing module / read failure must not
+    # break the audit, so degrade to the current content on any error.
+    draft_content: dict[str, Any] | None = None
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+        if draft is not None:
+            draft_content = draft.content
+    except Exception:  # noqa: BLE001 — versions read is best-effort
+        logger.warning(
+            "versions: failed to read draft for pocket %s audit — falling back to current content",
+            pocket_id,
+            exc_info=True,
+        )
+
+    content = draft_content if draft_content is not None else current
+    findings = audit_pocket_site(engine=engine, content=content)
+    return AuditResponse(
+        pocket_id=pocket_id,
+        engine=engine,
+        findings=[AuditFinding(**f) for f in findings],
+    )
 
 
 async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusResponse:

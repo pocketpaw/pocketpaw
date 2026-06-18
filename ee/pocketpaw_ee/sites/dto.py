@@ -34,6 +34,11 @@
 # and RequestPublishResponse (the Action created by POST
 # /sites/by-pocket/{pocket_id}/request-publish, the clean entry to the merge gate
 # so the client never hand-builds the Instinct proposal).
+# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7): added AuditFinding +
+# AuditResponse — the response shape for POST /sites/by-pocket/{pocket_id}/audit
+# (the first non-editor PRODUCER). Each finding carries a ``fix_prompt`` the UI
+# feeds to the EXISTING edit path so the fix lands as a reviewable draft; there is
+# NO new apply endpoint (BP-7 reuses edit_svelte_component / refine).
 
 from __future__ import annotations
 
@@ -133,6 +138,35 @@ class RequestPublishResponse(BaseModel):
     pocket_id: str
     to_version_id: str
     from_version_id: str | None = None
+
+
+class AuditFinding(BaseModel):
+    """One issue surfaced by the site audit (BP-7). ``check`` is the short check id
+    (e.g. "a11y.img_alt"); ``tier`` is "deterministic" for the rule-based core (a
+    later "judgment" tier is deferred); ``severity`` is "error" | "warning".
+    ``location`` is a {file, hint} pointer (the file + a source snippet). The
+    UI feeds ``fix_prompt`` to the EXISTING edit path (edit_svelte_component /
+    refine), which lands the fix as a reviewable draft in the Tray — there is no
+    separate apply endpoint."""
+
+    id: str
+    check: str
+    tier: str
+    severity: str  # error | warning
+    message: str
+    fix_prompt: str
+    location: dict[str, str] = {}
+
+
+class AuditResponse(BaseModel):
+    """The result of POST /sites/by-pocket/{pocket_id}/audit — the findings for a
+    pocket's published-site source. A clean site returns an empty ``findings``
+    list. Tenant-scoped; engine selects how the source was read (svelte source map
+    vs rippleSpec)."""
+
+    pocket_id: str
+    engine: str
+    findings: list[AuditFinding] = []
 
 
 class DomainRequest(BaseModel):
