@@ -1162,6 +1162,9 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         engine=body.engine,
         source=body.source,
         surface_profile=body.surface_profile,
+        # New pockets start with NO connectors allowed — the owner must
+        # explicitly grant each connector via the permission UI.
+        allowed_connectors=[],
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)
@@ -1824,6 +1827,8 @@ async def create_from_ripple_spec(
             visibility="workspace",
             rippleSpec=normalized,
             pattern=pattern,
+            # New agent-generated pockets start with no connectors allowed.
+            allowed_connectors=[],
         )
         await doc.insert()
         pocket_id = str(doc.id)
@@ -4606,10 +4611,7 @@ async def list_workspace_pocket_connector_permissions(
     ``None`` means the pocket inherits all workspace connectors.
     This is the bulk endpoint for the frontend's permission-store loader.
     """
-    docs = await _PocketDoc.find(
-        {"workspace": workspace_id},
-        projection={"allowed_connectors": 1},
-    ).to_list()
+    docs = await _PocketDoc.find({"workspace": workspace_id}).to_list()
     result: dict[str, list[str] | None] = {}
     for doc in docs:
         result[str(doc.id)] = doc.allowed_connectors

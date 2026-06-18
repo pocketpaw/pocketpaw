@@ -681,6 +681,23 @@ async def list_pocket_connectors(
     allowed_names = await filter_allowed_connectors(workspace_id, user_id, enabled_names)
     allowed_set = set(allowed_names)
 
+    # M3 — filter by the pocket's per-connector allowlist. When a pocket has
+    # explicit restrictions (allowed_connectors is a list), only connectors in
+    # that list are returned even if they are workspace-scoped. None = inherit
+    # all (backward-compatible). Imported lazily to keep the OSS-EE boundary
+    # (this service never imports the Pocket model directly).
+    if pocket_id:
+        from pocketpaw_ee.cloud.pockets.service import (
+            get_pocket_connector_permissions as _get_pocket_perms,
+        )
+
+        pocket_allowed = await _get_pocket_perms(pocket_id)
+        if pocket_allowed is not None:
+            pocket_set = set(pocket_allowed)
+            allowed_set &= pocket_set
+            if not allowed_set:
+                return []
+
     out: list[PocketConnectorInfo] = []
     seen: set[str] = set()
     for doc in enabled_docs:
