@@ -30,6 +30,16 @@
 # fresh one each time. No schema change: the upsert keys on the primary ``_id``
 # (already unique), so the existing compound (workspace, pocket_id) index — which
 # still serves the per-pocket reads — is sufficient and no new unique key is added.
+#
+# Updated 2026-06-18 (feat/sites-dedupe-migration, PERF-2): added ``archived`` — a
+# non-destructive tombstone flag for the duplicate Site docs the pre-PERF-1 minting
+# left behind. PERF-1 made NEW publishes stable (one upserted doc per pocket), but
+# EXISTING data still carries dupes (one pocket had 14 docs). The PERF-2 dedupe
+# migration (``sites.dedupe``) keeps ONE canonical doc per (workspace, pocket_id)
+# active and sets ``archived=True`` on the rest — it NEVER deletes, so the data is
+# recoverable. The gallery read (``service.list_for_workspace`` / listSites) filters
+# ``archived`` so each pocket shows exactly one card. Defaults False, so every
+# existing doc and every fresh publish reads active until the migration archives it.
 
 from __future__ import annotations
 
@@ -63,6 +73,11 @@ class Site(TimestampedDocument):
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""
+    # PERF-2: a non-destructive tombstone for duplicate Site docs the pre-PERF-1
+    # per-publish ObjectId minting left behind. The dedupe migration keeps ONE
+    # canonical doc per (workspace, pocket_id) active and sets this True on the
+    # rest (never deletes). The gallery read filters it so each pocket shows once.
+    archived: bool = False
     # SE-2b: the builder origin this site was published with, or "" when it was
     # published as a normal (non-editable) site. When set, the generated page
     # carries the gated edit-bridge keyed on this origin. Persisted so a

@@ -1347,7 +1347,20 @@ async def request_publish_pocket(
 
 
 async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
-    cursor = _SiteDoc.find({"workspace": workspace_id}).sort(-_SiteDoc.createdAt)  # type: ignore[operator]
+    """The gallery / listSites read: the workspace's Site cards, newest first.
+
+    PERF-2: filters out ARCHIVED docs so each pocket shows exactly one card. The
+    pre-PERF-1 minting left a pile of duplicate Site docs per pocket (one pocket
+    had 14), all of which this read listed → the gallery duplicated. The dedupe
+    migration (``sites.dedupe``) keeps ONE canonical doc per pocket active and
+    tombstones the rest with ``archived=True``; excluding them here collapses the
+    gallery to one card per pocket. ``archived: {"$ne": True}`` (not ``False``)
+    so docs predating the field — which have no ``archived`` key in Mongo — still
+    count as active.
+    """
+    cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}}).sort(
+        -_SiteDoc.createdAt
+    )  # type: ignore[operator]
     return [_to_response(doc) async for doc in cursor]
 
 
@@ -1359,8 +1372,13 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     (they show under /sites instead) WITHOUT the pockets service importing the
     Site Beanie model — the Site read stays in this service, which is the sole
     owner of Site reads (entity isolation). Tenant-scoped on ``workspace``.
+
+    PERF-2: excludes ARCHIVED dupes (``archived: {"$ne": True}``) so the set is
+    keyed on pockets that still have an ACTIVE Site — a fully-archived pocket
+    would be wrong to hide from the /pockets gallery. Pre-field docs (no
+    ``archived`` key) still count as active.
     """
-    cursor = _SiteDoc.find({"workspace": workspace_id})
+    cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}})
     return {doc.pocket_id async for doc in cursor}
 
 
