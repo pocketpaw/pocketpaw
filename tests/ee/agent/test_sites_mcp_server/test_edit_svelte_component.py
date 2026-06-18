@@ -6,10 +6,17 @@
 #      create_landing_site + create_svelte_site, and the provider advertises it.
 #   2. Handler wiring — identity gating, input validation, the success response
 #      shape, and error MAPPING: a SmokeGateFailed from the service becomes an
-#      is_error telling the agent the live site is unchanged; a CloudError
+#      is_error telling the agent the edit was not staged; a CloudError
 #      (NotFound / not-a-svelte-site) is relayed by code. The service-level
 #      persist + republish + rollback logic is covered by
 #      tests/ee/sites/test_component_edit.py; here we pin the agent surface.
+#
+# Updated: 2026-06-18 (fix/sites-edit-draft-not-publish, BUG 2) — an edit now stages
+# a DRAFT PREVIEW, not a live publish. The handler returns deployed=False +
+# status="draft" + is_live=False + a preview_url + a message that says draft/preview
+# and "Submit for review"; it must NOT narrate published/republished/live. The
+# success-shape test asserts the draft/preview framing; the smoke-gate test asserts
+# the "previous version is unchanged" (not "...still deployed") wording.
 """Tests for the targeted svelte-component edit tool (edit_svelte_component)."""
 
 from __future__ import annotations
@@ -37,8 +44,9 @@ def _identity(workspace_id: str | None, user_id: str | None):
 
 
 class _FakeSiteDoc:
-    """Stand-in for the Site Beanie doc the service returns — only the fields the
-    handler reads onto the response."""
+    """Stand-in for the Site doc the service returns — only the fields the handler
+    reads onto the response. The edit path returns a PREVIEW (deployed=False) since
+    an edit is now staged as a draft, not deployed live."""
 
     def __init__(self) -> None:
         from bson import ObjectId
@@ -46,8 +54,9 @@ class _FakeSiteDoc:
         self.id = ObjectId()
         self.pocket_id = "pk1"
         self.name = "Bright Smile"
-        self.url = "http://127.0.0.1:9999/site/"
-        self.deployed = True
+        self.url = "http://127.0.0.1:9999/preview-pk1/"
+        # An edit builds a PREVIEW, not a live deploy.
+        self.deployed = False
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +119,8 @@ class TestEditHandler:
         assert body["ok"] is True
         assert body["component_path"] == "src/lib/components/Hero.svelte"
         assert body["site"]["pocket_id"] == "pk1"
-        assert body["site"]["deployed"] is True
+        # The edit returns a PREVIEW, not a live deploy.
+        assert body["site"]["deployed"] is False
         # The service got the agent identity + the edit inputs.
         fake.assert_awaited_once()
         kwargs = fake.await_args.kwargs
@@ -118,6 +128,54 @@ class TestEditHandler:
         assert kwargs["user_id"] == "u1"
         assert kwargs["component_path"] == "src/lib/components/Hero.svelte"
         assert kwargs["new_source"] == "<section/>"
+
+    @pytest.mark.asyncio
+    async def test_success_payload_says_draft_preview_not_published(self) -> None:
+        """BUG 2: the edit success result must tell the agent the change is staged
+        as a DRAFT PREVIEW (NOT live/published) and that the user must Submit for
+        review to publish. The agent narrates this payload, so it must not claim
+        'published'/'live'/'republished'."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_svelte_component",
+                new=AsyncMock(return_value=_FakeSiteDoc()),
+            ),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/lib/components/Hero.svelte",
+                    "new_source": "<section/>",
+                }
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+
+        # The payload carries a draft/preview framing the agent relays.
+        assert body["status"] == "draft"
+        assert body["is_live"] is False
+        assert "preview_url" in body["site"]
+        # A human-readable message that says preview/draft + Submit for review.
+        message = (body.get("message") or "").lower()
+        assert "preview" in message or "draft" in message
+        assert "submit for review" in message
+
+        # And it does NOT CLAIM the edit is published / republished / live. The
+        # word "publish" may appear as an instruction ("to take it live, click
+        # Submit for review") but never as a completed-state claim about THIS edit.
+        text = out["content"][0]["text"].lower()
+        assert "republished" not in text
+        # No "published"/"is published"/"now published" completed-state claim.
+        assert "published" not in text
+        # No "live at <url>" / "now live" / "is live" publish claim. (is_live is a
+        # JSON key with an underscore, so the bare phrase "is live" must be absent.)
+        assert "live at" not in text
+        assert "now live" not in text
+        assert "is live" not in text
 
     @pytest.mark.asyncio
     async def test_missing_identity_is_error(self) -> None:
@@ -185,7 +243,9 @@ class TestEditHandler:
         assert out.get("is_error") is True
         text = out["content"][0]["text"]
         assert "smoke test" in text
-        assert "previous version is still deployed" in text
+        # The edit stages a draft preview, so a smoke failure means it was NOT
+        # staged and the previous version is unchanged (no deploy to roll back to).
+        assert "previous version is unchanged" in text
 
     @pytest.mark.asyncio
     async def test_cloud_error_is_relayed_by_code(self) -> None:

@@ -11,6 +11,12 @@
 # after a component edit; and make_site_editable republishes a site as editable.
 #
 # Fakes inject the generator + CF client so no Bun/workerd/Cloudflare is touched.
+#
+# Updated 2026-06-18 (fix/sites-edit-draft-not-publish): edit_svelte_component /
+# make_site_editable now take the PREVIEW branch (local serve, no live promote), so
+# the edit/arm-path tests inject a fake ``_local_deploy`` instead of relying on the
+# CF deploy. The builder_origin threading these tests pin is unchanged — a preview
+# still forwards the origin to the generator and carries it on the returned Site.
 
 from __future__ import annotations
 
@@ -50,6 +56,12 @@ class _FakeCF:
     async def put_worker(self, *, script_name, bundle):
         self.put_calls.append(script_name)
         return True
+
+
+def _fake_local_deploy(site_id: str, project_dir: str) -> str:
+    """Stand in for local_server.deploy_local so the PREVIEW serve (the edit/arm
+    path) does not need a real built dir on disk — returns the localhost URL."""
+    return f"http://127.0.0.1:9999/{site_id}/"
 
 
 @pytest.fixture(autouse=True)
@@ -190,6 +202,7 @@ async def test_edit_component_preserves_stored_builder_origin(beanie_test_db):
         _generator=gen,
         _cloudflare=_FakeCF(),
         _bundle_reader=lambda d: b"x",
+        _local_deploy=_fake_local_deploy,
     )
     # The edited site is STILL editable — builder_origin carried through.
     assert gen.built["builder_origin"] == "https://app.paw.example"
@@ -219,6 +232,7 @@ async def test_edit_component_on_non_editable_site_stays_non_editable(beanie_tes
         _generator=gen,
         _cloudflare=_FakeCF(),
         _bundle_reader=lambda d: b"x",
+        _local_deploy=_fake_local_deploy,
     )
     assert site.builder_origin == ""
     assert gen.built.get("builder_origin") in (None, "")
@@ -248,6 +262,7 @@ async def test_make_site_editable_republishes_with_origin(beanie_test_db):
         _generator=gen,
         _cloudflare=_FakeCF(),
         _bundle_reader=lambda d: b"x",
+        _local_deploy=_fake_local_deploy,
     )
     assert site.builder_origin == "https://app.paw.example"
     assert gen.built["builder_origin"] == "https://app.paw.example"
@@ -267,6 +282,7 @@ async def test_make_site_editable_defaults_builder_origin_from_config(beanie_tes
         _generator=gen,
         _cloudflare=_FakeCF(),
         _bundle_reader=lambda d: b"x",
+        _local_deploy=_fake_local_deploy,
     )
     assert site.builder_origin == "https://configured.paw.example"
     assert gen.built["builder_origin"] == "https://configured.paw.example"
