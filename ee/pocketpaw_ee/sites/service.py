@@ -70,6 +70,28 @@
 # creds ARE present (or a CF client is injected, e.g. by tests). PROD TODO: local
 # mode is a dev shim — production always takes the CF path.
 #
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): thread
+# ``builder_origin`` through the publish path so a svelte Paw Site stays
+# editable. publish()/publish_pocket() forward it to generator.build() (it rides
+# siteConfig.builderOrigin, which SE-1's generator gates the edit-bridge on) and
+# store it on the Site doc. edit_svelte_component() recovers the stored origin
+# from the pocket's current Site (via _latest_site_for_pocket) and re-applies it,
+# so a component edit does not strip the bridge. make_site_editable() republishes
+# a pocket as editable (builder_origin set, defaulting to PAW_SITES_BUILDER_ORIGIN)
+# and backs POST /sites/by-pocket/{pocket_id}/editable.
+#
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2): added
+# edit_svelte_component() — rewrite ONE file of a svelte Paw Site pocket's
+# ``source`` map and safely republish. It delegates the Pocket write to the
+# pockets service (set_svelte_source_file — entity isolation), then calls
+# publish_pocket() to regenerate + smoke-gate + redeploy. publish() smoke-gates
+# BEFORE it deploys, so a broken edit never reaches the live deploy; on
+# SmokeGateFailed this function ALSO rolls the persisted source back to its prior
+# contents and re-raises, so neither the deploy nor the stored source is left
+# broken. This is the chat-agent surface for a targeted component edit, exposed
+# beside create_landing_site / create_svelte_site / publish on the
+# pocketpaw_sites_manager MCP server.
+#
 # Updated 2026-06-03 (Sites backend fixes A+B): (A) added site_pocket_ids() — the
 # set of pocket_ids that have a Site in a workspace, so the /pockets gallery can
 # exclude already-published pockets WITHOUT the pockets service importing the Site
@@ -81,6 +103,30 @@
 # source-of-truth layer, so sites no longer land unnamed when the caller omits a
 # name. The resolved name flows into BOTH the generated site ``title`` and the
 # stored ``Site.name``.
+#
+# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
+# added preview_pocket() and pocket_status(), the two by-pocket reads the #432
+# frontend already calls (the backend half of #1345 never landed on dev, so every
+# Preview-tab fetch 404'd and the builder showed "Nothing to preview yet").
+# preview_pocket() reads the source pocket via the pockets service and returns its
+# DRAFT content — the rippleSpec for a ripple pocket, the {path: contents} source
+# map for a svelte pocket — reusing publish_pocket()'s pocket-read + engine logic
+# so the preview matches what publish would build. pocket_status() derives
+# draft/published + is_live from the Site deployment doc for the pocket
+# (tenant-scoped on ``workspace``, via the model's compound index): no Site doc =
+# draft / not live; a Site doc = published with is_live following ``deployed``.
+# Updated 2026-06-17 (feat/sites-local-reserve — local sites die on restart):
+# added reserve_local_sites(). LOCAL deploy mode (Phase 3) serves sites from a
+# per-process static server bound to an EPHEMERAL port that is only started
+# during publish(). After a backend restart the server is gone and every stored
+# ``url`` (http://127.0.0.1:<old-port>/<id>/) is dead, even though the built
+# files survive under sites_home()/<id>/. reserve_local_sites() (re)starts the
+# shared server via local_server.ensure_server() and rewrites every deployed
+# site's ``url`` to the fresh live base, so prior local sites become openable
+# again. It is a no-op outside local mode (the real CF path owns its own URLs)
+# and skips sites whose files are not on disk. The cloud boot hook calls it
+# unscoped so a restart auto-re-serves all sites; POST /sites/reserve calls it
+# workspace-scoped for an explicit "re-serve" action.
 
 from __future__ import annotations
 
@@ -96,7 +142,12 @@ from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
-from pocketpaw_ee.sites.dto import DomainStatusResponse, SiteResponse
+from pocketpaw_ee.sites.dto import (
+    DomainStatusResponse,
+    SitePreviewResponse,
+    SiteResponse,
+    SiteStatusResponse,
+)
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
@@ -111,6 +162,17 @@ def _capture_base() -> str:
     import os
 
     return os.environ.get("PAW_CAPTURE_API_BASE", "http://localhost:8888/api/v1")
+
+
+def _builder_origin() -> str:
+    """The dashboard/builder origin an editable Paw Site postMessages its
+    section rects to (SE-2b). The generated edit-bridge only accepts messages
+    from this exact origin. Defaults to the local dashboard; overridable via
+    PAW_SITES_BUILDER_ORIGIN. Used by ``make_site_editable`` when the caller does
+    not pass an explicit origin."""
+    import os
+
+    return os.environ.get("PAW_SITES_BUILDER_ORIGIN", "http://localhost:8888")
 
 
 # The default logical form type. The generated /api/submit endpoint sends this
@@ -185,6 +247,9 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         deployed=doc.deployed,
         signed_key=doc.signed_key,
         url=doc.url,
+        # SE-2b: surface whether the site is editable (non-empty = carries the
+        # edit-bridge) so the UI can show/hide the inline-edit affordance.
+        builder_origin=getattr(doc, "builder_origin", ""),
     )
 
 
@@ -198,6 +263,7 @@ async def publish(
     name: str = "",
     engine: str = "ripple",
     source: dict[str, str] | None = None,
+    builder_origin: str | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -221,7 +287,13 @@ async def publish(
     respecting entity isolation) and uses its ``name`` field; only when the pocket
     has no name does it fall back to "Untitled site". Callers that pre-resolve the
     name (e.g. ``publish_pocket``, which already holds the wire dict) pass it in,
-    so the common path does not re-fetch."""
+    so the common path does not re-fetch.
+
+    ``builder_origin`` (SE-2b) makes the site EDITABLE: when set, it rides
+    ``siteConfig.builderOrigin`` so the paw-sites generator injects the gated
+    edit-bridge, and it is persisted on the Site doc so a later component-edit
+    republish can re-apply it. ``None`` (the default) publishes a normal,
+    non-editable site (empty ``builder_origin`` on the doc, no bridge)."""
     generator = _generator or GeneratorClient()
 
     # Default a blank name to the source pocket's own display name so the schema's
@@ -249,6 +321,7 @@ async def publish(
         capture_signed_key=signed_key,
         engine=engine,
         source=source,
+        builder_origin=builder_origin,
     )
 
     # Local mode only when the caller did NOT inject a CF client (tests inject a
@@ -275,6 +348,9 @@ async def publish(
         deployed=True,
         signed_key=signed_key,
         url=url,
+        # SE-2b: persist the builder origin (or "") so a component-edit republish
+        # can re-apply it and the site stays editable across edits.
+        builder_origin=builder_origin or "",
         # Seed capture config so a lead lands with no manual Mongo edit: a default
         # mapping keyed on the form_type the generated endpoint sends, and the
         # local dev origins so the local smoke works. add_domain() appends the
@@ -369,6 +445,7 @@ async def publish_pocket(
     user_id: str,
     pocket_id: str,
     name: str = "",
+    builder_origin: str | None = None,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
@@ -387,6 +464,10 @@ async def publish_pocket(
     wire dict this function already holds, so ``publish`` does not re-fetch the
     pocket on this path. (``publish`` carries the same fallback as a safety net for
     direct callers who pass a blank name.)
+
+    ``builder_origin`` (SE-2b) is forwarded straight through so a publish via this
+    shared path can request an editable site (the edit-bridge gates on it). It
+    defaults to ``None`` (a normal, non-editable publish).
 
     The generator / Cloudflare / bundle-reader / local-deploy seams are forwarded
     straight through to ``publish`` so the shared path is unit-testable without
@@ -415,10 +496,207 @@ async def publish_pocket(
         engine=engine,
         source=source,
         name=name or pocket.get("name", ""),
+        builder_origin=builder_origin,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
         _local_deploy=_local_deploy,
+    )
+
+
+async def edit_svelte_component(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    component_path: str,
+    new_source: str,
+    name: str = "",
+    _generator: GeneratorClient | None = None,
+    _cloudflare: Any | None = None,
+    _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    _local_deploy: Callable[[str, str], str] | None = None,
+) -> _SiteDoc:
+    """Rewrite ONE component of a svelte Paw Site pocket and safely republish.
+
+    The chat-agent entry point for a targeted component edit: it replaces the
+    file at ``component_path`` in the pocket's svelte ``source`` map with
+    ``new_source`` and republishes the site. The Pocket write is owned by the
+    pockets service (``set_svelte_source_file`` — entity isolation); this
+    function only orchestrates persist → republish.
+
+    Safety contract — a broken edit must leave NEITHER a broken deploy NOR stale
+    source on the pocket:
+      1. persist the new component source (the pockets service validates the
+         pocket is a svelte site and that ``component_path`` exists, raising
+         ValidationError / NotFound otherwise — propagated to the caller);
+      2. republish via ``publish_pocket`` (regenerate + smoke-gate + redeploy);
+      3. if the republish raises ``SmokeGateFailed`` (the workerd smoke render
+         rejects the edited site), ROLL BACK the persisted source to its prior
+         contents and re-raise. ``publish`` smoke-gates BEFORE it deploys, so the
+         prior live deploy is already untouched; the rollback keeps the stored
+         source matching that last-good deploy so a later publish is not broken.
+
+    SE-2b: the republish recovers the ``builder_origin`` stored on the pocket's
+    current Site doc and re-applies it, so an EDITABLE site stays editable after
+    an edit (and a non-editable one stays non-editable — there is no origin to
+    re-apply). Without this, a republish would publish a fresh non-editable site
+    and strip the edit-bridge SE-1 gates on ``builderOrigin``.
+
+    The generator / Cloudflare / bundle-reader / local-deploy seams forward
+    straight to ``publish_pocket`` so the path is unit-testable without
+    Bun / workerd / Cloudflare.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    # SE-2b: recover the builder origin the site is currently published with so
+    # the republish keeps the edit-bridge. "" (or no prior site) republishes
+    # non-editable, exactly as before.
+    prior = await _latest_site_for_pocket(workspace_id, pocket_id)
+    builder_origin = prior.builder_origin if prior else ""
+
+    # 1. Persist the edit (pockets service owns the Pocket write + validation).
+    #    ``previous_source`` is the file's prior contents, held for rollback.
+    _wire, previous_source = await pockets_service.set_svelte_source_file(
+        pocket_id,
+        user_id,
+        component_path=component_path,
+        new_source=new_source,
+    )
+
+    # 2. Republish. 3. On a smoke-gate failure, restore the prior source so the
+    #    pocket never carries a component the renderer rejects — then re-raise so
+    #    the caller surfaces the reason. The prior deploy is untouched because the
+    #    gate fires before publish deploys.
+    try:
+        return await publish_pocket(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            name=name,
+            builder_origin=builder_origin or None,
+            _generator=_generator,
+            _cloudflare=_cloudflare,
+            _bundle_reader=_bundle_reader,
+            _local_deploy=_local_deploy,
+        )
+    except SmokeGateFailed:
+        await pockets_service.set_svelte_source_file(
+            pocket_id,
+            user_id,
+            component_path=component_path,
+            new_source=previous_source,
+        )
+        raise
+
+
+async def _latest_site_for_pocket(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """Return the most recently published Site doc for ``pocket_id`` in this
+    workspace, or ``None`` if the pocket was never published.
+
+    ``publish`` inserts a fresh Site doc per publish, so a pocket can have more
+    than one Site row; the newest (by ``createdAt``) is the live one. SE-2b uses
+    this to recover the ``builder_origin`` a republish must re-apply. Tenant-
+    scoped on ``workspace``."""
+    return await (
+        _SiteDoc.find({"workspace": workspace_id, "pocket_id": pocket_id})
+        .sort(-_SiteDoc.createdAt)  # type: ignore[operator]
+        .first_or_none()
+    )
+
+
+async def make_site_editable(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    builder_origin: str | None = None,
+    _generator: GeneratorClient | None = None,
+    _cloudflare: Any | None = None,
+    _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    _local_deploy: Callable[[str, str], str] | None = None,
+) -> _SiteDoc:
+    """Republish a pocket's site as EDITABLE (SE-2b).
+
+    Backs ``POST /sites/by-pocket/{pocket_id}/editable``: it republishes the
+    pocket with ``builder_origin`` set so the generated page carries the gated
+    edit-bridge, and persists that origin on the Site doc. ``builder_origin``
+    defaults to the configured dashboard origin (``PAW_SITES_BUILDER_ORIGIN``)
+    when the caller does not pass one, so the endpoint works with no body.
+
+    Delegates to ``publish_pocket`` (reads the pocket, regenerates, smoke-gates,
+    redeploys), so it inherits the same NotFound / Forbidden propagation and the
+    smoke gate — a build that fails the gate raises ``SmokeGateFailed`` and the
+    prior deploy is untouched.
+    """
+    origin = (builder_origin or "").strip() or _builder_origin()
+    return await publish_pocket(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        builder_origin=origin,
+        _generator=_generator,
+        _cloudflare=_cloudflare,
+        _bundle_reader=_bundle_reader,
+        _local_deploy=_local_deploy,
+    )
+
+
+async def preview_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+) -> SitePreviewResponse:
+    """Read a pocket's DRAFT content for the in-app builder Preview tab.
+
+    Loads the source pocket through the pockets service's PUBLIC ``get`` (the wire
+    dict — no Beanie import, respecting entity isolation; it raises NotFound /
+    Forbidden itself when the pocket is missing or access-denied, which the router
+    maps to 404 / 403). Mirrors ``publish_pocket``'s pocket-read + engine logic so
+    the preview matches what publish would build:
+      * ``engine="ripple"`` (the default) → ``content`` is the pocket's rippleSpec.
+      * ``engine="svelte"`` → ``content`` is the {path: contents} source map.
+    ``content`` is None when the pocket carries nothing to render on that track.
+
+    ``workspace_id`` is unused for the pocket read itself (the pockets service
+    scopes on ``user_id``), but it is required on every Sites service function so
+    the surface stays uniform and tenant-aware as the read paths converge.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    engine = pocket.get("engine") or "ripple"
+    if engine == "svelte":
+        source = pocket.get("source")
+        content = source if isinstance(source, dict) else None
+    else:
+        ripple_spec = pocket.get("rippleSpec")
+        content = ripple_spec if isinstance(ripple_spec, dict) else None
+    return SitePreviewResponse(pocket_id=pocket_id, engine=engine, content=content)
+
+
+async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusResponse:
+    """Derive a pocket's draft/published + is_live state from its Site deployment
+    doc, tenant-scoped on ``workspace``.
+
+    Looks up the Site for this (workspace, pocket_id) — the compound index the
+    model declares serves this read directly. With no Site doc the pocket has
+    never been published, so it reads ``draft`` / not live. With a Site doc it
+    reads ``published``; ``is_live`` follows the doc's ``deployed`` flag (the only
+    signal that earns a "Live" badge), and ``site_id`` carries the deployed id.
+    This is the authoritative state the builder uses to label a pocket even before
+    it surfaces in the gallery list. No Cloudflare call — just persisted state.
+    """
+    doc = await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+    if doc is None:
+        return SiteStatusResponse(pocket_id=pocket_id, status="draft", is_live=False)
+    return SiteStatusResponse(
+        pocket_id=pocket_id,
+        status="published",
+        is_live=doc.deployed,
+        site_id=str(doc.id),
     )
 
 
@@ -440,12 +718,69 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     return {doc.pocket_id async for doc in cursor}
 
 
+async def reserve_local_sites(workspace_id: str | None = None) -> int:
+    """Re-serve locally-deployed Paw Sites after a backend restart.
+
+    In LOCAL deploy mode (Phase 3) a published site is served from a per-process
+    static server on an EPHEMERAL OS-assigned port that is only started inside
+    ``publish``. The built files survive a restart under
+    ``local_server.sites_home()/<site_id>/``, but the server does not — so every
+    stored ``Site.url`` (``http://127.0.0.1:<old-port>/<site_id>/``) is dead and
+    re-publishing one site starts a server on a NEW port, leaving the rest stale.
+
+    This (re)starts the shared static server via ``local_server.ensure_server()``
+    and, for each deployed site whose files exist on disk, rewrites the stored
+    ``url`` to ``f"{base}/{site_id}/"`` against the now-live base, then saves.
+    Returns the count of sites reconciled.
+
+    Scope: ``workspace_id is None`` reconciles ALL workspaces' sites (the boot
+    hook path — a restart re-serves everything); a non-None id is tenant-scoped
+    to that workspace (the manual POST /sites/reserve path).
+
+    No-op outside local mode: the real Cloudflare path owns its own URLs, so when
+    ``_local_mode()`` is False this returns 0 without starting a server. Sites
+    with no persisted dir are skipped (nothing to serve)."""
+    if not _local_mode():
+        return 0
+
+    from pocketpaw_ee.sites import local_server
+
+    base = local_server.ensure_server()
+    home = local_server.sites_home()
+
+    # workspace=None → reconcile every tenant's sites (boot hook). A non-None id
+    # tenant-filters the read. Both paths only touch deployed sites.
+    query: dict[str, Any] = {"deployed": True}
+    if workspace_id is not None:
+        query["workspace"] = workspace_id
+
+    reconciled = 0
+    cursor = _SiteDoc.find(query)
+    async for doc in cursor:
+        site_id = str(doc.id)
+        # Skip sites whose built files are gone — there is nothing to serve, so
+        # rewriting the url to a 404-ing path would be worse than leaving it.
+        if not (home / site_id).is_dir():
+            continue
+        fresh_url = f"{base}/{site_id}/"
+        if doc.url != fresh_url:
+            doc.url = fresh_url
+            await doc.save()  # no-event: local-mode URL reconciliation, not a domain mutation
+        reconciled += 1
+    return reconciled
+
+
 __all__ = [
     "publish",
     "publish_pocket",
+    "preview_pocket",
+    "pocket_status",
+    "edit_svelte_component",
+    "make_site_editable",
     "add_domain",
     "domain_status",
     "list_domains",
     "list_for_workspace",
     "site_pocket_ids",
+    "reserve_local_sites",
 ]

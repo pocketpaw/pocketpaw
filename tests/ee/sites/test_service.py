@@ -582,3 +582,148 @@ async def test_publish_pocket_no_name_lands_site_with_pocket_name(beanie_test_db
         )
 
     assert site.name == "Flower Shop Landing Page"
+
+
+# ---------------------------------------------------------------------------
+# preview_pocket — the DRAFT-content reader backing
+# GET /sites/by-pocket/{pocket_id}/preview. Reads the source pocket via the
+# pockets service (the wire-dict reader, which raises NotFound itself) and
+# returns {pocket_id, engine, content}: the rippleSpec for a ripple pocket, or
+# the {path: contents} source map for a svelte pocket. Mirrors publish_pocket's
+# pocket-read + engine logic so the preview matches what publish would build.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_ripple_returns_ripple_spec():
+    """A ripple pocket previews its rippleSpec verbatim, with engine='ripple'."""
+    from unittest.mock import AsyncMock, patch
+
+    spec = {"type": "container", "ui": {"children": []}, "theme": {"primary": "#0A84FF"}}
+    wire = {"name": "Bright Smile", "engine": "ripple", "rippleSpec": spec}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ) as mock_get:
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    mock_get.assert_awaited_once_with("pk1", "u1")
+    assert res.pocket_id == "pk1"
+    assert res.engine == "ripple"
+    assert res.content == spec
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_defaults_engine_to_ripple():
+    """A pocket with no explicit engine previews as ripple (the default track)."""
+    from unittest.mock import AsyncMock, patch
+
+    spec = {"type": "container"}
+    wire = {"name": "x", "rippleSpec": spec}  # no engine key
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    assert res.engine == "ripple"
+    assert res.content == spec
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_svelte_returns_source_map():
+    """A svelte pocket previews its {path: contents} source map, engine='svelte'."""
+    from unittest.mock import AsyncMock, patch
+
+    source = {
+        "src/routes/+page.svelte": "<h1>Hello</h1>",
+        "src/lib/Hero.svelte": "<section>hero</section>",
+    }
+    wire = {"name": "x", "engine": "svelte", "source": source, "rippleSpec": {}}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    assert res.engine == "svelte"
+    assert res.content == source
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_propagates_not_found():
+    """A missing / access-denied pocket surfaces NotFound (router → 404), not a
+    swallowed empty preview."""
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    ):
+        with pytest.raises(NotFound):
+            await sites_service.preview_pocket(
+                workspace_id="ws1", user_id="u1", pocket_id="pk_missing"
+            )
+
+
+# ---------------------------------------------------------------------------
+# pocket_status — the draft/published + is_live reader backing
+# GET /sites/by-pocket/{pocket_id}/status. Derives the lifecycle from the Site
+# deployment doc for the pocket (tenant-scoped on workspace): a Site doc means
+# published (is_live == doc.deployed); no Site doc means draft / not live.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_no_site_is_draft_not_live(beanie_test_db):
+    """A pocket that has never been published has no Site doc → draft, not live."""
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_unpublished")
+    assert res.pocket_id == "pk_unpublished"
+    assert res.status == "draft"
+    assert res.is_live is False
+    assert res.site_id is None
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_published_site_is_live(beanie_test_db):
+    """A pocket with a deployed Site doc reads published + live, and carries the
+    site id."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_live",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_live")
+    assert res.pocket_id == "pk_live"
+    assert res.status == "published"
+    assert res.is_live is True
+    assert res.site_id == str(site.id)
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_is_tenant_scoped(beanie_test_db):
+    """A Site published in another workspace does not leak into this workspace's
+    status read — a different workspace sees the pocket as draft / not live."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    await sites_service.publish(
+        workspace_id="ws_owner",
+        user_id="u1",
+        pocket_id="pk_x",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    res = await sites_service.pocket_status(workspace_id="ws_intruder", pocket_id="pk_x")
+    assert res.status == "draft"
+    assert res.is_live is False
+    assert res.site_id is None

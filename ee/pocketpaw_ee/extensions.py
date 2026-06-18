@@ -321,6 +321,28 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("xproc consumer start failed: %s", exc)
 
+        # Re-serve locally-deployed Paw Sites. In LOCAL deploy mode the static
+        # server binds an ephemeral port and is only started during publish, so
+        # after this restart every prior site's stored url points at a dead
+        # port even though its files survived on disk. reserve_local_sites()
+        # (re)starts the shared server and rewrites every deployed site's url to
+        # the fresh live base so previously-published local sites are openable
+        # again with no manual re-publish. Unscoped (all workspaces) — this is
+        # the automatic boot path. A no-op when real Cloudflare creds are present
+        # (the CF path owns its own URLs). Guarded so a failure here never blocks
+        # boot. Mirrors this lifecycle hook's other best-effort boot reconcilers
+        # (run sweeper, xproc consumer) rather than mount_cloud's
+        # ``@app.on_event("startup")``, which is silently dropped under
+        # ``FastAPI(lifespan=...)`` (the host's default).
+        try:
+            from pocketpaw_ee.sites.service import reserve_local_sites
+
+            reconciled = await reserve_local_sites()
+            if reconciled:
+                logger.info("Re-served %d local Paw Site(s) after restart", reconciled)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Local Paw Sites re-serve failed (non-fatal): %s", exc)
+
     async def on_shutdown(self) -> None:
         import logging
 

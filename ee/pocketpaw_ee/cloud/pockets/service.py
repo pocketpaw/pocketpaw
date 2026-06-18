@@ -184,6 +184,13 @@ rippleSpec). Fixes the agent-view misread where ``get_pocket`` returned the
 empty legacy ``widgets: []`` alongside the full rippleSpec and agents
 concluded a fully composed template pocket was "an empty shell". The
 ``widgets`` field itself is NOT removed — other consumers may rely on it.
+
+Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
+``set_svelte_source_file``: rewrite ONE file in a svelte-engine pocket's
+``source`` map (the {path: contents} hand-written SvelteKit files) and persist
+it. The Pocket write stays here (entity isolation); the sites service
+orchestrates the republish. Returns the prior file contents alongside the wire
+dict so the caller can roll the edit back when the downstream smoke gate fails.
 """
 
 from __future__ import annotations
@@ -1394,6 +1401,58 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_svelte_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+) -> tuple[dict, str]:
+    """Rewrite ONE file in a svelte-engine pocket's ``source`` map and persist it.
+
+    The svelte analog of editing a single component of a Paw Site: ``source`` is
+    a ``{relative_path: file_contents}`` map (the hand-written SvelteKit files),
+    and this replaces the contents at ``component_path`` with ``new_source``. The
+    Pocket Beanie write stays inside the pockets service (entity isolation — the
+    sites service orchestrates the republish but never touches the Pocket model).
+
+    Access mirrors ``update``: explicit ``(pocket_id, user_id)`` with
+    ``_check_domain_edit_access`` (owner / shared_with / workspace-visible). A
+    missing pocket raises ``NotFound``; a non-svelte pocket or a non-existent
+    component path raise the obvious cloud errors rather than silently creating a
+    file or dereferencing ``None``:
+      * not a svelte pocket (``engine != "svelte"`` or no ``source`` map) →
+        ``ValidationError`` (422);
+      * ``component_path`` absent from the map → ``NotFound`` (404) on the
+        component, so a typo'd path is not a silent create.
+
+    Returns ``(resolved_wire_dict, previous_source)`` — the wire dict every other
+    write returns, plus the file's PRIOR contents so the caller can roll the edit
+    back if the downstream republish fails its smoke gate (the sites service does
+    exactly this so a broken edit never leaves stale source on the pocket).
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "svelte" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    if component_path not in doc.source:
+        raise NotFound("site_component", component_path)
+
+    previous_source = doc.source[component_path]
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM).
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    return await _resolved_wire_dict(doc, user_id), previous_source
 
 
 async def merge_spec(
@@ -4408,6 +4467,7 @@ __all__ = [
     "set_pocket_approval_route",
     "set_pocket_backend",
     "set_pocket_write_policy",
+    "set_svelte_source_file",
     "unassign_project_on_pockets",
     "update",
     "update_share_link",
