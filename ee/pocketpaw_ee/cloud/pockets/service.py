@@ -191,6 +191,13 @@ Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
 it. The Pocket write stays here (entity isolation); the sites service
 orchestrates the republish. Returns the prior file contents alongside the wire
 dict so the caller can roll the edit back when the downstream smoke gate fails.
+Changes: 2026-06-18 (feat/branch-primitive-versions, BP-1) — ``merge_spec``
+now ALSO records a draft ArtifactVersion (scope_type="pocket") after the
+rippleSpec persist, via the universal Branch-primitive versions service. The
+existing destructive overwrite + emit are unchanged; the version write is an
+additive, best-effort snapshot (a version-store failure never breaks the merge)
+so every content mutation gains a draft/history without changing the merge
+contract. TODO(BP-3/BP-4): merge gate + revert/history hook onto these rows.
 """
 
 from __future__ import annotations
@@ -1604,6 +1611,13 @@ async def merge_spec(
     doc.rippleSpec = normalized
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-1): record a draft ArtifactVersion snapshot of the
+    # mutated rippleSpec. ADDITIVE — the destructive overwrite above already
+    # happened and stays the source of truth for rendering; this captures a
+    # draft/history snapshot so the artifact can later have draft/published/
+    # rollback (BP-3/BP-4). Best-effort: a version-store failure must NOT break
+    # the merge, so it is wrapped and only logged.
+    await _record_pocket_draft_version(doc, author=user_id)
     resolved = await _resolved_wire_dict(doc, user_id)
     return {
         "ok": True,
@@ -1612,6 +1626,38 @@ async def merge_spec(
         "pocket": resolved,
         "warnings": warnings,
     }
+
+
+async def _record_pocket_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+    """Snapshot a pocket's current rippleSpec as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-1). Lazy-imports the versions service so the
+    pockets entity does not take a hard import on the versions package and so
+    a fork without the versions module degrades gracefully. The snapshot is
+    the full ``rippleSpec`` dict (empty dict when None). Failures are logged
+    and swallowed — versioning is an additive audit/history layer over the
+    existing merge, never a gate on it.
+
+    TODO(BP-3): a merge gate may branch this draft for human review before it
+    becomes the published pointer.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=doc.rippleSpec or {},
+            author=author,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the merge
+        logger.warning(
+            "versions: failed to record draft version for pocket %s — "
+            "merge persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
 
 
 async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
