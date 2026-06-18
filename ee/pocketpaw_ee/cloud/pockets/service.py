@@ -4508,6 +4508,114 @@ async def dispatch_bulk_action(
     return wire
 
 
+# ── Per-Pocket Connector Permissions ──────────────────────────────────
+
+
+async def get_pocket_connector_permissions(
+    pocket_id: str,
+) -> list[str] | None:
+    """Return the allowed connectors for a pocket.
+
+    Returns ``None`` when the pocket inherits all workspace connectors
+    (default). Returns a list (possibly empty) of connector names when
+    the pocket has explicit restrictions.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    return doc.allowed_connectors
+
+
+async def set_pocket_connector_permissions(
+    pocket_id: str,
+    allowed_connectors: list[str] | None,
+) -> None:
+    """Set the allowed connectors for a pocket.
+
+    Pass ``None`` to inherit all workspace connectors.
+    Pass ``[]`` to revoke all (pocket sees nothing).
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if allowed_connectors is not None:
+        doc.allowed_connectors = allowed_connectors
+    else:
+        doc.allowed_connectors = None
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.set",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "allowed_connectors": allowed_connectors,
+        },
+    )
+
+
+async def grant_pocket_connector(
+    pocket_id: str,
+    connector_name: str,
+) -> None:
+    """Grant a connector to a pocket (additive)."""
+    doc = await _fetch_pocket(pocket_id)
+    current = doc.allowed_connectors
+    if current is None:
+        # Currently inheriting all — switch to explicit allowlist with just this connector.
+        doc.allowed_connectors = [connector_name]
+    elif connector_name not in current:
+        doc.allowed_connectors = [*current, connector_name]
+    else:
+        return  # already granted
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.grant",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "connector_name": connector_name,
+        },
+    )
+
+
+async def revoke_pocket_connector(
+    pocket_id: str,
+    connector_name: str,
+) -> None:
+    """Revoke a connector from a pocket (removes from allowlist)."""
+    doc = await _fetch_pocket(pocket_id)
+    current = doc.allowed_connectors
+    if current is None:
+        return  # no restrictions, nothing to revoke
+    next_list = [c for c in current if c != connector_name]
+    # Keep the list (even empty) to distinguish "no restrictions" from "nothing allowed"
+    doc.allowed_connectors = next_list
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.revoke",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "connector_name": connector_name,
+        },
+    )
+
+
+async def list_workspace_pocket_connector_permissions(
+    workspace_id: str,
+) -> dict[str, list[str] | None]:
+    """Return the connector-permissions map for ALL pockets in a workspace.
+
+    Returns a dict of pocket_id → allowed_connectors (list or None).
+    ``None`` means the pocket inherits all workspace connectors.
+    This is the bulk endpoint for the frontend's permission-store loader.
+    """
+    docs = await _PocketDoc.find(
+        {"workspace": workspace_id},
+        projection={"allowed_connectors": 1},
+    ).to_list()
+    result: dict[str, list[str] | None] = {}
+    for doc in docs:
+        result[str(doc.id)] = doc.allowed_connectors
+    return result
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -4543,14 +4651,17 @@ __all__ = [
     "get",
     "get_pocket_backend",
     "get_pocket_backend_for_executor",
+    "get_pocket_connector_permissions",
     "get_pocket_ripple_spec",
     "get_webhook_secret",
+    "grant_pocket_connector",
     "has_action_run_access",
     "has_edit_access",
     "is_member",
     "is_owner",
     "list_interval_source_pockets",
     "list_pockets",
+    "list_workspace_pocket_connector_permissions",
     "remove_agent",
     "remove_collaborator",
     "remove_pocket_backend",
@@ -4559,10 +4670,12 @@ __all__ = [
     "reorder_widgets",
     "resolve_pocket_template",
     "resolve_webhook_pocket",
+    "revoke_pocket_connector",
     "revoke_share_link",
     "rotate_webhook_secret",
     "set_pocket_approval_route",
     "set_pocket_backend",
+    "set_pocket_connector_permissions",
     "set_pocket_write_policy",
     "set_svelte_source_file",
     "unassign_project_on_pockets",

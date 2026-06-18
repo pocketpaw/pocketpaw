@@ -161,6 +161,12 @@ class Pocket(TimestampedDocument):
     # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
     # surface-kind default.
     surface_profile: PocketSurfaceProfile | None = None
+    # Per-pocket connector allowlist. `None` (default) = inherit all workspace
+    # connectors (backward-compatible). An explicit list restricts the pocket to
+    # only those named connectors. Empty list = no connectors allowed.
+    # Workspace-level connector permissions (member → connector) still apply
+    # on top — a pocket cannot grant a connector the member doesn't have.
+    allowed_connectors: list[str] | None = None
 
     model_config = {"populate_by_name": True}
 

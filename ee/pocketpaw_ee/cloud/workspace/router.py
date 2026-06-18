@@ -24,6 +24,7 @@ from pocketpaw_ee.cloud._core.rate_limit import (
 from pocketpaw_ee.cloud.auth.core import current_optional_user
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.models.user import User
+from pocketpaw_ee.cloud.pockets.dto import WorkspacePocketConnectorPermissionsOut
 from pocketpaw_ee.cloud.workspace import domains as domains_service
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.cloud.workspace.dto import (
@@ -312,6 +313,34 @@ async def clear_member_connector_permissions(
     """Remove all connector restrictions for a member (grants full access)."""
     await workspace_service.clear_member_connector_permissions(ctx, workspace_id, user_id)
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Pocket Connector Permissions (workspace-level bulk read)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{workspace_id}/pocket-connector-permissions",
+    response_model=WorkspacePocketConnectorPermissionsOut,
+)
+async def get_workspace_pocket_connector_permissions(
+    workspace_id: str,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_membership),
+) -> WorkspacePocketConnectorPermissionsOut:
+    """Read the per-pocket connector allowlist for every pocket in this workspace.
+
+    Returns a map of ``pocket_id → allowed_connectors``. A ``null`` value
+    means the pocket inherits all workspace connectors (default / no
+    restrictions). An empty list means the pocket is restricted but has
+    nothing allowed. Admin/owner sees every pocket's permissions; a regular
+    member sees only pockets they can access (the service filters).
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    result = await pockets_service.list_workspace_pocket_connector_permissions(workspace_id)
+    return WorkspacePocketConnectorPermissionsOut(permissions=result)
 
 
 # ---------------------------------------------------------------------------

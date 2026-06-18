@@ -188,17 +188,21 @@ from pocketpaw_ee.cloud.pockets.dto import (
     BulkDispatchResponse,
     CreatePocketRequest,
     DispatchBulkRequest,
+    GrantPocketConnectorRequest,
     HomePocketResponse,
     MergeSpecRequest,
     PocketBackendConfigRequest,
     PocketBackendConfigResponse,
+    PocketConnectorPermissionsOut,
     ReorderWidgetsRequest,
+    RevokePocketConnectorRequest,
     RunActionRequest,
     RunActionResponse,
     RunSourcesRequest,
     RunToolRequest,
     RunToolResponse,
     SetApprovalRouteRequest,
+    SetPocketConnectorPermissionsRequest,
     SetWritePolicyRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
@@ -1631,3 +1635,94 @@ async def apply_pocket_reconcile(
         user_header=x_pocketpaw_user_id,
     )
     return await reconcile_service.apply_reconcile(pocket_id, workspace_id, user_id)
+
+
+# ---------------------------------------------------------------------------
+# Per-pocket connector permissions
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/{pocket_id}/connector-permissions",
+    response_model=PocketConnectorPermissionsOut,
+    dependencies=[Depends(require_pocket_edit)],
+)
+async def get_pocket_connector_permissions(
+    pocket_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketConnectorPermissionsOut:
+    """Read this pocket's connector allowlist.
+
+    Returns ``allowed_connectors: null`` when the pocket inherits all
+    workspace connectors (default / no restrictions). Returns an empty
+    list when the pocket is restricted but has nothing allowed.
+    """
+    allowed = await pockets_service.get_pocket_connector_permissions(pocket_id)
+    return PocketConnectorPermissionsOut(allowed_connectors=allowed)
+
+
+@router.put(
+    "/{pocket_id}/connector-permissions",
+    dependencies=[Depends(require_pocket_edit)],
+)
+async def set_pocket_connector_permissions(
+    pocket_id: str,
+    body: SetPocketConnectorPermissionsRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketConnectorPermissionsOut:
+    """Set this pocket's connector allowlist.
+
+    Pass ``allowed_connectors: null`` to inherit all workspace connectors
+    (clear restrictions). Pass ``allowed_connectors: []`` to restrict the
+    pocket but allow nothing — the pocket sees no connectors.
+    """
+    await pockets_service.set_pocket_connector_permissions(pocket_id, body.allowed_connectors)
+    return PocketConnectorPermissionsOut(allowed_connectors=body.allowed_connectors)
+
+
+@router.post(
+    "/{pocket_id}/connector-permissions/grant",
+    dependencies=[Depends(require_pocket_edit)],
+    status_code=204,
+)
+async def grant_pocket_connector(
+    pocket_id: str,
+    body: GrantPocketConnectorRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Grant one connector to this pocket (additive).
+
+    If the pocket currently inherits all connectors (``allowed_connectors``
+    is ``None``), granting creates an explicit allowlist starting with
+    this connector — effectively restricting the pocket to just this one.
+    Idempotent: granting an already-allowed connector is a no-op.
+    """
+    await pockets_service.grant_pocket_connector(pocket_id, body.connector_name)
+    return Response(status_code=204)
+
+
+@router.post(
+    "/{pocket_id}/connector-permissions/revoke",
+    dependencies=[Depends(require_pocket_edit)],
+    status_code=204,
+)
+async def revoke_pocket_connector(
+    pocket_id: str,
+    body: RevokePocketConnectorRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> Response:
+    """Revoke one connector from this pocket.
+
+    If the pocket inherits all connectors (``allowed_connectors`` is
+    ``None``), revoke is a no-op — there are no explicit restrictions to
+    remove from. When the last connector is revoked, the pocket's list
+    becomes empty (``[]``), meaning the pocket sees no connectors.
+    Idempotent: revoking a connector that is not in the allowlist is a
+    no-op.
+    """
+    await pockets_service.revoke_pocket_connector(pocket_id, body.connector_name)
+    return Response(status_code=204)
