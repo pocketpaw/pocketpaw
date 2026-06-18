@@ -184,6 +184,29 @@ rippleSpec). Fixes the agent-view misread where ``get_pocket`` returned the
 empty legacy ``widgets: []`` alongside the full rippleSpec and agents
 concluded a fully composed template pocket was "an empty shell". The
 ``widgets`` field itself is NOT removed — other consumers may rely on it.
+
+Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
+``set_svelte_source_file``: rewrite ONE file in a svelte-engine pocket's
+``source`` map (the {path: contents} hand-written SvelteKit files) and persist
+it. The Pocket write stays here (entity isolation); the sites service
+orchestrates the republish. Returns the prior file contents alongside the wire
+dict so the caller can roll the edit back when the downstream smoke gate fails.
+Changes: 2026-06-18 (feat/branch-primitive-versions, BP-1) — ``merge_spec``
+now ALSO records a draft ArtifactVersion (scope_type="pocket") after the
+rippleSpec persist, via the universal Branch-primitive versions service. The
+existing destructive overwrite + emit are unchanged; the version write is an
+additive, best-effort snapshot (a version-store failure never breaks the merge)
+so every content mutation gains a draft/history without changing the merge
+contract. TODO(BP-4): revert/history hook onto these rows.
+Changes: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) —
+``set_svelte_source_file`` now ALSO records a draft ArtifactVersion
+(scope_type="pocket") after a svelte source edit, via
+``_record_pocket_svelte_draft_version`` (the svelte peer of
+``_record_pocket_draft_version``). BP-1 only versioned the rippleSpec write
+(merge_spec); svelte edits go through ``set_svelte_source_file`` and were not
+versioned. Same additive, best-effort snapshot contract — a version-store
+failure never breaks the edit. The merge gate itself lives in the Instinct
+router (BP-3); these rows are the candidates it reviews.
 """
 
 from __future__ import annotations
@@ -1396,6 +1419,66 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     return await _resolved_wire_dict(doc, user_id)
 
 
+async def set_svelte_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+) -> tuple[dict, str]:
+    """Rewrite ONE file in a svelte-engine pocket's ``source`` map and persist it.
+
+    The svelte analog of editing a single component of a Paw Site: ``source`` is
+    a ``{relative_path: file_contents}`` map (the hand-written SvelteKit files),
+    and this replaces the contents at ``component_path`` with ``new_source``. The
+    Pocket Beanie write stays inside the pockets service (entity isolation — the
+    sites service orchestrates the republish but never touches the Pocket model).
+
+    Access mirrors ``update``: explicit ``(pocket_id, user_id)`` with
+    ``_check_domain_edit_access`` (owner / shared_with / workspace-visible). A
+    missing pocket raises ``NotFound``; a non-svelte pocket or a non-existent
+    component path raise the obvious cloud errors rather than silently creating a
+    file or dereferencing ``None``:
+      * not a svelte pocket (``engine != "svelte"`` or no ``source`` map) →
+        ``ValidationError`` (422);
+      * ``component_path`` absent from the map → ``NotFound`` (404) on the
+        component, so a typo'd path is not a silent create.
+
+    Returns ``(resolved_wire_dict, previous_source)`` — the wire dict every other
+    write returns, plus the file's PRIOR contents so the caller can roll the edit
+    back if the downstream republish fails its smoke gate (the sites service does
+    exactly this so a broken edit never leaves stale source on the pocket).
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "svelte" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    if component_path not in doc.source:
+        raise NotFound("site_component", component_path)
+
+    previous_source = doc.source[component_path]
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM).
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a svelte source edit ALSO writes a draft
+    # ArtifactVersion. BP-1 only hooked the rippleSpec write (merge_spec →
+    # _record_pocket_draft_version); svelte edits go through THIS function and
+    # were not versioned. The snapshot is the full svelte ``source`` map (the
+    # version model's ``content`` accepts either a rippleSpec dict OR a svelte
+    # source map). Same best-effort try/except as the rippleSpec hook —
+    # versioning is an additive history layer, never a gate on the edit.
+    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    return await _resolved_wire_dict(doc, user_id), previous_source
+
+
 async def merge_spec(
     workspace_id: str,
     user_id: str,
@@ -1545,6 +1628,13 @@ async def merge_spec(
     doc.rippleSpec = normalized
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-1): record a draft ArtifactVersion snapshot of the
+    # mutated rippleSpec. ADDITIVE — the destructive overwrite above already
+    # happened and stays the source of truth for rendering; this captures a
+    # draft/history snapshot so the artifact can later have draft/published/
+    # rollback (BP-3/BP-4). Best-effort: a version-store failure must NOT break
+    # the merge, so it is wrapped and only logged.
+    await _record_pocket_draft_version(doc, author=user_id)
     resolved = await _resolved_wire_dict(doc, user_id)
     return {
         "ok": True,
@@ -1553,6 +1643,72 @@ async def merge_spec(
         "pocket": resolved,
         "warnings": warnings,
     }
+
+
+async def _record_pocket_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+    """Snapshot a pocket's current rippleSpec as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-1). Lazy-imports the versions service so the
+    pockets entity does not take a hard import on the versions package and so
+    a fork without the versions module degrades gracefully. The snapshot is
+    the full ``rippleSpec`` dict (empty dict when None). Failures are logged
+    and swallowed — versioning is an additive audit/history layer over the
+    existing merge, never a gate on it.
+
+    TODO(BP-3): a merge gate may branch this draft for human review before it
+    becomes the published pointer.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=doc.rippleSpec or {},
+            author=author,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the merge
+        logger.warning(
+            "versions: failed to record draft version for pocket %s — "
+            "merge persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
+
+
+async def _record_pocket_svelte_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+    """Snapshot a svelte pocket's current ``source`` map as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-3). The svelte analog of
+    ``_record_pocket_draft_version``: BP-1 versioned the rippleSpec write
+    (merge_spec); svelte source edits go through ``set_svelte_source_file`` and
+    were not versioned, so a published svelte site had no draft version to
+    promote. This captures the full ``source`` map (``{path: contents}``) as the
+    version ``content`` — the version model accepts either shape — with
+    ``scope_type="pocket"`` (BP-2 keys site versions on the source pocket).
+
+    Lazy-imports the versions service so the pockets entity takes no hard import
+    on it; failures are logged and swallowed — versioning is an additive
+    history/Branch layer over the edit, never a gate on it.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=dict(doc.source) if isinstance(doc.source, dict) else {},
+            author=author,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the edit
+        logger.warning(
+            "versions: failed to record svelte draft version for pocket %s — "
+            "edit persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
 
 
 async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
@@ -4408,6 +4564,7 @@ __all__ = [
     "set_pocket_approval_route",
     "set_pocket_backend",
     "set_pocket_write_policy",
+    "set_svelte_source_file",
     "unassign_project_on_pockets",
     "update",
     "update_share_link",
