@@ -127,9 +127,35 @@
 # and skips sites whose files are not on disk. The cloud boot hook calls it
 # unscoped so a restart auto-re-serves all sites; POST /sites/reserve calls it
 # workspace-scoped for an explicit "re-serve" action.
+#
+# Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
+# sites publish/preview/status are now branch-aware over the BP-1 versions spine,
+# fixing the "Live badge lies" bug — a site was stamped ``deployed`` the instant a
+# Site doc existed, so a never-deployed / draft pocket still read published+live
+# and the builder preview pointed at the live URL instead of the working copy.
+#   * publish() — on a successful build, PROMOTES the pocket's current draft
+#     version to ``published`` via versions.publish() BEFORE deploy (writing a
+#     draft snapshot first if none exists, so a published pointer always lands).
+#     ``deployed``/Live still flips true ONLY after the deploy succeeds (the
+#     smoke gate already runs before deploy). If deploy fails the Site doc is not
+#     persisted (not live) — the published version tag may stand (published !=
+#     live). TODO(BP-3): a merge gate will replace this DIRECT publish.
+#   * preview_pocket() — serves the DRAFT VERSION's content (the unpublished
+#     working copy) via versions.get_draft(), so the Preview tab shows what
+#     publish WOULD build. Falls back to the pocket's current rippleSpec/source
+#     when no draft row exists yet (e.g. a pre-BP-1 pocket, or a svelte pocket
+#     whose source map is not versioned in BP-1).
+#   * pocket_status() — derives draft/published + is_live from the version
+#     pointers AND the real Site deploy state, NOT "a Site doc exists". A
+#     published version (or, for backward compat, a deployed Site doc predating
+#     BP-1) reads published; a draft newer than the published version sets
+#     has_unpublished_changes; is_live requires published AND the Site doc's real
+#     ``deployed``. The artifact is the source pocket: scope_type="pocket",
+#     scope_id=<pocket_id>.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable
 from pathlib import Path
@@ -150,8 +176,15 @@ from pocketpaw_ee.sites.dto import (
 )
 from pocketpaw_ee.sites.generator_client import GeneratorClient
 
+logger = logging.getLogger(__name__)
+
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
 _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
+
+# BP-2: the source pocket is the versionable artifact behind a site. The Branch
+# primitive (BP-1) keys every version on (scope_type, scope_id); for a site the
+# scope is the pocket it is published from.
+_VERSION_SCOPE_TYPE = "pocket"
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -238,6 +271,56 @@ def _local_mode() -> bool:
     return not os.environ.get("PAW_CF_ACCOUNT_ID")
 
 
+async def _promote_pocket_draft_to_published(
+    *, pocket_id: str, workspace_id: str, author: str | None, content: dict[str, Any]
+) -> None:
+    """Promote a pocket's current draft version to ``published`` (BP-2).
+
+    Called from ``publish`` after the build succeeds and BEFORE deploy: the
+    published version pointer is the durable "this is the version that was
+    published" record, independent of whether the deploy itself lands (published
+    != live). Reads the current draft via the BP-1 versions service and flips it
+    to published; when no draft row exists yet (a pocket published without ever
+    going through ``merge_spec``, or a svelte pocket whose source map BP-1 does
+    not version), it first writes a draft snapshot of ``content`` so a published
+    pointer always lands.
+
+    Lazy-imports the versions service so the sites entity does not take a hard
+    import on the versions package and a fork without it degrades gracefully:
+    versioning is an additive history/Branch layer over publish, never a gate on
+    it, so a failure here is logged and swallowed — the deploy still proceeds.
+
+    TODO(BP-3): the Instinct merge gate will replace this DIRECT promote — a
+    publish will branch the draft for human review and the merge accept (not this
+    call) will move the published pointer.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+        if draft is None:
+            draft = await versions_service.write_draft(
+                scope_type=_VERSION_SCOPE_TYPE,
+                scope_id=pocket_id,
+                workspace_id=workspace_id,
+                content=content or {},
+                author=author,
+            )
+        await versions_service.publish(
+            scope_type=_VERSION_SCOPE_TYPE,
+            scope_id=pocket_id,
+            workspace_id=workspace_id,
+            version_id=str(draft.id),
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break publish/deploy
+        logger.warning(
+            "versions: failed to promote draft→published for pocket %s — "
+            "deploy proceeds, published version pointer skipped",
+            pocket_id,
+            exc_info=True,
+        )
+
+
 def _to_response(doc: _SiteDoc) -> SiteResponse:
     return SiteResponse(
         id=str(doc.id),
@@ -322,6 +405,22 @@ async def publish(
         engine=engine,
         source=source,
         builder_origin=builder_origin,
+    )
+
+    # BP-2 / #1345: promote the pocket's current draft version to ``published``
+    # BEFORE deploy. The build (which runs the smoke gate) has succeeded, so the
+    # version being published is known-good; the published pointer is the durable
+    # "this is what was published" record even if the deploy below fails
+    # (published != live — a failed deploy just leaves the Site doc un-persisted,
+    # so the pocket reads not-live while the published tag stands). The snapshot
+    # for the promote is the engine's content: the rippleSpec for a ripple site,
+    # the {path: contents} source map for a svelte site.
+    version_content: dict[str, Any] = (source if engine == "svelte" else ripple_spec) or {}
+    await _promote_pocket_draft_to_published(
+        pocket_id=pocket_id,
+        workspace_id=workspace_id,
+        author=user_id,
+        content=version_content,
     )
 
     # Local mode only when the caller did NOT inject a CF client (tests inject a
@@ -649,14 +748,21 @@ async def preview_pocket(
     user_id: str,
     pocket_id: str,
 ) -> SitePreviewResponse:
-    """Read a pocket's DRAFT content for the in-app builder Preview tab.
+    """Read a pocket's DRAFT-version content for the in-app builder Preview tab.
 
     Loads the source pocket through the pockets service's PUBLIC ``get`` (the wire
     dict — no Beanie import, respecting entity isolation; it raises NotFound /
     Forbidden itself when the pocket is missing or access-denied, which the router
-    maps to 404 / 403). Mirrors ``publish_pocket``'s pocket-read + engine logic so
-    the preview matches what publish would build:
-      * ``engine="ripple"`` (the default) → ``content`` is the pocket's rippleSpec.
+    maps to 404 / 403) to resolve the engine + a current-content fallback.
+
+    BP-2 / #1345: the preview serves the DRAFT VERSION's content (the unpublished
+    working copy from the BP-1 versions spine) so the Preview tab shows what
+    publish WOULD build — not the live/published URL. It reads
+    ``versions.get_draft(scope_type="pocket", scope_id=pocket_id)`` and returns
+    that snapshot. It falls back to the pocket's CURRENT content when there is no
+    draft row yet (a pre-BP-1 pocket, or a svelte pocket whose source map BP-1
+    does not version) so the preview is never empty when content exists:
+      * ``engine="ripple"`` (the default) → ``content`` is the rippleSpec.
       * ``engine="svelte"`` → ``content`` is the {path: contents} source map.
     ``content`` is None when the pocket carries nothing to render on that track.
 
@@ -668,35 +774,120 @@ async def preview_pocket(
 
     pocket = await pockets_service.get(pocket_id, user_id)
     engine = pocket.get("engine") or "ripple"
+
+    # The pocket's CURRENT content for the engine — the fallback when the Branch
+    # primitive has no draft row for this pocket yet.
     if engine == "svelte":
         source = pocket.get("source")
-        content = source if isinstance(source, dict) else None
+        current = source if isinstance(source, dict) else None
     else:
         ripple_spec = pocket.get("rippleSpec")
-        content = ripple_spec if isinstance(ripple_spec, dict) else None
+        current = ripple_spec if isinstance(ripple_spec, dict) else None
+
+    # Prefer the DRAFT version's snapshot (the working copy publish would build).
+    # Versioning is an additive layer — a missing module / read failure must not
+    # break the preview, so degrade to the current content on any error.
+    draft_content: dict[str, Any] | None = None
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+        if draft is not None:
+            draft_content = draft.content
+    except Exception:  # noqa: BLE001 — versions read is best-effort
+        logger.warning(
+            "versions: failed to read draft for pocket %s preview — "
+            "falling back to current content",
+            pocket_id,
+            exc_info=True,
+        )
+
+    content = draft_content if draft_content is not None else current
     return SitePreviewResponse(pocket_id=pocket_id, engine=engine, content=content)
 
 
 async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusResponse:
-    """Derive a pocket's draft/published + is_live state from its Site deployment
-    doc, tenant-scoped on ``workspace``.
+    """Derive a pocket's draft/published + is_live state from the BRANCH version
+    pointers AND the real Site deploy state — NOT from "a Site doc exists".
 
-    Looks up the Site for this (workspace, pocket_id) — the compound index the
-    model declares serves this read directly. With no Site doc the pocket has
-    never been published, so it reads ``draft`` / not live. With a Site doc it
-    reads ``published``; ``is_live`` follows the doc's ``deployed`` flag (the only
-    signal that earns a "Live" badge), and ``site_id`` carries the deployed id.
-    This is the authoritative state the builder uses to label a pocket even before
-    it surfaces in the gallery list. No Cloudflare call — just persisted state.
+    BP-2 / #1345 fixes the "Live badge lies" bug: before, a Site doc was enough to
+    read published+live, but a Site was stamped ``deployed`` the instant it was
+    created, so a never-deployed / draft pocket reported live and the preview
+    pointed at a dead URL. Now:
+
+      * ``status`` is "published" when a published version pointer exists
+        (``versions.get_published(scope_type="pocket", scope_id=pocket_id)``).
+        Backward compat: a Site doc that was deployed BEFORE BP-1 (so it has no
+        version rows) still reads "published" — the deployed Site is itself the
+        evidence a publish happened. With neither, the pocket reads "draft".
+      * ``has_unpublished_changes`` is True when a draft version is NEWER than the
+        published one (or a draft exists with nothing published yet) — the edits a
+        publish would ship.
+      * ``is_live`` is the ONLY signal that earns a "Live" badge: it requires the
+        pocket to be published AND a real successful deploy, read from the Site
+        doc's ``deployed`` flag (publish only persists the Site doc, with
+        ``deployed=True``, AFTER the deploy succeeds — never optimistically). No
+        published version + a deployed Site (the legacy case) is still live.
+      * ``site_id`` carries the deployed Site's id when one exists.
+
+    Tenant-scoped on ``workspace`` for the Site read (the compound index serves
+    it). No Cloudflare call — just persisted state. Versioning is an additive
+    layer, so a versions read failure degrades to the Site-doc signal rather than
+    breaking the status read.
     """
     doc = await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
-    if doc is None:
-        return SiteStatusResponse(pocket_id=pocket_id, status="draft", is_live=False)
+
+    published_no: int | None = None
+    draft_no: int | None = None
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        # The BP-1 pointer reads key only on (scope_type, scope_id) — they are
+        # artifact-generic and do NOT take workspace_id. A pocket_id is globally
+        # unique and belongs to one workspace, so a row's stored ``workspace_id``
+        # is the owner's; we ignore any pointer whose workspace does not match
+        # this caller's so a foreign workspace cannot read another tenant's
+        # published/draft state through a known pocket id (tenant isolation, the
+        # same guarantee the workspace-scoped Site read gives).
+        published = await versions_service.get_published(
+            scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id
+        )
+        draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+        if published is not None and published.workspace_id == workspace_id:
+            published_no = published.version_no
+        if draft is not None and draft.workspace_id == workspace_id:
+            draft_no = draft.version_no
+    except Exception:  # noqa: BLE001 — versions read is best-effort
+        logger.warning(
+            "versions: failed to read pointers for pocket %s status — "
+            "falling back to the Site-doc signal",
+            pocket_id,
+            exc_info=True,
+        )
+
+    # Published when a published version pointer exists, OR (backward compat) a
+    # Site doc was already deployed before BP-1 ever recorded a version.
+    has_published = published_no is not None or (doc is not None and doc.deployed)
+    status = "published" if has_published else "draft"
+
+    # Unpublished edits: a draft strictly newer than the published version, or a
+    # draft with nothing published yet.
+    has_unpublished_changes = draft_no is not None and (
+        published_no is None or draft_no > published_no
+    )
+
+    # Live requires published AND a real successful deploy (the Site doc's
+    # ``deployed``). A draft-only pocket, or a published pocket whose deploy
+    # failed (no Site doc), is not live.
+    deployed = bool(doc is not None and doc.deployed)
+    is_live = has_published and deployed
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
-        status="published",
-        is_live=doc.deployed,
-        site_id=str(doc.id),
+        status=status,
+        is_live=is_live,
+        has_unpublished_changes=has_unpublished_changes,
+        site_id=str(doc.id) if doc is not None else None,
     )
 
 
