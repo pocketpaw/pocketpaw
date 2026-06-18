@@ -891,6 +891,108 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     )
 
 
+async def request_publish_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+) -> Any:
+    """Submit a pocket's current draft for human review (BP-4 Part C).
+
+    The clean entry to the Branch-primitive MERGE GATE: instead of a client
+    hand-building the Instinct ``_artifact_change`` proposal (and getting the
+    blob shape / tenancy wrong), it POSTs here and the SERVER constructs the
+    review Action via the Instinct store. The created Action is the gate item an
+    operator approves in The Tray; approving it dispatches BP-3's merge executor
+    (publish the candidate version + deploy), so this is the request-publish →
+    review → approve → published round-trip's first step.
+
+    The versionable artifact behind a Paw Site is the source pocket
+    (scope_type="pocket", scope_id=pocket_id — the same scope BP-2 keys site
+    versions on). The proposal's ``_artifact_change`` blob carries:
+      * ``from_version_id`` — the currently published version id (or None when
+        nothing is live yet — a first publish);
+      * ``to_version_id``   — the current DRAFT version id (the working copy the
+        operator is being asked to take live).
+
+    Tenancy: the blob's ``workspace`` is stamped with ``workspace_id`` (NEVER
+    empty — BP-3's ``_assert_artifact_change_workspace`` hard-403s an empty
+    workspace claim, so a real workspace MUST be set here for the gate to ever
+    approve). The caller passes its ``ctx.workspace_id``.
+
+    Raises ``ValueError`` when there is NO current draft to publish (the router
+    maps it to a 4xx — there is nothing to submit for review). A missing /
+    access-denied pocket surfaces via the pockets service (NotFound → 404) only
+    when no draft row exists; the common path (a draft was written by an edit)
+    reads the draft directly off the versions spine.
+    """
+    from pocketpaw.instinct.models import (
+        ActionCategory,
+        ActionPriority,
+        ActionTrigger,
+    )
+    from pocketpaw.stores import get_instinct_store
+    from pocketpaw_ee.versions import service as versions_service
+
+    draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+    if draft is None or draft.workspace_id != workspace_id:
+        # Nothing drafted for this pocket in this workspace — nothing to review.
+        # (A foreign-workspace draft is also "nothing here" for this caller —
+        # tenant isolation, the same guard pocket_status applies.)
+        raise ValueError(f"no draft version to publish for pocket {pocket_id} — nothing to review")
+
+    published = await versions_service.get_published(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id
+    )
+    from_version_id = (
+        str(published.id)
+        if published is not None and published.workspace_id == workspace_id
+        else None
+    )
+    to_version_id = str(draft.id)
+
+    # The merge-gate blob. Shape MUST match BP-3's ``_artifact_change_blob``
+    # (instinct/router.py) + the executor's reader exactly: the executor pulls
+    # scope_type/scope_id/workspace/to_version_id off it on approve. ``branch``
+    # is "main" (the published lineage — this is a publish, not a candidate
+    # branch). ``workspace`` is the canonical key; the executor also accepts
+    # ``workspace_id`` as an alias.
+    blob = {
+        "schema": 1,
+        "scope_type": _VERSION_SCOPE_TYPE,
+        "scope_id": pocket_id,
+        "branch": "main",
+        "from_version_id": from_version_id,
+        "to_version_id": to_version_id,
+        "workspace": workspace_id,
+        "user_id": user_id,
+        "correlation_id": None,
+        "proposed_event_id": None,
+    }
+
+    store = get_instinct_store()
+    action = await store.propose(
+        pocket_id=pocket_id,
+        title="Publish site changes",
+        description=(
+            "Take the current draft of this site live. Approving merges the "
+            "reviewed version and deploys it."
+        ),
+        recommendation="Review the draft, then approve to publish.",
+        trigger=ActionTrigger(
+            type="user",
+            source="request-publish",
+            reason="Operator requested the pocket's draft be published for review",
+        ),
+        category=ActionCategory.WORKFLOW,
+        priority=ActionPriority.MEDIUM,
+        parameters={"_artifact_change": blob},
+        workspace_id=workspace_id,
+        scope_type=_VERSION_SCOPE_TYPE,
+    )
+    return action
+
+
 async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     cursor = _SiteDoc.find({"workspace": workspace_id}).sort(-_SiteDoc.createdAt)  # type: ignore[operator]
     return [_to_response(doc) async for doc in cursor]
@@ -961,11 +1063,42 @@ async def reserve_local_sites(workspace_id: str | None = None) -> int:
     return reconciled
 
 
+async def version_history(*, workspace_id: str, pocket_id: str) -> list[Any]:
+    """The ordered version timeline for a pocket (BP-4 Part B).
+
+    Backs ``GET /sites/by-pocket/{pocket_id}/versions``: the version log for the
+    source pocket (scope_type="pocket"), oldest → newest, tenant-scoped on
+    ``workspace_id``. Reads the ArtifactVersion rows directly via
+    ``versions.list_versions`` — the rows ARE the ordered log (monotonic
+    ``version_no``), so the timeline is exact and current with no projection
+    replay. (The VersionProjection is the BP-4 deliverable for the EVENT history
+    view — what happened, in order; this endpoint shows the VERSION timeline,
+    which the rows serve directly and correctly.)
+
+    Tenant isolation: the BP-1 pointer/log reads key only on
+    (scope_type, scope_id) — artifact-generic, no workspace param — so we filter
+    the returned rows on the caller's ``workspace_id`` here, exactly as
+    ``pocket_status`` does, so a foreign workspace cannot read another tenant's
+    history through a known pocket id. Returned oldest → newest (the natural
+    reading order for a history view; list_versions returns newest-first).
+    """
+    from pocketpaw_ee.versions import service as versions_service
+
+    rows = await versions_service.list_versions(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
+    )
+    scoped = [r for r in rows if r.workspace_id == workspace_id]
+    # list_versions returns newest-first; a timeline reads oldest → newest.
+    return list(reversed(scoped))
+
+
 __all__ = [
     "publish",
     "publish_pocket",
     "preview_pocket",
     "pocket_status",
+    "request_publish_pocket",
+    "version_history",
     "edit_svelte_component",
     "make_site_editable",
     "add_domain",

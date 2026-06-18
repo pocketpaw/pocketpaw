@@ -19,8 +19,16 @@
 #     ``_artifact_change`` Action. Kept in this package (not the router) so the
 #     versions spine owns its merge logic; the router only gates (403) + emits.
 #
+# BP-4 additions (feat/branch-primitive-revert-history):
+#   * service.revert — revert an artifact to a prior snapshot by writing a NEW
+#     draft from the target version's content (revert moves forward; history is
+#     never mutated). service.publish now also emits artifact.version.published.
+#   * projection.VersionProjection — the READ projection that replays the
+#     journal's artifact.version.* events into a per-artifact EVENT history
+#     timeline (created / branched / merged / discarded / reverted / published),
+#     mirroring the Decision/Fabric projection contract.
+#
 # What lives elsewhere (later BP tasks — do NOT add here):
-#   * BP-4 — revert + a Journal read projection (version history view).
 #   * BP-5/6 — the site editor + the review/merge UI.
 #
 # Re-exports are intentionally minimal: the doc class and the service module.

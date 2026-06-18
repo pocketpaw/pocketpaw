@@ -14,7 +14,13 @@
 #   5. list_versions returns the version log newest-first.
 #   6. write_draft emits artifact.version.created; branch emits
 #      artifact.version.branched — both with a non-empty stamped scope.
-#   7. revert is a BP-4 stub (raises NotImplementedError).
+#
+# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4):
+#   7. revert(version_id) writes a NEW draft from the target version's content
+#      (revert moves forward; history is never mutated), emits
+#      artifact.version.reverted, and a follow-up publish takes the reverted
+#      content live. It is scope/workspace-checked. (Replaces the BP-1 stub test.)
+#   8. publish() now emits artifact.version.published.
 from __future__ import annotations
 
 import pytest
@@ -254,10 +260,131 @@ async def test_branch_emits_version_branched(beanie_test_db, versions_journal):
 
 
 # ---------------------------------------------------------------------------
-# 7. revert — BP-4 stub
+# 7. revert — BP-4: writes a new draft from a prior snapshot, moves forward
 # ---------------------------------------------------------------------------
 
 
-async def test_revert_is_bp4_stub(beanie_test_db):
-    with pytest.raises(NotImplementedError):
-        await versions.revert()
+async def test_revert_writes_new_draft_from_target_content(beanie_test_db):
+    """revert(v1) writes a NEW draft whose content == v1's content, on the same
+    branch, with the next version_no. History is not mutated — v1/v2 stand."""
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 1}
+    )
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 2}
+    )
+
+    reverted = await versions.revert(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+    # A NEW row (not v1/v2), next version_no, draft status, v1's content.
+    assert reverted.id not in (v1.id, v2.id)
+    assert reverted.version_no == 3
+    assert reverted.status == "draft"
+    assert reverted.content == {"v": 1}
+    assert reverted.branch == "main"
+    assert reverted.label == "Revert to v1"
+    # The new draft is the head (parent == v2).
+    assert reverted.parent_version_id == str(v2.id)
+    # History intact — v1/v2 unchanged, the log now has 3 rows.
+    log = await versions.list_versions(scope_type="pocket", scope_id=POCKET)
+    assert [v.version_no for v in log] == [3, 2, 1]
+
+
+async def test_revert_then_publish_goes_live_with_reverted_content(beanie_test_db):
+    """The full revert flow: revert(old) → publish(new draft) takes the reverted
+    content live."""
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "good"}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+    # A bad edit is published.
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "bad"}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v2.id)
+    )
+    assert (await versions.get_published(scope_type="pocket", scope_id=POCKET)).content == {
+        "v": "bad"
+    }
+
+    # Revert to the good version, then publish the resulting draft.
+    new_draft = await versions.revert(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(new_draft.id)
+    )
+
+    live = await versions.get_published(scope_type="pocket", scope_id=POCKET)
+    assert live is not None
+    assert live.id == new_draft.id
+    assert live.content == {"v": "good"}
+
+
+async def test_revert_emits_reverted_event(beanie_test_db, versions_journal):
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 1}, author="u-1"
+    )
+    new_draft = await versions.revert(
+        scope_type="pocket",
+        scope_id=POCKET,
+        workspace_id=WS,
+        version_id=str(v1.id),
+        author="u-2",
+    )
+    events = versions_journal.query(action="artifact.version.reverted")
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.payload["version_id"] == str(new_draft.id)
+    assert ev.payload["reverted_from"] == str(v1.id)
+    assert ev.payload["reverted_from_version_no"] == 1
+    assert ev.scope  # non-empty
+    assert f"workspace:{WS}" in ev.scope
+
+
+async def test_revert_rejects_cross_workspace(beanie_test_db):
+    v = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={}
+    )
+    with pytest.raises(ValueError):
+        await versions.revert(
+            scope_type="pocket",
+            scope_id=POCKET,
+            workspace_id="ws-OTHER",
+            version_id=str(v.id),
+        )
+
+
+async def test_revert_missing_version_raises(beanie_test_db):
+    from beanie import PydanticObjectId
+
+    with pytest.raises(ValueError):
+        await versions.revert(
+            scope_type="pocket",
+            scope_id=POCKET,
+            workspace_id=WS,
+            version_id=str(PydanticObjectId()),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. publish emits artifact.version.published (BP-4)
+# ---------------------------------------------------------------------------
+
+
+async def test_publish_emits_published_event(beanie_test_db, versions_journal):
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": 1}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(v1.id)
+    )
+    events = versions_journal.query(action="artifact.version.published")
+    assert len(events) == 1
+    assert events[0].payload["version_id"] == str(v1.id)
+    assert events[0].payload["status"] == "published"
+    assert f"workspace:{WS}" in events[0].scope
