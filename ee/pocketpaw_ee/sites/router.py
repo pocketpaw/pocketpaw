@@ -47,10 +47,22 @@
 # resolved in precedence: explicit body ``builder_origin`` > request ``Origin``
 # header > configured PAW_SITES_BUILDER_ORIGIN (env fallback in the service), so
 # the SE-3 editor's call carries the right origin with no extra wiring.
+# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two
+# Branch-primitive surfaces over the BP-1 versions spine.
+#   * GET /sites/by-pocket/{pocket_id}/versions — the ordered version timeline
+#     for the pocket (the source pocket is the versionable artifact; scope_type=
+#     "pocket"), tenant-scoped (fabric.read). Reads the durable ArtifactVersion
+#     rows (list_versions) — the exact, current log — not a journal replay.
+#   * POST /sites/by-pocket/{pocket_id}/request-publish — the CLEAN entry to the
+#     Instinct merge gate (BP-3): the server builds the ``_artifact_change``
+#     review proposal so the CLIENT never hand-builds the Instinct propose (BP-5
+#     needs this). Returns the created Action (id/status) so the client shows
+#     "submitted for review". fabric.write — it creates a gate item that, on
+#     approve, publishes + deploys. A 400 when there is no draft to publish.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from pocketpaw_ee.cloud._core.context import RequestContext, request_context
 from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_plan_feature
@@ -60,9 +72,12 @@ from pocketpaw_ee.sites.dto import (
     DomainStatusResponse,
     MakeEditableRequest,
     PublishRequest,
+    RequestPublishResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
+    SiteVersionResponse,
+    VersionHistoryResponse,
 )
 
 router = APIRouter(
@@ -168,6 +183,69 @@ async def status_by_pocket(
     status, is_live}. Derived from the tenant-scoped Site deployment doc — an
     unpublished pocket (no Site) reads draft / not live (NOT a 404)."""
     return await sites_service.pocket_status(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+
+
+@router.get("/sites/by-pocket/{pocket_id}/versions", response_model=VersionHistoryResponse)
+async def versions_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> VersionHistoryResponse:
+    """The ordered version timeline for a pocket (BP-4): every ArtifactVersion of
+    the source pocket (scope_type="pocket"), oldest → newest, tenant-scoped on
+    ctx.workspace_id. An unversioned pocket reads an empty list (not a 404)."""
+    rows = await sites_service.version_history(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+    return VersionHistoryResponse(
+        pocket_id=pocket_id,
+        versions=[
+            SiteVersionResponse(
+                id=str(r.id),
+                version_no=r.version_no,
+                branch=r.branch,
+                status=r.status,
+                label=r.label,
+                author=r.author,
+                created_at=r.created_at.isoformat(),
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.post("/sites/by-pocket/{pocket_id}/request-publish", response_model=RequestPublishResponse)
+async def request_publish_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> RequestPublishResponse:
+    """Submit the pocket's current draft for review (BP-4 Part C) — the clean
+    entry to the Instinct merge gate.
+
+    The SERVER builds the ``_artifact_change`` review proposal (the client must
+    NOT hand-build the Instinct propose) and returns the created Action so the
+    client can show "submitted for review". Approving that Action in The Tray
+    dispatches BP-3's merge executor (publish the reviewed version + deploy).
+
+    The blob's ``workspace`` is stamped with ctx.workspace_id (never empty —
+    BP-3's guard hard-403s an empty workspace claim). When the pocket has no
+    current draft to publish, the service raises ValueError → 400 (nothing to
+    review)."""
+    try:
+        action = await sites_service.request_publish_pocket(
+            workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+        )
+    except ValueError as exc:
+        # No draft to publish → 400 (nothing to submit for review).
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    blob = (action.parameters or {}).get("_artifact_change", {})
+    return RequestPublishResponse(
+        action_id=str(action.id),
+        status=action.status.value if hasattr(action.status, "value") else str(action.status),
+        pocket_id=pocket_id,
+        to_version_id=str(blob.get("to_version_id") or ""),
+        from_version_id=blob.get("from_version_id"),
+    )
 
 
 @router.post("/sites/{site_id}/domains", response_model=DomainStatusResponse)

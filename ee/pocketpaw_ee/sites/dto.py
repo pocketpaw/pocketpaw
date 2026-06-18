@@ -28,6 +28,12 @@
 # This flag (default False, backward-compatible) lets the builder badge "has
 # unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
 # semantics are unchanged in shape; only their derivation moves onto versions.
+# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two DTOs
+# for the Branch-primitive surfaces — SiteVersionResponse + VersionHistoryResponse
+# (the ordered version timeline GET /sites/by-pocket/{pocket_id}/versions returns)
+# and RequestPublishResponse (the Action created by POST
+# /sites/by-pocket/{pocket_id}/request-publish, the clean entry to the merge gate
+# so the client never hand-builds the Instinct proposal).
 
 from __future__ import annotations
 
@@ -90,6 +96,43 @@ class SiteStatusResponse(BaseModel):
     is_live: bool
     has_unpublished_changes: bool = False
     site_id: str | None = None
+
+
+class SiteVersionResponse(BaseModel):
+    """One row of a pocket's version timeline (BP-4). Mirrors the durable
+    ArtifactVersion row's reading-relevant fields: ``version_no`` (the monotonic
+    ordinal), ``status`` (draft|published|merged|reverted), ``label`` (e.g.
+    "Revert to v2"), ``author`` (who wrote it), ``created_at`` (ISO). ``id`` is
+    the version id a later revert / request-publish targets."""
+
+    id: str
+    version_no: int
+    branch: str
+    status: str
+    label: str | None = None
+    author: str | None = None
+    created_at: str
+
+
+class VersionHistoryResponse(BaseModel):
+    """The ordered version timeline for a pocket (oldest → newest), returned by
+    GET /sites/by-pocket/{pocket_id}/versions. Tenant-scoped."""
+
+    pocket_id: str
+    versions: list[SiteVersionResponse]
+
+
+class RequestPublishResponse(BaseModel):
+    """The review Action created by POST /sites/by-pocket/{pocket_id}/request-
+    publish (BP-4 Part C). Carries the created Action's id + status so the client
+    can show "submitted for review" without re-fetching. ``status`` is "pending"
+    on creation (the gate item awaits operator approval)."""
+
+    action_id: str
+    status: str
+    pocket_id: str
+    to_version_id: str
+    from_version_id: str | None = None
 
 
 class DomainRequest(BaseModel):

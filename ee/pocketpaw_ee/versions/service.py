@@ -39,9 +39,23 @@
 #                                pointer is untouched. Emits artifact.version.
 #                                discarded.
 # Both are minimal + idempotent-friendly (a missing row raises ValueError, same
-# defensive contract as publish()). TODO(BP-4) still owns full revert()/history.
-# TODO(BP-4): revert() reverts to a prior snapshot (status="reverted") and a
-#             Journal VersionProjection folds these events into a history view.
+# defensive contract as publish()).
+#
+# Updated: 2026-06-18 (feat/branch-primitive-revert-history, BP-4) — revert +
+# the publish event so the history view sees the full lifecycle:
+#   * revert(version_id)  — revert an artifact to a prior snapshot by writing a
+#                           NEW draft whose content == the target version's
+#                           content (revert moves FORWARD; history is never
+#                           mutated). A follow-up publish() then takes the
+#                           reverted content live. Emits artifact.version.reverted
+#                           (carrying ``reverted_from`` = the target version id).
+#   * publish() now also emits artifact.version.published so the BP-4
+#     VersionProjection (versions/projection.py) can fold the published-pointer
+#     move into the per-artifact history timeline alongside created / branched /
+#     merged / discarded / reverted. The projection is the event-history read; the
+#     ordered version timeline an endpoint shows is served by list_versions (the
+#     ArtifactVersion rows ARE the ordered log — see sites/router.py
+#     /history).
 from __future__ import annotations
 
 import logging
@@ -296,12 +310,30 @@ async def publish(
 
     Raises ``ValueError`` if the version does not exist or belongs to a
     different artifact/workspace (defensive scope check).
+
+    Emits ``artifact.version.published`` (BP-4) so the VersionProjection can
+    fold the published-pointer move into the per-artifact history timeline.
     """
     row = await _scoped_row(
         scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
     )
     row.status = "published"
     await row.save()
+    _emit_version_event(
+        action="artifact.version.published",
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        author=row.author,
+        payload={
+            "version_id": str(row.id),
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "branch": row.branch,
+            "version_no": row.version_no,
+            "status": "published",
+        },
+    )
     return row
 
 
@@ -417,15 +449,85 @@ async def discard(
     return row
 
 
-async def revert(*args, **kwargs):  # pragma: no cover — BP-4 owns this
-    """STUB — revert is owned by BP-4.
+async def revert(
+    *,
+    scope_type: str,
+    scope_id: str,
+    workspace_id: str,
+    version_id: str,
+    author: str | None = None,
+    label: str | None = None,
+) -> ArtifactVersion:
+    """Revert an artifact to a prior version (BP-4).
 
-    BP-4 will revert an artifact to a prior snapshot (writing a new row with
-    ``status="reverted"`` semantics) and fold the events into a Journal
-    history projection. Intentionally unimplemented in BP-1 so callers fail
-    loud rather than silently no-op.
+    Reverting writes a NEW draft on the target version's branch whose
+    ``content`` is a copy of the target version's content, and makes it the
+    head. Revert moves FORWARD — it never mutates history. The user can then
+    ``publish()`` the new draft to take the reverted content live, exactly as
+    they would publish any other draft. This keeps the version log append-only
+    and makes "revert" a first-class, auditable lineage step rather than a
+    destructive rewrite.
+
+    ``label`` defaults to a human-readable "Revert to v<n>" so the history view
+    reads cleanly; callers can override it.
+
+    Raises ``ValueError`` if the target version does not exist or belongs to a
+    different artifact/workspace (the shared ``_scoped_row`` defensive check —
+    a revert must never cross tenants or artifacts).
+
+    Emits ``artifact.version.reverted`` (carrying ``reverted_from`` = the target
+    version id + the new draft's id) so the VersionProjection records the revert
+    as its own lifecycle event in the history timeline.
     """
-    raise NotImplementedError("revert is implemented in BP-4")
+    target = await _scoped_row(
+        scope_type=scope_type, scope_id=scope_id, workspace_id=workspace_id, version_id=version_id
+    )
+
+    revert_label = label or f"Revert to v{target.version_no}"
+
+    # Write the new draft on the SAME branch as the target so the revert lands
+    # on the lineage it is reverting (typically "main"). Snapshot the target's
+    # content (a shallow dict copy so a later mutation of one row never bleeds
+    # into the other — content is a small full snapshot, not a diff).
+    head = await _latest_in_branch(
+        scope_type=scope_type, scope_id=scope_id, branch_name=target.branch
+    )
+    version_no = (head.version_no + 1) if head else 1
+
+    new_draft = ArtifactVersion(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        branch=target.branch,
+        version_no=version_no,
+        content=dict(target.content),
+        parent_version_id=str(head.id) if head else None,
+        status="draft",
+        label=revert_label,
+        author=author,
+    )
+    await new_draft.insert()
+
+    _emit_version_event(
+        action="artifact.version.reverted",
+        scope_type=scope_type,
+        scope_id=scope_id,
+        workspace_id=workspace_id,
+        author=author,
+        payload={
+            "version_id": str(new_draft.id),
+            "scope_type": scope_type,
+            "scope_id": scope_id,
+            "branch": target.branch,
+            "version_no": version_no,
+            "parent_version_id": new_draft.parent_version_id,
+            "reverted_from": str(target.id),
+            "reverted_from_version_no": target.version_no,
+            "status": "draft",
+            "label": revert_label,
+        },
+    )
+    return new_draft
 
 
 # ---------------------------------------------------------------------------
