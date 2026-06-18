@@ -1,10 +1,20 @@
 # ee/pocketpaw_ee/sites/generator_client.py — Python bridge to the Node/Bun
 # generator (paw-sites-gen). build() runs the generate CLI, then `bun install`
-# on the generated project, then the workerd smoke render; if the smoke gate
-# fails the site does NOT proceed to deploy (Contract clause 4). The subprocess
-# calls are isolated behind a _runner so the orchestration is unit-testable
-# without Bun/workerd present.
+# on the generated project, then (only for a LIVE publish) the workerd smoke
+# render; if the smoke gate fails the site does NOT proceed to deploy (Contract
+# clause 4). The subprocess calls are isolated behind a _runner so the
+# orchestration is unit-testable without Bun/workerd present.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
+#
+# Updated 2026-06-18 (feat/sites-smoke-at-publish, PERF-4 — smoke-gate only at
+# publish): build() gained a ``smoke: bool = True`` flag. The workerd SMOKE render
+# is per-edit overhead only needed before a LIVE deploy, so a PREVIEW/edit/arm
+# build now passes ``smoke=False`` to SKIP it (the build runs generate + install
+# only and never spawns the render). A LIVE publish keeps the default
+# ``smoke=True`` so the gate — and the caller's rollback-on-SmokeGateFailed — is
+# unchanged. service.publish() threads ``smoke=not preview`` from its existing
+# ``preview`` flag. A preview build that WOULD fail smoke is no longer blocked;
+# the live publish still gates + rolls back, so a broken edit can never go live.
 #
 # Updated 2026-06-18 (feat/sites-cached-build, PERF-3 — persistent build dir +
 # cached node_modules): the single biggest per-edit cost was running `bun install`
@@ -304,6 +314,7 @@ class GeneratorClient:
         source: dict[str, str] | None = None,
         builder_origin: str | None = None,
         pocket_id: str | None = None,
+        smoke: bool = True,
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -329,6 +340,15 @@ class GeneratorClient:
         build() falls back to a fresh throwaway tempfile dir (no caching) so legacy
         callers keep their prior behaviour. Concurrent builds of the SAME pocket
         are serialized by a per-pocket lock (they share the on-disk dir).
+
+        ``smoke`` (PERF-4) gates the workerd SMOKE render (the SSR safety check).
+        The smoke render is per-edit overhead only needed before a LIVE deploy, so
+        a PREVIEW/edit/arm build passes ``smoke=False`` to SKIP it — the build runs
+        generate + install only and never spawns the workerd render. A LIVE publish
+        keeps the default ``smoke=True`` so the gate (and its
+        rollback-on-SmokeGateFailed behaviour at the caller) is unchanged. A
+        preview build that WOULD fail smoke is no longer blocked — acceptable, since
+        the live publish still gates + rolls back.
         """
         if pocket_id is None:
             return await self._build_one(
@@ -342,6 +362,7 @@ class GeneratorClient:
                 source=source,
                 builder_origin=builder_origin,
                 pocket_id=None,
+                smoke=smoke,
             )
         async with self._lock_for(pocket_id):
             return await self._build_one(
@@ -355,6 +376,7 @@ class GeneratorClient:
                 source=source,
                 builder_origin=builder_origin,
                 pocket_id=pocket_id,
+                smoke=smoke,
             )
 
     async def _build_one(
@@ -370,6 +392,7 @@ class GeneratorClient:
         source: dict[str, str] | None,
         builder_origin: str | None,
         pocket_id: str | None,
+        smoke: bool,
     ) -> BuildResult:
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
         # so node_modules persists; fall back to a throwaway tempfile dir when no
@@ -435,9 +458,16 @@ class GeneratorClient:
             ok, reason = await self._runner.install(project_dir)
             if not ok:
                 raise SmokeGateFailed(reason)
-        ok, reason = await self._runner.smoke(project_dir)
-        if not ok:
-            raise SmokeGateFailed(reason)
+        # PERF-4: run the workerd SMOKE render only when the caller asked for it
+        # (smoke=True — the LIVE publish path). A PREVIEW/edit/arm build passes
+        # smoke=False to SKIP the render: it is per-edit overhead only needed before
+        # a live deploy, and a preview that would fail smoke is no longer blocked
+        # (the live publish still gates + rolls back). Skipping leaves
+        # generate+install (the correctness-bearing steps) intact.
+        if smoke:
+            ok, reason = await self._runner.smoke(project_dir)
+            if not ok:
+                raise SmokeGateFailed(reason)
         # ``rippleVersion`` is present only on the ripple GenerateResult; the svelte
         # path omits it (paw-sites types.ts §4.2), so read it defensively — a svelte
         # build must not KeyError here.
