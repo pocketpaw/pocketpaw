@@ -1,6 +1,12 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-18 (feat/sites-cached-build, PERF-3): publish() now forwards the
+# source pocket_id to generator.build() so the build runs in the STABLE per-pocket
+# working dir (persistent node_modules + cached `bun install`), cutting the dominant
+# per-edit cost across both preview and live publishes. A site_id is still minted
+# fresh per publish — only the on-disk build dir is reused per pocket.
+#
 # Updated 2026-06-01 (Phase 4 — chat→create-site): added publish_pocket(), the
 # shared "publish a pocket by id" path. It reads the pocket's rippleSpec + theme
 # via pockets_service (logic lifted verbatim from the router) and delegates to
@@ -459,6 +465,11 @@ async def publish(
         engine=engine,
         source=source,
         builder_origin=builder_origin,
+        # PERF-3: build into the STABLE per-pocket working dir so node_modules
+        # persists and `bun install` is cached across builds (preview AND publish),
+        # cutting the dominant per-edit cost. A fresh site_id is minted per publish,
+        # but a pocket's working dir is reused across its publishes/previews.
+        pocket_id=pocket_id,
     )
 
     # PREVIEW MODE (Branch primitive — EDIT/arm path): the build above already ran

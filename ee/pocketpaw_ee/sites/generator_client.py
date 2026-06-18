@@ -6,6 +6,33 @@
 # without Bun/workerd present.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-18 (feat/sites-cached-build, PERF-3 — persistent build dir +
+# cached node_modules): the single biggest per-edit cost was running `bun install`
+# on a FRESH throwaway tempfile dir on EVERY build (preview AND publish). build()
+# now materializes the generated source into a STABLE per-pocket working dir under
+# build_home() (``<build_home>/<pocket_id>/``, configurable via PAW_SITES_BUILD_DIR
+# — mirrors local_server.sites_home()), so node_modules persists across builds.
+#   * `bun install` runs ONLY when the dependency set changed: build() fingerprints
+#     the install inputs (the rewritten package.json + any lockfile) and compares
+#     it to a sentinel (``.paw-install-hash``) recorded after the last successful
+#     install in that dir. Hash match → SKIP install (reuse cached node_modules);
+#     mismatch (or first build) → install, then record the new hash. This keeps
+#     correctness: a stale node_modules can never serve old deps because the
+#     dep-hash guard forces a reinstall whenever the inputs change.
+#   * ``_rewrite_ripple_dep`` is preserved but now applied in build() (before the
+#     hash is computed) so the fingerprint reflects the FINAL install inputs; the
+#     runner's install() just runs `bun install` on the prepared dir.
+#   * The real runner gained install_inputs_hash(project_dir). Fakes that don't
+#     define it fall back to ALWAYS installing (legacy behaviour), so existing
+#     generator/svelte tests are unaffected.
+#   * Concurrent builds of the SAME pocket are serialized by a per-pocket asyncio
+#     lock (last-writer wins on the shared dir). Per-process only; per-tenant few
+#     editors makes cross-process contention a non-issue in practice. When no
+#     pocket_id is passed, build() falls back to the old throwaway tempfile dir
+#     (no caching) so legacy callers keep their prior behaviour.
+#
+# The smoke render stays as-is (PERF-4 gates it to publish-only — NOT here).
+#
 # Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): build() takes an
 # optional ``builder_origin`` and, when set, sends it on
 # ``siteConfig.builderOrigin``. The paw-sites generator (SE-1) gates the editable
@@ -53,6 +80,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shlex
@@ -60,6 +88,16 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+# Sentinel file (in the per-pocket build dir) recording the install-input
+# fingerprint of the last SUCCESSFUL `bun install`. build() skips install when the
+# current fingerprint matches this; mismatch forces a reinstall (PERF-3).
+_INSTALL_HASH_FILE = ".paw-install-hash"
+
+# Files whose contents define the dependency set. If any change, node_modules is
+# stale and must be reinstalled. The lockfile names cover bun's text + binary
+# lockfiles and the npm fallback.
+_INSTALL_INPUT_FILES = ("package.json", "bun.lock", "bun.lockb", "package-lock.json")
 
 
 class SmokeGateFailed(RuntimeError):
@@ -75,6 +113,36 @@ class BuildResult:
     # this is ``None`` on the svelte path. Optional so reading the svelte result
     # does not KeyError.
     ripple_version: str | None = None
+
+
+def build_home() -> Path:
+    """Root dir for the persistent per-pocket build working dirs (PERF-3). Each
+    pocket builds into ``build_home()/<pocket_id>/`` so node_modules persists
+    across builds and `bun install` can be cached. ~/.pocketpaw/site-builds by
+    default; override with PAW_SITES_BUILD_DIR (tests use a temp dir so they never
+    write the real home). Mirrors local_server.sites_home()'s convention."""
+    raw = os.environ.get("PAW_SITES_BUILD_DIR")
+    base = Path(raw) if raw else Path.home() / ".pocketpaw" / "site-builds"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _install_inputs_hash(project_dir: str) -> str:
+    """Fingerprint the install inputs (package.json + any lockfile) in a project
+    dir. A stable hash for an unchanged dependency set; it changes the moment a dep
+    or lockfile changes, which is exactly when node_modules goes stale and a
+    reinstall is required (PERF-3 correctness guard). Computed AFTER
+    ``_rewrite_ripple_dep`` so the @ripple-ui/svelte / motion rewrites are part of
+    the fingerprint."""
+    h = hashlib.sha256()
+    for name in _INSTALL_INPUT_FILES:
+        p = Path(project_dir, name)
+        if p.is_file():
+            h.update(name.encode())
+            h.update(b"\0")
+            h.update(p.read_bytes())
+            h.update(b"\0")
+    return h.hexdigest()
 
 
 def _gen_cmd_argv() -> list[str]:
@@ -125,6 +193,10 @@ class _Runner(Protocol):
     async def generate(self, input_json: dict[str, Any], out_dir: str) -> dict[str, Any]: ...
     async def install(self, project_dir: str) -> tuple[bool, str]: ...
     async def smoke(self, project_dir: str) -> tuple[bool, str]: ...
+    # PERF-3: fingerprint of the install inputs (package.json + lockfile). build()
+    # uses it to decide whether `bun install` can be skipped. Optional on a runner —
+    # build() falls back to always-install when a runner does not provide it.
+    def install_inputs_hash(self, project_dir: str) -> str: ...
 
 
 class _SubprocessRunner:
@@ -156,11 +228,16 @@ class _SubprocessRunner:
         finally:
             os.unlink(input_path)
 
+    def install_inputs_hash(self, project_dir: str) -> str:
+        # PERF-3: fingerprint of package.json + lockfile, computed on the real
+        # files in the prepared project dir (build() runs _rewrite_ripple_dep
+        # first, so the rewrite is included).
+        return _install_inputs_hash(project_dir)
+
     async def install(self, project_dir: str) -> tuple[bool, str]:
-        # Make the generated project's deps resolvable, then install. Without
-        # this the generated package.json pins an unpublished @ripple-ui/svelte
-        # and `bun run build` can't resolve it in a fresh environment.
-        _rewrite_ripple_dep(project_dir, _ripple_dep_source())
+        # The deps are already made resolvable by build() (_rewrite_ripple_dep runs
+        # before the install decision so the dep-hash reflects the final inputs).
+        # This just runs `bun install` on the prepared dir.
         proc = await asyncio.create_subprocess_exec(
             "bun",
             "install",
@@ -196,8 +273,23 @@ class _SubprocessRunner:
 
 
 class GeneratorClient:
+    # PERF-3: per-pocket async locks serialize concurrent builds of the SAME pocket
+    # (they share one on-disk working dir, so an interleaved generate/install would
+    # corrupt it). Class-level so all clients in a process share the same lock per
+    # pocket. Last-writer wins. Per-process only — per-tenant few editors makes
+    # cross-process contention a non-issue (noted in PERF-3 scope).
+    _pocket_locks: dict[str, asyncio.Lock] = {}
+
     def __init__(self, _runner: _Runner | None = None) -> None:
         self._runner = _runner or _SubprocessRunner()
+
+    @classmethod
+    def _lock_for(cls, pocket_id: str) -> asyncio.Lock:
+        lock = cls._pocket_locks.get(pocket_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._pocket_locks[pocket_id] = lock
+        return lock
 
     async def build(
         self,
@@ -211,6 +303,7 @@ class GeneratorClient:
         engine: str = "ripple",
         source: dict[str, str] | None = None,
         builder_origin: str | None = None,
+        pocket_id: str | None = None,
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -229,8 +322,63 @@ class GeneratorClient:
         is OMITTED from the payload when ``None`` so a normal (non-editable)
         publish keeps the exact prior wire bytes and the generator does not inject
         the bridge.
+
+        ``pocket_id`` (PERF-3) builds into a STABLE per-pocket working dir under
+        build_home() (``<build_home>/<pocket_id>/``) so node_modules persists and
+        `bun install` is cached across builds (preview AND publish). When None,
+        build() falls back to a fresh throwaway tempfile dir (no caching) so legacy
+        callers keep their prior behaviour. Concurrent builds of the SAME pocket
+        are serialized by a per-pocket lock (they share the on-disk dir).
         """
-        out_dir = tempfile.mkdtemp(prefix=f"paw-site-{site_id}-")
+        if pocket_id is None:
+            return await self._build_one(
+                ripple_spec=ripple_spec,
+                theme=theme,
+                site_id=site_id,
+                title=title,
+                capture_api_base=capture_api_base,
+                capture_signed_key=capture_signed_key,
+                engine=engine,
+                source=source,
+                builder_origin=builder_origin,
+                pocket_id=None,
+            )
+        async with self._lock_for(pocket_id):
+            return await self._build_one(
+                ripple_spec=ripple_spec,
+                theme=theme,
+                site_id=site_id,
+                title=title,
+                capture_api_base=capture_api_base,
+                capture_signed_key=capture_signed_key,
+                engine=engine,
+                source=source,
+                builder_origin=builder_origin,
+                pocket_id=pocket_id,
+            )
+
+    async def _build_one(
+        self,
+        *,
+        ripple_spec: dict[str, Any] | None,
+        theme: dict[str, Any],
+        site_id: str,
+        title: str,
+        capture_api_base: str,
+        capture_signed_key: str,
+        engine: str,
+        source: dict[str, str] | None,
+        builder_origin: str | None,
+        pocket_id: str | None,
+    ) -> BuildResult:
+        # PERF-3: stable per-pocket working dir (overwrite the source each build)
+        # so node_modules persists; fall back to a throwaway tempfile dir when no
+        # pocket_id is given (legacy callers — no caching).
+        if pocket_id is not None:
+            out_dir = str(build_home() / pocket_id)
+            Path(out_dir).mkdir(parents=True, exist_ok=True)
+        else:
+            out_dir = tempfile.mkdtemp(prefix=f"paw-site-{site_id}-")
         # §4.2: ``engine`` is always present; the STAGE-2 payload key forks on
         # it. svelte → ``source`` (no rippleSpec); ripple → ``rippleSpec`` (no
         # source). siteConfig + theme ride both tracks unchanged.
@@ -254,17 +402,43 @@ class GeneratorClient:
         else:
             input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)
-        # Install the generated project's deps (rewriting the @ripple-ui/svelte
-        # pin to a resolvable source) BEFORE the smoke build, or `bun run build`
-        # can't resolve them in a fresh environment. A failed install fails the
-        # gate closed — the site does NOT proceed to deploy.
-        ok, reason = await self._runner.install(gen["projectDir"])
-        if not ok:
-            raise SmokeGateFailed(reason)
-        ok, reason = await self._runner.smoke(gen["projectDir"])
+        project_dir = gen["projectDir"]
+        # Make the generated project's deps resolvable BEFORE install (and before
+        # the dep-hash is computed, so the rewrite is part of the fingerprint).
+        # The template pins an unpublished @ripple-ui/svelte; the rewrite swaps it
+        # for a resolvable source and adds motion. No-op on the svelte track (no
+        # @ripple-ui/svelte dep). Guarded so the fake-runner tests (whose projectDir
+        # is not a real dir) don't fail on a missing package.json.
+        if Path(project_dir, "package.json").is_file():
+            _rewrite_ripple_dep(project_dir, _ripple_dep_source())
+        # PERF-3 install cache: run `bun install` ONLY when the dependency set
+        # changed. Fingerprint the install inputs and compare to the sentinel from
+        # the last successful install in this dir. Match → skip (reuse the cached
+        # node_modules). Mismatch / first build → install, then record the new
+        # fingerprint. A runner without install_inputs_hash() always installs
+        # (legacy fakes), so existing tests are unaffected.
+        hasher = getattr(self._runner, "install_inputs_hash", None)
+        if hasher is not None:
+            new_hash = hasher(project_dir)
+            sentinel = Path(project_dir, _INSTALL_HASH_FILE)
+            prior_hash = sentinel.read_text().strip() if sentinel.is_file() else None
+            if new_hash != prior_hash:
+                ok, reason = await self._runner.install(project_dir)
+                if not ok:
+                    raise SmokeGateFailed(reason)
+                # Record AFTER a successful install so a failed install never
+                # poisons the cache (next build retries the install).
+                if Path(project_dir).is_dir():
+                    sentinel.write_text(new_hash)
+            # else: deps unchanged — reuse cached node_modules, skip install.
+        else:
+            ok, reason = await self._runner.install(project_dir)
+            if not ok:
+                raise SmokeGateFailed(reason)
+        ok, reason = await self._runner.smoke(project_dir)
         if not ok:
             raise SmokeGateFailed(reason)
         # ``rippleVersion`` is present only on the ripple GenerateResult; the svelte
         # path omits it (paw-sites types.ts §4.2), so read it defensively — a svelte
         # build must not KeyError here.
-        return BuildResult(project_dir=gen["projectDir"], ripple_version=gen.get("rippleVersion"))
+        return BuildResult(project_dir=project_dir, ripple_version=gen.get("rippleVersion"))
