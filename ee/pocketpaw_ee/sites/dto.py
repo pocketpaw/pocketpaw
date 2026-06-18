@@ -17,6 +17,10 @@
 # engine="svelte"); status is {pocket_id, status, is_live} plus the optional
 # site_id the frontend type also declares. Without these, every Preview-tab fetch
 # 404'd and the builder showed "Nothing to preview yet".
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added
+# MakeEditableRequest (the body for POST /sites/by-pocket/{pocket_id}/editable;
+# builder_origin optional) and SiteResponse.builder_origin so the UI can tell
+# whether a published site carries the edit-bridge (non-empty = editable).
 
 from __future__ import annotations
 
@@ -29,6 +33,15 @@ class PublishRequest(BaseModel):
     pocket_id: str
 
 
+class MakeEditableRequest(BaseModel):
+    """Body for POST /sites/by-pocket/{pocket_id}/editable (SE-2b). The builder
+    origin is optional — the service falls back to the configured dashboard
+    origin (PAW_SITES_BUILDER_ORIGIN) when it is omitted, so the body may be
+    empty."""
+
+    builder_origin: str = ""
+
+
 class SiteResponse(BaseModel):
     id: str
     pocket_id: str
@@ -37,6 +50,9 @@ class SiteResponse(BaseModel):
     deployed: bool
     signed_key: str
     url: str = ""
+    # SE-2b: the builder origin the site was published with, or "" for a normal
+    # (non-editable) site. Non-empty means the page carries the edit-bridge.
+    builder_origin: str = ""
 
 
 class SitePreviewResponse(BaseModel):

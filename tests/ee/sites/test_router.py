@@ -3,6 +3,13 @@
 # covers GET /sites/{site_id}/domains end-to-end through a FastAPI app — the new
 # tenant-scoped domains read backing the Domains tab's reload rehydration.
 #
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): covers POST
+# /sites/by-pocket/{pocket_id}/editable — the route republishes the pocket as
+# editable. The handler delegates to the service, so the tests patch
+# publish_pocket (the real generator would spawn bun) and assert the route
+# resolves the builder origin in precedence (explicit body > Origin header >
+# configured env fallback) and returns the editable SiteResponse.
+#
 # Auth wiring mirrors tests/cloud/test_ee_fabric_list_endpoints.py: the sites
 # router gates on require_plan_feature("fabric") (router level) +
 # require_action_any_workspace("fabric.read"), both of which resolve the caller
@@ -283,3 +290,147 @@ async def test_post_reserve_returns_reconciled_list(beanie_test_db, monkeypatch)
             local_server._server.shutdown()
             local_server._server.server_close()
             local_server._server = None
+
+
+@pytest.mark.asyncio
+async def test_make_editable_route_republishes_with_builder_origin(beanie_test_db, monkeypatch):
+    """POST /sites/by-pocket/{pocket_id}/editable republishes the pocket as
+    editable and returns the editable SiteResponse (builder_origin set). The real
+    generator would spawn bun, so publish_pocket is patched to record the
+    forwarded builder_origin."""
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, builder_origin=None, **kw):
+        captured["builder_origin"] = builder_origin
+        return _SiteDoc(
+            id=ObjectId(),
+            workspace="ws_owner",
+            pocket_id="pk1",
+            owner="user-test-1",
+            name="Owner Site",
+            script_name="site1",
+            deployed=True,
+            signed_key="k",
+            builder_origin=builder_origin or "",
+        )
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk1/editable",
+            json={"builder_origin": "https://app.paw.example"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["builder_origin"] == "https://app.paw.example"
+    body = resp.json()
+    assert body["pocket_id"] == "pk1"
+    assert body["builder_origin"] == "https://app.paw.example"
+
+
+@pytest.mark.asyncio
+async def test_make_editable_route_empty_body_falls_back_to_config(beanie_test_db, monkeypatch):
+    """An empty body works — the service falls back to the configured dashboard
+    origin (PAW_SITES_BUILDER_ORIGIN)."""
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.example")
+
+    async def _fake_publish_pocket(*, builder_origin=None, **kw):
+        return _SiteDoc(
+            id=ObjectId(),
+            workspace="ws_owner",
+            pocket_id="pk1",
+            owner="user-test-1",
+            name="Owner Site",
+            script_name="site1",
+            deployed=True,
+            signed_key="k",
+            builder_origin=builder_origin or "",
+        )
+
+    # make_site_editable computes the origin (the PAW_SITES_BUILDER_ORIGIN
+    # fallback) BEFORE it calls publish_pocket, so patching publish_pocket still
+    # exercises the genuine fallback and the resolved origin reaches the response.
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # No Origin header and no body field -> the configured env fallback fires.
+        resp = await c.post("/api/v1/sites/by-pocket/pk1/editable", json={})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["builder_origin"] == "https://configured.paw.example"
+
+
+@pytest.mark.asyncio
+async def test_make_editable_route_uses_origin_header(beanie_test_db, monkeypatch):
+    """When the body carries no builder_origin, the route derives it from the
+    request's Origin header — the dashboard origin the SE-3 editor calls from."""
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, builder_origin=None, **kw):
+        captured["builder_origin"] = builder_origin
+        return _SiteDoc(
+            id=ObjectId(),
+            workspace="ws_owner",
+            pocket_id="pk1",
+            owner="user-test-1",
+            name="Owner Site",
+            script_name="site1",
+            deployed=True,
+            signed_key="k",
+            builder_origin=builder_origin or "",
+        )
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk1/editable",
+            json={},
+            headers={"Origin": "https://dash.paw.example"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["builder_origin"] == "https://dash.paw.example"
+    assert resp.json()["builder_origin"] == "https://dash.paw.example"
+
+
+@pytest.mark.asyncio
+async def test_make_editable_route_body_beats_origin_header(beanie_test_db, monkeypatch):
+    """An explicit builder_origin in the body wins over the Origin header — it's
+    an override the editor can pass to publish against a different dashboard."""
+    from bson import ObjectId
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_publish_pocket(*, builder_origin=None, **kw):
+        captured["builder_origin"] = builder_origin
+        return _SiteDoc(
+            id=ObjectId(),
+            workspace="ws_owner",
+            pocket_id="pk1",
+            owner="user-test-1",
+            name="Owner Site",
+            script_name="site1",
+            deployed=True,
+            signed_key="k",
+            builder_origin=builder_origin or "",
+        )
+
+    monkeypatch.setattr(sites_service, "publish_pocket", _fake_publish_pocket)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk1/editable",
+            json={"builder_origin": "https://explicit.paw.example"},
+            headers={"Origin": "https://dash.paw.example"},
+        )
+    assert resp.status_code == 200, resp.text
+    assert captured["builder_origin"] == "https://explicit.paw.example"

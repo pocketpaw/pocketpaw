@@ -10,6 +10,14 @@
 # generator would parse, without spawning bun/node/workerd. siteConfig + theme
 # ride both tracks unchanged; install + smoke stay track-agnostic.
 #
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added coverage
+# that build() threads an optional ``builder_origin`` into
+# ``siteConfig.builderOrigin``. The paw-sites generator (SE-1) gates the
+# editable section anchors + the postMessage edit-bridge on this field, so a
+# site is only editable when it carries a builderOrigin. It is OMITTED from the
+# payload when not set, so non-editable publishes keep the exact prior wire
+# bytes.
+#
 # Updated 2026-06-04: added test_svelte_result_shape_no_ripple_version, a
 # regression for an integration KeyError. A's real generator returns
 # ``{"projectDir", "engine"}`` for svelte (NO ``rippleVersion`` — types.ts §4.2),
@@ -127,6 +135,52 @@ async def test_engine_defaults_to_ripple_when_unspecified() -> None:
     assert sent["engine"] == "ripple"
     assert "rippleSpec" in sent
     assert "source" not in sent
+
+
+@pytest.mark.asyncio
+async def test_builder_origin_is_threaded_into_site_config() -> None:
+    """SE-2b: build(builder_origin=...) puts it on siteConfig.builderOrigin so
+    the paw-sites generator injects the gated edit-bridge. A site is only
+    editable when this field is present."""
+    runner = _CapturingRunner()
+    client = GeneratorClient(_runner=runner)
+    await client.build(
+        engine="svelte",
+        source=_SOURCE_MAP,
+        ripple_spec=None,
+        theme={},
+        site_id="site_sv",
+        title="Tally",
+        capture_api_base="https://api.paw.example",
+        capture_signed_key="pp_tok_x",
+        builder_origin="https://app.paw.example",
+    )
+    sent = runner.input_json
+    assert sent is not None
+    assert sent["siteConfig"]["builderOrigin"] == "https://app.paw.example"
+
+
+@pytest.mark.asyncio
+async def test_builder_origin_omitted_when_not_set() -> None:
+    """A normal (non-editable) publish carries NO builderOrigin key — the wire
+    payload is byte-identical to before SE-2b, so the generator does not inject
+    the bridge."""
+    runner = _CapturingRunner()
+    client = GeneratorClient(_runner=runner)
+    await client.build(
+        engine="svelte",
+        source=_SOURCE_MAP,
+        ripple_spec=None,
+        theme={},
+        site_id="site_sv",
+        title="Tally",
+        capture_api_base="https://api.paw.example",
+        capture_signed_key="pp_tok_x",
+        # builder_origin omitted
+    )
+    sent = runner.input_json
+    assert sent is not None
+    assert "builderOrigin" not in sent["siteConfig"]
 
 
 class _SvelteShapeRunner:

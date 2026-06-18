@@ -16,6 +16,12 @@
 # openable address for the cmux smoke. In the real CF path it is left "" in v1
 # (the deployed Worker is reached via its custom domain, surfaced through the
 # domains list) until a canonical workers.dev URL is wired.
+#
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added
+# ``builder_origin`` — the builder origin the site was published with, or "" for
+# a normal (non-editable) site. When set, the generated page carries the gated
+# edit-bridge keyed on it. Persisted so a component-edit republish re-applies it
+# and the site stays editable across edits.
 
 from __future__ import annotations
 
@@ -49,6 +55,11 @@ class Site(TimestampedDocument):
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""
+    # SE-2b: the builder origin this site was published with, or "" when it was
+    # published as a normal (non-editable) site. When set, the generated page
+    # carries the gated edit-bridge keyed on this origin. Persisted so a
+    # component-edit republish can re-apply it and the site stays editable.
+    builder_origin: str = ""
     # Capture hardening config (mirrors sites_capture.SiteFormConfig fields).
     allowed_origins: list[str] = Field(default_factory=list)
     signed_key: str = ""
