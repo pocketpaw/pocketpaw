@@ -21,6 +21,13 @@
 # MakeEditableRequest (the body for POST /sites/by-pocket/{pocket_id}/editable;
 # builder_origin optional) and SiteResponse.builder_origin so the UI can tell
 # whether a published site carries the edit-bridge (non-empty = editable).
+# Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
+# SiteStatusResponse gains ``has_unpublished_changes`` — the Branch primitive now
+# derives draft/published from the version pointers (versions.get_draft /
+# get_published), so a pocket can carry a draft NEWER than its published version.
+# This flag (default False, backward-compatible) lets the builder badge "has
+# unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
+# semantics are unchanged in shape; only their derivation moves onto versions.
 
 from __future__ import annotations
 
@@ -69,13 +76,19 @@ class SitePreviewResponse(BaseModel):
 class SiteStatusResponse(BaseModel):
     """Authoritative draft/published + is_live state for a pocket, so the builder
     labels accurately even before the site appears in the gallery list. ``status``
-    is "draft" (no published deploy) or "published"; ``is_live`` is the ONLY signal
-    that earns a "Live" badge. ``site_id`` carries the deployed Site's id when one
-    exists. Mirrors the frontend SiteStatusResponse (core/sites/types.ts)."""
+    is "draft" (no published version) or "published"; ``is_live`` is the ONLY
+    signal that earns a "Live" badge — it requires a published version AND a real
+    successful deploy (the Site doc's ``deployed``), never an optimistic stamp.
+    ``has_unpublished_changes`` is True when a draft version is newer than the
+    published one (edits the publish would ship). ``site_id`` carries the deployed
+    Site's id when one exists. Mirrors the frontend SiteStatusResponse
+    (core/sites/types.ts); ``has_unpublished_changes`` defaults False so the field
+    is backward-compatible for callers that do not yet read it."""
 
     pocket_id: str
     status: str  # draft | published
     is_live: bool
+    has_unpublished_changes: bool = False
     site_id: str | None = None
 
 
