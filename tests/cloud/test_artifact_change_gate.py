@@ -286,3 +286,142 @@ class TestArtifactChangeDispatch:
             resp = client.post(f"/instinct/actions/{action_id}/approve")
             assert resp.status_code == 200, resp.text
             assert resp.json()["action"]["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Part C (security fix) — empty/missing workspace claim MUST 403, never pass
+# ---------------------------------------------------------------------------
+
+
+def _empty_workspace_params() -> dict:
+    """An ``_artifact_change`` blob with NO workspace claim (empty string + the
+    alias key absent). There is no legitimate empty-workspace case — the gate
+    must hard-403 rather than skip the tenancy check (the null-workspace bypass:
+    a blob with workspace="" and scope_id=<victim pocket> would otherwise be
+    approvable + DEPLOYABLE by any operator in any workspace)."""
+    return {
+        "_artifact_change": {
+            "schema": 1,
+            "scope_type": "pocket",
+            "scope_id": "victim-pocket",
+            "branch": "cand",
+            "from_version_id": "ver-from",
+            "to_version_id": "ver-to",
+            "workspace": "",  # empty claim — and ``workspace_id`` alias absent
+            "user_id": "attacker-1",
+            "correlation_id": None,
+            "proposed_event_id": None,
+        }
+    }
+
+
+class TestArtifactChangeEmptyWorkspaceBypass:
+    """Regression for the null/empty-workspace bypass. An attacker proposing an
+    ``_artifact_change`` blob with no workspace claim must NOT be able to get a
+    different-workspace operator to approve (publish + DEPLOY) or reject
+    (discard) it. Empty workspace = unverifiable tenancy = hard 403 on BOTH
+    sides, with NO executor side-effect."""
+
+    def _no_side_effect_spies(self, monkeypatch) -> dict:
+        """Patch BOTH executor entrypoints to record if they ever run. The 403
+        must fire before any of them — if a spy is recorded, the bypass is
+        live."""
+        ran: dict = {}
+
+        async def _merge_spy(action, *, human_event_id=None):
+            ran["merge"] = action.id
+
+        async def _discard_spy(action):
+            ran["discard"] = action.id
+
+        monkeypatch.setattr(
+            "pocketpaw_ee.versions.instinct_executor.execute_approved_change", _merge_spy
+        )
+        monkeypatch.setattr(
+            "pocketpaw_ee.versions.instinct_executor.discard_rejected_change", _discard_spy
+        )
+        return ran
+
+    def test_approve_of_empty_workspace_blob_is_403_no_merge(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        ran = self._no_side_effect_spies(monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="victim-pocket",
+                title="no-workspace merge",
+                parameters=_empty_workspace_params(),
+            )
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+            assert resp.status_code == 403, resp.text
+            assert resp.json()["error"]["code"] == "instinct.missing_workspace_in_blob"
+            # No state mutation, no merge/deploy side-effect.
+            assert _status_of(client, action_id) == "pending"
+            assert ran == {}
+
+    def test_reject_of_empty_workspace_blob_is_403_no_discard(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        ran = self._no_side_effect_spies(monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="victim-pocket",
+                title="no-workspace merge",
+                parameters=_empty_workspace_params(),
+            )
+            resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "nope"})
+            assert resp.status_code == 403, resp.text
+            assert resp.json()["error"]["code"] == "instinct.missing_workspace_in_blob"
+            assert _status_of(client, action_id) == "pending"
+            assert ran == {}
+
+    def test_empty_workspace_blob_403_even_from_matching_empty_caller(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """There is no legitimate empty-workspace case: even a caller whose own
+        active workspace resolves empty cannot approve an empty-workspace blob —
+        empty must ALWAYS 403, never match-through."""
+        client = _make_client(router_store, _FakeUser("user-X", ""), monkeypatch)
+        ran = self._no_side_effect_spies(monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            action_id = _propose(
+                client,
+                pocket_id="victim-pocket",
+                title="no-workspace merge",
+                parameters=_empty_workspace_params(),
+            )
+            resp = client.post(f"/instinct/actions/{action_id}/approve")
+            assert resp.status_code == 403, resp.text
+            assert resp.json()["error"]["code"] == "instinct.missing_workspace_in_blob"
+            assert ran == {}
+
+    def test_bulk_approve_with_empty_workspace_blob_is_403_no_merge(
+        self, router_store: InstinctStore, monkeypatch
+    ) -> None:
+        """The bulk path runs the same up-front guard — an empty-workspace item
+        fails the whole batch with 403 and nothing flips or merges."""
+        client = _make_client(router_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+        ran = self._no_side_effect_spies(monkeypatch)
+        with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
+            own = _propose(
+                client,
+                pocket_id="pocket-art",
+                title="ws-A merge",
+                parameters=_artifact_change_params(workspace_id="ws-A"),
+            )
+            empty = _propose(
+                client,
+                pocket_id="victim-pocket",
+                title="no-workspace merge",
+                parameters=_empty_workspace_params(),
+            )
+            resp = client.post("/instinct/actions/bulk-approve", json={"ids": [own, empty]})
+            assert resp.status_code == 403, resp.text
+            assert resp.json()["error"]["code"] == "instinct.missing_workspace_in_blob"
+            assert _status_of(client, own) == "pending"
+            assert _status_of(client, empty) == "pending"
+            assert ran == {}

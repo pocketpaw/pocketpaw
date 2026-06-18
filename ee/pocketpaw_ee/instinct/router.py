@@ -341,12 +341,34 @@ def _assert_artifact_change_workspace(action: Any, current_workspace: str) -> No
     mutation, on BOTH the approve and the reject side (asymmetric tenant scope is
     no tenant scope — pocketpaw#1183 / #1250). A non-artifact-change Action (no
     blob) is unaffected.
+
+    FAIL-CLOSED on an empty claim — a blob whose workspace resolves to "" (the
+    key absent or null) is a HARD 403 (``instinct.missing_workspace_in_blob``),
+    not a pass-through. An artifact change's tenancy is mandatory; without it the
+    gate cannot verify the caller owns the artifact, so allowing it would let an
+    attacker propose a workspace-less blob targeting a victim's pocket and have
+    any operator approve (publish + DEPLOY) it. There is no legitimate
+    empty-workspace case here.
     """
     blob = _artifact_change_blob(action)
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace") or blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # SECURITY — an absent/empty workspace claim is a HARD 403, never a
+    # pass-through. The old ``if blob_workspace and ...`` short-circuited: a blob
+    # whose workspace resolved to "" skipped the tenancy check entirely, so an
+    # attacker could propose an artifact change with workspace="" and
+    # scope_id=<victim pocket> and have ANY operator in ANY workspace approve
+    # (publish + DEPLOY) or reject (discard) it. There is no legitimate
+    # empty-workspace case for an artifact change — its tenancy is mandatory —
+    # so we fail closed before the equality check on both the approve and reject
+    # side.
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This artifact change has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This artifact change belongs to a different workspace",
