@@ -242,6 +242,7 @@ from beanie import PydanticObjectId
 from bson.errors import InvalidId
 from pydantic import ValidationError as PydanticValidationError
 
+from pocketpaw.bundled_templates.schema import RippleSpec
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     PocketCreated,
@@ -420,6 +421,26 @@ async def apply_derived_surface_profile(
     await doc.save()
 
 
+def _promote_ripple_spec(raw: Any) -> RippleSpec | dict[str, Any] | None:
+    """Promote a stored flat ``rippleSpec`` dict to a typed ``RippleSpec``.
+
+    Phase-2 domain-boundary promotion. The Beanie field stays a raw dict;
+    promotion happens here on read. The byte-equivalence invariant is
+    preserved at the edges:
+
+    * A falsy spec (``None`` or ``{}``) is returned VERBATIM — an empty dict
+      must stay ``{}`` and ``None`` must stay ``None``, so the wire serializer
+      (``pocket_to_wire_dict``) produces the same shape it did before Phase 2.
+    * A non-empty dict is promoted via ``from_flat_dict`` (which NEVER raises).
+    * A corrupt / unpromotable spec — ``from_flat_dict`` returns ``None`` —
+      falls back to the raw stored value, so a bad doc never breaks pocket
+      load. Every downstream reader is dual-path and accepts either shape.
+    """
+    if not raw:
+        return raw
+    return RippleSpec.from_flat_dict(raw) or raw
+
+
 def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
     return Pocket(
         id=str(doc.id),
@@ -434,7 +455,14 @@ def _pocket_to_domain(doc: _PocketDoc) -> Pocket:
         team=tuple(str(t) for t in doc.team),
         agents=tuple(str(a) for a in doc.agents),
         widgets=tuple(_widget_to_domain(w) for w in doc.widgets),
-        ripple_spec=doc.rippleSpec,
+        # Phase-2 (feat/typed-ripplespec-phase2) — PROMOTE-ON-READ at the
+        # domain boundary (see ``_promote_ripple_spec``). The Beanie
+        # ``Pocket.rippleSpec`` field stays a raw ``dict`` (no migration); a
+        # NON-EMPTY spec becomes a typed ``RippleSpec`` so every downstream
+        # reader can use the typed fields. A falsy spec (``None`` / ``{}``) and
+        # a corrupt/unpromotable spec are carried through verbatim so the wire
+        # stays byte-equivalent and a bad doc never breaks pocket load.
+        ripple_spec=_promote_ripple_spec(doc.rippleSpec),
         share_link_token=doc.share_link_token,
         share_link_access=doc.share_link_access,
         shared_with=tuple(doc.shared_with),
@@ -542,9 +570,20 @@ async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
         from pocketpaw_ee.cloud import ripple_sources  # noqa: F401  — register sources
         from pocketpaw_ee.cloud.ripple_resolver import ResolveCtx, resolve_ripple_spec
 
+        # Phase-2: ``pocket.ripple_spec`` is now a promoted ``RippleSpec`` (or a
+        # raw dict for an unpromotable doc). ``resolve_ripple_spec`` walks the
+        # flat ``$source``-marker tree, so flatten a typed spec back to its
+        # BSON-equivalent dict before resolving. ``resolved`` (a dict) is then
+        # stored on the domain object — the resolved view goes straight to the
+        # wire, so a dict here keeps the wire shape unchanged.
+        spec_for_resolve = (
+            pocket.ripple_spec.to_flat_dict()
+            if isinstance(pocket.ripple_spec, RippleSpec)
+            else pocket.ripple_spec
+        )
         try:
             resolved = await resolve_ripple_spec(
-                pocket.ripple_spec,
+                spec_for_resolve,
                 ResolveCtx(
                     workspace_id=doc.workspace,
                     user_id=viewer_user_id,
