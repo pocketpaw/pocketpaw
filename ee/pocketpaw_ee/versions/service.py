@@ -41,6 +41,19 @@
 # Both are minimal + idempotent-friendly (a missing row raises ValueError, same
 # defensive contract as publish()).
 #
+# Updated: 2026-06-19 (P2a — discard-all-drafts) — two changes that stop the
+# draft pile accumulating so ONE discard clears the unpublished-changes bar:
+#   * write_draft now SUPERSEDES the prior draft head: when the current branch
+#     head is already status="draft" it is flipped to "reverted" before the new
+#     row is inserted, so at most ONE live draft exists per (scope, branch). The
+#     monotonic version_no is preserved (the superseded row stays as history).
+#     A published/merged/reverted head is never superseded.
+#   * discard_all_drafts(scope, workspace, branch) reverts EVERY status="draft"
+#     row above the published pointer in one pass (tenant-scoped), back-handling
+#     pockets that already carry a pile of drafts. The Instinct reject path
+#     (instinct_executor.discard_rejected_change) now calls it instead of the
+#     single-row discard, so has_unpublished_changes goes false on click 1.
+#
 # Updated: 2026-06-18 (feat/branch-primitive-revert-history, BP-4) — revert +
 # the publish event so the history view sees the full lifecycle:
 #   * revert(version_id)  — revert an artifact to a prior snapshot by writing a
@@ -71,6 +84,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "branch",
     "discard",
+    "discard_all_drafts",
     "get_draft",
     "get_published",
     "list_versions",
@@ -191,10 +205,26 @@ async def write_draft(
     ``parent_version_id`` pointing at the prior branch head (None for the
     first version). Becomes the working draft (``get_draft`` returns it).
 
+    P2a (B) — SUPERSEDE the prior draft head: if the current branch head is
+    already ``status="draft"``, it is flipped to ``"reverted"`` BEFORE the new
+    row is inserted, so AT MOST ONE live draft exists per (scope, branch). This
+    stops the draft pile from accumulating (the cause of "discard needs N
+    clicks"): a pocket edited N times leaves one live draft, not N. The
+    monotonic ``version_no`` counter is NOT reused — the superseded row stays on
+    the append-only log as history, and the new row still gets head.version_no+1
+    so list_versions / lineage are unchanged. A PUBLISHED (or merged/reverted)
+    head is never superseded — a new draft on top of a published version is a
+    reviewable change that must keep the published pointer live.
+
     Emits ``artifact.version.created``.
     """
     head = await _latest_in_branch(scope_type=scope_type, scope_id=scope_id, branch_name=branch)
     version_no = (head.version_no + 1) if head else 1
+
+    # Supersede the prior DRAFT head so only one live draft survives (P2a B).
+    if head is not None and head.status == "draft":
+        head.status = "reverted"
+        await head.save()
 
     row = ArtifactVersion(
         scope_type=scope_type,
@@ -447,6 +477,72 @@ async def discard(
         },
     )
     return row
+
+
+async def discard_all_drafts(
+    *,
+    scope_type: str,
+    scope_id: str,
+    workspace_id: str,
+    branch: str = "main",  # noqa: A002 — domain term; not the builtin
+) -> int:
+    """Discard EVERY draft above the published pointer in one pass (P2a A).
+
+    The single-row :func:`discard` only abandons the candidate the merge gate
+    names. A pocket edited N times before this fix accumulated N ``status="draft"``
+    rows (write_draft always inserted a new one), so a single discard left the
+    other drafts standing → ``get_draft`` stayed non-None → the unpublished-changes
+    bar never cleared → "discard needs N clicks". This flips every
+    ``status="draft"`` row with ``version_no`` strictly greater than the published
+    pointer's ``version_no`` (or ALL drafts when nothing is published yet) to
+    ``"reverted"`` in a single call, so ONE discard makes ``has_unpublished_changes``
+    false. It also back-handles pockets already carrying a pile of drafts on disk.
+
+    The PUBLISHED pointer is left entirely untouched (a discard must never move
+    what is live), and the scan is tenant-scoped on ``workspace_id`` (a same-id
+    draft in another workspace is never reverted). Returns the number of drafts
+    reverted (0 when there is nothing above the published pointer — idempotent).
+
+    Emits ``artifact.version.discarded`` per reverted row so the history
+    projection records each abandonment.
+    """
+    published = await get_published(scope_type=scope_type, scope_id=scope_id, branch=branch)
+    floor = published.version_no if published is not None else 0
+
+    drafts = await ArtifactVersion.find(
+        ArtifactVersion.scope_type == scope_type,
+        ArtifactVersion.scope_id == scope_id,
+        ArtifactVersion.workspace_id == workspace_id,
+        ArtifactVersion.branch == branch,
+        ArtifactVersion.status == "draft",
+    ).to_list()
+
+    reverted = 0
+    for row in drafts:
+        if row.version_no <= floor:
+            # A draft at/below the published pointer is not an unpublished change
+            # (defensive — drafts are normally above; never touch live history).
+            continue
+        row.status = "reverted"
+        await row.save()
+        reverted += 1
+        _emit_version_event(
+            action="artifact.version.discarded",
+            scope_type=scope_type,
+            scope_id=scope_id,
+            workspace_id=workspace_id,
+            author=row.author,
+            payload={
+                "version_id": str(row.id),
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "branch": row.branch,
+                "version_no": row.version_no,
+                "status": "reverted",
+                "discard_all": True,
+            },
+        )
+    return reverted
 
 
 async def revert(

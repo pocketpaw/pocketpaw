@@ -3,6 +3,15 @@
 # apply-on-approve / discard-on-reject executor for the Branch primitive's
 # artifact-change merge gate.
 #
+# Updated 2026-06-19 (P2a — discard-all-drafts): discard_rejected_change now
+# clears ALL drafts above the published pointer in one pass via
+# versions_service.discard_all_drafts (passing the blob's branch), instead of
+# reverting only the single candidate ``to_version_id``. Fixes "discard needs N
+# clicks": a pocket edited N times accumulated N draft rows, and reverting only
+# the latest left the others standing so the unpublished-changes bar never
+# cleared. The published pointer is still left untouched (a reject never moves
+# Live).
+#
 # This is the executor the Instinct router dispatches to when an approved /
 # rejected Action carries an ``_artifact_change`` blob (the peer of the
 # pocket-write bridge, the belt code-change executor, and the external-action
@@ -177,17 +186,23 @@ async def execute_approved_change(action: Any, *, human_event_id: Any | None = N
 
 
 async def discard_rejected_change(action: Any) -> None:
-    """DISCARD a rejected artifact-change Action (BP-3).
+    """DISCARD a rejected artifact-change Action (BP-3 + P2a).
 
-    Flips the candidate draft (``to_version_id``) to ``status="reverted"`` so it
-    leaves the working-draft pointer; the PUBLISHED pointer is left untouched (a
-    rejection must never move what is live). No deploy. Best-effort: the router
-    already flipped the Action to ``rejected`` and closed the Decision-Graph
-    chain on the reject path, so a discard failure here is logged and swallowed —
-    it must not break the reject response.
+    P2a — clears ALL drafts above the published pointer in ONE pass via
+    ``versions_service.discard_all_drafts`` instead of reverting only the single
+    candidate the Action names. A pocket edited N times accumulated N draft rows
+    (one per edit); the old single-row discard reverted only ``to_version_id``, so
+    ``get_draft`` stayed non-None and the unpublished-changes bar never cleared →
+    "discard needs N clicks". One ``discard_all_drafts`` flips every draft above
+    published to ``status="reverted"`` so the bar clears on click 1, and it
+    back-handles pockets already carrying a pile of accumulated drafts.
 
-    TODO(BP-4): deeper discard/revert semantics (reverting the published pointer
-    to a prior snapshot, history projection) land in BP-4.
+    The PUBLISHED pointer is left untouched (a rejection must never move what is
+    live). No deploy. Tenant-scoped on the blob's ``workspace`` (the same scope
+    the merge gate enforces). Best-effort: the router already flipped the Action
+    to ``rejected`` and closed the Decision-Graph chain on the reject path, so a
+    discard failure here is logged and swallowed — it must not break the reject
+    response.
     """
     blob = artifact_change_blob(action)
     if blob is None:
@@ -197,6 +212,7 @@ async def discard_rejected_change(action: Any) -> None:
     scope_id = str(blob.get("scope_id") or "")
     workspace_id = str(blob.get("workspace") or blob.get("workspace_id") or "")
     to_version_id = str(blob.get("to_version_id") or "")
+    branch = str(blob.get("branch") or "main")
     if not (scope_type and scope_id and workspace_id and to_version_id):
         logger.debug("artifact-change discard: blob missing fields — nothing to discard")
         return
@@ -204,17 +220,18 @@ async def discard_rejected_change(action: Any) -> None:
     try:
         from pocketpaw_ee.versions import service as versions_service
 
-        await versions_service.discard(
+        # Clear EVERY draft above the published pointer in one pass (P2a), not just
+        # the candidate the Action names — so one discard clears the bar.
+        await versions_service.discard_all_drafts(
             scope_type=scope_type,
             scope_id=scope_id,
             workspace_id=workspace_id,
-            version_id=to_version_id,
+            branch=branch,
         )
     except Exception:  # noqa: BLE001 — discard nudge must never break the reject
         logger.warning(
-            "artifact-change discard: failed to revert candidate %s for %s:%s "
+            "artifact-change discard: failed to clear drafts for %s:%s "
             "(published pointer untouched)",
-            to_version_id,
             scope_type,
             scope_id,
             exc_info=True,

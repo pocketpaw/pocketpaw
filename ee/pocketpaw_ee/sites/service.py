@@ -1,6 +1,15 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-19 (P0b — review-400 self-heal): ``request_publish_pocket`` no
+# longer 400s a LEGACY site (one published before BP-1, so it has ZERO
+# ``artifact_versions`` rows and no draft). When ``get_draft`` is None it now
+# BACKFILLS a draft snapshot of the pocket's current content via the existing
+# ``_ensure_pocket_draft`` helper, then re-reads; the 400 is kept ONLY for a
+# genuinely empty / nonexistent pocket or a foreign-workspace draft. This fixes
+# the "Submit for review → 400 (and edits seem to go live)" bug — both symptoms
+# were the same missing-draft-lineage gap.
+#
 # Updated 2026-06-18 (feat/sites-smoke-at-publish, PERF-4): publish() now threads
 # ``smoke=not preview`` into generator.build(), so the workerd SMOKE render runs
 # ONLY for a LIVE publish (preview=False) and is SKIPPED for a preview/edit/arm
@@ -1555,11 +1564,17 @@ async def request_publish_pocket(
     workspace claim, so a real workspace MUST be set here for the gate to ever
     approve). The caller passes its ``ctx.workspace_id``.
 
-    Raises ``ValueError`` when there is NO current draft to publish (the router
-    maps it to a 4xx — there is nothing to submit for review). A missing /
-    access-denied pocket surfaces via the pockets service (NotFound → 404) only
-    when no draft row exists; the common path (a draft was written by an edit)
-    reads the draft directly off the versions spine.
+    P0b — SELF-HEAL legacy sites: a site published before BP-1 has ZERO
+    ``artifact_versions`` rows, so ``get_draft`` returns None even though the
+    pocket has live content. Rather than 400, this BACKFILLS a draft snapshot of
+    the pocket's current content (via ``_ensure_pocket_draft``) and proceeds. The
+    400 is kept ONLY for a genuinely empty / nonexistent pocket (nothing to
+    snapshot) or a foreign-workspace draft (tenant isolation).
+
+    Raises ``ValueError`` when there is NO current draft to publish AND none can
+    be backfilled (the router maps it to a 4xx — there is nothing to submit for
+    review). A missing / access-denied pocket surfaces via the pockets service
+    (NotFound, swallowed by the best-effort backfill) → still no draft → 400.
     """
     from pocketpaw.instinct.models import (
         ActionCategory,
@@ -1571,9 +1586,24 @@ async def request_publish_pocket(
 
     draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
     if draft is None or draft.workspace_id != workspace_id:
-        # Nothing drafted for this pocket in this workspace — nothing to review.
-        # (A foreign-workspace draft is also "nothing here" for this caller —
-        # tenant isolation, the same guard pocket_status applies.)
+        # P0b — a site PUBLISHED before BP-1 has ZERO artifact_versions rows, so it
+        # has no draft lineage at all. That is NOT "nothing to review": the pocket
+        # still has live content the operator wants to submit. BACKFILL a draft
+        # snapshot of the pocket's CURRENT content (reusing ``_ensure_pocket_draft``,
+        # which reads the engine + content via the pockets service and writes a draft
+        # only when none exists), then re-read. This self-heals the legacy site so
+        # Submit-for-review works on the first click instead of 400'ing — and the
+        # edits no longer leak to live, because they land on a draft the merge gate
+        # must approve. A genuinely empty / nonexistent pocket still has nothing to
+        # snapshot (``_ensure_pocket_draft`` swallows the pockets-service NotFound),
+        # so ``get_draft`` stays None below and we keep the 400.
+        await _ensure_pocket_draft(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+        draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+
+    if draft is None or draft.workspace_id != workspace_id:
+        # Still nothing after the backfill attempt — a genuinely empty / nonexistent
+        # pocket, or a foreign-workspace draft (tenant isolation, the same guard
+        # ``pocket_status`` applies). Nothing to review.
         raise ValueError(f"no draft version to publish for pocket {pocket_id} — nothing to review")
 
     published = await versions_service.get_published(

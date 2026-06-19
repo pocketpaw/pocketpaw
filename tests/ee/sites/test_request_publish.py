@@ -137,6 +137,75 @@ async def test_request_publish_ignores_foreign_workspace_draft(beanie_test_db, i
 
 
 # ---------------------------------------------------------------------------
+# P0b — a LEGACY site (published before BP-1) has ZERO artifact_versions rows,
+# so it has no draft. Submit-for-review must BACKFILL a draft snapshot of the
+# pocket's current content and succeed — not 400. Only a genuinely empty /
+# nonexistent pocket keeps the 400.
+# ---------------------------------------------------------------------------
+
+
+async def test_request_publish_backfills_draft_for_legacy_site(
+    beanie_test_db, instinct_store, monkeypatch
+):
+    """THE BUG (P0b): a site published before BP-1 has ZERO artifact_versions rows,
+    so ``get_draft`` is None and (pre-fix) ``request_publish_pocket`` raised
+    ValueError → the Submit-for-review UI 400'd. The fix backfills a draft snapshot
+    of the pocket's CURRENT content via ``_ensure_pocket_draft`` and then proceeds
+    to create the review Action.
+
+    Before the fix this fails: zero versions → get_draft None → ValueError.
+    """
+    # No artifact_versions exist for this pocket at all (the legacy-site state).
+    assert await versions.get_draft(scope_type="pocket", scope_id=POCKET) is None
+
+    # The pocket itself still has its current (ripple) content — the legacy live
+    # site. ``_ensure_pocket_draft`` reads it through the pockets service.
+    current_spec = {"widgets": [{"type": "hero", "props": {"title": "PawPlace"}}]}
+
+    async def _fake_get(pocket_id: str, user_id: str) -> dict:
+        assert pocket_id == POCKET
+        return {"id": POCKET, "engine": "ripple", "rippleSpec": current_spec}
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.service.get", _fake_get)
+
+    action = await sites_service.request_publish_pocket(
+        workspace_id=WS, user_id=USER, pocket_id=POCKET
+    )
+
+    # A draft was backfilled from the pocket's current content.
+    draft = await versions.get_draft(scope_type="pocket", scope_id=POCKET)
+    assert draft is not None, "a legacy site with no versions must get a backfilled draft"
+    assert draft.workspace_id == WS
+    assert draft.content == current_spec
+
+    # And the review Action was created over that backfilled draft (no 400).
+    assert action is not None
+    blob = action.parameters["_artifact_change"]
+    assert blob["to_version_id"] == str(draft.id)
+    # Nothing was published before — a first publish.
+    assert blob["from_version_id"] is None
+
+
+async def test_request_publish_genuinely_empty_pocket_still_raises(
+    beanie_test_db, instinct_store, monkeypatch
+):
+    """A pocket with no versions AND no current content (genuinely empty) keeps the
+    400: there is nothing to snapshot, so the backfill writes an empty draft only if
+    content exists — an empty pocket has nothing to review."""
+    from pocketpaw_ee.cloud.shared.errors import NotFound
+
+    async def _fake_get_missing(pocket_id: str, user_id: str) -> dict:
+        raise NotFound("pocket", pocket_id)
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.service.get", _fake_get_missing)
+
+    with pytest.raises(ValueError):
+        await sites_service.request_publish_pocket(
+            workspace_id=WS, user_id=USER, pocket_id="ghost-pocket"
+        )
+
+
+# ---------------------------------------------------------------------------
 # The round-trip — request-publish → approve (real gate + real merge executor)
 # → the reviewed draft version is published.
 # ---------------------------------------------------------------------------

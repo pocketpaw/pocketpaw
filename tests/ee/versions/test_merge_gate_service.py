@@ -114,6 +114,185 @@ async def test_discard_rejects_cross_workspace(beanie_test_db) -> None:
 
 
 # ---------------------------------------------------------------------------
+# P2a — discard must clear ALL accumulated drafts in one pass, and write_draft
+# must supersede the prior draft head so at most ONE live draft exists.
+# ---------------------------------------------------------------------------
+
+
+async def _draft_rows_above_published(scope_id: str) -> list:
+    """All status='draft' rows above the published pointer (the rows that keep
+    has_unpublished_changes true)."""
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    published = await versions.get_published(scope_type="pocket", scope_id=scope_id)
+    floor = published.version_no if published is not None else 0
+    rows = await ArtifactVersion.find(
+        ArtifactVersion.scope_type == "pocket",
+        ArtifactVersion.scope_id == scope_id,
+        ArtifactVersion.branch == "main",
+        ArtifactVersion.status == "draft",
+    ).to_list()
+    return [r for r in rows if r.version_no > floor]
+
+
+async def test_discard_all_drafts_clears_every_draft_in_one_pass(
+    beanie_test_db, versions_journal
+) -> None:
+    """P2a (A): after N edits a pocket has N draft rows above the published
+    pointer (write_draft inserts a fresh draft each time). ONE discard_all_drafts
+    must flip EVERY draft above published to 'reverted' so get_draft() is None and
+    has_unpublished_changes becomes false on the FIRST discard — not after N clicks.
+
+    Reproduce-first: pre-fix discard_all_drafts does not exist (AttributeError).
+    """
+    scope = "pocket-discard-all"
+    # A published baseline so we can prove discard leaves it untouched.
+    pub = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": "live"}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, version_id=str(pub.id)
+    )
+
+    # Three edits. Whether or not write_draft supersedes, this must end with at
+    # least one draft above published; the back-handling case (already-accumulated
+    # drafts) is exercised by inserting raw rows below.
+    for i in range(3):
+        await versions.write_draft(
+            scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": i}
+        )
+
+    # Back-handle the already-accumulated case: force three raw draft rows above
+    # published (the state a pre-fix pocket is already in on disk), so the test
+    # proves discard_all_drafts clears a PILE, not just the head.
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    head = await versions._latest_in_branch(scope_type="pocket", scope_id=scope, branch_name="main")
+    next_no = head.version_no + 1
+    for j in range(3):
+        await ArtifactVersion(
+            scope_type="pocket",
+            scope_id=scope,
+            workspace_id=WS,
+            branch="main",
+            version_no=next_no + j,
+            content={"raw": j},
+            status="draft",
+        ).insert()
+
+    # Multiple drafts above published exist now (the bug's accumulated state).
+    before = await _draft_rows_above_published(scope)
+    assert len(before) >= 2, "precondition: a pile of drafts above published"
+
+    # ONE discard_all_drafts clears them all.
+    n = await versions.discard_all_drafts(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, branch="main"
+    )
+    assert n >= 2
+
+    # Zero drafts above published → has_unpublished_changes is false on click 1.
+    after = await _draft_rows_above_published(scope)
+    assert after == []
+    assert await versions.get_draft(scope_type="pocket", scope_id=scope) is None
+
+    # The published pointer is untouched (a discard must never move what is live).
+    live = await versions.get_published(scope_type="pocket", scope_id=scope)
+    assert live is not None
+    assert live.id == pub.id
+    assert live.content == {"v": "live"}
+
+
+async def test_discard_all_drafts_is_tenant_scoped(beanie_test_db) -> None:
+    """discard_all_drafts must only touch THIS workspace's drafts — a same-id draft
+    under another workspace is never reverted."""
+    scope = "pocket-discard-tenant"
+    await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"mine": 1}
+    )
+    foreign = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id="ws-OTHER", content={"theirs": 1}
+    )
+
+    await versions.discard_all_drafts(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, branch="main"
+    )
+
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    foreign_row = await ArtifactVersion.get(str(foreign.id))
+    assert foreign_row is not None
+    assert foreign_row.status == "draft", "another workspace's draft must be untouched"
+
+
+async def test_write_draft_supersedes_prior_draft_head(beanie_test_db) -> None:
+    """P2a (B): three sequential write_drafts must leave EXACTLY ONE live draft —
+    each new write supersedes the prior draft head (flips it to 'reverted') so the
+    draft pile never accumulates again.
+
+    Reproduce-first: pre-fix write_draft always inserts a new status='draft' row,
+    so three writes leave THREE live drafts → this assertion fails (count == 3).
+    """
+    scope = "pocket-supersede"
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": 1}
+    )
+    v2 = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": 2}
+    )
+    v3 = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": 3}
+    )
+
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    live_drafts = await ArtifactVersion.find(
+        ArtifactVersion.scope_type == "pocket",
+        ArtifactVersion.scope_id == scope,
+        ArtifactVersion.branch == "main",
+        ArtifactVersion.status == "draft",
+    ).to_list()
+    assert len(live_drafts) == 1, "at most one live draft per (scope, branch)"
+    assert live_drafts[0].id == v3.id
+
+    # The current draft pointer is the newest write; monotonic version_no preserved.
+    draft = await versions.get_draft(scope_type="pocket", scope_id=scope)
+    assert draft is not None
+    assert draft.id == v3.id
+    assert draft.version_no == 3
+    # The superseded heads are still on the log as reverted (history is append-only).
+    superseded = await ArtifactVersion.find(
+        ArtifactVersion.scope_type == "pocket",
+        ArtifactVersion.scope_id == scope,
+        ArtifactVersion.branch == "main",
+        ArtifactVersion.status == "reverted",
+    ).to_list()
+    assert {r.id for r in superseded} == {v1.id, v2.id}
+
+
+async def test_write_draft_does_not_supersede_published_head(beanie_test_db) -> None:
+    """write_draft must only supersede a DRAFT head — a published head stays live so
+    the new draft is a reviewable change ON TOP of what is published."""
+    scope = "pocket-supersede-pub"
+    pub = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": "live"}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, version_id=str(pub.id)
+    )
+    # A new edit on top of the published version.
+    draft = await versions.write_draft(
+        scope_type="pocket", scope_id=scope, workspace_id=WS, content={"v": "edit"}
+    )
+
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    pub_row = await ArtifactVersion.get(str(pub.id))
+    assert pub_row.status == "published", "a published head must NOT be superseded"
+    assert (await versions.get_draft(scope_type="pocket", scope_id=scope)).id == draft.id
+    assert (await versions.get_published(scope_type="pocket", scope_id=scope)).id == pub.id
+
+
+# ---------------------------------------------------------------------------
 # Part D — svelte source edit writes a draft version
 # ---------------------------------------------------------------------------
 
