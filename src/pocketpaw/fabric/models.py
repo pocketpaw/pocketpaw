@@ -19,6 +19,15 @@
 #   latency / infinite-loop risk); PathHop.link_type carries Field(max_length=200)
 #   as a sanity bound on an LLM-facing string (values are already bound params,
 #   so this is hygiene, not injection defense).
+# Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ObjectType gains an
+#   optional ``workspace_id`` so the discovered-type catalog is per-tenant. This
+#   reverses the earlier W4a choice (object_types deliberately had NO workspace
+#   column then); the "sovereign zero-setup discovery" feature requires each
+#   tenant's discovered object TYPES to stay private, so a type defined in
+#   workspace A must be invisible/unusable from workspace B. ``None`` = a
+#   legacy/global type predating tenancy (or an OSS / single-tenant caller),
+#   which a scoped read still sees — exactly the NULL-as-legacy boundary the
+#   W4a object/link scoping already uses.
 
 from __future__ import annotations
 
@@ -66,6 +75,10 @@ class ObjectType(BaseModel):
     icon: str = "box"
     color: str = "#0A84FF"
     properties: list[PropertyDef] = Field(default_factory=list)
+    # Tenancy (SZD-2): the owning workspace of this object TYPE. ``None`` =
+    # legacy/global type written before per-type tenancy or by an OSS /
+    # single-tenant caller; a scoped read still sees it (own rows + NULL).
+    workspace_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
