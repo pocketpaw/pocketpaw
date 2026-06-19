@@ -193,3 +193,50 @@ async def test_cf_republish_uses_stable_script_name_and_one_doc(beanie_test_db):
     docs = await _SiteDoc.find({"workspace": "ws1", "pocket_id": "pk_cf"}).to_list()
     assert len(docs) == 1
     assert str(first.id) == str(second.id)
+
+
+async def test_republish_reuses_signed_key(beanie_test_db, monkeypatch):
+    """PERF-1 review fix: a live RE-publish must REUSE the stored ``signed_key`` so
+    the built HTML's ``captureSignedKey`` matches the persisted ``doc.signed_key``
+    the capture endpoint verifies against. Before the fix each publish minted a
+    fresh key while the upsert preserved the old one → silent lead-capture breakage
+    on every re-publish."""
+    from unittest.mock import AsyncMock, patch
+
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
+
+    keys: list[str] = []
+
+    class _RecordingGen:
+        async def build(self, **kw):
+            from pocketpaw_ee.sites.generator_client import BuildResult
+
+            keys.append(kw.get("capture_signed_key"))
+            return BuildResult(project_dir="/tmp/site", ripple_version="0.2.0")
+
+    wire = {"name": "AKB", "engine": "ripple", "rippleSpec": {"type": "container"}}
+
+    async def _pub():
+        with patch(
+            "pocketpaw_ee.cloud.pockets.service.get",
+            new=AsyncMock(return_value=wire),
+        ):
+            return await sites_service.publish_pocket(
+                workspace_id="ws1",
+                user_id="u1",
+                pocket_id="pk-signedkey",
+                _generator=_RecordingGen(),
+                _bundle_reader=lambda d: b"x",
+                _local_deploy=lambda sid, pd: f"http://127.0.0.1:9999/{sid}/",
+            )
+
+    await _pub()
+    await _pub()
+
+    assert keys[0] is not None
+    assert keys[0] == keys[1], "re-publish must reuse the same signed_key, not mint a new one"
+    doc = await _SiteDoc.find_one(
+        {"_id": sites_service._live_object_id("ws1", "pk-signedkey"), "workspace": "ws1"}
+    )
+    assert doc is not None and doc.signed_key == keys[1], "built key must match the stored doc"
