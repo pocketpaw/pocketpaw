@@ -633,12 +633,17 @@ async def publish(
         # cutting the dominant per-edit cost. A fresh site_id is minted per publish,
         # but a pocket's working dir is reused across its publishes/previews.
         pocket_id=pocket_id,
-        # PERF-4: run the workerd SMOKE render ONLY for a LIVE publish. The render
-        # is per-edit overhead only needed before a deploy, so a preview/edit/arm
-        # build (preview=True) skips it (smoke=False); a live publish (preview=False)
-        # keeps it (smoke=True) so the gate + the rollback below are unchanged. A
-        # preview that would fail smoke is no longer blocked — the live publish still
-        # gates + rolls back, so a broken edit never reaches the live deploy.
+        # P0a (was PERF-4): ``smoke`` now toggles ONLY the workerd SSR FAIL-gate,
+        # NOT whether ``bun run build`` runs. ``bun run build`` (the static-output
+        # step) runs on BOTH preview and publish (``static_build`` defaults to True),
+        # because this site is SERVED via deploy_local and persist_site copies
+        # whatever the build leaves on disk — skipping it served a STALE anchorless
+        # build (the #1 bug: no hover edit-pill). A preview/edit/arm build
+        # (preview=True) skips only the SSR fail-gate (smoke=False) — it still BUILDS
+        # fresh + anchored output; a live publish (preview=False) keeps the SSR gate
+        # (smoke=True) so the gate + the rollback below are unchanged. A preview that
+        # would fail the SSR render is not blocked — the live publish still gates +
+        # rolls back, so a broken edit never reaches the live deploy.
         smoke=not preview,
     )
 

@@ -3,6 +3,15 @@
 #
 # Created: 2026-06-18 (feat/sites-devserver, Phase 2 / P2a).
 #
+# Updated 2026-06-19 (fix/sites-preview-fresh-build, P0a): the P0a fix makes
+# generator.build()'s ``bun run build`` static-output step ALWAYS run by default
+# (so the served preview/publish is fresh + anchored — the #1 bug). The dev server
+# serves from SOURCE via ``vite dev`` and never goes through deploy_local, so it
+# needs no ``.svelte-kit/cloudflare/`` static output; ``_default_materialize`` now
+# passes ``static_build=False`` to SKIP the prod build (generate + cached install
+# is all ``vite dev`` needs). Without this the dev path would run a wasted full prod
+# build before every dev-server start.
+#
 # WHY: today editing a site rebuilds the whole SvelteKit app per edit (generate +
 # install + render). Phase 1 (PERF-3/PERF-4) cut that to a cached install + no
 # smoke, but a full `vite build` still runs per edit. P2a replaces the EDITING
@@ -178,6 +187,13 @@ async def _default_materialize(*, workspace_id: str, user_id: str, pocket_id: st
         pocket_id=f"dev-{pocket_id}",
         # PERF-4: the dev server never needs the workerd smoke render.
         smoke=False,
+        # P0a: the dev server serves from SOURCE via `vite dev` (never deploy_local),
+        # so it needs NO `.svelte-kit/cloudflare/` static output — skip `bun run
+        # build` entirely (generate + cached install is all it needs before `vite
+        # dev`). Forcing the static build here would add a wasted full prod build
+        # before every dev-server start. (The static build is REQUIRED only on the
+        # served preview/publish path — that is where the #1 stale-build bug lived.)
+        static_build=False,
     )
     return build.project_dir
 

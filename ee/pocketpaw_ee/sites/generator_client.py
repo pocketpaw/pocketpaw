@@ -1,10 +1,46 @@
 # ee/pocketpaw_ee/sites/generator_client.py — Python bridge to the Node/Bun
 # generator (paw-sites-gen). build() runs the generate CLI, then `bun install`
-# on the generated project, then (only for a LIVE publish) the workerd smoke
-# render; if the smoke gate fails the site does NOT proceed to deploy (Contract
-# clause 4). The subprocess calls are isolated behind a _runner so the
-# orchestration is unit-testable without Bun/workerd present.
+# on the generated project, then `bun run build` to emit the deployable
+# `.svelte-kit/cloudflare/` static output (with the data-paw-section anchors +
+# the injected edit-bridge for an editable site); a LIVE publish additionally
+# fail-gates on the workerd SSR render markers. If the gate fails the site does
+# NOT proceed to deploy (Contract clause 4). The subprocess calls are isolated
+# behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
+#
+# Updated 2026-06-19 (fix/sites-preview-fresh-build, P0a + P1a — the #1 Paw Sites
+# bug: the editable PREVIEW served STALE anchorless HTML so the hover edit-pill
+# never appeared). ROOT CAUSE: PERF-4 overloaded the ``smoke`` flag — it gated
+# ``_runner.smoke()``, the ONLY step that ran ``bun run build`` (the step that
+# emits ``.svelte-kit/cloudflare/index.html`` with the section anchors + the
+# injected ``id="paw-edit-bridge"``). A preview build (``smoke=False``) re-stamped
+# the SOURCE with anchors but SKIPPED ``bun run build``, so ``persist_site`` copied
+# whatever the LAST build left on disk — the stale, non-anchored LIVE build.
+#   * P0a: SPLIT the two concerns the ``smoke`` flag conflated. ``bun run build``
+#     (the static-output step — REQUIRED on any path that is served locally, i.e.
+#     every preview that goes through deploy_local) now ALWAYS runs; the SSR
+#     FAIL-gate (the actual "smoke" safety check) is the only thing the flag
+#     toggles. The runner gained ``build_static(project_dir, gate)``: it always
+#     runs ``bun run build`` (a non-zero exit always fails — a build that can't
+#     produce output is never servable), and applies the workerd SSR-marker
+#     fail-check ONLY when ``gate=True`` (the LIVE publish path). ``_build_one``
+#     now ALWAYS calls it (``gate=smoke``) instead of calling ``smoke()`` only on
+#     publish, so the preview/editable path produces FRESH anchored output and
+#     ``persist_site`` copies it. Reintroduces per-edit build time — acceptable +
+#     correct for now (instant-HMR via dev_server is a separate future change).
+#   * P1a: REAP the build-path workerd. ``adapter-cloudflare`` prerenders by
+#     booting a workerd that the bun build process never reaps (it reparents to
+#     PID 1 and lives on), so they pile up and progressively slow the box (~60
+#     observed). ``reap_build_workerd(project_dir)`` runs AFTER every static build
+#     and terminates any workerd whose executable lives under this build's
+#     ``project_dir`` (scoped so it never touches another build's / the dev
+#     server's processes). The leak is independent of the smoke flag, so the reap
+#     runs on BOTH the gated and ungated static build.
+#   * The legacy ``smoke()`` runner method is preserved for the fake runners in the
+#     existing generator/cache/smoke-gate unit tests (those fakes do not define
+#     ``build_static``); ``_build_one`` falls back to the OLD behaviour (call
+#     ``smoke()`` only when ``smoke=True``) for a runner without ``build_static``.
+#     The REAL runner defines ``build_static`` and is always on the new path.
 #
 # Updated 2026-06-18 (feat/sites-smoke-at-publish, PERF-4 — smoke-gate only at
 # publish): build() gained a ``smoke: bool = True`` flag. The workerd SMOKE render
@@ -92,12 +128,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shlex
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
 
 # Sentinel file (in the per-pocket build dir) recording the install-input
 # fingerprint of the last SUCCESSFUL `bun install`. build() skips install when the
@@ -108,6 +147,77 @@ _INSTALL_HASH_FILE = ".paw-install-hash"
 # stale and must be reinstalled. The lockfile names cover bun's text + binary
 # lockfiles and the npm fallback.
 _INSTALL_INPUT_FILES = ("package.json", "bun.lock", "bun.lockb", "package-lock.json")
+
+# Known workerd SSR-render failure markers (mirrors paw-sites/src/smoke.ts). A
+# LIVE publish fail-gates on these; a preview build tolerates them (the live
+# publish still gates + rolls back, so a broken edit can never go live).
+_WORKERD_SSR_MARKERS = ("window is not defined", "document is not defined", "No such module")
+
+
+def reap_build_workerd(project_dir: str) -> int:
+    """Terminate any orphaned ``workerd`` process spawned by THIS build's
+    ``bun run build`` (P1a). Returns the count reaped.
+
+    ``adapter-cloudflare`` prerenders by booting a workerd that ``bun run build``
+    does NOT reap: when the build process exits the workerd reparents to PID 1 and
+    lives on, so on a per-edit rebuild loop they pile up and progressively slow the
+    box (the reaper that already exists only covers ``dev_server``'s ``vite dev``).
+
+    The reap is SCOPED to this build's ``project_dir``: each generated project
+    installs its own ``@cloudflare/workerd-*`` binary under
+    ``<project_dir>/node_modules/...``, and a prerender workerd runs THAT binary, so
+    a process whose executable path is under ``project_dir`` is a leftover from this
+    build — never another build's, never the dev server's. We match on the resolved
+    project dir so the same pocket's persistent build dir (PERF-3) is handled too.
+
+    Best-effort + never raises: a reap failure must not fail the build. If
+    ``psutil`` is unavailable the reap is a logged no-op (the build still succeeds;
+    the leak just isn't swept on that box)."""
+    try:
+        import psutil
+    except Exception:  # noqa: BLE001 — reaping is best-effort; never fail the build
+        logger.debug("sites: psutil unavailable, skipping build-workerd reap")
+        return 0
+
+    try:
+        root = str(Path(project_dir).resolve())
+    except Exception:  # noqa: BLE001
+        root = project_dir
+    victims = []
+    for proc in psutil.process_iter(["name", "exe"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            exe = proc.info.get("exe") or ""
+            # A prerender workerd for this build runs the workerd binary that lives
+            # under this build's node_modules — match on the resolved project dir.
+            if "workerd" in name and exe and root in exe:
+                victims.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001 — never let one bad proc abort the sweep
+            continue
+    for proc in victims:
+        try:
+            proc.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # noqa: BLE001
+            continue
+    if victims:
+        # Give SIGTERM a moment, then SIGKILL any survivor so the leak is real-swept.
+        try:
+            _gone, alive = psutil.wait_procs(victims, timeout=3)
+            for proc in alive:
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            "sites: reaped %d build-path workerd process(es) under %s", len(victims), root
+        )
+    return len(victims)
 
 
 class SmokeGateFailed(RuntimeError):
@@ -202,6 +312,14 @@ def _rewrite_ripple_dep(project_dir: str, source: str) -> None:
 class _Runner(Protocol):
     async def generate(self, input_json: dict[str, Any], out_dir: str) -> dict[str, Any]: ...
     async def install(self, project_dir: str) -> tuple[bool, str]: ...
+    # P0a: the static-output step — runs `bun run build` (emits
+    # `.svelte-kit/cloudflare/` with the section anchors + injected edit-bridge),
+    # reaps the build-path workerd, and applies the SSR fail-gate ONLY when
+    # ``gate=True``. ALWAYS runs (preview + publish) so the served file is fresh.
+    async def build_static(self, project_dir: str, *, gate: bool) -> tuple[bool, str]: ...
+    # Legacy SSR fail-gate (== the old combined `bun run build` + marker check).
+    # Kept for fake runners that predate build_static; the real runner routes the
+    # gate through build_static. build() falls back to it when build_static is absent.
     async def smoke(self, project_dir: str) -> tuple[bool, str]: ...
     # PERF-3: fingerprint of the install inputs (package.json + lockfile). build()
     # uses it to decide whether `bun install` can be skipped. Optional on a runner —
@@ -261,9 +379,18 @@ class _SubprocessRunner:
             return False, f"bun install failed (exit {proc.returncode}): {stderr.decode()[-500:]}"
         return True, "ok"
 
-    async def smoke(self, project_dir: str) -> tuple[bool, str]:
-        # Build the generated project; a non-zero exit OR a known workerd marker
-        # in the output fails the gate. Mirrors paw-sites/src/smoke.ts markers.
+    async def build_static(self, project_dir: str, *, gate: bool) -> tuple[bool, str]:
+        # P0a: run `bun run build` — the step that emits the deployable
+        # `.svelte-kit/cloudflare/` static output (the data-paw-section anchors + the
+        # injected edit-bridge for an editable site). This ALWAYS runs (preview +
+        # publish): persist_site copies whatever this leaves on disk, so skipping it
+        # is exactly what served the stale anchorless build (the #1 bug).
+        #   * A non-zero exit ALWAYS fails — a build that can't produce output is
+        #     never servable, on any path.
+        #   * A known workerd SSR marker fails the gate ONLY when ``gate=True`` (the
+        #     LIVE publish path). A preview build tolerates a would-fail SSR render
+        #     (the live publish still gates + rolls back, so a broken edit can't go
+        #     live) but still BUILDS so the served preview is fresh + anchored.
         proc = await asyncio.create_subprocess_exec(
             "bun",
             "run",
@@ -273,13 +400,23 @@ class _SubprocessRunner:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
+        # P1a: reap the prerender-spawned workerd after EVERY build (the leak is
+        # independent of the gate), scoped to this build's project dir.
+        reap_build_workerd(project_dir)
         haystack = stdout.decode() + "\n" + stderr.decode()
-        for marker in ("window is not defined", "document is not defined", "No such module"):
-            if marker in haystack:
-                return False, f"workerd SSR failure: {marker}"
         if proc.returncode != 0:
             return False, f"build failed (exit {proc.returncode})"
+        if gate:
+            for marker in _WORKERD_SSR_MARKERS:
+                if marker in haystack:
+                    return False, f"workerd SSR failure: {marker}"
         return True, "ok"
+
+    async def smoke(self, project_dir: str) -> tuple[bool, str]:
+        # Legacy entry point (== the old combined `bun run build` + SSR fail-gate).
+        # The real path now routes through build_static; this delegates to it with
+        # the gate ON so any direct/legacy caller keeps the publish-time semantics.
+        return await self.build_static(project_dir, gate=True)
 
 
 class GeneratorClient:
@@ -315,6 +452,7 @@ class GeneratorClient:
         builder_origin: str | None = None,
         pocket_id: str | None = None,
         smoke: bool = True,
+        static_build: bool = True,
     ) -> BuildResult:
         """Generate + smoke-build a Paw Site, forking STAGE 2 on ``engine``.
 
@@ -341,14 +479,23 @@ class GeneratorClient:
         callers keep their prior behaviour. Concurrent builds of the SAME pocket
         are serialized by a per-pocket lock (they share the on-disk dir).
 
-        ``smoke`` (PERF-4) gates the workerd SMOKE render (the SSR safety check).
-        The smoke render is per-edit overhead only needed before a LIVE deploy, so
-        a PREVIEW/edit/arm build passes ``smoke=False`` to SKIP it — the build runs
-        generate + install only and never spawns the workerd render. A LIVE publish
-        keeps the default ``smoke=True`` so the gate (and its
-        rollback-on-SmokeGateFailed behaviour at the caller) is unchanged. A
-        preview build that WOULD fail smoke is no longer blocked — acceptable, since
-        the live publish still gates + rolls back.
+        ``static_build`` (P0a) controls whether ``bun run build`` runs to emit the
+        deployable ``.svelte-kit/cloudflare/`` static output. It defaults to ``True``
+        and MUST stay ``True`` on any path whose result is SERVED via deploy_local
+        (every preview / publish — ``persist_site`` copies whatever this leaves on
+        disk, so skipping it serves a stale build, the #1 bug). The dev server
+        (``vite dev`` serves from source, never deploy_local) passes
+        ``static_build=False`` so it only runs generate + cached install — the static
+        build is wasted work there.
+
+        ``smoke`` (P0a — was PERF-4) now gates ONLY the workerd SSR FAIL-check, NOT
+        whether ``bun run build`` runs. A PREVIEW/edit/arm build passes ``smoke=False``
+        to SKIP the SSR fail-gate (a preview that would fail SSR is no longer blocked
+        — the live publish still gates + rolls back) but the static build STILL runs
+        so the served preview is fresh + anchored. A LIVE publish keeps the default
+        ``smoke=True`` so the SSR gate (and its rollback-on-SmokeGateFailed behaviour
+        at the caller) is unchanged. Before this fix ``smoke`` ALSO gated the build
+        itself, so a preview skipped ``bun run build`` and served the stale build.
         """
         if pocket_id is None:
             return await self._build_one(
@@ -363,6 +510,7 @@ class GeneratorClient:
                 builder_origin=builder_origin,
                 pocket_id=None,
                 smoke=smoke,
+                static_build=static_build,
             )
         async with self._lock_for(pocket_id):
             return await self._build_one(
@@ -377,6 +525,7 @@ class GeneratorClient:
                 builder_origin=builder_origin,
                 pocket_id=pocket_id,
                 smoke=smoke,
+                static_build=static_build,
             )
 
     async def _build_one(
@@ -393,6 +542,7 @@ class GeneratorClient:
         builder_origin: str | None,
         pocket_id: str | None,
         smoke: bool,
+        static_build: bool = True,
     ) -> BuildResult:
         # PERF-3: stable per-pocket working dir (overwrite the source each build)
         # so node_modules persists; fall back to a throwaway tempfile dir when no
@@ -458,16 +608,32 @@ class GeneratorClient:
             ok, reason = await self._runner.install(project_dir)
             if not ok:
                 raise SmokeGateFailed(reason)
-        # PERF-4: run the workerd SMOKE render only when the caller asked for it
-        # (smoke=True — the LIVE publish path). A PREVIEW/edit/arm build passes
-        # smoke=False to SKIP the render: it is per-edit overhead only needed before
-        # a live deploy, and a preview that would fail smoke is no longer blocked
-        # (the live publish still gates + rolls back). Skipping leaves
-        # generate+install (the correctness-bearing steps) intact.
-        if smoke:
-            ok, reason = await self._runner.smoke(project_dir)
-            if not ok:
-                raise SmokeGateFailed(reason)
+        # P0a: run the static-output step (`bun run build`) so the served file is
+        # FRESH + anchored. The fix splits the two concerns PERF-4's ``smoke`` flag
+        # conflated: ``bun run build`` (REQUIRED on any locally-served path —
+        # persist_site copies whatever it leaves on disk) vs the workerd SSR
+        # FAIL-gate (the actual "smoke" safety check). ``build_static(gate=smoke)``
+        # builds; the SSR-marker fail-check applies only on a LIVE publish
+        # (smoke=True). A non-zero build exit fails on EITHER path (a build that
+        # can't produce output is never servable). This reintroduces per-edit build
+        # time — acceptable + correct for now; instant-HMR via dev_server is separate
+        # (the dev server passes ``static_build=False`` — it serves from source via
+        # ``vite dev`` and never goes through deploy_local, so it needs no static
+        # output and skips this whole step).
+        if static_build:
+            builder = getattr(self._runner, "build_static", None)
+            if builder is not None:
+                ok, reason = await builder(project_dir, gate=smoke)
+                if not ok:
+                    raise SmokeGateFailed(reason)
+            elif smoke:
+                # Legacy fakes without build_static: keep the old
+                # smoke()-only-on-publish contract so the existing
+                # generator/cache/smoke-gate unit tests (which fake the subprocess and
+                # never produce real files) are unaffected.
+                ok, reason = await self._runner.smoke(project_dir)
+                if not ok:
+                    raise SmokeGateFailed(reason)
         # ``rippleVersion`` is present only on the ripple GenerateResult; the svelte
         # path omits it (paw-sites types.ts §4.2), so read it defensively — a svelte
         # build must not KeyError here.
