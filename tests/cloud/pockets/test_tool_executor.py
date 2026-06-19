@@ -6,6 +6,15 @@
 #   `propose_external_action` (right kwargs), does NOT call
 #   `connectors.service.execute` inline, and returns code="instinct_pending"
 #   with a proposed action_id. (risk R1 — the human still gates the write.)
+# Updated: 2026-06-19 (repair/invoke-tool-v1) — close #1472 review HIGH. Every
+#   `run_tool` call now emits ONE append-only `AuditEvent` (action
+#   "pocket.tools.run", category "pocket_backend_config") so agent tool
+#   invocations leave a forensic trail, not just a logger.info line. New tests
+#   pin: (a) a `not_allowed` denial → WARNING audit, (b) an allowed connector
+#   READ → INFO audit, (c) a connector WRITE proposal → WARNING audit. Audit is
+#   captured by patching `pocketpaw.security.audit.get_audit_logger` (the lazy
+#   import target inside `_audit_tool_run`) with a Mock and asserting on the
+#   single emitted event's action / severity / target / status.
 #
 # These tests exercise `run_tool` directly (no FastAPI / Mongo) and spy on the
 # connector service + the external-action propose helper so they pin the
@@ -27,7 +36,8 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -37,9 +47,37 @@ from pocketpaw_ee.cloud.connectors.domain import ConnectorActionInfo  # noqa: E4
 from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse  # noqa: E402
 from pocketpaw_ee.cloud.pockets import tool_executor  # noqa: E402
 
+from pocketpaw.security.audit import AuditSeverity  # noqa: E402
+
 WS = "ws-alpha"
 POCKET = "pocket-1"
 USER = "user-alice"
+
+
+@contextmanager
+def _capture_audit():
+    """Patch the audit logger `_audit_tool_run` lazy-imports and yield the Mock
+    logger so a test can read the emitted `AuditEvent`(s).
+
+    `_audit_tool_run` does `from pocketpaw.security.audit import ...
+    get_audit_logger`, so the patch target is the source module symbol the lazy
+    import resolves to. The returned logger's `.log(event)` captures the single
+    emitted event for assertion.
+    """
+    fake_logger = Mock()
+    with patch(
+        "pocketpaw.security.audit.get_audit_logger",
+        return_value=fake_logger,
+    ):
+        yield fake_logger
+
+
+def _only_event(fake_logger: Mock):
+    """Assert exactly one audit event was logged and return it."""
+    assert fake_logger.log.call_count == 1, (
+        f"expected exactly one audit event, got {fake_logger.log.call_count}"
+    )
+    return fake_logger.log.call_args.args[0]
 
 
 def _read_trust(action: str = "list_issues") -> ConnectorActionInfo:
@@ -486,3 +524,156 @@ async def test_builtin_tool_grant_is_unknown_tool_in_v1() -> None:
 
     assert result["ok"] is False
     assert result["code"] == "unknown_tool"
+
+
+# ---------------------------------------------------------------------------
+# Audit trail (#1472 review HIGH) — every run_tool call emits ONE AuditEvent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_not_allowed_denial_emits_warning_audit_event() -> None:
+    """A denied tool (not on the allowlist) must leave a forensic audit trail,
+    not just a logger.info line. The emit is a WARNING `pocket.tools.run` event
+    targeting the pocket, with the denied tool + code in the fields."""
+    tool = "connector:github:list_issues"
+    with _capture_audit() as fake_logger:
+        result = await tool_executor.run_tool(
+            workspace_id=WS,
+            pocket_id=POCKET,
+            user_id=USER,
+            tool=tool,
+            args={"secret": "do-not-log-me"},
+            allowed_tools=[],  # empty allowlist — fail-closed denial
+        )
+
+    assert result["code"] == "not_allowed"
+    event = _only_event(fake_logger)
+    assert event.action == "pocket.tools.run"
+    assert event.severity == AuditSeverity.WARNING
+    assert event.target == POCKET
+    assert event.actor == USER
+    assert event.status == "not_allowed"
+    assert event.context["workspace_id"] == WS
+    assert event.context["category"] == "pocket_backend_config"
+    assert event.context["tool"] == tool
+    assert event.context["code"] == "not_allowed"
+    # The resolved args carry PII — they must NEVER ride into the audit log.
+    assert "secret" not in str(event.context)
+    assert "do-not-log-me" not in str(event.context)
+
+
+@pytest.mark.asyncio
+async def test_allowed_read_emits_info_audit_event() -> None:
+    """A successful connector READ is normal operation → an INFO audit event."""
+    tool = "connector:github:list_issues"
+    exec_result = ExecuteActionResponse(
+        success=True,
+        data=[{"number": 1, "title": "first issue"}],
+        execution_mode="cloud",
+    )
+    with (
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.is_connector_bound_to_pocket",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.get_action_trust",
+            new=AsyncMock(return_value=_read_trust()),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.execute",
+            new=AsyncMock(return_value=exec_result),
+        ),
+        _capture_audit() as fake_logger,
+    ):
+        result = await tool_executor.run_tool(
+            workspace_id=WS,
+            pocket_id=POCKET,
+            user_id=USER,
+            tool=tool,
+            args={"owner": "acme", "repo": "api"},
+            allowed_tools=[tool],
+        )
+
+    assert result["ok"] is True
+    event = _only_event(fake_logger)
+    assert event.action == "pocket.tools.run"
+    assert event.severity == AuditSeverity.INFO
+    assert event.target == POCKET
+    assert event.actor == USER
+    assert event.status == "ok"
+    assert event.context["workspace_id"] == WS
+    assert event.context["category"] == "pocket_backend_config"
+    assert event.context["tool"] == tool
+
+
+@pytest.mark.asyncio
+async def test_write_proposal_emits_warning_audit_event() -> None:
+    """A connector WRITE proposed via Instinct (pending human approval) is a
+    state-changing intent → a WARNING audit event with status="instinct_pending".
+    The proposal is visible in the trail even though the write hasn't fired."""
+    tool = "connector:github:create_issue"
+    proposed_id = "act-pending-123"
+    with (
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.is_connector_bound_to_pocket",
+            new=AsyncMock(return_value=True),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.get_action_trust",
+            new=AsyncMock(return_value=_write_trust()),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.connectors.service.execute",
+            new=AsyncMock(),
+        ),
+        patch(
+            "pocketpaw_ee.cloud.external_actions.propose.propose_external_action",
+            new=AsyncMock(return_value=proposed_id),
+        ),
+        _capture_audit() as fake_logger,
+    ):
+        result = await tool_executor.run_tool(
+            workspace_id=WS,
+            pocket_id=POCKET,
+            user_id=USER,
+            tool=tool,
+            args={"title": "needs a human to approve"},
+            allowed_tools=[tool],
+        )
+
+    assert result["code"] == "instinct_pending"
+    event = _only_event(fake_logger)
+    assert event.action == "pocket.tools.run"
+    assert event.severity == AuditSeverity.WARNING
+    assert event.target == POCKET
+    assert event.actor == USER
+    assert event.status == "instinct_pending"
+    assert event.context["workspace_id"] == WS
+    assert event.context["category"] == "pocket_backend_config"
+    assert event.context["tool"] == tool
+    assert event.context["code"] == "instinct_pending"
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_never_breaks_run_tool() -> None:
+    """Audit is observability — a crash inside the audit emit must NEVER fail the
+    run. If `get_audit_logger` raises, `run_tool` still returns its result."""
+    tool = "connector:github:list_issues"
+    with patch(
+        "pocketpaw.security.audit.get_audit_logger",
+        side_effect=RuntimeError("audit backend down"),
+    ):
+        result = await tool_executor.run_tool(
+            workspace_id=WS,
+            pocket_id=POCKET,
+            user_id=USER,
+            tool=tool,
+            args={},
+            allowed_tools=[],  # denial path — simplest to reach
+        )
+
+    # The run still produced its normal wire result despite the audit crash.
+    assert result["ok"] is False
+    assert result["code"] == "not_allowed"

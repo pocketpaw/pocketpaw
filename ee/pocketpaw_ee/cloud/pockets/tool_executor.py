@@ -37,6 +37,18 @@
 #   `pocketpaw.instinct.models` internally), so importing it here keeps the
 #   "Pockets — Beanie writes only from service.py" contract 0-broken — verified
 #   with `lint-imports --config ee/pyproject.toml`.
+# Updated: 2026-06-19 (repair/invoke-tool-v1) — close #1472 review HIGH. Every
+#   tool invocation now leaves an APPEND-ONLY forensic trail, not just a
+#   `logger.info` line (which is rotated/sampled and not the security audit
+#   sink the moat pitches). `run_tool` is now a thin wrapper: it calls the
+#   renamed `_run_tool_dispatch` (the unchanged gate logic) and then emits ONE
+#   `AuditEvent` per call covering EVERY outcome — denial, READ, WRITE-proposal,
+#   error — via `_audit_tool_run`. The audit helper mirrors
+#   `action_executor._audit_action_run` (action "pocket.tools.run", category
+#   "pocket_backend_config", wrapped in try/except so audit NEVER breaks the
+#   run). PII (`args`) and connector tokens are NEVER logged — only the tool
+#   name + outcome code. No gate / security logic changed; this is purely
+#   additive observability.
 
 from __future__ import annotations
 
@@ -47,6 +59,97 @@ logger = logging.getLogger(__name__)
 
 
 async def run_tool(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    tool: str,
+    args: dict[str, Any],
+    allowed_tools: list[str],
+) -> dict[str, Any]:
+    """Run a named tool and emit ONE append-only audit event for the outcome.
+
+    Thin wrapper over :func:`_run_tool_dispatch` (the gate logic, unchanged):
+    dispatch produces the wire dict, then :func:`_audit_tool_run` writes a
+    single ``pocket.tools.run`` :class:`~pocketpaw.security.audit.AuditEvent`
+    covering whatever happened — denial, READ, WRITE-proposal, or error. The
+    audit emit is wrapped (in the helper) so it NEVER breaks the run; the
+    result returned to the caller is exactly what dispatch produced.
+
+    See :func:`_run_tool_dispatch` for the gate order. ``args`` (which may carry
+    PII) and any connector token are NEVER logged — only the tool name + the
+    outcome code reach the audit sink (#1472 review HIGH).
+    """
+    result = await _run_tool_dispatch(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        tool=tool,
+        args=args,
+        allowed_tools=allowed_tools,
+    )
+    _audit_tool_run(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        tool=tool,
+        result=result,
+    )
+    return result
+
+
+def _audit_tool_run(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    tool: str,
+    result: dict[str, Any],
+) -> None:
+    """Write ONE append-only audit-log entry for a ``run_tool`` invocation.
+
+    Mirrors ``action_executor._audit_action_run`` — category
+    ``pocket_backend_config``, action ``pocket.tools.run``, ``target`` the
+    pocket, ``actor`` the clicking user, ``workspace_id`` logged so entries are
+    tenant-filterable. Severity by outcome: a successful READ (``ok`` True and
+    NOT a pending write-proposal) is normal operation → ``INFO``; everything
+    else — a denial, an Instinct write-proposal (still pending a human), or any
+    error code — is noteworthy → ``WARNING``. ``status`` is the outcome code
+    (``result["code"]`` or ``"ok"``). ``args`` (PII) and the connector token are
+    NEVER logged — only ``tool`` and the outcome ``code``. Audit failures must
+    not break the run, so the whole body is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import (
+            AuditEvent,
+            AuditSeverity,
+            get_audit_logger,
+        )
+
+        code = result.get("code")
+        is_pending = code == "instinct_pending" or "proposed_action_id" in result
+        succeeded_read = result.get("ok") is True and not is_pending
+        severity = AuditSeverity.INFO if succeeded_read else AuditSeverity.WARNING
+        status = code or "ok"
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=severity,
+                actor=user_id,
+                action="pocket.tools.run",
+                target=pocket_id,
+                status=status,
+                category="pocket_backend_config",
+                workspace_id=workspace_id,
+                tool=tool,
+                code=code,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the run
+        logger.warning("pocket tool-run audit-log write failed", exc_info=True)
+
+
+async def _run_tool_dispatch(
     *,
     workspace_id: str,
     pocket_id: str,
