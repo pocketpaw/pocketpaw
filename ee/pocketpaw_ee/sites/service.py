@@ -499,7 +499,19 @@ async def publish(
     # one each call. A PREVIEW build still uses the freshly-minted ObjectId for its
     # transient (never-persisted) doc id and serves at the stable preview path.
     site_id = str(ObjectId()) if preview else str(_live_object_id(workspace_id, pocket_id))
+    # PERF-1 fix (review finding): on a live RE-publish the upsert below preserves
+    # the stored ``doc.signed_key``, so minting a fresh key here would bake a
+    # ``captureSignedKey`` into the built HTML that no longer matches the doc the
+    # capture endpoint verifies against — silently breaking lead capture on every
+    # re-publish. Reuse the existing site's key when one is already stored; mint a
+    # new key only for a first publish or a preview (which never persists a doc).
     signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+    if not preview:
+        _existing = await _SiteDoc.find_one(
+            {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        )
+        if _existing is not None and _existing.signed_key:
+            signed_key = _existing.signed_key
 
     build = await generator.build(
         ripple_spec=ripple_spec,
