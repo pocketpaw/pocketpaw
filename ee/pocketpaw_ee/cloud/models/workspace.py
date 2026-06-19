@@ -96,6 +96,12 @@ class Workspace(TimestampedDocument):
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None
+    # Per-member route-level permissions: user_id → list of allowed route keys.
+    # An empty list or missing entry means the user has full access (no restrictions).
+    route_permissions: dict[str, list[str]] = Field(default_factory=dict)
+    # Per-member connector-level permissions: user_id → list of allowed connector names.
+    # An empty list or missing entry means the user has full access (no restrictions).
+    connector_permissions: dict[str, list[str]] = Field(default_factory=dict)
     # Layered/learning Instinct gate (T6) — per-workspace triager activation
     # level. None = use the global config default (Settings.
     # instinct_approval_level, "ASK"). A workspace owner opts in to "TRIAGE"

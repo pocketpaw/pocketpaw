@@ -828,3 +828,49 @@ def _widget_to_wire(w) -> dict:
         "assignedAgent": w.assigned_agent,
         "position": {"row": w.position.row, "col": w.position.col},
     }
+
+
+# ── Per-Pocket Connector Permissions ──────────────────────────────────
+
+
+class PocketConnectorPermissionsOut(BaseModel):
+    """GET /pockets/{id}/connector-permissions response.
+
+    ``allowed_connectors`` is ``None`` when the pocket inherits all workspace
+    connectors (default, backward-compatible). A list (possibly empty) means
+    the pocket is restricted to only those connectors.
+    """
+
+    allowed_connectors: list[str] | None = None
+
+
+class SetPocketConnectorPermissionsRequest(BaseModel):
+    """PUT /pockets/{id}/connector-permissions request.
+
+    Pass ``allowed_connectors=null`` to inherit all workspace connectors.
+    Pass ``allowed_connectors=[]`` to revoke all (pocket sees nothing).
+    """
+
+    allowed_connectors: list[str] | None = None
+
+
+class GrantPocketConnectorRequest(BaseModel):
+    """POST /pockets/{id}/connector-permissions/grant request."""
+
+    connector_name: str
+
+
+class RevokePocketConnectorRequest(BaseModel):
+    """POST /pockets/{id}/connector-permissions/revoke request."""
+
+    connector_name: str
+
+
+class WorkspacePocketConnectorPermissionsOut(BaseModel):
+    """GET /workspaces/{id}/pocket-connector-permissions response.
+
+    A map of pocket_id → list of allowed connector names. A missing entry
+    or ``None`` means the pocket inherits all workspace connectors.
+    """
+
+    permissions: dict[str, list[str] | None]

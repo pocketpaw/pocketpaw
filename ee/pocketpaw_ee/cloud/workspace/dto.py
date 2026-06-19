@@ -291,6 +291,73 @@ class VerifiedDomainOut(BaseModel):
     created_at: str | None = None
 
 
+class RoutePermissionsOut(BaseModel):
+    """GET /workspaces/{id}/route-permissions response.
+
+    A map of user_id → list of allowed route keys. An empty list or missing
+    entry means the user has full access (no route restrictions).
+    """
+
+    permissions: dict[str, list[str]]
+
+
+class SetMemberRoutePermissionsRequest(BaseModel):
+    """PUT /workspaces/{id}/route-permissions/{user_id} request.
+
+    An empty routes list grants full access (clears restrictions).
+    """
+
+    routes: list[str] = Field(default_factory=list)
+
+    @field_validator("routes")
+    @classmethod
+    def validate_routes(cls, v: list[str]) -> list[str]:
+        VALID_ROUTES = {
+            "studio",
+            "chat",
+            "code",
+            "agents",
+            "pockets",
+            "deep-work",
+            "calendar",
+            "activity",
+            "files",
+            "meetings",
+            "mission-control",
+            "knowledge",
+            "decisions-graph",
+            "foresight",
+            "sites",
+            "belt",
+            "paw-print",
+            "audit",
+            "settings",
+        }
+        for route in v:
+            if route not in VALID_ROUTES:
+                raise ValueError(f"Invalid route key: {route}")
+        return v
+
+
+class ConnectorPermissionsOut(BaseModel):
+    """GET /workspaces/{id}/connector-permissions response.
+
+    A map of user_id → list of allowed connector names. An empty list or
+    missing entry means the user has full access (no connector restrictions).
+    """
+
+    permissions: dict[str, list[str]]
+
+
+class SetMemberConnectorPermissionsRequest(BaseModel):
+    """PUT /workspaces/{id}/connector-permissions/{user_id} request.
+
+    An empty connectors list grants full access (clears restrictions).
+    """
+
+    connectors: list[str] = Field(default_factory=list)
+
+
 class InvitePreviewResponse(BaseModel):
     """Typed preview of an invite token for the accept UI.
 
@@ -419,12 +486,16 @@ __all__ = [
     "BulkInviteRequest",
     "BulkInviteResponse",
     "BulkInviteSkip",
+    "ConnectorPermissionsOut",
     "CreateInviteRequest",
     "CreateWorkspaceRequest",
     "InviteContextDTO",
     "InviteOut",
     "InvitePreviewResponse",
     "MemberOut",
+    "RoutePermissionsOut",
+    "SetMemberConnectorPermissionsRequest",
+    "SetMemberRoutePermissionsRequest",
     "SlugAvailabilityOut",
     "UpdateDomainRequest",
     "UpdateMemberRoleRequest",

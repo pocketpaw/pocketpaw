@@ -487,6 +487,8 @@ def _check_domain_owner(domain_pocket: Pocket, user_id: str) -> None:
 def _check_domain_edit_access(domain_pocket: Pocket, user_id: str) -> None:
     if domain_pocket.owner == user_id:
         return
+    if user_id in domain_pocket.team:
+        return
     if user_id in domain_pocket.shared_with:
         return
     if domain_pocket.visibility == "workspace":
@@ -520,6 +522,33 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
     )
 
 
+async def _resolve_user_ids(user_ids: list[str]) -> dict[str, dict]:
+    """Batch-resolve user IDs to wire-format ``{_id, fullName, email}``
+    dicts. Returns a ``{user_id: resolved_dict}`` map. Unknown IDs are
+    omitted so callers can key on presence."""
+    if not user_ids:
+        return {}
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    oids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            oids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not oids:
+        return {}
+    users = await _UserDoc.find({"_id": {"$in": oids}}).to_list()
+    return {
+        str(u.id): {
+            "_id": str(u.id),
+            "fullName": getattr(u, "full_name", "") or "",
+            "email": getattr(u, "email", "") or "",
+        }
+        for u in users
+    }
+
+
 async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
     """Build the wire dict with rippleSpec ``$source`` markers resolved
     against ``viewer_user_id``'s workspace context.
@@ -534,6 +563,10 @@ async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
     pass the doc's owner; this can over-share owner's private pockets to
     other recipients (metadata only). Tracked for v2: per-recipient
     resolution or frontend refetch on event receipt.
+
+    Also resolves the ``team`` field from raw user IDs to user objects
+    so the frontend can display member names/avatars without a second
+    lookup.
     """
     import dataclasses
 
@@ -558,7 +591,20 @@ async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
                 str(doc.id),
                 exc_info=True,
             )
-    return pocket_to_wire_dict(pocket)
+    wire = pocket_to_wire_dict(pocket)
+
+    # Resolve team member IDs to user objects for the frontend.
+    raw_team: list = wire.get("team", [])
+    if raw_team:
+        # Only resolve if team contains raw string IDs (not already objects).
+        if raw_team and isinstance(raw_team[0], str):
+            resolved_map = await _resolve_user_ids(raw_team)
+            wire["team"] = [
+                resolved_map.get(uid, {"_id": uid, "fullName": "Unknown", "email": ""})
+                for uid in raw_team
+            ]
+
+    return wire
 
 
 async def _pocket_event_payload(
@@ -1290,6 +1336,9 @@ async def create(workspace_id: str, user_id: str, body: CreatePocketRequest) -> 
         engine=body.engine,
         source=body.source,
         surface_profile=body.surface_profile,
+        # New pockets start with NO connectors allowed — the owner must
+        # explicitly grant each connector via the permission UI.
+        allowed_connectors=[],
     )
     await doc.insert()
     pocket = _pocket_to_domain(doc)
@@ -1399,7 +1448,8 @@ async def list_pockets(
     project_id: str | None = None,
     exclude_pocket_ids: set[str] | None = None,
 ) -> list[dict]:
-    """List pockets visible to the user (owned, shared_with, or workspace-visible).
+    """List pockets visible to the user (owned, team member, shared_with,
+    or workspace-visible).
 
     Each returned pocket has its rippleSpec ``$source`` markers resolved
     against ``user_id``'s context — the desktop client renders the canvas
@@ -1427,6 +1477,7 @@ async def list_pockets(
         "workspace": workspace_id,
         "$or": [
             {"owner": user_id},
+            {"team": user_id},
             {"shared_with": user_id},
             {"visibility": "workspace"},
         ],
@@ -1450,7 +1501,8 @@ async def list_pockets(
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
-    """Get a single pocket. Access check: owner, shared_with, or workspace-visible.
+    """Get a single pocket. Access check: owner, team member, shared_with,
+    or workspace-visible.
 
     rippleSpec $source markers are resolved on read against the calling user's
     workspace context.
@@ -1459,6 +1511,7 @@ async def get(pocket_id: str, user_id: str) -> dict:
     pocket = _pocket_to_domain(doc)
     if (
         pocket.owner != user_id
+        and user_id not in pocket.team
         and user_id not in pocket.shared_with
         and pocket.visibility == "private"
     ):
@@ -1967,6 +2020,8 @@ async def create_from_ripple_spec(
             visibility="workspace",
             rippleSpec=normalized,
             pattern=pattern,
+            # New agent-generated pockets start with no connectors allowed.
+            allowed_connectors=[],
         )
         await doc.insert()
         pocket_id = str(doc.id)
@@ -2193,17 +2248,68 @@ async def remove_collaborator(pocket_id: str, user_id: str, target_user_id: str)
 # ---------------------------------------------------------------------------
 
 
-async def add_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
+async def _is_workspace_admin_or_owner(workspace_id: str, user_id: str) -> bool:
+    """Return ``True`` if the user has ``owner`` or ``admin`` role in the
+    given workspace. Does NOT raise on missing membership — returns ``False``
+    so callers can chain this with other checks."""
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        oid = PydanticObjectId(user_id)
+    except Exception:
+        return False
+    user = await _UserDoc.get(oid)
+    if user is None or not getattr(user, "workspaces", None):
+        return False
+    for m in user.workspaces:
+        if m.workspace == workspace_id and m.role in ("owner", "admin"):
+            return True
+    return False
+
+
+async def add_team_member(
+    pocket_id: str,
+    user_id: str,
+    member_id: str,
+    actor_workspace_id: str | None = None,
+) -> dict:
     doc = await _fetch_pocket(pocket_id)
-    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    pocket = _pocket_to_domain(doc)
+    # Only the pocket owner or a workspace admin/owner may manage team
+    # membership. Team members cannot grant permissions to others.
+    if pocket.owner != user_id:
+        if not actor_workspace_id or not await _is_workspace_admin_or_owner(
+            actor_workspace_id,
+            user_id,
+        ):
+            raise Forbidden(
+                "pocket.admin_required",
+                "Only the pocket owner or a workspace admin can manage membership",
+            )
     await _mutate_list_field(pocket_id, "team", member_id, "add")
     doc = await _fetch_pocket(pocket_id)
     return await _resolved_wire_dict(doc, user_id)
 
 
-async def remove_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
+async def remove_team_member(
+    pocket_id: str,
+    user_id: str,
+    member_id: str,
+    actor_workspace_id: str | None = None,
+) -> dict:
     doc = await _fetch_pocket(pocket_id)
-    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    pocket = _pocket_to_domain(doc)
+    # Only the pocket owner or a workspace admin/owner may manage team
+    # membership. Team members cannot remove others.
+    if pocket.owner != user_id:
+        if not actor_workspace_id or not await _is_workspace_admin_or_owner(
+            actor_workspace_id,
+            user_id,
+        ):
+            raise Forbidden(
+                "pocket.admin_required",
+                "Only the pocket owner or a workspace admin can manage membership",
+            )
     await _mutate_list_field(pocket_id, "team", member_id, "remove")
     doc = await _fetch_pocket(pocket_id)
     return await _resolved_wire_dict(doc, user_id)
@@ -2315,8 +2421,8 @@ async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None
 
 
 async def has_edit_access(pocket_id: str, user_id: str) -> bool:
-    """Return ``True`` if ``user_id`` may edit the pocket — owner,
-    explicit shared_with, or workspace-visible. Raises ``NotFound`` if
+    """Return ``True`` if ``user_id`` may edit the pocket — owner, team
+    member, explicit shared_with, or workspace-visible. Raises ``NotFound`` if
     the pocket doesn't exist.
 
     Used by the ``require_pocket_edit`` FastAPI guard so the Pocket
@@ -2332,6 +2438,8 @@ async def has_edit_access(pocket_id: str, user_id: str) -> bool:
         raise NotFound("pocket", pocket_id)
 
     if doc.owner == user_id:
+        return True
+    if user_id in (doc.team or []):
         return True
     if user_id in (doc.shared_with or []):
         return True
@@ -4756,6 +4864,162 @@ async def dispatch_bulk_action(
     return wire
 
 
+# ── Per-Pocket Connector Permissions ──────────────────────────────────
+
+
+async def get_pocket_connector_permissions(
+    pocket_id: str,
+) -> list[str] | None:
+    """Return the allowed connectors for a pocket.
+
+    Returns ``None`` when the pocket inherits all workspace connectors
+    (default). Returns a list (possibly empty) of connector names when
+    the pocket has explicit restrictions.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    return doc.allowed_connectors
+
+
+async def _auto_enable_pocket_connectors(
+    workspace_id: str,
+    pocket_id: str,
+    connector_names: list[str],
+) -> None:
+    """Ensure each named connector has a WorkspaceConnector row at pocket scope.
+
+    When a connector is granted to a pocket via ``allowed_connectors``, it must
+    also be enabled in the workspace's connector store (``_WCDoc``) so the MCP
+    tool ``list_pocket_connectors`` can find it. For any connector that is NOT
+    already enabled at workspace scope, we create a pocket-scoped row so the
+    connector is usable from this pocket's chat.
+
+    Imported lazily to keep the OSS-EE boundary (this service never imports the
+    connector model at module level).
+    """
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    for name in connector_names:
+        await connectors_service.ensure_connector_enabled_for_pocket(
+            workspace_id,
+            name,
+            pocket_id,
+        )
+
+
+async def set_pocket_connector_permissions(
+    pocket_id: str,
+    allowed_connectors: list[str] | None,
+) -> None:
+    """Set the allowed connectors for a pocket.
+
+    Pass ``None`` to inherit all workspace connectors.
+    Pass ``[]`` to revoke all (pocket sees nothing).
+
+    When non-None, each connector in the list is auto-enabled at pocket scope
+    if not already enabled, so the MCP tool ``list_pocket_connectors`` can
+    find it.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    if allowed_connectors is not None:
+        doc.allowed_connectors = allowed_connectors
+    else:
+        doc.allowed_connectors = None
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.set",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "allowed_connectors": allowed_connectors,
+        },
+    )
+    # Auto-enable each newly granted connector at pocket scope.
+    if allowed_connectors is not None and allowed_connectors:
+        await _auto_enable_pocket_connectors(doc.workspace, pocket_id, allowed_connectors)
+
+
+async def grant_pocket_connector(
+    pocket_id: str,
+    connector_name: str,
+) -> None:
+    """Grant a connector to a pocket (additive).
+
+    Also auto-enables the connector at pocket scope if not already enabled,
+    so the MCP tool ``list_pocket_connectors`` can find it.
+    """
+    doc = await _fetch_pocket(pocket_id)
+    current = doc.allowed_connectors
+    if current is None:
+        # Currently inheriting all — switch to explicit allowlist with just this connector.
+        doc.allowed_connectors = [connector_name]
+    elif connector_name not in current:
+        doc.allowed_connectors = [*current, connector_name]
+    else:
+        return  # already granted
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.grant",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "connector_name": connector_name,
+        },
+    )
+    # Auto-enable the connector at pocket scope so it's usable in chat.
+    await _auto_enable_pocket_connectors(doc.workspace, pocket_id, [connector_name])
+
+
+async def revoke_pocket_connector(
+    pocket_id: str,
+    connector_name: str,
+) -> None:
+    """Revoke a connector from a pocket (removes from allowlist)."""
+    doc = await _fetch_pocket(pocket_id)
+    current = doc.allowed_connectors
+    if current is None:
+        return  # no restrictions, nothing to revoke
+    next_list = [c for c in current if c != connector_name]
+    # Keep the list (even empty) to distinguish "no restrictions" from "nothing allowed"
+    doc.allowed_connectors = next_list
+    await doc.save()
+    logger.info(
+        "pocket.connector_permissions.revoke",
+        extra={
+            "pocket_id": pocket_id,
+            "workspace_id": doc.workspace,
+            "connector_name": connector_name,
+        },
+    )
+
+
+async def list_workspace_pocket_connector_permissions(
+    workspace_id: str,
+    user_id: str | None = None,
+) -> dict[str, list[str] | None]:
+    """Return the connector-permissions map for pockets the user can access.
+
+    Returns a dict of pocket_id → allowed_connectors (list or None).
+    ``None`` means the pocket inherits all workspace connectors.
+    This is the bulk endpoint for the frontend's permission-store loader.
+
+    When ``user_id`` is provided, only pockets visible to that user are
+    returned (owner, team member, shared_with, or workspace-visible).
+    """
+    query: dict = {"workspace": workspace_id}
+    if user_id is not None:
+        query["$or"] = [
+            {"owner": user_id},
+            {"team": user_id},
+            {"shared_with": user_id},
+            {"visibility": "workspace"},
+        ]
+    docs = await _PocketDoc.find(query).to_list()
+    result: dict[str, list[str] | None] = {}
+    for doc in docs:
+        result[str(doc.id)] = doc.allowed_connectors
+    return result
+
+
 __all__ = [
     "access_via_share_link",
     "add_agent",
@@ -4791,14 +5055,17 @@ __all__ = [
     "get",
     "get_pocket_backend",
     "get_pocket_backend_for_executor",
+    "get_pocket_connector_permissions",
     "get_pocket_ripple_spec",
     "get_webhook_secret",
+    "grant_pocket_connector",
     "has_action_run_access",
     "has_edit_access",
     "is_member",
     "is_owner",
     "list_interval_source_pockets",
     "list_pockets",
+    "list_workspace_pocket_connector_permissions",
     "remove_agent",
     "remove_collaborator",
     "remove_pocket_backend",
@@ -4807,10 +5074,12 @@ __all__ = [
     "reorder_widgets",
     "resolve_pocket_template",
     "resolve_webhook_pocket",
+    "revoke_pocket_connector",
     "revoke_share_link",
     "rotate_webhook_secret",
     "set_pocket_approval_route",
     "set_pocket_backend",
+    "set_pocket_connector_permissions",
     "set_pocket_write_policy",
     "set_svelte_source_file",
     "unassign_project_on_pockets",

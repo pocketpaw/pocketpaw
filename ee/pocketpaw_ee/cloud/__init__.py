@@ -532,7 +532,9 @@ def mount_cloud(app: FastAPI) -> None:
                 "_id": str(u.id),
                 "email": u.email,
                 "name": u.full_name,
+                "fullName": u.full_name,
                 "avatar": u.avatar,
+                "profilePic": u.avatar,
                 "status": u.status,
             }
             for u in users
