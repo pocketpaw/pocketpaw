@@ -11,6 +11,12 @@
 # ``DiscoveryRun`` orchestrator (SZD-4) ties sampling → digest together: it reads
 # a workspace's bound connectors via the pocket-less ``ensure_connected(name,
 # "ws:<workspace_id>")`` path and feeds the sampled records to the digester.
+#
+# Updated 2026-06-19 (SZD-6 / feat/szd-6-integration): added the orchestrate
+# layer (``run_discovery_and_propose`` + ``assemble_discovery_pocket``) that wires
+# a DiscoveryRun's OntologyDraft into the two gated Instinct proposals (Fabric
+# objects + a starter Pocket) a human reviews, with key-confidence gating and
+# supersede-on-rerun.
 
 from __future__ import annotations
 
@@ -20,6 +26,13 @@ from pocketpaw_ee.discovery.models import (
     DraftObject,
     DraftObjectType,
     OntologyDraft,
+)
+from pocketpaw_ee.discovery.orchestrate import (
+    DISCOVERY_MARKER_KEY,
+    KEY_CONFIDENCE_FLOOR,
+    DiscoveryProposalResult,
+    assemble_discovery_pocket,
+    run_discovery_and_propose,
 )
 from pocketpaw_ee.discovery.run import (
     DEFAULT_SAMPLE_CAP,
@@ -39,4 +52,9 @@ __all__ = [
     "DiscoveryRunOptions",
     "ReadAction",
     "DEFAULT_SAMPLE_CAP",
+    "run_discovery_and_propose",
+    "assemble_discovery_pocket",
+    "DiscoveryProposalResult",
+    "KEY_CONFIDENCE_FLOOR",
+    "DISCOVERY_MARKER_KEY",
 ]
