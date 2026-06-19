@@ -207,6 +207,16 @@ Changes: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) —
 versioned. Same additive, best-effort snapshot contract — a version-store
 failure never breaks the edit. The merge gate itself lives in the Instinct
 router (BP-3); these rows are the candidates it reviews.
+Changes: 2026-06-19 (feat/typed-ripplespec-phase1) — fixed the 2026-06-13
+rippleSpec clobber bug in ``update``. A partial ``ripple_spec`` body that
+OMITS instance-owned regions (``state`` / ``selections``) no longer wipes
+them: ``update`` now routes through ``_layer_safe_update_spec`` (a per-key
+overlay expressed via the typed ``RippleSpec`` layer split) unless the new
+``UpdatePocketRequest.reset_state`` flag is set or a ``template_slug``
+recompile is in play. The typed model is used INTERNALLY only — Beanie
+``Pocket.rippleSpec`` and ``domain.Pocket.ripple_spec`` stay ``dict``, and
+every reader still receives a flat dict (executor dual-path readers deferred
+to a Phase 2 gated on PR #1472).
 """
 
 from __future__ import annotations
@@ -996,6 +1006,72 @@ def _merge_compile_into_ripple_spec(
     return out
 
 
+def _layer_safe_update_spec(
+    existing_raw: dict[str, Any] | None,
+    incoming_raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge an incoming (partial) rippleSpec onto the existing one WITHOUT
+    clobbering instance-owned regions the incoming spec omits.
+
+    This is the fix for the 2026-06-13 clobber bug. The bug: ``update()`` did a
+    wholesale ``doc.rippleSpec = normalized_spec``, so a frontend ``PATCH`` that
+    sent only the template canvas (``ui`` / ``actions`` / ``sources``) WIPED the
+    instance's ``state`` / ``selections`` — and, symmetrically, a state-only
+    write would have wiped the canvas.
+
+    The merge is a per-key overlay expressed through the typed layer split:
+    the result is the EXISTING spec with every key the INCOMING spec actually
+    SET overlaid on top. A key the incoming spec omits is preserved from the
+    existing spec — whichever layer it belongs to. Concretely:
+
+      * incoming carries ``ui`` but no ``state`` (the clobber case) →
+        new ``ui``, existing ``state`` preserved.
+      * incoming carries ``state`` but no ``ui`` (a state-only edit, e.g.
+        reconcile's instance-preserve path) → new ``state``, existing ``ui``
+        preserved.
+
+    Implementation uses ``RippleSpec`` for the type boundary: we promote both
+    sides, overlay the incoming TEMPLATE layer and the incoming INSTANCE layer
+    onto the existing spec (each carries only the keys that side set, via
+    ``exclude_unset``), then overlay any remaining incoming keys (the
+    compile_template passthrough envelope — ``name`` / ``version`` / ``lifecycle``
+    / ``metadata`` / etc. the normalizer stamps) so a partial write still
+    refreshes those. ``to_flat_dict`` returns the same BSON-shaped flat dict the
+    DB already stores — no migration.
+
+    Falls back to the legacy wholesale-incoming behaviour only if the incoming
+    spec cannot be promoted (corrupt) — never silently drops the write.
+    """
+    from pocketpaw.bundled_templates import InstanceLayer, RippleSpec, TemplateLayer
+
+    existing = RippleSpec.from_flat_dict(existing_raw)
+    incoming = RippleSpec.from_flat_dict(incoming_raw)
+    if incoming is None:
+        # Incoming is unpromotable (should not happen post-normalize) — keep the
+        # historical behaviour rather than drop the caller's write.
+        return incoming_raw
+    if existing is None:
+        # No existing spec to protect (fresh pocket / unpromotable existing) —
+        # the incoming spec is authoritative.
+        return incoming.to_flat_dict()
+
+    # Overlay the incoming layers onto the existing spec. ``with_*_layer`` only
+    # applies the keys the incoming side actually set, so an omitted region is
+    # preserved from ``existing`` verbatim.
+    merged = existing.with_template_layer(incoming.template_layer)
+    merged = merged.with_instance_layer(incoming.instance_layer)
+
+    # Overlay the remaining incoming keys (passthrough + envelope the normalizer
+    # stamps: name/version/lifecycle/title/color/metadata/...). The layer fields
+    # are already handled above, so skip them to avoid re-applying.
+    layer_fields = set(TemplateLayer.model_fields) | set(InstanceLayer.model_fields)
+    flat = merged.to_flat_dict()
+    for key, value in incoming.to_flat_dict().items():
+        if key not in layer_fields:
+            flat[key] = value
+    return flat
+
+
 async def _check_template_needs(loaded: dict[str, Any] | None, workspace_id: str) -> list[str]:
     """Return the template's declared Sense ids that NO enabled connector fills.
 
@@ -1393,7 +1469,22 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     if body.visibility is not None:
         doc.visibility = body.visibility
     if normalized_spec is not None:
-        doc.rippleSpec = normalized_spec
+        # Clobber-fix (2026-06-13 bug): a partial ``ripple_spec`` body that
+        # OMITS instance-owned regions (state / selections) must NOT wipe them.
+        # Three branches, in priority order:
+        #   1. ``reset_state`` — explicit caller intent to clear instance state.
+        #      Wholesale write (the legacy behaviour, now opt-in).
+        #   2. ``template_slug`` — the recompile path already ran ownership-aware
+        #      ``_merge_compile_into_ripple_spec`` against ``doc.rippleSpec``,
+        #      so the merged result is authoritative — write it wholesale.
+        #   3. default (user / frontend partial PATCH) — layer-safe merge that
+        #      preserves the existing instance layer for any region the incoming
+        #      spec omits (and, symmetrically, the template layer on a
+        #      state-only write).
+        if body.reset_state or body.template_slug is not None:
+            doc.rippleSpec = normalized_spec
+        else:
+            doc.rippleSpec = _layer_safe_update_spec(doc.rippleSpec, normalized_spec)
     if body.template_slug is not None:
         doc.template_slug = body.template_slug
     if body.project_id is not None:
