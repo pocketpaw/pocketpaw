@@ -1185,6 +1185,48 @@ async def resolve_pocket_template(
         return None
 
 
+async def resolve_workspace_approval_level(workspace_id: str) -> str:
+    """Return the effective layered-gate triager level for a workspace (T6).
+
+    Resolution order (design MF-9):
+      1. The workspace document's ``instinct_approval_level`` field, when set
+         to a non-empty value — the PER-WORKSPACE opt-in.
+      2. Otherwise the GLOBAL config default
+         (``Settings.instinct_approval_level``, itself "ASK").
+
+    A global env var therefore changes the default for workspaces that have
+    NOT set their own field — it can never silently upgrade a workspace that
+    relies on the default away from "ASK" once that workspace sets its own
+    value. Any read failure falls back to the global default (and ultimately
+    "ASK"), so a DB hiccup can never accidentally activate the triager.
+
+    Returns a bare string ("ASK" | "TRIAGE" | "TRUSTED"); ``gate_action``
+    coerces it onto the enum and treats an unknown value as ASK.
+    """
+    from pocketpaw.config import get_settings
+
+    try:
+        global_default = str(get_settings().instinct_approval_level or "ASK")
+    except Exception:  # noqa: BLE001 — config read failure → dormant
+        global_default = "ASK"
+
+    if not workspace_id:
+        return global_default
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — malformed id / read failure → global default
+        return global_default
+    if ws is None:
+        return global_default
+    field = getattr(ws, "instinct_approval_level", None)
+    if isinstance(field, str) and field:
+        return field
+    return global_default
+
+
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
@@ -4017,7 +4059,25 @@ async def set_pocket_backend(
         _BackendCredentialDoc.pocket_id == pocket_id,
         _BackendCredentialDoc.workspace_id == workspace_id,
     )
+    # T12 (layered/learning gate, design M-5) — detect a backend IDENTITY
+    # change so the trust ledger can be invalidated below. The identity is
+    # (backend_type, base_url, connector_name): a pocket that swaps which
+    # backend it points at must NOT inherit the prior backend's earned
+    # auto-approve trust (anti-gaming — a low-trust backend can't borrow a
+    # trusted one's score by re-pointing the URL). Compared on the EXISTING
+    # row BEFORE the overwrite. A first-time config (no existing row) earned
+    # nothing, so it never resets. A token rotation that keeps the same URL
+    # is NOT an identity change and does not reset.
+    backend_changed = False
     if existing is not None:
+        old_identity = (
+            getattr(existing, "backend_type", "http"),
+            existing.base_url,
+            getattr(existing, "connector_name", None),
+        )
+        new_identity = (backend_type, base_url, connector_name)
+        backend_changed = old_identity != new_identity
+
         existing.backend_type = backend_type
         existing.connector_name = connector_name
         existing.base_url = base_url
@@ -4040,6 +4100,22 @@ async def set_pocket_backend(
             nonce=nonce,
             salt=salt,
         ).insert()
+
+    # T12 — invalidate earned trust when the backend identity changed. Done
+    # AFTER the credential save so a save failure never leaves a reset marker
+    # for a backend that did not actually change. Best-effort: a trust-ledger
+    # write failure must not fail backend configuration (the more important
+    # operation succeeded). The lazy import keeps this module's static import
+    # graph free of the pure ledger helper.
+    if backend_changed:
+        try:
+            from pocketpaw_ee.cloud.pockets import trust_ledger
+
+            await trust_ledger.reset_pocket_trust(workspace_id, pocket_id)
+        except Exception:  # noqa: BLE001 — trust reset is best-effort
+            logger.warning(
+                "trust reset failed after backend change for pocket %s", pocket_id, exc_info=True
+            )
 
     _audit_backend_config(
         actor=user_id,

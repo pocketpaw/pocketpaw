@@ -217,6 +217,77 @@ async def test_set_backend_upserts(mongo_db):
     assert creds[3] == "new-token"
 
 
+# ---------------------------------------------------------------------------
+# T12 / T-37 — a backend credential change invalidates earned trust.
+# A pocket that swapped its backend must not inherit the prior backend's
+# auto-approve trust (anti-gaming, design M-5). The reset fires only when an
+# EXISTING row's base_url actually changes — not on first-time configuration
+# (nothing earned yet) and not on an unchanged re-save.
+# ---------------------------------------------------------------------------
+
+
+def _capture_trust_reset(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    async def _reset(workspace_id, pocket_id):
+        calls.append((workspace_id, pocket_id))
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.trust_ledger.reset_pocket_trust", _reset)
+    return calls
+
+
+async def test_backend_url_change_resets_trust(mongo_db, monkeypatch):
+    """T-37: changing the base_url on an existing backend resets the pocket's
+    trust ledger (the new backend earns its own trust from zero)."""
+    calls = _capture_trust_reset(monkeypatch)
+
+    # First-time set — NO reset (no prior trust to invalidate).
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://old.example.com",
+        auth_type="bearer",
+        auth_token="old-token",
+    )
+    assert calls == [], "first-time backend config must not reset trust"
+
+    # Swap the base_url — this is the credential change that invalidates trust.
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://new.example.com",
+        auth_type="bearer",
+        auth_token="new-token",
+    )
+    assert calls == [("w1", "pocket-1")]
+
+
+async def test_backend_unchanged_resave_does_not_reset_trust(mongo_db, monkeypatch):
+    """Re-saving the SAME base_url (e.g. a token rotation that keeps the URL)
+    must not reset trust — the backend identity (the URL) did not change."""
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="bearer",
+        auth_token="token-1",
+    )
+    calls = _capture_trust_reset(monkeypatch)
+    # Same URL, different token.
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="bearer",
+        auth_token="token-2",
+    )
+    assert calls == [], "an unchanged base_url must not reset trust"
+
+
 async def test_set_backend_rejects_http_url(mongo_db):
     with pytest.raises(ValidationError):
         await pockets_service.set_pocket_backend(

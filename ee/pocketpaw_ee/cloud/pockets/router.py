@@ -1114,6 +1114,21 @@ async def run_pocket_action(
     if template is not None and not any(a.name == body.action for a in template.actions):
         template = None
 
+    # Layered/learning gate (T6) — resolve the workspace's triager activation
+    # level (per-workspace field → global config default → "ASK") and the
+    # global dry-run flag, and thread them into the executor's gate 1.5. When
+    # the workspace has not opted in, the level is "ASK" and the gate behaves
+    # exactly as before — every escalate parks for a human. The level is only
+    # read when a template actually governs this action (otherwise the gate
+    # never runs), so a non-template write is byte-identical to before.
+    approval_level = "ASK"
+    dry_run_mode = False
+    if template is not None:
+        approval_level = await pockets_service.resolve_workspace_approval_level(workspace_id)
+        from pocketpaw.config import get_settings
+
+        dry_run_mode = bool(get_settings().instinct_dry_run_mode)
+
     # no-event: the write result is response-body delivery, not persisted.
     result = await action_executor.run_action(
         workspace_id=workspace_id,
@@ -1130,6 +1145,8 @@ async def run_pocket_action(
         allowed_writes=allowed_writes,
         idempotency_key=body.idempotency_key,
         template=template,
+        approval_level=approval_level,
+        dry_run_mode=dry_run_mode,
     )
 
     # W2a — a template-level CEL rule BLOCKED this write (gate 1.5). It
@@ -1144,6 +1161,19 @@ async def run_pocket_action(
             action=body.action,
             code="instinct_blocked",
             error="action blocked by an Instinct rule",
+        )
+
+    # Layered/learning gate (T7/T-31) — a DRY_RUN write. The executor
+    # resolved + audited the write but made NO backend call and persisted no
+    # approval row. It carries the resolved write under `_park`, which MUST
+    # NOT reach the client wire (the same constraint as `instinct_pending`).
+    # Surface a clean dry-run acknowledgement; the resolved write is visible
+    # only in the audit log, never the response.
+    if result.get("code") == "instinct_dry_run":
+        return RunActionResponse(
+            ok=True,
+            action=body.action,
+            code="instinct_dry_run",
         )
 
     # M2b.1 / W2a — a write was PARKED, not fired. There are TWO park
@@ -1215,16 +1245,33 @@ async def run_pocket_action(
     # assertion below catches a strip that drifts out of sync with the
     # executor's result keys; `RunActionResponse` is also `extra="forbid"`
     # so a missed key fails construction rather than leaking.
+    # Layered/learning gate (T10) — map the executor-internal optimistic
+    # handle id onto the PUBLIC wire field before the strip below removes the
+    # underscored key. Only set on an OPTIMISTIC-lane write that declared a
+    # compensate; absent otherwise.
+    optimistic_id = result.get("_optimistic_compensation_id")
+
     wire = {
         k: v
         for k, v in result.items()
         # gap-3 — strip the metering keys too: `outcome_value`/`outcome_unit`
         # join `outcome` as executor-internal fields the wire model
         # (`extra="forbid"`) does not carry. They were already consumed by
-        # the `emit_pocket_outcome` call above.
-        if k not in ("_park", "outcome", "outcome_value", "outcome_unit")
+        # the `emit_pocket_outcome` call above. `_optimistic_compensation_id`
+        # is the executor-internal key for the optimistic handle — re-exposed
+        # below as the public `optimistic_compensation_id` field.
+        if k
+        not in (
+            "_park",
+            "outcome",
+            "outcome_value",
+            "outcome_unit",
+            "_optimistic_compensation_id",
+        )
     }
     assert "_park" not in wire, "executor `_park` blob must be stripped before the wire response"
+    if optimistic_id:
+        wire["optimistic_compensation_id"] = optimistic_id
     return RunActionResponse(**wire)
 
 

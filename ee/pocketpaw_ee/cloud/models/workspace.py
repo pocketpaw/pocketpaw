@@ -1,5 +1,16 @@
 """Workspace document — one per deployment/org.
 
+2026-06-19 (layered/learning gate, T6): added
+``Workspace.instinct_approval_level`` — the PER-WORKSPACE override for the
+layered Instinct gate's triager activation level ("ASK" | "TRIAGE" |
+"TRUSTED"). ``None`` (the default) means "use the global config default"
+(``Settings.instinct_approval_level``, itself "ASK"). A workspace must
+explicitly set this to a non-ASK value to activate auto/optimistic/dry-run
+lanes for its writes — a global env var changes the default for NEW
+workspaces only and can never silently upgrade an existing tenant (design
+MF-9). The cloud router reads this field and passes the resolved level to
+``run_action`` → ``gate_action``.
+
 2026-06-14 (WB-1): added the ``Branding`` sub-model and a top-level
 ``Workspace.branding`` field for white-label theming (logo, display name,
 tab title, accent color, favicon, paw-mark toggle). Branding is a per-tenant
@@ -85,6 +96,13 @@ class Workspace(TimestampedDocument):
     sso_config: SsoConfig | None = None
     verified_domains: list[VerifiedDomain] = Field(default_factory=list)
     deleted_at: datetime | None = None
+    # Layered/learning Instinct gate (T6) — per-workspace triager activation
+    # level. None = use the global config default (Settings.
+    # instinct_approval_level, "ASK"). A workspace owner opts in to "TRIAGE"
+    # (or future "TRUSTED") to activate the auto/optimistic lanes for THIS
+    # workspace's writes; nothing else changes the default for an existing
+    # tenant (design MF-9 — global config cannot silently upgrade tenants).
+    instinct_approval_level: str | None = None
 
     class Settings:
         name = "workspaces"
