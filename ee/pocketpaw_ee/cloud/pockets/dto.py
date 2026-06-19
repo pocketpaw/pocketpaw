@@ -115,7 +115,16 @@ Client-sent ``path`` (a row-scoped binding whose stored path holds an unresolved
 ``{item.id}`` template, resolved client-side) still wins — the binding path is
 only the fallback. The server still reads the verb from the binding, so a
 compromised client cannot pick method OR a path the allowlist would reject.
-Updated: 2026-06-19 (feat/typed-ripplespec-phase1) — ``UpdatePocketRequest``
+Updated: 2026-06-15 (feat/invoke-tool-v1) — added ``ToolGrantDTO`` and
+``SetToolPolicyRequest`` for the new owner-only ``PUT
+/pockets/{id}/backend/tool-policy`` endpoint (the tool-allowlist analog of
+the write-policy route), and an ``allowed_tools`` field on
+``PocketBackendConfigResponse``. A grant's ``tool`` is a built-in tool name
+or a connector action ``connector:<name>:<action>``. Empty list = fail-closed
+(no ``invoke_tool`` fires until a human allow-lists one). ``RunToolResponse``
+is unchanged — it already carries ``{ok, tool, status, response, error, code,
+on_success, on_error}``.
+Updated: 2026-06-19 (feat/typed-ripplespec-phase1, #1503) — ``UpdatePocketRequest``
 gains ``reset_state: bool = False``. It is the escape hatch for the clobber-fix:
 by default a partial ``ripple_spec`` body that omits instance-owned regions
 (``state`` / ``selections``) now PRESERVES them (the service does a layer-safe
@@ -367,6 +376,17 @@ class AllowedWriteDTO(BaseModel):
     path_pattern: str = Field(min_length=1)
 
 
+class ToolGrantDTO(BaseModel):
+    """One tool-allowlist entry on the wire (feat/invoke-tool-v1).
+
+    Mirrors ``models.pocket_backend.ToolGrant``. ``tool`` is either a
+    built-in tool name (``"web_fetch"``) or a connector action
+    (``"connector:<name>:<action>"``, e.g. ``"connector:github:list_issues"``).
+    """
+
+    tool: str = Field(min_length=1)
+
+
 class PocketBackendConfigRequest(BaseModel):
     """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
 
@@ -430,6 +450,10 @@ class PocketBackendConfigResponse(BaseModel):
     an owner/editor-facing non-secret. Empty by default (fail-closed: no
     write fires until a human allow-lists it).
 
+    ``allowed_tools`` is the per-pocket tool allowlist (feat/invoke-tool-v1)
+    — the same fail-closed posture: empty by default, no ``invoke_tool``
+    fires until a human allow-lists it.
+
     ``approval_route`` is the per-pocket approver routing for
     ``requires_instinct`` writes (RFC 05 M2b.1). ``None`` means the
     default — the pocket owner approves.
@@ -441,6 +465,7 @@ class PocketBackendConfigResponse(BaseModel):
     auth_type: str
     configured: bool
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+    allowed_tools: list[ToolGrantDTO] = Field(default_factory=list)
     approval_route: ApprovalRouteDTO | None = None
 
 
@@ -548,6 +573,17 @@ class SetWritePolicyRequest(BaseModel):
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
 
 
+class SetToolPolicyRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend/tool-policy`` (feat/invoke-tool-v1).
+
+    Replaces the pocket's whole tool allowlist. An empty list is valid
+    and meaningful — it revokes every tool (fail-closed), exactly like the
+    write-policy precedent.
+    """
+
+    allowed_tools: list[ToolGrantDTO] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Pocket tool invocations (#1206 part a — invoke_tool wire)
 # ---------------------------------------------------------------------------
@@ -590,6 +626,16 @@ class RunToolResponse(BaseModel):
     client runs after — the same shape ``call_binding`` returns, so the
     home grid's ``onEvent`` plumbing handles both with one branch.
 
+    ``proposed_action_id`` carries the pending Instinct Action id when a
+    WRITE grant is invoked (feat/invoke-tool-v1 v2): the WRITE is proposed
+    for human approval rather than fired inline, so ``ok`` is true,
+    ``code`` is ``"instinct_pending"``, and this id lets the client
+    correlate the click with the pending Action it can watch in The Tray.
+    It mirrors :class:`RunActionResponse.proposed_action_id` so a single
+    client branch services gated tool-writes and gated ``call_binding``
+    writes. ``None`` for reads / blocked / not-allowed responses. The id
+    is ALSO echoed inside ``response`` for callers that read it there.
+
     ``extra="forbid"`` matches :class:`RunActionResponse`: any
     executor-internal key the route fails to strip raises on
     construction instead of leaking onto the wire.
@@ -603,6 +649,7 @@ class RunToolResponse(BaseModel):
     response: Any = None
     error: str | None = None
     code: str | None = None
+    proposed_action_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 

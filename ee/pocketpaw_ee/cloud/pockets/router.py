@@ -1,5 +1,13 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-15 (feat/invoke-tool-v1) — UNLOCKED ``POST /{id}/tools/run``.
+Added the owner-only ``PUT /{id}/backend/tool-policy`` route (the tool-allowlist
+analog of write-policy) and rewired ``run_pocket_tool`` to read the per-pocket
+``allowed_tools`` off the credential row (via
+``pockets_service.get_pocket_backend_for_executor``, 9th tuple element) and pass
+the tool NAMES to ``tool_executor.run_tool`` by parameter — never from the spec.
+A pocket with no backend / no grants reads as an empty allowlist (fail-closed).
+
 Updated: 2026-06-13 (feat/pocket-template-reconcile, P2.4) — added the
 Template Reconcile REST adapter: ``POST /{id}/reconcile/preview`` (dry-run
 diff) and ``POST /{id}/reconcile/apply`` (re-apply template-owned regions,
@@ -199,6 +207,7 @@ from pocketpaw_ee.cloud.pockets.dto import (
     RunToolRequest,
     RunToolResponse,
     SetApprovalRouteRequest,
+    SetToolPolicyRequest,
     SetWritePolicyRequest,
     ShareLinkRequest,
     UpdatePocketRequest,
@@ -939,6 +948,36 @@ async def set_pocket_write_policy(
 
 
 @router.put(
+    "/{pocket_id}/backend/tool-policy",
+    dependencies=[Depends(require_pocket_owner)],
+)
+async def set_pocket_tool_policy(
+    pocket_id: str,
+    body: SetToolPolicyRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> PocketBackendConfigResponse:
+    """Set this pocket's tool allowlist (feat/invoke-tool-v1). Owner-only.
+
+    Replaces the whole ``allowed_tools`` list — an empty list revokes every
+    tool (fail-closed). The policy lives on the backend-credential row,
+    OUTSIDE the spec, so the agent that authors the spec cannot grant itself
+    a tool (the same blast-radius invariant ``allowed_writes`` enforces). A
+    grant's ``tool`` is a built-in tool name or a connector action
+    ``connector:<name>:<action>``. Returns ``400`` when the pocket has no
+    backend configured — a tool policy with no backend to apply to is
+    meaningless.
+    """
+    result = await pockets_service.set_pocket_tool_policy(
+        workspace_id,
+        user_id,
+        pocket_id,
+        [grant.model_dump() for grant in body.allowed_tools],
+    )
+    return PocketBackendConfigResponse(**result)
+
+
+@router.put(
     "/{pocket_id}/backend/approval-route",
     dependencies=[Depends(require_pocket_owner)],
 )
@@ -1259,7 +1298,7 @@ async def dispatch_bulk_action_route(
 
 
 # ---------------------------------------------------------------------------
-# Pocket tool invocation (#1206 part a — invoke_tool wire)
+# Pocket tool invocation (#1206 — invoke_tool; UNLOCKED in feat/invoke-tool-v1)
 # ---------------------------------------------------------------------------
 
 
@@ -1285,12 +1324,15 @@ async def run_pocket_tool(
     has the same blast radius as a write binding, so a workspace-visible
     pocket does NOT grant run access.
 
-    Part (a) is intentionally fail-closed: the per-pocket allowlist is
-    empty (see :func:`tool_executor.get_pocket_allowed_tools`), so every
-    tool name returns ``ok:false, code:"not_allowed"``. The wire shape +
-    DTOs land here so part (b) (the home-grid ``onEvent`` wiring) has
-    somewhere to POST to. Part (c) adds Composio / WebFetch routing
-    through the real tool registry behind the allowlist.
+    The per-pocket tool allowlist (feat/invoke-tool-v1) lives on the
+    backend-credential row, OUTSIDE the spec — read here via
+    ``get_pocket_backend_for_executor`` and passed to the executor BY
+    PARAMETER, never sourced from ``rippleSpec``. A pocket with no backend
+    (or no grants) reads as an EMPTY allowlist → every tool returns
+    ``ok:false, code:"not_allowed"`` (fail-closed). A ``connector:<name>:
+    <action>`` grant for a READ action fires through
+    ``connectors.service.execute``; a WRITE action returns ``code="blocked"``
+    (approval lands in v2 via Instinct).
 
     The result is delivered in THIS response body — there is no
     ``pocket_mutation`` SSE emit, because the run endpoint is a
@@ -1304,7 +1346,15 @@ async def run_pocket_tool(
 
     from pocketpaw_ee.cloud.pockets import tool_executor
 
-    allowed_tools = await tool_executor.get_pocket_allowed_tools(workspace_id, pocket_id)
+    # Read the allowlist off the per-pocket backend credential row. The 9th
+    # tuple element is `allowed_tools` (a list of `{tool}` wire dicts). A
+    # pocket with no backend configured → `None` → empty allowlist, so the
+    # fail-closed `not_allowed` path holds with no special-casing. The
+    # executor stays Beanie-free — it only ever sees the flat list of names.
+    creds = await pockets_service.get_pocket_backend_for_executor(workspace_id, pocket_id)
+    allowed_tools: list[str] = []
+    if creds is not None:
+        allowed_tools = [grant["tool"] for grant in creds[8]]
 
     # no-event: the tool result is response-body delivery, not persisted.
     result = await tool_executor.run_tool(
