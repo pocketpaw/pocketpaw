@@ -43,6 +43,13 @@
 # template lint --registry <path>``. Wave 4c will replace it with the
 # live EE FabricRegistry; until then, this is the developer-facing mock
 # for ``tier: registered`` lint workflows.
+# Modified 2026-06-19 (feat/typed-ripplespec-phase1): re-exports the
+# RFC-03-v2 runtime layer-split models ``RippleSpec``, ``TemplateLayer`` and
+# ``InstanceLayer`` so the EE cloud service (service.update + reconcile) and
+# any future non-EE consumer (CLI lint, registry validator) can import the
+# typed rippleSpec at the package root. ``RippleSpec.to_flat_dict`` is
+# BSON-byte-equivalent to the stored flat dict — a TYPE boundary, not a
+# storage change.
 """Built-in pocket templates bundled and auto-installed by PocketPaw.
 
 Third sibling to ``pocketpaw.bundled_skills`` and ``pocketpaw.bundled_kb``.
@@ -142,13 +149,16 @@ from pocketpaw.bundled_templates.schema import (
     ColumnDef,
     ConfirmDef,
     DataSourceDef,
+    InstanceLayer,
     InstinctRule,
     InstinctRulesDef,
     JoinedEntity,
     PermissionsDef,
     PocketTemplate,
+    RippleSpec,
     SavedView,
     StateBinding,
+    TemplateLayer,
     TriggerDef,
 )
 from pocketpaw.bundled_templates.temporal_sweeper import (
@@ -176,6 +186,7 @@ __all__ = [
     "FabricValidationError",
     "IdentifierResolver",
     "InstallResult",
+    "InstanceLayer",
     "InstinctDecision",
     "InstinctResolutionError",
     "InstinctRule",
@@ -187,6 +198,7 @@ __all__ = [
     "NullFabricRegistry",
     "PermissionsDef",
     "PocketTemplate",
+    "RippleSpec",
     "RowExecution",
     "SavedView",
     "StateBinding",
@@ -194,6 +206,7 @@ __all__ = [
     "TemplateDiff",
     "TemplateIdentifierResolver",
     "TemplateInstallResult",
+    "TemplateLayer",
     "TemplateValidationError",
     "TemporalRisingEdge",
     "TemporalSweepError",

@@ -115,6 +115,13 @@ Client-sent ``path`` (a row-scoped binding whose stored path holds an unresolved
 ``{item.id}`` template, resolved client-side) still wins — the binding path is
 only the fallback. The server still reads the verb from the binding, so a
 compromised client cannot pick method OR a path the allowlist would reject.
+Updated: 2026-06-19 (feat/typed-ripplespec-phase1) — ``UpdatePocketRequest``
+gains ``reset_state: bool = False``. It is the escape hatch for the clobber-fix:
+by default a partial ``ripple_spec`` body that omits instance-owned regions
+(``state`` / ``selections``) now PRESERVES them (the service does a layer-safe
+merge), so a frontend canvas-only PATCH no longer wipes instance data. A caller
+that genuinely wants to clear instance state sends ``reset_state: true`` to
+restore the old wholesale write. Wire-level ``ripple_spec`` stays ``dict | None``.
 """
 
 from __future__ import annotations
@@ -187,6 +194,20 @@ class UpdatePocketRequest(BaseModel):
     # persisted ``PocketSurfaceProfile`` sub-model (all sub-fields optional,
     # JSON-friendly lists). Wire alias ``surfaceProfile``.
     surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
+    # Escape hatch for the clobber-fix (2026-06-13 bug). By DEFAULT a
+    # ``ripple_spec`` body that omits instance-owned regions (``state`` /
+    # ``selections``) PRESERVES them — the service does a layer-safe merge so a
+    # frontend canvas-only PATCH no longer wipes instance data. A caller that
+    # INTENDS to clear instance state (e.g. "reset this pocket to a clean
+    # slate") must opt in by sending ``reset_state: true``, which restores the
+    # old wholesale write of the incoming spec. Wire-level ``ripple_spec`` stays
+    # ``dict | None`` — this is the only new field on the wire.
+    reset_state: bool = Field(
+        default=False,
+        description="When true, an incoming ripple_spec replaces the pocket "
+        "spec wholesale, clearing instance-owned state/selections it omits. "
+        "Default false preserves existing instance state on a partial update.",
+    )
 
     model_config = {"populate_by_name": True}
 
