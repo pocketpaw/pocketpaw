@@ -14,6 +14,9 @@ UI can check a slug live; ``validate_slug`` now reuses ``SLUG_RE``.
 format validation) + ``BrandingOut`` (response), an optional ``branding``
 field on ``UpdateWorkspaceRequest``, a ``branding`` field on ``WorkspaceOut``,
 and the ``Branding`` -> ``BrandingOut`` mapping in ``workspace_to_dto``.
+2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
+``SetApprovalLevelRequest`` — the closed-enum body for the OWNER-only route
+that activates the layered Instinct gate's triager for a workspace.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.workspace.domain import (
@@ -110,6 +113,23 @@ class CreateInviteRequest(BaseModel):
 
 class UpdateMemberRoleRequest(BaseModel):
     role: str = Field(pattern="^(owner|admin|member)$")
+
+
+class SetApprovalLevelRequest(BaseModel):
+    """PATCH /workspaces/{id}/instinct/approval-level request (security FIX 1).
+
+    The body for the OWNER-only switch that activates the layered Instinct
+    gate's triager for a workspace. ``level`` is a closed enum
+    (``ASK`` | ``TRIAGE`` | ``TRUSTED``) so the route boundary 422s on any
+    other value — a typo can never silently land a junk level on the workspace
+    document (which the gate would then read and route ASK on, masking the
+    misconfiguration). ``extra="forbid"`` rejects stray fields. The service
+    re-validates against the canonical ``ApprovalLevel`` enum (defense in
+    depth, and so direct service callers get the same guarantee)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    level: Literal["ASK", "TRIAGE", "TRUSTED"]
 
 
 class BulkInviteRequest(BaseModel):

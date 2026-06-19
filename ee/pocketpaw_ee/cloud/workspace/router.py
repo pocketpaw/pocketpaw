@@ -3,6 +3,12 @@
 Authorization is declared at the route level via ``require_action(...)``.
 Service module functions take ``RequestContext`` and return domain
 entities; the router maps to DTOs at the boundary.
+
+2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
+``PATCH /{workspace_id}/instinct/approval-level`` — the OWNER-only
+(``instinct.activate``) switch that activates the layered Instinct gate's
+triager for a workspace. Kept off the general PATCH route because a non-ASK
+level enables auto-approval of agent WRITE actions workspace-wide.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ from pocketpaw_ee.cloud.workspace.dto import (
     RoutePermissionsOut,
     SetMemberConnectorPermissionsRequest,
     SetMemberRoutePermissionsRequest,
+    SetApprovalLevelRequest,
     SlugAvailabilityOut,
     UpdateDomainRequest,
     UpdateMemberRoleRequest,
@@ -131,6 +138,29 @@ async def delete_workspace(
 ) -> Response:
     await workspace_service.delete(ctx, workspace_id)
     return Response(status_code=204)
+
+
+@router.patch("/{workspace_id}/instinct/approval-level", response_model=WorkspaceOut)
+async def set_instinct_approval_level(
+    workspace_id: str,
+    body: SetApprovalLevelRequest,
+    ctx: RequestContext = Depends(request_context),
+    user: User = Depends(require_action("instinct.activate")),
+) -> WorkspaceOut:
+    """Activate (or stand down) the layered Instinct gate's triager for a
+    workspace — security-review FIX 1.
+
+    A non-ASK level turns ON auto-approval of agent WRITE actions for the whole
+    workspace, so this is the most security-sensitive workspace write in the
+    gate. It is a DEDICATED route — NOT folded into the general PATCH/
+    ``UpdateWorkspaceRequest`` path — guarded by the OWNER-only
+    ``instinct.activate`` action (the strongest workspace tier). The body is a
+    closed enum (422 on anything else); the service re-validates against the
+    ``ApprovalLevel`` enum and emits a WARNING audit event with the old→new
+    level.
+    """
+    ws = await workspace_service.set_instinct_approval_level(ctx, workspace_id, body.level)
+    return workspace_to_dto(ws)
 
 
 @router.get(

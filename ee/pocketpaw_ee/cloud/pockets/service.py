@@ -184,6 +184,15 @@ rippleSpec). Fixes the agent-view misread where ``get_pocket`` returned the
 empty legacy ``widgets: []`` alongside the full rippleSpec and agents
 concluded a fully composed template pocket was "an empty shell". The
 ``widgets`` field itself is NOT removed — other consumers may rely on it.
+Changes: 2026-06-15 (feat/invoke-tool-v1) — added the per-pocket TOOL
+allowlist half (the tool analog of the RFC 05 M2a write allowlist):
+``set_pocket_tool_policy`` (owner-only setter, audit-logged, rejects when no
+backend is configured); ``_allowed_tools_wire`` renders the grants for the
+wire; ``_backend_summary_wire`` / ``get_pocket_backend`` /
+``get_pocket_backend_for_executor`` now carry ``allowed_tools`` so the
+run-tool route can read the allowlist off the credential row.
+``get_pocket_backend_for_executor`` APPENDS ``allowed_tools`` as the 9th tuple
+element (back-compatible — every existing positional destructure uses ``*_``).
 
 Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
 ``set_svelte_source_file``: rewrite ONE file in a svelte-engine pocket's
@@ -207,6 +216,16 @@ Changes: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) —
 versioned. Same additive, best-effort snapshot contract — a version-store
 failure never breaks the edit. The merge gate itself lives in the Instinct
 router (BP-3); these rows are the candidates it reviews.
+Changes: 2026-06-19 (feat/typed-ripplespec-phase1) — fixed the 2026-06-13
+rippleSpec clobber bug in ``update``. A partial ``ripple_spec`` body that
+OMITS instance-owned regions (``state`` / ``selections``) no longer wipes
+them: ``update`` now routes through ``_layer_safe_update_spec`` (a per-key
+overlay expressed via the typed ``RippleSpec`` layer split) unless the new
+``UpdatePocketRequest.reset_state`` flag is set or a ``template_slug``
+recompile is in play. The typed model is used INTERNALLY only — Beanie
+``Pocket.rippleSpec`` and ``domain.Pocket.ripple_spec`` stay ``dict``, and
+every reader still receives a flat dict (executor dual-path readers deferred
+to a Phase 2 gated on PR #1472).
 """
 
 from __future__ import annotations
@@ -236,6 +255,7 @@ from pocketpaw_ee.cloud.models.pocket_backend import ApprovalRoute as _ApprovalR
 from pocketpaw_ee.cloud.models.pocket_backend import (
     PocketBackendCredential as _BackendCredentialDoc,
 )
+from pocketpaw_ee.cloud.models.pocket_backend import ToolGrant as _ToolGrantDoc
 from pocketpaw_ee.cloud.pockets import (
     actions_ops,
     backend_crypto,
@@ -1042,6 +1062,72 @@ def _merge_compile_into_ripple_spec(
     return out
 
 
+def _layer_safe_update_spec(
+    existing_raw: dict[str, Any] | None,
+    incoming_raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge an incoming (partial) rippleSpec onto the existing one WITHOUT
+    clobbering instance-owned regions the incoming spec omits.
+
+    This is the fix for the 2026-06-13 clobber bug. The bug: ``update()`` did a
+    wholesale ``doc.rippleSpec = normalized_spec``, so a frontend ``PATCH`` that
+    sent only the template canvas (``ui`` / ``actions`` / ``sources``) WIPED the
+    instance's ``state`` / ``selections`` — and, symmetrically, a state-only
+    write would have wiped the canvas.
+
+    The merge is a per-key overlay expressed through the typed layer split:
+    the result is the EXISTING spec with every key the INCOMING spec actually
+    SET overlaid on top. A key the incoming spec omits is preserved from the
+    existing spec — whichever layer it belongs to. Concretely:
+
+      * incoming carries ``ui`` but no ``state`` (the clobber case) →
+        new ``ui``, existing ``state`` preserved.
+      * incoming carries ``state`` but no ``ui`` (a state-only edit, e.g.
+        reconcile's instance-preserve path) → new ``state``, existing ``ui``
+        preserved.
+
+    Implementation uses ``RippleSpec`` for the type boundary: we promote both
+    sides, overlay the incoming TEMPLATE layer and the incoming INSTANCE layer
+    onto the existing spec (each carries only the keys that side set, via
+    ``exclude_unset``), then overlay any remaining incoming keys (the
+    compile_template passthrough envelope — ``name`` / ``version`` / ``lifecycle``
+    / ``metadata`` / etc. the normalizer stamps) so a partial write still
+    refreshes those. ``to_flat_dict`` returns the same BSON-shaped flat dict the
+    DB already stores — no migration.
+
+    Falls back to the legacy wholesale-incoming behaviour only if the incoming
+    spec cannot be promoted (corrupt) — never silently drops the write.
+    """
+    from pocketpaw.bundled_templates import InstanceLayer, RippleSpec, TemplateLayer
+
+    existing = RippleSpec.from_flat_dict(existing_raw)
+    incoming = RippleSpec.from_flat_dict(incoming_raw)
+    if incoming is None:
+        # Incoming is unpromotable (should not happen post-normalize) — keep the
+        # historical behaviour rather than drop the caller's write.
+        return incoming_raw
+    if existing is None:
+        # No existing spec to protect (fresh pocket / unpromotable existing) —
+        # the incoming spec is authoritative.
+        return incoming.to_flat_dict()
+
+    # Overlay the incoming layers onto the existing spec. ``with_*_layer`` only
+    # applies the keys the incoming side actually set, so an omitted region is
+    # preserved from ``existing`` verbatim.
+    merged = existing.with_template_layer(incoming.template_layer)
+    merged = merged.with_instance_layer(incoming.instance_layer)
+
+    # Overlay the remaining incoming keys (passthrough + envelope the normalizer
+    # stamps: name/version/lifecycle/title/color/metadata/...). The layer fields
+    # are already handled above, so skip them to avoid re-applying.
+    layer_fields = set(TemplateLayer.model_fields) | set(InstanceLayer.model_fields)
+    flat = merged.to_flat_dict()
+    for key, value in incoming.to_flat_dict().items():
+        if key not in layer_fields:
+            flat[key] = value
+    return flat
+
+
 async def _check_template_needs(loaded: dict[str, Any] | None, workspace_id: str) -> list[str]:
     """Return the template's declared Sense ids that NO enabled connector fills.
 
@@ -1143,6 +1229,48 @@ async def resolve_pocket_template(
             exc,
         )
         return None
+
+
+async def resolve_workspace_approval_level(workspace_id: str) -> str:
+    """Return the effective layered-gate triager level for a workspace (T6).
+
+    Resolution order (design MF-9):
+      1. The workspace document's ``instinct_approval_level`` field, when set
+         to a non-empty value — the PER-WORKSPACE opt-in.
+      2. Otherwise the GLOBAL config default
+         (``Settings.instinct_approval_level``, itself "ASK").
+
+    A global env var therefore changes the default for workspaces that have
+    NOT set their own field — it can never silently upgrade a workspace that
+    relies on the default away from "ASK" once that workspace sets its own
+    value. Any read failure falls back to the global default (and ultimately
+    "ASK"), so a DB hiccup can never accidentally activate the triager.
+
+    Returns a bare string ("ASK" | "TRIAGE" | "TRUSTED"); ``gate_action``
+    coerces it onto the enum and treats an unknown value as ASK.
+    """
+    from pocketpaw.config import get_settings
+
+    try:
+        global_default = str(get_settings().instinct_approval_level or "ASK")
+    except Exception:  # noqa: BLE001 — config read failure → dormant
+        global_default = "ASK"
+
+    if not workspace_id:
+        return global_default
+
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    try:
+        ws = await Workspace.get(PydanticObjectId(workspace_id))
+    except Exception:  # noqa: BLE001 — malformed id / read failure → global default
+        return global_default
+    if ws is None:
+        return global_default
+    field = getattr(ws, "instinct_approval_level", None)
+    if isinstance(field, str) and field:
+        return field
+    return global_default
 
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1574,22 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     if body.visibility is not None:
         doc.visibility = body.visibility
     if normalized_spec is not None:
-        doc.rippleSpec = normalized_spec
+        # Clobber-fix (2026-06-13 bug): a partial ``ripple_spec`` body that
+        # OMITS instance-owned regions (state / selections) must NOT wipe them.
+        # Three branches, in priority order:
+        #   1. ``reset_state`` — explicit caller intent to clear instance state.
+        #      Wholesale write (the legacy behaviour, now opt-in).
+        #   2. ``template_slug`` — the recompile path already ran ownership-aware
+        #      ``_merge_compile_into_ripple_spec`` against ``doc.rippleSpec``,
+        #      so the merged result is authoritative — write it wholesale.
+        #   3. default (user / frontend partial PATCH) — layer-safe merge that
+        #      preserves the existing instance layer for any region the incoming
+        #      spec omits (and, symmetrically, the template layer on a
+        #      state-only write).
+        if body.reset_state or body.template_slug is not None:
+            doc.rippleSpec = normalized_spec
+        else:
+            doc.rippleSpec = _layer_safe_update_spec(doc.rippleSpec, normalized_spec)
     if body.template_slug is not None:
         doc.template_slug = body.template_slug
     if body.project_id is not None:
@@ -4024,7 +4167,25 @@ async def set_pocket_backend(
         _BackendCredentialDoc.pocket_id == pocket_id,
         _BackendCredentialDoc.workspace_id == workspace_id,
     )
+    # T12 (layered/learning gate, design M-5) — detect a backend IDENTITY
+    # change so the trust ledger can be invalidated below. The identity is
+    # (backend_type, base_url, connector_name): a pocket that swaps which
+    # backend it points at must NOT inherit the prior backend's earned
+    # auto-approve trust (anti-gaming — a low-trust backend can't borrow a
+    # trusted one's score by re-pointing the URL). Compared on the EXISTING
+    # row BEFORE the overwrite. A first-time config (no existing row) earned
+    # nothing, so it never resets. A token rotation that keeps the same URL
+    # is NOT an identity change and does not reset.
+    backend_changed = False
     if existing is not None:
+        old_identity = (
+            getattr(existing, "backend_type", "http"),
+            existing.base_url,
+            getattr(existing, "connector_name", None),
+        )
+        new_identity = (backend_type, base_url, connector_name)
+        backend_changed = old_identity != new_identity
+
         existing.backend_type = backend_type
         existing.connector_name = connector_name
         existing.base_url = base_url
@@ -4047,6 +4208,22 @@ async def set_pocket_backend(
             nonce=nonce,
             salt=salt,
         ).insert()
+
+    # T12 — invalidate earned trust when the backend identity changed. Done
+    # AFTER the credential save so a save failure never leaves a reset marker
+    # for a backend that did not actually change. Best-effort: a trust-ledger
+    # write failure must not fail backend configuration (the more important
+    # operation succeeded). The lazy import keeps this module's static import
+    # graph free of the pure ledger helper.
+    if backend_changed:
+        try:
+            from pocketpaw_ee.cloud.pockets import trust_ledger
+
+            await trust_ledger.reset_pocket_trust(workspace_id, pocket_id)
+        except Exception:  # noqa: BLE001 — trust reset is best-effort
+            logger.warning(
+                "trust reset failed after backend change for pocket %s", pocket_id, exc_info=True
+            )
 
     _audit_backend_config(
         actor=user_id,
@@ -4081,6 +4258,17 @@ def _allowed_writes_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
     return out
 
 
+def _allowed_tools_wire(doc: _BackendCredentialDoc) -> list[dict[str, str]]:
+    """Render a backend doc's ``allowed_tools`` as plain wire dicts.
+
+    Each grant is ``{tool}``. A row written before feat/invoke-tool-v1 has no
+    ``allowed_tools`` attribute — ``getattr`` defaults it to an empty list
+    (fail-closed: no ``invoke_tool`` fires). Parallel to ``_allowed_writes_wire``.
+    """
+    grants = getattr(doc, "allowed_tools", None) or []
+    return [{"tool": g.tool} for g in grants]
+
+
 def _approval_route_wire(doc: _BackendCredentialDoc) -> dict[str, str | None] | None:
     """Render a backend doc's ``approval_route`` as a plain wire dict.
 
@@ -4099,9 +4287,10 @@ def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
     """Render the full NON-SECRET backend summary for a credential row.
 
     The ONE place the wire summary is shaped so ``get_pocket_backend`` and the
-    write-policy / approval-route setters never drift. NEVER includes the
-    token. ``backend_type`` / ``connector_name`` come via ``getattr`` defaults
-    so a legacy row reads as an http backend — back-compatible.
+    write-policy / tool-policy / approval-route setters never drift. NEVER
+    includes the token. ``backend_type`` / ``connector_name`` / ``allowed_tools``
+    come via ``getattr`` defaults so a legacy row reads as an http backend with
+    no tool grants — back-compatible.
     """
     return {
         "backend_type": getattr(doc, "backend_type", "http"),
@@ -4110,6 +4299,7 @@ def _backend_summary_wire(doc: _BackendCredentialDoc) -> dict:
         "auth_type": doc.auth_type,
         "configured": True,
         "allowed_writes": _allowed_writes_wire(doc),
+        "allowed_tools": _allowed_tools_wire(doc),
         "approval_route": _approval_route_wire(doc),
     }
 
@@ -4119,8 +4309,9 @@ async def get_pocket_backend(workspace_id: str, pocket_id: str) -> dict | None:
 
     NEVER returns the token — only ``backend_type`` / ``connector_name`` /
     ``base_url`` / ``auth_type`` / ``configured`` / ``allowed_writes`` (the
-    write allowlist) / ``approval_route`` (the gated-write approver routing;
-    ``None`` when unset). All owner/editor-facing non-secrets.
+    write allowlist) / ``allowed_tools`` (the tool allowlist) /
+    ``approval_route`` (the gated-write approver routing; ``None`` when unset).
+    All owner/editor-facing non-secrets.
 
     ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
     row written before this feature reads as ``backend_type="http"`` /
@@ -4147,23 +4338,29 @@ async def get_pocket_backend_for_executor(
         dict[str, str | None] | None,
         str,
         str | None,
+        list[dict[str, str]],
     ]
     | None
 ):
     """Internal — return ``(base_url, auth_type, auth_header, token,
-    allowed_writes, approval_route, backend_type, connector_name)``.
+    allowed_writes, approval_route, backend_type, connector_name,
+    allowed_tools)``.
 
     Decrypts the stored token (http backends only; a connector backend has no
-    token). Used by the run-sources route handler (which now also reads the
-    trailing ``backend_type`` / ``connector_name`` to route the run), the
-    run-action route handler (it needs ``allowed_writes`` / ``approval_route``),
-    and ``instinct_bridge`` / ``temporal_dispatcher`` / ``bulk_dispatch`` (which
-    ignore the trailing elements). Returns ``None`` when the pocket has no
-    backend configured. The plaintext token must never be logged or returned to
-    a client.
+    token). Used by the run-sources route handler (which reads
+    ``backend_type`` / ``connector_name`` to route the run), the run-action
+    route handler (it needs ``allowed_writes`` / ``approval_route``), the
+    run-tool route handler (it needs ``allowed_tools`` / ``backend_type`` /
+    ``connector_name``), and ``instinct_bridge`` / ``temporal_dispatcher`` /
+    ``bulk_dispatch`` (which ignore the trailing elements via ``*_``). Returns
+    ``None`` when the pocket has no backend configured. The plaintext token
+    must never be logged or returned to a client.
 
-    ``backend_type`` / ``connector_name`` come via ``getattr`` defaults so a
-    legacy row reads as ``"http"`` / ``None`` — back-compatible.
+    ``allowed_tools`` is appended LAST (the 9th element, feat/invoke-tool-v1)
+    so every existing positional destructure that uses ``*_`` / fixed slices
+    is byte-identical — appending a trailing element is back-compatible.
+    ``backend_type`` / ``connector_name`` / ``allowed_tools`` come via
+    ``getattr`` defaults so a legacy row reads as ``"http"`` / ``None`` / ``[]``.
     """
     doc = await _BackendCredentialDoc.find_one(
         _BackendCredentialDoc.pocket_id == pocket_id,
@@ -4184,6 +4381,7 @@ async def get_pocket_backend_for_executor(
         _approval_route_wire(doc),
         getattr(doc, "backend_type", "http"),
         getattr(doc, "connector_name", None),
+        _allowed_tools_wire(doc),
     )
 
 
@@ -4231,6 +4429,56 @@ async def set_pocket_write_policy(
         auth_type=doc.auth_type,
     )
     # no-event: backend credentials (and the write policy on them) are a
+    # separate collection, not pocket state — no downstream handler keys
+    # off a PocketUpdated for them.
+    return _backend_summary_wire(doc)
+
+
+async def set_pocket_tool_policy(
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    allowed_tools: list[dict[str, str]],
+) -> dict:
+    """Replace the pocket's tool allowlist (feat/invoke-tool-v1). Owner-only.
+
+    ``allowed_tools`` is a list of ``{tool}`` grants — each ``tool`` is a
+    built-in tool name or a connector action ``connector:<name>:<action>``.
+    The list lives on the backend-credential row — OUTSIDE the spec — so the
+    agent (which authors the spec) cannot grant itself a tool. An empty list
+    is valid and revokes every tool (fail-closed). Mirrors
+    ``set_pocket_write_policy`` exactly.
+
+    Rejects with ``pocket_backend.not_configured`` if the pocket has no
+    backend configured: a tool policy with no backend to apply it to is
+    meaningless, and silently storing one would mask the misconfiguration.
+    The mutation is audit-logged via the ``_audit_backend_config`` path.
+    """
+    doc = await _BackendCredentialDoc.find_one(
+        _BackendCredentialDoc.pocket_id == pocket_id,
+        _BackendCredentialDoc.workspace_id == workspace_id,
+    )
+    if doc is None:
+        raise ValidationError(
+            "pocket_backend.not_configured",
+            "This pocket has no backend configured — set one before a tool policy",
+        )
+
+    # `model_validate` re-checks each grant at runtime — the router already
+    # validated through `ToolGrantDTO`, but internal callers (bus handlers,
+    # jobs) re-parse here, matching the entry-point validation rule.
+    doc.allowed_tools = [_ToolGrantDoc.model_validate(grant) for grant in allowed_tools]
+    await doc.save()
+
+    _audit_backend_config(
+        actor=user_id,
+        action="pocket.backend.tool_policy",
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        base_url=doc.base_url,
+        auth_type=doc.auth_type,
+    )
+    # no-event: backend credentials (and the tool policy on them) are a
     # separate collection, not pocket state — no downstream handler keys
     # off a PocketUpdated for them.
     return _backend_summary_wire(doc)
