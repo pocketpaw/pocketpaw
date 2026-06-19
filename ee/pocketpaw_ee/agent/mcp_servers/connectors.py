@@ -108,6 +108,7 @@ CONNECTOR_TOOL_IDS = (
     SENSE_EXECUTE_TOOL_ID,
 )
 
+
 def _error_response(message: str) -> dict[str, Any]:
     """Build an MCP error response in the shape the SDK expects."""
     return {

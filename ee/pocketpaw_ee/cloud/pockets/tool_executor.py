@@ -227,9 +227,7 @@ async def _run_connector_tool(
         pocket_id=pocket_id or None,
     )
     try:
-        result = await connectors_service.execute(
-            workspace_id, conn_name, body, user_id=user_id
-        )
+        result = await connectors_service.execute(workspace_id, conn_name, body, user_id=user_id)
     except CloudError as exc:
         return {
             "ok": False,
