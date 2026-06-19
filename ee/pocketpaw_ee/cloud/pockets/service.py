@@ -500,6 +500,33 @@ def _build_widget_doc(payload: dict) -> _WidgetDoc:
     )
 
 
+async def _resolve_user_ids(user_ids: list[str]) -> dict[str, dict]:
+    """Batch-resolve user IDs to wire-format ``{_id, fullName, email}``
+    dicts. Returns a ``{user_id: resolved_dict}`` map. Unknown IDs are
+    omitted so callers can key on presence."""
+    if not user_ids:
+        return {}
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    oids: list[PydanticObjectId] = []
+    for uid in user_ids:
+        try:
+            oids.append(PydanticObjectId(uid))
+        except Exception:
+            continue
+    if not oids:
+        return {}
+    users = await _UserDoc.find({"_id": {"$in": oids}}).to_list()
+    return {
+        str(u.id): {
+            "_id": str(u.id),
+            "fullName": getattr(u, "full_name", "") or "",
+            "email": getattr(u, "email", "") or "",
+        }
+        for u in users
+    }
+
+
 async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
     """Build the wire dict with rippleSpec ``$source`` markers resolved
     against ``viewer_user_id``'s workspace context.
@@ -514,6 +541,10 @@ async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
     pass the doc's owner; this can over-share owner's private pockets to
     other recipients (metadata only). Tracked for v2: per-recipient
     resolution or frontend refetch on event receipt.
+
+    Also resolves the ``team`` field from raw user IDs to user objects
+    so the frontend can display member names/avatars without a second
+    lookup.
     """
     import dataclasses
 
@@ -538,7 +569,20 @@ async def _resolved_wire_dict(doc: _PocketDoc, viewer_user_id: str) -> dict:
                 str(doc.id),
                 exc_info=True,
             )
-    return pocket_to_wire_dict(pocket)
+    wire = pocket_to_wire_dict(pocket)
+
+    # Resolve team member IDs to user objects for the frontend.
+    raw_team: list = wire.get("team", [])
+    if raw_team:
+        # Only resolve if team contains raw string IDs (not already objects).
+        if raw_team and isinstance(raw_team[0], str):
+            resolved_map = await _resolve_user_ids(raw_team)
+            wire["team"] = [
+                resolved_map.get(uid, {"_id": uid, "fullName": "Unknown", "email": ""})
+                for uid in raw_team
+            ]
+
+    return wire
 
 
 async def _pocket_event_payload(
@@ -2055,17 +2099,60 @@ async def remove_collaborator(pocket_id: str, user_id: str, target_user_id: str)
 # ---------------------------------------------------------------------------
 
 
-async def add_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
+async def _is_workspace_admin_or_owner(workspace_id: str, user_id: str) -> bool:
+    """Return ``True`` if the user has ``owner`` or ``admin`` role in the
+    given workspace. Does NOT raise on missing membership — returns ``False``
+    so callers can chain this with other checks."""
+    from pocketpaw_ee.cloud.models.user import User as _UserDoc
+
+    try:
+        oid = PydanticObjectId(user_id)
+    except Exception:
+        return False
+    user = await _UserDoc.get(oid)
+    if user is None or not getattr(user, "workspaces", None):
+        return False
+    for m in user.workspaces:
+        if m.workspace == workspace_id and m.role in ("owner", "admin"):
+            return True
+    return False
+
+
+async def add_team_member(
+    pocket_id: str,
+    user_id: str,
+    member_id: str,
+    actor_workspace_id: str | None = None,
+) -> dict:
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    # For private pockets, only workspace admins/owner may add members.
+    if doc.visibility == "private" and actor_workspace_id:
+        if not await _is_workspace_admin_or_owner(actor_workspace_id, user_id):
+            raise Forbidden(
+                "pocket.admin_required",
+                "Only workspace owner or admin can add members to a private pocket",
+            )
     await _mutate_list_field(pocket_id, "team", member_id, "add")
     doc = await _fetch_pocket(pocket_id)
     return await _resolved_wire_dict(doc, user_id)
 
 
-async def remove_team_member(pocket_id: str, user_id: str, member_id: str) -> dict:
+async def remove_team_member(
+    pocket_id: str,
+    user_id: str,
+    member_id: str,
+    actor_workspace_id: str | None = None,
+) -> dict:
     doc = await _fetch_pocket(pocket_id)
     _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+    # For private pockets, only workspace admins/owner may remove members.
+    if doc.visibility == "private" and actor_workspace_id:
+        if not await _is_workspace_admin_or_owner(actor_workspace_id, user_id):
+            raise Forbidden(
+                "pocket.admin_required",
+                "Only workspace owner or admin can remove members from a private pocket",
+            )
     await _mutate_list_field(pocket_id, "team", member_id, "remove")
     doc = await _fetch_pocket(pocket_id)
     return await _resolved_wire_dict(doc, user_id)

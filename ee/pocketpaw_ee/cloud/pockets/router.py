@@ -1390,6 +1390,43 @@ async def remove_team_member(
 
 
 # ---------------------------------------------------------------------------
+# Members — frontend-facing aliases for team management
+# Uses workspace admin/owner check for private pockets.
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{pocket_id}/members")
+async def add_pocket_member(
+    pocket_id: str,
+    body: dict,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> dict:
+    return await pockets_service.add_team_member(
+        pocket_id,
+        user_id,
+        body.get("userId", body.get("member_id")),
+        actor_workspace_id=workspace_id,
+    )
+
+
+@router.delete("/{pocket_id}/members/{member_id}", status_code=204)
+async def remove_pocket_member(
+    pocket_id: str,
+    member_id: str,
+    user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
+) -> Response:
+    await pockets_service.remove_team_member(
+        pocket_id,
+        user_id,
+        member_id,
+        actor_workspace_id=workspace_id,
+    )
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
 
