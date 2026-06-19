@@ -1375,8 +1375,14 @@ async def add_team_member(
     pocket_id: str,
     body: dict,
     user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> dict:
-    return await pockets_service.add_team_member(pocket_id, user_id, body["member_id"])
+    return await pockets_service.add_team_member(
+        pocket_id,
+        user_id,
+        body["member_id"],
+        actor_workspace_id=workspace_id,
+    )
 
 
 @router.delete("/{pocket_id}/team/{member_id}", status_code=204)
@@ -1384,8 +1390,14 @@ async def remove_team_member(
     pocket_id: str,
     member_id: str,
     user_id: str = Depends(current_user_id),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> Response:
-    await pockets_service.remove_team_member(pocket_id, user_id, member_id)
+    await pockets_service.remove_team_member(
+        pocket_id,
+        user_id,
+        member_id,
+        actor_workspace_id=workspace_id,
+    )
     return Response(status_code=204)
 
 

@@ -467,6 +467,8 @@ def _check_domain_owner(domain_pocket: Pocket, user_id: str) -> None:
 def _check_domain_edit_access(domain_pocket: Pocket, user_id: str) -> None:
     if domain_pocket.owner == user_id:
         return
+    if user_id in domain_pocket.team:
+        return
     if user_id in domain_pocket.shared_with:
         return
     if domain_pocket.visibility == "workspace":
@@ -1318,7 +1320,8 @@ async def list_pockets(
     project_id: str | None = None,
     exclude_pocket_ids: set[str] | None = None,
 ) -> list[dict]:
-    """List pockets visible to the user (owned, shared_with, or workspace-visible).
+    """List pockets visible to the user (owned, team member, shared_with,
+    or workspace-visible).
 
     Each returned pocket has its rippleSpec ``$source`` markers resolved
     against ``user_id``'s context — the desktop client renders the canvas
@@ -1346,6 +1349,7 @@ async def list_pockets(
         "workspace": workspace_id,
         "$or": [
             {"owner": user_id},
+            {"team": user_id},
             {"shared_with": user_id},
             {"visibility": "workspace"},
         ],
@@ -1369,7 +1373,8 @@ async def list_pockets(
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
-    """Get a single pocket. Access check: owner, shared_with, or workspace-visible.
+    """Get a single pocket. Access check: owner, team member, shared_with,
+    or workspace-visible.
 
     rippleSpec $source markers are resolved on read against the calling user's
     workspace context.
@@ -1378,6 +1383,7 @@ async def get(pocket_id: str, user_id: str) -> dict:
     pocket = _pocket_to_domain(doc)
     if (
         pocket.owner != user_id
+        and user_id not in pocket.team
         and user_id not in pocket.shared_with
         and pocket.visibility == "private"
     ):
@@ -2125,13 +2131,17 @@ async def add_team_member(
     actor_workspace_id: str | None = None,
 ) -> dict:
     doc = await _fetch_pocket(pocket_id)
-    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
-    # For private pockets, only workspace admins/owner may add members.
-    if doc.visibility == "private" and actor_workspace_id:
-        if not await _is_workspace_admin_or_owner(actor_workspace_id, user_id):
+    pocket = _pocket_to_domain(doc)
+    # Only the pocket owner or a workspace admin/owner may manage team
+    # membership. Team members cannot grant permissions to others.
+    if pocket.owner != user_id:
+        if not actor_workspace_id or not await _is_workspace_admin_or_owner(
+            actor_workspace_id,
+            user_id,
+        ):
             raise Forbidden(
                 "pocket.admin_required",
-                "Only workspace owner or admin can add members to a private pocket",
+                "Only the pocket owner or a workspace admin can manage membership",
             )
     await _mutate_list_field(pocket_id, "team", member_id, "add")
     doc = await _fetch_pocket(pocket_id)
@@ -2145,13 +2155,17 @@ async def remove_team_member(
     actor_workspace_id: str | None = None,
 ) -> dict:
     doc = await _fetch_pocket(pocket_id)
-    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
-    # For private pockets, only workspace admins/owner may remove members.
-    if doc.visibility == "private" and actor_workspace_id:
-        if not await _is_workspace_admin_or_owner(actor_workspace_id, user_id):
+    pocket = _pocket_to_domain(doc)
+    # Only the pocket owner or a workspace admin/owner may manage team
+    # membership. Team members cannot remove others.
+    if pocket.owner != user_id:
+        if not actor_workspace_id or not await _is_workspace_admin_or_owner(
+            actor_workspace_id,
+            user_id,
+        ):
             raise Forbidden(
                 "pocket.admin_required",
-                "Only workspace owner or admin can remove members from a private pocket",
+                "Only the pocket owner or a workspace admin can manage membership",
             )
     await _mutate_list_field(pocket_id, "team", member_id, "remove")
     doc = await _fetch_pocket(pocket_id)
@@ -2264,8 +2278,8 @@ async def _agent_load_doc(pocket_id: str) -> tuple[_PocketDoc | None, str | None
 
 
 async def has_edit_access(pocket_id: str, user_id: str) -> bool:
-    """Return ``True`` if ``user_id`` may edit the pocket — owner,
-    explicit shared_with, or workspace-visible. Raises ``NotFound`` if
+    """Return ``True`` if ``user_id`` may edit the pocket — owner, team
+    member, explicit shared_with, or workspace-visible. Raises ``NotFound`` if
     the pocket doesn't exist.
 
     Used by the ``require_pocket_edit`` FastAPI guard so the Pocket
@@ -2281,6 +2295,8 @@ async def has_edit_access(pocket_id: str, user_id: str) -> bool:
         raise NotFound("pocket", pocket_id)
 
     if doc.owner == user_id:
+        return True
+    if user_id in (doc.team or []):
         return True
     if user_id in (doc.shared_with or []):
         return True
