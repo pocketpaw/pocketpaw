@@ -308,6 +308,16 @@ source_modules = [
     # ``outcomes.service``. Receives backend creds + bindings by
     # parameter — never imports a Beanie document class directly.
     "pocketpaw_ee.cloud.pockets.saga",
+    # Layered/learning Instinct gate foundation (2026-06-18 design). Three
+    # pure helper modules for the 4-lane triage router. None writes a
+    # Beanie document: ``instinct_triage`` is a pure classifier (no I/O),
+    # ``trust_ledger`` reads/writes a JSONL sidecar under ~/.pocketpaw, and
+    # ``instinct_compensation_registry`` is an in-memory TTL registry that
+    # persists expired handles to a JSONL sidecar. The gate's Beanie writes
+    # still go exclusively through ``instinct_approvals.service``.
+    "pocketpaw_ee.cloud.pockets.instinct_triage",
+    "pocketpaw_ee.cloud.pockets.trust_ledger",
+    "pocketpaw_ee.cloud.pockets.instinct_compensation_registry",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",

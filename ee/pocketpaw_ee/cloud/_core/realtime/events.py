@@ -803,6 +803,20 @@ class InstinctApprovalRejected(Event):
     EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
 
 
+# Layered/learning Instinct gate (2026-06-18 design / T3). Emitted by
+# ``instinct_approvals.service.auto_approve`` when the AUTO lane decides a
+# write WITHOUT a human — a row is created already-decided
+# (status="auto_approved"). Distinct from ``InstinctApprovalApproved``,
+# which fires only on a human's approve action; this one always carries
+# ``actor="system:triager"`` so the UI renders it with a robot icon and the
+# human-pending tray (which filters on status="pending") never shows it.
+# ``data`` carries the approval id + workspace/pocket context plus
+# ``trust_score``, ``triager_reasoning`` and ``lane`` for the audit trail.
+@dataclass
+class InstinctApprovalAutoApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.auto_approved"
+
+
 # Bulk action dispatch (RFC 03 v2 / Wave 3b). Emitted by
 # ``pockets.service.dispatch_bulk_action`` after a fan-out call resolves —
 # one event per dispatch, regardless of how many rows were processed.
