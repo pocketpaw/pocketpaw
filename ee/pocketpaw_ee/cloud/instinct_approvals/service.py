@@ -4,6 +4,13 @@
 # level ``async def`` API per EE cloud rule 5. Every state-mutating
 # function:
 #
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 3) —
+# ``list_approvals`` now honors optional ``action_name`` + ``row_id`` query
+# filters. The gate's BATCH dedup pushes them into the Mongo query so a pocket
+# with more pending rows than the page ``limit`` can no longer bury a duplicate
+# match past the page boundary (the old code listed + matched in Python and
+# could miss the row, stacking a duplicate pending approval).
+#
 # Updated: 2026-06-18 (feat/instinct-gate-foundation, T3) — added
 # ``auto_approve``, the layered/learning gate's AUTO-lane writer. It
 # inserts a row ALREADY-DECIDED (``status="auto_approved"``,
@@ -216,6 +223,13 @@ async def list_approvals(
         query["status"] = body.status
     if body.pocket_id:
         query["pocket_id"] = body.pocket_id
+    # Server-side dedup filters (security-review FIX 3). When the gate's BATCH
+    # dedup passes action_name + row_id, the DB does the matching so a pocket
+    # with more pending rows than ``limit`` can't bury the match past the page.
+    if body.action_name:
+        query["action_name"] = body.action_name
+    if body.row_id:
+        query["row_id"] = body.row_id
     cursor = (
         _ApprovalDoc.find(query).sort(-_ApprovalDoc.createdAt).limit(body.limit)  # type: ignore[operator]
     )

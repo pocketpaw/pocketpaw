@@ -411,6 +411,68 @@ async def test_batch_dedup_returns_existing_pending(recording_bus) -> None:
 
 
 # ===========================================================================
+# T-26b / FIX 3 — BATCH dedup must survive a pocket with MANY pending rows.
+# `_find_existing_pending_id` previously listed pending rows (default limit
+# 50) and matched in Python; a pocket with >50 pending rows could push the
+# target row past the limit, so the second escalate for the SAME row would
+# miss it and stack a duplicate. The fix pushes action_name + row_id into the
+# query filter so the DB finds the row regardless of how many others exist.
+# ===========================================================================
+
+
+async def test_batch_dedup_survives_many_pending_rows(recording_bus) -> None:
+    """FIX 3: with 60 OTHER pending rows already on the pocket (more than the
+    list default limit of 50), a re-escalate of the same (pocket, action, row)
+    still finds the existing pending row and returns its id — no duplicate."""
+    template = _escalate_template()
+
+    # First: the row we care about — creates ONE pending row.
+    target = dict(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="p1",
+        template=template,
+        action_name="do_thing",
+        row_context={"value": 1},
+        row_id="row-target",
+        park={"action": "do_thing", "method": "POST", "path": "/items"},
+        now=FROZEN_NOW,
+    )
+    first = await instinct_dispatch.gate_action(**target)
+    assert first.next_step == "pending_approval"
+
+    # Now flood the SAME pocket with 60 other distinct pending rows so the
+    # target row is no longer in the first page of a limit-50 list query.
+    for i in range(60):
+        await instinct_dispatch.gate_action(
+            workspace_id="w1",
+            user_id="u1",
+            pocket_id="p1",
+            template=template,
+            action_name="do_thing",
+            row_context={"value": 1},
+            row_id=f"row-noise-{i}",
+            park={"action": "do_thing", "method": "POST", "path": "/items"},
+            now=FROZEN_NOW,
+        )
+
+    # Re-escalate the ORIGINAL row. It must dedup to the first row's id even
+    # though 60 newer pending rows would otherwise bury it past the limit.
+    second = await instinct_dispatch.gate_action(**target)
+    assert second.next_step == "pending_approval"
+    assert second.approval_id == first.approval_id, (
+        "dedup missed the target row because it fell past the list limit"
+    )
+
+    # Exactly 61 distinct pending rows total — the target deduped, not stacked.
+    all_pending = await approvals_service.list_approvals(
+        "w1", "u1", {"status": "pending", "limit": 200}
+    )
+    target_rows = [r for r in all_pending if r.get("row_id") == "row-target"]
+    assert len(target_rows) == 1, "the target row was duplicated, not deduped"
+
+
+# ===========================================================================
 # T-35 / T9 — outcomes/service must NOT call trust_ledger (correctness guard).
 # The trust loop is written at EXACTLY ONE site (instinct_bridge, T8); a
 # second write from the outcomes path would self-poison the score by

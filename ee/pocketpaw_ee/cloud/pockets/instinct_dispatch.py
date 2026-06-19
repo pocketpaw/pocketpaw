@@ -1,4 +1,11 @@
 # ee/pocketpaw_ee/cloud/pockets/instinct_dispatch.py
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 3) —
+# `_find_existing_pending_id` now pushes the (action_name, row_id) match INTO
+# the approvals query (limit=1) instead of paging a default list and matching
+# in Python. A pocket with more pending rows than the page limit could bury the
+# target row, the scan would miss it, and the BATCH lane would stack a
+# DUPLICATE pending row. The DB-side filter makes dedup correct at any volume.
+#
 # Updated: 2026-06-19 (feat/instinct-gate-integration, T6/T11) — wired the
 # layered/learning gate LIVE. `gate_action` now takes `approval_level`
 # (default ASK = dormant) and `dry_run_mode` (default False), and after an
@@ -240,20 +247,35 @@ async def _find_existing_pending_id(
 
     Two escalating gate calls for the SAME row (a flapping rule, a retried
     dispatch, a bulk fan-out hitting the same row twice) must not stack N
-    pending rows in the human tray — the human decides the row ONCE. We scope
-    by ``(pocket_id, status="pending")`` and match the action + row in
-    Python (the list query has no row_id filter today). An empty ``row_id``
-    is NOT deduped — a row-less escalate has no stable identity to group on,
-    so it falls through to a fresh row (the conservative choice).
+    pending rows in the human tray — the human decides the row ONCE.
+
+    Security-review FIX 3: the match is now pushed INTO the query
+    (``action_name`` + ``row_id`` filters) with ``limit=1``, instead of listing
+    a default page of pending rows and matching in Python. A pocket with more
+    pending rows than the list page (default 50) could otherwise bury the
+    target row past the page boundary, the Python scan would miss it, and the
+    gate would stack a DUPLICATE pending row — exactly the dedup the lane is
+    meant to prevent. Letting Mongo do the match makes dedup correct regardless
+    of how many other pending rows the pocket carries.
+
+    An empty ``row_id`` is NOT deduped — a row-less escalate has no stable
+    identity to group on, so it falls through to a fresh row (conservative).
     """
     if not row_id:
         return None
     existing = await approvals_service.list_approvals(
-        workspace_id, user_id, {"pocket_id": pocket_id, "status": "pending"}
+        workspace_id,
+        user_id,
+        {
+            "pocket_id": pocket_id,
+            "status": "pending",
+            "action_name": action_name,
+            "row_id": row_id,
+            "limit": 1,
+        },
     )
-    for row in existing:
-        if row.get("action_name") == action_name and row.get("row_id") == row_id:
-            return row.get("id")
+    if existing:
+        return existing[0].get("id")
     return None
 
 

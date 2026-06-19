@@ -188,3 +188,45 @@ def test_proposal_is_frozen() -> None:
     p = _proposal()
     with pytest.raises(ValidationError):
         p.trust_score = 0.1  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# DELETE-floor guard (security-review FIX 2). The explicit DELETE check in
+# classify_lane is the hardest blast-radius floor: a DELETE must NEVER reach
+# OPTIMISTIC or AUTO — not even with a CompensateSpec AND perfect trust AND a
+# warm history. A future refactor that "simplifies" the DELETE check into
+# _is_high_blast would silently let a compensate lift a DELETE to OPTIMISTIC
+# (the financial-keyword floor permits that). This test pins the floor so that
+# refactor fails loudly. Do NOT delete or weaken it.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_floor_compensate_perfect_trust_triage_still_escalates() -> None:
+    """DELETE + CompensateSpec + trust_score=1.0 + TRIAGE + proposed_count=5
+    → ESCALATE. The delete floor overrides every promotion signal: an
+    "undelete" compensate is not a truthful inverse, so a DELETE always goes
+    to a human regardless of trust or warmup. Pins design rule that the
+    DELETE branch stays SEPARATE from _is_high_blast (the financial floor)."""
+    p = _proposal(
+        method="DELETE",
+        path="/items/42",
+        compensate=_compensate(),
+        trust_score=1.0,
+        proposed_count=5,
+        approval_level=ApprovalLevel.TRIAGE,
+    )
+    assert classify_lane(p) == TriageLane.ESCALATE
+
+
+def test_delete_floor_holds_at_trusted_level() -> None:
+    """Even at the (reserved) TRUSTED level, DELETE + compensate + max trust
+    escalates — the floor is independent of activation level."""
+    p = _proposal(
+        method="DELETE",
+        path="/items/42",
+        compensate=_compensate(),
+        trust_score=1.0,
+        proposed_count=99,
+        approval_level=ApprovalLevel.TRUSTED,
+    )
+    assert classify_lane(p) == TriageLane.ESCALATE

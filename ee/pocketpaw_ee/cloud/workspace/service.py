@@ -47,6 +47,14 @@ workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
 Forbidden (workspace.branding_asset_not_owned). accent_color format is
 validated upstream by BrandingPatch (422). _workspace_to_domain now carries
 branding through to the domain object so it serializes onto WorkspaceOut.
+2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
+set_instinct_approval_level() — the dedicated, OWNER-gated writer for a
+workspace's layered-Instinct-gate triager level. Validates against the
+ApprovalLevel enum (422 on a bad value, nothing written), kept off the
+general update() path on purpose (a non-ASK level enables auto-approval of
+agent writes), and emits a WARNING-severity append-only audit event with the
+old→new level. The write goes through this service per the import-linter
+Beanie-writes-only-from-service contract.
 """
 
 from __future__ import annotations
@@ -65,6 +73,7 @@ from pocketpaw_ee.cloud._core.errors import (
     Forbidden,
     NotFound,
     SeatLimitError,
+    ValidationError,
 )
 from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -427,6 +436,98 @@ async def update(
         target_type="workspace",
         target_id=workspace_id,
         metadata={"patched": patched},
+    )
+
+    count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=count)
+
+
+def _audit_approval_level_change(
+    *, actor: str, workspace_id: str, old_level: str, new_level: str
+) -> None:
+    """Append-only audit of the layered-gate activation switch (security FIX 1).
+
+    Setting a non-ASK ``instinct_approval_level`` turns ON auto-approval of
+    agent WRITE actions for the workspace — the single most security-sensitive
+    governance switch in the gate. Emitted at WARNING severity (a
+    state-changing, potentially-dangerous op, mirroring ``action_executor.
+    _audit_action_run``) carrying actor + workspace_id + old→new level so the
+    flip is loud and attributable. Audit failure must never break the write, so
+    the whole call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="instinct.approval_level.set",
+                target=workspace_id,
+                status="changed" if old_level != new_level else "unchanged",
+                category="instinct_activation",
+                workspace_id=workspace_id,
+                old_level=old_level,
+                new_level=new_level,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the activation write
+        logger.warning("instinct approval-level audit-log write failed", exc_info=True)
+
+
+async def set_instinct_approval_level(
+    ctx: RequestContext,
+    workspace_id: str,
+    level: str,
+) -> Workspace:
+    """Set a workspace's layered-Instinct-gate triager activation level.
+
+    The DEDICATED writer for the activation switch (security-review FIX 1).
+    Kept off the general ``UpdateWorkspaceRequest``/PATCH path on purpose: a
+    non-ASK level enables AUTO-APPROVAL of agent WRITE actions workspace-wide,
+    so it gets its own OWNER-only route (``instinct.activate``) and its own
+    loud WARNING audit trail, never folded into the routine workspace patch.
+
+    ``level`` is validated against the canonical ``ApprovalLevel`` enum here
+    (defense in depth — the DTO already constrains it at the route boundary).
+    An out-of-enum value raises ``ValidationError`` (422) and NOTHING is
+    written: the level must fail loudly, never be coerced to a fallback that
+    silently parks a typo on the document (the gate would then read it and
+    route ASK, masking the misconfiguration). The write goes through this
+    service per the import-linter contract (Beanie writes only from
+    ``service.py``). Emits a WARNING audit event carrying old→new level.
+    """
+    from pocketpaw_ee.cloud.pockets.instinct_triage import ApprovalLevel
+
+    valid = {lvl.value for lvl in ApprovalLevel}
+    if level not in valid:
+        raise ValidationError(
+            "workspace.invalid_approval_level",
+            f"approval level {level!r} must be one of {sorted(valid)}",
+        )
+
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    old_level = doc.instinct_approval_level or "ASK"
+    doc.instinct_approval_level = level
+    await doc.save()
+
+    _audit_approval_level_change(
+        actor=ctx.user_id,
+        workspace_id=workspace_id,
+        old_level=old_level,
+        new_level=level,
+    )
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.instinct_approval_level_set",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"old_level": old_level, "new_level": level},
     )
 
     count = await _count_members(workspace_id)
@@ -1550,6 +1651,7 @@ __all__ = [
     "resend_invite",
     "revoke_invite",
     "seed_default_workspace",
+    "set_instinct_approval_level",
     "update",
     "update_member_role",
     "validate_invite",
