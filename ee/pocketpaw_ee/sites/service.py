@@ -210,6 +210,23 @@
 #     doc, else the newest with a real url) and returns its non-null url + is_live,
 #     dropping the arbitrary find_one. PERF-1 does NOT migrate pre-existing dupes
 #     (that is PERF-2) — _canonical_site_doc just resolves the live one among them.
+#
+# Updated 2026-06-18 (feat/sites-diff-edit, P3 — TARGETED / DIFF edit): a svelte
+# component edit can now be expressed as a list of search/replace blocks
+# (``edits=[{old_string, new_string}, ...]``, like the built-in Edit tool) INSTEAD
+# of the FULL ``new_source``, so the agent emits ONLY the change for a small edit
+# ("add a bg color to the nav") rather than reading + regenerating the whole file
+# — far fewer tokens in and out, the dominant edit-latency cost. New pieces:
+#   * apply_edits(source, edits) — a PURE, I/O-free function that applies the
+#     blocks sequentially; each ``old_string`` must match EXACTLY ONCE (0 or >1
+#     raises ValidationError with a clear, retry-able message), so it is the same
+#     uniqueness contract the built-in Edit tool enforces.
+#   * edit_svelte_component() gained an ``edits`` param (alternative to
+#     ``new_source``). When ``edits`` is given it reads the pocket's CURRENT
+#     component source via the pockets service, computes the new source with
+#     apply_edits, and hands that to the UNCHANGED SE-2 persist + preview/republish
+#     + smoke-gate-rollback path. ``new_source`` (full rewrite) is unchanged and
+#     stays the fallback for large rewrites; exactly one of the two must be given.
 
 from __future__ import annotations
 
@@ -222,7 +239,7 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
@@ -838,13 +855,84 @@ async def publish_pocket(
     )
 
 
+def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
+    """Apply a list of search/replace blocks to ``source`` and return the result
+    (P3 — the TARGETED / DIFF edit primitive). PURE + I/O-free, so it is directly
+    unit-testable; ``edit_svelte_component`` calls it to turn the agent's minimal
+    diff into the new file contents before reusing the unchanged persist path.
+
+    Each block is ``{"old_string": <str>, "new_string": <str>}``. The contract
+    mirrors the built-in Edit tool so the agent's existing instinct transfers:
+
+      * ``old_string`` must match the CURRENT working text EXACTLY ONCE. 0 matches
+        or >1 matches raise ``ValidationError`` with a clear, retry-able message
+        (the agent makes ``old_string`` more specific and retries) — never a silent
+        no-op or a partial/ambiguous replace.
+      * blocks apply SEQUENTIALLY against the running result, so a later block can
+        target text an earlier block produced.
+      * ``new_string`` may be empty (a deletion); ``old_string == new_string`` is a
+        no-op the agent did not intend and is rejected.
+
+    Raises ``ValidationError`` on an empty list, a malformed block (missing/non-str
+    keys), or any match-count violation — so a bad diff fails closed BEFORE
+    anything is persisted or rebuilt.
+    """
+    if not isinstance(edits, list) or not edits:
+        raise ValidationError(
+            "site_edit.empty_edits",
+            "edits must be a non-empty list of {old_string, new_string} blocks.",
+        )
+    result = source
+    for i, block in enumerate(edits):
+        if not isinstance(block, dict):
+            raise ValidationError(
+                "site_edit.malformed_block",
+                f"edit block {i} is not an object with old_string/new_string.",
+            )
+        old = block.get("old_string")
+        new = block.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise ValidationError(
+                "site_edit.malformed_block",
+                f"edit block {i} must have string `old_string` and `new_string`.",
+            )
+        if old == "":
+            raise ValidationError(
+                "site_edit.empty_old_string",
+                f"edit block {i} has an empty `old_string` — provide the exact text to replace.",
+            )
+        if old == new:
+            raise ValidationError(
+                "site_edit.noop_block",
+                f"edit block {i} has identical old_string and new_string (no-op) — "
+                "the change would do nothing.",
+            )
+        count = result.count(old)
+        if count == 0:
+            raise ValidationError(
+                "site_edit.no_match",
+                f"edit block {i}: old_string was not found (0 times) in the current "
+                "source — it must match the file exactly. Re-read the component and "
+                "copy the text verbatim.",
+            )
+        if count > 1:
+            raise ValidationError(
+                "site_edit.ambiguous_match",
+                f"edit block {i}: old_string matches {count} times — it must be "
+                "unique. Include more surrounding context so it matches exactly once.",
+            )
+        result = result.replace(old, new, 1)
+    return result
+
+
 async def edit_svelte_component(
     *,
     workspace_id: str,
     user_id: str,
     pocket_id: str,
     component_path: str,
-    new_source: str,
+    new_source: str | None = None,
+    edits: list[dict[str, str]] | None = None,
     name: str = "",
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -853,11 +941,22 @@ async def edit_svelte_component(
 ) -> _SiteDoc:
     """Rewrite ONE component of a svelte Paw Site pocket and safely republish.
 
-    The chat-agent entry point for a targeted component edit: it replaces the
-    file at ``component_path`` in the pocket's svelte ``source`` map with
-    ``new_source`` and republishes the site. The Pocket write is owned by the
-    pockets service (``set_svelte_source_file`` — entity isolation); this
-    function only orchestrates persist → republish.
+    The chat-agent entry point for a targeted component edit. The edit can be
+    expressed two ways (exactly one is required):
+
+      * ``edits`` (PREFERRED for small changes, P3) — a list of search/replace
+        blocks ``[{old_string, new_string}, ...]`` the agent emits INSTEAD of the
+        whole file. This reads the pocket's CURRENT ``component_path`` source,
+        applies the blocks via ``apply_edits`` (each ``old_string`` must match
+        exactly once), and uses the COMPUTED new source. The agent sends only the
+        diff — the dominant token / latency saving over a full rewrite.
+      * ``new_source`` (full rewrite, the SE-2 fallback) — the whole new file
+        contents; used as-is. Reserve this for large rewrites.
+
+    Either way the resolved new source replaces the file at ``component_path`` in
+    the pocket's svelte ``source`` map and the site is republished. The Pocket
+    write is owned by the pockets service (``set_svelte_source_file`` — entity
+    isolation); this function only orchestrates resolve → persist → republish.
 
     Safety contract — a broken edit must leave NEITHER a broken deploy NOR stale
     source on the pocket:
@@ -883,6 +982,36 @@ async def edit_svelte_component(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    # P3 — resolve the edit shape to a single ``new_source`` string. Exactly one of
+    # ``edits`` (targeted diff) / ``new_source`` (full rewrite) must be supplied.
+    if (edits is None) == (new_source is None):
+        raise ValidationError(
+            "site_edit.invalid_args",
+            "edit_svelte_component requires exactly one of `edits` (a targeted "
+            "search/replace diff) or `new_source` (a full file rewrite).",
+        )
+    if edits is not None:
+        # Targeted/diff edit: read the pocket's CURRENT component source and apply
+        # the blocks to compute the new source. The read goes through the pockets
+        # service's PUBLIC ``get`` (wire dict — entity isolation; it raises
+        # NotFound/Forbidden itself) so the apply runs against the source of truth.
+        # A missing component path is a NotFound (same contract as the full-rewrite
+        # path, where set_svelte_source_file raises it) — not a silent create.
+        pocket = await pockets_service.get(pocket_id, user_id)
+        if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
+            pocket.get("source"), dict
+        ):
+            raise ValidationError(
+                "pocket.not_svelte_site",
+                "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+            )
+        source_map = pocket["source"]
+        if component_path not in source_map:
+            raise NotFound("site_component", component_path)
+        # apply_edits raises ValidationError (clear, retry-able) on any match-count
+        # violation, BEFORE anything is persisted or rebuilt.
+        new_source = apply_edits(source_map[component_path], edits)
 
     # SE-2b: recover the builder origin the site is currently published with so
     # the republish keeps the edit-bridge. "" (or no prior site) republishes
@@ -1523,6 +1652,7 @@ async def version_history(*, workspace_id: str, pocket_id: str) -> list[Any]:
 
 
 __all__ = [
+    "apply_edits",
     "publish",
     "publish_pocket",
     "preview_pocket",

@@ -33,6 +33,19 @@
 # "Submit for review" to publish. The tool docstring the agent reads was reworded to
 # match. The create + publish tools are unchanged (publish is a real live deploy).
 #
+# Updated: 2026-06-18 (feat/sites-diff-edit, P3) — ``edit_svelte_component`` now
+# accepts a TARGETED diff: ``edits=[{old_string, new_string}, ...]`` (search/replace
+# blocks like the built-in Edit tool) as an ALTERNATIVE to the full ``new_source``,
+# so the agent emits ONLY the change for a small edit instead of regenerating the
+# whole file (the dominant edit-latency cost). Exactly one of ``edits`` /
+# ``new_source`` is required (``new_source`` dropped from the schema's ``required``).
+# The handler validates the diff SHAPE (a non-empty list of string {old_string,
+# new_string} dicts) and forwards both fields to ``sites_service.edit_svelte_component``,
+# which applies the blocks to the pocket's CURRENT source (apply_edits) — a 0/>1
+# match raises ValidationError, relayed to the agent by code so it can retry. The
+# tool description steers the agent to PREFER ``edits`` for small changes and reserve
+# ``new_source`` for large rewrites.
+#
 # This is the decisive bypass of the dashboard-built ``pocket_specialist``
 # create machinery. The agent-mode pocket_specialist path (draft kit / plan kit /
 # subagent delegation + the validate-redraft loop) kept downgrading landing
@@ -562,12 +575,45 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             "of the file to rewrite (e.g. 'src/lib/components/Hero.svelte'). It "
             "must already exist in the site's source map."
         )
+    # P3 — the edit can be a TARGETED diff (``edits``) OR a full rewrite
+    # (``new_source``); exactly one is required. ``edits`` is preferred for small
+    # changes so the agent emits only the diff, not the whole file.
+    edits = args.get("edits")
     new_source = args.get("new_source")
-    if not isinstance(new_source, str):
+    has_edits = edits is not None
+    has_new_source = new_source is not None
+    if has_edits == has_new_source:
         return _error_response(
-            "edit_svelte_component requires `new_source` — the FULL new contents of "
-            "the file as a string (the tool replaces the whole file, not a patch)."
+            "edit_svelte_component requires exactly one of `edits` (a targeted "
+            "search/replace diff — PREFERRED for small changes) or `new_source` "
+            "(the FULL new file contents — for large rewrites). Provide one, not "
+            "both and not neither."
         )
+    if has_new_source and not isinstance(new_source, str):
+        return _error_response(
+            "edit_svelte_component `new_source` must be the FULL new contents of the "
+            "file as a string (the tool replaces the whole file, not a patch)."
+        )
+    if has_edits:
+        # Validate the diff SHAPE at the surface (a list of {old_string,
+        # new_string} string dicts) so a malformed payload gets a clear error
+        # before the service runs. The MATCH-uniqueness contract is enforced by the
+        # service's apply_edits (relayed below as a ValidationError).
+        if not isinstance(edits, list) or not edits:
+            return _error_response(
+                "edit_svelte_component `edits` must be a non-empty list of "
+                "{old_string, new_string} blocks (like the built-in Edit tool)."
+            )
+        for i, block in enumerate(edits):
+            if (
+                not isinstance(block, dict)
+                or not isinstance(block.get("old_string"), str)
+                or not isinstance(block.get("new_string"), str)
+            ):
+                return _error_response(
+                    f"edit_svelte_component `edits` block {i} must be an object with "
+                    "string `old_string` and `new_string`."
+                )
     name_raw = args.get("name")
     name = name_raw if isinstance(name_raw, str) else ""
 
@@ -581,7 +627,8 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             user_id=user_id,
             pocket_id=pocket_id,
             component_path=component_path,
-            new_source=new_source,
+            new_source=new_source if has_new_source else None,
+            edits=edits if has_edits else None,
             name=name,
         )
     except SmokeGateFailed as exc:
@@ -641,30 +688,39 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
     @tool(
         "edit_svelte_component",
         (
-            "Rewrite ONE component of an EXISTING svelte Paw Site and stage it as a "
+            "Edit ONE component of an EXISTING svelte Paw Site and stage it as a "
             "DRAFT PREVIEW. Use this when the user asks to change a section of a "
-            "svelte site — 'make the hero headline bolder', 'change the pricing "
-            "copy', 'restyle the FAQ'. You provide the FULL new file contents for "
-            "ONE file in the site's source map; the tool persists it as a draft and "
-            "builds a preview. The edit is NOT published and does NOT go live — it "
-            "is staged for review. Args: `pocket_id` (the svelte site pocket), "
-            "`component_path` (the relative path of the file to rewrite — it must "
-            "already exist in the source map, e.g. "
-            "'src/lib/components/Hero.svelte'), `new_source` (the whole new file "
-            "contents as a string — this REPLACES the file, it is not a patch), "
-            "and optional `name`. CRITICAL authoring rule (same as "
-            "create_svelte_site): the component must render its resting/final "
-            "state in MARKUP — never set it only in onMount — because the page is "
-            "PRERENDERED. Returns {ok, status:'draft', is_live:false, site: {id, "
-            "name, preview_url, deployed:false, pocket_id}, component_path, "
-            "message}. Relay the `message` to the user: the change is a DRAFT "
-            "PREVIEW (not live), `preview_url` is a PREVIEW (not the published "
-            "site), and to publish it the user clicks 'Submit for review'. Do NOT "
-            "tell the user the change is published or live. ok=false with an error "
-            "means the edit was NOT staged: a smoke-test failure leaves the "
-            "previous version unchanged (fix the component and retry), and a "
-            "not-found / not-a-svelte-site error means relay the reason. Do NOT "
-            "report a successful edit when ok=false."
+            "svelte site — 'add a background color to the nav', 'make the hero "
+            "headline bolder', 'change the pricing copy', 'restyle the FAQ'. The "
+            "edit is NOT published and does NOT go live — it is staged for review. "
+            "Give the edit ONE of two ways (exactly one, not both):\n"
+            "  * `edits` — PREFER THIS for small/targeted changes. A list of "
+            "search/replace blocks [{old_string, new_string}, ...], exactly like "
+            "the built-in Edit tool: each `old_string` is copied VERBATIM from the "
+            "current file and must match EXACTLY ONCE (include enough surrounding "
+            "context to be unique), and `new_string` is what it becomes. You send "
+            "ONLY the change, not the whole file — far fewer tokens and faster. If "
+            "you have not read the file this turn, read it first so old_string "
+            "matches.\n"
+            "  * `new_source` — the FULL new file contents as a string (REPLACES "
+            "the whole file, not a patch). Reserve this for LARGE rewrites where "
+            "most of the file changes; for a small tweak use `edits`.\n"
+            "Other args: `pocket_id` (the svelte site pocket), `component_path` (the "
+            "relative path of the file to edit — it must already exist in the source "
+            "map, e.g. 'src/lib/components/Hero.svelte'), optional `name`. CRITICAL "
+            "authoring rule (same as create_svelte_site): the component must render "
+            "its resting/final state in MARKUP — never set it only in onMount — "
+            "because the page is PRERENDERED. Returns {ok, status:'draft', "
+            "is_live:false, site: {id, name, preview_url, deployed:false, "
+            "pocket_id}, component_path, message}. Relay the `message` to the user: "
+            "the change is a DRAFT PREVIEW (not live), `preview_url` is a PREVIEW "
+            "(not the published site), and to publish it the user clicks 'Submit for "
+            "review'. Do NOT tell the user the change is published or live. ok=false "
+            "with an error means the edit was NOT staged: an `edits` old_string that "
+            "matched 0 or >1 times means make it more specific and retry, a "
+            "smoke-test failure leaves the previous version unchanged (fix the "
+            "component and retry), and a not-found / not-a-svelte-site error means "
+            "relay the reason. Do NOT report a successful edit when ok=false."
         ),
         {
             "type": "object",
@@ -678,16 +734,44 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Relative path of the file to rewrite — must already exist "
+                        "Relative path of the file to edit — must already exist "
                         "in the site's source map (e.g. "
                         "'src/lib/components/Hero.svelte')."
                     ),
                 },
+                "edits": {
+                    "type": "array",
+                    "description": (
+                        "PREFERRED for small changes: a list of search/replace "
+                        "blocks applied to the file's CURRENT contents. Each "
+                        "`old_string` must match exactly once. Send this INSTEAD of "
+                        "`new_source` so you emit only the diff."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_string": {
+                                "type": "string",
+                                "description": (
+                                    "Exact text to replace, copied verbatim from the "
+                                    "current file; must match exactly once."
+                                ),
+                            },
+                            "new_string": {
+                                "type": "string",
+                                "description": "Replacement text (may be empty to delete).",
+                            },
+                        },
+                        "required": ["old_string", "new_string"],
+                        "additionalProperties": False,
+                    },
+                },
                 "new_source": {
                     "type": "string",
                     "description": (
-                        "The FULL new contents of the file as a string. This "
-                        "replaces the whole file — it is not a diff/patch."
+                        "The FULL new contents of the file as a string (REPLACES the "
+                        "whole file — not a diff). Use for large rewrites; for small "
+                        "changes prefer `edits`."
                     ),
                 },
                 "name": {
@@ -698,7 +782,7 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
                     ),
                 },
             },
-            "required": ["pocket_id", "component_path", "new_source"],
+            "required": ["pocket_id", "component_path"],
             "additionalProperties": False,
         },
     )
