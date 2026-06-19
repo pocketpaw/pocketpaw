@@ -45,6 +45,11 @@
 # (the first non-editor PRODUCER). Each finding carries a ``fix_prompt`` the UI
 # feeds to the EXISTING edit path so the fix lands as a reviewable draft; there is
 # NO new apply endpoint (BP-7 reuses edit_svelte_component / refine).
+# Updated 2026-06-19 (P2b-backend — "Last Deployed"): SiteResponse and
+# SiteStatusResponse gain ``deployed_at`` — the ISO-8601 string of the pocket's most
+# recent successful live deploy (the Site doc's ``deployed_at``), or None before the
+# first deploy. The builder/gallery surface a "Last deployed <time>" label without a
+# second fetch. Optional (default None) so the field is backward-compatible.
 
 from __future__ import annotations
 
@@ -77,6 +82,9 @@ class SiteResponse(BaseModel):
     # SE-2b: the builder origin the site was published with, or "" for a normal
     # (non-editable) site. Non-empty means the page carries the edit-bridge.
     builder_origin: str = ""
+    # P2b: ISO-8601 timestamp of the most recent successful live deploy, or None
+    # before the first deploy (a preview-only / never-deployed pocket reads None).
+    deployed_at: str | None = None
 
 
 class SitePreviewResponse(BaseModel):
@@ -121,6 +129,10 @@ class SiteStatusResponse(BaseModel):
     # PERF-1: the canonical live url of the pocket's deployed site (the address the
     # latest build serves at). None when no deployed site exists.
     url: str | None = None
+    # P2b: ISO-8601 timestamp of the pocket's most recent successful live deploy,
+    # read from the canonical Site doc's ``deployed_at``. None when the pocket has
+    # never been deployed (no Site doc, or a pre-P2b row that predates the field).
+    deployed_at: str | None = None
 
 
 class SiteVersionResponse(BaseModel):

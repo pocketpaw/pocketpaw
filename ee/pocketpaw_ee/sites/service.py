@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
+# now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
+# succeeds (when ``deployed`` flips True) — the true "last shipped" marker, not a
+# "last touched" one. ``_to_response``/``pocket_status`` surface it as an ISO
+# string|None on the DTOs. Added ``revert_pocket_version`` — resolves a pocket's
+# version_no → its ArtifactVersion row (tenant-scoped, main branch) and calls
+# ``versions.revert`` to write a NEW forward-moving draft from that version's
+# content (the normal review/publish flow then applies); backs the new
+# POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert endpoint.
+#
 # Updated 2026-06-19 (P0b — review-400 self-heal): ``request_publish_pocket`` no
 # longer 400s a LEGACY site (one published before BP-1, so it has ZERO
 # ``artifact_versions`` rows and no draft). When ``get_draft`` is None it now
@@ -255,6 +265,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -474,6 +485,7 @@ async def _promote_pocket_draft_to_published(
 
 
 def _to_response(doc: _SiteDoc) -> SiteResponse:
+    deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
         pocket_id=doc.pocket_id,
@@ -485,6 +497,9 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         # SE-2b: surface whether the site is editable (non-empty = carries the
         # edit-bridge) so the UI can show/hide the inline-edit affordance.
         builder_origin=getattr(doc, "builder_origin", ""),
+        # P2b: ISO string of the last successful live deploy, or None before the
+        # first deploy (pre-P2b rows read null via the getattr default).
+        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
     )
 
 
@@ -732,6 +747,12 @@ async def publish(
     # re-publish; only a first insert seeds the defaults. ``signed_key`` is likewise
     # kept stable across re-publishes (the capture endpoint verifies against it).
     oid = ObjectId(site_id)
+    # P2b: this branch runs ONLY on a successful non-preview deploy (a preview
+    # returned earlier), so ``deployed`` flips True HERE — stamp the live-deploy
+    # time alongside it. A re-publish refreshes it (it is "last shipped", not
+    # "first shipped"). It is NOT set on a preview/edit build and NOT a plain
+    # updatedAt bump, so it stays a true "last deployed" marker.
+    now = datetime.now(UTC)
     doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
         doc = _SiteDoc(
@@ -742,6 +763,7 @@ async def publish(
             name=site_name,
             script_name=site_id,
             deployed=True,
+            deployed_at=now,
             signed_key=signed_key,
             url=url,
             # SE-2b: persist the builder origin (or "") so a component-edit republish
@@ -761,6 +783,7 @@ async def publish(
         doc.name = site_name
         doc.script_name = site_id
         doc.deployed = True
+        doc.deployed_at = now
         doc.url = url
         doc.builder_origin = builder_origin or ""
         await doc.save()
@@ -1522,6 +1545,11 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     deployed = bool(doc is not None and doc.deployed)
     is_live = has_published and deployed
 
+    # P2b: surface the canonical doc's last-deploy time so the builder/gallery can
+    # render "Last deployed <time>" without a second fetch. None when the pocket has
+    # no deployed site or the doc predates the field (a pre-P2b row).
+    deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
         status=status,
@@ -1532,6 +1560,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         # the address the latest build actually serves at, not a stale ``url=None``
         # dupe. None when the pocket has no deployed site.
         url=(doc.url or None) if doc is not None else None,
+        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
     )
 
 
@@ -1775,6 +1804,50 @@ async def version_history(*, workspace_id: str, pocket_id: str) -> list[Any]:
     return list(reversed(scoped))
 
 
+async def revert_pocket_version(
+    *, workspace_id: str, user_id: str, pocket_id: str, version_no: int
+) -> Any:
+    """Revert a pocket's site to a prior version by ordinal (P2b-backend).
+
+    Backs ``POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert``.
+    Revert is FORWARD-MOVING: it writes a NEW draft (on the main branch) whose
+    content is a snapshot of the target version's content, then the normal
+    review/publish flow applies (the operator can request-publish that draft and
+    take the reverted content live through the merge gate). It never mutates
+    history — the version log stays append-only and the revert is its own
+    auditable lineage step.
+
+    The router carries the human-friendly ``version_no`` (the timeline ordinal the
+    UI shows); the versions ``revert`` keys on the durable ``version_id``, so this
+    resolves the ordinal → the row via the SAME tenant-scoped, main-branch log
+    ``version_history`` reads. A version_no the pocket does not have (or one under
+    another workspace — the rows are pre-filtered on ``workspace_id``) raises
+    ``ValueError`` (the router maps it to a 404). Returns the new draft
+    ``ArtifactVersion``.
+    """
+    from pocketpaw_ee.versions import service as versions_service
+
+    rows = await versions_service.list_versions(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
+    )
+    target = next(
+        (r for r in rows if r.version_no == version_no and r.workspace_id == workspace_id),
+        None,
+    )
+    if target is None:
+        raise ValueError(
+            f"no version v{version_no} for pocket {pocket_id} — cannot revert"
+        )
+
+    return await versions_service.revert(
+        scope_type=_VERSION_SCOPE_TYPE,
+        scope_id=pocket_id,
+        workspace_id=workspace_id,
+        version_id=str(target.id),
+        author=user_id,
+    )
+
+
 __all__ = [
     "apply_edits",
     "publish",
@@ -1783,6 +1856,7 @@ __all__ = [
     "pocket_status",
     "request_publish_pocket",
     "version_history",
+    "revert_pocket_version",
     "edit_svelte_component",
     "make_site_editable",
     "require_sites_plan",

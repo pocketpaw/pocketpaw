@@ -40,9 +40,17 @@
 # recoverable. The gallery read (``service.list_for_workspace`` / listSites) filters
 # ``archived`` so each pocket shows exactly one card. Defaults False, so every
 # existing doc and every fresh publish reads active until the migration archives it.
+#
+# Updated 2026-06-19 (P2b-backend — "Last Deployed"): added ``deployed_at`` — the UTC
+# timestamp of the most recent SUCCESSFUL live deploy. ``service.publish`` stamps it
+# (``datetime.now(UTC)``) ONLY when a non-preview deploy succeeds and ``deployed``
+# flips True — NOT on a preview/edit/arm build and NOT on every ``updatedAt`` bump,
+# so it is a true "last shipped" marker, not a "last touched" one. Defaults None;
+# backfill is not required (pre-P2b rows read null, exposed as None on the DTOs).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from beanie import Indexed
@@ -70,6 +78,11 @@ class Site(TimestampedDocument):
     # Workers-for-Platforms script name (== site id) once deployed.
     script_name: str = ""
     deployed: bool = False
+    # P2b: UTC timestamp of the most recent SUCCESSFUL live deploy. Stamped by
+    # service.publish ONLY when a non-preview deploy succeeds (when ``deployed``
+    # flips True) — never on a preview/edit build, never on a plain updatedAt bump.
+    # None until the pocket has been deployed at least once (old rows read null).
+    deployed_at: datetime | None = None
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""
