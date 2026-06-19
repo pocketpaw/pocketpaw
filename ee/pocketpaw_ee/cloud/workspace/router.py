@@ -369,7 +369,9 @@ async def get_workspace_pocket_connector_permissions(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    result = await pockets_service.list_workspace_pocket_connector_permissions(workspace_id)
+    result = await pockets_service.list_workspace_pocket_connector_permissions(
+        workspace_id, user_id=str(user.id)
+    )
     return WorkspacePocketConnectorPermissionsOut(permissions=result)
 
 

@@ -4899,20 +4899,11 @@ async def _auto_enable_pocket_connectors(
     from pocketpaw_ee.cloud.connectors import service as connectors_service
 
     for name in connector_names:
-        try:
-            await connectors_service.ensure_connector_enabled_for_pocket(
-                workspace_id,
-                name,
-                pocket_id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "auto-enable failed for connector=%s pocket=%s workspace=%s",
-                name,
-                pocket_id,
-                workspace_id,
-                exc_info=True,
-            )
+        await connectors_service.ensure_connector_enabled_for_pocket(
+            workspace_id,
+            name,
+            pocket_id,
+        )
 
 
 async def set_pocket_connector_permissions(
@@ -5003,14 +4994,26 @@ async def revoke_pocket_connector(
 
 async def list_workspace_pocket_connector_permissions(
     workspace_id: str,
+    user_id: str | None = None,
 ) -> dict[str, list[str] | None]:
-    """Return the connector-permissions map for ALL pockets in a workspace.
+    """Return the connector-permissions map for pockets the user can access.
 
     Returns a dict of pocket_id → allowed_connectors (list or None).
     ``None`` means the pocket inherits all workspace connectors.
     This is the bulk endpoint for the frontend's permission-store loader.
+
+    When ``user_id`` is provided, only pockets visible to that user are
+    returned (owner, team member, shared_with, or workspace-visible).
     """
-    docs = await _PocketDoc.find({"workspace": workspace_id}).to_list()
+    query: dict = {"workspace": workspace_id}
+    if user_id is not None:
+        query["$or"] = [
+            {"owner": user_id},
+            {"team": user_id},
+            {"shared_with": user_id},
+            {"visibility": "workspace"},
+        ]
+    docs = await _PocketDoc.find(query).to_list()
     result: dict[str, list[str] | None] = {}
     for doc in docs:
         result[str(doc.id)] = doc.allowed_connectors
