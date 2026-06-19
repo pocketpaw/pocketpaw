@@ -129,23 +129,32 @@ class CallMeetingAgent:
         # Disconnect RTC room first (stops audio streams)
         await self._disconnect_rtc()
 
-        # Cancel monitor task
+        # Cancel monitor task — do NOT await; the task's CancelledError
+        # propagates at its next await point and asyncio.run() handles
+        # cleanup.  Avoiding the await here means _finalize_notes() is
+        # called promptly even when Deepgram/AudioStream cleanup is slow.
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
 
-        # Cancel transcribe task
+        # Cancel transcribe task — same rationale: don't block on
+        # AudioStream/Deepgram pipe cleanup, especially for long meetings
+        # with many participants where cleanup can take many seconds.
         if self._transcribe_task:
             self._transcribe_task.cancel()
-            try:
-                await self._transcribe_task
-            except asyncio.CancelledError:
-                pass
 
         await self._finalize_notes()
+
+        # Brief drain for cancelled tasks so they don't leak
+        if self._transcribe_task and not self._transcribe_task.done():
+            try:
+                await asyncio.wait_for(self._transcribe_task, timeout=3)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+        if self._monitor_task and not self._monitor_task.done():
+            try:
+                await asyncio.wait_for(self._monitor_task, timeout=1)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
 
         logger.info(
             "CallMeetingAgent stopped for room %s (group %s)",
