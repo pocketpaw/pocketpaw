@@ -99,6 +99,42 @@
 #   tenant-scoped per hop, so this changes no result, it just makes the last read
 #   self-guarding. Walk is iterative, fixed-depth, no cross-hop cycle re-visit
 #   (see the note in _query_path).
+# Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — closes the LAST
+#   cross-tenant leak in the Fabric store: the object-TYPE catalog was GLOBAL.
+#   W4a deliberately left ``fabric_object_types`` without a ``workspace_id``
+#   column ("definitions are not per-tenant data"), and ``list_types`` / ``stats``
+#   only hid type NAMES indirectly by joining to a visible object row. But the
+#   "sovereign zero-setup discovery" feature requires the DISCOVERED type catalog
+#   to be private per workspace, and ``define_type`` / ``get_type_by_name`` took
+#   no workspace — so a type defined in workspace A was directly visible and
+#   reusable from workspace B (``get_type_by_name`` returned it, ``ensure_type``
+#   reused its id). This change:
+#     1. Adds a ``workspace_id TEXT`` column to ``fabric_object_types`` via the
+#        same additive ALTER migration the W4a object/link columns use (idempotent
+#        — the duplicate-column OperationalError is swallowed on every boot). A
+#        pre-existing row keeps NULL ``workspace_id`` = legacy/global; the backfill
+#        below attributes a row to a workspace ONLY when every object of that type
+#        unambiguously shares one workspace (otherwise it stays NULL = global, the
+#        documented sentinel — a type cannot be safely attributed after the fact
+#        when its objects span tenants or predate tenancy).
+#     2. ``define_type`` stamps the caller's ``workspace_id``; ``get_type_by_name``
+#        and ``get_type`` take an optional ``workspace_id`` and apply the same
+#        ``(workspace_id = ? OR workspace_id IS NULL)`` scope as every other W4a
+#        read. A scoped read for workspace B can therefore neither see nor reuse
+#        workspace A's type. ``workspace_id=None`` = unscoped (OSS / agent-tool /
+#        single-tenant callers), full backward compatibility.
+#     3. ``list_types`` / ``stats`` now scope on the TYPE's OWN ``workspace_id``
+#        (own rows + legacy NULL) instead of joining through a visible object row,
+#        so a tenant's empty (object-less) type is visible to its owner and an
+#        owned-but-empty type no longer disappears — the type catalog is now first
+#        -class tenant data, not metadata inferred from object rows.
+#     4. The unique-name index becomes UNIQUE on ``(workspace_id, LOWER(name))``
+#        (was a global UNIQUE on ``LOWER(name)``) so two workspaces may each define
+#        their own "Customer" type; the concurrent-``ensure_type`` race guard now
+#        holds PER workspace. The de-dup pass keys on ``(workspace_id, name)`` to
+#        match. ``ensure_type`` / ``ingest_records`` (connectors/fabric_ingest.py)
+#        thread ``workspace_id`` so existing ingestion keeps working and minted
+#        types land in the caller's tenant.
 
 
 from __future__ import annotations
@@ -141,6 +177,11 @@ CREATE TABLE IF NOT EXISTS fabric_object_types (
     icon TEXT DEFAULT 'box',
     color TEXT DEFAULT '#0A84FF',
     properties_schema TEXT DEFAULT '[]',
+    -- Tenancy (SZD-2): the owning workspace of this object TYPE. NULL =
+    -- legacy/global type written before per-type tenancy or by an OSS caller;
+    -- a scoped read still sees it (own rows + NULL). On a pre-SZD-2 DB this
+    -- column is added by the ALTER migration in _ensure_schema, NOT here.
+    workspace_id TEXT,
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -187,19 +228,34 @@ CREATE INDEX IF NOT EXISTS idx_links_type ON fabric_links(link_type);
 _WORKSPACE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_objects_workspace ON fabric_objects(workspace_id)",
     "CREATE INDEX IF NOT EXISTS idx_links_workspace ON fabric_links(workspace_id)",
+    # SZD-2: a plain (non-unique) index on the type's workspace for scoped
+    # list_types / stats reads. The UNIQUE (workspace_id, LOWER(name)) index is
+    # created separately (_TYPE_NAME_UNIQUE_INDEX_SQL) after the de-dup pass.
+    "CREATE INDEX IF NOT EXISTS idx_object_types_workspace ON fabric_object_types(workspace_id)",
 )
 
-# A UNIQUE index on the (case-folded) type name closes a concurrent
+# A UNIQUE index on (workspace_id, case-folded type name) closes a concurrent
 # ``ensure_type`` race: two callers both miss ``get_type_by_name`` and both run
 # ``define_type``, leaving two type rows with the SAME name but different ids —
 # objects of "the same logical type" then split across two ``type_id``s. Created
 # AFTER SCHEMA_SQL (same reason as _WORKSPACE_INDEX_SQL): a pre-existing DB may
 # already hold duplicate-name rows, so _ensure_schema de-dups defensively before
 # creating the index. ``get_type_by_name`` matches case-insensitively, so the
-# uniqueness key is LOWER(name) to match.
+# name key is LOWER(name).
+#
+# SZD-2: the uniqueness key now includes ``workspace_id`` so two DIFFERENT
+# workspaces may each define their own "Customer" type — the race guard is
+# per-workspace. SQLite treats NULLs as DISTINCT in a UNIQUE index, so legacy
+# NULL-workspace rows are NOT collapsed by this index (multiple NULL-workspace
+# "Customer" rows can coexist); the de-dup pass that runs first keys on
+# (workspace_id, name) and still collapses true within-workspace duplicates
+# (including NULL/NULL pairs) up front. The old global index on LOWER(name)
+# (``idx_object_types_name_unique``) is DROPPED in the migration first, because
+# it would otherwise reject a second workspace defining a name the first used.
+_OLD_GLOBAL_TYPE_NAME_INDEX = "idx_object_types_name_unique"
 _TYPE_NAME_UNIQUE_INDEX_SQL = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_object_types_name_unique"
-    " ON fabric_object_types(LOWER(name))"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_object_types_ws_name_unique"
+    " ON fabric_object_types(workspace_id, LOWER(name))"
 )
 
 # Whitelist of filter operators -> SQL operator. User input never reaches the
@@ -318,28 +374,45 @@ class FabricStore:
             return
         async with aiosqlite.connect(self._db_path) as db:
             await db.executescript(SCHEMA_SQL)
-            # Additive migration (W4a): tenancy columns on a pre-existing DB.
-            # CREATE TABLE IF NOT EXISTS won't add a column to a table that
+            # Additive migration (W4a + SZD-2): tenancy columns on a pre-existing
+            # DB. CREATE TABLE IF NOT EXISTS won't add a column to a table that
             # already exists, so ALTER and swallow the duplicate-column error
             # that fires on every subsequent boot — same pattern as the W2b
             # instinct hash-chain / assignee migrations. Pre-existing rows keep
-            # NULL workspace_id (legacy/global; see the module header).
-            for _tbl in ("fabric_objects", "fabric_links"):
+            # NULL workspace_id (legacy/global; see the module header). SZD-2
+            # extends the same ALTER to fabric_object_types so the type catalog
+            # is per-tenant too.
+            for _tbl in ("fabric_objects", "fabric_links", "fabric_object_types"):
                 try:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # SZD-2: drop the pre-SZD-2 GLOBAL unique index on LOWER(name) if it
+            # exists. It enforced one type name per WHOLE DB; under per-workspace
+            # tenancy two tenants must be able to use the same name, so it would
+            # otherwise reject the second tenant's define_type. The replacement
+            # (workspace_id, LOWER(name)) index is created below. DROP IF EXISTS
+            # is a no-op on a fresh / already-migrated DB.
+            await db.execute(f"DROP INDEX IF EXISTS {_OLD_GLOBAL_TYPE_NAME_INDEX}")
             # Create the tenancy indexes only after the column is guaranteed to
             # exist (fresh DB via CREATE TABLE, or pre-existing DB via the ALTER
             # above). Doing this inside SCHEMA_SQL would fail on a pre-W4a DB.
             for _idx in _WORKSPACE_INDEX_SQL:
                 await db.execute(_idx)
-            # Unique-name index on fabric_object_types. A pre-existing DB may
-            # already hold duplicate-name rows (the ensure_type race this index
-            # prevents could have fired before this code shipped), so de-dup
-            # FIRST, then create the index. Both steps are wrapped so a residual
-            # duplicate can never crash _ensure_schema — a metering/ontology
-            # nicety must not take the store down on boot.
+            # SZD-2 backfill: attribute a NULL-workspace type to a tenant ONLY
+            # when every object of that type unambiguously shares one workspace.
+            # A type whose objects span tenants (or that has no objects, or whose
+            # objects are themselves legacy NULL) stays NULL = global, the
+            # documented sentinel — it cannot be safely attributed after the
+            # fact. Idempotent: a second run finds nothing left to attribute.
+            await self._backfill_object_type_workspaces(db)
+            # Unique (workspace_id, name) index on fabric_object_types. A
+            # pre-existing DB may already hold duplicate (workspace, name) rows
+            # (the ensure_type race this index prevents could have fired before
+            # this code shipped), so de-dup FIRST, then create the index. Both
+            # steps are wrapped so a residual duplicate can never crash
+            # _ensure_schema — a metering/ontology nicety must not take the store
+            # down on boot.
             await self._dedup_object_types(db)
             try:
                 await db.execute(_TYPE_NAME_UNIQUE_INDEX_SQL)
@@ -350,37 +423,88 @@ class FabricStore:
                 # is a race guard, not a correctness invariant the store needs
                 # to function.
                 logger.warning(
-                    "could not create unique index on fabric_object_types(name) — "
-                    "duplicate type names may remain; ensure_type race guard is off",
+                    "could not create unique index on "
+                    "fabric_object_types(workspace_id, name) — duplicate type "
+                    "names may remain; ensure_type race guard is off",
                     exc_info=True,
                 )
             await db.commit()
         self._initialized = True
 
     @staticmethod
-    async def _dedup_object_types(db: aiosqlite.Connection) -> None:
-        """Collapse duplicate-name object types before the UNIQUE index is built.
+    async def _backfill_object_type_workspaces(db: aiosqlite.Connection) -> None:
+        """Attribute NULL-workspace object types to a tenant where unambiguous (SZD-2).
 
-        Two type rows can share a name (case-insensitively) only on a DB that
-        predates the unique index — the concurrent ``ensure_type`` race. Keep the
-        LOWEST rowid per case-folded name (the first-defined survivor), re-point
-        any objects bound to a losing type id at the survivor's id so no object is
-        orphaned, then delete the loser type rows. Best-effort: a failure here is
-        swallowed (logged) so it can never crash ``_ensure_schema``; the index
-        creation that follows is itself try/except-guarded as the final backstop.
+        A pre-SZD-2 row has NULL ``workspace_id``. We can sometimes recover the
+        owning tenant from its objects: if EVERY non-NULL object of the type
+        carries the SAME ``workspace_id`` and there is exactly one such workspace,
+        the type clearly belongs to that tenant and we stamp it. Otherwise — the
+        type has no objects, or its objects span multiple workspaces, or its
+        objects are themselves all legacy NULL — the row stays NULL = global (the
+        documented sentinel), because it cannot be safely attributed after the
+        fact. Only NULL-workspace type rows are touched, so this never re-homes a
+        type a caller already stamped. Idempotent: a second run re-derives the
+        same single-workspace attributions and finds nothing new to change.
+        Best-effort: any failure is swallowed (logged) so it can never crash
+        ``_ensure_schema``.
+        """
+        try:
+            db.row_factory = aiosqlite.Row
+            # For each NULL-workspace type, the DISTINCT non-NULL workspaces of
+            # its objects. A HAVING COUNT(DISTINCT ...) = 1 keeps only the
+            # types whose objects unambiguously live in a single tenant.
+            async with db.execute(
+                "SELECT o.type_id AS type_id, MIN(o.workspace_id) AS ws "
+                "FROM fabric_objects o "
+                "JOIN fabric_object_types t ON t.id = o.type_id "
+                "WHERE t.workspace_id IS NULL AND o.workspace_id IS NOT NULL "
+                "GROUP BY o.type_id "
+                "HAVING COUNT(DISTINCT o.workspace_id) = 1"
+            ) as cur:
+                rows = await cur.fetchall()
+            for row in rows:
+                await db.execute(
+                    "UPDATE fabric_object_types SET workspace_id = ? "
+                    "WHERE id = ? AND workspace_id IS NULL",
+                    (row["ws"], row["type_id"]),
+                )
+        except aiosqlite.Error:
+            logger.warning(
+                "fabric_object_types workspace backfill failed — leaving rows NULL",
+                exc_info=True,
+            )
+        finally:
+            db.row_factory = None
+
+    @staticmethod
+    async def _dedup_object_types(db: aiosqlite.Connection) -> None:
+        """Collapse duplicate (workspace, name) object types before the UNIQUE index.
+
+        Two type rows can share a (workspace_id, case-folded name) only on a DB
+        that predates the unique index — the concurrent ``ensure_type`` race.
+        Keep the LOWEST rowid per (workspace, case-folded name) (the
+        first-defined survivor), re-point any objects bound to a losing type id
+        at the survivor's id so no object is orphaned, then delete the loser type
+        rows. SZD-2: the de-dup key now includes ``workspace_id`` so two tenants'
+        same-named types are NOT collapsed into one — only true within-workspace
+        duplicates are (legacy NULL/NULL pairs included, so the survivor of a pair
+        of global "Customer" rows is kept and the index can be created). Best
+        -effort: a failure here is swallowed (logged) so it can never crash
+        ``_ensure_schema``; the index creation that follows is itself try/except
+        -guarded as the final backstop.
         """
         try:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT rowid, id, name FROM fabric_object_types ORDER BY rowid ASC"
+                "SELECT rowid, id, name, workspace_id FROM fabric_object_types ORDER BY rowid ASC"
             ) as cur:
                 rows = await cur.fetchall()
-            survivor_by_name: dict[str, str] = {}
+            survivor_by_key: dict[tuple[str | None, str], str] = {}
             for row in rows:
-                key = (row["name"] or "").strip().lower()
-                survivor_id = survivor_by_name.get(key)
+                key = (row["workspace_id"], (row["name"] or "").strip().lower())
+                survivor_id = survivor_by_key.get(key)
                 if survivor_id is None:
-                    survivor_by_name[key] = row["id"]
+                    survivor_by_key[key] = row["id"]
                     continue
                 loser_id = row["id"]
                 if loser_id == survivor_id:
@@ -416,20 +540,30 @@ class FabricStore:
         description: str = "",
         icon: str = "box",
         color: str = "#0A84FF",
+        workspace_id: str | None = None,
     ) -> ObjectType:
+        """Define a new object type, optionally scoped to a tenant (SZD-2).
+
+        ``workspace_id`` stamps the owning workspace on the type row so the
+        discovered-type catalog stays private per tenant: a type defined here
+        for workspace A is invisible/unusable from workspace B (see
+        :meth:`get_type_by_name`). ``None`` writes a legacy/global type (OSS /
+        agent-tool / single-tenant callers), visible to every scoped read.
+        """
         obj_type = ObjectType(
             name=name,
             description=description,
             icon=icon,
             color=color,
             properties=properties,
+            workspace_id=workspace_id,
         )
         await self._ensure_schema()
         async with self._conn() as db:
             await db.execute(
                 "INSERT INTO fabric_object_types"
-                " (id, name, description, icon, color, properties_schema)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
+                " (id, name, description, icon, color, properties_schema, workspace_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     obj_type.id,
                     obj_type.name,
@@ -437,64 +571,91 @@ class FabricStore:
                     obj_type.icon,
                     obj_type.color,
                     json.dumps([p.model_dump() for p in properties]),
+                    workspace_id,
                 ),
             )
             await db.commit()
         return obj_type
 
-    async def get_type(self, type_id: str) -> ObjectType | None:
+    async def get_type(self, type_id: str, workspace_id: str | None = None) -> ObjectType | None:
+        """Fetch one object type by id, optionally scoped to ``workspace_id`` (SZD-2).
+
+        When ``workspace_id`` is supplied, a type owned by another tenant returns
+        ``None`` (legacy NULL-workspace types stay visible). ``None`` leaves the
+        read unscoped (OSS / agent-tool / single-tenant callers). Note that
+        :meth:`create_object` calls this UNSCOPED on purpose — it only needs the
+        type's name to denormalize onto the object row, and the object write
+        itself carries the tenancy guard.
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_object_types WHERE id = ?"
+        params: list[Any] = [type_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM fabric_object_types WHERE id = ?", (type_id,)
-            ) as cur:
+            async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
                 if not row:
                     return None
                 return self._row_to_type(row)
 
-    async def get_type_by_name(self, name: str) -> ObjectType | None:
+    async def get_type_by_name(
+        self, name: str, workspace_id: str | None = None
+    ) -> ObjectType | None:
+        """Resolve an object type by (case-insensitive) name, scoped to a tenant (SZD-2).
+
+        This is the read ``ensure_type`` uses to decide "reuse the existing type
+        or define a new one". Scoping it is the core of SZD-2: a type defined in
+        workspace A must be invisible AND non-reusable from workspace B, so a
+        scoped lookup returns only the caller's own type (or a legacy NULL-
+        workspace type). With ``workspace_id`` set, two tenants that both have a
+        "Customer" type each resolve to THEIR OWN id; ``None`` is unscoped and
+        returns the first match by rowid (OSS / single-tenant callers).
+        """
+        ws_cond, ws_params = _workspace_scope(workspace_id)
+        sql = "SELECT * FROM fabric_object_types WHERE LOWER(name) = LOWER(?)"
+        params: list[Any] = [name]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        # When scoped, the caller's OWN type wins over a legacy NULL-workspace
+        # type of the same name: order own-rows-first (workspace_id NOT NULL),
+        # then by rowid for a stable pick.
+        sql += " ORDER BY (workspace_id IS NULL), rowid LIMIT 1"
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute(
-                "SELECT * FROM fabric_object_types WHERE LOWER(name) = LOWER(?)", (name,)
-            ) as cur:
+            async with db.execute(sql, params) as cur:
                 row = await cur.fetchone()
                 if not row:
                     return None
                 return self._row_to_type(row)
 
     async def list_types(self, workspace_id: str | None = None) -> list[ObjectType]:
-        """List object types, optionally scoped to a tenant (W4a follow-up).
+        """List object types, optionally scoped to a tenant (SZD-2).
 
-        Type DEFINITIONS are global — ``fabric_object_types`` has no
-        ``workspace_id`` column (a deliberate W4a choice: the shared schema is
-        not per-tenant data). But the type NAMES a tenant can see are tenant
-        metadata: on a shared deployment, listing every defined type leaks what
-        other tenants are modeling. So a scoped call returns only the types
-        with at least one object row VISIBLE to that workspace — the same
-        visibility ``query()`` applies (own rows plus legacy NULL-workspace
-        rows, via ``_workspace_scope``). A defined type with no visible rows
-        (including the caller's own empty types) is omitted; it reappears the
-        moment a visible object exists. ``workspace_id=None`` keeps the
-        original unscoped behavior (all defined types) for OSS / single-tenant
-        callers.
+        SZD-2: type definitions are now first-class TENANT data —
+        ``fabric_object_types`` carries its own ``workspace_id``. A scoped call
+        returns the caller's OWN types plus legacy NULL-workspace types (the
+        same ``_workspace_scope`` visibility every other W4a read uses), scoped
+        on the TYPE's column directly. This supersedes the earlier
+        join-through-a-visible-object-row approach (fix/fabric-stats-workspace-
+        scope): a tenant's empty (object-less) type is now correctly listed for
+        its owner and is invisible to other tenants. ``workspace_id=None`` keeps
+        the original unscoped behavior (all defined types) for OSS / single-
+        tenant callers.
         """
         await self._ensure_schema()
         async with self._conn() as db:
             db.row_factory = aiosqlite.Row
-            if workspace_id is None:
+            ws_cond, params = _workspace_scope(workspace_id)
+            if ws_cond is None:
                 sql = "SELECT * FROM fabric_object_types ORDER BY name"
-                params: list[Any] = []
             else:
-                ws_cond, params = _workspace_scope(workspace_id, column="o.workspace_id")
-                sql = (
-                    "SELECT DISTINCT t.* FROM fabric_object_types t"
-                    " JOIN fabric_objects o ON o.type_id = t.id"
-                    f" WHERE {ws_cond} ORDER BY t.name"
-                )
+                sql = f"SELECT * FROM fabric_object_types WHERE {ws_cond} ORDER BY name"
             async with db.execute(sql, params) as cur:
                 return [self._row_to_type(row) async for row in cur]
 
@@ -1083,12 +1244,11 @@ class FabricStore:
         legacy NULL-workspace rows, via ``_workspace_scope``) so stats and
         query always agree: ``stats(workspace_id=w)["objects"]`` equals the
         ``total`` of an unfiltered scoped query. ``links`` applies the same
-        scope to ``fabric_links``. ``types`` counts the DEFINED types with at
-        least one visible object row — matching ``list_types(workspace_id=w)``
-        — because type definitions are global but which types a tenant sees is
-        tenant metadata (the cross-tenant type-name leak this closes).
-        ``workspace_id=None`` keeps the original unscoped, instance-wide
-        behavior for OSS / single-tenant callers.
+        scope to ``fabric_links``. SZD-2: ``types`` now counts types scoped on
+        the TYPE's OWN ``workspace_id`` (own rows + legacy NULL) so it matches
+        ``list_types(workspace_id=w)`` exactly — including the caller's empty,
+        object-less types. ``workspace_id=None`` keeps the original unscoped,
+        instance-wide behavior for OSS / single-tenant callers.
         """
         await self._ensure_schema()
         async with self._conn() as db:
@@ -1103,11 +1263,9 @@ class FabricStore:
                 }
             obj_cond, obj_params = _workspace_scope(workspace_id)
             link_cond, link_params = _workspace_scope(workspace_id)
-            type_cond, type_params = _workspace_scope(workspace_id, column="o.workspace_id")
+            type_cond, type_params = _workspace_scope(workspace_id)
             types = await db.execute_fetchall(
-                "SELECT COUNT(DISTINCT t.id) FROM fabric_object_types t"
-                " JOIN fabric_objects o ON o.type_id = t.id"
-                f" WHERE {type_cond}",
+                f"SELECT COUNT(*) FROM fabric_object_types WHERE {type_cond}",
                 type_params,
             )
             objects = await db.execute_fetchall(
@@ -1126,6 +1284,11 @@ class FabricStore:
 
     def _row_to_type(self, row: Any) -> ObjectType:
         props_raw = json.loads(row["properties_schema"]) if row["properties_schema"] else []
+        # SZD-2: surface the type's owning workspace. ``keys()`` guard keeps the
+        # helper resilient to any legacy SELECT projection that omitted the
+        # column (defensive — current callers all SELECT *).
+        keys = row.keys() if hasattr(row, "keys") else ()
+        workspace_id = row["workspace_id"] if "workspace_id" in keys else None
         return ObjectType(
             id=row["id"],
             name=row["name"],
@@ -1133,6 +1296,7 @@ class FabricStore:
             icon=row["icon"] or "box",
             color=row["color"] or "#0A84FF",
             properties=[PropertyDef(**p) for p in props_raw],
+            workspace_id=workspace_id,
         )
 
     def _row_to_object(self, row: Any) -> FabricObject:

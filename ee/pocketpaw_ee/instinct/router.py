@@ -1,5 +1,37 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-19 (SZD-5b — _pocket_create proposal type) — added a gated
+#   starter-Pocket-create proposal kind (TENANCY GATE). ``_pocket_create_blob`` +
+#   ``_assert_pocket_create_workspace`` are the peers of the existing blob
+#   accessors + tenancy guards. The blob (``Action.parameters._pocket_create``)
+#   carries the staged ``pocket_spec`` plus, as SEPARATE top-level fields, the
+#   originating ``workspace_id`` and the owner ``user_id`` (kept OUT of the
+#   editable spec so the correction flow can't move tenancy/owner). On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``pocket_proposals.executor.execute_approved_pocket_create`` (which creates the
+#   Pocket via the workspace-scoped ``pockets.service.create`` after a
+#   ``CreatePocketRequest.model_validate`` at entry, and OWNS the chain close). On
+#   REJECT the router emits ``human.corrected`` + ``decision.completed(rejected)``
+#   itself (the executor never runs on reject — no Pocket is created). The
+#   ``_assert_pocket_create_workspace`` 403 runs in ALL FOUR locations (approve /
+#   bulk-approve / reject / bulk-reject) BEFORE any mutation — asymmetric tenant
+#   scope is no tenant scope (pocketpaw#1183 / #1250). Same exactly-one-terminal
+#   discipline as the Fabric-objects gate.
+# Updated: 2026-06-19 (SZD-5a — _fabric_objects proposal type) — added a gated
+#   Fabric-ontology proposal kind. ``_fabric_objects_blob`` +
+#   ``_assert_fabric_objects_workspace`` are the peers of the existing blob
+#   accessors + tenancy guards. The blob (``Action.parameters._fabric_objects``)
+#   carries {object_types[], objects[], links[], workspace_id}. On APPROVE the
+#   router emits ``human.corrected`` then fires
+#   ``fabric_proposals.executor.execute_approved_fabric_objects`` (which
+#   materialises the ontology via the workspace-scoped, idempotent
+#   ``connectors.fabric_ingest.ingest_records`` upsert loop and OWNS the chain
+#   close). On REJECT the router emits ``human.corrected`` +
+#   ``decision.completed(rejected)`` itself (the executor never runs on reject —
+#   no Fabric write happens). The ``_assert_fabric_objects_workspace`` 403 runs
+#   in ALL FOUR locations (approve / bulk-approve / reject / bulk-reject) BEFORE
+#   any mutation — asymmetric tenant scope is no tenant scope (pocketpaw#1183 /
+#   #1250). Same exactly-one-terminal discipline as the external-action gate.
 # Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — added the
 #   FIFTH gated proposal kind: the Branch-primitive artifact-change MERGE GATE.
 #   ``_artifact_change_blob`` + ``_assert_artifact_change_workspace`` are the
@@ -498,6 +530,91 @@ def _assert_external_action_workspace(action: Any, current_workspace: str) -> No
         )
 
 
+def _fabric_objects_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_fabric_objects`` blob on an Action, or ``None``.
+
+    The blob is the gated Fabric-ontology payload
+    ``ee.cloud.fabric_proposals.propose`` stores under
+    ``Action.parameters._fabric_objects`` (object_types / objects / links + the
+    originating ``workspace_id``). This is a peer gated proposal kind — the
+    approve path dispatches the apply-on-approve executor on its presence,
+    exactly as it dispatches the external-action executor on ``_external_action``.
+    Anything that is not a dict is treated as "no fabric objects".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_fabric_objects")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_fabric_objects_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a Fabric-ontology write from another workspace.
+
+    Mirror of ``_assert_external_action_workspace`` for the ``_fabric_objects``
+    blob. ``require_action_any_workspace("instinct.approve")`` only proves the
+    caller holds the role SOMEWHERE; this binds the Fabric-objects Action to the
+    caller's active workspace. A Fabric write carries no pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's ``workspace_id``. A
+    blob whose ``workspace_id`` differs from the caller's active workspace → 403,
+    on BOTH the approve and reject side (asymmetric tenant scope is no tenant
+    scope — pocketpaw#1183 / #1250). A non-fabric-objects Action (no blob) is
+    unaffected.
+    """
+    blob = _fabric_objects_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This fabric-objects write belongs to a different workspace",
+        )
+
+
+def _pocket_create_blob(action: Any) -> dict[str, Any] | None:
+    """Return the ``_pocket_create`` blob on an Action, or ``None``.
+
+    The blob is the gated starter-Pocket-create payload
+    ``ee.cloud.pocket_proposals.propose`` stores under
+    ``Action.parameters._pocket_create`` (the staged ``pocket_spec`` +, as SEPARATE
+    top-level fields, the originating ``workspace_id`` and the owner ``user_id``).
+    This is a peer gated proposal kind — the approve path dispatches the
+    apply-on-approve executor on its presence, exactly as it dispatches the
+    Fabric-objects executor on ``_fabric_objects``. Anything that is not a dict is
+    treated as "no pocket create".
+    """
+    params = getattr(action, "parameters", None)
+    if not isinstance(params, dict):
+        return None
+    blob = params.get("_pocket_create")
+    return blob if isinstance(blob, dict) else None
+
+
+def _assert_pocket_create_workspace(action: Any, current_workspace: str) -> None:
+    """Reject approving / rejecting a starter-Pocket create from another workspace.
+
+    Mirror of ``_assert_fabric_objects_workspace`` for the ``_pocket_create`` blob.
+    ``require_action_any_workspace("instinct.approve")`` only proves the caller
+    holds the role SOMEWHERE; this binds the Pocket-create Action to the caller's
+    active workspace. A proposed Pocket carries no EXISTING pocket the way a parked
+    write does, so its tenancy lives entirely on the blob's top-level
+    ``workspace_id`` (NEVER inside the editable ``pocket_spec``). A blob whose
+    ``workspace_id`` differs from the caller's active workspace → 403, on BOTH the
+    approve and reject side (asymmetric tenant scope is no tenant scope —
+    pocketpaw#1183 / #1250). A non-pocket-create Action (no blob) is unaffected.
+    """
+    blob = _pocket_create_blob(action)
+    if blob is None:
+        return
+    blob_workspace = str(blob.get("workspace_id") or "")
+    if blob_workspace and blob_workspace != current_workspace:
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This pocket create belongs to a different workspace",
+        )
+
+
 def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
     """Reject approving a parked pocket write from another workspace.
 
@@ -818,6 +935,8 @@ async def bulk_approve_actions(
             _assert_pocket_write_workspace(action, workspace_id)
             _assert_code_change_workspace(action, workspace_id)
             _assert_external_action_workspace(action, workspace_id)
+            _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_pocket_create_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
 
@@ -904,6 +1023,71 @@ async def bulk_approve_actions(
             except Exception:
                 logger.exception(
                     "bulk-approve external-action execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_fabric_objects`` Action materialises its
+        # proposed ontology in Fabric. Mirrors the external-action branch above:
+        # per-item ``human.corrected(accepted)`` (bulk-approve has no edit
+        # surface), the ``agent.proposed`` event id (off the blob's
+        # ``proposed_event_id``) as causation, then the executor (which owns the
+        # chain close). Matched BEFORE the pocket-write fallthrough and
+        # ``continue``d so the kinds never cross.
+        fabric_objects_blob = _fabric_objects_blob(action)
+        if fabric_objects_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_objects_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.fabric_proposals import (
+                    executor as fabric_objects_executor,
+                )
+
+                await fabric_objects_executor.execute_approved_fabric_objects(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve fabric-objects execution failed for %s (non-fatal)",
+                    action.id,
+                )
+            continue
+
+        # A bulk-approved gated ``_pocket_create`` Action creates its proposed
+        # starter Pocket. Mirrors the Fabric-objects branch above: per-item
+        # ``human.corrected(accepted)`` (bulk-approve has no edit surface), the
+        # ``agent.proposed`` event id (off the blob's ``proposed_event_id``) as
+        # causation, then the executor (which owns the chain close). Matched BEFORE
+        # the pocket-write fallthrough and ``continue``d so the kinds never cross.
+        pocket_create_blob = _pocket_create_blob(action)
+        if pocket_create_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=pocket_create_blob,
+                action=action,
+                user_id=approver_id,
+                workspace_id=workspace_id,
+                disposition="accepted",
+                note=req.note,
+                causation_override=_code_change_proposed_event_id(pocket_create_blob),
+            )
+            try:
+                from pocketpaw_ee.cloud.pocket_proposals import (
+                    executor as pocket_create_executor,
+                )
+
+                await pocket_create_executor.execute_approved_pocket_create(
+                    action, human_event_id=human_event_id
+                )
+            except Exception:
+                logger.exception(
+                    "bulk-approve pocket-create execution failed for %s (non-fatal)",
                     action.id,
                 )
             continue
@@ -1039,6 +1223,8 @@ async def bulk_reject_actions(
             _assert_pocket_write_workspace(action, workspace_id)
             _assert_code_change_workspace(action, workspace_id)
             _assert_external_action_workspace(action, workspace_id)
+            _assert_fabric_objects_workspace(action, workspace_id)
+            _assert_pocket_create_workspace(action, workspace_id)
             _assert_belt_plan_workspace(action, workspace_id)
             _assert_artifact_change_workspace(action, workspace_id)
 
@@ -1118,6 +1304,58 @@ async def bulk_reject_actions(
             )
             _emit_decision_completed_rejected(
                 blob=external_action_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # A bulk-rejected gated ``_fabric_objects`` Action closes its chain HERE
+        # (the executor never runs on reject — the router owns the close). NO
+        # Fabric write happens. Mirrors the external-action reject branch.
+        # Matched AFTER pocket-write + code-change + external-action and
+        # ``continue``d so the kinds never cross.
+        fabric_objects_blob = _fabric_objects_blob(action)
+        if fabric_objects_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=fabric_objects_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=fabric_objects_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                reason=req.reason,
+                causation_override=human_event_id,
+            )
+            continue
+
+        # A bulk-rejected gated ``_pocket_create`` Action closes its chain HERE
+        # (the executor never runs on reject — the router owns the close). NO
+        # Pocket is created. Mirrors the Fabric-objects reject branch. Matched
+        # AFTER pocket-write + code-change + external-action + fabric-objects and
+        # ``continue``d so the kinds never cross.
+        pocket_create_blob = _pocket_create_blob(action)
+        if pocket_create_blob is not None:
+            human_event_id = _emit_human_corrected(
+                blob=pocket_create_blob,
+                action=action,
+                user_id=rejector_id,
+                workspace_id=workspace_id,
+                disposition="rejected",
+                note=req.reason or None,
+                causation_override=_code_change_proposed_event_id(pocket_create_blob),
+            )
+            _emit_decision_completed_rejected(
+                blob=pocket_create_blob,
                 action=action,
                 user_id=rejector_id,
                 workspace_id=workspace_id,
@@ -1226,6 +1464,16 @@ async def approve_action(
     # Same tenancy gate for a gated external-action Action — its
     # ``_external_action`` blob carries the workspace, not a pocket.
     _assert_external_action_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Fabric-objects Action — its
+    # ``_fabric_objects`` blob carries the workspace, not a pocket. Approving it
+    # writes typed objects into the tenant's Fabric, so the cross-workspace gate
+    # is mandatory here.
+    _assert_fabric_objects_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Pocket-create Action — its ``_pocket_create``
+    # blob carries the workspace (and owner) on SEPARATE top-level fields, not a
+    # pocket. Approving it creates a Pocket in the tenant's workspace, so the
+    # cross-workspace gate is mandatory here.
+    _assert_pocket_create_workspace(before, workspace_id)
     # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
     # ``_belt_plan`` blob carries the workspace.
     _assert_belt_plan_workspace(before, workspace_id)
@@ -1392,6 +1640,85 @@ async def approve_action(
         except Exception:
             logger.exception("external-action execution after approval failed (non-fatal)")
 
+    # When the approved Action carries a gated ``_fabric_objects`` blob,
+    # materialise the proposed ontology in Fabric (workspace-scoped, idempotent
+    # ingest). Same best-effort, lazy-import, never-break-the-approve-response
+    # shape as the external-action hook above; the executor records success /
+    # failure on the Action itself. A non-fabric-objects Action skips this.
+    #
+    # The Fabric-objects write is part of its own Decision-Graph chain (the
+    # propose helper minted the ``correlation_id`` + emitted ``agent.proposed``).
+    # Emit the ``human.corrected`` event for the approval HERE (the router owns
+    # the human-action emit on every approve path), citing the ``agent.proposed``
+    # event id (stored on the blob as ``proposed_event_id`` — the same field the
+    # external-action path reads, so ``_code_change_proposed_event_id`` resolves
+    # it) as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` here, mirroring the external-action executor. No
+    # double terminal.
+    fabric_objects_blob = _fabric_objects_blob(approved)
+    if fabric_objects_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=fabric_objects_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.fabric_proposals import executor as fabric_objects_executor
+
+            await fabric_objects_executor.execute_approved_fabric_objects(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("fabric-objects execution after approval failed (non-fatal)")
+
+    # When the approved Action carries a gated ``_pocket_create`` blob, create the
+    # proposed starter Pocket via ``pockets.service.create`` (workspace-scoped,
+    # owned by the blob's top-level ``user_id``). Same best-effort, lazy-import,
+    # never-break-the-approve-response shape as the Fabric-objects hook above; the
+    # executor records success / failure on the Action itself. A non-pocket-create
+    # Action skips this.
+    #
+    # The Pocket create is part of its own Decision-Graph chain (the propose helper
+    # minted the ``correlation_id`` + emitted ``agent.proposed``). Emit the
+    # ``human.corrected`` event for the approval HERE (the router owns the
+    # human-action emit on every approve path), citing the ``agent.proposed`` event
+    # id (stored on the blob as ``proposed_event_id`` — the same field the
+    # Fabric-objects path reads, so ``_code_change_proposed_event_id`` resolves it)
+    # as causation, then thread its event id into the executor so the terminal
+    # ``decision.completed`` chains back to the approval. The executor owns the
+    # chain CLOSE (success or failure) — the router does NOT emit
+    # ``decision.completed`` here, mirroring the Fabric-objects executor. No double
+    # terminal.
+    pocket_create_blob = _pocket_create_blob(approved)
+    if pocket_create_blob is not None:
+        disposition = "edited" if edited_fields else "accepted"
+        note = correction.context_summary if correction is not None else None
+        human_event_id = _emit_human_corrected(
+            blob=pocket_create_blob,
+            action=approved,
+            user_id=approver_id,
+            workspace_id=workspace_id,
+            disposition=disposition,
+            note=note,
+            causation_override=_code_change_proposed_event_id(pocket_create_blob),
+        )
+        try:
+            from pocketpaw_ee.cloud.pocket_proposals import executor as pocket_create_executor
+
+            await pocket_create_executor.execute_approved_pocket_create(
+                approved, human_event_id=human_event_id
+            )
+        except Exception:
+            logger.exception("pocket-create execution after approval failed (non-fatal)")
+
     # MANDATES — when the approved Action carries a ``_belt_plan`` blob (the
     # mandate foreman's shift plan), dispatch the plan executor. Same shape as
     # the code-change hook: the router owns the ``human.corrected`` emit, the
@@ -1524,6 +1851,14 @@ async def reject_action(
     _assert_pocket_write_workspace(before, workspace_id)
     _assert_code_change_workspace(before, workspace_id)
     _assert_external_action_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Fabric-objects Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_fabric_objects_workspace(before, workspace_id)
+    # Same tenancy gate for a gated Pocket-create Action on the REJECT side —
+    # asymmetric tenant scope is no tenant scope: a cross-workspace reject must
+    # 403 before any mutation, exactly like the approve side.
+    _assert_pocket_create_workspace(before, workspace_id)
     # Same tenancy gate for a mandate shift-plan Action (belt_plan) — its
     # ``_belt_plan`` blob carries the workspace.
     _assert_belt_plan_workspace(before, workspace_id)
@@ -1613,6 +1948,60 @@ async def reject_action(
         )
         _emit_decision_completed_rejected(
             blob=external_action_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # A rejected gated ``_fabric_objects`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # external-action reject path). NO Fabric write happens.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    fabric_objects_blob = _fabric_objects_blob(action)
+    if fabric_objects_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=fabric_objects_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(fabric_objects_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=fabric_objects_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            reason=reason,
+            causation_override=human_event_id,
+        )
+
+    # A rejected gated ``_pocket_create`` Action closes its chain HERE (the
+    # executor never runs on reject — the router owns the close, mirroring the
+    # Fabric-objects reject path). NO Pocket is created.
+    # ``human.corrected(rejected)`` cites the ``agent.proposed`` event (off the
+    # blob's ``proposed_event_id``); ``decision.completed(rejected)`` cites the
+    # human event so the chain reads ``agent.proposed → human.corrected →
+    # decision.completed``.
+    pocket_create_blob = _pocket_create_blob(action)
+    if pocket_create_blob is not None:
+        human_event_id = _emit_human_corrected(
+            blob=pocket_create_blob,
+            action=action,
+            user_id=rejector_id,
+            workspace_id=workspace_id,
+            disposition="rejected",
+            note=reason or None,
+            causation_override=_code_change_proposed_event_id(pocket_create_blob),
+        )
+        _emit_decision_completed_rejected(
+            blob=pocket_create_blob,
             action=action,
             user_id=rejector_id,
             workspace_id=workspace_id,

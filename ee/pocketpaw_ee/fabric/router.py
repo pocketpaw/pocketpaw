@@ -35,6 +35,14 @@
 #   the store's scoped ``list_types()`` / ``stats()`` (own rows + legacy NULL
 #   rows, matching every other scoped read; type list = defined types with at
 #   least one visible object row — definitions stay global in the schema).
+# Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — the
+#   ``POST /fabric/types`` (define_type) endpoint now stamps the caller's
+#   ``current_workspace_id`` onto the new type, so the discovered-type catalog
+#   is private per tenant: a type defined by workspace A is invisible/unusable
+#   from workspace B (``get_type_by_name`` / ``list_types`` / ``stats`` are
+#   scoped on the type's own ``workspace_id`` now). This supersedes the W4a /
+#   fix/fabric-stats note above that called definitions "global in the schema"
+#   — they carry their own workspace column as of SZD-2.
 
 from __future__ import annotations
 
@@ -125,13 +133,18 @@ async def list_types(workspace_id: str = Depends(current_workspace_id)):
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("fabric.write"))],
 )
-async def define_type(req: DefineTypeRequest):
+async def define_type(
+    req: DefineTypeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Define an object type stamped with the caller's active workspace (SZD-2)."""
     return await _store().define_type(
         name=req.name,
         properties=req.properties,
         description=req.description,
         icon=req.icon,
         color=req.color,
+        workspace_id=workspace_id,
     )
 
 
