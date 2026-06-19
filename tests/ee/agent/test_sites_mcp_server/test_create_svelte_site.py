@@ -1,4 +1,9 @@
 # tests/ee/agent/test_sites_mcp_server/test_create_svelte_site.py
+# Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — create_svelte_site now
+# calls the shared Sites plan gate (sites.service.require_sites_plan) before
+# agent_create, so an autouse fixture defaults get_workspace_plan to "business"
+# (which unlocks Sites) for the end-to-end create test. Denial is covered in
+# tests/ee/sites/test_plan_gate.py.
 # Created: 2026-06-04 (feat/sites-svelte-engine) — coverage for the Paw Sites
 # "Svelte track" create tool ``create_svelte_site`` on the in-process
 # ``pocketpaw_sites_manager`` server. Three layers:
@@ -17,10 +22,25 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 pytest.importorskip("pocketpaw_ee")
+
+
+@pytest.fixture(autouse=True)
+def _default_sites_plan():
+    """create_svelte_site now calls the shared Sites plan gate
+    (sites.service.require_sites_plan) before agent_create. These tests use
+    synthetic workspace ids with no seeded Workspace doc, so default the plan to
+    one that unlocks Sites ("business") to exercise the create mechanics. Plan-gate
+    denial is covered separately in tests/ee/sites/test_plan_gate.py."""
+    with patch(
+        "pocketpaw_ee.cloud.workspace.service.get_workspace_plan",
+        new=AsyncMock(return_value="business"),
+    ):
+        yield
 
 
 # A representative §4.3-complete source map (paths -> file contents).
