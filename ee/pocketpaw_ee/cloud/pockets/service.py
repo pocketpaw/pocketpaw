@@ -193,6 +193,39 @@ wire; ``_backend_summary_wire`` / ``get_pocket_backend`` /
 run-tool route can read the allowlist off the credential row.
 ``get_pocket_backend_for_executor`` APPENDS ``allowed_tools`` as the 9th tuple
 element (back-compatible — every existing positional destructure uses ``*_``).
+
+Changes: 2026-06-17 (feat/sites-svelte-component-edit, SE-2) — added
+``set_svelte_source_file``: rewrite ONE file in a svelte-engine pocket's
+``source`` map (the {path: contents} hand-written SvelteKit files) and persist
+it. The Pocket write stays here (entity isolation); the sites service
+orchestrates the republish. Returns the prior file contents alongside the wire
+dict so the caller can roll the edit back when the downstream smoke gate fails.
+Changes: 2026-06-18 (feat/branch-primitive-versions, BP-1) — ``merge_spec``
+now ALSO records a draft ArtifactVersion (scope_type="pocket") after the
+rippleSpec persist, via the universal Branch-primitive versions service. The
+existing destructive overwrite + emit are unchanged; the version write is an
+additive, best-effort snapshot (a version-store failure never breaks the merge)
+so every content mutation gains a draft/history without changing the merge
+contract. TODO(BP-4): revert/history hook onto these rows.
+Changes: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) —
+``set_svelte_source_file`` now ALSO records a draft ArtifactVersion
+(scope_type="pocket") after a svelte source edit, via
+``_record_pocket_svelte_draft_version`` (the svelte peer of
+``_record_pocket_draft_version``). BP-1 only versioned the rippleSpec write
+(merge_spec); svelte edits go through ``set_svelte_source_file`` and were not
+versioned. Same additive, best-effort snapshot contract — a version-store
+failure never breaks the edit. The merge gate itself lives in the Instinct
+router (BP-3); these rows are the candidates it reviews.
+Changes: 2026-06-19 (feat/typed-ripplespec-phase1) — fixed the 2026-06-13
+rippleSpec clobber bug in ``update``. A partial ``ripple_spec`` body that
+OMITS instance-owned regions (``state`` / ``selections``) no longer wipes
+them: ``update`` now routes through ``_layer_safe_update_spec`` (a per-key
+overlay expressed via the typed ``RippleSpec`` layer split) unless the new
+``UpdatePocketRequest.reset_state`` flag is set or a ``template_slug``
+recompile is in play. The typed model is used INTERNALLY only — Beanie
+``Pocket.rippleSpec`` and ``domain.Pocket.ripple_spec`` stay ``dict``, and
+every reader still receives a flat dict (executor dual-path readers deferred
+to a Phase 2 gated on PR #1472).
 """
 
 from __future__ import annotations
@@ -983,6 +1016,72 @@ def _merge_compile_into_ripple_spec(
     return out
 
 
+def _layer_safe_update_spec(
+    existing_raw: dict[str, Any] | None,
+    incoming_raw: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge an incoming (partial) rippleSpec onto the existing one WITHOUT
+    clobbering instance-owned regions the incoming spec omits.
+
+    This is the fix for the 2026-06-13 clobber bug. The bug: ``update()`` did a
+    wholesale ``doc.rippleSpec = normalized_spec``, so a frontend ``PATCH`` that
+    sent only the template canvas (``ui`` / ``actions`` / ``sources``) WIPED the
+    instance's ``state`` / ``selections`` — and, symmetrically, a state-only
+    write would have wiped the canvas.
+
+    The merge is a per-key overlay expressed through the typed layer split:
+    the result is the EXISTING spec with every key the INCOMING spec actually
+    SET overlaid on top. A key the incoming spec omits is preserved from the
+    existing spec — whichever layer it belongs to. Concretely:
+
+      * incoming carries ``ui`` but no ``state`` (the clobber case) →
+        new ``ui``, existing ``state`` preserved.
+      * incoming carries ``state`` but no ``ui`` (a state-only edit, e.g.
+        reconcile's instance-preserve path) → new ``state``, existing ``ui``
+        preserved.
+
+    Implementation uses ``RippleSpec`` for the type boundary: we promote both
+    sides, overlay the incoming TEMPLATE layer and the incoming INSTANCE layer
+    onto the existing spec (each carries only the keys that side set, via
+    ``exclude_unset``), then overlay any remaining incoming keys (the
+    compile_template passthrough envelope — ``name`` / ``version`` / ``lifecycle``
+    / ``metadata`` / etc. the normalizer stamps) so a partial write still
+    refreshes those. ``to_flat_dict`` returns the same BSON-shaped flat dict the
+    DB already stores — no migration.
+
+    Falls back to the legacy wholesale-incoming behaviour only if the incoming
+    spec cannot be promoted (corrupt) — never silently drops the write.
+    """
+    from pocketpaw.bundled_templates import InstanceLayer, RippleSpec, TemplateLayer
+
+    existing = RippleSpec.from_flat_dict(existing_raw)
+    incoming = RippleSpec.from_flat_dict(incoming_raw)
+    if incoming is None:
+        # Incoming is unpromotable (should not happen post-normalize) — keep the
+        # historical behaviour rather than drop the caller's write.
+        return incoming_raw
+    if existing is None:
+        # No existing spec to protect (fresh pocket / unpromotable existing) —
+        # the incoming spec is authoritative.
+        return incoming.to_flat_dict()
+
+    # Overlay the incoming layers onto the existing spec. ``with_*_layer`` only
+    # applies the keys the incoming side actually set, so an omitted region is
+    # preserved from ``existing`` verbatim.
+    merged = existing.with_template_layer(incoming.template_layer)
+    merged = merged.with_instance_layer(incoming.instance_layer)
+
+    # Overlay the remaining incoming keys (passthrough + envelope the normalizer
+    # stamps: name/version/lifecycle/title/color/metadata/...). The layer fields
+    # are already handled above, so skip them to avoid re-applying.
+    layer_fields = set(TemplateLayer.model_fields) | set(InstanceLayer.model_fields)
+    flat = merged.to_flat_dict()
+    for key, value in incoming.to_flat_dict().items():
+        if key not in layer_fields:
+            flat[key] = value
+    return flat
+
+
 async def _check_template_needs(loaded: dict[str, Any] | None, workspace_id: str) -> list[str]:
     """Return the template's declared Sense ids that NO enabled connector fills.
 
@@ -1380,7 +1479,22 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     if body.visibility is not None:
         doc.visibility = body.visibility
     if normalized_spec is not None:
-        doc.rippleSpec = normalized_spec
+        # Clobber-fix (2026-06-13 bug): a partial ``ripple_spec`` body that
+        # OMITS instance-owned regions (state / selections) must NOT wipe them.
+        # Three branches, in priority order:
+        #   1. ``reset_state`` — explicit caller intent to clear instance state.
+        #      Wholesale write (the legacy behaviour, now opt-in).
+        #   2. ``template_slug`` — the recompile path already ran ownership-aware
+        #      ``_merge_compile_into_ripple_spec`` against ``doc.rippleSpec``,
+        #      so the merged result is authoritative — write it wholesale.
+        #   3. default (user / frontend partial PATCH) — layer-safe merge that
+        #      preserves the existing instance layer for any region the incoming
+        #      spec omits (and, symmetrically, the template layer on a
+        #      state-only write).
+        if body.reset_state or body.template_slug is not None:
+            doc.rippleSpec = normalized_spec
+        else:
+            doc.rippleSpec = _layer_safe_update_spec(doc.rippleSpec, normalized_spec)
     if body.template_slug is not None:
         doc.template_slug = body.template_slug
     if body.project_id is not None:
@@ -1404,6 +1518,66 @@ async def update(pocket_id: str, user_id: str, body: UpdatePocketRequest) -> dic
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
     return await _resolved_wire_dict(doc, user_id)
+
+
+async def set_svelte_source_file(
+    pocket_id: str,
+    user_id: str,
+    *,
+    component_path: str,
+    new_source: str,
+) -> tuple[dict, str]:
+    """Rewrite ONE file in a svelte-engine pocket's ``source`` map and persist it.
+
+    The svelte analog of editing a single component of a Paw Site: ``source`` is
+    a ``{relative_path: file_contents}`` map (the hand-written SvelteKit files),
+    and this replaces the contents at ``component_path`` with ``new_source``. The
+    Pocket Beanie write stays inside the pockets service (entity isolation — the
+    sites service orchestrates the republish but never touches the Pocket model).
+
+    Access mirrors ``update``: explicit ``(pocket_id, user_id)`` with
+    ``_check_domain_edit_access`` (owner / shared_with / workspace-visible). A
+    missing pocket raises ``NotFound``; a non-svelte pocket or a non-existent
+    component path raise the obvious cloud errors rather than silently creating a
+    file or dereferencing ``None``:
+      * not a svelte pocket (``engine != "svelte"`` or no ``source`` map) →
+        ``ValidationError`` (422);
+      * ``component_path`` absent from the map → ``NotFound`` (404) on the
+        component, so a typo'd path is not a silent create.
+
+    Returns ``(resolved_wire_dict, previous_source)`` — the wire dict every other
+    write returns, plus the file's PRIOR contents so the caller can roll the edit
+    back if the downstream republish fails its smoke gate (the sites service does
+    exactly this so a broken edit never leaves stale source on the pocket).
+    """
+    doc = await _fetch_pocket(pocket_id)
+    _check_domain_edit_access(_pocket_to_domain(doc), user_id)
+
+    if getattr(doc, "engine", "ripple") != "svelte" or not isinstance(doc.source, dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    if component_path not in doc.source:
+        raise NotFound("site_component", component_path)
+
+    previous_source = doc.source[component_path]
+    # Reassign a fresh dict so Beanie tracks the change (in-place mutation of a
+    # dict field is not always detected as dirty by the ODM).
+    updated = dict(doc.source)
+    updated[component_path] = new_source
+    doc.source = updated
+    await doc.save()
+    await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-3): a svelte source edit ALSO writes a draft
+    # ArtifactVersion. BP-1 only hooked the rippleSpec write (merge_spec →
+    # _record_pocket_draft_version); svelte edits go through THIS function and
+    # were not versioned. The snapshot is the full svelte ``source`` map (the
+    # version model's ``content`` accepts either a rippleSpec dict OR a svelte
+    # source map). Same best-effort try/except as the rippleSpec hook —
+    # versioning is an additive history layer, never a gate on the edit.
+    await _record_pocket_svelte_draft_version(doc, author=user_id)
+    return await _resolved_wire_dict(doc, user_id), previous_source
 
 
 async def merge_spec(
@@ -1555,6 +1729,13 @@ async def merge_spec(
     doc.rippleSpec = normalized
     await doc.save()
     await emit(PocketUpdated(data=await _pocket_event_payload(doc)))
+    # Branch primitive (BP-1): record a draft ArtifactVersion snapshot of the
+    # mutated rippleSpec. ADDITIVE — the destructive overwrite above already
+    # happened and stays the source of truth for rendering; this captures a
+    # draft/history snapshot so the artifact can later have draft/published/
+    # rollback (BP-3/BP-4). Best-effort: a version-store failure must NOT break
+    # the merge, so it is wrapped and only logged.
+    await _record_pocket_draft_version(doc, author=user_id)
     resolved = await _resolved_wire_dict(doc, user_id)
     return {
         "ok": True,
@@ -1563,6 +1744,72 @@ async def merge_spec(
         "pocket": resolved,
         "warnings": warnings,
     }
+
+
+async def _record_pocket_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+    """Snapshot a pocket's current rippleSpec as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-1). Lazy-imports the versions service so the
+    pockets entity does not take a hard import on the versions package and so
+    a fork without the versions module degrades gracefully. The snapshot is
+    the full ``rippleSpec`` dict (empty dict when None). Failures are logged
+    and swallowed — versioning is an additive audit/history layer over the
+    existing merge, never a gate on it.
+
+    TODO(BP-3): a merge gate may branch this draft for human review before it
+    becomes the published pointer.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=doc.rippleSpec or {},
+            author=author,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the merge
+        logger.warning(
+            "versions: failed to record draft version for pocket %s — "
+            "merge persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
+
+
+async def _record_pocket_svelte_draft_version(doc: _PocketDoc, *, author: str | None) -> None:
+    """Snapshot a svelte pocket's current ``source`` map as a draft ArtifactVersion.
+
+    Branch-primitive hook (BP-3). The svelte analog of
+    ``_record_pocket_draft_version``: BP-1 versioned the rippleSpec write
+    (merge_spec); svelte source edits go through ``set_svelte_source_file`` and
+    were not versioned, so a published svelte site had no draft version to
+    promote. This captures the full ``source`` map (``{path: contents}``) as the
+    version ``content`` — the version model accepts either shape — with
+    ``scope_type="pocket"`` (BP-2 keys site versions on the source pocket).
+
+    Lazy-imports the versions service so the pockets entity takes no hard import
+    on it; failures are logged and swallowed — versioning is an additive
+    history/Branch layer over the edit, never a gate on it.
+    """
+    try:
+        from pocketpaw_ee.versions import service as versions_service
+
+        await versions_service.write_draft(
+            scope_type="pocket",
+            scope_id=str(doc.id),
+            workspace_id=doc.workspace,
+            content=dict(doc.source) if isinstance(doc.source, dict) else {},
+            author=author,
+        )
+    except Exception:  # noqa: BLE001 — versioning must not break the edit
+        logger.warning(
+            "versions: failed to record svelte draft version for pocket %s — "
+            "edit persisted, version skipped",
+            doc.id,
+            exc_info=True,
+        )
 
 
 async def _ensure_project_in_workspace(workspace_id: str, project_id: str) -> None:
@@ -4489,6 +4736,7 @@ __all__ = [
     "set_pocket_approval_route",
     "set_pocket_backend",
     "set_pocket_write_policy",
+    "set_svelte_source_file",
     "unassign_project_on_pockets",
     "update",
     "update_share_link",

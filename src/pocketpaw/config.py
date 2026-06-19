@@ -1,6 +1,13 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-18: Added the four layered/learning Instinct gate defaults —
+    ``instinct_approval_level`` (default "ASK", dormant),
+    ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
+    (False), ``instinct_optimistic_ttl_seconds`` (300). Global host-wide
+    defaults for the 4-lane triage router; per-workspace overrides land
+    with the gate integration layer. Dormant on ship (ASK escalates
+    everything). Env: POCKETPAW_INSTINCT_* .
   - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
@@ -1327,6 +1334,54 @@ class Settings(BaseSettings):
             "then loopback / private / link-local / cloud-metadata hosts stay "
             "hard-blocked. Defaults to a curated set of sandbox-friendly "
             "embed providers."
+        ),
+    )
+
+    # Layered/learning Instinct gate — GLOBAL DEFAULTS (2026-06-18 design).
+    # These are the host-wide defaults for the 4-lane triage router that
+    # turns the binary escalate/execute Instinct gate into a learning gate.
+    # They are DORMANT by default: `instinct_approval_level="ASK"` makes the
+    # lane classifier always escalate, so shipping these changes zero
+    # behavior. A per-workspace override (a field on the workspace document)
+    # lands with the integration layer; until an admin opts a workspace into
+    # "TRIAGE", the global default governs and every escalate goes to a
+    # human. A support engineer setting the env var changes the default for
+    # NEW workspaces only — it cannot silently upgrade existing tenants.
+    instinct_approval_level: str = Field(
+        default="ASK",
+        description=(
+            "Global default triager activation level for the layered Instinct "
+            "gate: 'ASK' (dormant — every escalate goes to a human), 'TRIAGE' "
+            "(triager active — auto/optimistic/batch lanes live), or 'TRUSTED' "
+            "(reserved; treated as TRIAGE today). Per-workspace overrides live "
+            "on the workspace document. Set via POCKETPAW_INSTINCT_APPROVAL_LEVEL."
+        ),
+    )
+    instinct_auto_approve_threshold: float = Field(
+        default=0.9,
+        description=(
+            "Trust-score bar (0.0-1.0) a (pocket, action) pair must reach for "
+            "the AUTO/OPTIMISTIC lanes. A score below this escalates. Money- "
+            "moving and DELETE actions never AUTO regardless of score (a hard "
+            "blast-radius floor). Set via POCKETPAW_INSTINCT_AUTO_APPROVE_THRESHOLD."
+        ),
+    )
+    instinct_dry_run_mode: bool = Field(
+        default=False,
+        description=(
+            "When true, the Instinct gate routes escalating writes to the "
+            "DRY_RUN lane: the write is resolved and audited but never sent to "
+            "the backend (a governance rehearsal). BLOCK verdicts still block. "
+            "Set via POCKETPAW_INSTINCT_DRY_RUN_MODE."
+        ),
+    )
+    instinct_optimistic_ttl_seconds: int = Field(
+        default=300,
+        description=(
+            "Seconds an OPTIMISTIC-lane compensation handle stays live before "
+            "hard expiry. On expiry the registry fires an ALERT audit event and "
+            "persists the expired handle (no heartbeat extension). Set via "
+            "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
         ),
     )
 

@@ -7,14 +7,57 @@
 # per-site static server serves so the caller (and the cmux smoke) can open the
 # published site directly. Empty in the CF path in v1 (reached via custom
 # domain). The frontend Site type mirrors this in Phase 4.
+#
+# Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
+# added SitePreviewResponse and SiteStatusResponse, the two by-pocket read DTOs
+# the #432 frontend already calls (getSitePreviewByPocket / getSiteStatusByPocket
+# in core/sites/api.ts). Field names/types mirror the frontend types.ts EXACTLY:
+# preview is {pocket_id, engine, content} (content optional — absent when nothing
+# drafted; a rippleSpec for engine="ripple", a {path: contents} source map for
+# engine="svelte"); status is {pocket_id, status, is_live} plus the optional
+# site_id the frontend type also declares. Without these, every Preview-tab fetch
+# 404'd and the builder showed "Nothing to preview yet".
+# Updated 2026-06-17 (feat/sites-svelte-component-edit, SE-2b): added
+# MakeEditableRequest (the body for POST /sites/by-pocket/{pocket_id}/editable;
+# builder_origin optional) and SiteResponse.builder_origin so the UI can tell
+# whether a published site carries the edit-bridge (non-empty = editable).
+# Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
+# SiteStatusResponse gains ``has_unpublished_changes`` — the Branch primitive now
+# derives draft/published from the version pointers (versions.get_draft /
+# get_published), so a pocket can carry a draft NEWER than its published version.
+# This flag (default False, backward-compatible) lets the builder badge "has
+# unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
+# semantics are unchanged in shape; only their derivation moves onto versions.
+# Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two DTOs
+# for the Branch-primitive surfaces — SiteVersionResponse + VersionHistoryResponse
+# (the ordered version timeline GET /sites/by-pocket/{pocket_id}/versions returns)
+# and RequestPublishResponse (the Action created by POST
+# /sites/by-pocket/{pocket_id}/request-publish, the clean entry to the merge gate
+# so the client never hand-builds the Instinct proposal).
+# Updated 2026-06-18 (feat/branch-primitive-audit, BP-7): added AuditFinding +
+# AuditResponse — the response shape for POST /sites/by-pocket/{pocket_id}/audit
+# (the first non-editor PRODUCER). Each finding carries a ``fix_prompt`` the UI
+# feeds to the EXISTING edit path so the fix lands as a reviewable draft; there is
+# NO new apply endpoint (BP-7 reuses edit_svelte_component / refine).
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel
 
 
 class PublishRequest(BaseModel):
     pocket_id: str
+
+
+class MakeEditableRequest(BaseModel):
+    """Body for POST /sites/by-pocket/{pocket_id}/editable (SE-2b). The builder
+    origin is optional — the service falls back to the configured dashboard
+    origin (PAW_SITES_BUILDER_ORIGIN) when it is omitted, so the body may be
+    empty."""
+
+    builder_origin: str = ""
 
 
 class SiteResponse(BaseModel):
@@ -25,6 +68,105 @@ class SiteResponse(BaseModel):
     deployed: bool
     signed_key: str
     url: str = ""
+    # SE-2b: the builder origin the site was published with, or "" for a normal
+    # (non-editable) site. Non-empty means the page carries the edit-bridge.
+    builder_origin: str = ""
+
+
+class SitePreviewResponse(BaseModel):
+    """Draft content to render in the in-app builder Preview tab. ``engine``
+    selects the shape of ``content``: "ripple" → a rippleSpec object; "svelte" →
+    a {path: contents} source map. ``content`` is None when there is nothing
+    drafted yet. Mirrors the frontend SitePreviewResponse (core/sites/types.ts)."""
+
+    pocket_id: str
+    engine: str
+    content: dict[str, Any] | None = None
+
+
+class SiteStatusResponse(BaseModel):
+    """Authoritative draft/published + is_live state for a pocket, so the builder
+    labels accurately even before the site appears in the gallery list. ``status``
+    is "draft" (no published version) or "published"; ``is_live`` is the ONLY
+    signal that earns a "Live" badge — it requires a published version AND a real
+    successful deploy (the Site doc's ``deployed``), never an optimistic stamp.
+    ``has_unpublished_changes`` is True when a draft version is newer than the
+    published one (edits the publish would ship). ``site_id`` carries the deployed
+    Site's id when one exists. Mirrors the frontend SiteStatusResponse
+    (core/sites/types.ts); ``has_unpublished_changes`` defaults False so the field
+    is backward-compatible for callers that do not yet read it."""
+
+    pocket_id: str
+    status: str  # draft | published
+    is_live: bool
+    has_unpublished_changes: bool = False
+    site_id: str | None = None
+
+
+class SiteVersionResponse(BaseModel):
+    """One row of a pocket's version timeline (BP-4). Mirrors the durable
+    ArtifactVersion row's reading-relevant fields: ``version_no`` (the monotonic
+    ordinal), ``status`` (draft|published|merged|reverted), ``label`` (e.g.
+    "Revert to v2"), ``author`` (who wrote it), ``created_at`` (ISO). ``id`` is
+    the version id a later revert / request-publish targets."""
+
+    id: str
+    version_no: int
+    branch: str
+    status: str
+    label: str | None = None
+    author: str | None = None
+    created_at: str
+
+
+class VersionHistoryResponse(BaseModel):
+    """The ordered version timeline for a pocket (oldest → newest), returned by
+    GET /sites/by-pocket/{pocket_id}/versions. Tenant-scoped."""
+
+    pocket_id: str
+    versions: list[SiteVersionResponse]
+
+
+class RequestPublishResponse(BaseModel):
+    """The review Action created by POST /sites/by-pocket/{pocket_id}/request-
+    publish (BP-4 Part C). Carries the created Action's id + status so the client
+    can show "submitted for review" without re-fetching. ``status`` is "pending"
+    on creation (the gate item awaits operator approval)."""
+
+    action_id: str
+    status: str
+    pocket_id: str
+    to_version_id: str
+    from_version_id: str | None = None
+
+
+class AuditFinding(BaseModel):
+    """One issue surfaced by the site audit (BP-7). ``check`` is the short check id
+    (e.g. "a11y.img_alt"); ``tier`` is "deterministic" for the rule-based core (a
+    later "judgment" tier is deferred); ``severity`` is "error" | "warning".
+    ``location`` is a {file, hint} pointer (the file + a source snippet). The
+    UI feeds ``fix_prompt`` to the EXISTING edit path (edit_svelte_component /
+    refine), which lands the fix as a reviewable draft in the Tray — there is no
+    separate apply endpoint."""
+
+    id: str
+    check: str
+    tier: str
+    severity: str  # error | warning
+    message: str
+    fix_prompt: str
+    location: dict[str, str] = {}
+
+
+class AuditResponse(BaseModel):
+    """The result of POST /sites/by-pocket/{pocket_id}/audit — the findings for a
+    pocket's published-site source. A clean site returns an empty ``findings``
+    list. Tenant-scoped; engine selects how the source was read (svelte source map
+    vs rippleSpec)."""
+
+    pocket_id: str
+    engine: str
+    findings: list[AuditFinding] = []
 
 
 class DomainRequest(BaseModel):
