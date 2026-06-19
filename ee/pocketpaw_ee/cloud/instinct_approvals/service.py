@@ -132,18 +132,26 @@ async def auto_approve(
     body: dict | CreateApprovalRequest,
     trust_score: float,
     triager_reasoning: str,
+    lane: str = "AUTO",
 ) -> dict:
     """Create a decided (``auto_approved``) approval row in one write.
 
-    The layered/learning gate's AUTO lane calls this instead of
-    ``create_approval`` when ``classify_lane`` returns ``AUTO``. The row is
-    inserted ALREADY-DECIDED: ``status="auto_approved"``,
-    ``decided_by="system:triager"``, ``decided_at=now`` — there is no
-    intermediate pending state and the OSS SQLite store is never touched
-    (design MF-1). Emits ``InstinctApprovalAutoApproved`` carrying the
-    triager's ``trust_score`` + ``triager_reasoning`` + ``lane="AUTO"`` so
-    the audit trail and Decision-Graph join have a backing row in the same
-    collection as every human decision (design MF-2).
+    The layered/learning gate's AUTO and OPTIMISTIC lanes call this instead
+    of ``create_approval`` when ``classify_lane`` clears the write for an
+    auto decision. The row is inserted ALREADY-DECIDED:
+    ``status="auto_approved"``, ``decided_by="system:triager"``,
+    ``decided_at=now`` — there is no intermediate pending state and the OSS
+    SQLite store is never touched (design MF-1). Emits
+    ``InstinctApprovalAutoApproved`` carrying the triager's ``trust_score``
+    + ``triager_reasoning`` + ``lane`` so the audit trail and Decision-Graph
+    join have a backing row in the same collection as every human decision
+    (design MF-2).
+
+    ``lane`` is the triage lane that produced the decision (``"AUTO"`` or
+    ``"OPTIMISTIC"``) — it rides on the emitted event so the UI can render
+    an optimistic (reversible, fired-now) decision distinctly from a fully
+    auto-approved one. Both share ``status="auto_approved"``; the lane is
+    the discriminator.
 
     ``user_id`` is the human who TRIGGERED the action (recorded as
     ``requested_by``); the DECIDER is the system triager, not the user.
@@ -188,7 +196,7 @@ async def auto_approve(
     payload["actor"] = "system:triager"
     payload["trust_score"] = trust_score
     payload["triager_reasoning"] = triager_reasoning
-    payload["lane"] = "AUTO"
+    payload["lane"] = lane
     await emit(InstinctApprovalAutoApproved(data=payload))
     return wire
 

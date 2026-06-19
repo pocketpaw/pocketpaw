@@ -559,6 +559,12 @@ class RunActionResponse(BaseModel):
     error: str | None = None
     code: str | None = None
     proposed_action_id: str | None = None
+    # Layered/learning gate (T6/T10) — set only on an OPTIMISTIC-lane write:
+    # the id of the bounded compensation handle the client can roll back via
+    # the optimistic rollback endpoint. None on every other path. The
+    # executor returns it as ``_optimistic_compensation_id`` (internal key);
+    # the router maps it onto this public field.
+    optimistic_compensation_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 
