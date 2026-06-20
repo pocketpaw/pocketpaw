@@ -321,8 +321,7 @@ async def _create_links_deduped(
         )
         if from_obj is None or to_obj is None:
             logger.info(
-                "fabric_objects: skipping link %s — endpoint not resolvable in "
-                "workspace %s",
+                "fabric_objects: skipping link %s — endpoint not resolvable in workspace %s",
                 link_type,
                 workspace_id,
             )
@@ -530,8 +529,7 @@ async def execute_approved_fabric_objects(
         user_id=approver,
         causation_id=causation,
         summary=(
-            f"{total_created} created, {total_updated} updated, "
-            f"{links_created} link(s) created"
+            f"{total_created} created, {total_updated} updated, {links_created} link(s) created"
         ),
     )
     logger.info(
