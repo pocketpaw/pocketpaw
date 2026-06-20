@@ -6,6 +6,13 @@
 # INFO audit), the tenancy-checked status read, and the lifecycle transitions
 # (`mark_running` / `mark_done` / `mark_failed`) the worker drives. `mark_failed`
 # emits a WARNING `WorkspaceJobUpdated` + audit; success emits INFO.
+#
+# Updated: 2026-06-20 (fix/jobs-arq-enqueue-contract) — fixed the showstopper
+# enqueue: dropped the bogus ``queue=JOBS_QUEUE`` kwarg (arq's selector is
+# ``_queue_name``; the stray ``queue=`` was forwarded to the job function and
+# raised ``TypeError`` on every dispatch). Jobs now ride arq's default queue on
+# the shared worker, matching ``chat/runs/arq_executor.py``. Removed the now-
+# unused ``JOBS_QUEUE`` import.
 
 """Workspace-jobs service — Beanie writes + dispatch + lifecycle."""
 
@@ -26,7 +33,7 @@ from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceJobQueued,
     WorkspaceJobUpdated,
 )
-from pocketpaw_ee.cloud.jobs.domain import JOBS_QUEUE, WORKSPACE_JOB_IDENTITY
+from pocketpaw_ee.cloud.jobs.domain import WORKSPACE_JOB_IDENTITY
 from pocketpaw_ee.cloud.jobs.registry import resolve_job, validate_job_params
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 
@@ -79,7 +86,7 @@ async def dispatch_job(
       2. param validation — a credential-shaped key raises ``JobParamsError``
          (400), again before any persistence.
       3. create the ``queued`` status doc.
-      4. enqueue ``execute_workspace_job(job_id)`` on the jobs queue.
+      4. enqueue ``execute_workspace_job(job_id)`` on the shared default queue.
       5. emit ``WorkspaceJobQueued`` + an INFO audit event.
 
     Returns ``{ok: True, code: "job_enqueued", job_id}`` for the action route.
@@ -105,7 +112,16 @@ async def dispatch_job(
     # into a 5xx); the queued doc stays so an operator can see the orphan.
     try:
         pool = await _get_pool()
-        arq_job = await pool.enqueue_job("execute_workspace_job", job_id, queue=JOBS_QUEUE)
+        # arq 0.28's queue selector is ``_queue_name`` (underscore-prefixed),
+        # NOT ``queue``. Any non-control kwarg is forwarded to the job FUNCTION
+        # as a call arg, so ``queue=`` would land on
+        # ``execute_workspace_job(ctx, job_id)`` and crash every job with a
+        # ``TypeError``. Jobs ride the same default queue as chat runs on the
+        # one shared worker process (single-process design — see
+        # ``chat/runs/worker.py`` ``WorkerSettings``), so we enqueue with the
+        # job id positional and no queue kwarg, exactly like
+        # ``chat/runs/arq_executor.py``.
+        arq_job = await pool.enqueue_job("execute_workspace_job", job_id)
         if arq_job is not None:
             doc.arq_job_id = getattr(arq_job, "job_id", None)
             await doc.save()
