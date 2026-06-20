@@ -16,6 +16,21 @@
 #
 # These mirror the repo's pytest-asyncio + mongo_db fixture conventions
 # (see tests/cloud/pockets/test_merge_spec_endpoint.py and conftest.py).
+#
+# Updated: 2026-06-20 (review fix pass) — adds coverage for the review
+# findings:
+#   - IMPORTANT 1: router HTTP-handler tests for the ``kind:"job"`` dispatch
+#     (job_enqueued + job_id, requires_instinct → 400, no-kind back-compat).
+#   - IMPORTANT 2: drives the REAL ARQ entrypoint with ``xproc.is_worker()``
+#     True and asserts the worker→merge_spec→emit chain produces a
+#     ``PocketUpdated`` through ``publish_bus_envelope`` (not just emit in
+#     isolation).
+#   - IMPORTANT 3: a job whose doc names a pocket in a DIFFERENT workspace →
+#     job failed, NO merge_spec call (fail-closed tenancy re-check).
+#   - MINOR A: non-empty client params on a job action → 400.
+#   - MINOR B: a credential NESTED under a benign key → 400.
+# A new ``seed_pocket`` fixture inserts a real Pocket doc so the worker's
+# tenancy re-check has something to fetch.
 
 from __future__ import annotations
 
@@ -123,6 +138,31 @@ def test_clean_params_pass_validation() -> None:
     jobs_registry.validate_job_params({"batch_size": 20, "connector": "snctm-api"})
 
 
+@pytest.mark.parametrize(
+    "nested_params",
+    [
+        {"config": {"api_key": "leak-me"}},
+        {"outer": {"inner": {"token": "leak-me"}}},
+        {"items": [{"name": "ok"}, {"secret": "leak-me"}]},
+        {"a": [{"b": {"password": "leak-me"}}]},
+    ],
+)
+def test_nested_cred_bearing_param_rejected(nested_params: dict) -> None:
+    # MINOR B — the scrub recurses, so a credential buried under a benign key
+    # (or inside a list of dicts) is rejected just like a top-level one.
+    with pytest.raises(JobParamsError) as exc:
+        jobs_registry.validate_job_params(nested_params)
+    assert exc.value.code == "job.params_forbidden"
+    assert exc.value.status == 400
+
+
+def test_nested_clean_params_pass_validation() -> None:
+    # Deeply nested but credential-free → accepted untouched.
+    jobs_registry.validate_job_params(
+        {"config": {"batch_size": 10, "rows": [{"id": "a1"}, {"id": "a2"}]}}
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6. _validate_job_result rejects ui/actions/sources/shape writes.
 # ---------------------------------------------------------------------------
@@ -163,6 +203,27 @@ async def fake_pool(monkeypatch: pytest.MonkeyPatch) -> _FakePool:
 
     monkeypatch.setattr(jobs_service, "_get_pool", _get_pool)
     return pool
+
+
+@pytest_asyncio.fixture
+async def seed_pocket(mongo_db: Any):  # noqa: ARG001 — mongo_db forces Beanie init
+    """Insert a real Pocket doc and return its ObjectId string.
+
+    The worker's fail-closed tenancy re-check (IMPORTANT 3) fetches the pocket
+    the job names and asserts it lives in the job's workspace, so the worker
+    tests need a persisted pocket whose id is a valid ObjectId and whose
+    ``workspace`` matches the dispatch. Returns a factory so a test can seed a
+    pocket in a chosen workspace (the tenancy-mismatch test seeds one in a
+    DIFFERENT workspace than the job doc).
+    """
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    async def _seed(*, workspace: str = WS, owner: str = "owner-1") -> str:
+        doc = _PocketDoc(workspace=workspace, name="jobs-test-pocket", owner=owner)
+        await doc.insert()
+        return str(doc.id)
+
+    return _seed
 
 
 @pytest.mark.asyncio
@@ -243,7 +304,7 @@ async def test_get_job_enforces_tenancy(mongo_db: Any, fake_pool: _FakePool) -> 
 
 @pytest.mark.asyncio
 async def test_worker_writeback_uses_system_identity(
-    mongo_db: Any, fake_pool: _FakePool, monkeypatch: pytest.MonkeyPatch
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # noqa: ARG001
     captured: dict[str, Any] = {}
 
@@ -256,9 +317,11 @@ async def test_worker_writeback_uses_system_identity(
 
     monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
 
+    # Seed a real pocket in WS so the worker's tenancy re-check passes.
+    pocket_id = await seed_pocket(workspace=WS)
     result = await jobs_service.dispatch_job(
         workspace_id=WS,
-        pocket_id=POCKET,
+        pocket_id=pocket_id,
         action="run_echo",
         job_name="echo_job",
         params={"value": "hello"},
@@ -271,7 +334,7 @@ async def test_worker_writeback_uses_system_identity(
     assert captured["user_id"] == WORKSPACE_JOB_IDENTITY
     assert captured["user_id"] == "system:workspace_job"
     assert captured["workspace_id"] == WS
-    assert captured["pocket_id"] == POCKET
+    assert captured["pocket_id"] == pocket_id
     # Writeback is a partial-spec merge carrying only state.
     assert captured["body"]["merge"]["state"]["echo_value"] == "hello"
 
@@ -287,7 +350,7 @@ async def test_worker_writeback_uses_system_identity(
 
 @pytest.mark.asyncio
 async def test_worker_failure_writes_failed_state(
-    mongo_db: Any, fake_pool: _FakePool, monkeypatch: pytest.MonkeyPatch
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # noqa: ARG001
     captured: dict[str, Any] = {}
 
@@ -297,9 +360,10 @@ async def test_worker_failure_writes_failed_state(
 
     monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
 
+    pocket_id = await seed_pocket(workspace=WS)
     result = await jobs_service.dispatch_job(
         workspace_id=WS,
-        pocket_id=POCKET,
+        pocket_id=pocket_id,
         action="run_boom",
         job_name="boom_job",
         params={},
@@ -322,7 +386,7 @@ async def test_worker_failure_writes_failed_state(
 
 @pytest.mark.asyncio
 async def test_worker_rejects_template_owned_result(
-    mongo_db: Any, fake_pool: _FakePool, monkeypatch: pytest.MonkeyPatch
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # noqa: ARG001
     captured: dict[str, Any] = {}
 
@@ -332,9 +396,10 @@ async def test_worker_rejects_template_owned_result(
 
     monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
 
+    pocket_id = await seed_pocket(workspace=WS)
     result = await jobs_service.dispatch_job(
         workspace_id=WS,
-        pocket_id=POCKET,
+        pocket_id=pocket_id,
         action="run_bad",
         job_name="bad_result_job",  # returns a `ui` write → must be rejected
         params={},
@@ -371,6 +436,44 @@ async def test_worker_tenancy_recheck_missing_doc_noop(
     assert called["merge"] is False
 
 
+@pytest.mark.asyncio
+async def test_worker_tenancy_mismatch_fails_without_writeback(
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """IMPORTANT 3 — a job whose doc.pocket lives in a DIFFERENT workspace than
+    doc.workspace is marked failed with NO merge_spec call (fail-closed)."""
+    called = {"merge": False}
+
+    async def _fake_merge_spec(*a, **k):  # type: ignore[no-untyped-def]
+        called["merge"] = True
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
+
+    # The pocket really lives in OTHER_WS, but we dispatch the job under WS —
+    # simulating a doc whose workspace no longer matches the pocket's tenancy.
+    pocket_id = await seed_pocket(workspace=OTHER_WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_echo",
+        job_name="echo_job",
+        params={"value": "hi"},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    # No cross-workspace write fired.
+    assert called["merge"] is False
+    # The job is marked failed so the caller / poll sees the rejection.
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.status == "failed"
+    assert doc.error
+
+
 # ---------------------------------------------------------------------------
 # 9. xproc bridge — when the worker role is set, emit routes a PocketUpdated
 #    through publish_bus_envelope (not the local bus).
@@ -399,6 +502,79 @@ async def test_emit_routes_through_xproc_when_worker(
     assert len(published) == 1
     assert published[0].type == "pocket.updated"
     assert published[0].data["id"] == POCKET
+
+
+@pytest.mark.asyncio
+async def test_worker_writeback_emits_pocket_updated_in_worker_context(
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """IMPORTANT 2 — drive the REAL ARQ entrypoint with ``is_worker()`` True and
+    a real ``merge_spec`` writeback, and assert the worker→merge_spec→emit chain
+    publishes a ``PocketUpdated`` through ``publish_bus_envelope`` for the right
+    pocket. Unlike ``test_emit_routes_through_xproc_when_worker`` (which hand-
+    builds the event and calls ``emit`` in isolation), this exercises the
+    writeback that PRODUCES the emit in worker context.
+    """
+    from pocketpaw_ee.cloud._core.realtime import emit as emit_mod
+    from pocketpaw_ee.cloud._core.realtime import xproc
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    published: list[Any] = []
+
+    async def _fake_publish(event):  # type: ignore[no-untyped-def]
+        published.append(event)
+
+    # Catalog validation is orthogonal to the emit chain under test — no-op it
+    # so a minimal seeded spec doesn't trip the strict gate. Everything else on
+    # the merge_spec path (merge, normalize, save, _pocket_event_payload, emit)
+    # runs for real, so the PocketUpdated is the one merge_spec actually fires.
+    async def _noop_gate_catalog(*a, **k):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(pockets_service, "_gate_catalog", _noop_gate_catalog)
+
+    # Seed a real pocket in WS with a minimal valid rippleSpec so the state-only
+    # job result merges cleanly.
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    pdoc = _PocketDoc(
+        workspace=WS,
+        name="jobs-emit-pocket",
+        owner="owner-1",
+        rippleSpec={"version": "1.0", "state": {}, "ui": {"id": "n_root0001", "type": "card"}},
+    )
+    await pdoc.insert()
+    pocket_id = str(pdoc.id)
+
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_echo",
+        job_name="echo_job",
+        params={"value": "emitted"},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    # Flip to worker context ONLY for the worker run — dispatch above already
+    # emitted (WorkspaceJobQueued) against the recording bus in web context.
+    monkeypatch.setattr(xproc, "is_worker", lambda: True)
+    monkeypatch.setattr(emit_mod.xproc, "publish_bus_envelope", _fake_publish)
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    # The writeback's merge_spec fired a PocketUpdated for THIS pocket, and it
+    # routed over the xproc bridge (not the local bus) because is_worker()=True.
+    pocket_updates = [e for e in published if e.type == "pocket.updated"]
+    assert pocket_updates, f"expected a pocket.updated emit, saw: {[e.type for e in published]}"
+    # merge_spec's PocketUpdated carries the id under ``pocket_id`` (see
+    # _pocket_event_payload). Assert it names the pocket the job wrote to.
+    assert any(e.data.get("pocket_id") == pocket_id for e in pocket_updates)
+
+    # And the merge actually persisted the job's state-only result.
+    refreshed = await _PocketDoc.get(pdoc.id)
+    assert refreshed is not None
+    assert refreshed.rippleSpec["state"]["echo_value"] == "emitted"
 
 
 # ---------------------------------------------------------------------------
@@ -471,3 +647,146 @@ def test_system_identity_bypasses_edit_check_on_private_pocket() -> None:
     # An arbitrary user is still rejected.
     with pytest.raises(Forbidden):
         _check_domain_edit_access(pocket, "random-user")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# IMPORTANT 1 + MINOR A — router HTTP-handler coverage for the ``kind:"job"``
+# dispatch in ``POST /pockets/{id}/actions/run``. Mirrors the app/auth-override
+# pattern of tests/cloud/pockets/test_tools_run.py, but runs over an async
+# httpx client so the real ``dispatch_job`` (which writes a Beanie doc) works
+# against the ``mongo_db`` fixture. The ARQ pool is faked (``fake_pool``) so
+# nothing is really enqueued. ``pockets_service.get`` is stubbed to return a
+# pocket whose ``rippleSpec.actions`` carries the action under test, so the
+# route reads the binding without a real Mongo pocket.
+# ---------------------------------------------------------------------------
+
+ROUTER_WS = "ws-jobs-1"
+ROUTER_USER = "user-jobs-1"
+
+
+def _job_action_spec(action: dict) -> dict:
+    """A minimal pocket wire-dict whose rippleSpec.actions has one action."""
+    return {"_id": "pkt-router-1", "rippleSpec": {"actions": {"act1": action}}}
+
+
+@pytest_asyncio.fixture
+async def jobs_router_client(monkeypatch: pytest.MonkeyPatch):
+    """Mount the pockets router with auth/license overridden; yield an async
+    client + a place to pin the pocket the route loads."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+    from pocketpaw_ee.cloud.license import require_license
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.cloud.pockets.router import router as pockets_router
+    from pocketpaw_ee.cloud.shared.deps import (
+        current_user_id,
+        current_workspace_id,
+        require_pocket_action_run,
+    )
+
+    state: dict[str, Any] = {"pocket": None}
+
+    async def _get(pocket_id, user_id):  # type: ignore[no-untyped-def]
+        return state["pocket"]
+
+    monkeypatch.setattr(pockets_service, "get", _get)
+
+    app = FastAPI()
+    add_error_handler(app)
+    app.include_router(pockets_router)
+    app.dependency_overrides[require_license] = lambda: None
+    app.dependency_overrides[require_pocket_action_run] = lambda: None
+    app.dependency_overrides[current_user_id] = lambda: ROUTER_USER
+    app.dependency_overrides[current_workspace_id] = lambda: ROUTER_WS
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        yield client, state
+
+
+@pytest.mark.asyncio
+async def test_route_kind_job_enqueues_and_returns_job_id(
+    mongo_db: Any, fake_pool: _FakePool, jobs_router_client
+) -> None:  # noqa: ARG001
+    """(a) a kind:"job" action → code:"job_enqueued" + a job_id; the ARQ pool
+    was asked to enqueue (faked, nothing real queued)."""
+    client, state = jobs_router_client
+    state["pocket"] = _job_action_spec({"kind": "job", "job": "echo_job"})
+
+    res = await client.post("/pockets/pkt-router-1/actions/run", json={"action": "act1"})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is True
+    assert body["code"] == "job_enqueued"
+    assert body["job_id"]
+    # The faked pool received exactly one enqueue — nothing hit real Redis.
+    assert len(fake_pool.calls) == 1
+    assert fake_pool.calls[0][0][0] == "execute_workspace_job"
+
+
+@pytest.mark.asyncio
+async def test_route_kind_job_requires_instinct_rejected(
+    mongo_db: Any, fake_pool: _FakePool, jobs_router_client
+) -> None:  # noqa: ARG001
+    """(b) a kind:"job" action with requires_instinct:true → HTTP 400 with
+    code job.instinct_not_yet_supported; nothing enqueued."""
+    client, state = jobs_router_client
+    state["pocket"] = _job_action_spec(
+        {"kind": "job", "job": "echo_job", "requires_instinct": True}
+    )
+
+    res = await client.post("/pockets/pkt-router-1/actions/run", json={"action": "act1"})
+    assert res.status_code == 400, res.text
+    assert res.json()["error"]["code"] == "job.instinct_not_yet_supported"
+    assert fake_pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_route_kind_job_rejects_client_params(
+    mongo_db: Any, fake_pool: _FakePool, jobs_router_client
+) -> None:  # noqa: ARG001
+    """MINOR A — non-empty client params on a kind:"job" run → HTTP 400 with
+    code job.params_not_accepted; nothing enqueued (a clicker can't widen the
+    job's scope)."""
+    client, state = jobs_router_client
+    state["pocket"] = _job_action_spec({"kind": "job", "job": "echo_job"})
+
+    res = await client.post(
+        "/pockets/pkt-router-1/actions/run",
+        json={"action": "act1", "params": {"value": "smuggled"}},
+    )
+    assert res.status_code == 400, res.text
+    assert res.json()["error"]["code"] == "job.params_not_accepted"
+    assert fake_pool.calls == []
+
+
+@pytest.mark.asyncio
+async def test_route_no_kind_does_not_enqueue_job(
+    mongo_db: Any, fake_pool: _FakePool, jobs_router_client, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """(c) an action with NO kind still hits the existing (non-job) action path
+    (back-compat) — it does NOT enqueue a job nor return job_enqueued.
+
+    We stub the credential reader to return None so the legacy path short-
+    circuits at the "no backend configured" gate — that's enough to prove the
+    request fell through to the HTTP-write branch rather than the job branch.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    async def _no_creds(workspace_id, pocket_id):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
+
+    client, state = jobs_router_client
+    # A classic HTTP-write action: no `kind`, carries a path.
+    state["pocket"] = _job_action_spec({"path": "/things", "method": "POST"})
+
+    res = await client.post("/pockets/pkt-router-1/actions/run", json={"action": "act1"})
+    # The legacy path was taken: it reached the backend-config gate (400
+    # pocket_backend.not_configured), NOT the job branch.
+    assert res.status_code == 400, res.text
+    assert res.json()["error"]["code"] == "pocket_backend.not_configured"
+    # Crucially — no job was enqueued and no job_enqueued response was produced.
+    assert fake_pool.calls == []
