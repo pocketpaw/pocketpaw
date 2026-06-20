@@ -181,8 +181,7 @@ async def _resolve_fabric_objects(
     type_name = args.get("type_name")
     if not type_id and not type_name:
         logger.warning(
-            "ripple_resolver: fabric source needs a type_id or type_name "
-            "(workspace=%s pocket=%s)",
+            "ripple_resolver: fabric source needs a type_id or type_name (workspace=%s pocket=%s)",
             ctx.workspace_id,
             ctx.pocket_id,
         )
