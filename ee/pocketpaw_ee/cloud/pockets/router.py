@@ -8,6 +8,12 @@ the ARQ worker under the synthetic ``system:workspace_job`` identity, and
 returns ``{ok:true, code:"job_enqueued", job_id}``. A missing ``kind`` falls
 through unchanged (back-compat); ``requires_instinct:true`` on a job is rejected
 with ``job.instinct_not_yet_supported`` (deferred to v1.1).
+Updated: 2026-06-20 (review fix MINOR A) — ``_dispatch_job`` now REJECTS any
+non-empty client ``params`` on a ``kind:"job"`` run with
+``job.params_not_accepted`` (400). A job is parameterized only by its declared
+author-time params, so accepting per-click input would let a clicker widen the
+job's scope — the rejection makes that guarantee explicit instead of a silent
+drop.
 
 Updated: 2026-06-15 (feat/invoke-tool-v1) — UNLOCKED ``POST /{id}/tools/run``.
 Added the owner-only ``PUT /{id}/backend/tool-policy`` route (the tool-allowlist
@@ -1039,6 +1045,13 @@ async def _dispatch_job(
     ``requires_instinct:true`` is rejected with ``job.instinct_not_yet_supported``
     (DEFAULT #2 — the Instinct path is untested for jobs, deferred to v1.1; do
     NOT silently fire an ungated job that declared it wanted a gate).
+
+    Client-supplied ``params`` are REJECTED with ``job.params_not_accepted``
+    (400) — a job is parameterized only by its DECLARED (author-time) params,
+    so accepting per-click input would let a clicker widen the job's scope.
+    Enforcing the rejection makes the scope guarantee explicit rather than a
+    silent drop. The normal (non-job) action path is unaffected: it never
+    reaches this function — the ``kind:"job"`` branch returns first.
     """
     from pocketpaw_ee.cloud.jobs import service as jobs_service
     from pocketpaw_ee.cloud.jobs.registry import JobError
@@ -1048,6 +1061,16 @@ async def _dispatch_job(
             400,
             "job.instinct_not_yet_supported",
             "requires_instinct is not yet supported for jobs (deferred to v1.1)",
+        )
+
+    # A clicker cannot widen a job's scope: a job's params come from the
+    # binding (declared, author-time), never from per-click input. Reject any
+    # non-empty client params rather than silently dropping them.
+    if request_params:
+        raise CloudError(
+            400,
+            "job.params_not_accepted",
+            "a job action does not accept client params — its params are fixed by the binding",
         )
 
     job_name = raw_action.get("job")

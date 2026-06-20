@@ -12,6 +12,15 @@
 # (state-only) before writeback; any rejection / exception / timeout marks the
 # job failed AND writes a failed-state partial so the button never hangs.
 # `merge_spec` is imported at module scope so tests can monkeypatch it.
+#
+# Updated: 2026-06-20 (review fix IMPORTANT 3) — fail-closed TENANCY RE-CHECK.
+# Before any execution or writeback, the worker fetches the pocket the doc
+# names and asserts its workspace equals the doc's workspace. `merge_spec`
+# fetches by pocket id only and trusts the passed workspace, so without this
+# the writeback would write wherever the doc points. On a mismatch the job is
+# marked failed with NO writeback (we cannot safely write to a pocket outside
+# the doc's workspace). The check sits ONCE near the top so it can't perturb
+# the failure path's "un-hang the button" guarantee.
 
 """ARQ entrypoint: execute one workspace job + write the result back."""
 
@@ -27,7 +36,7 @@ from pocketpaw_ee.cloud.jobs.domain import (
     failed_state_writeback,
 )
 from pocketpaw_ee.cloud.jobs.registry import resolve_job, validate_job_result
-from pocketpaw_ee.cloud.pockets.service import merge_spec
+from pocketpaw_ee.cloud.pockets.service import get_pocket_workspace, merge_spec
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +68,30 @@ async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
     pocket_id = doc.pocket_id
     action = doc.action
 
+    # Fail-closed tenancy re-check (review fix IMPORTANT 3). `merge_spec`
+    # fetches the pocket by id only and trusts the workspace we hand it, so the
+    # writeback layer has no tenancy assertion of its own. Re-fetch the pocket
+    # and confirm it lives in the doc's workspace BEFORE we run or write. On a
+    # mismatch we can NOT safely write a failed-state partial either — that
+    # would be the same cross-workspace write we're refusing — so we mark the
+    # job failed with NO writeback and return. Done ONCE here (not in
+    # `_writeback`, which both success and failure paths call) so the failure
+    # path's "un-hang the button" guarantee stays clean.
+    pocket_workspace = await get_pocket_workspace(pocket_id)
+    if pocket_workspace != workspace_id:
+        logger.error(
+            "jobs: TENANCY MISMATCH — job %s names pocket %s in workspace %r but the "
+            "pocket lives in workspace %r; refusing writeback and marking failed",
+            job_id,
+            pocket_id,
+            workspace_id,
+            pocket_workspace,
+        )
+        await jobs_service.mark_failed(
+            doc, error="tenancy mismatch: pocket is not in the job's workspace"
+        )
+        return
+
     await jobs_service.mark_running(doc)
 
     try:
@@ -73,6 +106,12 @@ async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
         result = validate_job_result(raw)
     except Exception as exc:  # noqa: BLE001 — every failure path converges here
         logger.exception("jobs: job %s (%s) failed", job_id, doc.job_name)
+        # NOTE for connector-job authors: ``str(exc)`` lands in broadcast state
+        # via ``failed_state_writeback`` and is visible to every viewer of the
+        # pocket. Do NOT let raw exception text carry PII or secrets — map your
+        # job's failure modes to FIXED, safe strings (e.g. "upstream timeout")
+        # rather than surfacing the raw message. (Tracked as a follow-up; the
+        # default below is intentionally left as-is for the built-in jobs.)
         message = str(exc) or exc.__class__.__name__
         # Writeback FIRST so the button un-hangs even if the status save races.
         await _writeback(

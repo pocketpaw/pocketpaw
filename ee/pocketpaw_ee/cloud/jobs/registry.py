@@ -7,6 +7,11 @@
 # one process-wide dict, registered into at mount time by the built-ins
 # package. Pure module — no Beanie / FastAPI imports — so it sits on the
 # import-linter "Jobs" allowlist (only `service.py` writes Beanie).
+# Updated: 2026-06-20 (review fix MINOR B) — `validate_job_params` now
+# RECURSES into nested dicts and lists, so a credential hidden under
+# `{"config": {"api_key": "..."}}` can no longer slip past the top-level
+# scan. The validator's contract ("a job NEVER receives credentials through
+# params") now matches its implementation at every depth.
 
 """Named job registry + param/result validators for workspace jobs."""
 
@@ -120,20 +125,38 @@ _CRED_KEY_SUBSTRINGS = ("token", "api_key", "apikey", "credential", "secret", "p
 _FORBIDDEN_RESULT_KEYS = frozenset({"ui", "actions", "sources", "shape"})
 
 
+def _scan_for_cred_keys(value: object) -> None:
+    """Walk a params value depth-first; raise on the first credential key.
+
+    Recurses into nested dicts and lists so a credential buried under
+    ``{"config": {"api_key": "..."}}`` (or inside a list of dicts) is caught
+    just like a top-level key. Scalars are inert — only dict KEYS are matched
+    against the credential substrings.
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            lowered = str(key).lower()
+            if any(sub in lowered for sub in _CRED_KEY_SUBSTRINGS):
+                raise JobParamsError(
+                    f"param key '{key}' looks credential-bearing — jobs read workspace "
+                    "creds server-side and never accept tokens through params"
+                )
+            _scan_for_cred_keys(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _scan_for_cred_keys(child)
+
+
 def validate_job_params(params: dict) -> dict:
     """Reject credential-shaped param keys; return the params unchanged.
 
-    Case-insensitive substring match on the top-level keys. Raises
-    :class:`JobParamsError` (400) on the first offending key so no
-    credential-bearing value ever reaches a job or the audit log.
+    Case-insensitive substring match on EVERY key, at every depth — the scan
+    recurses into nested dicts and lists (see :func:`_scan_for_cred_keys`).
+    Raises :class:`JobParamsError` (400) on the first offending key so no
+    credential-bearing value ever reaches a job or the audit log, even when
+    nested under a benign-looking parent key.
     """
-    for key in params:
-        lowered = str(key).lower()
-        if any(sub in lowered for sub in _CRED_KEY_SUBSTRINGS):
-            raise JobParamsError(
-                f"param key '{key}' looks credential-bearing — jobs read workspace "
-                "creds server-side and never accept tokens through params"
-            )
+    _scan_for_cred_keys(params)
     return params
 
 
