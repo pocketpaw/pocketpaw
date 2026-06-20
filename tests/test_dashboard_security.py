@@ -674,3 +674,112 @@ class TestWebSocketMiddlewareAuth:
 
         await middleware(scope, None, None)
         assert downstream_called
+
+
+# ---------------------------------------------------------------------------
+# P1b — authenticated full-access editing must not trip the per-IP api_limiter
+#
+# The desktop editor (paw-enterprise) talks to localhost:8888, so every
+# /api/v1/* control-plane call shares ONE client_ip (127.0.0.1) and therefore
+# ONE 30-token api_limiter bucket. During editing the FE fans out many
+# /api/v1/* calls (/editable, /preview, /status, /audit, /cloud/chat refine),
+# draining 30 tokens faster than the 10/s refill -> HTTP 429 "Too many
+# requests". These requests are authenticated full-access and already trusted,
+# so the per-IP api_limiter must NOT apply to them. Unauthenticated /api
+# traffic must STILL be limited (no open hole), and the separate login / auth /
+# qr brute-force buckets are untouched.
+# ---------------------------------------------------------------------------
+
+
+class TestFullAccessApiLimiterExemption:
+    """Authenticated full-access /api/v1 traffic must bypass the per-IP api_limiter."""
+
+    _MASTER = "test-master-token-1234567890"
+
+    def _make_request(
+        self,
+        path: str = "/api/v1/sites/editable",
+        method: str = "GET",
+        client_ip: str = "127.0.0.1",
+        authorized: bool = True,
+    ):
+        from types import SimpleNamespace
+
+        req = MagicMock()
+        req.method = method
+        req.url.path = path
+        req.client = MagicMock()
+        req.client.host = client_ip
+        req.query_params = {}
+        # A valid master token in the Authorization header sets is_valid +
+        # full_access via the bearer branch of _auth_dispatch.
+        req.headers = {"Authorization": f"Bearer {self._MASTER}"} if authorized else {}
+        req.cookies = {}
+        # Use a real namespace so request.state.full_access is a real bool,
+        # not a truthy MagicMock attribute.
+        req.state = SimpleNamespace()
+        return req
+
+    async def test_full_access_flood_not_rate_limited(self):
+        """>30 rapid authenticated full-access /api/v1 requests from one IP: no 429."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+        from pocketpaw.security.rate_limiter import RateLimiter
+
+        # Fresh limiter (capacity 30, like the real api_limiter) so prior test
+        # state doesn't pollute, and so a flood would deterministically drain it
+        # if the exemption were missing.
+        fresh = RateLimiter(rate=10.0, capacity=30)
+        with (
+            patch("pocketpaw.dashboard_auth.api_limiter", fresh),
+            patch("pocketpaw.dashboard_auth.get_access_token", return_value=self._MASTER),
+        ):
+            for i in range(60):
+                req = self._make_request()
+                resp = await _auth_dispatch(req)
+                # Allow-through is None; any 429 is a failure.
+                assert resp is None or resp.status_code != 429, (
+                    f"request {i} got 429 despite full_access"
+                )
+                assert getattr(req.state, "full_access", False) is True
+
+    async def test_unauthenticated_flood_still_limited(self):
+        """Unauthenticated remote /api/v1 flood from one IP still gets a 429 (no open hole).
+
+        A *remote* (non-localhost, non-tunnel-trusted) caller with no token does
+        not get full_access, so the per-IP api_limiter must still cap it. We
+        patch _is_genuine_localhost to False so the request is treated as the
+        untrusted remote client the per-IP bucket exists to defend against.
+        """
+        from pocketpaw.dashboard_auth import _auth_dispatch
+        from pocketpaw.security.rate_limiter import RateLimiter
+
+        fresh = RateLimiter(rate=10.0, capacity=30)
+        saw_429 = False
+        with (
+            patch("pocketpaw.dashboard_auth.api_limiter", fresh),
+            patch("pocketpaw.dashboard_auth.get_access_token", return_value=self._MASTER),
+            patch("pocketpaw.dashboard_auth._is_genuine_localhost", return_value=False),
+        ):
+            # /api/v1/* is auth-optional (no 401), but the per-IP api_limiter
+            # must still cap unauthenticated callers. 40 > capacity 30.
+            for _ in range(40):
+                req = self._make_request(authorized=False, client_ip="203.0.113.7")
+                resp = await _auth_dispatch(req)
+                if resp is not None and resp.status_code == 429:
+                    saw_429 = True
+                    break
+        assert saw_429, "unauthenticated flood was not rate-limited — security hole"
+
+    async def test_auth_session_brute_force_bucket_untouched(self):
+        """/api/auth/session keeps its per-IP auth_limiter (brute-force guard)."""
+        from pocketpaw.dashboard_auth import _auth_dispatch
+        from pocketpaw.security.rate_limiter import RateLimitInfo
+
+        denied = RateLimitInfo(allowed=False, limit=5, remaining=0, reset_after=1.0)
+        with patch("pocketpaw.dashboard_auth.auth_limiter") as mock_auth_limiter:
+            mock_auth_limiter.check.return_value = denied
+            req = self._make_request(path="/api/auth/session", method="POST")
+            resp = await _auth_dispatch(req)
+            assert resp is not None
+            assert resp.status_code == 429
+            mock_auth_limiter.check.assert_called_once_with("127.0.0.1")

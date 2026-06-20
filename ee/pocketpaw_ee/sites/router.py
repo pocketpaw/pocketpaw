@@ -66,6 +66,22 @@
 # apply endpoint). It's a read of the pocket's content, so it carries fabric.read
 # (the same gate as preview/status). Tenant-scoped on ctx; the pockets service
 # raises NotFound → 404 itself.
+# Updated 2026-06-18 (feat/sites-devserver, Phase 2 / P2a): added POST
+# /sites/by-pocket/{pocket_id}/dev-preview — start (or reuse) a live Vite dev-server
+# for the pocket's EDITING preview and return its localhost url. Delegates to
+# sites_service.dev_preview_pocket → the DevServerManager singleton (long-lived
+# `vite dev` per pocket, HMR in ~ms vs a per-edit rebuild). Carries fabric.write (it
+# spawns a process / mutates server state); a missing pocket is a 404 (the pockets
+# service raises NotFound during materialize). Publish/editable are unchanged.
+# Updated 2026-06-19 (P2b-backend — revert endpoint): added POST
+# /sites/by-pocket/{pocket_id}/versions/{version_no}/revert — revert a pocket's site
+# to a prior version by ordinal. Delegates to sites_service.revert_pocket_version,
+# which resolves version_no → the durable ArtifactVersion row (tenant-scoped, main
+# branch) and writes a NEW forward-moving draft snapshot of that version's content;
+# the normal review/publish flow then applies (request-publish → merge gate). Returns
+# the new draft as a SiteVersionResponse (the same row shape the versions timeline
+# uses). fabric.write (it creates a draft); an unknown version_no is a 404 (the
+# service raises ValueError).
 
 from __future__ import annotations
 
@@ -76,6 +92,7 @@ from pocketpaw_ee.cloud._core.deps import require_action_any_workspace, require_
 from pocketpaw_ee.sites import service as sites_service
 from pocketpaw_ee.sites.dto import (
     AuditResponse,
+    DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
     MakeEditableRequest,
@@ -181,6 +198,29 @@ async def preview_by_pocket(
     )
 
 
+@router.post("/sites/by-pocket/{pocket_id}/dev-preview", response_model=DevPreviewResponse)
+async def dev_preview_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> DevPreviewResponse:
+    """Start (or reuse) a live Vite dev-server for the pocket's EDITING preview and
+    return its localhost URL (Phase 2 / P2a): {pocket_id, url}.
+
+    The editor frames this URL so edits hot-reload over Vite HMR in ~ms instead of
+    rebuilding the whole site per edit. A running server for the pocket is reused
+    (touched); otherwise one is materialized from the pocket's current source
+    (PERF-3 persistent dir, cached node_modules) and started on an ephemeral port.
+    Publish / make_site_editable are unchanged — this is the editing preview only.
+
+    Carries fabric.write (it spawns a process / mutates server state), matching the
+    other by-pocket write actions. A missing / access-denied pocket surfaces as a
+    404 (the pockets service raises NotFound itself during materialize)."""
+    return await sites_service.dev_preview_pocket(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+
+
 @router.get("/sites/by-pocket/{pocket_id}/status", response_model=SiteStatusResponse)
 async def status_by_pocket(
     pocket_id: str,
@@ -277,6 +317,48 @@ async def request_publish_by_pocket(
         pocket_id=pocket_id,
         to_version_id=str(blob.get("to_version_id") or ""),
         from_version_id=blob.get("from_version_id"),
+    )
+
+
+@router.post(
+    "/sites/by-pocket/{pocket_id}/versions/{version_no}/revert",
+    response_model=SiteVersionResponse,
+)
+async def revert_version_by_pocket(
+    pocket_id: str,
+    version_no: int,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> SiteVersionResponse:
+    """Revert a pocket's site to a prior version by ordinal (P2b-backend).
+
+    Revert is FORWARD-MOVING: it writes a NEW draft on the main branch whose
+    content snapshots the target version, then the normal review/publish flow
+    applies — the operator request-publishes the new draft and the merge gate
+    takes the reverted content live. History is never rewritten; the revert is its
+    own auditable lineage step. Tenant-scoped on ctx.workspace_id; a version_no the
+    pocket does not have (or one under another workspace) raises ValueError → 404.
+    Carries fabric.write — it creates a draft. Returns the new draft row so the UI
+    can show the freshly-created version (and feed it to request-publish)."""
+    try:
+        draft = await sites_service.revert_pocket_version(
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
+            pocket_id=pocket_id,
+            version_no=version_no,
+        )
+    except ValueError as exc:
+        # Unknown / cross-tenant version_no → 404 (nothing to revert to).
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return SiteVersionResponse(
+        id=str(draft.id),
+        version_no=draft.version_no,
+        branch=draft.branch,
+        status=draft.status,
+        label=draft.label,
+        author=draft.author,
+        created_at=draft.created_at.isoformat(),
     )
 
 

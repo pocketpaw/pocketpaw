@@ -30,6 +30,13 @@
 # service (mocked here, as the preview/status tests do) and runs the pure audit
 # engine. Asserts a site with known issues surfaces findings (each with a
 # fix_prompt), a clean site returns an empty list, and a missing pocket is a 404.
+#
+# Updated 2026-06-19 (P2b-backend): adds coverage for POST
+# /sites/by-pocket/{pocket_id}/versions/{version_no}/revert — revert to a prior
+# version by ordinal. The handler delegates to sites_service.revert_pocket_version
+# (over the real versions spine) and returns the new draft as a SiteVersionResponse;
+# an unknown version_no is a 404. Also asserts the seeded-site status response now
+# carries a ``deployed_at`` ISO string (None before any deploy).
 
 from __future__ import annotations
 
@@ -227,7 +234,7 @@ async def test_status_by_pocket_unpublished_is_draft(beanie_test_db, monkeypatch
 @pytest.mark.asyncio
 async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
     """A published pocket (the seeded site is under pk1 / ws_owner) reads
-    {status: published, is_live: true}."""
+    {status: published, is_live: true} and carries a deployed_at ISO string (P2b)."""
     app = _build_app("ws_owner", monkeypatch)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk1/status")
@@ -236,6 +243,90 @@ async def test_status_by_pocket_published_is_live(_seeded_site, monkeypatch):
     assert body["pocket_id"] == "pk1"
     assert body["status"] == "published"
     assert body["is_live"] is True
+    # P2b: the deployed site carries a last-deploy ISO timestamp.
+    assert body["deployed_at"] is not None
+    from datetime import datetime
+
+    datetime.fromisoformat(body["deployed_at"])
+
+
+@pytest.mark.asyncio
+async def test_status_by_pocket_unpublished_deployed_at_is_none(beanie_test_db, monkeypatch):
+    """P2b: an unpublished pocket (no Site doc) reads deployed_at None — the DTO
+    exposes None before the first deploy."""
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_never_deployed/status")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deployed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_dev_preview_by_pocket_returns_url(beanie_test_db, monkeypatch):
+    """POST /sites/by-pocket/{id}/dev-preview returns {pocket_id, url} — the live
+    Vite dev-server URL for the editing preview (P2a). The route delegates to
+    sites_service.dev_preview_pocket → the DevServerManager singleton; we inject a
+    manager built with fake spawn/port/materialize seams so no real vite is spawned,
+    exercising the real service→manager→endpoint path end to end."""
+    import pocketpaw_ee.sites.dev_server as dev_server_mod
+    from pocketpaw_ee.sites.dev_server import DevServerManager
+
+    async def _fake_materialize(*, workspace_id, user_id, pocket_id):
+        return f"/tmp/site-builds/{pocket_id}"
+
+    async def _fake_spawn(cmd, cwd, port):
+        class _P:
+            returncode = None
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return 0
+
+        return _P()
+
+    mgr = DevServerManager(
+        _spawn=_fake_spawn, _free_port=lambda: 41234, _materialize=_fake_materialize
+    )
+    monkeypatch.setattr(dev_server_mod, "_MANAGER", mgr)
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk1/dev-preview")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {"pocket_id": "pk1", "url": "http://127.0.0.1:41234/"}
+    # The endpoint actually started a server in the singleton.
+    assert mgr.live_pocket_ids() == ["pk1"]
+    await mgr.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_dev_preview_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch):
+    """A missing / access-denied pocket surfaces as a 404: the DEFAULT materialize
+    reads the pocket via the pockets service, whose NotFound flows through the
+    standard error handler."""
+    from unittest.mock import AsyncMock
+
+    import pocketpaw_ee.sites.dev_server as dev_server_mod
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.sites.dev_server import DevServerManager
+
+    # Fresh singleton with the REAL materialize so it hits the pockets service.
+    monkeypatch.setattr(dev_server_mod, "_MANAGER", DevServerManager())
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    )
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk_missing/dev-preview")
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -533,4 +624,74 @@ async def test_audit_by_pocket_missing_pocket_is_404(beanie_test_db, monkeypatch
     app = _build_app("ws_owner", monkeypatch)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post("/api/v1/sites/by-pocket/pk_missing/audit")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# revert (P2b-backend): POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert
+# reverts a pocket's site to a prior version by ordinal — it writes a NEW
+# forward-moving draft snapshot of the target version and returns it as a
+# SiteVersionResponse. fabric.write; tenant-scoped; an unknown version_no is a 404.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_revert_by_pocket_creates_draft(beanie_test_db, monkeypatch):
+    """POST .../versions/{n}/revert returns 200 with a NEW draft whose content is a
+    snapshot of version n — the normal review/publish flow then applies."""
+    from pocketpaw_ee.versions import service as versions
+
+    v1 = await versions.write_draft(
+        scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", content={"v": "one"}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", version_id=str(v1.id)
+    )
+    await versions.write_draft(
+        scope_type="pocket", scope_id="pk_rev", workspace_id="ws_owner", content={"v": "two"}
+    )
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(f"/api/v1/sites/by-pocket/pk_rev/versions/{v1.version_no}/revert")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # A new draft row, forward of v1, labelled as a revert.
+    assert body["status"] == "draft"
+    assert body["version_no"] > v1.version_no
+    assert body["label"] == f"Revert to v{v1.version_no}"
+
+    # The new draft carries v1's content (verified through the versions spine).
+    draft = await versions.get_draft(scope_type="pocket", scope_id="pk_rev")
+    assert draft is not None
+    assert str(draft.id) == body["id"]
+    assert draft.content == {"v": "one"}
+
+
+@pytest.mark.asyncio
+async def test_revert_by_pocket_unknown_version_is_404(beanie_test_db, monkeypatch):
+    """An unknown version_no → 404 (the service ValueError maps to a 404)."""
+    from pocketpaw_ee.versions import service as versions
+
+    await versions.write_draft(
+        scope_type="pocket", scope_id="pk_rev2", workspace_id="ws_owner", content={"v": 1}
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk_rev2/versions/999/revert")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_revert_by_pocket_cross_tenant_is_404(beanie_test_db, monkeypatch):
+    """A version that exists only under ANOTHER workspace is a 404 for this caller —
+    the service's tenant filter treats it as no such version."""
+    from pocketpaw_ee.versions import service as versions
+
+    foreign = await versions.write_draft(
+        scope_type="pocket", scope_id="pk_rev3", workspace_id="ws_other", content={"v": 1}
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(f"/api/v1/sites/by-pocket/pk_rev3/versions/{foreign.version_no}/revert")
     assert resp.status_code == 404

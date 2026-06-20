@@ -1,6 +1,54 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
+# now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
+# succeeds (when ``deployed`` flips True) — the true "last shipped" marker, not a
+# "last touched" one. ``_to_response``/``pocket_status`` surface it as an ISO
+# string|None on the DTOs. Added ``revert_pocket_version`` — resolves a pocket's
+# version_no → its ArtifactVersion row (tenant-scoped, main branch) and calls
+# ``versions.revert`` to write a NEW forward-moving draft from that version's
+# content (the normal review/publish flow then applies); backs the new
+# POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert endpoint.
+#
+# Updated 2026-06-19 (P0b — review-400 self-heal): ``request_publish_pocket`` no
+# longer 400s a LEGACY site (one published before BP-1, so it has ZERO
+# ``artifact_versions`` rows and no draft). When ``get_draft`` is None it now
+# BACKFILLS a draft snapshot of the pocket's current content via the existing
+# ``_ensure_pocket_draft`` helper, then re-reads; the 400 is kept ONLY for a
+# genuinely empty / nonexistent pocket or a foreign-workspace draft. This fixes
+# the "Submit for review → 400 (and edits seem to go live)" bug — both symptoms
+# were the same missing-draft-lineage gap.
+#
+# Updated 2026-06-18 (feat/sites-smoke-at-publish, PERF-4): publish() now threads
+# ``smoke=not preview`` into generator.build(), so the workerd SMOKE render runs
+# ONLY for a LIVE publish (preview=False) and is SKIPPED for a preview/edit/arm
+# build (preview=True). The render is per-edit overhead only needed before a
+# deploy; skipping it cuts the remaining per-edit cost left after PERF-3 cached
+# `bun install`. The live publish keeps the gate AND the edit_svelte_component
+# rollback-on-SmokeGateFailed behaviour unchanged. A preview that would fail smoke
+# is no longer blocked — acceptable, because the live publish still gates + rolls
+# back, so a broken edit can never reach the live deploy.
+#
+# Updated 2026-06-18 (feat/sites-cached-build, PERF-3): publish() now forwards the
+# source pocket_id to generator.build() so the build runs in the STABLE per-pocket
+# working dir (persistent node_modules + cached `bun install`), cutting the dominant
+# per-edit cost across both preview and live publishes. A site_id is still minted
+# fresh per publish — only the on-disk build dir is reused per pocket.
+#
+# Updated 2026-06-17 (fix/sites-plan-gate-asymmetry): added require_sites_plan()
+# and call it at the top of publish() AND publish_pocket(). Sites is the "fabric"
+# plan feature; the REST router gates it with require_plan_feature("fabric"), but
+# the chat agent created + published sites IN-PROCESS via the sites_manager MCP
+# tools, which bypass the HTTP router. A team-plan workspace could therefore
+# deploy a live site that GET /sites then 403'd (write path ungated, read path
+# gated). The guard reads the plan from workspace_service.get_workspace_plan
+# against guards.abac.PLAN_FEATURES (same source of truth as the HTTP gate) and
+# raises Forbidden('plan.feature_denied') before any pocket read / generate /
+# deploy. Every publish path (REST + MCP publish + direct callers) funnels
+# through publish(), so this one call covers them all; the create MCP handlers
+# call require_sites_plan() directly (they reach agent_create, not this service).
+#
 # Updated 2026-06-01 (Phase 4 — chat→create-site): added publish_pocket(), the
 # shared "publish a pocket by id" path. It reads the pocket's rippleSpec + theme
 # via pockets_service (logic lifted verbatim from the router) and delegates to
@@ -176,25 +224,62 @@
 # finding carries a ``fix_prompt`` the UI feeds to the EXISTING edit path
 # (edit_svelte_component / refine) so a fix lands as a reviewable draft in the
 # Tray — BP-7 adds NO apply endpoint.
+#
+# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): a LIVE publish now has a
+# STABLE per-(workspace, pocket_id) identity instead of minting a fresh ObjectId per
+# call (which inserted a NEW Site doc at a NEW folder/URL every publish — one pocket
+# had 14 docs, the gallery showed dupes, and pocket_status returned an arbitrary
+# stale doc with url=None: the stale-live-link bug). Mirroring the preview path's
+# _preview_id:
+#   * _live_object_id(workspace, pocket) derives a deterministic ObjectId from the
+#     pair, used for the deploy folder/URL, the CF Worker script_name (overwrite the
+#     worker, no orphan), and the Site doc _id. publish()'s preview branch is
+#     unchanged (it already serves at the stable preview-<pocket> path).
+#   * publish() UPSERTS ONE canonical Site doc keyed on the stable _id (find-then-
+#     save/insert) — re-publish refreshes the deploy fields in place and PRESERVES
+#     domain/allowed_origins/signed_key, instead of inserting a second row.
+#   * pocket_status() reads the CANONICAL doc via _canonical_site_doc (the stable-id
+#     doc, else the newest with a real url) and returns its non-null url + is_live,
+#     dropping the arbitrary find_one. PERF-1 does NOT migrate pre-existing dupes
+#     (that is PERF-2) — _canonical_site_doc just resolves the live one among them.
+#
+# Updated 2026-06-18 (feat/sites-diff-edit, P3 — TARGETED / DIFF edit): a svelte
+# component edit can now be expressed as a list of search/replace blocks
+# (``edits=[{old_string, new_string}, ...]``, like the built-in Edit tool) INSTEAD
+# of the FULL ``new_source``, so the agent emits ONLY the change for a small edit
+# ("add a bg color to the nav") rather than reading + regenerating the whole file
+# — far fewer tokens in and out, the dominant edit-latency cost. New pieces:
+#   * apply_edits(source, edits) — a PURE, I/O-free function that applies the
+#     blocks sequentially; each ``old_string`` must match EXACTLY ONCE (0 or >1
+#     raises ValidationError with a clear, retry-able message), so it is the same
+#     uniqueness contract the built-in Edit tool enforces.
+#   * edit_svelte_component() gained an ``edits`` param (alternative to
+#     ``new_source``). When ``edits`` is given it reads the pocket's CURRENT
+#     component source via the pockets service, computes the new source with
+#     apply_edits, and hands that to the UNCHANGED SE-2 persist + preview/republish
+#     + smoke-gate-rollback path. ``new_source`` (full rewrite) is unchanged and
+#     stays the fallback for large rewrites; exactly one of the two must be given.
 
 from __future__ import annotations
 
 import logging
 import secrets
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from pocketpaw_ee.cloud._core.errors import NotFound
+from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
 from pocketpaw_ee.sites.dto import (
     AuditFinding,
     AuditResponse,
+    DevPreviewResponse,
     DomainStatusResponse,
     SitePreviewResponse,
     SiteResponse,
@@ -212,6 +297,16 @@ _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
 # scope is the pocket it is published from.
 _VERSION_SCOPE_TYPE = "pocket"
 
+# Sites is a plan-gated feature: it unlocks with the "fabric" plan feature
+# (business+). The REST router (sites/router.py) gates every endpoint with
+# require_plan_feature("fabric"), but the chat agent creates + publishes sites
+# IN-PROCESS via the sites_manager MCP tools, which never pass through that HTTP
+# router. Without a service-level gate a team-plan workspace could create and
+# deploy a live site that GET /sites then 403'd — a created-but-invisible
+# resource. require_sites_plan() closes that asymmetry at the service chokepoint
+# so the in-process write paths are gated identically to HTTP.
+_SITES_PLAN_FEATURE = "fabric"
+
 
 def _default_bundle_reader(project_dir: str) -> bytes:
     return Path(project_dir, _WORKER_BUNDLE_REL).read_bytes()
@@ -220,14 +315,43 @@ def _default_bundle_reader(project_dir: str) -> bytes:
 def _preview_id(pocket_id: str) -> str:
     """A STABLE per-pocket id for serving a preview build (the EDIT/arm path).
 
-    A live publish mints a fresh ObjectId per site, but a preview must serve at the
-    SAME URL across repeated builds so the builder iframe can frame it once and just
-    reload — otherwise every edit/arm builds at a new ``/<minted-id>/`` and the user
-    never sees the change (the churn bug). ``local_server.persist_site`` overwrites
-    ``<home>/<id>/`` in place, so a deterministic id derived from the pocket gives
-    the same URL with fresh content on each preview build. Prefixed ``preview-`` so a
-    preview dir never collides with a live site's minted-ObjectId dir."""
+    A live publish derives a stable per-pocket ObjectId (``_live_object_id``); a
+    preview must likewise serve at the SAME URL across repeated builds so the
+    builder iframe can frame it once and just reload — otherwise every edit/arm
+    builds at a new ``/<minted-id>/`` and the user never sees the change (the churn
+    bug). ``local_server.persist_site`` overwrites ``<home>/<id>/`` in place, so a
+    deterministic id derived from the pocket gives the same URL with fresh content
+    on each preview build. Prefixed ``preview-`` so a preview dir never collides
+    with a live site's dir."""
     return f"preview-{pocket_id}"
+
+
+def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
+    """A STABLE per-(workspace, pocket) ObjectId for the LIVE published site (PERF-1).
+
+    Before PERF-1 ``publish`` minted ``ObjectId()`` per call, so every publish
+    inserted a NEW Site doc at a NEW deploy folder / URL — one pocket accumulated 14
+    Site docs, the gallery showed dupes, and ``pocket_status`` did an arbitrary
+    ``find_one`` across them (the stale-live-link bug). Mirroring ``_preview_id``,
+    the live site now has a STABLE identity derived deterministically from
+    ``(workspace_id, pocket_id)``: the SAME 12-byte ObjectId every publish, so:
+
+      * the deploy folder / URL is stable (``local_server.persist_site`` overwrites
+        ``<home>/<id>/`` in place ⇒ same URL, fresh content);
+      * the CF Worker ``script_name`` (== this id) is stable ⇒ ``put_worker``
+        OVERWRITES the worker per pocket instead of orphaning the old one;
+      * the Site doc ``_id`` is stable ⇒ publish UPSERTS ONE canonical doc per
+        ``(workspace, pocket_id)`` rather than inserting a fresh row each time, and
+        ``script_name == str(site.id)`` still holds.
+
+    The id is the first 12 bytes of ``sha1(workspace_id:pocket_id)`` — a pure
+    function of the pair, collision-resistant across the id space the same way a
+    minted ObjectId is, and never colliding with a ``preview-<pocket>`` dir (those
+    are strings, not ObjectId hex)."""
+    import hashlib
+
+    digest = hashlib.sha1(f"{workspace_id}:{pocket_id}".encode()).digest()
+    return ObjectId(digest[:12])
 
 
 def _capture_base() -> str:
@@ -361,6 +485,7 @@ async def _promote_pocket_draft_to_published(
 
 
 def _to_response(doc: _SiteDoc) -> SiteResponse:
+    deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
         pocket_id=doc.pocket_id,
@@ -372,7 +497,46 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         # SE-2b: surface whether the site is editable (non-empty = carries the
         # edit-bridge) so the UI can show/hide the inline-edit affordance.
         builder_origin=getattr(doc, "builder_origin", ""),
+        # P2b: ISO string of the last successful live deploy, or None before the
+        # first deploy (pre-P2b rows read null via the getattr default).
+        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
     )
+
+
+async def require_sites_plan(workspace_id: str) -> None:
+    """Raise cloud Forbidden('plan.feature_denied') unless the workspace's plan
+    includes the Sites ("fabric") feature.
+
+    The shared plan gate for the in-process site write paths (publish + the
+    create MCP handlers). Reads the plan with the SAME source of truth
+    (``workspace_service.get_workspace_plan``) and the SAME feature table
+    (``guards.abac.PLAN_FEATURES``) as the HTTP ``require_plan_feature("fabric")``
+    dependency, so a team-plan caller is denied identically whether it arrives
+    over REST or through the chat agent. A missing workspace surfaces as NotFound
+    (mirroring the HTTP gate), and the error message names the minimum plan that
+    unlocks Sites. Imports are local to keep the sites service importable without
+    eagerly pulling the cloud workspace/guards modules."""
+    from pocketpaw_ee.cloud.workspace import service as workspace_service
+    from pocketpaw_ee.guards.abac import PLAN_FEATURES
+
+    plan = await workspace_service.get_workspace_plan(workspace_id)
+    if plan is None:
+        raise NotFound("workspace", workspace_id)
+    if _SITES_PLAN_FEATURE not in PLAN_FEATURES.get(plan, set()):
+        # Name the minimum plan that unlocks the feature, like the HTTP gate.
+        needed = next(
+            (
+                p
+                for p in ("team", "business", "enterprise")
+                if _SITES_PLAN_FEATURE in PLAN_FEATURES.get(p, set())
+            ),
+            "business",
+        )
+        raise Forbidden(
+            "plan.feature_denied",
+            f"Sites requires the {needed.capitalize()} plan — upgrade, or switch "
+            "to a workspace that has it.",
+        )
 
 
 async def publish(
@@ -430,7 +594,19 @@ async def publish(
     ``siteConfig.builderOrigin`` so the paw-sites generator injects the gated
     edit-bridge, and it is persisted on the Site doc so a later component-edit
     republish can re-apply it. ``None`` (the default) publishes a normal,
-    non-editable site (empty ``builder_origin`` on the doc, no bridge)."""
+    non-editable site (empty ``builder_origin`` on the doc, no bridge).
+
+    Gated on the workspace's plan: Sites is the "fabric" feature, so a team-plan
+    workspace is rejected with Forbidden('plan.feature_denied') here — BEFORE any
+    pocket read, generation, or deploy. Both ``publish_pocket`` (REST + MCP) and
+    direct service callers funnel through ``publish``, so this one gate covers
+    every in-process publish path."""
+    # Plan gate FIRST — before any pocket read, name resolution, generation, or
+    # deploy — so a team-plan caller is denied identically to the HTTP router's
+    # require_plan_feature("fabric") gate. Every in-process publish path (REST,
+    # MCP publish, direct callers) funnels through here.
+    await require_sites_plan(workspace_id)
+
     generator = _generator or GeneratorClient()
 
     # Default a blank name to the source pocket's own display name so the schema's
@@ -446,8 +622,25 @@ async def publish(
     if not site_name:
         site_name = "Untitled site"
 
-    site_id = str(ObjectId())
+    # PERF-1: the LIVE site has a STABLE per-(workspace, pocket) id (mirroring the
+    # preview path's _preview_id), so re-publishing a pocket overwrites the SAME
+    # deploy folder / URL / CF worker / Site doc in place instead of minting a fresh
+    # one each call. A PREVIEW build still uses the freshly-minted ObjectId for its
+    # transient (never-persisted) doc id and serves at the stable preview path.
+    site_id = str(ObjectId()) if preview else str(_live_object_id(workspace_id, pocket_id))
+    # PERF-1 fix (review finding): on a live RE-publish the upsert below preserves
+    # the stored ``doc.signed_key``, so minting a fresh key here would bake a
+    # ``captureSignedKey`` into the built HTML that no longer matches the doc the
+    # capture endpoint verifies against — silently breaking lead capture on every
+    # re-publish. Reuse the existing site's key when one is already stored; mint a
+    # new key only for a first publish or a preview (which never persists a doc).
     signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+    if not preview:
+        _existing = await _SiteDoc.find_one(
+            {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+        )
+        if _existing is not None and _existing.signed_key:
+            signed_key = _existing.signed_key
 
     build = await generator.build(
         ripple_spec=ripple_spec,
@@ -459,6 +652,23 @@ async def publish(
         engine=engine,
         source=source,
         builder_origin=builder_origin,
+        # PERF-3: build into the STABLE per-pocket working dir so node_modules
+        # persists and `bun install` is cached across builds (preview AND publish),
+        # cutting the dominant per-edit cost. A fresh site_id is minted per publish,
+        # but a pocket's working dir is reused across its publishes/previews.
+        pocket_id=pocket_id,
+        # P0a (was PERF-4): ``smoke`` now toggles ONLY the workerd SSR FAIL-gate,
+        # NOT whether ``bun run build`` runs. ``bun run build`` (the static-output
+        # step) runs on BOTH preview and publish (``static_build`` defaults to True),
+        # because this site is SERVED via deploy_local and persist_site copies
+        # whatever the build leaves on disk — skipping it served a STALE anchorless
+        # build (the #1 bug: no hover edit-pill). A preview/edit/arm build
+        # (preview=True) skips only the SSR fail-gate (smoke=False) — it still BUILDS
+        # fresh + anchored output; a live publish (preview=False) keeps the SSR gate
+        # (smoke=True) so the gate + the rollback below are unchanged. A preview that
+        # would fail the SSR render is not blocked — the live publish still gates +
+        # rolls back, so a broken edit never reaches the live deploy.
+        smoke=not preview,
     )
 
     # PREVIEW MODE (Branch primitive — EDIT/arm path): the build above already ran
@@ -528,27 +738,55 @@ async def publish(
         bundle = _bundle_reader(build.project_dir)
         await cf.put_worker(script_name=site_id, bundle=bundle)
 
-    doc = _SiteDoc(
-        id=ObjectId(site_id),
-        workspace=workspace_id,
-        pocket_id=pocket_id,
-        owner=user_id,
-        name=site_name,
-        script_name=site_id,
-        deployed=True,
-        signed_key=signed_key,
-        url=url,
-        # SE-2b: persist the builder origin (or "") so a component-edit republish
-        # can re-apply it and the site stays editable across edits.
-        builder_origin=builder_origin or "",
-        # Seed capture config so a lead lands with no manual Mongo edit: a default
-        # mapping keyed on the form_type the generated endpoint sends, and the
-        # local dev origins so the local smoke works. add_domain() appends the
-        # production hostname when a custom domain is connected.
-        allowed_origins=_default_allowed_origins(),
-        event_mapping=_DEFAULT_EVENT_MAPPING,
-    )
-    await doc.insert()
+    # PERF-1: UPSERT ONE canonical Site doc per (workspace, pocket_id) keyed on the
+    # stable ``_id`` (== site_id), rather than inserting a fresh row every publish.
+    # The stable id means the existing doc (if any) is found by ``_id`` directly; we
+    # refresh the deploy-facing fields in place (a re-publish ships fresh content at
+    # the same URL/worker). Fields a domain connect mutates later (``domains``,
+    # ``allowed_origins``) are PRESERVED on update so connecting a domain survives a
+    # re-publish; only a first insert seeds the defaults. ``signed_key`` is likewise
+    # kept stable across re-publishes (the capture endpoint verifies against it).
+    oid = ObjectId(site_id)
+    # P2b: this branch runs ONLY on a successful non-preview deploy (a preview
+    # returned earlier), so ``deployed`` flips True HERE — stamp the live-deploy
+    # time alongside it. A re-publish refreshes it (it is "last shipped", not
+    # "first shipped"). It is NOT set on a preview/edit build and NOT a plain
+    # updatedAt bump, so it stays a true "last deployed" marker.
+    now = datetime.now(UTC)
+    doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if doc is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=True,
+            deployed_at=now,
+            signed_key=signed_key,
+            url=url,
+            # SE-2b: persist the builder origin (or "") so a component-edit republish
+            # can re-apply it and the site stays editable across edits.
+            builder_origin=builder_origin or "",
+            # Seed capture config so a lead lands with no manual Mongo edit: a default
+            # mapping keyed on the form_type the generated endpoint sends, and the
+            # local dev origins so the local smoke works. add_domain() appends the
+            # production hostname when a custom domain is connected.
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        doc.pocket_id = pocket_id
+        doc.owner = user_id
+        doc.name = site_name
+        doc.script_name = site_id
+        doc.deployed = True
+        doc.deployed_at = now
+        doc.url = url
+        doc.builder_origin = builder_origin or ""
+        await doc.save()
     return doc
 
 
@@ -563,6 +801,41 @@ async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     if doc is None:
         raise NotFound("site", site_id)
     return doc
+
+
+async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
+    """The ONE canonical Site doc for (workspace, pocket_id), or None (PERF-1).
+
+    Stable identity (``_live_object_id``) means a pocket published after PERF-1 has
+    exactly one doc — the stable-id one. But PERF-1 does NOT migrate the dupes the
+    old per-publish minting left behind (PERF-2 does), so a pocket may still have
+    several Site docs, one of which the old arbitrary ``find_one`` could return with
+    a stale ``url`` (the stale-live-link bug). This resolves the canonical doc
+    deterministically:
+
+      1. the STABLE-id doc (``_live_object_id``) when it exists — every post-PERF-1
+         publish writes here, so it is the live one;
+      2. otherwise the newest doc (by ``createdAt``) that actually carries a url —
+         the freshest live build among legacy dupes;
+      3. otherwise the newest doc at all (so a pre-url-era doc still resolves).
+
+    Tenant-scoped on ``workspace``. Returns None when the pocket has no Site doc.
+    """
+    stable = await _SiteDoc.find_one(
+        {"_id": _live_object_id(workspace_id, pocket_id), "workspace": workspace_id}
+    )
+    if stable is not None:
+        return stable
+    docs = (
+        await _SiteDoc.find({"workspace": workspace_id, "pocket_id": pocket_id})
+        .sort(-_SiteDoc.createdAt)  # type: ignore[operator]
+        .to_list()
+    )
+    if not docs:
+        return None
+    # Prefer the newest doc that carries a real url (the freshest live build);
+    # fall back to the newest doc overall when none has one.
+    return next((d for d in docs if d.url), docs[0])
 
 
 async def add_domain(
@@ -670,6 +943,12 @@ async def publish_pocket(
     straight through to ``publish`` so the shared path is unit-testable without
     Bun / workerd / Cloudflare (the same injection contract ``publish`` exposes).
     """
+    # Plan gate FIRST — before reading the pocket — so a team-plan caller gets
+    # plan.feature_denied regardless of whether the pocket exists, rather than a
+    # misleading pocket.not_found. ``publish`` re-checks for direct callers; the
+    # repeat read is a single cheap workspace lookup.
+    await require_sites_plan(workspace_id)
+
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
     pocket = await pockets_service.get(pocket_id, user_id)
@@ -702,13 +981,84 @@ async def publish_pocket(
     )
 
 
+def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
+    """Apply a list of search/replace blocks to ``source`` and return the result
+    (P3 — the TARGETED / DIFF edit primitive). PURE + I/O-free, so it is directly
+    unit-testable; ``edit_svelte_component`` calls it to turn the agent's minimal
+    diff into the new file contents before reusing the unchanged persist path.
+
+    Each block is ``{"old_string": <str>, "new_string": <str>}``. The contract
+    mirrors the built-in Edit tool so the agent's existing instinct transfers:
+
+      * ``old_string`` must match the CURRENT working text EXACTLY ONCE. 0 matches
+        or >1 matches raise ``ValidationError`` with a clear, retry-able message
+        (the agent makes ``old_string`` more specific and retries) — never a silent
+        no-op or a partial/ambiguous replace.
+      * blocks apply SEQUENTIALLY against the running result, so a later block can
+        target text an earlier block produced.
+      * ``new_string`` may be empty (a deletion); ``old_string == new_string`` is a
+        no-op the agent did not intend and is rejected.
+
+    Raises ``ValidationError`` on an empty list, a malformed block (missing/non-str
+    keys), or any match-count violation — so a bad diff fails closed BEFORE
+    anything is persisted or rebuilt.
+    """
+    if not isinstance(edits, list) or not edits:
+        raise ValidationError(
+            "site_edit.empty_edits",
+            "edits must be a non-empty list of {old_string, new_string} blocks.",
+        )
+    result = source
+    for i, block in enumerate(edits):
+        if not isinstance(block, dict):
+            raise ValidationError(
+                "site_edit.malformed_block",
+                f"edit block {i} is not an object with old_string/new_string.",
+            )
+        old = block.get("old_string")
+        new = block.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str):
+            raise ValidationError(
+                "site_edit.malformed_block",
+                f"edit block {i} must have string `old_string` and `new_string`.",
+            )
+        if old == "":
+            raise ValidationError(
+                "site_edit.empty_old_string",
+                f"edit block {i} has an empty `old_string` — provide the exact text to replace.",
+            )
+        if old == new:
+            raise ValidationError(
+                "site_edit.noop_block",
+                f"edit block {i} has identical old_string and new_string (no-op) — "
+                "the change would do nothing.",
+            )
+        count = result.count(old)
+        if count == 0:
+            raise ValidationError(
+                "site_edit.no_match",
+                f"edit block {i}: old_string was not found (0 times) in the current "
+                "source — it must match the file exactly. Re-read the component and "
+                "copy the text verbatim.",
+            )
+        if count > 1:
+            raise ValidationError(
+                "site_edit.ambiguous_match",
+                f"edit block {i}: old_string matches {count} times — it must be "
+                "unique. Include more surrounding context so it matches exactly once.",
+            )
+        result = result.replace(old, new, 1)
+    return result
+
+
 async def edit_svelte_component(
     *,
     workspace_id: str,
     user_id: str,
     pocket_id: str,
     component_path: str,
-    new_source: str,
+    new_source: str | None = None,
+    edits: list[dict[str, str]] | None = None,
     name: str = "",
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
@@ -717,11 +1067,22 @@ async def edit_svelte_component(
 ) -> _SiteDoc:
     """Rewrite ONE component of a svelte Paw Site pocket and safely republish.
 
-    The chat-agent entry point for a targeted component edit: it replaces the
-    file at ``component_path`` in the pocket's svelte ``source`` map with
-    ``new_source`` and republishes the site. The Pocket write is owned by the
-    pockets service (``set_svelte_source_file`` — entity isolation); this
-    function only orchestrates persist → republish.
+    The chat-agent entry point for a targeted component edit. The edit can be
+    expressed two ways (exactly one is required):
+
+      * ``edits`` (PREFERRED for small changes, P3) — a list of search/replace
+        blocks ``[{old_string, new_string}, ...]`` the agent emits INSTEAD of the
+        whole file. This reads the pocket's CURRENT ``component_path`` source,
+        applies the blocks via ``apply_edits`` (each ``old_string`` must match
+        exactly once), and uses the COMPUTED new source. The agent sends only the
+        diff — the dominant token / latency saving over a full rewrite.
+      * ``new_source`` (full rewrite, the SE-2 fallback) — the whole new file
+        contents; used as-is. Reserve this for large rewrites.
+
+    Either way the resolved new source replaces the file at ``component_path`` in
+    the pocket's svelte ``source`` map and the site is republished. The Pocket
+    write is owned by the pockets service (``set_svelte_source_file`` — entity
+    isolation); this function only orchestrates resolve → persist → republish.
 
     Safety contract — a broken edit must leave NEITHER a broken deploy NOR stale
     source on the pocket:
@@ -747,6 +1108,36 @@ async def edit_svelte_component(
     """
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    # P3 — resolve the edit shape to a single ``new_source`` string. Exactly one of
+    # ``edits`` (targeted diff) / ``new_source`` (full rewrite) must be supplied.
+    if (edits is None) == (new_source is None):
+        raise ValidationError(
+            "site_edit.invalid_args",
+            "edit_svelte_component requires exactly one of `edits` (a targeted "
+            "search/replace diff) or `new_source` (a full file rewrite).",
+        )
+    if edits is not None:
+        # Targeted/diff edit: read the pocket's CURRENT component source and apply
+        # the blocks to compute the new source. The read goes through the pockets
+        # service's PUBLIC ``get`` (wire dict — entity isolation; it raises
+        # NotFound/Forbidden itself) so the apply runs against the source of truth.
+        # A missing component path is a NotFound (same contract as the full-rewrite
+        # path, where set_svelte_source_file raises it) — not a silent create.
+        pocket = await pockets_service.get(pocket_id, user_id)
+        if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(
+            pocket.get("source"), dict
+        ):
+            raise ValidationError(
+                "pocket.not_svelte_site",
+                "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+            )
+        source_map = pocket["source"]
+        if component_path not in source_map:
+            raise NotFound("site_component", component_path)
+        # apply_edits raises ValidationError (clear, retry-able) on any match-count
+        # violation, BEFORE anything is persisted or rebuilt.
+        new_source = apply_edits(source_map[component_path], edits)
 
     # SE-2b: recover the builder origin the site is currently published with so
     # the republish keeps the edit-bridge. "" (or no prior site) republishes
@@ -976,6 +1367,36 @@ async def preview_pocket(
     return SitePreviewResponse(pocket_id=pocket_id, engine=engine, content=content)
 
 
+async def dev_preview_pocket(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+) -> DevPreviewResponse:
+    """Ensure a live Vite dev-server is running for the pocket and return its URL
+    (Phase 2 / P2a — the EDITING preview).
+
+    Delegates to the DevServerManager singleton: a running server for the pocket is
+    touched + reused (its URL returned); otherwise the manager materializes the
+    pocket's current source into the persistent per-pocket build dir (PERF-3 —
+    cached node_modules) and starts ``vite dev`` on an ephemeral port, so subsequent
+    edits hot-reload over Vite HMR in ~ms instead of rebuilding the whole site. The
+    workerd smoke render is NOT run for the dev server (it is a publish-only gate,
+    PERF-4); publish() is unchanged and still does the full prod build + smoke.
+
+    ``user_id`` is threaded through so the manager reads the pocket via the pockets
+    service under the caller's scope (it raises NotFound / Forbidden itself, mapped
+    by the router to 404 / 403). ``workspace_id`` keeps the surface uniform and
+    tenant-aware with the other by-pocket reads.
+    """
+    from pocketpaw_ee.sites.dev_server import get_manager
+
+    url = await get_manager().ensure_dev_server(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    return DevPreviewResponse(pocket_id=pocket_id, url=url)
+
+
 async def audit_pocket(
     *,
     workspace_id: str,
@@ -1068,8 +1489,16 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     it). No Cloudflare call — just persisted state. Versioning is an additive
     layer, so a versions read failure degrades to the Site-doc signal rather than
     breaking the status read.
+
+    PERF-1: the read is now the CANONICAL Site doc for (workspace, pocket_id), not
+    an arbitrary ``find_one`` across dupes. With stable identity a pocket has ONE
+    doc; but PERF-1 does NOT migrate the dupes the old minting left behind (that's
+    PERF-2), so to fix the stale-live-link bug today we pick the canonical doc
+    deterministically — the stable-id doc when present, else the newest doc that
+    actually carries a url — and surface its (non-null, latest) ``url`` so the live
+    link no longer points at a stale ``url=None`` row.
     """
-    doc = await _SiteDoc.find_one({"workspace": workspace_id, "pocket_id": pocket_id})
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
 
     published_no: int | None = None
     draft_no: int | None = None
@@ -1116,12 +1545,22 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     deployed = bool(doc is not None and doc.deployed)
     is_live = has_published and deployed
 
+    # P2b: surface the canonical doc's last-deploy time so the builder/gallery can
+    # render "Last deployed <time>" without a second fetch. None when the pocket has
+    # no deployed site or the doc predates the field (a pre-P2b row).
+    deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
         status=status,
         is_live=is_live,
         has_unpublished_changes=has_unpublished_changes,
         site_id=str(doc.id) if doc is not None else None,
+        # PERF-1: surface the canonical doc's live url so the builder/gallery link to
+        # the address the latest build actually serves at, not a stale ``url=None``
+        # dupe. None when the pocket has no deployed site.
+        url=(doc.url or None) if doc is not None else None,
+        deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
     )
 
 
@@ -1154,11 +1593,17 @@ async def request_publish_pocket(
     workspace claim, so a real workspace MUST be set here for the gate to ever
     approve). The caller passes its ``ctx.workspace_id``.
 
-    Raises ``ValueError`` when there is NO current draft to publish (the router
-    maps it to a 4xx — there is nothing to submit for review). A missing /
-    access-denied pocket surfaces via the pockets service (NotFound → 404) only
-    when no draft row exists; the common path (a draft was written by an edit)
-    reads the draft directly off the versions spine.
+    P0b — SELF-HEAL legacy sites: a site published before BP-1 has ZERO
+    ``artifact_versions`` rows, so ``get_draft`` returns None even though the
+    pocket has live content. Rather than 400, this BACKFILLS a draft snapshot of
+    the pocket's current content (via ``_ensure_pocket_draft``) and proceeds. The
+    400 is kept ONLY for a genuinely empty / nonexistent pocket (nothing to
+    snapshot) or a foreign-workspace draft (tenant isolation).
+
+    Raises ``ValueError`` when there is NO current draft to publish AND none can
+    be backfilled (the router maps it to a 4xx — there is nothing to submit for
+    review). A missing / access-denied pocket surfaces via the pockets service
+    (NotFound, swallowed by the best-effort backfill) → still no draft → 400.
     """
     from pocketpaw.instinct.models import (
         ActionCategory,
@@ -1170,9 +1615,24 @@ async def request_publish_pocket(
 
     draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
     if draft is None or draft.workspace_id != workspace_id:
-        # Nothing drafted for this pocket in this workspace — nothing to review.
-        # (A foreign-workspace draft is also "nothing here" for this caller —
-        # tenant isolation, the same guard pocket_status applies.)
+        # P0b — a site PUBLISHED before BP-1 has ZERO artifact_versions rows, so it
+        # has no draft lineage at all. That is NOT "nothing to review": the pocket
+        # still has live content the operator wants to submit. BACKFILL a draft
+        # snapshot of the pocket's CURRENT content (reusing ``_ensure_pocket_draft``,
+        # which reads the engine + content via the pockets service and writes a draft
+        # only when none exists), then re-read. This self-heals the legacy site so
+        # Submit-for-review works on the first click instead of 400'ing — and the
+        # edits no longer leak to live, because they land on a draft the merge gate
+        # must approve. A genuinely empty / nonexistent pocket still has nothing to
+        # snapshot (``_ensure_pocket_draft`` swallows the pockets-service NotFound),
+        # so ``get_draft`` stays None below and we keep the 400.
+        await _ensure_pocket_draft(workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id)
+        draft = await versions_service.get_draft(scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id)
+
+    if draft is None or draft.workspace_id != workspace_id:
+        # Still nothing after the backfill attempt — a genuinely empty / nonexistent
+        # pocket, or a foreign-workspace draft (tenant isolation, the same guard
+        # ``pocket_status`` applies). Nothing to review.
         raise ValueError(f"no draft version to publish for pocket {pocket_id} — nothing to review")
 
     published = await versions_service.get_published(
@@ -1228,7 +1688,20 @@ async def request_publish_pocket(
 
 
 async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
-    cursor = _SiteDoc.find({"workspace": workspace_id}).sort(-_SiteDoc.createdAt)  # type: ignore[operator]
+    """The gallery / listSites read: the workspace's Site cards, newest first.
+
+    PERF-2: filters out ARCHIVED docs so each pocket shows exactly one card. The
+    pre-PERF-1 minting left a pile of duplicate Site docs per pocket (one pocket
+    had 14), all of which this read listed → the gallery duplicated. The dedupe
+    migration (``sites.dedupe``) keeps ONE canonical doc per pocket active and
+    tombstones the rest with ``archived=True``; excluding them here collapses the
+    gallery to one card per pocket. ``archived: {"$ne": True}`` (not ``False``)
+    so docs predating the field — which have no ``archived`` key in Mongo — still
+    count as active.
+    """
+    cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}}).sort(
+        -_SiteDoc.createdAt
+    )  # type: ignore[operator]
     return [_to_response(doc) async for doc in cursor]
 
 
@@ -1240,8 +1713,13 @@ async def site_pocket_ids(workspace_id: str) -> set[str]:
     (they show under /sites instead) WITHOUT the pockets service importing the
     Site Beanie model — the Site read stays in this service, which is the sole
     owner of Site reads (entity isolation). Tenant-scoped on ``workspace``.
+
+    PERF-2: excludes ARCHIVED dupes (``archived: {"$ne": True}``) so the set is
+    keyed on pockets that still have an ACTIVE Site — a fully-archived pocket
+    would be wrong to hide from the /pockets gallery. Pre-field docs (no
+    ``archived`` key) still count as active.
     """
-    cursor = _SiteDoc.find({"workspace": workspace_id})
+    cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}})
     return {doc.pocket_id async for doc in cursor}
 
 
@@ -1326,15 +1804,60 @@ async def version_history(*, workspace_id: str, pocket_id: str) -> list[Any]:
     return list(reversed(scoped))
 
 
+async def revert_pocket_version(
+    *, workspace_id: str, user_id: str, pocket_id: str, version_no: int
+) -> Any:
+    """Revert a pocket's site to a prior version by ordinal (P2b-backend).
+
+    Backs ``POST /sites/by-pocket/{pocket_id}/versions/{version_no}/revert``.
+    Revert is FORWARD-MOVING: it writes a NEW draft (on the main branch) whose
+    content is a snapshot of the target version's content, then the normal
+    review/publish flow applies (the operator can request-publish that draft and
+    take the reverted content live through the merge gate). It never mutates
+    history — the version log stays append-only and the revert is its own
+    auditable lineage step.
+
+    The router carries the human-friendly ``version_no`` (the timeline ordinal the
+    UI shows); the versions ``revert`` keys on the durable ``version_id``, so this
+    resolves the ordinal → the row via the SAME tenant-scoped, main-branch log
+    ``version_history`` reads. A version_no the pocket does not have (or one under
+    another workspace — the rows are pre-filtered on ``workspace_id``) raises
+    ``ValueError`` (the router maps it to a 404). Returns the new draft
+    ``ArtifactVersion``.
+    """
+    from pocketpaw_ee.versions import service as versions_service
+
+    rows = await versions_service.list_versions(
+        scope_type=_VERSION_SCOPE_TYPE, scope_id=pocket_id, branch="main"
+    )
+    target = next(
+        (r for r in rows if r.version_no == version_no and r.workspace_id == workspace_id),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"no version v{version_no} for pocket {pocket_id} — cannot revert")
+
+    return await versions_service.revert(
+        scope_type=_VERSION_SCOPE_TYPE,
+        scope_id=pocket_id,
+        workspace_id=workspace_id,
+        version_id=str(target.id),
+        author=user_id,
+    )
+
+
 __all__ = [
+    "apply_edits",
     "publish",
     "publish_pocket",
     "preview_pocket",
     "pocket_status",
     "request_publish_pocket",
     "version_history",
+    "revert_pocket_version",
     "edit_svelte_component",
     "make_site_editable",
+    "require_sites_plan",
     "add_domain",
     "domain_status",
     "list_domains",

@@ -343,6 +343,20 @@ class CloudLifecycleHook:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Local Paw Sites re-serve failed (non-fatal): %s", exc)
 
+        # Paw Sites live Vite dev-server reaper (Phase 2 / P2a). The DevServerManager
+        # runs one long-lived `vite dev` per pocket being edited (HMR preview); the
+        # idle reaper stops servers idle past DEV_SERVER_IDLE_SECONDS so editor
+        # sessions that walk away never leak processes. Best-effort, like the other
+        # boot reconcilers — a failure here must not block boot. The manager itself
+        # is lazily created on the first dev-preview call; starting the reaper here
+        # just ensures the idle sweep is ticking. on_shutdown stops it + every server.
+        try:
+            from pocketpaw_ee.sites.dev_server import start_dev_server_reaper
+
+            await start_dev_server_reaper()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Paw Sites dev-server reaper start failed (non-fatal): %s", exc)
+
     async def on_shutdown(self) -> None:
         import logging
 
@@ -387,6 +401,15 @@ class CloudLifecycleHook:
             await stop_xproc_consumer()
         except Exception as exc:  # noqa: BLE001
             logger.warning("xproc consumer stop failed: %s", exc)
+
+        # Stop the Paw Sites dev-server reaper AND terminate every running `vite dev`
+        # so no editor preview process outlives the web process (P2a resource safety).
+        try:
+            from pocketpaw_ee.sites.dev_server import stop_dev_servers
+
+            await stop_dev_servers()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Paw Sites dev-server stop failed: %s", exc)
 
         # Close the arq enqueuer pool if this web process ever built one
         # (POCKETPAW_CLOUD_RUN_EXECUTOR=arq). No-op otherwise.

@@ -178,6 +178,97 @@ class TestEditHandler:
         assert "is live" not in text
 
     @pytest.mark.asyncio
+    async def test_edits_input_forwarded_to_service(self) -> None:
+        """P3: the agent can send a targeted ``edits`` list INSTEAD of the whole
+        ``new_source``; the handler forwards the blocks to the service and does NOT
+        require ``new_source``."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        fake = AsyncMock(return_value=_FakeSiteDoc())
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch("pocketpaw_ee.sites.service.edit_svelte_component", new=fake),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/lib/components/Hero.svelte",
+                    "edits": [{"old_string": "Bright", "new_string": "Brighter"}],
+                }
+            )
+
+        assert not out.get("is_error"), out
+        fake.assert_awaited_once()
+        kwargs = fake.await_args.kwargs
+        assert kwargs["edits"] == [{"old_string": "Bright", "new_string": "Brighter"}]
+        # No full-file rewrite was forced on the diff path.
+        assert kwargs.get("new_source") is None
+
+    @pytest.mark.asyncio
+    async def test_neither_edits_nor_new_source_is_error(self) -> None:
+        """P3: a call with neither ``edits`` nor ``new_source`` is rejected with a
+        clear is_error before the service is touched."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with patch.object(mcp, "_identity", return_value=("ws1", "u1")):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/lib/components/Hero.svelte",
+                }
+            )
+        assert out.get("is_error") is True
+        text = out["content"][0]["text"]
+        assert "edits" in text and "new_source" in text
+
+    @pytest.mark.asyncio
+    async def test_malformed_edits_is_error(self) -> None:
+        """P3: ``edits`` must be a list of {old_string, new_string} dicts — a
+        malformed shape is caught at the handler with a clear is_error."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+
+        with patch.object(mcp, "_identity", return_value=("ws1", "u1")):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/lib/components/Hero.svelte",
+                    "edits": [{"old_string": "only-old"}],
+                }
+            )
+        assert out.get("is_error") is True
+        assert "`edits`" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_validation_error_from_apply_relayed(self) -> None:
+        """P3: when the service's apply step rejects the edit (e.g. old_string does
+        not match uniquely) the ValidationError is relayed by code + message so the
+        agent can retry with a more specific old_string."""
+        from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
+        from pocketpaw_ee.cloud._core.errors import ValidationError
+
+        with (
+            patch.object(mcp, "_identity", return_value=("ws1", "u1")),
+            patch(
+                "pocketpaw_ee.sites.service.edit_svelte_component",
+                new=AsyncMock(
+                    side_effect=ValidationError(
+                        "site_edit.no_match",
+                        "old_string did not match (0 times)",
+                    )
+                ),
+            ),
+        ):
+            out = await mcp._edit_svelte_component_handler(
+                {
+                    "pocket_id": "pk1",
+                    "component_path": "src/lib/components/Hero.svelte",
+                    "edits": [{"old_string": "nope", "new_string": "x"}],
+                }
+            )
+        assert out.get("is_error") is True
+        assert "site_edit.no_match" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
     async def test_missing_identity_is_error(self) -> None:
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 

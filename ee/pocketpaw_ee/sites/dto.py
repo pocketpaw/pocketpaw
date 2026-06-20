@@ -28,6 +28,12 @@
 # This flag (default False, backward-compatible) lets the builder badge "has
 # unpublished edits" without inferring it from the Site doc. ``status``/``is_live``
 # semantics are unchanged in shape; only their derivation moves onto versions.
+# Updated 2026-06-18 (feat/sites-stable-identity, PERF-1): SiteStatusResponse gains
+# ``url`` — the canonical live address of the pocket's deployed site. With stable
+# per-pocket identity (one Site doc per pocket) pocket_status reads the ONE
+# canonical doc and surfaces its non-null url, so the builder/gallery link to the
+# address the latest build actually serves at instead of a stale dupe's url=None.
+# Optional (default None, backward-compatible) — None when no deployed site exists.
 # Updated 2026-06-18 (feat/branch-primitive-revert-history, BP-4): added two DTOs
 # for the Branch-primitive surfaces — SiteVersionResponse + VersionHistoryResponse
 # (the ordered version timeline GET /sites/by-pocket/{pocket_id}/versions returns)
@@ -39,6 +45,11 @@
 # (the first non-editor PRODUCER). Each finding carries a ``fix_prompt`` the UI
 # feeds to the EXISTING edit path so the fix lands as a reviewable draft; there is
 # NO new apply endpoint (BP-7 reuses edit_svelte_component / refine).
+# Updated 2026-06-19 (P2b-backend — "Last Deployed"): SiteResponse and
+# SiteStatusResponse gain ``deployed_at`` — the ISO-8601 string of the pocket's most
+# recent successful live deploy (the Site doc's ``deployed_at``), or None before the
+# first deploy. The builder/gallery surface a "Last deployed <time>" label without a
+# second fetch. Optional (default None) so the field is backward-compatible.
 
 from __future__ import annotations
 
@@ -71,6 +82,9 @@ class SiteResponse(BaseModel):
     # SE-2b: the builder origin the site was published with, or "" for a normal
     # (non-editable) site. Non-empty means the page carries the edit-bridge.
     builder_origin: str = ""
+    # P2b: ISO-8601 timestamp of the most recent successful live deploy, or None
+    # before the first deploy (a preview-only / never-deployed pocket reads None).
+    deployed_at: str | None = None
 
 
 class SitePreviewResponse(BaseModel):
@@ -82,6 +96,17 @@ class SitePreviewResponse(BaseModel):
     pocket_id: str
     engine: str
     content: dict[str, Any] | None = None
+
+
+class DevPreviewResponse(BaseModel):
+    """The live Vite dev-server URL for a pocket's EDITING preview (Phase 2 / P2a).
+    ``url`` is a localhost address (http://127.0.0.1:<port>/) the builder iframe
+    frames so edits hot-reload over Vite HMR in ~ms, instead of a full per-edit
+    rebuild. This is the editing preview only — publish still does the full prod
+    build + workerd smoke."""
+
+    pocket_id: str
+    url: str
 
 
 class SiteStatusResponse(BaseModel):
@@ -101,6 +126,13 @@ class SiteStatusResponse(BaseModel):
     is_live: bool
     has_unpublished_changes: bool = False
     site_id: str | None = None
+    # PERF-1: the canonical live url of the pocket's deployed site (the address the
+    # latest build serves at). None when no deployed site exists.
+    url: str | None = None
+    # P2b: ISO-8601 timestamp of the pocket's most recent successful live deploy,
+    # read from the canonical Site doc's ``deployed_at``. None when the pocket has
+    # never been deployed (no Site doc, or a pre-P2b row that predates the field).
+    deployed_at: str | None = None
 
 
 class SiteVersionResponse(BaseModel):

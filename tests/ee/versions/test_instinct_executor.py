@@ -43,7 +43,13 @@ class _FakeStore:
 
 
 def _action(to_version_id: str) -> SimpleNamespace:
-    """A minimal Action stand-in carrying an ``_artifact_change`` blob."""
+    """A minimal Action stand-in carrying an ``_artifact_change`` blob.
+
+    ``branch`` is "main" to match the real request_publish_pocket flow (it stamps
+    branch="main") AND the branch the candidate drafts below are written on
+    (write_draft defaults to "main"). The P2a discard_all_drafts is branch-scoped,
+    so the blob branch must match where the draft actually lives — exactly as it
+    does in production."""
     return SimpleNamespace(
         id="act-1",
         pocket_id=POCKET,
@@ -51,7 +57,7 @@ def _action(to_version_id: str) -> SimpleNamespace:
             "_artifact_change": {
                 "scope_type": "pocket",
                 "scope_id": POCKET,
-                "branch": "cand",
+                "branch": "main",
                 "from_version_id": "ver-from",
                 "to_version_id": to_version_id,
                 "workspace": WS,
@@ -167,3 +173,79 @@ async def test_reject_discards_candidate_and_leaves_published(
     assert published is not None
     assert str(published.id) == str(live.id)
     assert published.content == {"v": "live"}
+
+
+async def test_reject_clears_all_accumulated_drafts(
+    beanie_test_db, versions_journal, monkeypatch
+) -> None:
+    """P2a: ONE reject (discard_rejected_change) must clear ALL drafts above the
+    published pointer — not just the candidate the Action names — so
+    has_unpublished_changes goes false on the first click instead of after N.
+
+    The action's ``to_version_id`` names the latest draft, but a pocket edited N
+    times (back-handling the pre-fix accumulated state) has N draft rows above
+    published. After the fix the discard reverts every one in a single pass.
+
+    Reproduce-first: pre-fix discard_rejected_change reverts only to_version_id,
+    so the other accumulated drafts remain → get_draft is non-None → fails.
+    """
+    store = _FakeStore()
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+
+    # A live published version.
+    live = await versions.write_draft(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, content={"v": "live"}
+    )
+    await versions.publish(
+        scope_type="pocket", scope_id=POCKET, workspace_id=WS, version_id=str(live.id)
+    )
+
+    # Force three raw draft rows above published (the already-accumulated state a
+    # pre-fix pocket is in on disk), independent of the supersede behaviour.
+    from pocketpaw_ee.versions.models import ArtifactVersion
+
+    head = await versions._latest_in_branch(
+        scope_type="pocket", scope_id=POCKET, branch_name="main"
+    )
+    next_no = head.version_no + 1
+    cands = []
+    for j in range(3):
+        row = ArtifactVersion(
+            scope_type="pocket",
+            scope_id=POCKET,
+            workspace_id=WS,
+            branch="main",
+            version_no=next_no + j,
+            content={"raw": j},
+            status="draft",
+        )
+        await row.insert()
+        cands.append(row)
+
+    # The Action names only the LATEST draft as to_version_id. The publish flow's
+    # blob is on the "main" lineage (request_publish_pocket stamps branch="main"),
+    # so build a main-branch action here.
+    main_action = SimpleNamespace(
+        id="act-discard-all",
+        pocket_id=POCKET,
+        parameters={
+            "_artifact_change": {
+                "scope_type": "pocket",
+                "scope_id": POCKET,
+                "branch": "main",
+                "from_version_id": str(live.id),
+                "to_version_id": str(cands[-1].id),
+                "workspace": WS,
+                "user_id": USER,
+            }
+        },
+    )
+    await executor.discard_rejected_change(main_action)
+
+    # ALL drafts above published are gone → get_draft is None on click 1.
+    assert await versions.get_draft(scope_type="pocket", scope_id=POCKET) is None
+
+    # The published pointer is untouched.
+    published = await versions.get_published(scope_type="pocket", scope_id=POCKET)
+    assert published is not None
+    assert str(published.id) == str(live.id)
