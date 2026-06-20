@@ -4,6 +4,16 @@ Sole owner of writes to the ``Pocket`` Beanie document. Module-level
 ``async def`` API. The doc → domain mapping helpers (formerly in
 ``repositories.py``) live alongside the public API as private helpers.
 
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``_check_domain_edit_access``
+now allows the synthetic ``system:workspace_job`` identity so a workspace job
+can merge its result back even on a private (non-workspace-visible) pocket.
+The authorization already happened at dispatch (the triggering user passed
+``require_pocket_action_run``); the writeback is the downstream system effect of
+that authorized dispatch, and the identity is not user-assignable.
+Also adds ``get_pocket_workspace`` (review fix IMPORTANT 3) — a session-free
+tenancy read the jobs worker uses to fail closed before a cross-workspace
+writeback.
+
 Public API (returns wire dicts for legacy router compatibility):
 - ``create``, ``list_pockets``, ``get``, ``update``, ``delete``
 - ``ensure_home_pocket`` — resolve-or-provision the user's home pocket
@@ -513,6 +523,19 @@ def _check_domain_owner(domain_pocket: Pocket, user_id: str) -> None:
 
 
 def _check_domain_edit_access(domain_pocket: Pocket, user_id: str) -> None:
+    # Workspace jobs (pp#1459) — the trusted, hardcoded ``system:workspace_job``
+    # writer is allowed to merge its result back regardless of the pocket's
+    # owner / shared_with / visibility. The authorization decision already
+    # happened at DISPATCH time (the triggering user passed
+    # ``require_pocket_action_run``, owner/shared_with-only); the worker
+    # writeback is a downstream system effect of that authorized dispatch.
+    # The identity is synthetic and not user-assignable, so this cannot be
+    # forged from a request. Without this, a job on a private (non-workspace-
+    # visible) pocket would 403 at writeback and the button would hang.
+    from pocketpaw_ee.cloud.jobs.domain import WORKSPACE_JOB_IDENTITY
+
+    if user_id == WORKSPACE_JOB_IDENTITY:
+        return
     if domain_pocket.owner == user_id:
         return
     if user_id in domain_pocket.team:
@@ -2523,6 +2546,26 @@ async def has_action_run_access(pocket_id: str, user_id: str) -> bool:
     if doc.owner == user_id:
         return True
     return user_id in (doc.shared_with or [])
+
+
+async def get_pocket_workspace(pocket_id: str) -> str | None:
+    """Return the workspace a pocket belongs to, or ``None`` if it doesn't exist.
+
+    A workspace-free tenancy read for callers that hold a pocket id but no
+    user session — notably the workspace-jobs worker, which re-asserts that
+    the pocket the job's doc names actually lives in the doc's workspace
+    BEFORE writing anything back (defense-in-depth: ``merge_spec`` fetches by
+    id only and trusts the passed workspace). A malformed / unknown id returns
+    ``None`` so the caller fails closed rather than raising. Keeps the Beanie
+    ``WorkspaceJobDoc``-adjacent ``_PocketDoc`` load inside this service module.
+    """
+    try:
+        doc = await _PocketDoc.get(PydanticObjectId(pocket_id))
+    except Exception:  # noqa: BLE001 — malformed id surfaces as "not found"
+        return None
+    if doc is None:
+        return None
+    return doc.workspace
 
 
 async def is_member(pocket_id: str, user_id: str) -> bool:

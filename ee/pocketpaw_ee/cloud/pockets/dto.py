@@ -1,5 +1,10 @@
 """Pockets domain — request/response schemas.
 
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``RunActionResponse``
+gained ``job_id``, set ONLY on a ``kind:"job"`` action dispatch
+(``code:"job_enqueued"``). It carries the WorkspaceJobDoc id the client polls
+via ``GET /workspaces/{ws}/jobs/{job_id}``; None on every other action path.
+
 Changes: Added agents, rippleSpec (aliased), and widgets fields to CreatePocketRequest
 so the frontend can pass the full pocket spec on creation instead of requiring
 separate follow-up calls.
@@ -565,6 +570,10 @@ class RunActionResponse(BaseModel):
     # executor returns it as ``_optimistic_compensation_id`` (internal key);
     # the router maps it onto this public field.
     optimistic_compensation_id: str | None = None
+    # Workspace jobs (pp#1459) — set ONLY on a ``kind:"job"`` action dispatch
+    # (``code:"job_enqueued"``). Carries the WorkspaceJobDoc id the client polls
+    # via ``GET /workspaces/{ws}/jobs/{job_id}``. None on every other path.
+    job_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 

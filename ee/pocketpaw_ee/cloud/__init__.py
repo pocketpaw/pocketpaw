@@ -1,5 +1,11 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-20 (feat/workspace-jobs, pp#1459) — Mounts the workspace-jobs
+    status router (``GET /workspaces/{ws}/jobs/{job_id}``) and registers the
+    built-in jobs into the process-wide registry via ``register_builtins()``
+    AFTER ``init_realtime()`` (so a job's writeback emit has a bus to publish
+    onto). Jobs are TRIGGERED through the existing
+    ``POST /pockets/{id}/actions/run`` kind=="job" branch.
 Modified: 2026-06-13 (feat/patrol-engine) — Registers the mandate cadence
     SCHEDULER lifespan pair next to the autopilot pair, under the same
     POCKETPAW_CLOUD_SCHEDULER_ENABLED gate: ``reconcile_scheduler`` at startup
@@ -193,6 +199,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
+    from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
     from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
         router as meetings_webhooks_router,
@@ -229,6 +236,12 @@ def mount_cloud(app: FastAPI) -> None:
     # same surface as live cycles. Persistence lands in the
     # ``foresight_runs`` Mongo collection via ``ee.cloud.foresight.service``.
     app.include_router(foresight_router, prefix="/api/v1")
+    # Workspace jobs — pp#1459. The status-poll surface
+    # (GET /workspaces/{ws}/jobs/{job_id}); jobs are TRIGGERED through the
+    # existing POST /pockets/{id}/actions/run kind=="job" branch, so there is
+    # no dispatch route here. Built-in jobs are registered after init_realtime
+    # below.
+    app.include_router(jobs_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
@@ -585,6 +598,13 @@ def mount_cloud(app: FastAPI) -> None:
     # first service that calls ``emit(...)`` fails with "EventBus not
     # initialized".
     init_realtime()
+
+    # Register built-in workspace jobs (pp#1459) into the process-wide job
+    # registry. Must run AFTER ``init_realtime`` so a job's writeback emit has
+    # a bus to publish onto — same lifecycle ordering as the listeners below.
+    from pocketpaw_ee.cloud.jobs.builtin import register_builtins
+
+    register_builtins()
 
     # Bridge ``AuditLogger`` (JSONL) writes into ``AuditStore`` (SQLite).
     # Cloud writers across the EE codebase (pockets/action_executor,

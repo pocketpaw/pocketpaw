@@ -1,5 +1,12 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — registered the workspace
+jobs entrypoint ``execute_workspace_job`` into ``WorkerSettings.functions``
+(default #1: SAME worker process, no new deploy artifact). It is wrapped with
+``arq.worker.func(timeout=...)`` so workspace jobs get their OWN per-function
+timeout (``POCKETPAW_JOB_TIMEOUT_SECONDS``, default 900s) without changing the
+chat-run timeout. The jobs share this worker's Redis pool + realtime bootstrap.
+
 Deploy as a separate process alongside the web service::
 
     arq pocketpaw_ee.cloud.chat.runs.worker.WorkerSettings
@@ -21,6 +28,7 @@ import os
 from typing import Any
 
 from arq.connections import RedisSettings
+from arq.worker import func
 
 # Imported at module scope so tests can ``monkeypatch.setattr(worker, …)``.
 from pocketpaw_ee.cloud import init_realtime
@@ -28,6 +36,8 @@ from pocketpaw_ee.cloud._core.realtime import xproc
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
+from pocketpaw_ee.cloud.jobs.worker import execute_workspace_job
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
 logger = logging.getLogger(__name__)
@@ -101,10 +111,23 @@ def _redis_settings() -> RedisSettings:
     return RedisSettings.from_dsn(url)
 
 
+# Workspace jobs (pp#1459) run on this same worker but get their OWN
+# per-function timeout via ``arq.worker.func`` so a long-running job can't be
+# clipped by the chat-run timeout and vice-versa. The dotted name the web
+# process enqueues (``"execute_workspace_job"``) is the function's __qualname__
+# by default; pin it explicitly so the enqueue/registration names can't drift.
+_workspace_job_fn = func(
+    execute_workspace_job,
+    name="execute_workspace_job",
+    timeout=job_timeout_seconds(),
+    max_tries=1,
+)
+
+
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
-    functions = [execute_run_job]
+    functions = [execute_run_job, _workspace_job_fn]
     on_startup = _startup
     on_shutdown = _shutdown
     # Crash policy: no auto-retry. A failed run is left as ``failed``/``interrupted``
