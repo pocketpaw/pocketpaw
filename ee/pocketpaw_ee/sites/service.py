@@ -1835,9 +1835,7 @@ async def revert_pocket_version(
         None,
     )
     if target is None:
-        raise ValueError(
-            f"no version v{version_no} for pocket {pocket_id} — cannot revert"
-        )
+        raise ValueError(f"no version v{version_no} for pocket {pocket_id} — cannot revert")
 
     return await versions_service.revert(
         scope_type=_VERSION_SCOPE_TYPE,

@@ -214,9 +214,7 @@ def reap_build_workerd(project_dir: str) -> int:
                     continue
         except Exception:  # noqa: BLE001
             pass
-        logger.info(
-            "sites: reaped %d build-path workerd process(es) under %s", len(victims), root
-        )
+        logger.info("sites: reaped %d build-path workerd process(es) under %s", len(victims), root)
     return len(victims)
 
 
