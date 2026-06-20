@@ -50,6 +50,14 @@
 # recent successful live deploy (the Site doc's ``deployed_at``), or None before the
 # first deploy. The builder/gallery surface a "Last deployed <time>" label without a
 # second fetch. Optional (default None) so the field is backward-compatible.
+# Updated 2026-06-20 (DS-1a — surface dynamic-site pattern): SiteResponse and
+# SiteStatusResponse gain ``pattern`` — the SOURCE pocket's authoring pattern
+# ("dynamic" for a live-data site, "landing" for a marketing page, "" / other for
+# the rest). It lives on ``Pocket.pattern``, not the Site, so the service resolves
+# it from the source pocket (sites/service.py: patterns_for_pockets) per list +
+# status response. The frontend uses it to badge dynamic sites in the gallery.
+# Default "" so the field is backward-compatible and empty-safe (a pocket with no
+# pattern, or a missing/cross-tenant pocket, reads "").
 
 from __future__ import annotations
 
@@ -85,6 +93,11 @@ class SiteResponse(BaseModel):
     # P2b: ISO-8601 timestamp of the most recent successful live deploy, or None
     # before the first deploy (a preview-only / never-deployed pocket reads None).
     deployed_at: str | None = None
+    # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" | ...),
+    # resolved from Pocket.pattern (it lives on the pocket, not the Site). "" when
+    # the pocket has no pattern or could not be resolved. Lets the frontend badge
+    # dynamic sites in the gallery without a second fetch.
+    pattern: str = ""
 
 
 class SitePreviewResponse(BaseModel):
@@ -133,6 +146,11 @@ class SiteStatusResponse(BaseModel):
     # read from the canonical Site doc's ``deployed_at``. None when the pocket has
     # never been deployed (no Site doc, or a pre-P2b row that predates the field).
     deployed_at: str | None = None
+    # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" | ...),
+    # resolved from Pocket.pattern. "" when the pocket has no pattern. Same field
+    # the list response carries, so a by-pocket status read can badge a dynamic
+    # site too.
+    pattern: str = ""
 
 
 class SiteVersionResponse(BaseModel):
