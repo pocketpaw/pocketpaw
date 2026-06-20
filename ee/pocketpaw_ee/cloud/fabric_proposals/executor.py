@@ -452,8 +452,10 @@ async def execute_approved_fabric_objects(
             error_class="MalformedBlob",
         )
         return
-    object_types = blob.get("object_types") if isinstance(blob.get("object_types"), list) else []
-    links = blob.get("links") if isinstance(blob.get("links"), list) else []
+    _ot = blob.get("object_types")
+    object_types: list[dict[str, Any]] = _ot if isinstance(_ot, list) else []
+    _lk = blob.get("links")
+    links: list[dict[str, Any]] = _lk if isinstance(_lk, list) else []
 
     # Materialise the ontology. Any failure (bad property, store error) is
     # captured as a failed outcome — NEVER re-raised into the router.
