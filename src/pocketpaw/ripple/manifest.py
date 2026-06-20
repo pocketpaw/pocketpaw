@@ -11,6 +11,29 @@ returns None — the caller is expected to fall back to a different
 source (today: kb scope search).
 
 Changes:
+  - 2026-06-07 (polish/rfc13-flow-nav-validation): made the catalog and
+    action-verb walkers (``_walk_catalog`` / ``_walk_action_verbs``) descend a
+    Chain Flow step's ``ui`` tree, its linear ``chain`` next step, and each
+    ``chain_map`` branch step — not just ``children`` / ``else_children``.
+    Previously a bad widget type or unknown action verb buried in step 2/3 of a
+    materialized flow escaped author-time validation; now every step's UI node
+    tree in the flow is checked, not just the root step's.
+  - 2026-06-04 (feat/sites-validator-site-aware): added ``relax_ssr_props``
+    to ``validate_against_manifest`` + the ``SSR_NODE_LEVEL_PROPS`` allowlist.
+    On the site-generation path the renderer-honored SSR node-level props
+    (``section``/``card`` ``id`` anchors, ``input``/``textarea`` ``name`` POST
+    fields, ``button``/``cta`` ``href`` anchor CTAs) are no longer flagged as
+    ``unknown_props`` — they render on a static Paw Site but the manifest omits
+    them from per-widget props, so the default walk was driving the agent's
+    redraft loop into stripping the marketing widgets. Closed combo list, gated
+    on the flag; dashboard validation (flag defaults False) is unchanged.
+  - 2026-05-31 (constraint-zone enforcer): added ``validate_required_props``
+    + ``required_props_from_manifest`` — a mechanical walker that flags any
+    node missing a prop the manifest marks ``required: true`` for its
+    ``type``. The rippleSpec analogue of the genesis "Constraint Zones" 🔒
+    HARD ``required_fields`` zone; sibling to ``validate_against_catalog`` /
+    ``validate_action_verbs``. Previously the ``required`` flag was surfaced
+    only in the system prompt and never enforced at gate time.
   - 2026-05-22 (Increment 5): added ``validate_against_catalog`` — a
     catalog-as-allowlist ingest gate that flags any node whose ``type``
     is not in the widget manifest (sibling to ``validate_against_manifest``,
@@ -135,11 +158,46 @@ _KNOWN_ITEM_ALIASES: dict[str, dict[str, dict[str, str]]] = {
 }
 
 
+# SSR-essential node-level props that the renderer honors on specific widgets
+# but the manifest's per-widget ``props`` map omits (they are universal
+# node-level attributes the renderer wraps on, not per-widget props). A
+# statically-rendered Paw Site (csr=false, no client JS) REQUIRES these:
+#
+#   * ``id`` on ``section`` / ``card`` — emitted as the HTML element ``id``
+#     so in-page anchor links (#services, #book) resolve. Confirmed in the
+#     ripple source: ``<section {id} …>`` / ``<div {id} … (Card)>``.
+#   * ``name`` on ``input`` / ``textarea`` — emitted on the native control so
+#     the page's outer <form> POSTs the field. Confirmed: ``<input {name} …>``
+#     / ``<textarea {name} …>``.
+#   * ``href`` on ``button`` — renders the button as an anchor CTA on a static
+#     page; ``href`` on ``cta`` is already a declared manifest prop but is
+#     included here so the relaxation is symmetric for anchor CTAs.
+#
+# These are flagged as ``unknown_props`` by the default manifest walk, which
+# drives the agent's redraft loop into stripping the marketing widgets. The
+# walk relaxes them ONLY when ``relax_ssr_props=True`` (the site-generation
+# path), keyed to this closed combo list — it is NOT a blanket "allow ``id``
+# everywhere". Dashboard / pocket validation passes the flag False and is
+# unaffected. When a new SSR-honored prop/widget combo is confirmed in the
+# renderer, add it here.
+#
+# Format: ``{ widget_type: frozenset({prop, …}) }``
+SSR_NODE_LEVEL_PROPS: dict[str, frozenset[str]] = {
+    "section": frozenset({"id"}),
+    "card": frozenset({"id"}),
+    "input": frozenset({"name"}),
+    "textarea": frozenset({"name"}),
+    "button": frozenset({"href", "name"}),
+    "cta": frozenset({"href"}),
+}
+
+
 def validate_against_manifest(
     spec: dict[str, Any] | None,
     manifest: dict[str, Any],
     *,
     apply_aliases: bool = False,
+    relax_ssr_props: bool = False,
 ) -> list[dict[str, Any]]:
     """Walk a rippleSpec tree and flag nodes whose ``props`` keys are not
     declared in the manifest for that ``type``.
@@ -148,6 +206,19 @@ def validate_against_manifest(
     drifted in production (see ``_KNOWN_ITEM_ALIASES``). When
     ``apply_aliases=True``, the spec is mutated in place to rewrite the
     known wrong keys to their canonical form.
+
+    ``relax_ssr_props`` (site-generation path only): when True, the
+    SSR-essential renderer-honored node-level props in
+    :data:`SSR_NODE_LEVEL_PROPS` (``section.id`` / ``card.id`` anchor
+    targets, ``input.name`` / ``textarea.name`` native POST fields,
+    ``button.href`` / ``cta.href`` anchor CTAs) are NOT reported as
+    ``unknown_props``. They render correctly on a static Paw Site
+    (csr=false) but the manifest omits them from per-widget props, so the
+    default walk would flag them and trigger the agent's redraft loop into
+    stripping the marketing widgets. The relaxation is a closed combo list,
+    keyed to the specific widget — it does NOT blanket-allow ``id``/``name``/
+    ``href`` everywhere. Dashboard / pocket validation passes False (the
+    default) and is unaffected.
 
     Returns one issue dict per offending node; ``[]`` when ``spec`` is not
     a dict or no issues are found. Issue shape::
@@ -178,7 +249,7 @@ def validate_against_manifest(
 
     root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
     issues: list[dict[str, Any]] = []
-    _walk_validate(root, "ui", by_type, apply_aliases, issues)
+    _walk_validate(root, "ui", by_type, apply_aliases, issues, relax_ssr_props)
     return issues
 
 
@@ -188,6 +259,7 @@ def _walk_validate(
     by_type: dict[str, set[str]],
     apply_aliases: bool,
     issues: list[dict[str, Any]],
+    relax_ssr_props: bool = False,
 ) -> None:
     if not isinstance(node, dict):
         return
@@ -196,7 +268,14 @@ def _walk_validate(
     props = node.get("props")
     if isinstance(wtype, str) and wtype in by_type and isinstance(props, dict):
         allowed = by_type[wtype]
-        unknown = sorted(k for k in props.keys() if k not in allowed)
+        # On the site-generation path, the SSR-essential renderer-honored
+        # node-level props (anchor ``id``, native-POST ``name``, anchor
+        # ``href``) are treated as allowed for the specific widget that
+        # carries them — they render fine on a static page but the manifest
+        # omits them from per-widget props. Closed combo list, NOT a blanket
+        # allow; dashboard validation (relax_ssr_props=False) is untouched.
+        ssr_ok = SSR_NODE_LEVEL_PROPS.get(wtype, frozenset()) if relax_ssr_props else frozenset()
+        unknown = sorted(k for k in props.keys() if k not in allowed and k not in ssr_ok)
         item_issues: list[dict[str, Any]] = []
 
         for items_key, alias_map in _KNOWN_ITEM_ALIASES.get(wtype, {}).items():
@@ -234,7 +313,14 @@ def _walk_validate(
     children = node.get("children")
     if isinstance(children, list):
         for i, child in enumerate(children):
-            _walk_validate(child, f"{path}.children[{i}]", by_type, apply_aliases, issues)
+            _walk_validate(
+                child,
+                f"{path}.children[{i}]",
+                by_type,
+                apply_aliases,
+                issues,
+                relax_ssr_props,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +413,22 @@ def _walk_catalog(
         if isinstance(kids, list):
             for i, child in enumerate(kids):
                 _walk_catalog(child, f"{path}.{key}[{i}]", allowed, pool, issues)
+
+    # Chain Flow descent (RFC 13): a step node carries its widget tree under
+    # `ui`, a linear next step under `chain`, and selection-branch steps under
+    # `chain_map`. Without descending these, a bad widget buried in step 2/3 of
+    # a materialized flow escapes catalog validation.
+    ui = node.get("ui")
+    if isinstance(ui, dict):
+        _walk_catalog(ui, f"{path}.ui", allowed, pool, issues)
+    chain = node.get("chain")
+    if isinstance(chain, dict):
+        _walk_catalog(chain, f"{path}.chain", allowed, pool, issues)
+    chain_map = node.get("chain_map")
+    if isinstance(chain_map, dict):
+        for branch_id, branch in chain_map.items():
+            if isinstance(branch, dict):
+                _walk_catalog(branch, f"{path}.chain_map[{branch_id}]", allowed, pool, issues)
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +751,21 @@ def _walk_action_verbs(node: Any, path: str, issues: list[dict[str, Any]]) -> No
                 for i, child in enumerate(kids):
                     _walk_action_verbs(child, f"{path}.{key}[{i}]", issues)
 
+        # Chain Flow descent (RFC 13): descend a step node's `ui` tree, its
+        # linear `chain` next step, and each `chain_map` branch step, so a bad
+        # action verb buried in a later flow step is caught at author time.
+        ui = node.get("ui")
+        if isinstance(ui, dict):
+            _walk_action_verbs(ui, f"{path}.ui", issues)
+        chain = node.get("chain")
+        if isinstance(chain, dict):
+            _walk_action_verbs(chain, f"{path}.chain", issues)
+        chain_map = node.get("chain_map")
+        if isinstance(chain_map, dict):
+            for branch_id, branch in chain_map.items():
+                if isinstance(branch, dict):
+                    _walk_action_verbs(branch, f"{path}.chain_map[{branch_id}]", issues)
+
 
 def validate_action_verbs(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Walk the spec, flag every event-handler whose ``action`` verb
@@ -809,6 +926,169 @@ def find_unwired_live_buttons(spec: dict[str, Any] | None) -> list[dict[str, Any
     root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
     issues: list[dict[str, Any]] = []
     _walk_live_buttons(root, "ui", raw_sources, issues)
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Required-prop "HARD constraint" gate (2026-05-31).
+#
+# The widget manifest declares ``required: true`` on the props a widget
+# cannot render without (a ``chart`` with no ``data``, a ``stat`` with no
+# ``value``, an ``each``-driven ``table`` with no ``columns``). Today that
+# flag is surfaced only in the system prompt — nothing mechanically enforces
+# it, so a node like ``{"type": "chart", "props": {}}`` sails through every
+# gate and renders an empty box.
+#
+# This is the rippleSpec analogue of the genesis "Constraint Zones" model's
+# 🔒 HARD ``required_fields`` zone: the agent is free to choose WHICH widgets
+# to use and HOW to fill the creative props, but the structural minimum — the
+# manifest-declared required props — is locked and checked, not merely asked
+# for. A prompt-side "include required props" rule rots at agent-write-rate;
+# this walker catches every omission for free, exactly like the catalog and
+# action-verb gates it sits beside.
+#
+# Runs as a sibling to ``validate_against_catalog`` — strict on the
+# agent-generation path (raises so the chat agent can retry with the missing
+# prop named), logged on the human / import path.
+# ---------------------------------------------------------------------------
+
+
+def required_props_from_manifest(manifest: dict[str, Any]) -> dict[str, list[str]]:
+    """Extract the per-widget required-prop map from a parsed manifest.
+
+    Returns ``{ widget_type: [required_prop, ...] }`` for every widget that
+    declares at least one ``required: true`` prop; widgets with no required
+    props are omitted entirely (so a membership test doubles as "does this
+    type have anything to enforce"). Prop order follows the manifest's
+    declaration order so corrective hints read naturally.
+
+    Mirrors :func:`allowed_types_from_manifest` — a pure manifest reader with
+    no spec involvement.
+    """
+    out: dict[str, list[str]] = {}
+    for w in manifest.get("widgets") or []:
+        if not isinstance(w, dict):
+            continue
+        wtype = w.get("type")
+        props = w.get("props")
+        if not isinstance(wtype, str) or not wtype or not isinstance(props, dict):
+            continue
+        required = [
+            name
+            for name, spec in props.items()
+            if isinstance(spec, dict) and spec.get("required") and isinstance(name, str)
+        ]
+        if required:
+            out[wtype] = required
+    return out
+
+
+def _prop_is_present(value: Any) -> bool:
+    """True when a prop value counts as "provided" for required-prop checks.
+
+    Present means the key exists with a non-``None`` value. An empty string,
+    empty list, empty dict, ``0``, or ``False`` all count as present — the
+    agent made a deliberate choice and the renderer can handle them; only a
+    missing key or an explicit ``null`` is a structural omission. A bound
+    expression string (``"{item.data}"``) is a non-empty string, so it counts
+    — key-presence, not value-resolution, is what this gate enforces.
+    """
+    return value is not None
+
+
+def _walk_required_props(
+    node: Any,
+    path: str,
+    required_by_type: dict[str, list[str]],
+    issues: list[dict[str, Any]],
+) -> None:
+    """Recursive walk that flags nodes missing a manifest-required prop.
+
+    Only nodes whose ``type`` is a key in ``required_by_type`` are checked —
+    an unknown ``type`` is the catalog gate's concern, not this one, so it is
+    never double-flagged here. A node that carries ``bind`` for a required
+    prop is treated as supplying it: the bound value populates the prop at
+    render time even though the literal key is absent from ``props``.
+    """
+    if not isinstance(node, dict):
+        return
+
+    wtype = node.get("type")
+    if isinstance(wtype, str) and wtype in required_by_type:
+        props = node.get("props")
+        props = props if isinstance(props, dict) else {}
+        # A node-level ``bind`` feeds exactly one prop (the widget's bind
+        # contract target). We can't know that prop's name here without the
+        # bind-contract map, so a present ``bind`` rescues the single most
+        # common bindable required prop families. Conservative: only suppress
+        # when bind is set AND there's exactly one required prop, the typical
+        # input-widget case (``value`` on input, ``checked`` on checkbox).
+        bound = isinstance(node.get("bind"), str) and bool(node.get("bind"))
+        required = required_by_type[wtype]
+        missing = [p for p in required if not _prop_is_present(props.get(p))]
+        if missing and bound and len(required) == 1:
+            missing = []
+        if missing:
+            issues.append(
+                {
+                    "path": path,
+                    "type": wtype,
+                    "missing": missing,
+                    "required": list(required),
+                }
+            )
+
+    for key in ("children", "else_children"):
+        kids = node.get(key)
+        if isinstance(kids, list):
+            for i, child in enumerate(kids):
+                _walk_required_props(child, f"{path}.{key}[{i}]", required_by_type, issues)
+
+
+def validate_required_props(
+    spec: dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Walk a rippleSpec tree and flag every node missing a prop the widget
+    manifest marks ``required: true`` for that ``type``.
+
+    ``manifest_or_required`` accepts either a full parsed manifest (a dict
+    with a ``widgets`` array) or an already-extracted required-prop map
+    (``{type: [prop, ...]}`` from :func:`required_props_from_manifest`); the
+    latter lets a hot path extract the map once and reuse it across specs.
+
+    Returns one issue dict per offending node; ``[]`` when ``spec`` is not a
+    dict or every node supplies its required props. Issue shape::
+
+        {
+          "path": "ui.children[2]",
+          "type": "chart",
+          "missing": ["data"],            # required props this node omitted
+          "required": ["data"],           # all required props for the type
+        }
+
+    The renderer draws a node with a missing required prop as an empty / broken
+    widget rather than erroring, so the failure is invisible until a human
+    looks at the canvas. Catching it at spec ingest forces the agent to fill
+    the structural minimum — the rippleSpec analogue of the genesis HARD
+    ``required_fields`` constraint zone.
+    """
+    if not isinstance(spec, dict):
+        return []
+    if "widgets" in manifest_or_required:
+        required_by_type = required_props_from_manifest(manifest_or_required)
+    else:
+        required_by_type = {
+            t: list(p)
+            for t, p in manifest_or_required.items()
+            if isinstance(t, str) and isinstance(p, (list, tuple))
+        }
+    if not required_by_type:
+        return []
+
+    root = spec.get("ui") if isinstance(spec.get("ui"), dict) else spec
+    issues: list[dict[str, Any]] = []
+    _walk_required_props(root, "ui", required_by_type, issues)
     return issues
 
 

@@ -3,6 +3,11 @@
 # ``scopes: list[str]`` to AgentConfig so ScopePicker assignments persist.
 # The field is a plain list of hierarchical scope tags (``org:sales:*``)
 # validated at the schema boundary via scope_rules.normalise_and_validate.
+# Updated 2026-06-08 (feat/agent-plugin-fields, M2): added
+# ``skill_refs: list[str]`` and ``plugins: list[str]`` so an agent carries
+# its own skill set (direct refs + enabled plugins). These fold into the
+# per-run skill materialization (run_core) so they apply on EVERY run the
+# agent does, independent of the surface/entity profile.
 
 """Agent configuration document."""
 
@@ -25,6 +30,12 @@ class AgentConfig(BaseModel):
     # Scope assignment — hierarchical tags that bound the agent's retrieval
     # surface. Empty list == "no scope narrowing" (agent sees whole workspace).
     scopes: list[str] = Field(default_factory=list)
+    # Per-agent skill set — folded into the per-run skill materialization so it
+    # applies on EVERY run this agent does (any surface). ``skill_refs`` are
+    # direct skill names; ``plugins`` are enabled plugin names whose bundled
+    # skills resolve via the OSS PluginInstaller registry at run time.
+    skill_refs: list[str] = Field(default_factory=list)
+    plugins: list[str] = Field(default_factory=list)
     # Soul integration
     soul_enabled: bool = True
     soul_persona: str = ""

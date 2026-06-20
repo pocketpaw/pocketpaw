@@ -218,13 +218,16 @@ async def startup_event(
 
     # Mirror PocketPaw's bundled AgentSkills-format SKILL.md files into
     # ``~/.claude/skills/<name>/`` so PocketPaw's own ``SkillLoader``
-    # (and Claude Code's native discovery, for claude_agent_sdk users)
-    # picks them up. Skills loaded from there work across every chat
-    # backend via PocketPaw's slash-command dispatcher; claude_agent_sdk
-    # additionally auto-discovers them on natural-language intent.
-    # Best-effort — a failure here just means the chat agent won't have
-    # the ``pocketpaw-create-pocket`` / ``pocketpaw-edit-pocket`` skills;
-    # the MCP tool surface still works. Opt-out:
+    # picks them up — that drives the slash-command dispatcher on the
+    # non-SDK backends (codex_cli / openai_agents / deep_agents) and the
+    # desktop dashboard. NOTE: this mirror is INVISIBLE to the default
+    # ``claude_agent_sdk`` backend, which runs ``setting_sources=[]`` and
+    # therefore ignores ``~/.claude/skills``; that backend loads the
+    # bundled skills as a local plugin instead (see
+    # ``bundled_skills_plugin_dir`` + ``sdk_load_bundled_skills`` in
+    # ``agents/claude_sdk.py``). Best-effort — a failure here just means
+    # the non-SDK backends won't have the bundled skills; the MCP tool
+    # surface still works. Opt-out:
     # ``POCKETPAW_AUTO_INSTALL_BUNDLED_SKILLS=false``.
     if settings.auto_install_bundled_skills:
         try:

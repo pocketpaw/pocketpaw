@@ -31,6 +31,12 @@
 #   (edges_fired / blocked / escalated / errors / sweep_duration_ms) so
 #   audit + dashboards listen to one event per dispatch rather than N
 #   per-row events, the same shape ``BulkActionDispatched`` uses.
+# Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — added
+#   ``WorkspaceJobQueued`` (type="workspace_job.queued") and
+#   ``WorkspaceJobUpdated`` (type="workspace_job.updated") for the workspace
+#   jobs primitive. Queued is emitted at dispatch; Updated on a terminal
+#   transition by the ARQ worker. Worker-side emits route over the xproc
+#   bridge to the web bus, the same path ``PocketUpdated`` uses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -424,6 +430,27 @@ class PocketOutcomeEvent(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.outcome"
 
 
+# Workspace jobs — pp#1459 (feat/workspace-jobs). A pocket job is a named,
+# server-side async callable run in the ARQ worker under the synthetic
+# `system:workspace_job` identity. `WorkspaceJobQueued` is emitted at dispatch
+# (the action route's kind=="job" branch); `WorkspaceJobUpdated` is emitted on
+# a terminal transition (done / failed) by the worker. Both ride the same
+# xproc bridge as `PocketUpdated` — worker-side emits route through
+# `publish_bus_envelope` to the web bus.
+#
+# Payload (`data`) for both:
+#   job_id, workspace_id, pocket_id, action, job_name
+#   status — present on WorkspaceJobUpdated only (done | failed)
+@dataclass
+class WorkspaceJobQueued(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.queued"
+
+
+@dataclass
+class WorkspaceJobUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.updated"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):
@@ -544,6 +571,16 @@ class CallStarted(Event):
 @dataclass
 class CallEnded(Event):
     EVENT_TYPE: ClassVar[str] = "call.ended"
+
+
+@dataclass
+class CallParticipantJoined(Event):
+    EVENT_TYPE: ClassVar[str] = "call.participant_joined"
+
+
+@dataclass
+class CallParticipantLeft(Event):
+    EVENT_TYPE: ClassVar[str] = "call.participant_left"
 
 
 # Meetings — scheduled group meeting lifecycle
@@ -730,6 +767,34 @@ class ConnectorSyncRecorded(Event):
     EVENT_TYPE: ClassVar[str] = "connector.sync_recorded"
 
 
+# Member ingest — VIP Onboarding Phase B. Fired when the per-user ingest
+# worker finishes a member's Gmail/Calendar → private-KB sync (backfill or
+# incremental). data: workspace_id, member_id, scope, mode, status, documents.
+@dataclass
+class MemberIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.completed"
+
+
+# member_ingest.purged — fan-out when a member's Phase B per-user data is
+# deleted (member disconnected their accounts, or was offboarded from the
+# workspace). data: workspace_id, member_id, scope, status, and the per-store
+# delete counts (kb_cleared, tokens_deleted, connectors_deleted,
+# ingest_state_deleted). Downstream consumers (soul memory, the member's home
+# surface, search index) react by dropping anything keyed on that scope.
+@dataclass
+class MemberDataPurged(Event):
+    EVENT_TYPE: ClassVar[str] = "member_ingest.purged"
+
+
+# Fabric ingest — generic Firestore→Fabric mirror worker. Fired when the
+# per-source ingest worker finishes mirroring one Firestore collection into
+# Fabric objects (backfill or incremental). data: workspace_id, source_id,
+# object_type_id, mode, status, objects_ingested, cursor.
+@dataclass
+class FabricIngestCompleted(Event):
+    EVENT_TYPE: ClassVar[str] = "fabric_ingest.completed"
+
+
 # Calls — call.notes_posted. The lifecycle events (call.started / call.ended)
 # are defined above with the rest of the LiveKit group-call types; this is the
 # post-call notes fan-out, audience = the group's members.
@@ -763,6 +828,20 @@ class InstinctApprovalApproved(Event):
 @dataclass
 class InstinctApprovalRejected(Event):
     EVENT_TYPE: ClassVar[str] = "instinct.approval.rejected"
+
+
+# Layered/learning Instinct gate (2026-06-18 design / T3). Emitted by
+# ``instinct_approvals.service.auto_approve`` when the AUTO lane decides a
+# write WITHOUT a human — a row is created already-decided
+# (status="auto_approved"). Distinct from ``InstinctApprovalApproved``,
+# which fires only on a human's approve action; this one always carries
+# ``actor="system:triager"`` so the UI renders it with a robot icon and the
+# human-pending tray (which filters on status="pending") never shows it.
+# ``data`` carries the approval id + workspace/pocket context plus
+# ``trust_score``, ``triager_reasoning`` and ``lane`` for the audit trail.
+@dataclass
+class InstinctApprovalAutoApproved(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.approval.auto_approved"
 
 
 # Bulk action dispatch (RFC 03 v2 / Wave 3b). Emitted by
@@ -835,3 +914,25 @@ class OutcomeEmitted(Event):
 @dataclass
 class TemporalSweepCompleted(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.temporal_sweep_completed"
+
+
+# Belt & Pulley station run lifecycle (feat/belt-console-backend, SC-2).
+# Fired on every Belt code-change run state transition so the /belt console
+# refreshes a run's status / stage / PR link WITHOUT polling. The transitions
+# happen ASYNCHRONOUSLY relative to the chat turn — propose lands during the
+# turn, but approve (in the Tray) and the executed / failed terminals fire long
+# after the turn's per-session SSE drain is gone — so this MUST ride the
+# workspace realtime bus (the same path Tray / Mission Control events take) to
+# reach the page. Workspace-scoped: the audience resolver fans it out to every
+# workspace member (the /belt console is a per-workspace view).
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id  — tenancy (drives the workspace fan-out).
+#   action_id     — the Instinct code-change Action id (the run id).
+#   status        — proposed | approved | rejected | landed | failed.
+#   stage         — gate | done.
+#   pr_url        — the opened PR url (only on the landed terminal); omitted
+#                   otherwise so the wire stays minimal.
+@dataclass
+class BeltRunUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "belt_run_updated"

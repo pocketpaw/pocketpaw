@@ -81,19 +81,19 @@ class WorkItem:
     description: str
     assignee_kind: AssigneeKind
     assignee_id: str
-    pocket_id: str | None
-    agent_id: str | None
     source_kind: str  # 'nudge' (PR 1) | 'task' (PR 2) | 'cycle' (PR 3)
     source_id: str
     priority: str  # low | medium | high | critical
     created_at: datetime | None
     updated_at: datetime | None
+    assignee_name: str = ""  # display name
+    agent_id: str | None = None
+    agent_name: str = ""  # display name
+    pocket_id: str | None = None
+    pocket_name: str = ""  # display name
     fabric_refs: tuple[str, ...] = field(default_factory=tuple)
-    # Prefixed WorkItem ids this row depends on (``task:<task_id>`` for
-    # Tasks, future ``nudge:<id>`` etc. when other sources gain deps).
-    # Empty tuple for sources that don't model dependencies (Instinct
-    # Nudges, activity ticker entries).
     blocked_by: tuple[str, ...] = field(default_factory=tuple)
+    due_at: datetime | None = None
 
 
 __all__ = [

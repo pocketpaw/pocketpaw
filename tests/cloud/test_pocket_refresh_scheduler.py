@@ -66,7 +66,12 @@ def _patch_executor(monkeypatch, calls: list, *, raises_for=None):
 
 
 def _patch_service(
-    monkeypatch, pockets: list, *, creds=("https://api.example.com", "none", None, "", [], None)
+    monkeypatch,
+    pockets: list,
+    *,
+    # connector-as-backend: the executor tuple is now an 8-tuple — trailing
+    # backend_type / connector_name (http / None for the scheduler's http path).
+    creds=("https://api.example.com", "none", None, "", [], None, "http", None),
 ):
     """Patch the pockets service calls the scheduler makes."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service

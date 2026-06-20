@@ -4,10 +4,13 @@
 # Auth is OAuth 2.0 (bearer token) — either from the credential broker at
 # dispatch time or from GOOGLE_OAUTH_TOKEN for local dev.
 
-name: drive
+name: google_drive
 display_name: Google Drive
 type: knowledge
 icon: cloud
+
+senses:
+  - paw.docs.v1
 
 auth:
   method: bearer

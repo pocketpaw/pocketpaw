@@ -1,6 +1,46 @@
 """Enterprise auth — fastapi-users with JWT cookie + bearer transport.
 
+Import-time side effect (read this before touching imports or tests):
+    ``SECRET = _resolve_secret()`` runs at MODULE IMPORT time (see below). In a
+    production posture with no real ``AUTH_SECRET``, importing this module
+    therefore raises ``RuntimeError`` during the import chain — the fail-fast is
+    intentional, but it fires at import, not at first use. Two consequences:
+      * Anything that imports ``auth.core`` (directly or transitively) inherits
+        that fail-fast, so the prod posture must have ``AUTH_SECRET`` set before
+        the import happens, not merely before the first auth call.
+      * Tests must set ``AUTH_SECRET`` / the posture env vars (``POCKETPAW_ENV``,
+        ``POCKETPAW_AUTH_COOKIE_SECURE``) BEFORE this module is first imported.
+        After the first import the module is cached, so ``SECRET`` is frozen at
+        the value resolved on that first import — later ``monkeypatch.setenv``
+        only affects functions that re-read the env (``_resolve_secret``,
+        ``_is_production``), not the already-bound module-level ``SECRET``.
+
 Changes:
+    2026-06-10 (security R2b review — staging-posture blind spot) — Added
+        ``_is_ambiguous_nonprod_label()`` and a LOUD ``logger.warning`` on the
+        dev ephemeral-secret path (``_resolve_secret``) for deployments labelled
+        with a non-dev, non-prod ``POCKETPAW_ENV`` (e.g. ``staging``) that did
+        not positively trip the prod detector. Such a deployment used to boot
+        SILENTLY on the ephemeral default secret; it now warns. Dev / unset /
+        explicit prod behaviour is unchanged (prod still hard-fails; dev/unset
+        still warns only with the existing ephemeral message). Also documented
+        the import-time ``SECRET`` resolution side effect in this docstring.
+    2026-06-10 (security W0e — insecure-by-default first boot) — Fail-fast on
+        the placeholder AUTH_SECRET in production posture, and stop seeding the
+        hardcoded ``admin123`` password:
+        - ``_is_production()`` decides posture from POCKETPAW_ENV (production /
+          prod) OR the existing prod TLS signal POCKETPAW_AUTH_COOKIE_SECURE=
+          true. Dev/test (neither set) keeps the previous ergonomics.
+        - ``_resolve_secret()`` hard-fails (RuntimeError) when AUTH_SECRET is
+          unset or equals the known placeholder in production posture; in dev
+          it generates an ephemeral random secret and logs a loud warning so
+          tokens minted across a restart don't silently verify with a public
+          default.
+        - ``seed_admin()`` no longer defaults the password to ``admin123``. It
+          prefers an operator-supplied ADMIN_PASSWORD; otherwise it generates a
+          strong random one and prints it ONCE to stdout (never the logger).
+        - The "Admin user created (password: ...)" log line is gone — the
+          password is never written to the application logger.
     2026-05-17 (security #1117 P1) — Cookie transport hardening:
         - cookie_secure is now env-driven (POCKETPAW_AUTH_COOKIE_SECURE,
           defaults to false for local HTTP dev; production must set true).
@@ -28,6 +68,8 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+import string
 import uuid
 from typing import Any
 
@@ -50,7 +92,121 @@ from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembersh
 
 logger = logging.getLogger(__name__)
 
-SECRET = os.environ.get("AUTH_SECRET", "change-me-in-production-please")
+# The historical placeholder. Shipping with this value means every deployment
+# signs JWTs with a public secret — anyone can forge an admin token. Treated as
+# "no real secret set" everywhere below.
+_DEFAULT_SECRET = "change-me-in-production-please"
+
+# The historical hardcoded admin password. Kept here only so we can detect and
+# refuse it; it is never used as a live credential anymore.
+_LEGACY_ADMIN_PASSWORD = "admin123"
+
+
+def _is_production() -> bool:
+    """True when this process is running in a production posture.
+
+    Two signals, OR'd, so a real deployment trips at least one:
+      * ``POCKETPAW_ENV`` set to ``production`` / ``prod`` (the explicit knob —
+        documented in the Dockerfile so the shipped container is prod by
+        default), or
+      * ``POCKETPAW_AUTH_COOKIE_SECURE=true`` — already mandatory for any
+        TLS-terminated deployment (see the cookie-hardening note above), so an
+        operator who set it has, by definition, a production front door.
+
+    Dev / test set neither, so they fall through to the ergonomic path
+    (generated secret + generated admin password). Deny-by-default would break
+    the test suite and local boot, so the compromise is: prod must be
+    *signalled*, but the realistic prod path (TLS + Secure cookies, or the
+    shipped Docker image) signals it without extra operator effort.
+    """
+    env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+    if env in {"production", "prod"}:
+        return True
+    return os.environ.get("POCKETPAW_AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
+
+
+# Env labels we treat as unambiguous local development. Anything else that is
+# *set* (e.g. "staging", "qa", "preprod") is an ambiguous non-prod label: it is
+# clearly not a dev box, yet ``_is_production()`` didn't positively detect prod,
+# so the insecure dev defaults would apply silently. We warn loudly in that gap.
+_DEV_ENV_LABELS = {"dev", "development", "local", "test"}
+
+
+def _is_ambiguous_nonprod_label() -> bool:
+    """True for a non-prod posture wearing a label that isn't obviously dev.
+
+    Returns True only when ALL of:
+      * ``_is_production()`` is False (prod was not positively detected), and
+      * ``POCKETPAW_ENV`` is *set* to a non-empty value, and
+      * that value is not one of the known local-dev labels (``dev`` /
+        ``development`` / ``local`` / ``test``).
+
+    The motivating case is ``POCKETPAW_ENV=staging`` with no cookie-secure and
+    no real ``AUTH_SECRET`` / no operator license key: it boots on the insecure
+    defaults with zero signal. Unset env and explicit dev labels return False
+    (their ergonomic silent-dev path is intentional); explicit prod is handled
+    by the hard fail-fast upstream, never reaching here.
+    """
+    if _is_production():
+        return False
+    env = os.environ.get("POCKETPAW_ENV", "").strip().lower()
+    return bool(env) and env not in _DEV_ENV_LABELS
+
+
+def _resolve_secret() -> str:
+    """Return the JWT signing secret, refusing the insecure default in prod.
+
+    Production posture: a real ``AUTH_SECRET`` is required. Unset or equal to
+    the public placeholder → fail fast with a clear, actionable error so the
+    tenant can never boot ownable.
+
+    Dev / test posture: an unset / placeholder secret is tolerated, but we
+    substitute a fresh random per-process secret (NOT the public default) and
+    warn loudly. Ephemeral by design — tokens don't survive a restart, which is
+    correct for dev and forces operators to set a stable secret before prod.
+    """
+    raw = os.environ.get("AUTH_SECRET", "").strip()
+    if raw and raw != _DEFAULT_SECRET:
+        return raw
+
+    if _is_production():
+        raise RuntimeError(
+            "AUTH_SECRET is unset or still the public placeholder "
+            f"({_DEFAULT_SECRET!r}). Refusing to boot in production: JWTs would "
+            "be signed with a secret anyone can read, letting attackers forge "
+            "admin sessions. Set AUTH_SECRET to a strong random value, e.g.\n"
+            "  AUTH_SECRET=\"$(python -c 'import secrets; "
+            "print(secrets.token_urlsafe(48))')\""
+        )
+
+    if _is_ambiguous_nonprod_label():
+        # Staging-posture blind spot: a labelled-but-not-prod deployment (e.g.
+        # POCKETPAW_ENV=staging) without a real AUTH_SECRET would otherwise boot
+        # SILENTLY on the ephemeral default. Warn loudly so an operator who
+        # meant this to be prod-like notices the insecure secret. We still
+        # substitute the ephemeral secret (boot is unchanged) — only the signal
+        # is added; flipping this to a hard fail would break the test suite and
+        # any intentional staging-on-defaults run.
+        logger.warning(
+            "POCKETPAW_ENV=%s is a non-dev, non-prod label, but no real "
+            "AUTH_SECRET is set and production was not positively detected. "
+            "Falling back to an EPHEMERAL per-process JWT secret — tokens will "
+            "not survive a restart and this deployment is NOT production-secure. "
+            "Set a strong AUTH_SECRET (and POCKETPAW_ENV=production) before "
+            "treating this as production.",
+            os.environ.get("POCKETPAW_ENV", "").strip(),
+        )
+
+    ephemeral = secrets.token_urlsafe(48)
+    logger.warning(
+        "AUTH_SECRET is unset or the public default — using an ephemeral "
+        "per-process secret for dev. Tokens will NOT survive a restart. Set a "
+        "strong AUTH_SECRET (and POCKETPAW_ENV=production) before deploying."
+    )
+    return ephemeral
+
+
+SECRET = _resolve_secret()
 TOKEN_LIFETIME = 60 * 60 * 24 * 7  # 7 days
 
 # Cookie hardening — flip to true via env in any deployment that terminates
@@ -234,21 +390,71 @@ class UserCreate(fastapi_users_schemas.BaseUserCreate):
 # ---------------------------------------------------------------------------
 
 
+def _generate_admin_password(length: int = 24) -> str:
+    """Generate a strong random password that satisfies the password policy.
+
+    The policy (``auth.password_policy``) requires upper, lower, digit and
+    symbol, plus a minimum length. We guarantee one of each class, then fill
+    the rest from the full alphabet and shuffle, so the seeded admin always
+    passes ``validate_password`` and is never weaker than a user-chosen one.
+    """
+    # Symbols restricted to a shell/URL-safe set so the operator can copy the
+    # printed password without quoting headaches.
+    symbols = "!@#$%^&*-_=+?"
+    alphabet = string.ascii_letters + string.digits + symbols
+    required = [
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.digits),
+        secrets.choice(symbols),
+    ]
+    fill_count = max(length, len(required)) - len(required)
+    remaining = [secrets.choice(alphabet) for _ in range(fill_count)]
+    chars = required + remaining
+    # secrets-backed Fisher-Yates so the guaranteed-class chars aren't pinned
+    # to the front (random.shuffle isn't cryptographically seeded).
+    for i in range(len(chars) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        chars[i], chars[j] = chars[j], chars[i]
+    return "".join(chars)
+
+
 async def seed_admin(
     email: str | None = None,
     password: str | None = None,
     full_name: str | None = None,
 ) -> User | None:
-    """Create default admin user if it doesn't exist.
+    """Create the default admin user if it doesn't already exist.
 
-    Reads from env vars if args not provided:
+    Resolution order for the initial password:
+      1. The ``password`` argument, if passed explicitly.
+      2. ``ADMIN_PASSWORD`` from the environment (operator-supplied) — the
+         legacy ``admin123`` is rejected so a stale ``.env`` can't reintroduce
+         the weak credential.
+      3. A freshly generated strong random password, printed ONCE to stdout for
+         the operator. The password is NEVER written to the application logger.
+
+    Other env defaults:
       ADMIN_EMAIL (default: admin@pocketpaw.ai)
-      ADMIN_PASSWORD (default: admin123)
-      ADMIN_NAME (default: Admin)
+      ADMIN_NAME  (default: Admin)
     """
     email = email or os.environ.get("ADMIN_EMAIL", "admin@pocketpaw.ai")
-    password = password or os.environ.get("ADMIN_PASSWORD", "admin123")
     full_name = full_name or os.environ.get("ADMIN_NAME", "Admin")
+
+    # Resolve the initial password without ever defaulting to a known value.
+    generated = False
+    if password is None:
+        env_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+        if env_password and env_password != _LEGACY_ADMIN_PASSWORD:
+            password = env_password
+        else:
+            if env_password == _LEGACY_ADMIN_PASSWORD:
+                logger.warning(
+                    "ADMIN_PASSWORD is set to the legacy default — ignoring it "
+                    "and generating a strong random initial admin password."
+                )
+            password = _generate_admin_password()
+            generated = True
 
     existing = await User.find_one(User.email == email)
     if existing:
@@ -271,7 +477,24 @@ async def seed_admin(
         )
         user.full_name = full_name
         await user.save()
-        logger.info("Admin user created: %s (password: %s)", email, password)
+        # Log WITHOUT the password — the credential never touches the logger.
+        logger.info("Admin user created: %s", email)
+        if generated:
+            # One-time, stdout-only disclosure for the operator who just booted
+            # the tenant. Deliberately not logger.info so it can't land in log
+            # aggregation / files. Print rather than return-only so a headless
+            # first boot still surfaces the credential to the console operator.
+            print(  # noqa: T201 — intentional one-time operator channel
+                "\n"
+                "============================================================\n"
+                " PocketPaw — initial admin account created\n"
+                f"   email:    {email}\n"
+                f"   password: {password}\n"
+                " Save this now. It is shown once and is NOT written to logs.\n"
+                " Set ADMIN_PASSWORD to choose your own before first boot.\n"
+                "============================================================\n",
+                flush=True,
+            )
         return user
     except UserAlreadyExists:
         return await User.find_one(User.email == email)

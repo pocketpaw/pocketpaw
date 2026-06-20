@@ -37,6 +37,23 @@ agent's retry loop sees a tight, focused corrective hint that names the
 exact bad verb without needing a cloud round-trip. The service-layer gate
 in ``pockets/service.py`` is still the authoritative ground truth — this
 is a cheap belt-and-suspenders that runs first.
+Changes: 2026-05-31 (feat/home-pocket-sources-authoring) — the ``add_widget``
+tool now documents an optional ``widget.sources`` field: a dict keyed by
+source name of RFC-04 GET bindings ({method, path, bind, refresh}) that the
+home grid runs to hydrate the tile's state. ``add_widget_for_agent`` pulls
+``sources`` off the widget dict and the service layer merges it (logged /
+drift-allowed) onto the pocket's top-level ``rippleSpec.sources`` in the same
+write — so the agent can create a live tile AND the source feeding it in one
+call. The handler itself is unchanged (it forwards the whole ``widget``); only
+the tool schema/description grew.
+Changes: 2026-05-31 (feat/home-agent-source-authoring) — the REFINE half.
+The ``update_widget`` tool now documents an optional ``fields.sources`` field
+(same RFC-04 GET-binding shape) so refining a static tile into a live one is
+one call. Both ``add_widget`` and ``update_widget`` descriptions now point the
+agent at the ``authored_sources`` / ``skipped_sources`` honesty fields the
+result carries — confirm only the authored keys. The handlers are unchanged
+(they forward the whole ``widget`` / ``fields``); ``update_widget_for_agent``
+pulls ``sources`` off ``fields`` so it never lands as a widget field.
 """
 
 from __future__ import annotations
@@ -340,7 +357,15 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
             "real `data` series). Call `get_widget_spec` for the widget "
             "type FIRST so the spec uses valid props; a spec with invented "
             'props is rejected. Native widgets pass `type:"native"` and '
-            "no `spec`."
+            "no `spec`. To make the tile LIVE, also pass `widget.sources` — "
+            "a dict keyed by source name; each value is a read-only GET "
+            "binding `{method:'GET', path:'/...', bind:'state.<key>', "
+            "refresh:['pocket_open'|'manual']}`. The source hydrates the "
+            "state path the tile's `spec` binds to (e.g. tile "
+            "`value:'{state.revenue}'` + source `bind:'state.revenue'`). "
+            "Sources are authored onto the pocket's top-level "
+            "rippleSpec.sources and run by the source executor; an invalid "
+            "source is dropped without blocking the tile."
         ),
         {
             "type": "object",
@@ -352,8 +377,12 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
                 "widget": {
                     "type": "object",
                     "description": (
-                        "Widget entry: name, type, optional icon/color, and a "
-                        "rippleSpec `spec` subtree (omit for native widgets)."
+                        "Widget entry: name, type, optional icon/color, a "
+                        "rippleSpec `spec` subtree (omit for native widgets), "
+                        "and optional `sources` — a dict keyed by source name "
+                        "of RFC-04 GET bindings ({method, path, bind, refresh}) "
+                        "that feed the tile's state. Omit `sources` for a "
+                        "static tile."
                     ),
                 },
             },
@@ -374,7 +403,16 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
             "`{spec: <new spec>}`. Validation runs on the new spec the same "
             "way `add_widget` does; an invalid spec is rejected. Use this "
             "when the user says 'refresh', 'reload', 'update', 'show latest' "
-            "on an existing tile."
+            "on an existing tile. To turn a STATIC tile LIVE, also pass "
+            "`fields.sources` — a dict keyed by source name; each value is a "
+            "read-only GET binding `{method:'GET', path:'/...', "
+            "bind:'state.<key>', refresh:['pocket_open'|'manual']}` — and bind "
+            "the tile's `spec` to the same `{state.<key>}` (mirrors "
+            "`add_widget`'s `widget.sources`). Sources are authored onto the "
+            "pocket's top-level rippleSpec.sources; an invalid source is "
+            "dropped without blocking the patch. The result carries "
+            "`authored_sources` / `skipped_sources` — confirm ONLY the "
+            "authored keys; never report a skipped one as written."
         ),
         {
             "type": "object",
@@ -391,7 +429,12 @@ def build_pocket_context_server() -> tuple[str, Any] | None:
                     "type": "object",
                     "description": (
                         "Widget fields to overwrite. Usually "
-                        "{spec: <new rippleSpec>} for a refresh."
+                        "{spec: <new rippleSpec>} for a refresh. Pass optional "
+                        "`sources` (a dict keyed by source name of RFC-04 GET "
+                        "bindings {method, path, bind, refresh}) to make the "
+                        "tile live — bind the spec to the same state path. "
+                        "`sources` is authored at the pocket's top-level "
+                        "sources, never as a widget field."
                     ),
                 },
             },

@@ -46,6 +46,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from pocketpaw_ee.cloud._core.time import iso_utc
 from pocketpaw_ee.cloud.mission_control.domain import (
     AssigneeKind,
     WorkItem,
@@ -132,6 +133,17 @@ class BulkSnoozeRequest(BaseModel):
     until_iso: str = Field(description="ISO-8601 timestamp to snooze until")
 
 
+class BulkRevertRequest(BaseModel):
+    """Body for ``POST /mission-control/items/bulk-revert``.
+
+    Reverts N Tasks from a terminal status (done, reverted, failed) back
+    to ``in_progress`` via ``tasks.service.agent_update_task``. Ids that
+    aren't Tasks come back in ``skipped``.
+    """
+
+    ids: list[str] = Field(min_length=1)
+
+
 class OutcomesQueryRequest(BaseModel):
     """Query filters for ``GET /mission-control/outcomes``."""
 
@@ -198,6 +210,23 @@ class AttachCycleItemsResponse(BaseModel):
     cycle_id: str
 
 
+DetachCycleItemsRequest = AttachCycleItemsRequest
+
+
+class DetachCycleItemsResponse(BaseModel):
+    """Result of a bulk-detach call.
+
+    Same partial-success posture as ``AttachCycleItemsResponse``.
+    ``detached`` lists ids that were successfully removed from the
+    sprint; ``skipped`` lists ids the caller couldn't see or that
+    weren't in this sprint.
+    """
+
+    detached: list[str]
+    skipped: list[str] = Field(default_factory=list)
+    cycle_id: str
+
+
 class CreateCycleRequest(BaseModel):
     """Body for ``POST /mission-control/cycles``.
 
@@ -250,15 +279,19 @@ class WorkItemResponse(BaseModel):
     description: str
     assignee_kind: AssigneeKind
     assignee_id: str
-    pocket_id: str | None = None
-    agent_id: str | None = None
     source_kind: str
     source_id: str
     priority: str
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    assignee_name: str = ""  # display name
+    agent_id: str | None = None
+    agent_name: str = ""  # display name
+    pocket_id: str | None = None
+    pocket_name: str = ""  # display name
     fabric_refs: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
+    due_at: str | None = None
 
 
 def work_item_to_response(item: WorkItem) -> WorkItemResponse:
@@ -272,15 +305,19 @@ def work_item_to_response(item: WorkItem) -> WorkItemResponse:
         description=item.description,
         assignee_kind=item.assignee_kind,
         assignee_id=item.assignee_id,
-        pocket_id=item.pocket_id,
-        agent_id=item.agent_id,
         source_kind=item.source_kind,
         source_id=item.source_id,
         priority=item.priority,
         created_at=item.created_at,
         updated_at=item.updated_at,
+        assignee_name=item.assignee_name,
+        agent_id=item.agent_id,
+        agent_name=item.agent_name,
+        pocket_id=item.pocket_id,
+        pocket_name=item.pocket_name,
         fabric_refs=list(item.fabric_refs),
         blocked_by=list(item.blocked_by),
+        due_at=iso_utc(item.due_at),
     )
 
 
@@ -307,8 +344,10 @@ class ActivityEventResponse(BaseModel):
     workspace_id: str
     kind: str
     agent_id: str | None = None
+    agent_name: str = ""  # display name
     summary: str
     pocket_id: str | None = None
+    pocket_name: str = ""  # display name
     ts: float
 
 
@@ -319,6 +358,8 @@ class PlanSessionDTO(BaseModel):
       - ``id`` — opaque PlanSession doc id; the frontend round-trips it
         when the operator opens a draft for full detail (separate
         endpoint, not in scope here).
+      - ``project_id`` — the project this session belongs to; the frontend
+        uses it to load the full plan detail via ``/planner/by-project/``.
       - ``name`` — display label from the linked Project. Empty string
         when the project was deleted underneath the session.
       - ``status`` — wire vocabulary (``draft``/``active``/``archived``).
@@ -335,6 +376,7 @@ class PlanSessionDTO(BaseModel):
     """
 
     id: str
+    project_id: str
     name: str
     status: PlanSessionStatus
     task_count: int
@@ -355,12 +397,54 @@ class PlanSessionListResponse(BaseModel):
     total: int
 
 
+class AnalyticsDayDTO(BaseModel):
+    """Shipped count for one day."""
+
+    day: str  # e.g. "Mon"
+    shipped: int
+
+
+class AnalyticsAgentDTO(BaseModel):
+    """Per-agent shipped/reverted counts."""
+
+    agent: str
+    shipped: int
+    reverted: int
+
+
+class AnalyticsPocketDTO(BaseModel):
+    """Per-pocket shipped + share %."""
+
+    pocket: str
+    shipped: int
+    share: float
+
+
+class AnalyticsResponse(BaseModel):
+    """Full analytics snapshot for the operator dashboard."""
+
+    shipped: int
+    approval_rate: float  # 0-100
+    revert_rate: float  # 0-100
+    latency_p50_seconds: float
+    latency_p90_seconds: float
+    per_day: list[AnalyticsDayDTO]
+    by_agent: list[AnalyticsAgentDTO]
+    by_pocket: list[AnalyticsPocketDTO]
+
+
 __all__ = [
     "ActivityEventResponse",
+    "AnalyticsResponse",
+    "AttachCycleItemsRequest",
+    "AttachCycleItemsResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
+    "BulkRevertRequest",
     "BulkSnoozeRequest",
     "CreateCycleRequest",
+    "DetachCycleItemsRequest",
+    "DetachCycleItemsResponse",
     "ListActivityRequest",
     "ListPlanSessionsRequest",
     "ListWorkItemsRequest",

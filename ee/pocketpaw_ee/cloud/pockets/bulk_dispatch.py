@@ -49,6 +49,15 @@
 # a Beanie document class. The ee/pyproject.toml import-linter contract
 # adds this module to the ``pockets`` source_modules list to lock the
 # invariant.
+#
+# Updated: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER. The
+# spec-level actions read in ``_fire_executions`` now goes through the new
+# ``_action_binding_for`` helper, which promotes the pocket's (legacy flat
+# dict) ``rippleSpec`` to a typed ``RippleSpec`` via ``from_flat_dict`` and
+# reads ``spec.actions[name]`` — or reads a typed spec directly. A corrupt /
+# unpromotable spec yields ``None`` (the same ``action_not_found`` per-row
+# error as before), so a bad doc never crashes the fan-out. Promote-on-read:
+# the pocket document shape is unchanged, no migration.
 
 """Bulk action dispatch — fan-out across N rows with ONE batch approval."""
 
@@ -59,7 +68,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pocketpaw.bundled_templates import PocketTemplate
+from pocketpaw.bundled_templates import PocketTemplate, RippleSpec
 from pocketpaw.bundled_templates.bulk_executor import (
     BulkExecutionError,
     plan_bulk_execution,
@@ -67,6 +76,32 @@ from pocketpaw.bundled_templates.bulk_executor import (
 from pocketpaw.bundled_templates.identifier_resolver import IdentifierResolver
 from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
 from pocketpaw_ee.cloud.instinct_approvals import service as approvals_service
+
+
+def _action_binding_for(
+    ripple_spec: RippleSpec | dict | None, action_name: str
+) -> dict[str, Any] | None:
+    """Return the named write-binding dict from a pocket's rippleSpec.
+
+    Phase-2 dual-path: promotes a legacy flat dict to ``RippleSpec`` via
+    ``from_flat_dict`` (returns ``None`` on a corrupt/unpromotable spec, so the
+    bulk path fails the row cleanly rather than crashing), then reads
+    ``spec.actions[action_name]``. An already-typed ``RippleSpec`` is read
+    directly. Returns ``None`` when there is no actions block or the named
+    binding is absent / not a dict — the caller turns that into a per-row
+    ``action_not_found`` error.
+    """
+    spec = (
+        ripple_spec
+        if isinstance(ripple_spec, RippleSpec)
+        else RippleSpec.from_flat_dict(ripple_spec)
+    )
+    if spec is None:
+        return None
+    actions = spec.actions if isinstance(spec.actions, dict) else {}
+    raw_action = actions.get(action_name)
+    return raw_action if isinstance(raw_action, dict) else None
+
 
 # ---------------------------------------------------------------------------
 # Result models — frozen so the caller (service / router) cannot mutate
@@ -359,9 +394,11 @@ async def _fire_executions(
     if not plan.executions:
         return []
 
-    spec = pocket.get("rippleSpec") or {}
-    actions = spec.get("actions") if isinstance(spec.get("actions"), dict) else {}
-    raw_action = actions.get(plan.action_name) if isinstance(actions, dict) else None
+    # Phase-2 dual-path: ``pocket["rippleSpec"]`` is a legacy flat dict today;
+    # ``_action_binding_for`` promotes it to ``RippleSpec`` (or reads a typed
+    # spec directly) and pulls the named write binding. A corrupt spec yields
+    # ``None`` → the same per-row ``action_not_found`` error below.
+    raw_action = _action_binding_for(pocket.get("rippleSpec"), plan.action_name)
 
     if not isinstance(raw_action, dict):
         # The action is declared on the template but not in the pocket's
@@ -399,7 +436,9 @@ async def _fire_executions(
             )
             for row in plan.executions
         ]
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+    # Trailing `backend_type` / `connector_name` (connector-backend feature)
+    # don't apply to the http write executor — absorbed and ignored.
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route, *_ = creds
 
     # Per-row path/params: the OSS planner does not resolve Ripple
     # ``{...}`` expressions — that's a frontend / executor concern. For

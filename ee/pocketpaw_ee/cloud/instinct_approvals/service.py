@@ -3,6 +3,23 @@
 # writer for the ``InstinctApproval`` collection (RFC 03 v2). Module-
 # level ``async def`` API per EE cloud rule 5. Every state-mutating
 # function:
+#
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 3) —
+# ``list_approvals`` now honors optional ``action_name`` + ``row_id`` query
+# filters. The gate's BATCH dedup pushes them into the Mongo query so a pocket
+# with more pending rows than the page ``limit`` can no longer bury a duplicate
+# match past the page boundary (the old code listed + matched in Python and
+# could miss the row, stacking a duplicate pending approval).
+#
+# Updated: 2026-06-18 (feat/instinct-gate-foundation, T3) — added
+# ``auto_approve``, the layered/learning gate's AUTO-lane writer. It
+# inserts a row ALREADY-DECIDED (``status="auto_approved"``,
+# ``decided_by="system:triager"``, ``decided_at=now``) in a single write
+# and emits ``InstinctApprovalAutoApproved``. This is how the AUTO lane
+# keeps a complete approval-level audit trail in the SAME Mongo collection
+# as every human decision without ever touching the OSS SQLite store
+# (design MF-1/MF-2). The human queue filters on ``status="pending"``, so
+# an auto-approved row never appears in the human tray.
 #   * validates at entry via ``<Request>.model_validate(body)`` (rule 6)
 #   * filters reads by ``workspace=workspace_id`` (rule 7)
 #   * raises ``CloudError`` subclasses, never ``HTTPException`` (rule 10)
@@ -27,6 +44,7 @@ from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound, ValidationE
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     InstinctApprovalApproved,
+    InstinctApprovalAutoApproved,
     InstinctApprovalCreated,
     InstinctApprovalRejected,
 )
@@ -115,6 +133,81 @@ async def create_approval(
     return wire
 
 
+async def auto_approve(
+    workspace_id: str,
+    user_id: str,
+    body: dict | CreateApprovalRequest,
+    trust_score: float,
+    triager_reasoning: str,
+    lane: str = "AUTO",
+) -> dict:
+    """Create a decided (``auto_approved``) approval row in one write.
+
+    The layered/learning gate's AUTO and OPTIMISTIC lanes call this instead
+    of ``create_approval`` when ``classify_lane`` clears the write for an
+    auto decision. The row is inserted ALREADY-DECIDED:
+    ``status="auto_approved"``, ``decided_by="system:triager"``,
+    ``decided_at=now`` — there is no intermediate pending state and the OSS
+    SQLite store is never touched (design MF-1). Emits
+    ``InstinctApprovalAutoApproved`` carrying the triager's ``trust_score``
+    + ``triager_reasoning`` + ``lane`` so the audit trail and Decision-Graph
+    join have a backing row in the same collection as every human decision
+    (design MF-2).
+
+    ``lane`` is the triage lane that produced the decision (``"AUTO"`` or
+    ``"OPTIMISTIC"``) — it rides on the emitted event so the UI can render
+    an optimistic (reversible, fired-now) decision distinctly from a fully
+    auto-approved one. Both share ``status="auto_approved"``; the lane is
+    the discriminator.
+
+    ``user_id`` is the human who TRIGGERED the action (recorded as
+    ``requested_by``); the DECIDER is the system triager, not the user.
+    """
+    body = CreateApprovalRequest.model_validate(body)
+
+    if not workspace_id:
+        raise ValidationError(
+            "instinct_approval.workspace_required",
+            "workspace_id is required to auto-approve an approval row",
+        )
+    if not user_id:
+        raise ValidationError(
+            "instinct_approval.user_required",
+            "user_id is required to auto-approve an approval row",
+        )
+
+    now = datetime.now(UTC)
+    doc = _ApprovalDoc(
+        workspace=workspace_id,
+        pocket_id=body.pocket_id,
+        action_name=body.action_name,
+        row_id=body.row_id,
+        row_data=body.row_data,
+        verdict=body.verdict,
+        reason=body.reason,
+        matched_rules=body.matched_rules,
+        requested_at=now,
+        requested_by=user_id,
+        status="auto_approved",
+        decided_at=now,
+        decided_by="system:triager",
+        park=body.park,
+    )
+    await doc.insert()
+    domain = _to_domain(doc)
+    wire = approval_to_wire_dict(domain)
+    # The event payload carries the triager rationale alongside the wire
+    # row. ``actor`` is the system triager (UI renders system: with a robot
+    # icon, not in the human-pending queue).
+    payload = dict(wire)
+    payload["actor"] = "system:triager"
+    payload["trust_score"] = trust_score
+    payload["triager_reasoning"] = triager_reasoning
+    payload["lane"] = lane
+    await emit(InstinctApprovalAutoApproved(data=payload))
+    return wire
+
+
 async def list_approvals(
     workspace_id: str, user_id: str, body: dict | ListApprovalsRequest
 ) -> list[dict]:
@@ -130,6 +223,13 @@ async def list_approvals(
         query["status"] = body.status
     if body.pocket_id:
         query["pocket_id"] = body.pocket_id
+    # Server-side dedup filters (security-review FIX 3). When the gate's BATCH
+    # dedup passes action_name + row_id, the DB does the matching so a pocket
+    # with more pending rows than ``limit`` can't bury the match past the page.
+    if body.action_name:
+        query["action_name"] = body.action_name
+    if body.row_id:
+        query["row_id"] = body.row_id
     cursor = (
         _ApprovalDoc.find(query).sort(-_ApprovalDoc.createdAt).limit(body.limit)  # type: ignore[operator]
     )
@@ -244,6 +344,7 @@ async def _decide(
 
 __all__ = [
     "approve",
+    "auto_approve",
     "create_approval",
     "get_approval",
     "list_approvals",

@@ -23,6 +23,24 @@ the authoring agent stops hallucinating endpoints.
 Updated: 2026-05-22 (feat/catalog-allowlist, Increment 5) — documented
 the catalog-as-allowlist ingest gate, the two escape-hatch widgets
 (`model-viewer` + `embed`), and the `embed` URL/host policy.
+
+Updated: 2026-06-11 (gap-3 outcome VALUE metering) — documented the
+Outcome Metering section: the binding-level `outcome` / `outcome_value` /
+`outcome_unit` declaration, the existing `GET /outcomes` count surface,
+and the new `GET /outcomes/meter` aggregation surface that sums billable
+value by unit per workspace over a since/until window. Invoicing /
+payment / pricing-rules / clawback remain deferred.
+
+Updated: 2026-06-15 (feat/invoke-tool-v1) — documented the now-live
+POST /pockets/{id}/tools/run (was a fail-closed stub) and the new
+owner-only PUT /pockets/{id}/backend/tool-policy. The backend summary now
+carries `allowed_tools` (the per-pocket tool allowlist) alongside
+`allowed_writes`.
+Updated: 2026-06-15 (feat/invoke-tool-v1, v2) — the WRITE path is now live.
+A connector READ tool still fires immediately; a WRITE tool is no longer
+refused with `code: blocked` — it is PROPOSED for human approval through the
+Instinct gate and returns `code: instinct_pending` with a `proposed_action_id`
+(the write fires only when a human approves it in The Tray).
 -->
 
 # Cloud REST API Reference
@@ -61,14 +79,18 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": []
+  "allowed_writes": [],
+  "allowed_tools": []
 }
 ```
 
 The token is never echoed back. A non-https or internal `base_url` yields
 a `400`. `allowed_writes` is the per-pocket write allowlist (RFC 05 M2a) —
 empty by default, so no write action can fire until an owner sets a policy
-via `PUT /pockets/{id}/backend/write-policy`.
+via `PUT /pockets/{id}/backend/write-policy`. `allowed_tools` is the
+per-pocket tool allowlist (feat/invoke-tool-v1) — also empty by default, so
+no `invoke_tool` can fire until an owner sets a policy via
+`PUT /pockets/{id}/backend/tool-policy`.
 
 For `basic` auth, send `auth_token` as the raw `user:pass` credential —
 the server base64-encodes it into the `Authorization: Basic` header. Do
@@ -87,13 +109,15 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }]
+  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }],
+  "allowed_tools": [{ "tool": "connector:github:list_issues" }]
 }
 ```
 
 Returns `404` when the pocket has no backend configured. The token is
 never included in the response. `allowed_writes` carries the current
-write allowlist (RFC 05 M2a).
+write allowlist (RFC 05 M2a); `allowed_tools` carries the current tool
+allowlist (feat/invoke-tool-v1).
 
 ### `DELETE /pockets/{pocket_id}/backend`
 
@@ -243,6 +267,198 @@ minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
 
+## Pockets — Tool Invocations (`invoke_tool`)
+
+feat/invoke-tool-v1. `invoke_tool` is the click-driven tool verb for pocket
+FLOW-BUTTONs. A button fires `{action: "invoke_tool", tool, args}`; Ripple
+resolves the `args` client-side and the host POSTs to the route below. Like
+write actions, it carries a per-pocket allowlist that lives **outside**
+`rippleSpec` — a human authorizes which tools a pocket may run, so a
+compromised or hallucinated spec cannot grant itself a tool.
+
+A grant's `tool` is one of:
+
+- a connector action, `connector:<name>:<action>` (e.g.
+  `connector:github:list_issues`), or
+- a built-in tool name (e.g. `web_fetch`) — reserved; the built-in registry
+  dispatch is a v1.x follow-up, so a built-in grant currently returns
+  `code: unknown_tool`.
+
+**Read/write split.** A connector grant is dispatched through the shared
+connector executor (`connectors.service.execute`). A **read** action
+(`trust=auto`) fires immediately and returns its data. A **write** action
+(`trust=confirm`/`restricted`) **never** runs inline — it is **proposed for
+human approval** through the Instinct gate. The route files a pending Instinct
+Action (via `propose_external_action`) and returns `code: instinct_pending`
+with a `proposed_action_id`; the connector write fires only when a human
+approves the Action in The Tray, at which point the instinct router runs the
+existing execute-on-approve path (`execute_approved_external_action` →
+`connectors.service.execute`, re-validated for workspace + params + idempotency).
+The client's `on_success` handler branches on `code == "instinct_pending"` to
+show a "sent for approval" state and can watch the `proposed_action_id`.
+
+### `PUT /pockets/{pocket_id}/backend/tool-policy`
+
+Set the pocket's tool allowlist. Requires pocket **owner** access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `allowed_tools` | array | List of `{tool}` grants. Replaces the whole list. An empty list is valid — it revokes every tool (fail-closed). |
+
+Each grant: `tool` is a built-in tool name or a connector action
+`connector:<name>:<action>` (`min_length=1`). Omitting a tool means that
+tool can never fire.
+
+Response `200`: the backend summary, including the updated `allowed_tools`.
+
+Returns `400` when the pocket has no backend configured — a tool policy with
+no backend to apply it to is meaningless. The change is audit-logged
+(`pocket.backend.tool_policy`).
+
+### `POST /pockets/{pocket_id}/tools/run`
+
+Invoke a named tool with the resolved args. Access is **owner or explicit
+`shared_with` only** — a tool invocation has the same blast radius as a write
+binding, so a workspace-visible pocket does **not** grant run access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `tool` | string | Required (`min_length=1`). The tool name — a built-in name or `connector:<name>:<action>`. |
+| `args` | object | Optional. The resolved tool arguments (Ripple's `{...}` resolver runs client-side at click time). |
+
+The allowlist is read server-side off the backend-credential row, never from
+the spec. A pocket with no backend, no grants, or a tool not on the list
+returns `code: not_allowed` — fail-closed.
+
+Response `200` (connector read fired):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:list_issues",
+  "status": 200,
+  "response": [{ "number": 1, "title": "first issue" }],
+  "on_success": [],
+  "on_error": []
+}
+```
+
+Response `202` (write proposed for approval):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:create_issue",
+  "status": 202,
+  "code": "instinct_pending",
+  "proposed_action_id": "act-7f3c…",
+  "response": {
+    "action_id": "act-7f3c…",
+    "proposed_action_id": "act-7f3c…",
+    "status": "pending_approval",
+    "connector": "github",
+    "action": "create_issue"
+  }
+}
+```
+
+The write does **not** run at this point. The pending Action appears in The
+Tray; on approve, the instinct router fires the connector write through the
+existing execute-on-approve path. On reject, the write never runs.
+
+Other rejection codes (`ok: false`): `not_allowed` (tool not on the
+allowlist / no backend), `not_reachable` (connector not bound to this
+pocket), `unknown_tool` (the connector has no such action, or a built-in
+grant has no registry implementation yet), `bad_grant` (malformed
+`connector:` grant), `propose_failed` (the write could not be filed for
+approval — e.g. the Instinct store was unavailable; the write is **not** run
+inline as a fallback), plus any connector-side `CloudError` code. The result
+is delivered **in this response body** — there is no `pocket_mutation` SSE
+emit; the client applies the `on_success` / `on_error` reconcile handlers.
+
+Returns `403` when the caller is neither the owner nor in `shared_with`;
+`404` when the pocket is not in the caller's scope.
+
+**Security.** A connector grant re-checks the pocket/workspace bind
+(`is_connector_bound_to_pocket`, the tenant boundary) and the action's trust
+level before any call leaves PocketPaw; the connector path's outbound URL is
+bounded by the connector definition, not by a spec-supplied URL. A
+URL-taking built-in tool, when that path lands, must route through the same
+`_http_guard` SSRF boundary the read/write executors use.
+
+## Pockets — Template Reconcile
+
+A pocket created from a template stores its `template_slug`. Re-running an
+install/deploy script re-applies the template and **clobbers instance edits**.
+Reconcile fixes that: it re-applies only the **template-owned** regions of the
+source template while preserving the **instance-owned** regions.
+
+| Region | Owner | Reconcile behavior |
+|--------|-------|--------------------|
+| `rippleSpec.ui` | template | overwritten from the template |
+| `rippleSpec.actions` | template | overwritten from the template |
+| `rippleSpec.sources` | template | overwritten from the template |
+| `rippleSpec.shape` | template | overwritten from the template |
+| `rippleSpec.state` (rows, `selected_id`, `pending_proposal`, …) | instance | never touched |
+| pocket name / owner / team / visibility | instance | never touched |
+
+Both endpoints accept standard cookie / bearer auth, or the loopback
+internal-token bypass (the same one `GET /pockets/{id}` and `/spec/merge`
+accept) so the `pocketpaw pocket reconcile` CLI can authenticate locally. The
+service re-checks read (preview) / edit (apply) access on the resolved
+identity.
+
+### `POST /pockets/{pocket_id}/reconcile/preview`
+
+Dry-run a reconcile — report what **would** change, write nothing. No
+`PocketUpdated` event is emitted.
+
+Response `200`:
+
+```json
+{
+  "pocket_id": "663...",
+  "template_slug": "applications-triage",
+  "template_owned_regions": ["ui", "actions", "sources", "shape"],
+  "changed_regions": ["ui"],
+  "unchanged_regions": ["actions", "sources", "shape"],
+  "preserved_regions": ["state"],
+  "has_changes": true
+}
+```
+
+Returns `422` (`reconcile.no_template`) when the pocket has no `template_slug`,
+`422` (`reconcile.template_unresolved`) when the slug no longer resolves on
+disk, `403` when the caller can't read the pocket, `404` for a missing /
+cross-tenant pocket.
+
+### `POST /pockets/{pocket_id}/reconcile/apply`
+
+Apply the reconcile — re-write the template-owned regions, preserve the
+instance-owned regions, persist through the same spec write path as a normal
+edit (so the spec is normalized + validated and a `PocketUpdated` event fires).
+**Edit access required.**
+
+Response `200`:
+
+```json
+{
+  "ok": true,
+  "skipped": false,
+  "diff": { "...": "the same diff shape as preview" },
+  "pocket": { "...": "the updated pocket wire dict" }
+}
+```
+
+When the pocket already matches its template the write is **skipped**
+(`"skipped": true`, no `pocket` field, no event). Error codes mirror the
+preview route, plus `403` when the caller lacks edit access — enforced even on
+the skipped no-write path so a non-editor cannot probe sync state.
+
 ## Skills — Per-Backend API Skills
 
 Increment 2b (the second half of pocket Increment 2, after the built-in
@@ -289,6 +505,194 @@ the 2 MB cap, the document is unparseable, or it carries no `paths`
 object. Every install is audit-logged with the workspace, the actor, and
 the resulting slug — never the spec contents.
 
+## Plugins — Install a `.claude-plugin`'s Skills and MCP Servers
+
+PocketPaw adopts the `.claude-plugin` standard so a whole plugin's skills
+and MCP servers install in one step. This endpoint clones a GitHub repo,
+reads its `.claude-plugin/plugin.json`, copies each `skills/<name>/SKILL.md`
+directory into the skill loader path, reloads the loader, registers and
+starts any MCP servers the bundle declares, and records the install in a
+registry at `~/.pocketpaw/plugins.json`.
+
+### MCP servers
+
+After the skills step, the installer reads the bundle's MCP config — a
+`.mcp.json` file at the plugin root in the standard
+`{"mcpServers": {name: spec}}` shape (a manifest `mcp_servers` path
+override is honoured if present). When there is no MCP config the step is
+recorded as `skipped`; it never fails the install.
+
+Each declared server is mapped to a PocketPaw MCP server config:
+`command`, `args`, and `env` carry over directly, and `transport` is
+derived from the spec's `type` (`stdio` is the default; `http`, `sse`, and
+`streamable-http` map through). To avoid cross-plugin collisions the
+registered name is namespaced as `plugin:<plugin_name>:<server_name>`.
+
+Every server is registered and started through the MCP manager — one step
+per server:
+
+- **`succeeded`** — the server started, **or** it registered but couldn't
+  start because it's missing required env. The latter is non-fatal and
+  carries a `needs env: KEY` detail so the operator knows to supply the
+  credential; the server is still recorded as installed.
+- **`failed`** — the server failed to start for any other reason.
+
+The namespaced server names appear in the registry entry under
+`mcp_servers` and on the report's `installed_mcp_servers`.
+
+### `POST /plugins/install`
+
+Install a plugin's skills and MCP servers from a GitHub source. Requires
+the **admin** scope — installing a plugin changes workspace-wide agent
+behaviour.
+
+Request body:
+
+```json
+{ "source": "owner/repo" }
+```
+
+`source` accepts `owner/repo`, `owner/repo/subdir` (when the plugin lives
+in a subdirectory), or a full GitHub URL (a `/tree/<ref>/<subdir>` path is
+honoured). The repo (or subdir) must contain a `.claude-plugin/plugin.json`
+manifest and at least one `skills/<name>/SKILL.md`. An MCP `.mcp.json` is
+optional.
+
+Response `200` — a step-by-step install report:
+
+```json
+{
+  "plugin": "my-plugin",
+  "installed_at": "2026-06-07T12:00:00",
+  "steps": [
+    { "name": "read_manifest", "status": "succeeded", "detail": "my-plugin v1.2.3" },
+    { "name": "skill:alpha", "status": "succeeded", "detail": "" },
+    { "name": "reload_loader", "status": "succeeded", "detail": "" },
+    { "name": "mcp:weather", "status": "succeeded", "detail": "" },
+    { "name": "mcp:db", "status": "succeeded", "detail": "needs env: DB_URL" },
+    { "name": "record_registry", "status": "succeeded", "detail": "" }
+  ],
+  "installed_skills": ["alpha"],
+  "installed_mcp_servers": ["plugin:my-plugin:weather", "plugin:my-plugin:db"]
+}
+```
+
+Each unit of work is a step with status `succeeded` / `skipped` /
+`failed`, so a per-skill copy failure or a single MCP server start failure
+surfaces in the report rather than aborting the whole install. When the
+bundle declares no MCP servers, a single `mcp` step is recorded as
+`skipped`. Up-front failures return clear status codes instead of `500`:
+
+| Status | When |
+|--------|------|
+| `400` | Missing or malformed `source`, or an invalid `plugin.json`. |
+| `404` | No `.claude-plugin/plugin.json`, or no skills found in the plugin. |
+| `502` | The git clone failed. |
+| `504` | The git clone timed out. |
+
+A malformed `.mcp.json` (parse error, or a wrong `mcpServers` shape) does
+**not** fail the request — it surfaces as a single `failed` `mcp` step in
+the report, so already-installed skills and the registry entry are
+preserved.
+
+Every install is audit-logged with the source, plugin name, version, and
+the installed skill names.
+
+### `GET /plugins`
+
+List every installed plugin from the registry
+(`~/.pocketpaw/plugins.json`). Requires the **admin** scope.
+
+Response `200` — an array of installed plugins:
+
+```json
+[
+  {
+    "name": "my-plugin",
+    "version": "1.2.3",
+    "source": "acme/widgets",
+    "skills": ["alpha", "beta"],
+    "mcp_servers": ["plugin:my-plugin:weather"],
+    "installed_at": "2026-06-08T12:00:00"
+  }
+]
+```
+
+### `POST /plugins/remove`
+
+Uninstall a plugin: delete each skill directory it installed, **stop** each
+of its namespaced MCP servers and remove their configs from the MCP manager,
+reload the skill loader, and drop its registry entry. Stopping the live
+server (not just deleting its config) mirrors install, which both registers
+the config and starts the server — so remove tears down the running
+connection too, rather than leaving it up until the next restart. Requires
+the **admin** scope.
+
+Request body:
+
+```json
+{ "name": "my-plugin" }
+```
+
+Response `200` — a step-by-step remove report (mirrors the install report):
+
+```json
+{
+  "plugin": "my-plugin",
+  "removed_at": "2026-06-08T12:05:00",
+  "steps": [
+    { "name": "skill:alpha", "status": "succeeded" },
+    { "name": "mcp:plugin:my-plugin:weather", "status": "succeeded" },
+    { "name": "reload_loader", "status": "succeeded" },
+    { "name": "drop_registry", "status": "succeeded" }
+  ],
+  "removed_skills": ["alpha", "beta"],
+  "removed_mcp_servers": ["plugin:my-plugin:weather"]
+}
+```
+
+Like install, each component is a step with status `succeeded` / `skipped`
+/ `failed`. A component that's already gone (a missing skill dir, an MCP
+server that's neither running nor registered) is `skipped` — the remove
+still completes and the registry entry is **always** dropped, so a
+half-removed plugin never lingers in the listing. The only up-front error
+is an unknown plugin:
+
+| Status | When |
+|--------|------|
+| `400` | Missing or invalid `name`. |
+| `404` | The named plugin is not installed. |
+
+Every removal is audit-logged (`action="plugin_remove"`) with the plugin
+name and the removed skill / MCP server names.
+
+The registry read-modify-write (shared by install and remove) is
+serialised by a process-level lock and written via a temp file + atomic
+`os.replace`, so concurrent operations can't corrupt `plugins.json` or
+clobber each other's entries.
+
+### Per-agent skills (`skill_refs` + `plugins`)
+
+An agent's `config` carries two skill-bearing fields, set on
+`POST /agents` (create) or `PATCH /agents/{id}` (update — via either the
+nested `config` object or the flat top-level fields):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `skill_refs` | `string[]` | Skill names this agent always materializes. |
+| `plugins` | `string[]` | Installed plugin names whose bundled skills this agent always materializes. |
+
+Both default to `[]`. Unlike a surface / entity-room `skill_names` subset
+— which only applies inside that room — an agent's `skill_refs` plus the
+skills of its enabled `plugins` fold into the per-run skill set on **every**
+run the agent does, regardless of surface. At run time the plugin names are
+resolved to their skills via the installed-plugin registry
+(`~/.pocketpaw/plugins.json`); an unknown plugin name is ignored and a
+missing / unreadable registry degrades to no plugin skills (it never fails
+the run). The agent set is UNIONed with any surface/entity skill subset, so
+both apply together. Per-agent MCP servers are **not** part of this — that
+is a separate, deferred slice.
+
 ## Pockets — Catalog-as-Allowlist Ingest Gate
 
 Increment 5. The Ripple renderer has a **closed widget registry**: a
@@ -313,6 +717,31 @@ two modes:
 Each flagged node reports `{path, type, suggestion}`, where `suggestion`
 is the nearest catalog widget by edit distance. The gate is best-effort:
 when the widget manifest can't be fetched it is skipped.
+
+### Required-prop gate
+
+The widget manifest marks the props a widget cannot render without as
+`required: true` (a `chart` with no `data`, a `stat` with no `value`, a
+`table` with no `columns`/`rows`). That flag used to live only in the
+system prompt — a node like `{"type": "chart", "props": {}}` passed the
+catalog gate (its `type` is known) and rendered an empty box. The
+required-prop gate runs as a sibling to the catalog walk and closes that
+hole: it flags any node missing a manifest-required prop for its `type`.
+
+It is the rippleSpec expression of the constraint-zone model's 🔒 **HARD**
+`required_fields` zone — the agent is free to choose which widgets to use
+and how to fill the creative props, but the manifest-declared structural
+minimum is locked and checked, not merely asked for. Same **strict**
+(agent path, blocks + returns a corrective message naming the missing
+prop) / **logged** (human / import path, structured warning, never blocks)
+posture as the catalog gate, and the same best-effort skip when the
+manifest can't be fetched. A prop counts as present when its key exists
+with a non-null value — a literal, an empty list / `0` / `false`, or a
+bound `{...}` expression all satisfy it; only a missing key or explicit
+`null` is a violation. A node-level `bind` satisfies a single-required-prop
+input widget (the bound value populates the prop at render time).
+
+Each flagged node reports `{path, type, missing, required}`.
 
 ### Escape-hatch widgets
 
@@ -343,3 +772,70 @@ enforces:
 Every ingested spec that contains an `embed` node is audit-logged
 (category `pocket_embed`) with the embed count and URLs — never the
 iframe contents.
+
+## Outcome Metering
+
+RFC 05 M2b.2 + gap-3. When a governed write action succeeds, the pocket's
+binding can declare a named `outcome` and an optional billable value/unit.
+Each one appends a row to a workspace-scoped, append-only JSONL ledger.
+Two read surfaces sit over the ledger; both take tenancy from the auth
+context and **reject** a `workspace_id` query param (a caller cannot read
+another workspace's ledger).
+
+### Declaring an outcome on a binding
+
+A write binding in `rippleSpec.actions` declares the metering fields:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `outcome` | string \| null | The named business event (`meeting_booked`, `ticket_resolved`, …). `null` → the write is not metered. |
+| `outcome_value` | number \| null | The billable value the operator assigns this outcome. Requires `outcome_unit` AND a non-null `outcome` — a half-declared pair is rejected at parse time. |
+| `outcome_unit` | string \| null | The unit the value is denominated in (`usd`, `ticket_resolved`, …). Requires `outcome_value`. |
+
+Declaring `outcome` with no value/unit is the **count-only** binding (the
+prior behaviour). Declaring all three turns the count into a billable
+figure.
+
+### `GET /outcomes`
+
+Count this workspace's recorded outcomes, grouped by name and pocket.
+Requires the `outcomes.read` action.
+
+Query params: `pocket_id` (narrow to one pocket), `since` (inclusive
+ISO-8601 lower bound on `occurred_at`). Both optional.
+
+Response `200`:
+
+```json
+{ "total": 12, "by_outcome": { "ticket_resolved": 9, "meeting_booked": 3 },
+  "by_pocket": { "p_support": 9, "p_sales": 3 } }
+```
+
+### `GET /outcomes/meter`
+
+Aggregate this workspace's **billable** outcomes into a queryable figure —
+the "pay for governed outcomes" read primitive. Requires the
+`outcomes.read` action.
+
+Query params: `pocket_id`, `since` (inclusive lower bound), `until`
+(**exclusive** upper bound, so adjacent periods never double-count a
+boundary outcome). All optional.
+
+Response `200`:
+
+```json
+{ "total_outcomes": 12, "metered_count": 9,
+  "by_unit": {
+    "usd": { "unit": "usd", "count": 6, "total_value": 7200.0 },
+    "ticket_resolved": { "unit": "ticket_resolved", "count": 3, "total_value": 3.0 }
+  } }
+```
+
+`total_outcomes` counts every matching row (including count-only ones);
+`metered_count` counts only the rows carrying a whole value/unit pair;
+`by_unit` sums `outcome_value` per unit over the window.
+
+**Deferred (not in this surface):** invoicing, payment, currency
+conversion, a pricing-rules engine, and disputes / clawback. This endpoint
+returns a raw sum of declared values — the queryable figure those layers
+will build on later (see `outcome-spec.md`).

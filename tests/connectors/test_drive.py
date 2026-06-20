@@ -1,5 +1,11 @@
 # Tests for the Google Drive SourceAdapter (Workstream C2).
 # Created: 2026-04-16.
+# Updated: 2026-06-02 (feat/retrieval-rehome, #1327) — dropped the ImportError
+# guard + skip marker that fenced off the RetrievalRouter/InMemoryCredentialBroker
+# integration tests. Those classes are now re-homed in pocketpaw.retrieval, so
+# the end-to-end router/broker tests run for real. Also fixed the integration
+# assertion to read candidate.content.kind as an attribute: 0.4.0 promotes the
+# adapter's dataref dict to a typed DataRef, which isn't subscriptable.
 #
 # Covers:
 #   * DriveClient request plumbing (auth header, params, rate-limit retry,
@@ -21,10 +27,6 @@ from typing import Any
 
 import pytest
 from soul_protocol.engine.journal import open_journal
-from soul_protocol.engine.retrieval import (
-    InMemoryCredentialBroker,
-    RetrievalRouter,
-)
 from soul_protocol.spec.journal import Actor
 from soul_protocol.spec.retrieval import (
     CandidateSource,
@@ -40,6 +42,13 @@ from pocketpaw.connectors.drive import (
     DriveSourceAdapter,
 )
 from pocketpaw.connectors.drive.auth import resolve_bearer_token
+
+# Retrieval orchestration (RetrievalRouter, InMemoryCredentialBroker) was removed
+# from soul-protocol in 0.4.0 (#179) — the spec now ships only the vocabulary in
+# soul_protocol.spec.retrieval. The concrete orchestration was re-homed into the
+# consuming runtime at pocketpaw.retrieval in #1327, so these classes import
+# directly now and the router/broker end-to-end tests below run for real.
+from pocketpaw.retrieval import InMemoryCredentialBroker, RetrievalRouter
 
 # ---------------------------------------------------------------------------
 # HTTP scripting helpers — a tiny replacement for httpx_mock so we don't pull
@@ -356,11 +365,15 @@ class TestDriveSourceAdapter:
         candidates = adapter.query(request, credential=None)
 
         assert len(candidates) == 2
+        # 0.4.0: content with kind="dataref" is auto-promoted to a typed DataRef,
+        # so read fixed fields as attributes and Drive metadata via .extra.
         payload = candidates[0].content
-        assert payload["kind"] == "dataref"
-        assert payload["source"] == "drive"
-        assert payload["id"] == "file_1"
-        assert payload["scopes"] == ["org:sales:*"]
+        assert payload.kind == "dataref"
+        assert payload.source == "drive"
+        assert payload.id == "file_1"
+        assert payload.scopes == ["org:sales:*"]
+        assert payload.extra["name"] == "Q3 forecast"
+        assert payload.extra["web_view_link"] == "https://drive.google.com/file_1"
         # First candidate must rank higher than the second under position scoring.
         assert candidates[0].score is not None
         assert candidates[1].score is not None
@@ -417,14 +430,13 @@ class TestDriveSourceAdapter:
         candidates = adapter.query(request, credential=None)
 
         assert len(candidates) == 1
+        # revision_id is a top-level DataRef field (the point-in-time pin).
         payload = candidates[0].content
-        assert payload["revision_id"] == "rev-mid"
+        assert payload.revision_id == "rev-mid"
         assert candidates[0].as_of == _ts(2026, 4, 1, 0)
         assert fake.revision_calls == [("file_1", _ts(2026, 4, 1, 0))]
 
     def test_query_uses_credential_token_when_provided(self) -> None:
-        from soul_protocol.engine.retrieval import InMemoryCredentialBroker
-
         broker = InMemoryCredentialBroker()
         credential = broker.acquire("drive", ["org:sales:*"])
 
@@ -467,8 +479,6 @@ class TestDriveSourceAdapter:
 
 class TestResolveBearerToken:
     def test_credential_wins_over_env(self) -> None:
-        from soul_protocol.engine.retrieval import InMemoryCredentialBroker
-
         broker = InMemoryCredentialBroker()
         cred = broker.acquire("drive", ["org:sales:*"])
         token = resolve_bearer_token(cred, env={"GOOGLE_OAUTH_TOKEN": "env-value"})
@@ -525,9 +535,12 @@ class TestRouterIntegration:
 
         result = router.dispatch(_make_request("Q3 forecast"))
 
-        # Router produced candidates with the DataRef shape.
+        # Router produced candidates with the DataRef shape. As of soul-protocol
+        # 0.4.0 the adapter's dataref dict is auto-promoted to a typed DataRef on
+        # RetrievalCandidate validation, so read the discriminator as an attribute
+        # (subscript would raise — pydantic models aren't subscriptable).
         assert len(result.candidates) == 2
-        assert result.candidates[0].content["kind"] == "dataref"
+        assert result.candidates[0].content.kind == "dataref"
         assert result.sources_queried == ["drive"]
         assert result.sources_failed == []
 

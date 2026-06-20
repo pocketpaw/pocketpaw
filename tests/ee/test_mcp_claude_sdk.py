@@ -1,5 +1,34 @@
 """Tests for MCP + Claude Agent SDK integration — Sprint 17.
 
+Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) —
+  ``_strip_builtin_servers`` now also drops ``pocketpaw_fabric`` (fabric_query /
+  fabric_stats) and ``pocketpaw_instinct`` (instinct_pending / instinct_audit),
+  the two new always-on read-only servers, so the external-config assertions
+  stay focused. Same regime as pocketpaw_external_actions / pocketpaw_belt.
+Updated: 2026-06-11 (feat/external-action-mcp-tool) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_external_actions`` (the new always-on gated
+  external-action proposal server: propose_external_action), so the
+  external-config assertions stay focused after that MCP server became
+  ambient. Same regime as pocketpaw_belt / pocketpaw_media.
+Updated: 2026-06-10 (integration/belt-thin-slice) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_belt`` (the always-on Belt gate server:
+  belt_propose_change — the bundled `belt` skill calls it without an explicit
+  opt-in) and, defensively, ``loom`` (settings-gated, but a developer's
+  POCKETPAW_LOOM_MODEL_PATH env would leak into Settings and register it).
+Updated: 2026-06-10 (feat/studio-code-migration) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_media`` (the new always-on STUDIO media-generation
+  server: image_generate / video_generate), so the external-config assertions
+  stay focused after the media MCP server became ambient. Same regime as
+  pocketpaw_sites_manager / pocketpaw_connectors.
+Updated: 2026-06-08 (feat/connector-mcp-execution / keystone) —
+  ``_strip_builtin_servers`` now also drops ``pocketpaw_connectors`` (the new
+  always-on connector-execution server: list_connector_actions /
+  connector_execute), so the external-config assertions stay focused after the
+  connector MCP server became ambient. Same regime as pocketpaw_sites_manager.
+Updated: 2026-06-01 (Phase 4 — chat→create-site) — ``_strip_builtin_servers``
+  now also drops ``pocketpaw_sites_manager`` (the new always-on Paw Sites
+  publish server), so the external-config assertions stay focused after the
+  sites MCP server became ambient.
 Updated: 2026-05-28 (#FU-F) — added ``TestMcpProviderLoadFailures``: a provider
   that raises on ``build_server()`` must log at WARNING (not DEBUG), including
   the provider class name and exception type. Also covers the startup INFO
@@ -15,6 +44,14 @@ Updated: 2026-05-22 (#1174) — added ``TestMcpToolAllowlist``: the resolved
   in-process MCP tool-id allowlist (``_collect_mcp_tool_ids``) includes the
   cloud ``pocketpaw_pocket`` server's writable ``add_widget`` tool, so the
   home-pocket agent on this backend can pin real widgets.
+Updated: 2026-05-31 (fix/bridge-start-flow-to-chat, RFC 13) — added
+  ``TestStartFlowReachable``: the RFC 13 M3 ``start_flow`` authoring tool must
+  be present in the cloud chat agent's ASSEMBLED tool set (the widgets server
+  is registered AND its ``start_flow`` id is on the in-process allowlist). M3
+  shipped ``start_flow`` only in the runtime builtin registry and its tests
+  imported the tool directly, so the gap — the tool being unreachable from the
+  cloud chat agent — went uncaught. This is the guard that catches it:
+  reachability, not just importability.
 
 All SDK imports are mocked.
 """
@@ -22,14 +59,24 @@ All SDK imports are mocked.
 import logging
 from unittest.mock import patch
 
+from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.external_actions import (
+    SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
+)
+from pocketpaw_ee.agent.mcp_servers.fabric import SERVER_NAME as _FABRIC_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.foresight import SERVER_NAME as _FORESIGHT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.instinct import SERVER_NAME as _INSTINCT_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.loom import SERVER_NAME as _LOOM_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.media import SERVER_NAME as _MEDIA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.meetings import SERVER_NAME as _MEETINGS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.planner import (
     POCKET_PLANNER_SERVER_NAME as _POCKET_PLANNER_MCP_SERVER_NAME,
 )
 from pocketpaw_ee.agent.mcp_servers.planner import SERVER_NAME as _PLANNER_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.pockets import SERVER_NAME as _POCKET_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.sites import SERVER_NAME as _SITES_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.tasks import SERVER_NAME as _TASKS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.pocket_specialist.mcp_tool import (
     SERVER_NAME as _POCKET_SPECIALIST_MCP_SERVER_NAME,
@@ -62,6 +109,32 @@ def _strip_builtin_servers(result: dict) -> dict:
     out.pop(_MEETINGS_MCP_SERVER_NAME, None)
     out.pop(_FORESIGHT_MCP_SERVER_NAME, None)
     out.pop(_POCKET_PLANNER_MCP_SERVER_NAME, None)
+    # ``pocketpaw_sites_manager`` is always-on too — the bundled
+    # pocketpaw-create-site skill calls it without an explicit opt-in.
+    out.pop(_SITES_MCP_SERVER_NAME, None)
+    # ``pocketpaw_connectors`` is always-on — the M3-derived connector skills
+    # (gmail/github) call connector_execute without an explicit opt-in.
+    out.pop(_CONNECTORS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_media`` is always-on too — the bundled `studio` skill calls
+    # image_generate / video_generate without an explicit opt-in.
+    out.pop(_MEDIA_MCP_SERVER_NAME, None)
+    # ``pocketpaw_belt`` is always-on too — the bundled `belt` skill calls
+    # belt_propose_change without an explicit opt-in. ``loom`` is settings-gated
+    # (loom_model_path unset -> not registered) but stripped defensively: a
+    # developer's POCKETPAW_LOOM_MODEL_PATH env leaks into Settings() and would
+    # otherwise register it in these tests.
+    out.pop(_BELT_MCP_SERVER_NAME, None)
+    out.pop(_LOOM_MCP_SERVER_NAME, None)
+    # ``pocketpaw_external_actions`` is always-on too — a chat agent proposes a
+    # gated connector call (propose_external_action) without an explicit
+    # opt-in; the connector only fires after human approval.
+    out.pop(_EXTERNAL_ACTIONS_MCP_SERVER_NAME, None)
+    # ``pocketpaw_fabric`` + ``pocketpaw_instinct`` are always-on too — the
+    # cloud chat agent's only path to the Fabric ontology and Instinct gate
+    # visibility on this backend (registry BaseTools never reach it). Both are
+    # read-only.
+    out.pop(_FABRIC_MCP_SERVER_NAME, None)
+    out.pop(_INSTINCT_MCP_SERVER_NAME, None)
     return out
 
 
@@ -320,6 +393,58 @@ class TestMcpToolAllowlist:
         sdk = self._make_sdk()
         ids = sdk._collect_mcp_tool_ids()
         assert not any(f"__{_PLANNER_MCP_SERVER_NAME}__" in t for t in ids)
+
+
+class TestStartFlowReachable:
+    """GUARD (RFC 13 M3): the ``start_flow`` authoring tool must be reachable
+    from the cloud chat agent's ASSEMBLED tool set — not merely importable.
+
+    M3 (#1318) shipped ``start_flow`` only in the runtime builtin registry and
+    its tests imported ``StartFlowTool`` directly, so nothing caught that the
+    cloud chat agent (claude_agent_sdk backend) had no way to *call* it. The
+    agent then hand-authored a flat ``set``-stepped spec — the anti-pattern
+    start_flow exists to prevent. This test asserts the bridge: the
+    ``pocketpaw_widgets`` server is registered AND ``start_flow``'s tool id is
+    on the in-process allowlist, with no policy opt-in. If the bridge is ever
+    removed, this fails."""
+
+    def _make_sdk(self) -> ClaudeAgentSDK:
+        settings = Settings(anthropic_api_key="test-key", tool_profile="full")
+        with patch.object(ClaudeAgentSDK, "_initialize"):
+            sdk = ClaudeAgentSDK(settings)
+            sdk._sdk_available = False
+        return sdk
+
+    def test_start_flow_on_allowlist_by_default(self):
+        """The assembled in-process tool allowlist carries ``start_flow`` with
+        no opt-in — the cloud chat agent calls it via
+        ``mcp__pocketpaw_widgets__start_flow`` and that id must be reachable."""
+        from pocketpaw.agents.sdk_mcp_widgets import START_FLOW_TOOL_ID
+
+        sdk = self._make_sdk()
+        ids = sdk._collect_mcp_tool_ids()
+        assert START_FLOW_TOOL_ID in ids, (
+            "start_flow must be on the assembled allowlist or the cloud chat "
+            "agent cannot call it (the exact RFC 13 M3 reachability gap)"
+        )
+
+    def test_widgets_server_with_start_flow_is_registered(self):
+        """The host server for ``start_flow`` (``pocketpaw_widgets``) must
+        appear in the assembled ``_get_mcp_servers`` set — registration is the
+        other half of reachability."""
+        sdk = self._make_sdk()
+        with patch("pocketpaw.mcp.config.load_mcp_config", return_value=[]):
+            servers = sdk._get_mcp_servers()
+        assert _WIDGETS_MCP_SERVER_NAME in servers, (
+            "the pocketpaw_widgets server (host of start_flow) must be registered"
+        )
+
+    def test_start_flow_id_matches_widgets_server_namespace(self):
+        """The tool id is namespaced under the registered server, so the SDK
+        routes ``mcp__pocketpaw_widgets__start_flow`` to this server."""
+        from pocketpaw.agents.sdk_mcp_widgets import START_FLOW_TOOL_ID
+
+        assert START_FLOW_TOOL_ID == f"mcp__{_WIDGETS_MCP_SERVER_NAME}__start_flow"
 
 
 class TestMcpProviderLoadFailures:

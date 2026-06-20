@@ -1,5 +1,11 @@
 # Gmail connector — REST API over OAuth bearer token.
 # Created: 2026-05-03 — Phase 1 PR-3.
+# Updated: 2026-06-07 (M3 connector→skill auto-authoring) — added the optional
+#   ``surface_profile:`` block. When this connector is bound to a pocket
+#   (scope=pocket), the cloud derivation helper folds this block into the
+#   pocket's PocketSurfaceProfile so the entity room auto-loads the bundled
+#   ``gmail`` skill (no hand-setting). See ``allow_tools`` note below re: the
+#   tool-id pattern.
 # This YAML carries the catalog metadata + the action manifest. The
 # runtime wiring lives in src/pocketpaw/connectors/adapters/gmail.py
 # (GmailConnector) which wraps the existing GmailClient from
@@ -16,6 +22,27 @@ name: gmail
 display_name: Gmail
 type: communication
 icon: mail
+
+# M3 — connector→skill/tool auto-authoring. When Gmail is bound to a pocket,
+# the entity room auto-loads the bundled "gmail" skill (which teaches the
+# search→read→act workflow over the actions below).
+#
+# allow_tools NOTE on the tool-id pattern: gmail's agent tools are the
+# hand-written BaseTool classes in src/pocketpaw/tools/builtin/gmail.py
+# (gmail_search / gmail_read / gmail_send / ...). They are NOT yet wrapped as
+# ``mcp__<server>__<tool>`` SDK tool ids — a future connector-tools PR
+# generates those. So today the SKILL is the load-bearing contribution and
+# allow_tools is left EMPTY: the resolver treats an empty allow as "no SDK-tool
+# restriction" (the union only ADDS to the allowlist, never narrows it), so an
+# empty list is the safe, correct default until the gmail tools have stable MCP
+# ids to glob against. When they do, set e.g. allow_tools: ["mcp__*gmail*"].
+surface_profile:
+  skill: gmail
+  allow_tools: []
+  deny_tools: []
+
+senses:
+  - paw.email.v1
 
 auth:
   method: oauth2

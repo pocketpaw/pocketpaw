@@ -121,6 +121,9 @@ class SseEventName(StrEnum):
     POCKET_MUTATION = "pocket_mutation"
     POCKET_EXECUTION = "pocket_execution"
     ASK_USER_QUESTION = "ask_user_question"
+    # Per-run token metering (W3a): the backend's reported prompt / completion /
+    # cached token counts, surfaced mid-stream and folded into ``stream_end.usage``.
+    TOKEN_USAGE = "token_usage"
     STREAM_END = "stream_end"
     ERROR = "error"
 

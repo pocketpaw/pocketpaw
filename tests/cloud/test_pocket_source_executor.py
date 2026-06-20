@@ -7,6 +7,22 @@
 # required user_id; added coverage for basic-auth base64 encoding, the
 # per-(pocket, user) rate-limit key, the async-safe limiter under
 # asyncio.gather, and the audit-log entry written for every run.
+# Updated: 2026-06-08 (feat/sense-source, Sense tier chunk 6b) — coverage for
+# the new type="sense" source: a mocked execute_sense ok-result binds the
+# unwrapped .data.data payload to state in the same {source,bind,value} row
+# shape; an ok=False result lands in the errors aggregation with the
+# resolver's stable code/message and does NOT abort a sibling http source.
+# Updated: 2026-06-12 (feat/connector-as-pocket-backend) — coverage for the
+# CONNECTOR backend + the source TRANSFORM. With backend_type="connector" each
+# non-sense source routes through a mocked connectors_service.execute (read-first:
+# only auto-trust actions run; a confirm/restricted/unknown action is refused
+# with `action_needs_approval` and execute is never called); the response's
+# `.data` binds in the same {source,bind,value} row shape; a failed connector
+# source is contained (sibling keeps running); the empty connector base_url
+# skips the SSRF validation. The transform (select+map+values+const+missing)
+# shapes the raw result before binding for BOTH http and connector sources; a
+# malformed transform fails that source cleanly (`bad_transform`). The http path
+# with no transform is asserted unchanged (regression).
 #
 # What this pins:
 #   - SSRF rejections: absolute-URL path, `..` traversal, path to a
@@ -87,6 +103,7 @@ async def test_happy_path_returns_parsed_json(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -107,6 +124,7 @@ async def test_bind_without_state_prefix_passes_through(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -127,6 +145,7 @@ async def test_absolute_url_path_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -144,6 +163,7 @@ async def test_dotdot_traversal_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -160,6 +180,7 @@ async def test_encoded_dotdot_traversal_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -177,6 +198,7 @@ async def test_protocol_relative_path_to_other_host_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -194,6 +216,7 @@ async def test_internal_base_url_rejected(monkeypatch):
         await source_executor.run_sources(
             pocket_id="p1",
             user_id="runner-1",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url="http://127.0.0.1",
             auth_type="none",
@@ -215,6 +238,7 @@ async def test_host_resolving_internal_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -242,6 +266,7 @@ async def test_oversize_response_rejected(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -277,6 +302,7 @@ async def test_trigger_pocket_open_selects_open_sources(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -293,6 +319,7 @@ async def test_trigger_manual_selects_manual_sources(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -309,6 +336,7 @@ async def test_only_source_runs_just_that_source(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -324,6 +352,7 @@ async def test_no_trigger_runs_all_sources(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=_multi_source_spec(),
         base_url=BASE,
         auth_type="none",
@@ -347,6 +376,7 @@ async def test_redirect_becomes_source_error(monkeypatch):
     result = await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -371,6 +401,7 @@ async def test_rate_limit_breach_returns_rate_limited(monkeypatch):
         await source_executor.run_sources(
             pocket_id="p-rl",
             user_id="runner-1",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -381,6 +412,7 @@ async def test_rate_limit_breach_returns_rate_limited(monkeypatch):
     breach = await source_executor.run_sources(
         pocket_id="p-rl",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -398,6 +430,7 @@ async def test_rate_limit_is_per_pocket(monkeypatch):
         await source_executor.run_sources(
             pocket_id="pocket-a",
             user_id="runner-1",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -408,6 +441,7 @@ async def test_rate_limit_is_per_pocket(monkeypatch):
     other = await source_executor.run_sources(
         pocket_id="pocket-b",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -434,6 +468,7 @@ async def test_bearer_auth_header(monkeypatch):
     await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="bearer",
@@ -455,6 +490,7 @@ async def test_api_key_custom_header(monkeypatch):
     await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="api_key",
@@ -479,6 +515,7 @@ async def test_basic_auth_header_is_base64_encoded(monkeypatch):
     await source_executor.run_sources(
         pocket_id="p1",
         user_id="runner-1",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="basic",
@@ -507,6 +544,7 @@ async def test_rate_limit_is_per_user(monkeypatch):
         await source_executor.run_sources(
             pocket_id="shared-pocket",
             user_id="alice",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -516,6 +554,7 @@ async def test_rate_limit_is_per_user(monkeypatch):
     alice_breach = await source_executor.run_sources(
         pocket_id="shared-pocket",
         user_id="alice",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -528,6 +567,7 @@ async def test_rate_limit_is_per_user(monkeypatch):
     bob = await source_executor.run_sources(
         pocket_id="shared-pocket",
         user_id="bob",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE,
         auth_type="none",
@@ -554,6 +594,7 @@ async def test_rate_limit_async_safe_under_gather(monkeypatch):
             source_executor.run_sources(
                 pocket_id="race-pocket",
                 user_id="racer",
+                workspace_id="ws-test",
                 ripple_spec=spec,
                 base_url=BASE,
                 auth_type="none",
@@ -594,6 +635,7 @@ async def test_run_writes_audit_entry(monkeypatch):
     await source_executor.run_sources(
         pocket_id="audited-pocket",
         user_id="auditor",
+        workspace_id="ws-test",
         ripple_spec=spec,
         base_url=BASE + "/?token=leak",
         auth_type="bearer",
@@ -631,6 +673,7 @@ async def test_rate_limited_run_audits_as_rate_limited(monkeypatch):
         await source_executor.run_sources(
             pocket_id="rl-audit",
             user_id="auditor",
+            workspace_id="ws-test",
             ripple_spec=spec,
             base_url=BASE,
             auth_type="none",
@@ -638,3 +681,744 @@ async def test_rate_limited_run_audits_as_rate_limited(monkeypatch):
             token="",
         )
     assert logged[-1].status == "rate-limited"
+
+
+# ---------------------------------------------------------------------------
+# Sense sources (Sense tier chunk 6b) — type="sense" resolves via the Sense
+# resolver, NOT httpx. execute_sense is mocked; no connectors are needed.
+# ---------------------------------------------------------------------------
+
+
+def _patch_execute_sense(monkeypatch, fake):
+    """Patch the lazily-imported ``execute_sense`` on the resolver module.
+
+    ``_run_sense_binding`` does ``from ...senses.resolver import execute_sense``
+    at call time, so patching the attribute on that module is what takes
+    effect.
+    """
+    import pocketpaw_ee.cloud.senses.resolver as resolver_mod
+
+    monkeypatch.setattr(resolver_mod, "execute_sense", fake)
+
+
+async def test_sense_source_binds_unwrapped_payload(monkeypatch):
+    """An ok sense result writes ``result.data.data`` (the unwrapped payload)
+    to the bound state path, in the same ``{source, bind, value}`` row shape
+    the http path returns."""
+    from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+    class _Resp:
+        # Stand-in for ExecuteActionResponse — only `.data` is read.
+        data = [{"id": "m1", "subject": "hello"}]
+        success = True
+
+    captured = {}
+
+    async def _fake(sense_id, action, params, workspace_id, *, pocket_id=None, user_id=None):
+        captured.update(
+            sense_id=sense_id,
+            action=action,
+            params=params,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            user_id=user_id,
+        )
+        return SenseExecutionResult(
+            ok=True, sense_id=sense_id, connector_name="gmail", action=action, data=_Resp()
+        )
+
+    _patch_execute_sense(monkeypatch, _fake)
+
+    spec = {
+        "sources": {
+            "inbox": {
+                "type": "sense",
+                "sense_id": "paw.email.v1",
+                "action": "gmail_search",
+                "params": {"q": "is:unread"},
+                "bind": "state.inbox",
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+
+    assert result["errors"] == []
+    assert len(result["ran"]) == 1
+    ran = result["ran"][0]
+    assert ran["source"] == "inbox"
+    assert ran["bind"] == "inbox"  # `state.` stripped
+    assert ran["value"] == [{"id": "m1", "subject": "hello"}]  # unwrapped .data.data
+    # Identity + static params threaded through to the resolver.
+    assert captured["sense_id"] == "paw.email.v1"
+    assert captured["action"] == "gmail_search"
+    assert captured["params"] == {"q": "is:unread"}
+    assert captured["workspace_id"] == "ws-1"
+    assert captured["pocket_id"] == "p1"
+    assert captured["user_id"] == "runner-1"
+
+
+async def test_sense_source_failure_lands_in_errors(monkeypatch):
+    """A sense result with ok=False lands in the errors aggregation with the
+    resolver's stable code/message — it does NOT crash the run."""
+    from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+    async def _fake(sense_id, action, params, workspace_id, *, pocket_id=None, user_id=None):
+        return SenseExecutionResult(
+            ok=False,
+            sense_id=sense_id,
+            error="sense.no_provider",
+            message="no connector fills paw.email.v1 for this workspace",
+        )
+
+    _patch_execute_sense(monkeypatch, _fake)
+
+    spec = {
+        "sources": {
+            "inbox": {
+                "type": "sense",
+                "sense_id": "paw.email.v1",
+                "action": "gmail_search",
+                "bind": "state.inbox",
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+
+    assert result["ran"] == []
+    assert len(result["errors"]) == 1
+    err = result["errors"][0]
+    assert err["source"] == "inbox"
+    assert err["code"] == "sense.no_provider"
+    assert "no connector fills" in err["error"]
+
+
+async def test_failed_sense_does_not_abort_sibling_http_source(monkeypatch):
+    """A failed sense source is contained — a sibling http source in the same
+    run still completes."""
+    from pocketpaw_ee.cloud.senses.resolver import SenseExecutionResult
+
+    async def _fake(sense_id, action, params, workspace_id, *, pocket_id=None, user_id=None):
+        return SenseExecutionResult(
+            ok=False, sense_id=sense_id, error="sense.no_provider", message="no provider"
+        )
+
+    _patch_execute_sense(monkeypatch, _fake)
+    _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"ok": True}))
+
+    spec = {
+        "sources": {
+            "inbox": {
+                "type": "sense",
+                "sense_id": "paw.email.v1",
+                "action": "gmail_search",
+                "bind": "state.inbox",
+            },
+            "prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"},
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+
+    # The http sibling succeeds; the sense source is the only error.
+    ran_sources = {r["source"] for r in result["ran"]}
+    err_sources = {e["source"] for e in result["errors"]}
+    assert ran_sources == {"prs"}
+    assert err_sources == {"inbox"}
+    assert result["ran"][0]["value"] == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# workspace_id robustness (sense-tier robustness fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_sources_requires_workspace_id():
+    """``workspace_id`` is keyword-required — omitting it is a loud TypeError,
+    not a silent None that mis-resolves a sense to "no provider"."""
+    with pytest.raises(TypeError):
+        await source_executor.run_sources(
+            pocket_id="p1",
+            user_id="runner-1",
+            ripple_spec={"sources": {}},
+            base_url=BASE,
+            auth_type="none",
+            auth_header=None,
+            token="",
+        )
+
+
+async def test_sense_source_with_falsy_workspace_is_clear_bad_source(monkeypatch):
+    """DEFENSE: a sense source run with a falsy workspace_id yields a CLEAR
+    bad_source error and NEVER calls the resolver — so it can never come back
+    as a silent no-provider."""
+    called = {"execute_sense": False}
+
+    async def _fake(sense_id, action, params, workspace_id, *, pocket_id=None, user_id=None):
+        called["execute_sense"] = True
+        raise AssertionError("execute_sense must not be called without a workspace")
+
+    _patch_execute_sense(monkeypatch, _fake)
+
+    spec = {
+        "sources": {
+            "inbox": {
+                "type": "sense",
+                "sense_id": "paw.email.v1",
+                "action": "gmail_search",
+                "bind": "state.inbox",
+            }
+        }
+    }
+    # An empty-string workspace is falsy — the guard must catch it before
+    # the resolver runs. (run_sources itself requires the kwarg.)
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="",
+    )
+
+    assert called["execute_sense"] is False
+    assert result["ran"] == []
+    assert len(result["errors"]) == 1
+    err = result["errors"][0]
+    assert err["source"] == "inbox"
+    assert err["code"] == "bad_source"
+    assert "workspace" in err["error"]
+
+
+# ---------------------------------------------------------------------------
+# Connector backend (feat/connector-as-pocket-backend) — when the pocket's
+# backend is `backend_type="connector"`, each non-sense source runs against the
+# BOUND connector via connectors_service.execute (read-first: auto-trust only).
+# The connectors service is mocked; no real connectors are needed.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTrust:
+    """Stand-in for ConnectorActionInfo — only `is_read` / `trust_level` read."""
+
+    def __init__(self, is_read: bool, trust_level: str):
+        self.is_read = is_read
+        self.trust_level = trust_level
+
+
+class _FakeExecResp:
+    """Stand-in for ExecuteActionResponse — `success` / `data` / `error` read."""
+
+    def __init__(self, success=True, data=None, error=None):
+        self.success = success
+        self.data = data
+        self.error = error
+
+
+def _patch_connector_service(monkeypatch, *, trust, execute):
+    """Patch the lazily-imported connectors service used by the connector path.
+
+    `_run_connector_binding` does `from ...connectors import service` at call
+    time, so patching the attributes on that module is what takes effect.
+    `trust` fakes `get_action_trust`; `execute` fakes `execute`.
+    """
+    import pocketpaw_ee.cloud.connectors.service as cs
+
+    monkeypatch.setattr(cs, "get_action_trust", trust)
+    monkeypatch.setattr(cs, "execute", execute)
+
+
+async def test_connector_backend_source_executes_via_connector(monkeypatch):
+    """A connector-backed source routes each source through
+    connectors_service.execute and binds the response's `.data` payload in the
+    same `{source, bind, value}` row shape the http/sense paths return."""
+    captured = {}
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        captured.update(
+            workspace_id=workspace_id,
+            name=name,
+            action=body.action,
+            params=body.params,
+            user_id=user_id,
+            pocket_id=body.pocket_id,
+        )
+        return _FakeExecResp(success=True, data=[{"id": "app-1", "fullName": "Ada"}])
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "apps": {
+                "type": "connector",
+                "action": "list_applications",
+                "params": {"status": "new"},
+                "bind": "state.apps",
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url="",  # a connector backend has no base_url
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+
+    assert result["errors"] == []
+    assert len(result["ran"]) == 1
+    ran = result["ran"][0]
+    assert ran["source"] == "apps"
+    assert ran["bind"] == "apps"  # `state.` stripped
+    assert ran["value"] == [{"id": "app-1", "fullName": "Ada"}]
+    # The pocket's bound connector + the binding's action/params were threaded.
+    assert captured["name"] == "snctm-admin"
+    assert captured["action"] == "list_applications"
+    assert captured["params"] == {"status": "new"}
+    assert captured["workspace_id"] == "ws-1"
+    assert captured["pocket_id"] == "p1"
+    assert captured["user_id"] == "runner-1"
+
+
+async def test_connector_backend_routes_plain_http_typed_source(monkeypatch):
+    """A source that omits `type` (defaults to "http") STILL routes through the
+    connector when the pocket's BACKEND is a connector — the backend, not the
+    source's type, selects the transport for non-sense sources."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=True, data={"ok": True})
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"action": "ping", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == {"ok": True}
+
+
+async def test_connector_backend_applies_transform(monkeypatch):
+    """The binding's transform shapes the connector response BEFORE it binds —
+    select drills, map reshapes (values + const + missing-field)."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(
+            success=True,
+            data={
+                "applications": [
+                    {"fullName": "Ada", "status": "new", "id": "x1"},
+                    {"fullName": "Bo", "status": "rejected", "id": "x2"},
+                ]
+            },
+        )
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "apps": {
+                "type": "connector",
+                "action": "list_applications",
+                "bind": "state.apps",
+                "transform": {
+                    "select": "applications",
+                    "map": [
+                        {"to": "applicant", "from": "fullName"},
+                        {
+                            "to": "status_variant",
+                            "from": "status",
+                            "values": {"new": "warning", "rejected": "destructive"},
+                            "default": "muted",
+                        },
+                        {"to": "id", "from": "id"},
+                        {"to": "source", "const": "snctm-admin"},
+                        {"to": "missing", "from": "nope"},
+                    ],
+                },
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == [
+        {
+            "applicant": "Ada",
+            "status_variant": "warning",
+            "id": "x1",
+            "source": "snctm-admin",
+            "missing": None,
+        },
+        {
+            "applicant": "Bo",
+            "status_variant": "destructive",
+            "id": "x2",
+            "source": "snctm-admin",
+            "missing": None,
+        },
+    ]
+
+
+async def test_connector_backend_refuses_non_auto_trust_action(monkeypatch):
+    """READ-FIRST: a confirm/restricted action is refused with a clean
+    per-source error and execute is NEVER called."""
+    called = {"execute": False}
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=False, trust_level="confirm")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        called["execute"] = True
+        raise AssertionError("execute must not run for a non-auto action")
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "danger": {
+                "type": "connector",
+                "action": "delete_application",
+                "bind": "state.danger",
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert called["execute"] is False
+    assert result["ran"] == []
+    assert len(result["errors"]) == 1
+    err = result["errors"][0]
+    assert err["source"] == "danger"
+    assert err["code"] == "action_needs_approval"
+
+
+async def test_connector_backend_unknown_action_refused(monkeypatch):
+    """An action the connector doesn't expose (get_action_trust -> None) is
+    refused at the read-first gate — execute is never called."""
+
+    async def _trust(name, action):
+        return None
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        raise AssertionError("execute must not run for an unknown action")
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "nope", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["ran"] == []
+    assert result["errors"][0]["code"] == "action_needs_approval"
+
+
+async def test_connector_backend_execute_failure_is_per_source_error(monkeypatch):
+    """A connector action that returns success=False lands in the errors
+    aggregation — it does NOT crash the run."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=False, data=None, error="upstream 500")
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "list", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["ran"] == []
+    assert result["errors"][0]["source"] == "s"
+    assert result["errors"][0]["code"] == "connector_error"
+
+
+async def test_connector_backend_failed_source_does_not_abort_sibling(monkeypatch):
+    """A refused connector source is contained — a sibling auto-trust source in
+    the same run still completes."""
+
+    async def _trust(name, action):
+        # `ok_action` is auto; `bad_action` is confirm (refused).
+        if action == "ok_action":
+            return _FakeTrust(is_read=True, trust_level="auto")
+        return _FakeTrust(is_read=False, trust_level="confirm")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=True, data={"ran": body.action})
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {
+        "sources": {
+            "good": {"type": "connector", "action": "ok_action", "bind": "state.good"},
+            "bad": {"type": "connector", "action": "bad_action", "bind": "state.bad"},
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    ran_sources = {r["source"] for r in result["ran"]}
+    err_sources = {e["source"] for e in result["errors"]}
+    assert ran_sources == {"good"}
+    assert err_sources == {"bad"}
+
+
+async def test_connector_backend_missing_connector_name_is_bad_source(monkeypatch):
+    """A connector backend with no connector_name fails the source cleanly —
+    get_action_trust / execute are never reached."""
+
+    async def _boom(*a, **k):
+        raise AssertionError("connector service must not be reached")
+
+    _patch_connector_service(monkeypatch, trust=_boom, execute=_boom)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "list", "bind": "state.s"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name=None,  # backend is connector but names no connector
+    )
+    assert result["ran"] == []
+    assert result["errors"][0]["code"] == "bad_source"
+
+
+async def test_connector_backend_skips_base_url_ssrf_validation(monkeypatch):
+    """A connector backend has an empty base_url — run_sources must NOT run the
+    SSRF base-URL validation (which would reject "") for a connector backend."""
+
+    async def _trust(name, action):
+        return _FakeTrust(is_read=True, trust_level="auto")
+
+    async def _execute(workspace_id, name, body, *, user_id=None):
+        return _FakeExecResp(success=True, data={"ok": True})
+
+    _patch_connector_service(monkeypatch, trust=_trust, execute=_execute)
+
+    spec = {"sources": {"s": {"type": "connector", "action": "ping", "bind": "state.s"}}}
+    # base_url="" would raise ValueError under validate_external_url_strict on
+    # the http path; the connector path must skip that validation entirely.
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url="",
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+        backend_type="connector",
+        connector_name="snctm-admin",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == {"ok": True}
+
+
+async def test_http_backend_unchanged_with_no_transform(monkeypatch):
+    """Regression: the http path with no transform behaves byte-for-byte as
+    before — the connector-backend / transform additions are transparent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": 1, "title": "PR one"}])
+
+    _mock_client_patch(monkeypatch, handler)
+
+    spec = {"sources": {"prs": {"method": "GET", "path": "/pulls", "bind": "state.prs"}}}
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="runner-1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-test",
+        # backend_type defaults to "http" — explicitly here for clarity.
+        backend_type="http",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == [{"id": 1, "title": "PR one"}]
+
+
+async def test_http_backend_applies_transform(monkeypatch):
+    """An http source can ALSO carry a transform — it shapes the parsed JSON
+    before binding, exactly like the connector path."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"data": {"rows": [{"name": "Ada", "state": "open"}]}},
+        )
+
+    _mock_client_patch(monkeypatch, handler)
+
+    spec = {
+        "sources": {
+            "items": {
+                "method": "GET",
+                "path": "/list",
+                "bind": "state.items",
+                "transform": {
+                    "select": "data.rows",
+                    "map": [
+                        {"to": "label", "from": "name"},
+                        {
+                            "to": "variant",
+                            "from": "state",
+                            "values": {"open": "success"},
+                            "default": "muted",
+                        },
+                    ],
+                },
+            }
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+    assert result["errors"] == []
+    assert result["ran"][0]["value"] == [{"label": "Ada", "variant": "success"}]
+
+
+async def test_bad_transform_is_per_source_error(monkeypatch):
+    """A transform outside the v1 grammar fails THAT source cleanly with a
+    `bad_transform` code — it does not crash the run or a sibling."""
+    _mock_client_patch(monkeypatch, lambda r: httpx.Response(200, json={"x": 1}))
+
+    spec = {
+        "sources": {
+            "broken": {
+                "method": "GET",
+                "path": "/x",
+                "bind": "state.broken",
+                "transform": {"map": [{"to": "a"}]},  # field needs from/const
+            },
+            "fine": {"method": "GET", "path": "/y", "bind": "state.fine"},
+        }
+    }
+    result = await source_executor.run_sources(
+        pocket_id="p1",
+        user_id="u1",
+        ripple_spec=spec,
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        workspace_id="ws-1",
+    )
+    err_by_source = {e["source"]: e for e in result["errors"]}
+    ran_sources = {r["source"] for r in result["ran"]}
+    assert "broken" in err_by_source
+    assert err_by_source["broken"]["code"] == "bad_transform"
+    assert ran_sources == {"fine"}

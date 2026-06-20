@@ -35,6 +35,19 @@
 # returns `code:"instinct_pending"` with the resolved write under `_park`
 # and makes NO call. `from_instinct=True` skips the gate. A successful
 # write result carries the binding's `outcome`.
+#
+# Updated: 2026-06-10 (W2a — deny-by-default Instinct governance) —
+# `ActionBinding.requires_instinct` now DEFAULTS to True, so a plain
+# agent-authored binding PARKS instead of firing. The shared
+# `_write_action()` helper marks its binding EXPLICITLY EXEMPT by default
+# (`instinct_exempt=True, requires_instinct=False`) so the legacy fire-path
+# tests (allowlist / SSRF / rate-limit / idempotency / HTTP call) still
+# reach gate 8; tests that exercise the gate pass `exempt=False`. The old
+# `test_action_binding_defaults_governance_fields_off` is now
+# `..._on` (default flipped). A new W2a block at the bottom pins:
+# plain-agent park, explicitly-exempt flow, the `instinct_exempt` +
+# `instinct_policy` rejection, and the template-gate-cleared interaction
+# (a `proceed` verdict from gate 1.5 must not be re-parked by gate 7).
 
 from __future__ import annotations
 
@@ -87,9 +100,26 @@ def _mock_client_patch(monkeypatch, handler):
     monkeypatch.setattr(action_executor.httpx, "AsyncClient", _factory)
 
 
-def _write_action(method: str = "POST", path: str = "/leases/42/renew") -> dict:
-    """A minimal, well-formed raw action dict."""
-    return {"kind": "write_binding", "method": method, "path": path, "params": {}}
+def _write_action(
+    method: str = "POST", path: str = "/leases/42/renew", *, exempt: bool = True
+) -> dict:
+    """A minimal, well-formed raw action dict.
+
+    W2a — deny-by-default: ``ActionBinding.requires_instinct`` now defaults
+    to ``True``, so a plain binding PARKS at the Instinct gate instead of
+    firing. The fire-path tests in this file (allowlist, SSRF, rate-limit,
+    idempotency, the HTTP call) want a binding that actually reaches gate 8,
+    so the helper marks the binding EXPLICITLY EXEMPT by default
+    (``instinct_exempt=True, requires_instinct=False`` — the canonical
+    exempt shape). Tests that exercise the gate itself pass ``exempt=False``
+    to build a governed (deny-by-default) binding. New W2a tests at the
+    bottom of this file pin the deny-by-default behavior directly.
+    """
+    raw: dict = {"kind": "write_binding", "method": method, "path": path, "params": {}}
+    if exempt:
+        raw["instinct_exempt"] = True
+        raw["requires_instinct"] = False
+    return raw
 
 
 def _allow(method: str = "POST", pattern: str = "/leases/*/renew") -> list[dict]:
@@ -117,7 +147,7 @@ def test_action_binding_declares_m2b_governance_fields():
     """`requires_instinct` / `instinct_policy` / `outcome` are now REAL
     declared fields on ActionBinding (RFC 05 M2b.1) — parsed, not dropped."""
     raw = {
-        **_write_action(),
+        **_write_action(exempt=False),
         "requires_instinct": True,
         "instinct_policy": "approve_per_row",
         "outcome": "renewal_completed",
@@ -131,10 +161,15 @@ def test_action_binding_declares_m2b_governance_fields():
     assert dumped["outcome"] == "renewal_completed"
 
 
-def test_action_binding_defaults_governance_fields_off():
-    """A plain binding has the gate off, no policy, no outcome."""
-    binding = ActionBinding.model_validate(_write_action())
-    assert binding.requires_instinct is False
+def test_action_binding_defaults_governance_fields_on():
+    """W2a — DENY-BY-DEFAULT. A plain agent-authored binding (one that
+    sets NEITHER `requires_instinct` NOR `instinct_exempt`) now defaults
+    the gate ON: `requires_instinct` is True, `instinct_exempt` is False,
+    no policy, no outcome. This is the core of the W2a flip — an agent that
+    never sets the field no longer bypasses the approval gate."""
+    binding = ActionBinding.model_validate(_write_action(exempt=False))
+    assert binding.requires_instinct is True
+    assert binding.instinct_exempt is False
     assert binding.instinct_policy is None
     assert binding.outcome is None
 
@@ -143,7 +178,13 @@ def test_action_binding_policy_without_gate_is_invalid():
     """An `instinct_policy` set without `requires_instinct` is a
     misconfiguration — the model_validator rejects the binding."""
     with pytest.raises(Exception):
-        ActionBinding.model_validate({**_write_action(), "instinct_policy": "approve_per_row"})
+        ActionBinding.model_validate(
+            {
+                **_write_action(exempt=False),
+                "requires_instinct": False,
+                "instinct_policy": "approve_per_row",
+            }
+        )
 
 
 def test_action_binding_rejects_non_write_verb():
@@ -168,7 +209,7 @@ async def test_instinct_required_parks_before_any_call(monkeypatch):
 
     _mock_client_patch(monkeypatch, handler)
 
-    raw = {**_write_action(), "requires_instinct": True, "outcome": "renewal_completed"}
+    raw = {**_write_action(exempt=False), "requires_instinct": True, "outcome": "renewal_completed"}
     result = await run_action(
         workspace_id="w1",
         pocket_id="p1",
@@ -211,7 +252,10 @@ async def test_instinct_required_allowlist_miss_rejected_not_parked(monkeypatch)
         pocket_id="p1",
         user_id="u1",
         action="del",
-        raw_action={**_write_action("POST", "/users/9/delete"), "requires_instinct": True},
+        raw_action={
+            **_write_action("POST", "/users/9/delete", exempt=False),
+            "requires_instinct": True,
+        },
         path="/users/9/delete",
         params={},
         base_url=BASE,
@@ -237,7 +281,7 @@ async def test_from_instinct_skips_the_park_gate(monkeypatch):
         return httpx.Response(200, json={"renewed": True})
 
     _mock_client_patch(monkeypatch, handler)
-    raw = {**_write_action(), "requires_instinct": True}
+    raw = {**_write_action(exempt=False), "requires_instinct": True}
     result = await run_action(
         workspace_id="w1",
         pocket_id="p1",
@@ -1013,3 +1057,227 @@ async def test_delete_with_params_still_sends_body(monkeypatch):
     )
     assert result["ok"] is True
     assert seen["body"] == {"reason": "expired"}
+
+
+# ---------------------------------------------------------------------------
+# W2a — deny-by-default Instinct governance
+# ---------------------------------------------------------------------------
+# These pin the W2a flip directly: a plain agent-authored binding (sets
+# neither `requires_instinct` nor `instinct_exempt`) now PARKS at the gate
+# instead of firing, while an EXPLICITLY exempt binding still flows. The
+# helpers above default `_write_action(exempt=True)` for the legacy
+# fire-path tests; here we build the governed shapes by hand so the intent
+# is unambiguous.
+
+
+def _plain_agent_action(method: str = "POST", path: str = "/leases/42/renew") -> dict:
+    """A binding exactly as an AGENT authors it — no governance fields set.
+
+    Under deny-by-default this must PARK: `requires_instinct` defaults True,
+    `instinct_exempt` defaults False.
+    """
+    return {"kind": "write_binding", "method": method, "path": path, "params": {}}
+
+
+async def test_w2a_plain_agent_action_parks_instead_of_firing(monkeypatch):
+    """W2a — DENY-BY-DEFAULT. A plain agent-authored binding (no governance
+    fields) now PARKS: `run_action` returns `code:"instinct_pending"` with
+    the resolved write under `_park` and makes NO HTTP call. This is the
+    bypass W2a closes — before the flip this binding fired directly."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={})
+
+    _mock_client_patch(monkeypatch, handler)
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=_plain_agent_action(),
+        path="/leases/42/renew",
+        params={"rent": 2000},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow(),
+    )
+    assert result["ok"] is True
+    assert result["code"] == "instinct_pending"
+    assert called["hit"] is False
+    # The resolved write is parked for the bridge to propose.
+    assert result["_park"]["action"] == "mark_renewed"
+    assert result["_park"]["path"] == "/leases/42/renew"
+
+
+async def test_w2a_explicitly_exempt_action_still_flows(monkeypatch):
+    """W2a — an EXPLICITLY exempt binding (`instinct_exempt=True,
+    requires_instinct=False`) is the only author-time opt-out and still
+    fires directly. The exemption is declarative (a persisted spec field),
+    not a silent code-path bypass."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={"renewed": True})
+
+    _mock_client_patch(monkeypatch, handler)
+    raw = {
+        **_plain_agent_action(),
+        "instinct_exempt": True,
+        "requires_instinct": False,
+    }
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=raw,
+        path="/leases/42/renew",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow(),
+    )
+    assert result["ok"] is True
+    assert result.get("code") != "instinct_pending"
+    assert result["response"] == {"renewed": True}
+    assert called["hit"] is True
+
+
+def test_w2a_exempt_with_policy_is_invalid():
+    """W2a — `instinct_exempt` cannot coexist with an `instinct_policy`:
+    exempt means "no gate", a policy means "gate this way". The
+    model_validator rejects the contradiction at parse time."""
+    with pytest.raises(Exception):
+        ActionBinding.model_validate(
+            {
+                **_plain_agent_action(),
+                "instinct_exempt": True,
+                "requires_instinct": False,
+                "instinct_policy": "approve_per_row",
+            }
+        )
+
+
+def test_w2a_canonical_exempt_shape_parses():
+    """The canonical exempt shape `{instinct_exempt: True,
+    requires_instinct: False}` parses cleanly and reports exempt."""
+    binding = ActionBinding.model_validate(
+        {**_plain_agent_action(), "instinct_exempt": True, "requires_instinct": False}
+    )
+    assert binding.instinct_exempt is True
+    assert binding.requires_instinct is False
+
+
+async def test_w2a_template_gate_proceed_fires_despite_default_on(monkeypatch):
+    """W2a — when the template-level CEL gate (1.5) runs and returns
+    `proceed`, that verdict is an explicit, auditable adjudication of this
+    write. The binding-level deny-by-default gate (gate 7) must NOT re-park
+    it — otherwise the temporal sweeper / bulk fan-out (both thread a
+    template with `from_instinct=False`) would silently double-gate their
+    already-cleared rows. A plain agent binding (default-on gate) fires
+    when the template gate cleared it."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={"renewed": True})
+
+    _mock_client_patch(monkeypatch, handler)
+
+    # Patch `gate_action` on the REAL dispatch module so we don't need a
+    # Beanie / OSS template load — the executor only branches on
+    # `gate.next_step`. We patch the function (not swap the module in
+    # `sys.modules`) because the executor reaches it as a package attribute
+    # via `from ... import instinct_dispatch`, which resolves the already-
+    # imported real module regardless of a `sys.modules` swap.
+    from pocketpaw_ee.cloud.pockets import instinct_dispatch
+
+    class _FakeDecision:
+        reason = "no_rule_matched"
+
+    class _FakeGate:
+        next_step = "proceed"
+        decision = _FakeDecision()
+        approval_id = None
+
+    async def _fake_gate_action(**_kwargs):
+        return _FakeGate()
+
+    monkeypatch.setattr(instinct_dispatch, "gate_action", _fake_gate_action)
+
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=_plain_agent_action(),  # default-on gate
+        path="/leases/42/renew",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow(),
+        template=object(),  # non-None triggers gate 1.5; the fake ignores it
+    )
+    assert result["ok"] is True
+    assert result.get("code") != "instinct_pending"
+    assert called["hit"] is True
+
+
+async def test_w2a_template_gate_pending_does_not_also_park(monkeypatch):
+    """W2a — when the template gate escalates to approval (gate 1.5 →
+    `pending_approval`), the executor returns the gate-1.5 pending sentinel
+    (carrying `approval_id`) and never reaches gate 7. Exactly ONE park
+    happens, with the approval id the gate persisted."""
+    called = {"hit": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["hit"] = True
+        return httpx.Response(200, json={})
+
+    _mock_client_patch(monkeypatch, handler)
+
+    from pocketpaw_ee.cloud.pockets import instinct_dispatch
+
+    class _FakeDecision:
+        reason = "needs_human"
+
+    class _FakeGate:
+        next_step = "pending_approval"
+        decision = _FakeDecision()
+        approval_id = "appr-123"
+
+    async def _fake_gate_action(**_kwargs):
+        return _FakeGate()
+
+    monkeypatch.setattr(instinct_dispatch, "gate_action", _fake_gate_action)
+
+    result = await run_action(
+        workspace_id="w1",
+        pocket_id="p1",
+        user_id="u1",
+        action="mark_renewed",
+        raw_action=_plain_agent_action(),
+        path="/leases/42/renew",
+        params={},
+        base_url=BASE,
+        auth_type="none",
+        auth_header=None,
+        token="",
+        allowed_writes=_allow(),
+        template=object(),
+    )
+    assert result["ok"] is True
+    assert result["code"] == "instinct_pending"
+    # The gate-1.5 escalation carries the approval id it persisted; the
+    # router surfaces this as `proposed_action_id` without re-proposing.
+    assert result["approval_id"] == "appr-123"
+    assert called["hit"] is False

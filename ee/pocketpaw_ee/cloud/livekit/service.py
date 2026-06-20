@@ -23,7 +23,14 @@ from livekit.protocol.room import (
 )
 
 from pocketpaw_ee.cloud._core.realtime.emit import emit
-from pocketpaw_ee.cloud._core.realtime.events import CallEnded, CallNotesPosted, CallStarted
+from pocketpaw_ee.cloud._core.realtime.events import (
+    CallEnded,
+    CallNotesPosted,
+    CallStarted,
+    MessageNew,
+)
+from pocketpaw_ee.cloud.models.meeting import Meeting as MeetingDoc
+from pocketpaw_ee.cloud.models.meeting import MeetingTranscript
 
 logger = logging.getLogger(__name__)
 
@@ -108,16 +115,16 @@ class _SubprocessAgentRef:
         pass
 
     async def stop(self) -> None:
-        """Send SIGTERM and wait up to 10 s for graceful exit."""
+        """Send SIGTERM and wait up to 30 s for graceful exit."""
         if self._process.returncode is not None:
             return  # already terminated
         try:
             self._process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=10)
+                await asyncio.wait_for(self._process.wait(), timeout=30)
             except TimeoutError:
                 logger.warning(
-                    "Agent subprocess for room %s did not exit in 10s, killing",
+                    "Agent subprocess for room %s did not exit in 30s, killing",
                     self.room_name,
                 )
                 self._process.kill()
@@ -234,6 +241,7 @@ async def _collect_agent_notes(
 async def _reap_agent_process(
     group_id: str,
     proc: asyncio.subprocess.Process,
+    workspace_id: str = "",
 ) -> None:
     """Wait for an agent subprocess to finish, then clean up the registry.
 
@@ -278,7 +286,9 @@ async def _reap_agent_process(
                 summary=payload.get("summary", "Call ended."),
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
                 duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
             )
             logger.info("Posted meeting notes for group %s from agent payload", group_id)
         except Exception:
@@ -522,7 +532,11 @@ async def get_recording_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-async def create_room(group_id: str) -> dict[str, Any]:
+async def create_room(
+    group_id: str,
+    workspace_id: str = "",
+    user_id: str = "",
+) -> dict[str, Any]:
     """Create a LiveKit room for a group call.
 
     Returns room metadata including the room name and the admin token.
@@ -530,7 +544,9 @@ async def create_room(group_id: str) -> dict[str, Any]:
     Automatically starts the meeting notes agent for this room.
 
     The returned dict includes an ``is_new`` boolean indicating whether
-    the room was just created or already existed.
+    the room was just created or already existed. When a new room is
+    created, a ``Meeting`` document is also persisted so the call
+    appears in the scheduled meetings sidebar as "Live".
     """
     _ensure_configured()
 
@@ -556,6 +572,47 @@ async def create_room(group_id: str) -> dict[str, Any]:
             is_new = True
         else:
             logger.info("LiveKit room %s already exists for group %s", room_name, group_id)
+
+    # Persist a Meeting document when a new room is created so the
+    # call shows up in the scheduled meetings sidebar as "Live".
+    if is_new and workspace_id:
+        try:
+            now = datetime.now(UTC)
+            meeting = MeetingDoc(
+                workspace=workspace_id,
+                source="livekit",
+                provider=None,
+                provider_meeting_id=room_name,
+                title="Instant call",
+                join_url="",
+                scheduled_start=now,
+                scheduled_end=None,
+                actual_start=now,
+                status="in_progress",
+                participants=[],
+                recording_file_ids=[],
+                raw_provider_payload={"group_id": group_id},
+                created_by_user_id=user_id or None,
+            )
+            await meeting.insert()
+            logger.info("Created Meeting doc for instant call in group %s", group_id)
+
+            # Emit meeting.started so other clients pick it up
+            from pocketpaw_ee.cloud.meetings.events import MeetingStarted
+
+            await emit(
+                MeetingStarted(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "group_id": group_id,
+                    }
+                )
+            )
+            logger.info("Emitted meeting.started for instant call in group %s", group_id)
+        except Exception as exc:
+            logger.warning("Failed to create Meeting doc for instant call: %s", exc)
 
     # Generate a subscriber-only token for the call bot (no agent flag
     # so it auto-subscribes to remote tracks for transcription).
@@ -586,7 +643,7 @@ async def create_room(group_id: str) -> dict[str, Any]:
 
         # Background task: wait for the subprocess to finish, then clean
         # up the registry so we don't leak agent references.
-        asyncio.create_task(_reap_agent_process(group_id, proc))
+        asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
 
         logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
 
@@ -635,11 +692,13 @@ async def generate_participant_token(
     )
 
 
-async def end_room(group_id: str) -> dict[str, Any]:
+async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
     """End an active call by deleting the LiveKit room.
 
     When the room is deleted, all participants are disconnected and the
     call bot's cleanup logic (posting meeting notes) is triggered.
+    Also transitions the associated Meeting document to ``ended`` so
+    the call shows as "Over" in the scheduled meetings sidebar.
     """
     _ensure_configured()
 
@@ -671,7 +730,9 @@ async def end_room(group_id: str) -> dict[str, Any]:
                 summary=payload.get("summary", "Call ended."),
                 action_items=payload.get("action_items", []),
                 participants=payload.get("participants", []),
+                participant_map=payload.get("participant_map", None),
                 duration_seconds=payload.get("duration_seconds", 0),
+                workspace_id=workspace_id,
             )
             logger.info("Posted meeting notes for group %s (end_room)", group_id)
         except Exception as exc:
@@ -691,6 +752,24 @@ async def end_room(group_id: str) -> dict[str, Any]:
                 raise
 
     await emit(CallEnded(data={"group_id": group_id, "room_name": room_name}))
+
+    # Transition the Meeting doc to ended so the call shows as "Over".
+    if workspace_id:
+        try:
+            now = datetime.now(UTC)
+            meeting = await MeetingDoc.find_one(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+                MeetingDoc.status == "in_progress",
+            )
+            if meeting is not None:
+                meeting.status = "ended"
+                meeting.actual_end = now
+                await meeting.save()
+                logger.info("Marked Meeting %s as ended for group %s", meeting.id, group_id)
+        except Exception as exc:
+            logger.warning("Failed to end Meeting for group %s: %s", group_id, exc)
 
     return {
         "room_name": room_name,
@@ -754,22 +833,43 @@ async def post_meeting_notes_to_group(
     action_items: list[str],
     participants: list[str],
     duration_seconds: int,
+    workspace_id: str = "",
+    participant_map: list[dict[str, str]] | None = None,
 ) -> None:
     """Post meeting notes to a group after a call ends.
 
     Creates a system message directly (bypassing membership check since the
     call-bot is not a group member) and emits a real-time event so all
-    group members see it.
+    group members see it. Also stores the transcript as a file and creates
+    a MeetingTranscript record so the meeting detail in /meetings can
+    display the transcript.
     """
+    # Resolve participant identities to display names using participant_map
+    # (which maps identity → name as sent by the agent).
+    name_map: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "") or pid
+            if pid:
+                name_map[pid] = pname
+    participant_names = [name_map.get(p, p) for p in participants]
+
     lines = [
         "📋 **Meeting Notes**",
         "",
         f"**Duration:** {_format_duration(duration_seconds)}",
-        f"**Participants:** {', '.join(participants) if participants else 'N/A'}",
+        f"**Participants:** {', '.join(participant_names) if participant_names else 'N/A'}",
         "",
-        "**Summary:**",
-        summary,
     ]
+
+    # If the summary is rich markdown (has its own headings), use it directly.
+    # Otherwise, wrap it in a "**Summary:**" label.
+    if summary.strip().startswith("## "):
+        lines.append(summary)
+    else:
+        lines.append("**Summary:**")
+        lines.append(summary)
 
     if action_items:
         lines.append("")
@@ -824,10 +924,104 @@ async def post_meeting_notes_to_group(
                 }
             )
         )
+        await emit(
+            MessageNew(
+                data={
+                    "group": group_id,
+                    "group_id": group_id,
+                    "sender": CALL_BOT_USER_ID,
+                    "senderName": "Meeting Notes",
+                    "senderType": "user",
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "message_id": domain_msg.id,
+                    "_id": domain_msg.id,
+                    "content": content,
+                    "mentions": [],
+                }
+            )
+        )
         logger.info("Posted meeting notes to group %s (message %s)", group_id, domain_msg.id)
     except Exception as exc:
         logger.error("Failed to post meeting notes to group %s: %s", group_id, exc)
         raise
+
+    # Store transcript as a file and create MeetingTranscript doc.
+    if workspace_id and transcript:
+        try:
+            from pocketpaw_ee.cloud.meetings.events import MeetingTranscriptReady
+            from pocketpaw_ee.cloud.uploads.service import write_text_file
+
+            room_name = room_name_for_group(group_id)
+            meeting = await MeetingDoc.find_one(
+                MeetingDoc.workspace == workspace_id,
+                MeetingDoc.provider_meeting_id == room_name,
+                MeetingDoc.source == "livekit",
+            )
+            if meeting is None:
+                return
+
+            safe_title = (meeting.title or "call").replace("/", "-")[:80]
+            file_rec = await write_text_file(
+                workspace_id=workspace_id,
+                owner_id=meeting.created_by_user_id or "system",
+                folder_path="/transcripts",
+                filename=f"{safe_title}-transcript.vtt",
+                content=transcript,
+                mime="text/vtt",
+            )
+
+            import re as _re
+
+            cue_count = transcript.count("\n--> ") + transcript.count(" --> ")
+            # For plain-text transcripts (no VTT cues), fall back to line count
+            entry_count = max(cue_count, 1) if transcript.strip() else 0
+            speaker_count = len({m.group(1) for m in _re.finditer(r"<v\s+([^>]+)>", transcript)})
+
+            transcript_doc = MeetingTranscript(
+                workspace=workspace_id,
+                meeting_id=str(meeting.id),
+                provider_transcript_id=room_name,
+                file_id=file_rec.id,
+                entry_count=entry_count,
+                speaker_count=speaker_count,
+                language=None,
+                fetched_at=datetime.now(UTC),
+                indexed_in_kb=False,
+                kb_indexed_version=1,
+            )
+            await transcript_doc.insert()
+
+            await emit(
+                MeetingTranscriptReady(
+                    data={
+                        "workspace_id": workspace_id,
+                        "meeting_id": str(meeting.id),
+                        "source": "livekit",
+                        "file_id": file_rec.id,
+                        "entry_count": entry_count,
+                        "speaker_count": speaker_count,
+                        "language": None,
+                    }
+                )
+            )
+            logger.info("Stored transcript for meeting %s (%d cues)", meeting.id, cue_count)
+        except Exception as exc:
+            logger.warning("Failed to store transcript: %s", exc)
+
+    # ── Create Mission Control tasks from action items ──
+    # Prefer the structured action_items list (already extracted by the LLM)
+    # over re-parsing the markdown summary.
+    if workspace_id and (action_items or summary):
+        try:
+            await _create_tasks_from_meeting_notes(
+                workspace_id=workspace_id,
+                group_id=group_id,
+                action_items=action_items,
+                summary=summary,
+                participant_map=participant_map,
+            )
+        except Exception as exc:
+            logger.warning("Failed to create tasks from meeting notes: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -896,3 +1090,151 @@ def _format_joined_at(joined_at: Any) -> str | None:
     if isinstance(joined_at, int | float):
         return datetime.fromtimestamp(joined_at, tz=UTC).isoformat()
     return str(joined_at)
+
+
+# ---------------------------------------------------------------------------
+# Meeting notes → Mission Control tasks
+# ---------------------------------------------------------------------------
+
+
+async def _create_tasks_from_meeting_notes(
+    workspace_id: str,
+    group_id: str,
+    action_items: list[str] | None = None,
+    summary: str = "",
+    participant_map: list[dict[str, str]] | None = None,
+) -> None:
+    """Create Mission Control tasks from meeting notes action items.
+
+    Prefers the structured ``action_items`` list (already extracted by the
+    LLM), falling back to parsing ``## ✅ Action Items`` from the markdown
+    ``summary`` for backwards compatibility.
+    """
+    items: list[str] = []
+    if action_items:
+        items = action_items
+    elif summary:
+        items = _extract_action_items_from_markdown(summary)
+
+    if not items:
+        logger.info("No action items found in meeting notes for group %s", group_id)
+        return
+
+    # Build name→id lookup from participant_map (sent by agent, no DB needed)
+    name_to_id: dict[str, str] = {}
+    if participant_map:
+        for p in participant_map:
+            pid = p.get("identity", "")
+            pname = p.get("name", "")
+            if pid and pname:
+                name_to_id[pname.lower()] = pid
+                first_word = pname.split(" ", 1)[0].lower()
+                if first_word not in name_to_id:
+                    name_to_id[first_word] = pid
+
+    from datetime import UTC, datetime
+
+    from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+    from pocketpaw_ee.cloud.tasks.dto import AssigneeDTO, CreateTaskRequest, SourceDTO
+
+    ctx = RequestContext(
+        user_id=CALL_BOT_USER_ID,
+        workspace_id=workspace_id,
+        request_id=f"meeting-notes-{group_id}",
+        scope=ScopeKind.NONE,
+        started_at=datetime.now(UTC),
+    )
+
+    created = 0
+    for item in items:
+        try:
+            # Parse @Name prefix from the action item, e.g. "@Admin: do X"
+            assignee_name, description = _parse_action_item_assignee(item)
+
+            # Resolve the @mention name to a user ID using participant_map.
+            q = assignee_name.strip().lower()
+            assignee_id = name_to_id.get(q)
+            if not assignee_id and participant_map:
+                # Check if mention is a substring of a participant name
+                # or if a participant name is a substring of the mention
+                for p in participant_map:
+                    pname = (p.get("name", "") or "").lower()
+                    if q in pname or pname in q:
+                        assignee_id = p.get("identity")
+                        break
+            assignee_id = assignee_id or "__unassigned__"
+
+            await tasks_service.agent_create_task(
+                ctx,
+                CreateTaskRequest(
+                    title=(description or item)[:200],
+                    summary=f"(from meeting notes, group {group_id})",
+                    assignee=AssigneeDTO(
+                        kind="human",
+                        id=assignee_id,
+                        name=assignee_name,
+                    ),
+                    source=SourceDTO(
+                        type="meeting_notes",
+                        ref_id=group_id,
+                        metadata={"group_id": group_id},
+                    ),
+                ),
+            )
+            created += 1
+        except Exception as exc:
+            logger.warning("Failed to create task for action item %r: %s", item, exc)
+
+    logger.info("Created %d tasks from meeting notes for group %s", created, group_id)
+
+
+def _parse_action_item_assignee(item: str) -> tuple[str, str]:
+    """Extract ``@Name`` prefix from an action item, returning (assignee, rest)."""
+    import re
+
+    m = re.match(r"@(\S[\w\s]*?)\s*[:—\-]\s*(.*)", item.strip())
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return "__unassigned__", item
+
+
+def _extract_action_items_from_markdown(markdown: str) -> list[str]:
+    """Extract bullet-point action items from the ## ✅ Action Items section.
+
+    Looks for a heading matching "Action Items" (with optional emoji prefix)
+    and collects all following list items until the next heading or end of text.
+    """
+    import re
+
+    lines = markdown.split("\n")
+    in_section = False
+    items: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect the start of the Action Items section
+        if (
+            re.match(r"^##\s*[✅📋📌⚠️🔜❓⚙️]*\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^##\s*✅\s*Action\s*Items", stripped, re.IGNORECASE)
+            or re.match(r"^##\s*Action\s*Items", stripped, re.IGNORECASE)
+        ):
+            in_section = True
+            continue
+
+        # If we hit another heading, stop
+        if in_section and stripped.startswith("## "):
+            break
+
+        if in_section:
+            # Match bullet points: -, *, or numbered 1.
+            m = re.match(r"\s*[-*]\s+(.*)", stripped)
+            if not m:
+                m = re.match(r"\s*\d+[.)]\s+(.*)", stripped)
+            if m:
+                text = m.group(1).strip()
+                if text and text != "None" and not text.startswith("```"):
+                    items.append(text)
+
+    return items

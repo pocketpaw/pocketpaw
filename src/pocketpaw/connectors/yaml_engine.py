@@ -1,6 +1,23 @@
 # DirectREST YAML engine — reads connector YAML definitions and executes REST actions.
 # Created: 2026-03-27 — Primary adapter. One YAML per service.
 # Updated: 2026-03-28 — Real HTTP execution via httpx (was placeholder).
+# Updated: 2026-06-07 (M3 connector→skill auto-authoring) — ConnectorDef grows an
+#   optional ``surface_profile`` block (skill / allow_tools / deny_tools) parsed
+#   from the YAML. It is the per-connector mapping source for deriving a pocket's
+#   PocketSurfaceProfile when the connector is bound to a pocket. Backward-compat:
+#   connectors with no block parse with ``surface_profile=None``.
+# Updated: 2026-06-08 — Added `senses: list[str]` to ConnectorDef + parse-time
+#   validation via senses.validate_sense_id (Sense tier chunk 1). Unknown paw.*
+#   ids fail loudly; missing `senses:` key is backward compatible ([]).
+# Updated: 2026-06-11 — Cookie/session auth + a persistent HTTP client.
+#   _build_auth_headers gains two additive methods: `cookie` (emits a Cookie:
+#   header from a declared credential, name set via auth.credential) and
+#   `header` (emits an arbitrary header named by auth.header from a credential —
+#   the escape hatch for APIs whose key is not a Bearer token, fixing the
+#   api_key-always-Bearer trap without touching api_key). execute() now reuses a
+#   lazily-built httpx.AsyncClient per adapter instance (connection pooling +
+#   cookie jar) instead of opening a fresh client per call; disconnect() closes
+#   it. Existing auth methods, timeouts, and error mapping are unchanged.
 
 from __future__ import annotations
 
@@ -20,6 +37,28 @@ from pocketpaw.connectors.protocol import (
 )
 
 
+@dataclass(frozen=True)
+class ConnectorSurfaceProfile:
+    """The surface-profile contribution a connector makes to a pocket.
+
+    Parsed from the OPTIONAL ``surface_profile:`` block on a connector YAML.
+    When a connector is bound to a pocket (scope=pocket), the cloud derivation
+    helper folds every enabled connector's ``ConnectorSurfaceProfile`` into the
+    pocket's ``PocketSurfaceProfile`` (skill_names + tool allow/deny). A
+    connector with no block contributes nothing (``ConnectorDef.surface_profile``
+    is ``None``).
+
+    Fields (all optional):
+      * ``skill`` — a single skill name to load for rooms with this connector.
+      * ``allow_tools`` — tool-id glob/patterns to add to the SDK allowlist.
+      * ``deny_tools`` — tool-id glob/patterns to deny.
+    """
+
+    skill: str | None = None
+    allow_tools: tuple[str, ...] = field(default_factory=tuple)
+    deny_tools: tuple[str, ...] = field(default_factory=tuple)
+
+
 @dataclass
 class ConnectorDef:
     """Parsed connector YAML definition."""
@@ -31,6 +70,33 @@ class ConnectorDef:
     auth: dict[str, Any] = field(default_factory=dict)
     actions: list[dict[str, Any]] = field(default_factory=list)
     sync: dict[str, Any] = field(default_factory=dict)
+    # M3 — optional connector→skill/tool mapping. ``None`` when the YAML has
+    # no ``surface_profile:`` block (the common case / backward-compat).
+    surface_profile: ConnectorSurfaceProfile | None = None
+    # Sense tier — the provider-agnostic capabilities this connector fills
+    # (e.g. ["paw.email.v1"]). Empty when the YAML has no ``senses:`` key.
+    senses: list[str] = field(default_factory=list)
+
+
+def _parse_surface_profile(raw: Any) -> ConnectorSurfaceProfile | None:
+    """Parse the optional ``surface_profile:`` YAML block.
+
+    Returns ``None`` when the block is absent or not a mapping, so connectors
+    without the block stay byte-identical to pre-M3 behavior. Tolerates a bare
+    string or a list for ``skill`` only by ignoring non-string values; the
+    canonical shape is a mapping with ``skill`` / ``allow_tools`` / ``deny_tools``.
+    """
+    if not isinstance(raw, dict):
+        return None
+    skill = raw.get("skill")
+    skill = skill if isinstance(skill, str) and skill else None
+    allow = raw.get("allow_tools") or []
+    deny = raw.get("deny_tools") or []
+    allow_tuple = tuple(str(t) for t in allow if t) if isinstance(allow, list) else ()
+    deny_tuple = tuple(str(t) for t in deny if t) if isinstance(deny, list) else ()
+    if skill is None and not allow_tuple and not deny_tuple:
+        return None
+    return ConnectorSurfaceProfile(skill=skill, allow_tools=allow_tuple, deny_tools=deny_tuple)
 
 
 def parse_connector_yaml(path: Path) -> ConnectorDef:
@@ -38,14 +104,32 @@ def parse_connector_yaml(path: Path) -> ConnectorDef:
     with open(path) as f:
         raw = yaml.safe_load(f)
 
+    name = raw.get("name", path.stem)
+
+    # Validate any declared senses at parse time. An unknown paw.* id must fail
+    # loudly with a message naming the connector + the bad id — this is the
+    # "no fragmentation of the core" rule (Sense tier chunk 1).
+    from pocketpaw.senses import SenseValidationError, validate_sense_id
+
+    senses = raw.get("senses", [])
+    for sense_id in senses:
+        try:
+            validate_sense_id(sense_id)
+        except SenseValidationError as e:
+            raise SenseValidationError(
+                f"connector {name!r} declares invalid sense {sense_id!r}: {e}"
+            ) from e
+
     return ConnectorDef(
-        name=raw.get("name", path.stem),
+        name=name,
         display_name=raw.get("display_name", raw.get("name", path.stem)),
         type=raw.get("type", "generic"),
         icon=raw.get("icon", "plug"),
         auth=raw.get("auth", {}),
         actions=raw.get("actions", []),
         sync=raw.get("sync", {}),
+        surface_profile=_parse_surface_profile(raw.get("surface_profile")),
+        senses=senses,
     )
 
 
@@ -62,6 +146,19 @@ class DirectRESTAdapter:
         self._def = definition
         self._credentials: dict[str, str] = {}
         self._connected = False
+        # Persistent HTTP client — built lazily on first execute() and reused
+        # across calls so connections pool and any Set-Cookie response is kept
+        # in the client's cookie jar for the next request. ``Any`` avoids a
+        # module-level httpx import (it stays inside execute()/_get_client).
+        self._client: Any | None = None
+
+    async def _get_client(self) -> Any:
+        """Return the per-adapter httpx.AsyncClient, building it on first use."""
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.AsyncClient(timeout=30.0)
+        return self._client
 
     @property
     def name(self) -> str:
@@ -102,6 +199,10 @@ class DirectRESTAdapter:
     async def disconnect(self, pocket_id: str) -> bool:
         self._credentials.clear()
         self._connected = False
+        # Close the pooled HTTP client (and drop the cookie jar) on disconnect.
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
         return True
 
     async def actions(self) -> list[ActionSchema]:
@@ -210,57 +311,59 @@ class DirectRESTAdapter:
             content_type = act_def.get("content_type", "")
             use_form = content_type == "form" or "stripe.com" in url
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                if method == "GET":
-                    resp = await client.get(url, params=query_params, headers=headers)
-                elif method == "POST":
-                    if use_form:
-                        resp = await client.post(
-                            url, data=body_data, params=query_params, headers=headers
-                        )
-                    else:
-                        resp = await client.post(
-                            url, json=body_data, params=query_params, headers=headers
-                        )
-                elif method == "PUT":
-                    if use_form:
-                        resp = await client.put(
-                            url, data=body_data, params=query_params, headers=headers
-                        )
-                    else:
-                        resp = await client.put(
-                            url, json=body_data, params=query_params, headers=headers
-                        )
-                elif method == "PATCH":
-                    if use_form:
-                        resp = await client.patch(
-                            url, data=body_data, params=query_params, headers=headers
-                        )
-                    else:
-                        resp = await client.patch(
-                            url, json=body_data, params=query_params, headers=headers
-                        )
-                elif method == "DELETE":
-                    resp = await client.delete(url, params=query_params, headers=headers)
+            # Reuse the per-adapter client: pooled connections + persistent
+            # cookie jar across calls. Closed in disconnect().
+            client = await self._get_client()
+            if method == "GET":
+                resp = await client.get(url, params=query_params, headers=headers)
+            elif method == "POST":
+                if use_form:
+                    resp = await client.post(
+                        url, data=body_data, params=query_params, headers=headers
+                    )
                 else:
-                    return ActionResult(success=False, error=f"Unsupported method: {method}")
-
-                resp.raise_for_status()
-                data = (
-                    resp.json()
-                    if resp.headers.get("content-type", "").startswith("application/json")
-                    else resp.text
-                )
-
-                # Count records — handle wrapped responses (Stripe: {data: [...]})
-                if isinstance(data, list):
-                    records = len(data)
-                elif isinstance(data, dict) and isinstance(data.get("data"), list):
-                    records = len(data["data"])
+                    resp = await client.post(
+                        url, json=body_data, params=query_params, headers=headers
+                    )
+            elif method == "PUT":
+                if use_form:
+                    resp = await client.put(
+                        url, data=body_data, params=query_params, headers=headers
+                    )
                 else:
-                    records = 1
+                    resp = await client.put(
+                        url, json=body_data, params=query_params, headers=headers
+                    )
+            elif method == "PATCH":
+                if use_form:
+                    resp = await client.patch(
+                        url, data=body_data, params=query_params, headers=headers
+                    )
+                else:
+                    resp = await client.patch(
+                        url, json=body_data, params=query_params, headers=headers
+                    )
+            elif method == "DELETE":
+                resp = await client.delete(url, params=query_params, headers=headers)
+            else:
+                return ActionResult(success=False, error=f"Unsupported method: {method}")
 
-                return ActionResult(success=True, data=data, records_affected=records)
+            resp.raise_for_status()
+            data = (
+                resp.json()
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else resp.text
+            )
+
+            # Count records — handle wrapped responses (Stripe: {data: [...]})
+            if isinstance(data, list):
+                records = len(data)
+            elif isinstance(data, dict) and isinstance(data.get("data"), list):
+                records = len(data["data"])
+            else:
+                records = 1
+
+            return ActionResult(success=True, data=data, records_affected=records)
 
         except httpx.HTTPStatusError as e:
             return ActionResult(
@@ -298,6 +401,33 @@ class DirectRESTAdapter:
             password = self._credentials.get("password", "")
             encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
             headers["Authorization"] = f"Basic {encoded}"
+        elif auth_method == "cookie":
+            # Session/cookie auth — emit a `Cookie:` header from a declared
+            # credential. The credential name comes from `auth.credential`,
+            # falling back to the first declared credential. The stored value
+            # is sent verbatim (e.g. "sessionid=abc" or a raw token).
+            cred_name = self._def.auth.get("credential")
+            if not cred_name:
+                creds = self._def.auth.get("credentials", [])
+                cred_name = creds[0]["name"] if creds else None
+            if cred_name:
+                value = self._credentials.get(cred_name, "")
+                if value:
+                    headers["Cookie"] = value
+        elif auth_method == "header":
+            # Custom-header auth — emit an arbitrary header (name from
+            # `auth.header`, value from the declared credential). This is the
+            # escape hatch for APIs whose key is NOT a Bearer token, so it
+            # avoids the api_key-always-Bearer trap without changing api_key.
+            header_name = self._def.auth.get("header")
+            cred_name = self._def.auth.get("credential")
+            if not cred_name:
+                creds = self._def.auth.get("credentials", [])
+                cred_name = creds[0]["name"] if creds else None
+            if header_name and cred_name:
+                value = self._credentials.get(cred_name, "")
+                if value:
+                    headers[header_name] = value
 
         return headers
 

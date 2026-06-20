@@ -1,5 +1,10 @@
 """Pockets domain — request/response schemas.
 
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``RunActionResponse``
+gained ``job_id``, set ONLY on a ``kind:"job"`` action dispatch
+(``code:"job_enqueued"``). It carries the WorkspaceJobDoc id the client polls
+via ``GET /workspaces/{ws}/jobs/{job_id}``; None on every other action path.
+
 Changes: Added agents, rippleSpec (aliased), and widgets fields to CreatePocketRequest
 so the frontend can pass the full pocket spec on creation instead of requiring
 separate follow-up calls.
@@ -63,6 +68,74 @@ When supplied on create, the service loads the named bundled template,
 compiles it, and merges the runtime-shaped dict into the pocket's
 ``rippleSpec`` (compile-on-install). Legacy callers that omit it see
 the same shape they always have.
+Updated: 2026-06-03 (feat/sites-landing-brain) — added the optional
+``pattern`` field on ``CreatePocketRequest`` / ``PocketResponse`` (and
+threaded onto the wire dict). Records the create-pocket layout pattern
+(``"landing"`` for marketing sites). Single-word key, so the wire form
+is the same snake_case ``"pattern"`` on both DTOs and the legacy wire
+dict. Legacy callers that omit it read back ``None``.
+Updated: 2026-06-04 (feat/sites-svelte-engine) — added the Paw Sites
+"Svelte track" fields ``engine`` (``"ripple"`` default | ``"svelte"``)
+and ``source`` (the SvelteKit source map, or ``None``) on
+``CreatePocketRequest`` / ``PocketResponse`` and threaded onto the wire
+dict. Both are single-word snake_case keys (no camelCase split), matching
+the read-back form. Defaults keep legacy callers reading ``engine="ripple"``,
+``source=None``.
+Updated: 2026-06-05 (feat/entity-pocket-profile-field, entity-rooms
+chunk ②) — added the optional ``surface_profile`` field (aliased
+``surfaceProfile`` on the wire) on ``CreatePocketRequest`` /
+``PocketResponse`` and threaded it onto the wire dict. Reuses the
+``PocketSurfaceProfile`` sub-model (all sub-fields optional, JSON-friendly
+lists) so the create/read DTOs share one shape with the persisted model.
+Defaults to ``None`` → legacy callers read back ``None`` with no migration.
+Updated: 2026-06-06 (feat/entity-pocket-profile-field) — added the
+``surface_profile`` field (aliased ``surfaceProfile``) to
+``UpdatePocketRequest`` so an existing pocket's override can be SET / CHANGED
+/ CLEARED (the auto-authoring write path). Three-way partial semantics live
+in ``pockets_service.update`` and key off ``model_fields_set``: present +
+non-null sets/replaces, explicit ``null`` clears, absent leaves it unchanged.
+Updated: 2026-06-07 (feat/entity-pocket-profile-field) — import
+``PocketSurfaceProfile`` from ``surface.domain`` (its new home) instead of
+``models.pocket``. The OSS-EE boundary contract forbids ``pockets.dto`` from
+importing ``models.*``; the class is a plain value object, not a Beanie doc,
+so sharing it via the leaf domain module keeps one shape without crossing the
+boundary.
+Updated: 2026-06-12 (feat/connector-as-pocket-backend) — a pocket backend
+can be an existing CONNECTOR, not only an http base_url.
+PocketBackendConfigRequest gained ``backend_type`` ("http" default |
+"connector") + ``connector_name`` and made ``base_url`` optional (a
+connector backend needs none; the service still requires a valid URL for an
+http backend). PocketBackendConfigResponse echoes ``backend_type`` /
+``connector_name`` back (never the token).
+Updated: 2026-06-13 (fix/ripple-normalizer-path-drop, native gated actions
+step 1) — ``RunActionRequest.path`` is now OPTIONAL (``str | None``, default
+``None``). The read-time ripple normalizer rewrites an inline write ``api``
+handler into a PATHLESS ``call_binding`` handler (it has no request context to
+carry a path), so the client fires ``/actions/run`` with only ``{action,
+params}``. The path is author-time data the server already persists on the
+``rippleSpec.actions`` binding (it must, to read the HTTP method), so the route
+resolves it from there when the client omits it. A required ``path`` 422'd
+every relative-URL api button (caught live on the Nerve demo's "Score next 20").
+Client-sent ``path`` (a row-scoped binding whose stored path holds an unresolved
+``{item.id}`` template, resolved client-side) still wins — the binding path is
+only the fallback. The server still reads the verb from the binding, so a
+compromised client cannot pick method OR a path the allowlist would reject.
+Updated: 2026-06-15 (feat/invoke-tool-v1) — added ``ToolGrantDTO`` and
+``SetToolPolicyRequest`` for the new owner-only ``PUT
+/pockets/{id}/backend/tool-policy`` endpoint (the tool-allowlist analog of
+the write-policy route), and an ``allowed_tools`` field on
+``PocketBackendConfigResponse``. A grant's ``tool`` is a built-in tool name
+or a connector action ``connector:<name>:<action>``. Empty list = fail-closed
+(no ``invoke_tool`` fires until a human allow-lists one). ``RunToolResponse``
+is unchanged — it already carries ``{ok, tool, status, response, error, code,
+on_success, on_error}``.
+Updated: 2026-06-19 (feat/typed-ripplespec-phase1, #1503) — ``UpdatePocketRequest``
+gains ``reset_state: bool = False``. It is the escape hatch for the clobber-fix:
+by default a partial ``ripple_spec`` body that omits instance-owned regions
+(``state`` / ``selections``) now PRESERVES them (the service does a layer-safe
+merge), so a frontend canvas-only PATCH no longer wipes instance data. A caller
+that genuinely wants to clear instance state sends ``reset_state: true`` to
+restore the old wholesale write. Wire-level ``ripple_spec`` stays ``dict | None``.
 """
 
 from __future__ import annotations
@@ -71,6 +144,8 @@ from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from pocketpaw_ee.cloud.surface.domain import PocketSurfaceProfile
 
 
 class CreatePocketRequest(BaseModel):
@@ -90,6 +165,23 @@ class CreatePocketRequest(BaseModel):
     # template at create time and merges the result into ``rippleSpec``.
     # Omitting it preserves the pre-Wave-3e behaviour.
     template_slug: str | None = Field(default=None, alias="templateSlug")
+    # The create-pocket layout pattern (``"dashboard"`` | ``"viewer"`` |
+    # ``"app"`` | ``"landing"`` | ...). The marketing-site brain stamps
+    # ``"landing"`` so the published site renders as a landing page.
+    # Optional; omitting it persists ``None`` (legacy behaviour).
+    pattern: str | None = None
+    # Paw Sites generation track (``"ripple"`` default | ``"svelte"``) and,
+    # for svelte sites, the hand-written SvelteKit source map
+    # ``{relative_path: file_contents}``. Omitting them persists the ripple
+    # defaults (``engine="ripple"``, ``source=None``).
+    engine: str = "ripple"
+    source: dict[str, str] | None = None
+    # Optional per-entity surface-profile override. Consumed by the
+    # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
+    # surface-kind default. Reuses the persisted ``PocketSurfaceProfile``
+    # sub-model (all fields optional, JSON-friendly lists). Wire alias
+    # ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
 
     model_config = {"populate_by_name": True}
 
@@ -108,6 +200,28 @@ class UpdatePocketRequest(BaseModel):
     # Pass the same slug to force a recompile (template content edited
     # out-of-band). ``None`` (the default) means "leave it alone."
     template_slug: str | None = Field(default=None, alias="templateSlug")
+    # Optional per-entity surface-profile override (the auto-authoring
+    # foundation). Three-way partial semantics, distinguished by
+    # ``model_fields_set`` in the service: present + non-null SETs/REPLACEs,
+    # explicit ``null`` CLEARS (un-profiles the pocket), and absent (not in
+    # the partial update) leaves the existing value untouched. Reuses the
+    # persisted ``PocketSurfaceProfile`` sub-model (all sub-fields optional,
+    # JSON-friendly lists). Wire alias ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
+    # Escape hatch for the clobber-fix (2026-06-13 bug). By DEFAULT a
+    # ``ripple_spec`` body that omits instance-owned regions (``state`` /
+    # ``selections``) PRESERVES them — the service does a layer-safe merge so a
+    # frontend canvas-only PATCH no longer wipes instance data. A caller that
+    # INTENDS to clear instance state (e.g. "reset this pocket to a clean
+    # slate") must opt in by sending ``reset_state: true``, which restores the
+    # old wholesale write of the incoming spec. Wire-level ``ripple_spec`` stays
+    # ``dict | None`` — this is the only new field on the wire.
+    reset_state: bool = Field(
+        default=False,
+        description="When true, an incoming ripple_spec replaces the pocket "
+        "spec wholesale, clearing instance-owned state/selections it omits. "
+        "Default false preserves existing instance state on a partial update.",
+    )
 
     model_config = {"populate_by_name": True}
 
@@ -217,8 +331,21 @@ class PocketResponse(BaseModel):
     # RFC 03 v2 (Wave 3e) — the bundled-template slug, or ``None`` for
     # legacy pockets / cold-generated rippleSpecs.
     template_slug: str | None = None
+    # The create-pocket layout pattern (``"landing"`` for marketing
+    # sites), or ``None`` for legacy pockets.
+    pattern: str | None = None
+    # Paw Sites generation track (``"ripple"`` | ``"svelte"``) and the
+    # svelte source map (or ``None`` for ripple pockets).
+    engine: str = "ripple"
+    source: dict[str, str] | None = None
+    # Optional per-entity surface-profile override. Consumed by the
+    # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
+    # surface-kind default. Wire alias ``surfaceProfile``.
+    surface_profile: PocketSurfaceProfile | None = Field(default=None, alias="surfaceProfile")
     created_at: datetime
     updated_at: datetime
+
+    model_config = {"populate_by_name": True}
 
 
 class HomePocketResponse(BaseModel):
@@ -254,24 +381,45 @@ class AllowedWriteDTO(BaseModel):
     path_pattern: str = Field(min_length=1)
 
 
+class ToolGrantDTO(BaseModel):
+    """One tool-allowlist entry on the wire (feat/invoke-tool-v1).
+
+    Mirrors ``models.pocket_backend.ToolGrant``. ``tool`` is either a
+    built-in tool name (``"web_fetch"``) or a connector action
+    (``"connector:<name>:<action>"``, e.g. ``"connector:github:list_issues"``).
+    """
+
+    tool: str = Field(min_length=1)
+
+
 class PocketBackendConfigRequest(BaseModel):
     """Body for ``PUT /pockets/{id}/backend`` — bind a pocket to one backend.
 
-    ``auth_token`` carries the secret only on the way IN; it is encrypted
-    server-side and never returned. Its meaning depends on ``auth_type``:
+    ``backend_type`` selects the shape:
 
-    * ``bearer`` — the bearer token, sent as ``Authorization: Bearer <token>``.
-    * ``api_key`` — the API key value, sent in the ``auth_header`` header.
-    * ``basic`` — the raw ``user:pass`` credential. The server base64-encodes
-      it to form a valid ``Authorization: Basic`` header — do NOT pre-encode.
-    * ``none`` — unused.
+    * ``"http"`` (the default) — ``base_url`` + optional auth. ``auth_token``
+      carries the secret only on the way IN; it is encrypted server-side and
+      never returned. Its meaning depends on ``auth_type``:
+        - ``bearer`` — the bearer token (``Authorization: Bearer <token>``).
+        - ``api_key`` — the API key value, sent in the ``auth_header`` header.
+        - ``basic`` — the raw ``user:pass`` credential. The server
+          base64-encodes it — do NOT pre-encode.
+        - ``none`` — unused.
+      ``auth_header`` names the custom header for the ``api_key`` auth type
+      (defaults to ``X-Api-Key`` when omitted).
+    * ``"connector"`` — ``connector_name`` names a workspace-bound connector.
+      ``base_url``/``auth_*`` are unused (and not required); the service
+      validates the connector is enabled for the workspace.
 
-    ``auth_header`` names the custom header for the ``api_key`` auth type
-    (defaults to ``X-Api-Key`` when omitted).
+    ``base_url`` is OPTIONAL here (defaults to ``""``) so a connector backend
+    needn't send one; the service still requires a valid URL for an http
+    backend.
     """
 
-    base_url: str = Field(min_length=1)
-    auth_type: Literal["bearer", "api_key", "basic", "none"]
+    backend_type: Literal["http", "connector"] = "http"
+    connector_name: str | None = None
+    base_url: str = ""
+    auth_type: Literal["bearer", "api_key", "basic", "none"] = "none"
     auth_token: str = ""
     auth_header: str | None = None
 
@@ -297,19 +445,32 @@ class ApprovalRouteDTO(BaseModel):
 class PocketBackendConfigResponse(BaseModel):
     """Backend binding as returned to clients — never carries the token.
 
+    ``backend_type`` is ``"http"`` (the default / legacy) or ``"connector"``;
+    ``connector_name`` names the bound connector when ``backend_type`` is
+    ``"connector"`` (``None`` for http). For an http backend ``base_url`` /
+    ``auth_type`` describe the endpoint; for a connector backend ``base_url``
+    is ``""`` and ``auth_type`` is ``"none"``.
+
     ``allowed_writes`` is the per-pocket write allowlist (RFC 05 M2a) —
     an owner/editor-facing non-secret. Empty by default (fail-closed: no
     write fires until a human allow-lists it).
+
+    ``allowed_tools`` is the per-pocket tool allowlist (feat/invoke-tool-v1)
+    — the same fail-closed posture: empty by default, no ``invoke_tool``
+    fires until a human allow-lists it.
 
     ``approval_route`` is the per-pocket approver routing for
     ``requires_instinct`` writes (RFC 05 M2b.1). ``None`` means the
     default — the pocket owner approves.
     """
 
+    backend_type: str = "http"
+    connector_name: str | None = None
     base_url: str
     auth_type: str
     configured: bool
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+    allowed_tools: list[ToolGrantDTO] = Field(default_factory=list)
     approval_route: ApprovalRouteDTO | None = None
 
 
@@ -343,17 +504,29 @@ class RunActionRequest(BaseModel):
     """Body for ``POST /pockets/{id}/actions/run``.
 
     The client sends the action's NAME (``action``) plus the *resolved*
-    ``path`` and ``params`` — Ripple's ``{...}`` expression resolver runs
-    client-side at click time. The server loads the named action from the
-    persisted ``rippleSpec.actions`` block to read the HTTP ``method`` —
-    the client never picks the verb.
+    ``params`` — Ripple's ``{...}`` expression resolver runs client-side at
+    click time. The server loads the named action from the persisted
+    ``rippleSpec.actions`` block to read the HTTP ``method`` — the client
+    never picks the verb.
+
+    ``path`` is OPTIONAL. The read-time ripple normalizer rewrites an inline
+    write ``api`` handler into a PATHLESS ``call_binding`` handler, so the
+    normal client fires with no ``path`` and the route resolves it from the
+    persisted binding's ``path`` (which the spec already carries — see
+    :class:`~pocketpaw_ee.cloud.pockets.action_executor.ActionBinding`). A
+    client MAY still send a ``path`` — a row-scoped binding whose stored path
+    holds an unresolved ``{item.id}`` template gets resolved client-side, and
+    that resolved value takes precedence over the binding's templated one.
+    Either way the server reads the verb from the binding and the executor
+    matches the final ``(method, path)`` against the owner's allowlist, so a
+    client cannot pick a path the allowlist would reject.
 
     ``idempotency_key`` is optional: when omitted the server generates one
     so a write retried after a timeout cannot double-submit.
     """
 
     action: str = Field(min_length=1)
-    path: str = Field(min_length=1)
+    path: str | None = Field(default=None, min_length=1)
     params: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = None
 
@@ -391,6 +564,16 @@ class RunActionResponse(BaseModel):
     error: str | None = None
     code: str | None = None
     proposed_action_id: str | None = None
+    # Layered/learning gate (T6/T10) — set only on an OPTIMISTIC-lane write:
+    # the id of the bounded compensation handle the client can roll back via
+    # the optimistic rollback endpoint. None on every other path. The
+    # executor returns it as ``_optimistic_compensation_id`` (internal key);
+    # the router maps it onto this public field.
+    optimistic_compensation_id: str | None = None
+    # Workspace jobs (pp#1459) — set ONLY on a ``kind:"job"`` action dispatch
+    # (``code:"job_enqueued"``). Carries the WorkspaceJobDoc id the client polls
+    # via ``GET /workspaces/{ws}/jobs/{job_id}``. None on every other path.
+    job_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 
@@ -403,6 +586,17 @@ class SetWritePolicyRequest(BaseModel):
     """
 
     allowed_writes: list[AllowedWriteDTO] = Field(default_factory=list)
+
+
+class SetToolPolicyRequest(BaseModel):
+    """Body for ``PUT /pockets/{id}/backend/tool-policy`` (feat/invoke-tool-v1).
+
+    Replaces the pocket's whole tool allowlist. An empty list is valid
+    and meaningful — it revokes every tool (fail-closed), exactly like the
+    write-policy precedent.
+    """
+
+    allowed_tools: list[ToolGrantDTO] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +641,16 @@ class RunToolResponse(BaseModel):
     client runs after — the same shape ``call_binding`` returns, so the
     home grid's ``onEvent`` plumbing handles both with one branch.
 
+    ``proposed_action_id`` carries the pending Instinct Action id when a
+    WRITE grant is invoked (feat/invoke-tool-v1 v2): the WRITE is proposed
+    for human approval rather than fired inline, so ``ok`` is true,
+    ``code`` is ``"instinct_pending"``, and this id lets the client
+    correlate the click with the pending Action it can watch in The Tray.
+    It mirrors :class:`RunActionResponse.proposed_action_id` so a single
+    client branch services gated tool-writes and gated ``call_binding``
+    writes. ``None`` for reads / blocked / not-allowed responses. The id
+    is ALSO echoed inside ``response`` for callers that read it there.
+
     ``extra="forbid"`` matches :class:`RunActionResponse`: any
     executor-internal key the route fails to strip raises on
     construction instead of leaking onto the wire.
@@ -460,6 +664,7 @@ class RunToolResponse(BaseModel):
     response: Any = None
     error: str | None = None
     code: str | None = None
+    proposed_action_id: str | None = None
     on_success: list[dict] = Field(default_factory=list)
     on_error: list[dict] = Field(default_factory=list)
 
@@ -592,6 +797,20 @@ def pocket_to_wire_dict(p) -> dict:
         # RFC 03 v2 (Wave 3e) — the bundled-template slug the pocket was
         # instantiated from. ``None`` for legacy / cold-generated pockets.
         "templateSlug": getattr(p, "template_slug", None),
+        # The create-pocket layout pattern (``"landing"`` for marketing
+        # sites). Single-word key — no camelCase split. ``None`` for
+        # legacy pockets.
+        "pattern": getattr(p, "pattern", None),
+        # Paw Sites generation track + svelte source map. Single-word keys,
+        # no camelCase split. ``engine`` defaults to ``"ripple"`` and
+        # ``source`` to ``None`` for legacy / ripple pockets.
+        "engine": getattr(p, "engine", "ripple"),
+        "source": getattr(p, "source", None),
+        # Entity-rooms chunk ② — optional per-entity surface-profile override
+        # (JSON dict mirroring the surface-domain ``SurfaceProfile``), or
+        # ``None`` for legacy pockets. Two-word key → camelCase wire form, like
+        # ``templateSlug`` / ``shareLinkToken``.
+        "surfaceProfile": getattr(p, "surface_profile", None),
         "createdAt": iso_utc(p.created_at),
         "updatedAt": iso_utc(p.updated_at),
     }
@@ -618,3 +837,49 @@ def _widget_to_wire(w) -> dict:
         "assignedAgent": w.assigned_agent,
         "position": {"row": w.position.row, "col": w.position.col},
     }
+
+
+# ── Per-Pocket Connector Permissions ──────────────────────────────────
+
+
+class PocketConnectorPermissionsOut(BaseModel):
+    """GET /pockets/{id}/connector-permissions response.
+
+    ``allowed_connectors`` is ``None`` when the pocket inherits all workspace
+    connectors (default, backward-compatible). A list (possibly empty) means
+    the pocket is restricted to only those connectors.
+    """
+
+    allowed_connectors: list[str] | None = None
+
+
+class SetPocketConnectorPermissionsRequest(BaseModel):
+    """PUT /pockets/{id}/connector-permissions request.
+
+    Pass ``allowed_connectors=null`` to inherit all workspace connectors.
+    Pass ``allowed_connectors=[]`` to revoke all (pocket sees nothing).
+    """
+
+    allowed_connectors: list[str] | None = None
+
+
+class GrantPocketConnectorRequest(BaseModel):
+    """POST /pockets/{id}/connector-permissions/grant request."""
+
+    connector_name: str
+
+
+class RevokePocketConnectorRequest(BaseModel):
+    """POST /pockets/{id}/connector-permissions/revoke request."""
+
+    connector_name: str
+
+
+class WorkspacePocketConnectorPermissionsOut(BaseModel):
+    """GET /workspaces/{id}/pocket-connector-permissions response.
+
+    A map of pocket_id → list of allowed connector names. A missing entry
+    or ``None`` means the pocket inherits all workspace connectors.
+    """
+
+    permissions: dict[str, list[str] | None]

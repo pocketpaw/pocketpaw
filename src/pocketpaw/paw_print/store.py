@@ -2,6 +2,21 @@
 # Created: 2026-04-13 (Move 3 PR-A) — CRUD for PawPrintWidget + append-only
 # PawPrintEvent log. Token rotation invalidates any cached copies. Event ingest
 # + rate-limit logic lives in PR-B; this module only handles persistence.
+# Updated: 2026-06-11 (gap2 — close the customer decision loop) — Added the
+# paw_print_decisions table + upsert_decision / set_decision /
+# get_latest_decision. This is the delivery sink for the back-half of the loop:
+# an inbound event raises an Instinct proposal and parks a PENDING DecisionStatus
+# here; on human approval/rejection the EE approve hook flips it to
+# delivered/declined; the customer surface polls get_latest_decision by
+# (widget_id, customer_ref). Pure SQLite — no EE import, OSS-boundary clean.
+# Updated: 2026-06-11 (gap-housekeeping) — get_decision_by_action /
+# set_decision now take an optional workspace_id and scope the lookup +
+# UPDATE to that tenant (via the new _decision_workspace_scope helper, which
+# also matches the empty-string/NULL legacy rows). The EE delivery hook threads
+# the workspace off the approved Action's blob so a cross-tenant action id flips
+# nothing. The hot-lookup indexes the decision-loop needs already ship in
+# SCHEMA_SQL: idx_pp_decisions_action covers the instinct_action_id lookup and
+# idx_pp_decisions_customer covers the (widget_id, customer_ref) poll.
 
 from __future__ import annotations
 
@@ -12,7 +27,14 @@ from typing import Any
 
 import aiosqlite
 
-from pocketpaw.paw_print.models import PawPrintEvent, PawPrintSpec, PawPrintWidget, _gen_token
+from pocketpaw.paw_print.models import (
+    DecisionState,
+    DecisionStatus,
+    PawPrintEvent,
+    PawPrintSpec,
+    PawPrintWidget,
+    _gen_token,
+)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS paw_print_widgets (
@@ -39,13 +61,48 @@ CREATE TABLE IF NOT EXISTS paw_print_events (
     timestamp TEXT NOT NULL
 );
 
+-- gap2: the customer-decision delivery sink. One row per inbound event that
+-- raised an Instinct proposal; the customer surface polls the latest row for
+-- (widget_id, customer_ref) to read the owner's decision.
+CREATE TABLE IF NOT EXISTS paw_print_decisions (
+    id TEXT PRIMARY KEY,
+    widget_id TEXT NOT NULL,
+    customer_ref TEXT NOT NULL,
+    event_type TEXT DEFAULT '',
+    instinct_action_id TEXT DEFAULT '',
+    workspace_id TEXT DEFAULT '',
+    state TEXT DEFAULT 'pending',
+    reply TEXT DEFAULT '',
+    decided_by TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_pocket ON paw_print_widgets(pocket_id);
 CREATE INDEX IF NOT EXISTS idx_pp_widgets_owner ON paw_print_widgets(owner);
 CREATE INDEX IF NOT EXISTS idx_pp_events_widget_ts
     ON paw_print_events(widget_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_pp_events_customer
     ON paw_print_events(widget_id, customer_ref);
+CREATE INDEX IF NOT EXISTS idx_pp_decisions_customer
+    ON paw_print_decisions(widget_id, customer_ref, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pp_decisions_action
+    ON paw_print_decisions(instinct_action_id);
 """
+
+
+def _decision_workspace_scope(workspace_id: str | None) -> tuple[str | None, list[Any]]:
+    """Build the tenancy WHERE fragment + bound params for a scoped decision read.
+
+    Mirrors the Fabric store's ``_workspace_scope`` helper, but decision rows
+    store ``workspace_id`` as an EMPTY STRING (the model default) rather than
+    SQL NULL when no workspace was set, so a legacy/global row is matched on
+    ``= ''`` as well as ``IS NULL``. Returns ``(None, [])`` when ``workspace_id``
+    is ``None`` — no scoping, fully backward-compatible.
+    """
+    if workspace_id is None:
+        return None, []
+    return "(workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL)", [workspace_id]
 
 
 class PawPrintStore:
@@ -242,6 +299,136 @@ class PawPrintStore:
         )
         return per_customer < per_customer_per_min
 
+    # ---------------- Decisions (gap2 — the back-half of the loop) ----------------
+
+    async def create_decision(self, decision: DecisionStatus) -> DecisionStatus:
+        """Insert a PENDING (or any pre-built) decision row.
+
+        Called from the ingest path right after an Instinct proposal is raised:
+        the customer's request is now "we're looking into it" until a human
+        decides. One row per inbound event — the latest row for
+        ``(widget_id, customer_ref)`` is what the customer surface reads back.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(
+                "INSERT INTO paw_print_decisions"
+                " (id, widget_id, customer_ref, event_type, instinct_action_id,"
+                " workspace_id, state, reply, decided_by, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    decision.id,
+                    decision.widget_id,
+                    decision.customer_ref,
+                    decision.event_type,
+                    decision.instinct_action_id,
+                    decision.workspace_id,
+                    decision.state.value,
+                    decision.reply,
+                    decision.decided_by,
+                    decision.created_at.isoformat(),
+                    decision.updated_at.isoformat(),
+                ),
+            )
+            await db.commit()
+        return decision
+
+    async def get_decision_by_action(
+        self, instinct_action_id: str, workspace_id: str | None = None
+    ) -> DecisionStatus | None:
+        """Fetch the decision row tied to an Instinct action id.
+
+        The approve/reject delivery hook resolves the parked row this way: the
+        Instinct Action's ``_customer_reply`` blob carries no DB handle, only the
+        action id, which is the stable join key back to the parked row.
+
+        ``workspace_id`` gives the lookup its own tenancy guard: when supplied,
+        only a row in that workspace (or a legacy NULL/empty-workspace row that
+        predates per-row tenancy) resolves — a row owned by another tenant
+        returns ``None``. The decision row stores ``workspace_id`` as an empty
+        string for rows created without one, so the scope matches
+        ``workspace_id = ? OR workspace_id = '' OR workspace_id IS NULL``.
+        ``None`` leaves the lookup unscoped (backward-compatible).
+        """
+        ws_cond, ws_params = _decision_workspace_scope(workspace_id)
+        sql = "SELECT * FROM paw_print_decisions WHERE instinct_action_id = ?"
+        params: list[Any] = [instinct_action_id]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        sql += " LIMIT 1"
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(sql, params) as cur:
+                row = await cur.fetchone()
+                return self._row_to_decision(row) if row else None
+
+    async def set_decision(
+        self,
+        instinct_action_id: str,
+        *,
+        state: DecisionState,
+        reply: str,
+        decided_by: str,
+        workspace_id: str | None = None,
+    ) -> DecisionStatus | None:
+        """Flip a parked decision to delivered/declined and record the answer.
+
+        Idempotent on the action id. Returns the updated row, or ``None`` when no
+        parked row matches (e.g. the proposal was raised before this slice
+        shipped, or the row was never created — the approve hook degrades
+        cleanly in that case).
+
+        ``workspace_id``, when supplied, scopes BOTH the resolve and the UPDATE
+        to the caller's tenant so a cross-tenant action id flips nothing — the
+        delivery hook threads the workspace off the approved Action's blob.
+        """
+        existing = await self.get_decision_by_action(instinct_action_id, workspace_id=workspace_id)
+        if existing is None:
+            return None
+        ws_cond, ws_params = _decision_workspace_scope(workspace_id)
+        sql = (
+            "UPDATE paw_print_decisions"
+            " SET state = ?, reply = ?, decided_by = ?, updated_at = ?"
+            " WHERE instinct_action_id = ?"
+        )
+        params: list[Any] = [
+            state.value,
+            reply,
+            decided_by,
+            datetime.now().isoformat(),
+            instinct_action_id,
+        ]
+        if ws_cond:
+            sql += f" AND {ws_cond}"
+            params.extend(ws_params)
+        await self._ensure_schema()
+        async with self._conn() as db:
+            await db.execute(sql, params)
+            await db.commit()
+        return await self.get_decision_by_action(instinct_action_id, workspace_id=workspace_id)
+
+    async def get_latest_decision(self, widget_id: str, customer_ref: str) -> DecisionStatus | None:
+        """Return the most-recent decision for a (widget, customer) pair.
+
+        This is the customer-surface poll: the rendered widget posted an event,
+        then polls here to read "what did the owner decide about my request?".
+        No owner credential is required — the row is scoped to the customer's own
+        ``customer_ref`` on a specific widget, which is all the widget knows.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM paw_print_decisions"
+                " WHERE widget_id = ? AND customer_ref = ?"
+                " ORDER BY created_at DESC LIMIT 1",
+                (widget_id, customer_ref),
+            ) as cur:
+                row = await cur.fetchone()
+                return self._row_to_decision(row) if row else None
+
     # ---------------- Helpers ----------------
 
     def _row_to_widget(self, row: Any) -> PawPrintWidget:
@@ -273,4 +460,19 @@ class PawPrintStore:
             payload=json.loads(row["payload"]) if row["payload"] else {},
             customer_ref=row["customer_ref"],
             timestamp=datetime.fromisoformat(row["timestamp"]),
+        )
+
+    def _row_to_decision(self, row: Any) -> DecisionStatus:
+        return DecisionStatus(
+            id=row["id"],
+            widget_id=row["widget_id"],
+            customer_ref=row["customer_ref"],
+            event_type=row["event_type"] or "",
+            instinct_action_id=row["instinct_action_id"] or "",
+            workspace_id=row["workspace_id"] or "",
+            state=DecisionState(row["state"]),
+            reply=row["reply"] or "",
+            decided_by=row["decided_by"] or "",
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
         )

@@ -9,3 +9,12 @@
 #   is reserved: the event carries both fields as `null` and this entity
 #   never sets them. The meter exists so an operator can SEE how many
 #   business outcomes a pocket produced before any pricing is wired.
+#
+# Updated: 2026-06-11 (gap-3 outcome VALUE metering) — Layer 4 is now
+#   partially wired: `outcome_value` / `outcome_unit` carry the author-time
+#   billable pair declared on the `ActionBinding`, persisted on the ledger
+#   row, and `GET /api/v1/outcomes/meter` aggregates them into a billable
+#   figure per workspace per period (count + total value by unit). This is
+#   the "pay for governed outcomes" READ primitive. Still DEFERRED:
+#   invoicing, payment, currency, a pricing-rules engine, and
+#   disputes/clawback — turning the queryable figure into money.

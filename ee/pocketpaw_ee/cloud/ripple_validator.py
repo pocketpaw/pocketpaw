@@ -23,6 +23,23 @@ new token / method added to the resolver should be added here too — the
 two files together are the contract.
 
 Changes:
+  - 2026-06-19 (feat/typed-ripplespec-phase2): DUAL-PATH READER. Every public
+    spec reader (``validate_ripple_spec`` + ``_logged`` / ``_strict``,
+    ``validate_against_catalog_*``, ``validate_action_wiring_*``,
+    ``validate_required_props_*``, ``find_unreferenced_state_keys``) now accepts
+    ``RippleSpec | dict | None``. A new ``_as_flat_dict`` helper flattens a
+    typed ``RippleSpec`` to its BSON-equivalent dict so the existing whole-spec
+    tree walks run unchanged; a legacy dict passes through. Promote-on-read,
+    no migration.
+  - 2026-05-31 (constraint-zone enforcer): added the required-prop gate —
+    ``MissingRequiredPropError`` plus ``validate_required_props_strict``
+    (agent-generation path, RAISES) and ``..._logged`` (human/import path,
+    structured warn, does not block). Mirrors the catalog / action-wiring
+    strict/logged split. The pure walk + the manifest required-prop reader
+    live in OSS ``pocketpaw.ripple.manifest``; this module supplies the
+    EE-side strict/logged wiring + the agent-readable error formatting. It
+    is the rippleSpec analogue of the genesis "Constraint Zones" 🔒 HARD
+    ``required_fields`` zone.
   - 2026-05-30 (issue #1301): added ``find_unreferenced_state_keys`` —
     a pure ui-walk collector (mirrors ``find_unwired_live_buttons``) that
     returns top-level ``state`` keys no ui node references. Closes the
@@ -47,14 +64,30 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from pocketpaw.bundled_templates.schema import RippleSpec
 from pocketpaw.ripple.manifest import (
     check_embed_nodes_in_spec,
     find_unwired_live_buttons,
     validate_action_verbs,
     validate_against_catalog,
+    validate_required_props,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _as_flat_dict(spec: RippleSpec | dict[str, Any] | None) -> dict[str, Any] | None:
+    """Coerce a ``RippleSpec | dict | None`` reader input to a flat dict.
+
+    Phase-2 dual-path: a typed ``RippleSpec`` is flattened to its
+    BSON-equivalent dict (``to_flat_dict``) so the existing whole-spec tree
+    walks (expression grammar, catalog, action wiring, required props, orphan
+    state) run UNCHANGED on the flat shape. A legacy dict passes through; any
+    other value becomes ``None`` (the walkers already no-op on a non-dict).
+    """
+    if isinstance(spec, RippleSpec):
+        return spec.to_flat_dict()
+    return spec if isinstance(spec, dict) else None
 
 
 # Mirrors the whitelist in ``expression-resolver.ts:applyMethod``.
@@ -245,12 +278,15 @@ def _validate_one(path: str, expression: str) -> list[ExpressionWarning]:
 # ---------------------------------------------------------------------------
 
 
-def validate_ripple_spec(spec: dict[str, Any] | None) -> list[ExpressionWarning]:
+def validate_ripple_spec(spec: RippleSpec | dict[str, Any] | None) -> list[ExpressionWarning]:
     """Walk the spec and return one warning per offending expression.
 
     Empty list means the spec's expression grammar is fully supported by
     the current resolver. Does not block; never raises.
+
+    Accepts a typed ``RippleSpec`` or a legacy flat dict (Phase-2 dual-path).
     """
+    spec = _as_flat_dict(spec)
     if not isinstance(spec, dict):
         return []
     out: list[ExpressionWarning] = []
@@ -262,7 +298,7 @@ def validate_ripple_spec(spec: dict[str, Any] | None) -> list[ExpressionWarning]
 
 
 def validate_ripple_spec_logged(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     *,
     pocket_id: str | None = None,
     workspace_id: str | None = None,
@@ -313,7 +349,7 @@ class RippleSpecGrammarError(Exception):
 
 
 def validate_ripple_spec_strict(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     *,
     pocket_id: str | None = None,
     workspace_id: str | None = None,
@@ -398,13 +434,14 @@ class CatalogViolationError(Exception):
 
 
 def _collect_catalog_violations(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     allowed_types: list[str] | set[str],
     embed_allowed_hosts: list[str] | set[str],
 ) -> list[dict[str, Any]]:
     """Run both the catalog-type walk and the embed URL/host walk, return
     the combined violations list (unknown-type issues first, then embed
     policy issues)."""
+    spec = _as_flat_dict(spec)
     violations: list[dict[str, Any]] = []
     violations.extend(validate_against_catalog(spec, allowed_types))
     violations.extend(check_embed_nodes_in_spec(spec, embed_allowed_hosts))
@@ -438,7 +475,7 @@ def format_violations_for_agent(violations: list[dict[str, Any]]) -> str:
 
 
 def validate_against_catalog_logged(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     allowed_types: list[str] | set[str],
     *,
     embed_allowed_hosts: list[str] | set[str],
@@ -480,7 +517,7 @@ def validate_against_catalog_logged(
 
 
 def validate_against_catalog_strict(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     allowed_types: list[str] | set[str],
     *,
     embed_allowed_hosts: list[str] | set[str],
@@ -553,7 +590,9 @@ class ActionWiringViolationError(Exception):
         return "\n".join(lines)
 
 
-def _collect_action_wiring_violations(spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _collect_action_wiring_violations(
+    spec: RippleSpec | dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     """Run both action-wiring walks, return the combined list.
 
     Unknown-verb issues first (cheaper to fix, also catch the inert
@@ -562,6 +601,7 @@ def _collect_action_wiring_violations(spec: dict[str, Any] | None) -> list[dict[
     handler that also fails the live-button check isn't reported
     twice.
     """
+    spec = _as_flat_dict(spec)
     violations: list[dict[str, Any]] = []
     violations.extend(validate_action_verbs(spec))
     seen_paths = {v["path"] for v in violations}
@@ -604,7 +644,7 @@ def format_action_violations_for_agent(violations: list[dict[str, Any]]) -> str:
 
 
 def validate_action_wiring_logged(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     *,
     pocket_id: str | None = None,
     workspace_id: str | None = None,
@@ -644,7 +684,7 @@ def validate_action_wiring_logged(
 
 
 def validate_action_wiring_strict(
-    spec: dict[str, Any] | None,
+    spec: RippleSpec | dict[str, Any] | None,
     *,
     pocket_id: str | None = None,
     workspace_id: str | None = None,
@@ -665,6 +705,128 @@ def validate_action_wiring_strict(
     )
     if violations:
         raise ActionWiringViolationError(violations)
+
+
+# ---------------------------------------------------------------------------
+# Required-prop gate (constraint-zone enforcer, 2026-05-31).
+#
+# The widget manifest marks the props a widget cannot render without as
+# ``required: true``. That flag was previously surfaced only in the system
+# prompt — a node like ``{"type": "chart", "props": {}}`` passed the catalog
+# gate (its ``type`` is known) and the action-wiring gate (no handlers) and
+# rendered an empty box. This gate closes that hole: the genesis "Constraint
+# Zones" model's 🔒 HARD ``required_fields`` zone, re-expressed for rippleSpec
+# at the widget-prop level. The pure walk lives in OSS
+# ``pocketpaw.ripple.manifest``; this layer adds the strict / logged wiring +
+# the agent-readable error formatting, symmetric with the catalog gate above.
+# ---------------------------------------------------------------------------
+
+
+class MissingRequiredPropError(Exception):
+    """Raised by :func:`validate_required_props_strict` when a spec carries a
+    node missing a prop the widget manifest marks ``required: true``.
+
+    Same shape as :class:`CatalogViolationError` / :class:`ActionWiringViolationError`:
+    ``.violations`` plus a class-level formatter so the chat agent's retry
+    loop can surface a focused corrective hint naming the missing prop.
+    """
+
+    def __init__(self, violations: list[dict[str, Any]]) -> None:
+        self.violations = violations
+        super().__init__(self._format(violations))
+
+    @staticmethod
+    def _format(violations: list[dict[str, Any]]) -> str:
+        lines = [f"{len(violations)} required-prop violation(s) in rippleSpec:"]
+        for v in violations[:20]:
+            missing = ", ".join(v.get("missing", []))
+            lines.append(
+                f"  - [missing_required_prop] {v['path']}: '{v['type']}' is missing "
+                f"required prop(s): {missing}"
+            )
+        if len(violations) > 20:
+            lines.append(f"  - …and {len(violations) - 20} more")
+        return "\n".join(lines)
+
+
+def format_required_prop_violations_for_agent(violations: list[dict[str, Any]]) -> str:
+    """Build a compact, agent-readable summary of required-prop violations.
+
+    Suitable as the ``error`` field on an MCP tool result so the specialist
+    sees specifically which node is missing which required prop and can target
+    its fix.
+    """
+    if not violations:
+        return ""
+    lines = ["The rippleSpec was rejected — some widgets are missing required props:"]
+    for v in violations[:10]:
+        missing = ", ".join(v.get("missing", []))
+        lines.append(
+            f"  • {v['path']}: '{v['type']}' must set {missing} "
+            f"(required props for this widget: {', '.join(v.get('required', []))})."
+        )
+    if len(violations) > 10:
+        lines.append(f"  • …and {len(violations) - 10} more")
+    lines.append(
+        "Every prop the widget catalog marks `required` must be present on the node "
+        "(a literal value or a bound `{...}` expression). A missing required prop "
+        "renders the widget empty / broken even though every other gate passes."
+    )
+    return "\n".join(lines)
+
+
+def validate_required_props_logged(
+    spec: RippleSpec | dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+    *,
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Validate manifest-required props, emit one ``log.warning`` per
+    violation, and return the violations list.
+
+    Use this on the human / import path — a violation is recorded for triage
+    but does NOT block the write (an older imported spec may predate a prop
+    becoming required).
+    """
+    violations = validate_required_props(_as_flat_dict(spec), manifest_or_required)
+    for v in violations:
+        log.warning(
+            "ripple_spec.missing_required_prop",
+            extra={
+                "pocket_id": pocket_id,
+                "workspace_id": workspace_id,
+                "field_path": v["path"],
+                "widget_type": v["type"],
+                "missing_props": v.get("missing"),
+            },
+        )
+    return violations
+
+
+def validate_required_props_strict(
+    spec: RippleSpec | dict[str, Any] | None,
+    manifest_or_required: dict[str, Any],
+    *,
+    pocket_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Validate manifest-required props; raise :class:`MissingRequiredPropError`
+    if any node omits a prop its widget marks ``required: true``.
+
+    Use this only on the agent-generation path where the caller can handle a
+    retry. Human / import callers should use
+    :func:`validate_required_props_logged` — strict mode would block a
+    legitimate import of an older spec.
+    """
+    violations = validate_required_props_logged(
+        spec,
+        manifest_or_required,
+        pocket_id=pocket_id,
+        workspace_id=workspace_id,
+    )
+    if violations:
+        raise MissingRequiredPropError(violations)
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +930,7 @@ def _collect_referenced_state(
         referenced.update(_state_keys_in_expression(node))
 
 
-def find_unreferenced_state_keys(spec: dict[str, Any] | None) -> list[str]:
+def find_unreferenced_state_keys(spec: RippleSpec | dict[str, Any] | None) -> list[str]:
     """Return top-level ``state`` keys that no ui node references.
 
     Walks ``spec["ui"]`` collecting every state reference (template
@@ -780,8 +942,11 @@ def find_unreferenced_state_keys(spec: dict[str, Any] | None) -> list[str]:
     Pure / side-effect-free — mirrors ``find_unwired_live_buttons``. The
     caller decides what to do with the result; this never blocks.
 
-    Returns ``[]`` when ``spec`` is not a dict or has no ``state`` dict.
+    Accepts a typed ``RippleSpec`` or a legacy flat dict (Phase-2 dual-path).
+    Returns ``[]`` when ``spec`` is not a dict / RippleSpec or has no
+    ``state`` dict.
     """
+    spec = _as_flat_dict(spec)
     if not isinstance(spec, dict):
         return []
     state = spec.get("state")
@@ -816,15 +981,19 @@ __all__ = [
     "ActionWiringViolationError",
     "CatalogViolationError",
     "ExpressionWarning",
+    "MissingRequiredPropError",
     "RippleSpecGrammarError",
     "find_unreferenced_state_keys",
     "format_action_violations_for_agent",
+    "format_required_prop_violations_for_agent",
     "format_violations_for_agent",
     "format_warnings_for_agent",
     "validate_action_wiring_logged",
     "validate_action_wiring_strict",
     "validate_against_catalog_logged",
     "validate_against_catalog_strict",
+    "validate_required_props_logged",
+    "validate_required_props_strict",
     "validate_ripple_spec",
     "validate_ripple_spec_logged",
     "validate_ripple_spec_strict",

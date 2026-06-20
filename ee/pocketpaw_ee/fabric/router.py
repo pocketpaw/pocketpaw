@@ -14,6 +14,35 @@
 #   business-tier (or higher) plans. Closes the plan-tier bypass where a
 #   team-plan member who passed the workspace RBAC check still hit Fabric for
 #   free.
+# Updated: 2026-06-10 (W4a — workspace-scope fabric) — closes a cross-tenant
+#   read leak. The store is GLOBAL (one shared ``~/.pocketpaw/fabric.db``), and
+#   ``require_action_any_workspace`` only proves the caller holds the action in
+#   SOME workspace — it does NOT bind the request to one. So on a shared
+#   deployment (micro tier / an agency running multiple client tenants) a
+#   workspace-A member could read and link workspace-B's objects. Every read
+#   and write endpoint now takes the caller's active workspace via
+#   ``current_workspace_id`` and threads it into the store as a PLAIN str: reads
+#   (``list_objects`` / ``list_links`` / ``query_fabric`` / ``get_object``) are
+#   scoped to that tenant; writes (``create_object`` / ``create_link``) stamp
+#   it. Legacy NULL-workspace rows stay visible to all tenants (see the store
+#   header).
+# Updated: 2026-06-11 (fix/fabric-stats-workspace-scope) — scoped the LAST two
+#   reads, ``list_types`` and ``fabric_stats``. W4a left them global on the
+#   assumption that type definitions and bare counts are not tenant data; a
+#   live shared box disproved it — one tenant's chat listed another context's
+#   experimental type names through the unscoped stats path. Type NAMES are
+#   tenant metadata. Both endpoints now thread ``current_workspace_id`` into
+#   the store's scoped ``list_types()`` / ``stats()`` (own rows + legacy NULL
+#   rows, matching every other scoped read; type list = defined types with at
+#   least one visible object row — definitions stay global in the schema).
+# Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — the
+#   ``POST /fabric/types`` (define_type) endpoint now stamps the caller's
+#   ``current_workspace_id`` onto the new type, so the discovered-type catalog
+#   is private per tenant: a type defined by workspace A is invisible/unusable
+#   from workspace B (``get_type_by_name`` / ``list_types`` / ``stats`` are
+#   scoped on the type's own ``workspace_id`` now). This supersedes the W4a /
+#   fix/fabric-stats note above that called definitions "global in the schema"
+#   — they carry their own workspace column as of SZD-2.
 
 from __future__ import annotations
 
@@ -33,7 +62,7 @@ from pocketpaw.fabric.models import (
     PropertyDef,
 )
 from pocketpaw.fabric.store import FabricStore
-from pocketpaw_ee.cloud._core.deps import require_plan_feature
+from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_plan_feature
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
 
@@ -88,8 +117,14 @@ class LinkRequest(BaseModel):
     response_model=list[ObjectType],
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def list_types():
-    return await _store().list_types()
+async def list_types(workspace_id: str = Depends(current_workspace_id)):
+    """List object types visible to the caller's workspace.
+
+    Scoped (fix/fabric-stats-workspace-scope): only types with at least one
+    object row visible to the workspace — type names are tenant metadata on a
+    shared deployment.
+    """
+    return await _store().list_types(workspace_id=workspace_id)
 
 
 @router.post(
@@ -98,13 +133,18 @@ async def list_types():
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("fabric.write"))],
 )
-async def define_type(req: DefineTypeRequest):
+async def define_type(
+    req: DefineTypeRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Define an object type stamped with the caller's active workspace (SZD-2)."""
     return await _store().define_type(
         name=req.name,
         properties=req.properties,
         description=req.description,
         icon=req.icon,
         color=req.color,
+        workspace_id=workspace_id,
     )
 
 
@@ -130,16 +170,18 @@ async def list_objects(
     ),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> ObjectsListResponse:
     """List objects with optional type filter.
 
     Wraps ``FabricStore.query()`` so we inherit its parameter binding. The
     ``type_id`` / ``type_name`` filters go through ``FabricQuery``, which
     concatenates only whitelisted column names — user input flows exclusively
-    through bound parameters.
+    through bound parameters. W4a — results are scoped to the caller's active
+    workspace so a tenant never sees another tenant's objects.
     """
     q = FabricQuery(type_id=type_id, type_name=type_name, limit=limit, offset=offset)
-    result = await _store().query(q)
+    result = await _store().query(q, workspace_id=workspace_id)
     return ObjectsListResponse(objects=result.objects, total=result.total)
 
 
@@ -154,14 +196,20 @@ async def list_links(
     link_type: str | None = Query(None, description="Filter by link type"),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    workspace_id: str = Depends(current_workspace_id),
 ) -> LinksListResponse:
-    """List links between objects with optional endpoint + type filters."""
+    """List links between objects with optional endpoint + type filters.
+
+    W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
+    links) so a tenant cannot enumerate another tenant's relationships.
+    """
     links, total = await _store().list_links(
         from_id=from_id,
         to_id=to_id,
         link_type=link_type,
         limit=limit,
         offset=offset,
+        workspace_id=workspace_id,
     )
     return LinksListResponse(links=links, total=total)
 
@@ -172,12 +220,17 @@ async def list_links(
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("fabric.write"))],
 )
-async def create_object(req: CreateObjectRequest):
+async def create_object(
+    req: CreateObjectRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Create an object stamped with the caller's active workspace (W4a)."""
     return await _store().create_object(
         type_id=req.type_id,
         properties=req.properties,
         source_connector=req.source_connector,
         source_id=req.source_id,
+        workspace_id=workspace_id,
     )
 
 
@@ -186,8 +239,16 @@ async def create_object(req: CreateObjectRequest):
     response_model=FabricObject,
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def get_object(obj_id: str):
-    obj = await _store().get_object(obj_id)
+async def get_object(
+    obj_id: str,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Fetch one object, scoped to the caller's workspace (W4a).
+
+    A 404 — not a 403 — is returned for another tenant's object so the
+    endpoint never leaks the existence of cross-workspace ids.
+    """
+    obj = await _store().get_object(obj_id, workspace_id=workspace_id)
     if not obj:
         raise HTTPException(404, "Object not found")
     return obj
@@ -198,8 +259,12 @@ async def get_object(obj_id: str):
     response_model=FabricQueryResult,
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def query_fabric(q: FabricQuery):
-    return await _store().query(q)
+async def query_fabric(
+    q: FabricQuery,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a)."""
+    return await _store().query(q, workspace_id=workspace_id)
 
 
 @router.post(
@@ -207,12 +272,17 @@ async def query_fabric(q: FabricQuery):
     status_code=201,
     dependencies=[Depends(require_action_any_workspace("fabric.write"))],
 )
-async def create_link(req: LinkRequest):
+async def create_link(
+    req: LinkRequest,
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Create a link stamped with the caller's active workspace (W4a)."""
     return await _store().link(
         from_id=req.from_id,
         to_id=req.to_id,
         link_type=req.link_type,
         properties=req.properties,
+        workspace_id=workspace_id,
     )
 
 
@@ -220,5 +290,13 @@ async def create_link(req: LinkRequest):
     "/fabric/stats",
     dependencies=[Depends(require_action_any_workspace("fabric.read"))],
 )
-async def fabric_stats():
-    return await _store().stats()
+async def fabric_stats(workspace_id: str = Depends(current_workspace_id)):
+    """Ontology counts scoped to the caller's workspace.
+
+    Scoped (fix/fabric-stats-workspace-scope): counts mirror ``list_objects``
+    / ``query`` visibility exactly (own rows plus legacy NULL-workspace rows),
+    and ``types`` counts only types with at least one visible object row — type
+    names are tenant metadata on a shared deployment, so an unscoped stats here
+    leaked another tenant's experimental type names into chat.
+    """
+    return await _store().stats(workspace_id=workspace_id)

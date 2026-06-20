@@ -2,26 +2,38 @@
 # Created: 2026-02-20
 # 2026-04-16: Router-level files:read scope guard + symlink filter in
 # /files/download-zip. Closes #884 and #886.
+# 2026-06-10: expanduser() in browse + _resolve_path so "~/foo" paths resolve
+# to home — the /code IDE roots its tree at "~" and addresses children that
+# way. Jail checks unchanged.
 
 from __future__ import annotations
 
 import io
 import logging
 import mimetypes
+import re
+import subprocess
 import urllib.parse
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 
 from pocketpaw.api.deps import require_scope
 from pocketpaw.api.v1.schemas.files import (
     BrowseResponse,
+    CreateFileRequest,
+    FileActionResponse,
     FileEntry,
+    GitDiffResponse,
+    GitStatusEntry,
+    GitStatusResponse,
+    MkdirRequest,
     OpenPathRequest,
     OpenPathResponse,
     RecentFilesResponse,
+    RenameRequest,
     WriteFileRequest,
 )
 
@@ -41,13 +53,14 @@ async def browse_files(path: str = "~"):
 
     settings = get_settings()
 
-    # Resolve path
+    # Resolve path. "~"-prefixed paths expand to home so the /code IDE (whose
+    # tree roots at "~") can address children as ~/foo — see _resolve_path.
     if path in ("~", ""):
         resolved_path = Path.home()
-    elif not path.startswith("/"):
-        resolved_path = Path.home() / path
     else:
-        resolved_path = Path(path)
+        resolved_path = Path(path).expanduser()
+        if not resolved_path.is_absolute():
+            resolved_path = Path.home() / resolved_path
 
     resolved_path = resolved_path.resolve()
     jail = settings.file_jail_path.resolve()
@@ -155,9 +168,11 @@ async def get_file_content(path: str):
     if mime is None:
         mime = "application/octet-stream"
 
-    # For text files requested with ?mode=text, return plain text
-    # (allows JS to fetch content for the code viewer)
-    return FileResponse(str(resolved), media_type=mime)
+    return FileResponse(
+        str(resolved),
+        media_type=mime,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @router.get("/files/recent", response_model=RecentFilesResponse)
@@ -171,11 +186,12 @@ async def get_recent_files(limit: int = 20):
 
 
 def _resolve_path(path: str) -> Path:
-    """Resolve a path string to an absolute Path."""
-    candidate = Path(path)
+    """Resolve a path string to an absolute Path. Expands a leading ``~``
+    (the /code IDE addresses workspace files as ``~/foo``)."""
+    candidate = Path(path).expanduser()
     if candidate.is_absolute():
         return candidate.resolve()
-    return (Path.home() / path).resolve()
+    return (Path.home() / candidate).resolve()
 
 
 def _content_disposition(filename: str) -> str:
@@ -222,6 +238,151 @@ async def download_file(path: str):
         media_type=mime,
         headers={"Content-Disposition": _content_disposition(resolved.name)},
     )
+
+
+@router.post("/files/create", dependencies=[Depends(require_scope("files:write"))])
+async def create_file(req: CreateFileRequest):
+    """Create a new file with optional initial content. Returns 409 if the path
+    already exists (use /files/write to overwrite existing files)."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(req.path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if resolved.exists():
+        raise HTTPException(status_code=409, detail="File or directory already exists")
+
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        resolved.write_text(req.content, encoding="utf-8")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Create failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=str(resolved))
+
+
+@router.post("/files/mkdir", dependencies=[Depends(require_scope("files:write"))])
+async def create_directory(req: MkdirRequest):
+    """Create a new directory. When ``parents`` is true, creates intermediate
+    directories as needed (like ``mkdir -p``)."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(req.path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if resolved.exists() and resolved.is_dir():
+        raise HTTPException(status_code=409, detail="Directory already exists")
+    if resolved.exists() and not resolved.is_dir():
+        raise HTTPException(status_code=409, detail="A file exists at this path")
+
+    try:
+        if req.parents:
+            resolved.mkdir(parents=True, exist_ok=True)
+        else:
+            resolved.mkdir(parents=False, exist_ok=False)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=400,
+            detail="Parent directory does not exist — set parents=true to create intermediates",
+        ) from None
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Mkdir failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=str(resolved))
+
+
+@router.patch("/files/rename", dependencies=[Depends(require_scope("files:write"))])
+async def rename_file_or_directory(req: RenameRequest):
+    """Rename or move a file or directory within the jail.
+
+    Both ``path`` and ``new_path`` must resolve inside the file jail.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved_old = _resolve_path(req.path)
+    resolved_new = _resolve_path(req.new_path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved_old, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: source path outside allowed directory",
+        )
+    if not is_safe_path(resolved_new, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: target path outside allowed directory",
+        )
+    if not resolved_old.exists():
+        raise HTTPException(status_code=404, detail="Source path does not exist")
+    if resolved_new.exists():
+        raise HTTPException(status_code=409, detail="Target path already exists")
+
+    try:
+        resolved_new.parent.mkdir(parents=True, exist_ok=True)
+        resolved_old.rename(resolved_new)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Rename failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=str(resolved_new))
+
+
+@router.delete("/files/delete", dependencies=[Depends(require_scope("files:write"))])
+async def delete_file_or_directory(
+    path: str,
+    recursive: bool = False,
+):
+    """Delete a file or directory. For non-empty directories, ``recursive``
+    must be true."""
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directory")
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Path does not exist")
+
+    try:
+        if resolved.is_dir():
+            if recursive:
+                import shutil
+
+                shutil.rmtree(resolved)
+            else:
+                resolved.rmdir()
+        else:
+            resolved.unlink()
+    except OSError as exc:
+        if "Directory not empty" in str(exc):
+            raise HTTPException(
+                status_code=400,
+                detail="Directory not empty — set recursive=true to delete",
+            ) from exc
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    return FileActionResponse(ok=True)
 
 
 @router.get("/files/download-zip")
@@ -310,7 +471,12 @@ async def download_dir_as_zip(path: str):
 
 @router.post("/files/write", dependencies=[Depends(require_scope("files:write"))])
 async def write_file(req: WriteFileRequest):
-    """Overwrite a file's content. Only text files within the jail are permitted."""
+    """Create or overwrite a file's content. Only text files within the jail are permitted.
+
+    Unlike the original endpoint (which required the file to exist), this version
+    also creates new files — the /code IDE needs to write brand-new files the
+    assistant creates through the Write tool.
+    """
     from pocketpaw.config import get_settings
     from pocketpaw.tools.fetch import is_safe_path
 
@@ -323,21 +489,267 @@ async def write_file(req: WriteFileRequest):
             status_code=403,
             detail="Access denied: path outside allowed directory",
         )
-    if not resolved.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="File not found — this endpoint only edits existing files",
-        )
+
+    # Guard: refuse to write over an existing directory.
     if resolved.is_dir():
         raise HTTPException(status_code=400, detail="Cannot write to a directory")
-    if resolved.stat().st_size > _MAX_VIEWABLE_BYTES:
+
+    # For existing files, enforce the size limit.
+    if resolved.exists() and resolved.stat().st_size > _MAX_VIEWABLE_BYTES:
         raise HTTPException(status_code=413, detail="File too large to edit via the browser")
 
     try:
+        # Ensure parent directory exists (may be creating files in new dirs).
+        resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(req.content, encoding="utf-8")
     except PermissionError:
         raise HTTPException(status_code=403, detail="Permission denied")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Write failed: {exc}") from exc
 
-    return {"ok": True}
+    return {"ok": True, "path": str(resolved)}
+
+
+# ── Label mapping for git status porcelain codes ──────────────────────────
+_GIT_STATUS_LABELS: dict[str, str] = {
+    "M ": "staged",
+    " M": "modified",
+    "A ": "added",
+    " D": "deleted",
+    "D ": "deleted",
+    "R ": "renamed",
+    "??": "untracked",
+    "!!": "ignored",
+}
+
+
+@router.get("/git/status", response_model=GitStatusResponse)
+async def git_status(
+    path: str = Query("~", description="Directory to check git status in"),
+):
+    """Return git status (branch + changed files) for a workspace directory.
+
+    If the directory is not a git repository, returns ``is_git_repo=False``
+    with no error — the frontend shows a helpful message instead.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: path outside allowed directory",
+        )
+
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="Path does not exist")
+
+    # Check if this is a git repository by looking for a .git directory
+    # walking up the tree from the requested path.
+    git_dir = resolved / ".git"
+    if not git_dir.exists():
+        # Walk up to find .git
+        parent = resolved.parent
+        while parent != parent.parent:
+            if (parent / ".git").exists():
+                git_dir = parent / ".git"
+                break
+            parent = parent.parent
+        else:
+            return GitStatusResponse(is_git_repo=False, branch=None, entries=[])
+
+    try:
+        # Get the current branch name
+        branch_result = subprocess.run(
+            ["git", "-C", str(resolved), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+
+        # Get the status in porcelain format
+        status_result = subprocess.run(
+            ["git", "-C", str(resolved), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        entries: list[GitStatusEntry] = []
+        if status_result.returncode == 0:
+            for line in status_result.stdout.splitlines():
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                code = line[:2]
+                file_path = line[3:].strip()
+                label = _GIT_STATUS_LABELS.get(code, "modified")
+                entries.append(GitStatusEntry(path=file_path, status=code, label=label))
+
+        return GitStatusResponse(
+            branch=branch,
+            entries=entries,
+            is_git_repo=True,
+        )
+
+    except subprocess.TimeoutExpired:
+        return GitStatusResponse(
+            is_git_repo=True,
+            error="Git operation timed out",
+        )
+    except FileNotFoundError:
+        return GitStatusResponse(
+            is_git_repo=True,
+            error="Git executable not found on server",
+        )
+    except Exception as exc:
+        logger.warning("git status failed: %s", exc)
+        return GitStatusResponse(
+            is_git_repo=True,
+            error=str(exc),
+        )
+
+
+# ── Git diff (per-file line-level changes for gutter indicators) ──────────
+
+
+@router.get("/git/diff")
+async def git_diff(
+    path: str = Query("~", description="File path to get diff for"),
+):
+    """Return per-line change types for a file compared to HEAD.
+
+    Returns a ``line_changes`` dict keyed by 1-based line number in the
+    current (working tree) version of the file. Each value is either
+    ``"added"`` (green gutter) or ``"modified"`` (amber gutter).
+    Lines not present in the dict are unchanged.
+    """
+    from pocketpaw.config import get_settings
+    from pocketpaw.tools.fetch import is_safe_path
+
+    settings = get_settings()
+    resolved = _resolve_path(path)
+    jail = settings.file_jail_path.resolve()
+
+    if not is_safe_path(resolved, jail):
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: path outside allowed directory",
+        )
+    if not resolved.exists():
+        raise HTTPException(status_code=404, detail="File does not exist")
+    if resolved.is_dir():
+        raise HTTPException(status_code=400, detail="Cannot diff a directory")
+
+    # Find the git root by walking up
+    git_root = resolved.parent
+    while git_root != git_root.parent:
+        if (git_root / ".git").exists():
+            break
+        git_root = git_root.parent
+    else:
+        return GitDiffResponse(file_path=path, is_git_repo=False, line_changes={})
+
+    try:
+        relative_path = resolved.relative_to(git_root)
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(git_root),
+                "diff",
+                "HEAD",
+                "--",
+                str(relative_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            return GitDiffResponse(
+                file_path=path,
+                is_git_repo=True,
+                line_changes={},
+                error="git diff returned non-zero",
+            )
+
+        line_changes: dict[str, str] = {}
+        hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+        current_new_line: int | None = None
+        hunk_has_minus = False
+
+        for line in result.stdout.splitlines():
+            hunk_match = hunk_re.match(line)
+            if hunk_match:
+                # Previous hunk: mark all context lines as modified if it had deletions
+                current_new_line = int(hunk_match.group(3))
+                hunk_has_minus = False
+                continue
+
+            if current_new_line is None:
+                continue
+
+            if line.startswith("\\"):  # \ No newline at end of file
+                continue
+
+            prefix = line[:1] if line else " "
+
+            if prefix == "-":
+                hunk_has_minus = True
+                # No corresponding line in the new file
+                continue
+            elif prefix == "+":
+                line_changes[str(current_new_line)] = "added"
+                current_new_line += 1
+            else:  # context line (space prefix)
+                if hunk_has_minus:
+                    line_changes[str(current_new_line)] = "modified"
+                # If no deletions, context lines in an addition-only hunk are unchanged
+                current_new_line += 1
+
+        # Get branch name for display
+        branch_result = subprocess.run(
+            ["git", "-C", str(git_root), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+
+        return GitDiffResponse(
+            file_path=path,
+            branch=branch,
+            line_changes=line_changes,
+            is_git_repo=True,
+        )
+
+    except subprocess.TimeoutExpired:
+        return GitDiffResponse(
+            file_path=path,
+            is_git_repo=True,
+            line_changes={},
+            error="Git operation timed out",
+        )
+    except FileNotFoundError:
+        return GitDiffResponse(
+            file_path=path,
+            is_git_repo=True,
+            line_changes={},
+            error="Git executable not found on server",
+        )
+    except Exception as exc:
+        logger.warning("git diff failed: %s", exc)
+        return GitDiffResponse(
+            file_path=path,
+            is_git_repo=True,
+            line_changes={},
+            error=str(exc),
+        )

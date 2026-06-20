@@ -233,11 +233,15 @@ class DecisionProjection:
         applied = 0
         for entry in journal_iter:
             entry_seq = getattr(entry, "seq", None)
-            # Skip events whose seq is at or below the cursor — but if
-            # the entry has no seq at all (older soul-protocol wheels
-            # don't expose it yet), apply unconditionally. The cursor
-            # itself only advances when seq is present.
-            if entry_seq is not None and entry_seq <= since_seq:
+            # On an INCREMENTAL replay (since_seq > 0) skip events at or below
+            # the cursor — they were already folded before the restart.
+            # On a FULL rebuild (since_seq == 0) the store was just reset, so
+            # every event is new and must apply — including seq 0. (Guarding on
+            # `since_seq > 0` matters now that soul-protocol >=0.4.0 round-trips
+            # seq: replay_from(0) yields a real seq-0 entry that `<= 0` would
+            # otherwise drop. Older wheels left seq absent, so this path never
+            # triggered then.)
+            if since_seq > 0 and entry_seq is not None and entry_seq <= since_seq:
                 continue
             self.apply(entry)
             applied += 1

@@ -460,6 +460,11 @@
             "icon": "lucide:search"
           },
           {
+            "label": "Zero-Config Tools",
+            "href": "/tools/zero-config",
+            "icon": "lucide:zap"
+          },
+          {
             "label": "Image Generation",
             "href": "/tools/image-generation",
             "icon": "lucide:image"
@@ -498,6 +503,11 @@
             "label": "Skill Generator",
             "href": "/tools/skill-generator",
             "icon": "lucide:wand-2"
+          },
+          {
+            "label": "Flow Authoring",
+            "href": "/tools/flow-authoring",
+            "icon": "lucide:list-ordered"
           },
           {
             "label": "Desktop",
@@ -888,6 +898,11 @@
             "label": "Docker",
             "href": "/deployment/docker",
             "icon": "lucide:container"
+          },
+          {
+            "label": "Sovereign Tenant (Enterprise)",
+            "href": "/deployment/sovereign-tenant",
+            "icon": "lucide:building-2"
           },
           {
             "label": "Discord Docker",

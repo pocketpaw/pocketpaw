@@ -15,13 +15,24 @@ PocketPaw's existing `pocketpaw.skills` module is the **runtime side**
 
 The install destination (`~/.claude/skills/`) is one of the three
 paths PocketPaw's own `SkillLoader.SKILL_PATHS` scans, so bundled
-skills are available to **every chat backend** — claude_agent_sdk,
-codex_cli, openai_agents, deep_agents, langchain_react — via
-PocketPaw's slash-command dispatcher in `dashboard_ws.py`.
-claude_agent_sdk users get an extra bonus: Claude Code's CLI also
-auto-discovers `~/.claude/skills/` natively, so the agent can load
-the skill on natural-language intent without the user typing a slash
-command.
+skills are available to the **non-SDK** backends — codex_cli,
+openai_agents, deep_agents, langchain_react — via PocketPaw's
+slash-command dispatcher in `dashboard_ws.py`, plus the desktop
+dashboard.
+
+The default `claude_agent_sdk` backend is the exception: it launches
+with `setting_sources=[]` for persona isolation, which disables the
+SDK's filesystem skill discovery — `~/.claude/skills/` is invisible to
+it (verified 2026-06-03 — a slash hits the SDK as an unknown command
+and the run returns with no assistant turn; the SDK `skills=` option is
+gated by `setting_sources` too). So that backend gets the bundled
+skills a different way: the `_bundled/` directory is also a Claude Code
+**local plugin** (`.claude-plugin/plugin.json` + `skills/`), and the
+backend passes it via the SDK `plugins=` option, which loads regardless
+of `setting_sources`. The skills then load by slash command and by
+natural-language intent, without leaking the rest of `~/.claude`
+(CLAUDE.md, output styles) into the agent. Toggle with
+`POCKETPAW_SDK_LOAD_BUNDLED_SKILLS` (default on).
 
 ## Why ship them with PocketPaw
 
@@ -131,17 +142,94 @@ Planned (not yet shipped):
 ## How this fits across chat backends
 
 Bundled skills work for **every** backend because the AgentSkills
-format is universal:
+format is universal — but the *route* differs by backend, because
+the default SDK backend can't see `~/.claude/skills/`:
 
 | Backend | Discovery | Invocation |
 | --- | --- | --- |
-| `claude_agent_sdk` | Claude Code CLI scans `~/.claude/skills/` natively + PocketPaw's `SkillLoader` also scans it | Natural-language intent (chat agent loads skill on its own) OR `/<skill>` slash command |
+| `claude_agent_sdk` | `_bundled/` passed as a local plugin via the SDK `plugins=` option (NOT `~/.claude/skills/` — `setting_sources=[]` disables that) | Natural-language intent OR `/<skill>` slash command, handled inside the SDK run |
 | `codex_cli`, `openai_agents`, `deep_agents`, `langchain_react` | PocketPaw's `SkillLoader.SKILL_PATHS` (includes `~/.claude/skills/`) | `/<skill>` slash command in chat UI → `dashboard_ws.py` → `SkillExecutor.execute_skill` |
 
-The chat UI's slash-command dispatcher runs the skill body through
-`AgentRouter.run(prompt)` against whatever backend the user has
-configured. So the skill is single-source — same SKILL.md, same
-shipping pipeline, every backend benefits.
+Both routes read the same single-source SKILL.md files under
+`_bundled/skills/`. The `~/.claude/skills/` mirror and the local
+plugin are two installs of one set of files, so a skill added once is
+picked up by every backend.
+
+## Per-entity skills and system-message override (entity rooms)
+
+**Status:** Shipped 2026-06-07 via `feat/entity-pocket-profile-field` (PR #1343).
+
+A pocket-entity can carry a `surface_profile` override. Two of its fields are
+now **live at runtime** (they were composed-but-inert before this PR):
+
+- **`skill_names: frozenset[str]`** — the skills this entity surfaces to its
+  agent. Composed as a **UNION** over the surface base (`compose_entity_profile`):
+  the entity adds its skills to whatever the surface already offers.
+- **`system_message_override: str | None`** — a full base-identity swap for the
+  entity. Composed **entity-wins-when-set** (a `None` override means "no opinion,
+  keep the base").
+
+Both cross the EE→OSS boundary as **plain data** (a `frozenset[str]` and a
+`str`) — no `pocketpaw_ee` symbol enters `src/pocketpaw/`. They are resolved once
+per run onto `ctx.resolved_profile` (in `run_core.execute_run`), then read in
+`_drive_agent_loop` and forwarded into `AgentPool.run` with the same
+withhold-when-empty idiom the `deny_mcp_tool_ids` / `allowed_sdk_tools` fields
+use, so non-entity runs are byte-identical.
+
+### How each field is consumed
+
+**`system_message_override` — SWAP THE BASE, KEEP THE LAYERS.** Applied in
+`AgentPool.run` before any backend dispatch. It replaces ONLY the base
+persona/soul identity portion of the assembled system prompt; every downstream
+layer still appends. The final prompt is:
+
+```
+override + instructions (incl. ripple LAW) + soul-memory recall + knowledge-base wrapper
+```
+
+Because it rides the existing `system_prompt` channel, it works for **every**
+backend — no backend signature change.
+
+**`skill_names` — per-run materialized plugin (SDK) / filtered advertisement
+(non-SDK).** The consumption route differs by backend, mirroring how the bundled
+skills already differ:
+
+| Backend | How `skill_names` is applied |
+| --- | --- |
+| `claude_agent_sdk` | `materialize_run_skills()` copies ONLY the named skills into a throwaway local-plugin dir (`.claude-plugin/plugin.json` + `skills/<slug>/`) and appends it to the SDK `plugins=` list, coexisting with the bundled plugin. So the agent sees the bundled skills PLUS exactly the entity's named skills. The temp dir is cleaned up after the run. |
+| non-SDK (`codex_cli`, `openai_agents`, `deep_agents`, `langchain_react`) | `AgentContextBuilder.build_system_prompt(skill_names=...)` FILTERS the "Available Skills" block to the named set, so the agent is advertised only those skills. |
+
+The SDK path is the keystone: `setting_sources=[]` disables filesystem and
+`skills=` discovery (see above), so a **local plugin is the only channel** that
+surfaces a per-run skill subset. We build a fresh plugin per run rather than
+reusing `~/.claude/skills` so the entity gets exactly its named subset, never the
+full installed set.
+
+### Warm-client caveat (SDK)
+
+The Claude SDK backend keeps a persistent ("warm") `ClaudeSDKClient` per
+session. That client applies its options **only at first `connect()`**, and the
+warm-client cache key (`_client_cache_key`) does **not** include `plugins=`. So a
+warm client connected without the per-run skills would silently ignore them (and
+one connected with them would leak them into later non-skill turns). To stay
+correct, a run with a non-empty `skill_names` **bypasses the warm client** and
+runs on a fresh stateless query whose options carry the materialized plugin.
+Empty `skill_names` keeps the normal warm-client fast path.
+
+### Precedence summary
+
+| Field | Composition | Consumer |
+| --- | --- | --- |
+| `skill_names` | UNION (base ∪ entity) | SDK: per-run plugin; non-SDK: filtered advertisement |
+| `system_message_override` | entity-wins-when-set, else base | all backends (base swap, layers kept) |
+
+Implementation: `src/pocketpaw/skills/materialize.py` (materializer +
+cleanup), `src/pocketpaw/agents/pool.py` (override base-swap + skill forwarding),
+`src/pocketpaw/agents/claude_sdk.py` (plugin wiring + warm-client bypass),
+`src/pocketpaw/bootstrap/context_builder.py` (non-SDK filter),
+`ee/pocketpaw_ee/cloud/chat/runs/run_core.py` (reads `ctx.resolved_profile`,
+forwards as plain data). Compose rules:
+`ee/pocketpaw_ee/cloud/surface/service.py::compose_entity_profile`.
 
 ## Implementation notes
 

@@ -7,6 +7,13 @@
 # ``temporal_sweeps`` entity's job; per-row Instinct branching is
 # Wave 3a's; this module is the orchestration glue.
 #
+# Updated: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER. The
+# action-binding lookup in ``_dispatch_action_for_row`` now promotes the
+# pocket's rippleSpec through ``RippleSpec.from_flat_dict`` (accepts a legacy
+# flat dict OR a typed RippleSpec, never raises) before reading
+# ``spec.actions[name]``. A corrupt spec yields the same ``action_not_found``
+# soft failure. Promote-on-read; no document migration.
+#
 # Wave 3d scope (locked by the architect brief):
 #
 #   1. Load the prior sweep state via ``temporal_sweeps.service.load_last_seen``.
@@ -69,7 +76,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from pocketpaw.bundled_templates import PocketTemplate
+from pocketpaw.bundled_templates import PocketTemplate, RippleSpec
 from pocketpaw.bundled_templates.identifier_resolver import IdentifierResolver
 from pocketpaw.bundled_templates.temporal_sweeper import (
     SweepResult,
@@ -285,10 +292,18 @@ async def _invoke_executor(
             "code": "pocket_backend.not_configured",
             "on_error": [],
         }
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+    # Trailing `backend_type` / `connector_name` (connector-backend feature)
+    # don't apply to the http write executor — absorbed and ignored.
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route, *_ = creds
 
     ripple_spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
-    actions = (ripple_spec or {}).get("actions")
+    # Phase-2 dual-path: ``get_pocket_ripple_spec`` returns a legacy flat dict
+    # today, but promote-on-read at the domain boundary means a typed
+    # ``RippleSpec`` is also a valid shape. ``RippleSpec.from_flat_dict``
+    # accepts either (idempotent on a RippleSpec) and never raises — a corrupt
+    # spec yields ``None`` → the ``action_not_found`` path below.
+    spec = RippleSpec.from_flat_dict(ripple_spec)
+    actions = spec.actions if spec is not None and isinstance(spec.actions, dict) else None
     raw_action = actions.get(action_name) if isinstance(actions, dict) else None
     if not isinstance(raw_action, dict):
         return {

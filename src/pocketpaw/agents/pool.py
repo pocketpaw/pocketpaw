@@ -9,6 +9,47 @@ Updated: 2026-05-21 — ``_build`` now translates an agent's ``config.tools``
   ``ToolPolicy.mcp_servers_allow`` frozenset, and passes the resulting
   policy to the Claude SDK backend. This is how a cloud agent opts into
   the planner MCP server.
+Updated: 2026-06-05 (feat/sites-svelte-engine) — ``run`` accepts a
+  ``deny_mcp_tool_ids: frozenset[str]`` per-surface MCP-tool deny set (resolved
+  from the request's ``SurfaceProfile`` in the EE chat loop) and forwards it to
+  the backend's ``run`` when non-empty. Only the Claude SDK backend consumes it
+  (subtracting the ids from its tool allowlist before launch); it is withheld
+  from the call when empty so backends that don't accept the kwarg are
+  unaffected. Non-empty only on /sites svelte-create.
+Updated: 2026-06-06 (feat/entity-pocket-profile-field, entity-rooms chunk ①) —
+  ``run`` also accepts ``allow_sdk_tools: frozenset[str]``, the per-entity
+  additive SDK-tool allowlist (resolved from the entity pocket's
+  ``surface_profile.allowed_sdk_tools`` upstream). It mirrors the
+  ``deny_mcp_tool_ids`` threading EXACTLY: a plain ``frozenset[str]`` forwarded
+  to the backend's ``run`` ONLY when non-empty (so the 6 non-Claude backends
+  keep their narrower signature), and consumed only by the Claude SDK backend,
+  which UNIONs it into the allowlist BEFORE subtracting the deny set —
+  precedence ``effective = (agent_tools ∪ allow) − deny`` (deny is the hard
+  cap). Empty for every legacy / non-entity run, so ordinary runs are untouched.
+  No ``pocketpaw_ee`` symbol crosses the boundary — only the frozenset.
+Updated: 2026-06-07 (feat/entity-pocket-profile-field, entity-rooms A1/A2) —
+  ``run`` grows two more entity-profile knobs, both plain data across the EE→OSS
+  boundary:
+   * ``system_message_override: str | None`` — when set, REPLACES the base
+     persona/soul identity portion of the system prompt while the downstream
+     layers (authoritative ``instructions`` incl. ripple LAW, soul memory recall,
+     knowledge-base wrapper) STILL append. So the final prompt is
+     ``override + instructions + soul-memory + knowledge``. ``None`` = unchanged.
+   * ``skill_names: frozenset[str]`` — the per-entity skill subset, forwarded to
+     the Claude SDK backend (withhold-when-empty, same idiom as deny/allow). The
+     SDK backend materializes those skills into a throwaway local plugin so ONLY
+     the named skills are surfaced. Empty = legacy all-skills behavior.
+Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``, which eagerly
+  warms the agent's CLI subprocess for a session before its first turn (only the
+  Claude SDK backend has one; no-op elsewhere). ``run``'s system-prompt assembly
+  was factored into a shared ``_assemble_system_prompt`` so ``prewarm`` builds
+  the IDENTICAL prompt the first turn will — the backend's warm-client cache key
+  hashes the prompt's stable behavioral prefix, so a divergent prefix would make
+  turn 1 evict the prewarmed client. ``prewarm`` folds in the agent's own skills
+  (``skill_refs`` + enabled-plugin skills) exactly as ``run`` does so the plugin
+  digest matches too. Fire-and-forget: never raises (the backend's ``prewarm``
+  swallows its own errors; this guards instance load + prompt assembly). The EE
+  trigger fires it as a background task in ``run_core.execute_run``.
 """
 
 from __future__ import annotations
@@ -153,30 +194,29 @@ class AgentPool:
                 await self._evict_oldest()
             return await self._build(agent_doc)
 
-    async def run(
+    async def _assemble_system_prompt(
         self,
+        instance: AgentInstance,
+        *,
         agent_id: str,
         message: str,
-        session_key: str,
-        history: list[dict] | None = None,
-        knowledge_context: str = "",
-        instructions: str = "",
-    ) -> AsyncIterator[Any]:
-        """Run an agent on a message. Yields AgentEvent stream.
+        instructions: str,
+        knowledge_context: str,
+        system_message_override: str | None,
+    ) -> str | None:
+        """Build the agent's system prompt from soul/persona + override +
+        instructions + per-message soul recall + knowledge wrapper.
 
-        ``instructions`` is for AUTHORITATIVE behavioral rules — surface
-        conventions, delegation routing, mandatory pre-tool narration,
-        etc. — and is injected directly after persona/extra without the
-        "Your Knowledge Base" wrapper. Use it for anything the model
-        MUST do; the wrapper around ``knowledge_context`` framed
-        instructions as reference data, which models were ignoring.
-
-        ``knowledge_context`` remains reference material (KB snippets +
-        per-turn scope/participants tags). Kept under the wrapper.
+        Factored out of ``run`` (feat/claude-sdk-prewarm) so ``prewarm`` builds
+        the IDENTICAL prompt the first real turn will. The Claude SDK warm-client
+        cache key hashes the prompt's STABLE behavioral prefix (soul/persona +
+        override + ``instructions``); the volatile tail this also appends
+        (``## Relevant Past Memories`` soul recall, ``## Your Knowledge Base``)
+        is stripped before hashing, so a prewarm that passes ``message=""`` /
+        ``knowledge_context=""`` still hashes to the SAME prefix as the run that
+        passes the real values — which is exactly what makes the prewarmed client
+        reused rather than evicted on turn 1.
         """
-        instance = await self.get(agent_id)
-        instance.last_active = datetime.now(UTC)
-
         # Build system prompt via soul bootstrap if available
         system_prompt = None
         if instance.soul_manager and instance.soul_manager.bootstrap_provider:
@@ -197,6 +237,17 @@ class AgentPool:
             extra = instance.config.get("system_prompt", "")
             system_prompt = f"{persona}\n\n{extra}".strip() if persona or extra else ""
 
+        # Per-entity system-message override (entity-rooms A1): SWAP the base,
+        # KEEP the layers. Everything assembled ABOVE this point is the base
+        # persona/soul identity — exactly what the override replaces. The
+        # downstream layers (authoritative ``instructions`` incl. the ripple LAW,
+        # the soul-memory recall, the knowledge wrapper) are appended BELOW, so
+        # they still ride on top of the override. ``None`` leaves the base
+        # untouched (legacy path). Applied here so a backend never needs to know
+        # the override exists — it rides the existing ``system_prompt`` channel.
+        if system_message_override is not None:
+            system_prompt = system_message_override
+
         # Authoritative behavior rules — injected BEFORE the knowledge
         # wrapper so the model reads them as instructions, not reference.
         if instructions:
@@ -205,6 +256,8 @@ class AgentPool:
         # Query-specific soul memory recall — inject relevant past interactions
         # so the agent can reference cross-session memories. This complements
         # the general semantic facts already injected by SoulBootstrapProvider.
+        # Skipped on an empty message (e.g. prewarm) — and stripped from the
+        # cache key's behavioral prefix regardless, so it never affects reuse.
         if instance.soul_manager and instance.soul_manager.soul and message.strip():
             try:
                 soul_ctx = await instance.soul_manager.soul.context_for(
@@ -239,6 +292,178 @@ class AgentPool:
                 f"{knowledge_context}"
             )
 
+        return system_prompt
+
+    async def prewarm(
+        self,
+        agent_id: str,
+        session_key: str,
+        *,
+        instructions: str = "",
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_sdk_tools: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        system_message_override: str | None = None,
+        skill_names: frozenset[str] = frozenset(),
+    ) -> None:
+        """Eagerly warm the agent's CLI subprocess for ``session_key`` before its
+        first turn, so the first ``run`` reuses it instead of paying the cold
+        ~12s ``connect()`` (feat/claude-sdk-prewarm).
+
+        Only the Claude SDK backend has a warm-client subprocess, so this no-ops
+        on every other backend (it checks for a ``prewarm`` attribute). It
+        assembles the SAME system prompt and folds in the SAME agent-own skills
+        (``skill_refs`` + enabled-plugin skills) that ``run`` will, so the
+        backend computes a matching cache key — a mismatched key would make the
+        first turn EVICT the prewarmed client (a net loss).
+
+        FIRE-AND-FORGET: the call is designed to be wrapped in
+        ``asyncio.create_task`` by the caller. It NEVER raises — the backend's
+        ``prewarm`` swallows its own errors, and this method guards instance load
+        + prompt assembly in try/except. A failed prewarm leaves the next ``run``
+        to pay the cold connect it would have paid anyway (no regression).
+
+        IMPORTANT: the caller must only invoke this when the first turn's model
+        is message-INDEPENDENT (smart routing OFF). With smart routing ON the
+        model is classified from the message, which prewarm doesn't have, so a
+        prewarm could warm the wrong model tier and cause evict-churn. The
+        run_core trigger gates on this.
+        """
+        try:
+            instance = await self.get(agent_id)
+        except Exception:
+            logger.debug("prewarm: could not load agent %s (skipped)", agent_id)
+            return
+
+        # Only the Claude SDK backend has a warm subprocess to prewarm.
+        backend_prewarm = getattr(instance.backend, "prewarm", None)
+        if backend_prewarm is None:
+            return
+
+        # Fold the agent's OWN skills into the set, mirroring ``run`` exactly so
+        # the plugin digest (and thus the cache key) matches the first turn.
+        cfg = getattr(instance, "config", None) or {}
+        own_skills = (
+            frozenset(cfg.get("skill_refs", []) or []) if isinstance(cfg, dict) else frozenset()
+        )
+        effective_skills = skill_names | own_skills
+
+        try:
+            system_prompt = await self._assemble_system_prompt(
+                instance,
+                agent_id=agent_id,
+                message="",  # no turn yet — the volatile tail is stripped anyway
+                instructions=instructions,
+                knowledge_context="",  # stripped from the cache-key prefix
+                system_message_override=system_message_override,
+            )
+        except Exception:
+            logger.debug("prewarm: prompt assembly failed for %s (skipped)", agent_id)
+            return
+
+        # The backend's prewarm swallows ALL of its own errors, so this is
+        # already safe; the outer guards above cover instance/prompt failures.
+        prewarm_kwargs: dict[str, Any] = {
+            "session_key": session_key,
+            "system_prompt": system_prompt,
+        }
+        if deny_mcp_tool_ids:
+            prewarm_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
+        if allow_sdk_tools:
+            prewarm_kwargs["allow_sdk_tools"] = allow_sdk_tools
+        if allow_mcp_tool_ids is not None:
+            prewarm_kwargs["allow_mcp_tool_ids"] = allow_mcp_tool_ids
+        if effective_skills:
+            prewarm_kwargs["skill_names"] = effective_skills
+        await backend_prewarm(**prewarm_kwargs)
+
+    async def run(
+        self,
+        agent_id: str,
+        message: str,
+        session_key: str,
+        history: list[dict] | None = None,
+        knowledge_context: str = "",
+        instructions: str = "",
+        deny_mcp_tool_ids: frozenset[str] = frozenset(),
+        allow_sdk_tools: frozenset[str] = frozenset(),
+        allow_mcp_tool_ids: frozenset[str] | None = None,
+        system_message_override: str | None = None,
+        skill_names: frozenset[str] = frozenset(),
+    ) -> AsyncIterator[Any]:
+        """Run an agent on a message. Yields AgentEvent stream.
+
+        ``instructions`` is for AUTHORITATIVE behavioral rules — surface
+        conventions, delegation routing, mandatory pre-tool narration,
+        etc. — and is injected directly after persona/extra without the
+        "Your Knowledge Base" wrapper. Use it for anything the model
+        MUST do; the wrapper around ``knowledge_context`` framed
+        instructions as reference data, which models were ignoring.
+
+        ``knowledge_context`` remains reference material (KB snippets +
+        per-turn scope/participants tags). Kept under the wrapper.
+
+        ``deny_mcp_tool_ids`` is a per-surface MCP-tool deny set (resolved
+        from the request's ``SurfaceProfile`` upstream). It is forwarded to
+        the backend's ``run`` ONLY when non-empty so it reaches the Claude
+        SDK backend — the one backend that consumes it — without passing an
+        unexpected kwarg to backends that don't accept it. Empty for every
+        surface except /sites svelte-create, so ordinary runs are untouched.
+
+        ``allow_sdk_tools`` is the per-entity ADDITIVE SDK-tool allowlist
+        (resolved from the entity pocket's ``surface_profile.allowed_sdk_tools``
+        upstream — entity-rooms chunk ①). It mirrors ``deny_mcp_tool_ids``
+        exactly: forwarded to the backend's ``run`` ONLY when non-empty, and
+        consumed only by the Claude SDK backend, which UNIONs it into the
+        allowlist BEFORE subtracting the deny set (``(agent ∪ allow) − deny``).
+        Empty for every legacy / non-entity run.
+
+        ``system_message_override`` (entity-rooms A1), when set, REPLACES the base
+        persona/soul identity portion of the assembled system prompt — the text
+        built from soul bootstrap / persona / config ``system_prompt`` BEFORE the
+        authoritative ``instructions`` are appended. The override SWAPS that base
+        but KEEPS every downstream layer: ``instructions`` (incl. the ripple LAW),
+        the query-specific soul-memory recall, and the knowledge-base wrapper all
+        still append. Net prompt = ``override + instructions + soul-memory +
+        knowledge``. ``None`` (the default / legacy path) leaves the base intact.
+
+        ``skill_names`` (entity-rooms A2) is the per-entity skill subset. It is
+        forwarded to the backend's ``run`` ONLY when non-empty (same
+        withhold-when-empty idiom as deny/allow, so the 6 non-Claude backends keep
+        their narrower signature). The Claude SDK backend materializes exactly
+        those skills into a throwaway local plugin so ONLY the named skills are
+        surfaced to the agent for this run. Empty = legacy all-skills behavior.
+        """
+        instance = await self.get(agent_id)
+        instance.last_active = datetime.now(UTC)
+
+        # An agent's OWN declared skills (config.skill_refs) must materialize on
+        # EVERY run path, not only entity-room runs that thread skill_names in.
+        # The SSE chat path resolves this upstream and passes skill_names; the
+        # group/DM bridge (agent_bridge) calls run() without it, so a deployment
+        # agent with skill_refs got none of its skills. Union the agent's own
+        # skill_refs here so run() is the single source of truth for them; the
+        # passed-in skill_names stays an additive per-entity subset.
+        cfg = getattr(instance, "config", None) or {}
+        own_skills = (
+            frozenset(cfg.get("skill_refs", []) or []) if isinstance(cfg, dict) else frozenset()
+        )
+        if own_skills:
+            skill_names = skill_names | own_skills
+
+        # Assemble the system prompt (factored into ``_assemble_system_prompt``
+        # so ``prewarm`` builds the SAME prompt this run will — the warm-client
+        # cache key hashes the prompt's stable behavioral prefix, so a divergent
+        # prefix would make the first turn evict the prewarmed client).
+        system_prompt = await self._assemble_system_prompt(
+            instance,
+            agent_id=agent_id,
+            message=message,
+            instructions=instructions,
+            knowledge_context=knowledge_context,
+            system_message_override=system_message_override,
+        )
+
         # Mark this instance as actively running for the duration of the
         # stream. ``last_active`` alone isn't enough because the LLM can have
         # multi-minute gaps between yielded events (DeepSeek thinking, slow
@@ -249,12 +474,38 @@ class AgentPool:
         # LRU evictor honor.
         instance.active_runs += 1
         try:
-            async for event in instance.backend.run(
-                message,
-                system_prompt=system_prompt,
-                history=history,
-                session_key=session_key,
-            ):
+            # Only forward the deny set when non-empty: the Claude SDK backend
+            # accepts ``deny_mcp_tool_ids``, but the other backends keep the
+            # narrower ``(message, *, system_prompt, history, session_key)``
+            # signature, so passing the kwarg to them would raise TypeError.
+            # The set is empty for every surface except /sites svelte-create
+            # (which always runs on the Claude SDK backend), so this never
+            # withholds a needed deny from a backend that would honor it.
+            run_kwargs: dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "history": history,
+                "session_key": session_key,
+            }
+            if deny_mcp_tool_ids:
+                run_kwargs["deny_mcp_tool_ids"] = deny_mcp_tool_ids
+            # Same withhold-when-empty rule as the deny set: only the Claude SDK
+            # backend accepts ``allow_sdk_tools``; the others keep the narrower
+            # signature, so an entity allowlist is forwarded only when non-empty.
+            if allow_sdk_tools:
+                run_kwargs["allow_sdk_tools"] = allow_sdk_tools
+            # Per-MODE restrictive MCP allow-list. Forwarded only when not None
+            # (the Claude SDK backend is the only consumer); None = no
+            # restriction, so broad surfaces / non-Claude backends are untouched.
+            if allow_mcp_tool_ids is not None:
+                run_kwargs["allow_mcp_tool_ids"] = allow_mcp_tool_ids
+            # Per-entity skill subset (entity-rooms A2). Same withhold-when-empty
+            # rule: only the Claude SDK backend accepts ``skill_names`` (it
+            # materializes them into a per-run local plugin); the other backends
+            # keep the narrower signature, so the subset is forwarded only when
+            # non-empty. Empty = legacy all-skills advertise behavior.
+            if skill_names:
+                run_kwargs["skill_names"] = skill_names
+            async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
         finally:

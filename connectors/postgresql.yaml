@@ -6,6 +6,9 @@ display_name: PostgreSQL
 type: database
 icon: server
 
+senses:
+  - paw.db.v1
+
 auth:
   method: none
   credentials:

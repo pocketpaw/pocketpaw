@@ -37,6 +37,12 @@ import os
 import time
 from typing import Any
 
+from pocketpaw_ee.cloud.livekit.prompts import (
+    ANTHROPIC_SUMMARY_PROMPT,
+    DEEPSEEK_SUMMARY_PROMPT,
+    OPENAI_SUMMARY_PROMPT,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -78,6 +84,7 @@ class CallMeetingAgent:
         # Accumulated transcript segments
         self.transcript_segments: list[dict[str, Any]] = []
         self._participant_identities: set[str] = set()
+        self._participant_info: dict[str, str] = {}  # identity → display_name
         self._has_ever_had_humans: bool = False
         self._call_start_time: float = 0.0
 
@@ -122,23 +129,32 @@ class CallMeetingAgent:
         # Disconnect RTC room first (stops audio streams)
         await self._disconnect_rtc()
 
-        # Cancel monitor task
+        # Cancel monitor task — do NOT await; the task's CancelledError
+        # propagates at its next await point and asyncio.run() handles
+        # cleanup.  Avoiding the await here means _finalize_notes() is
+        # called promptly even when Deepgram/AudioStream cleanup is slow.
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
 
-        # Cancel transcribe task
+        # Cancel transcribe task — same rationale: don't block on
+        # AudioStream/Deepgram pipe cleanup, especially for long meetings
+        # with many participants where cleanup can take many seconds.
         if self._transcribe_task:
             self._transcribe_task.cancel()
-            try:
-                await self._transcribe_task
-            except asyncio.CancelledError:
-                pass
 
         await self._finalize_notes()
+
+        # Brief drain for cancelled tasks so they don't leak
+        if self._transcribe_task and not self._transcribe_task.done():
+            try:
+                await asyncio.wait_for(self._transcribe_task, timeout=3)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+        if self._monitor_task and not self._monitor_task.done():
+            try:
+                await asyncio.wait_for(self._monitor_task, timeout=1)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
 
         logger.info(
             "CallMeetingAgent stopped for room %s (group %s)",
@@ -227,6 +243,7 @@ class CallMeetingAgent:
 
                 pname = participant.name or pid
                 self._participant_identities.add(pid)
+                self._participant_info[pid] = pname
                 logger.info("Agent: setting up audio pipe for %s (from_participant)", pname)
 
                 try:
@@ -512,6 +529,7 @@ class CallMeetingAgent:
                         if pid and pid != "call-bot":
                             human_count += 1
                             self._participant_identities.add(pid)
+                            self._participant_info[pid] = p.get("name", "") or pid
                             self._has_ever_had_humans = True
 
                 if human_count == 0:
@@ -617,11 +635,28 @@ class CallMeetingAgent:
 
             transcript_text = "\n".join(transcript_lines)
 
+            # Truncate long transcripts before sending to the LLM so the
+            # API call finishes within the process-grace-period window.
+            # Limit to ~5K chars (~1K tokens) which captures enough context
+            # for a useful summary while keeping latency predictable.
+            # The full transcript is still included in the meeting notes payload.
+            llm_transcript = transcript_text
+            if len(transcript_text) > 5000:
+                logger.info(
+                    "Agent: truncating long transcript for LLM (%d chars → 5000)",
+                    len(transcript_text),
+                )
+                llm_transcript = (
+                    transcript_text[:2500]
+                    + "\n\n[... transcript truncated at 5000 chars ...]\n\n"
+                    + transcript_text[-2500:]
+                )
+
             # Generate AI summary — non-fatal if it fails; notes still post
             # with raw transcript (or a fallback message).
             try:
                 summary, action_items = await self._generate_summary(
-                    transcript_text,
+                    llm_transcript,
                 )
             except Exception:
                 logger.exception("Agent: AI summarization failed — posting notes without summary")
@@ -629,11 +664,35 @@ class CallMeetingAgent:
                 action_items = ["Transcript captured but summarization failed."]
         else:
             transcript_text = ""
-            summary = "Call ended with no speech detected."
-            action_items = []
 
-        # Merge participant identities from room tracking + transcript
-        all_participants = list(self._participant_identities | speakers_seen)
+            # Still attempt AI summarization so DeepSeek can process
+            # whatever context is available (room info, participant IDs).
+            try:
+                summary, action_items = await self._generate_summary(
+                    transcript_text or "(no speech captured)",
+                )
+            except Exception:
+                logger.exception("Agent: AI summarization failed — posting notes without summary")
+                summary = "Call ended with no speech detected."
+                action_items = []
+
+        # Merge participant identities from room tracking + transcript.
+        # Resolve identity strings to display names for the meeting notes.
+        all_participants_set: set[str] = set()
+        for pid in sorted(self._participant_identities):
+            display_name = self._participant_info.get(pid, pid)
+            all_participants_set.add(display_name)
+        for s in speakers_seen:
+            all_participants_set.add(s)
+        all_participants = sorted(all_participants_set)
+
+        # Build structured participant info (identity → display_name) so the
+        # service can resolve @mentions in action items to real user IDs
+        # without querying the User collection.
+        participant_map = [
+            {"identity": pid, "name": self._participant_info.get(pid, pid)}
+            for pid in sorted(self._participant_identities)
+        ]
 
         # ── Emit notes payload to stdout ──
         # Instead of calling post_meeting_notes_to_group directly (which
@@ -648,6 +707,7 @@ class CallMeetingAgent:
                 "summary": summary,
                 "action_items": action_items,
                 "participants": all_participants,
+                "participant_map": participant_map,
                 "duration_seconds": duration,
             }
         )
@@ -667,13 +727,22 @@ class CallMeetingAgent:
     ) -> tuple[str, list[str]]:
         """Generate a meeting summary and action items from transcript.
 
-        Uses Anthropic Claude by default, falls back to OpenAI.
-        Falls back to heuristic extraction if no LLM is configured.
+        Uses DeepSeek by default (OpenAI-compatible API), falls back to
+        Anthropic Claude, then OpenAI. Falls back to heuristic extraction
+        if no LLM is configured.
         """
         if not transcript:
             return "No speech detected during the call.", []
 
-        # Try Anthropic first
+        # Try DeepSeek first (OpenAI-compatible API)
+        deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        if deepseek_key:
+            try:
+                return await self._summarize_with_deepseek(transcript, deepseek_key)
+            except Exception as exc:
+                logger.warning("DeepSeek summarization failed: %s", exc)
+
+        # Fall back to Anthropic
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if api_key:
             try:
@@ -700,15 +769,7 @@ class CallMeetingAgent:
         """Use Anthropic Claude to summarize the transcript."""
         import httpx
 
-        prompt = (
-            "You are a meeting notes assistant. Given the following transcript of a group call, "
-            "provide:\n"
-            "1. A concise summary (2-3 paragraphs) of what was discussed\n"
-            "2. A list of action items / decisions made\n\n"
-            "Format your response as JSON with keys 'summary' (string) and "
-            "'action_items' (list of strings).\n\n"
-            f"Transcript:\n{transcript}"
-        )
+        prompt = ANTHROPIC_SUMMARY_PROMPT.format(transcript=transcript)
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -730,6 +791,36 @@ class CallMeetingAgent:
         content = data.get("content", [{}])[0].get("text", "")
         return self._parse_summary_json(content)
 
+    async def _summarize_with_deepseek(
+        self,
+        transcript: str,
+        api_key: str,
+    ) -> tuple[str, list[str]]:
+        """Use DeepSeek (OpenAI-compatible API) to summarize the transcript."""
+        import httpx
+
+        prompt = DEEPSEEK_SUMMARY_PROMPT.format(transcript=transcript)
+        logger.info("DeepSeek prompt length: %d chars", len(prompt))
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 4096,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return self._parse_summary_json(content)
+
     async def _summarize_with_openai(
         self,
         transcript: str,
@@ -738,15 +829,7 @@ class CallMeetingAgent:
         """Use OpenAI GPT to summarize the transcript."""
         import httpx
 
-        prompt = (
-            "You are a meeting notes assistant. Given the following transcript of a group call, "
-            "provide:\n"
-            "1. A concise summary (2-3 paragraphs) of what was discussed\n"
-            "2. A list of action items / decisions made\n\n"
-            "Format your response as JSON with keys 'summary' (string) and "
-            "'action_items' (list of strings).\n\n"
-            f"Transcript:\n{transcript}"
-        )
+        prompt = OPENAI_SUMMARY_PROMPT.format(transcript=transcript)
 
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -851,12 +934,17 @@ if __name__ == "__main__":
                 logger.info("Agent: SIGTERM — finalising notes")
                 agent._running = False
                 await agent._disconnect_rtc()
+                # Cancel transcribe task but do NOT await it here —
+                # waiting for cleanup of AudioStreams + Deepgram pipes
+                # can be slow for long meetings. The parent process
+                # waits up to 30s for this process to exit; we want to
+                # spend that time on _finalize_notes, not on teardown.
                 if agent._transcribe_task:
                     agent._transcribe_task.cancel()
-                    try:
-                        await agent._transcribe_task
-                    except asyncio.CancelledError:
-                        pass
+                # Cancel the monitor task so it doesn't block exit with
+                # its 5s sleep interval.
+                if agent._monitor_task:
+                    agent._monitor_task.cancel()
                 await agent._finalize_notes()
                 # Do NOT clean up the room here — the parent process
                 # (end_room) handles room deletion after the agent exits.
@@ -866,14 +954,17 @@ if __name__ == "__main__":
 
             await asyncio.sleep(1)
 
-        # Wait for the monitor task (natural end) to finish its finalise
-        # + cleanup chain before exiting. Without this, asyncio.run()
-        # cancels pending tasks the moment _main() returns, which kills
-        # the monitor task mid-_finalize_notes().
+        # Give cancelled tasks a moment to drain, then let _main()
+        # return so asyncio.run() can clean up.
+        if agent._transcribe_task and not agent._transcribe_task.done():
+            try:
+                await asyncio.wait_for(agent._transcribe_task, timeout=3)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
         if agent._monitor_task and not agent._monitor_task.done():
             try:
-                await agent._monitor_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(agent._monitor_task, timeout=1)
+            except (asyncio.CancelledError, TimeoutError):
                 pass
 
     asyncio.run(_main())

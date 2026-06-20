@@ -245,17 +245,91 @@ def task_to_dto(task: Task) -> TaskResponse:
     )
 
 
+class CreateTaskEventRequest(BaseModel):
+    """Body for ``POST /tasks/{id}/events``."""
+
+    body: str = Field(min_length=1, max_length=2000)
+
+
+class TaskEventResponse(BaseModel):
+    """Wire shape for one task event."""
+
+    id: str
+    task_id: str
+    author_id: str
+    author_name: str
+    body: str
+    created_at: str | None = None
+
+
+def task_event_to_dto(event: Any) -> TaskEventResponse:
+    return TaskEventResponse(
+        id=str(event.id),
+        task_id=event.task_id,
+        author_id=event.author_id,
+        author_name=event.author_name,
+        body=event.body,
+        created_at=iso_utc(event.createdAt) if event.createdAt else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Attachment DTOs
+# ---------------------------------------------------------------------------
+
+
+class TaskAttachmentResponse(BaseModel):
+    """Wire shape for a file attached to a task."""
+
+    id: str
+    task_id: str
+    file_id: str
+    filename: str
+    mime: str
+    size: int
+    creator_id: str
+    created_at: str | None = None
+
+
+class AttachFilesRequest(BaseModel):
+    """Body for ``POST /tasks/{id}/attachments``."""
+
+    file_ids: list[str] = Field(min_length=1, max_length=50)
+
+
+def task_attachment_to_dto(att: Any) -> TaskAttachmentResponse:
+    """Map a ``TaskAttachment`` Beanie doc to its wire DTO."""
+    from pocketpaw_ee.cloud._core.time import iso_utc
+
+    return TaskAttachmentResponse(
+        id=str(att.id),
+        task_id=att.task_id,
+        file_id=att.file_id,
+        filename=att.filename,
+        mime=att.mime,
+        size=att.size,
+        creator_id=att.creator_id,
+        created_at=iso_utc(getattr(att, "createdAt", None)),
+    )
+
+
 __all__ = [
     "AssigneeDTO",
+    "AttachFilesRequest",
     "BlockTaskRequest",
     "BulkReassignRequest",
     "ClaimTaskRequest",
     "CompleteTaskRequest",
+    "CreateTaskEventRequest",
     "CreateTaskRequest",
     "ListTasksRequest",
     "ReassignTaskRequest",
     "SourceDTO",
+    "TaskAttachmentResponse",
+    "TaskEventResponse",
     "TaskResponse",
     "UpdateTaskRequest",
+    "task_attachment_to_dto",
+    "task_event_to_dto",
     "task_to_dto",
 ]

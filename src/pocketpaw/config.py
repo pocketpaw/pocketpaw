@@ -1,6 +1,22 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-18: Added the four layered/learning Instinct gate defaults —
+    ``instinct_approval_level`` (default "ASK", dormant),
+    ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
+    (False), ``instinct_optimistic_ttl_seconds`` (300). Global host-wide
+    defaults for the 4-lane triage router; per-workspace overrides land
+    with the gate integration layer. Dormant on ship (ASK escalates
+    everything). Env: POCKETPAW_INSTINCT_* .
+  - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
+    Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
+    repo path must resolve inside one of these roots; empty defaults to the
+    cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
+    orientation (loom) MCP server settings. ``loom_model_path`` defaults
+    to None, which disables the loom MCP server; set it to a built
+    world-model JSON to enable orient / locate / why / what_depends_on /
+    boundaries for the cloud chat agent (BS-1, Belt & Pulley stations).
   - 2026-05-26: Added ``foresight_use_skill`` — env gate for the
     ``foresight-create-sim`` bundled skill (default OFF). The SKILL.md
     still auto-installs; this flag toggles the chat-surface affordance
@@ -418,17 +434,36 @@ class Settings(BaseSettings):
         default=True,
         description=(
             "On dashboard startup, mirror bundled AgentSkills-format "
-            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/`` "
-            "into ``~/.claude/skills/<name>/SKILL.md``. That destination "
-            "is covered by both Claude Code's native skill discovery AND "
-            "PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the skill works "
-            "for all chat backends (claude_agent_sdk via natural-language "
-            "invocation, codex_cli / openai_agents / deep_agents via the "
-            "``/<skill-name>`` slash command). Idempotent — SHA-256 hash "
-            "compare per file. Set ``false`` to freeze a manually-customized "
-            "copy or disable bundled skills entirely. Skill installation "
-            "is best-effort: pocket creation still works via the MCP tool "
-            "surface even when no skill is installed."
+            "SKILL.md files from ``pocketpaw/bundled_skills/_bundled/skills/`` "
+            "into ``~/.claude/skills/<name>/SKILL.md``. That destination is "
+            "covered by PocketPaw's ``SkillLoader.SKILL_PATHS`` — so the "
+            "skill works on the non-SDK backends (codex_cli / openai_agents / "
+            "deep_agents) via the ``/<skill-name>`` slash command, and on the "
+            "desktop dashboard. NOTE: this mirror is INVISIBLE to the default "
+            "claude_agent_sdk backend (it runs ``setting_sources=[]`` which "
+            "disables filesystem skill discovery) — that backend loads the "
+            "bundled skills via ``sdk_load_bundled_skills`` instead. "
+            "Idempotent — SHA-256 hash compare per file. Set ``false`` to "
+            "freeze a manually-customized copy. Best-effort: pocket creation "
+            "still works via the MCP tool surface even when no skill loads."
+        ),
+    )
+    sdk_load_bundled_skills: bool = Field(
+        default=True,
+        description=(
+            "Load PocketPaw's bundled skills into the claude_agent_sdk "
+            "backend as a Claude Code local plugin (SDK ``plugins=`` option). "
+            "This is the ONLY mechanism that reaches that backend: it runs "
+            "``setting_sources=[]`` for persona isolation, which disables the "
+            "SDK's ``~/.claude/skills`` discovery, so the "
+            "``auto_install_bundled_skills`` mirror above does not help it. "
+            "A local plugin loads regardless of setting_sources, so the "
+            "bundled skills (pocket/site creation, editing, planning, "
+            "foresight) become invokable via both slash command and "
+            "natural-language intent without leaking the rest of ``~/.claude`` "
+            "(CLAUDE.md, output styles) into the agent. Set ``false`` to keep "
+            "the backend skill-free and drive everything via the per-surface "
+            "MCP-tool preambles only."
         ),
     )
     auto_install_bundled_kb_scopes: bool = Field(
@@ -779,7 +814,66 @@ class Settings(BaseSettings):
     # Image Generation
     google_api_key: str | None = Field(default=None, description="Google API key (for Gemini)")
     image_model: str = Field(
-        default="gemini-2.0-flash-exp", description="Google image generation model"
+        default="gemini-2.5-flash-image",
+        description=(
+            "Google image generation model. Gemini image models "
+            "(gemini-*-image) run via generateContent and work on free-tier "
+            "keys; imagen-* models run via the predict endpoint, which "
+            "Google restricts to paid-tier keys."
+        ),
+    )
+    # Video Generation (Replicate HTTP API — used by the /studio surface's
+    # media MCP server). Env auto-derives POCKETPAW_REPLICATE_API_TOKEN /
+    # POCKETPAW_FAL_API_KEY / POCKETPAW_VIDEO_MODEL.
+    replicate_api_token: str | None = Field(
+        default=None, description="Replicate API token (for video generation via the HTTP API)"
+    )
+    fal_api_key: str | None = Field(
+        default=None, description="fal.ai API key (alternate media-generation provider)"
+    )
+    video_model: str = Field(
+        default="kwaivgi/kling-v2.0",
+        description="Replicate video-generation model (owner/name slug)",
+    )
+
+    # Codebase orientation (loom) — the loom binary serves an MCP server over
+    # stdio that orients the cloud chat agent to a codebase (orient / locate /
+    # why / what_depends_on / boundaries). Wired into the claude_agent_sdk
+    # backend via CloudLoomMcpProvider. Env auto-derives POCKETPAW_LOOM_BIN /
+    # POCKETPAW_LOOM_MODEL_PATH.
+    loom_bin: str = Field(
+        default="loom",
+        description=(
+            "Path to the loom binary. Resolved as: this explicit setting → "
+            "PATH lookup → ~/go/bin/loom fallback. The default 'loom' relies on "
+            "PATH; set an absolute path to pin a specific build."
+        ),
+    )
+    loom_model_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a loom world-model JSON (built via `loom build`). When "
+            "unset, the loom MCP server is not registered — orientation is "
+            "disabled. The binary is served as `loom mcp -model <this path>`."
+        ),
+    )
+
+    # Belt & Pulley — the develop station's code-change gate. The
+    # ``belt_propose_change`` MCP tool proposes a unified diff through Instinct
+    # (the human approve/reject layer); on approval the executor applies it in a
+    # fresh worktree and opens a PR. ``belt_repo_allowlist`` is the security
+    # boundary: a proposed ``repo`` path must resolve INSIDE one of these roots,
+    # so the agent can never move a diff into an arbitrary filesystem location.
+    # When empty, the allowlist defaults to the current working directory's
+    # parent (the workspace root that holds the project checkouts). Env auto-
+    # derives POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+    belt_repo_allowlist: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allowlisted root directories a Belt code-change proposal's repo "
+            "must live under. A repo path resolving outside every root is "
+            "refused. Empty → defaults to the cwd's parent (the workspace root)."
+        ),
     )
 
     # Security
@@ -1240,6 +1334,54 @@ class Settings(BaseSettings):
             "then loopback / private / link-local / cloud-metadata hosts stay "
             "hard-blocked. Defaults to a curated set of sandbox-friendly "
             "embed providers."
+        ),
+    )
+
+    # Layered/learning Instinct gate — GLOBAL DEFAULTS (2026-06-18 design).
+    # These are the host-wide defaults for the 4-lane triage router that
+    # turns the binary escalate/execute Instinct gate into a learning gate.
+    # They are DORMANT by default: `instinct_approval_level="ASK"` makes the
+    # lane classifier always escalate, so shipping these changes zero
+    # behavior. A per-workspace override (a field on the workspace document)
+    # lands with the integration layer; until an admin opts a workspace into
+    # "TRIAGE", the global default governs and every escalate goes to a
+    # human. A support engineer setting the env var changes the default for
+    # NEW workspaces only — it cannot silently upgrade existing tenants.
+    instinct_approval_level: str = Field(
+        default="ASK",
+        description=(
+            "Global default triager activation level for the layered Instinct "
+            "gate: 'ASK' (dormant — every escalate goes to a human), 'TRIAGE' "
+            "(triager active — auto/optimistic/batch lanes live), or 'TRUSTED' "
+            "(reserved; treated as TRIAGE today). Per-workspace overrides live "
+            "on the workspace document. Set via POCKETPAW_INSTINCT_APPROVAL_LEVEL."
+        ),
+    )
+    instinct_auto_approve_threshold: float = Field(
+        default=0.9,
+        description=(
+            "Trust-score bar (0.0-1.0) a (pocket, action) pair must reach for "
+            "the AUTO/OPTIMISTIC lanes. A score below this escalates. Money- "
+            "moving and DELETE actions never AUTO regardless of score (a hard "
+            "blast-radius floor). Set via POCKETPAW_INSTINCT_AUTO_APPROVE_THRESHOLD."
+        ),
+    )
+    instinct_dry_run_mode: bool = Field(
+        default=False,
+        description=(
+            "When true, the Instinct gate routes escalating writes to the "
+            "DRY_RUN lane: the write is resolved and audited but never sent to "
+            "the backend (a governance rehearsal). BLOCK verdicts still block. "
+            "Set via POCKETPAW_INSTINCT_DRY_RUN_MODE."
+        ),
+    )
+    instinct_optimistic_ttl_seconds: int = Field(
+        default=300,
+        description=(
+            "Seconds an OPTIMISTIC-lane compensation handle stays live before "
+            "hard expiry. On expiry the registry fires an ALERT audit event and "
+            "persists the expired handle (no heartbeat extension). Set via "
+            "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
         ),
     )
 

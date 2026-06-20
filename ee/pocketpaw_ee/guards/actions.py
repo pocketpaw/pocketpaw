@@ -29,6 +29,19 @@
 # Updated: 2026-05-22 (RFC 05 M2b.2) — added ``outcomes.read`` (MEMBER) so
 # the pocket-outcomes count router (ee.cloud.outcomes) can guard
 # ``GET /api/v1/outcomes``.
+#
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 1) —
+# added ``instinct.activate`` (OWNER) gating the workspace route that sets a
+# workspace's ``instinct_approval_level``. A non-ASK level turns on
+# auto-approval of agent WRITE actions workspace-wide, so the switch is
+# OWNER-only — the most restrictive workspace tier.
+#
+# Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added ``belt.read``
+# (MEMBER) and ``belt.manage`` (ADMIN) so the Belt console router
+# (ee.cloud.belt.router) can guard its read routes (repos list, runs list, run
+# detail) and its add-repo route. ``belt.manage`` is ADMIN because adding a repo
+# root extends the code-change security boundary workspace-wide — it must not be
+# open to every member (mirrors connector.manage / skills.manage).
 
 from __future__ import annotations
 
@@ -169,6 +182,13 @@ ACTIONS: dict[str, ActionRule] = {
     "instinct.propose": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "instinct.approve": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "instinct.audit": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Activating the layered Instinct gate's triager (setting a workspace's
+    # ``instinct_approval_level`` to a non-ASK value) turns ON AUTO-APPROVAL of
+    # agent WRITE actions for the whole workspace — the single most sensitive
+    # governance switch in the gate. OWNER-only, the most restrictive workspace
+    # tier (mirrors workspace.delete / billing.manage): a mere admin must not
+    # be able to disable the human-in-the-loop for everyone.
+    "instinct.activate": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
     # Connector — workspace-level connector lifecycle.
     # execute is MEMBER so any team member can run actions against enabled connectors.
     # manage (enable/disable/config) is ADMIN because it changes workspace-wide state
@@ -202,6 +222,14 @@ ACTIONS: dict[str, ActionRule] = {
     # pocket produced), with no credentials or decision payloads — any
     # workspace member may view it, mirroring instinct.read.
     "outcomes.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    # Belt console — the develop-station read + repo-admin surface
+    # (ee.cloud.belt.router, feat/belt-console-backend SC-1). read is MEMBER so
+    # any team member can list discoverable repos + their own station runs.
+    # manage is ADMIN because adding a repo root EXTENDS the code-change security
+    # boundary workspace-wide (an admin authorizing where the agent may apply
+    # diffs), mirroring connector.manage / skills.manage.
+    "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
+    "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
 }
 
 

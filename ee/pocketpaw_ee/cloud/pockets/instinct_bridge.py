@@ -208,6 +208,11 @@ async def propose_pocket_write(
         "params": parked_write.get("params") or {},
         "idempotency_key": parked_write.get("idempotency_key"),
         "outcome": parked_write.get("outcome"),
+        # gap-3 — the billable value/unit declared on the binding. Persisted
+        # on the parked blob so `execute_approved_write` can thread them to
+        # the outcome ledger row after the human-approved write succeeds.
+        "outcome_value": parked_write.get("outcome_value"),
+        "outcome_unit": parked_write.get("outcome_unit"),
         "workspace_id": workspace_id,
         "requested_by": requested_by,
         # RFC 09 Slice 2 — schema-2 chain-correlation fields
@@ -520,9 +525,11 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         )
         return
 
-    # The executor-creds tuple is a 6-tuple (M2b.1); `approval_route` is
-    # unused at execution — the approver already approved.
-    base_url, auth_type, auth_header, token, allowed_writes, _approval_route = creds
+    # The executor-creds tuple gained trailing `backend_type` /
+    # `connector_name` (connector-backend feature); the http write executor
+    # ignores them, and `approval_route` is unused at execution — the approver
+    # already approved.
+    base_url, auth_type, auth_header, token, allowed_writes, _approval_route, *_ = creds
 
     try:
         result = await action_executor.run_action(
@@ -594,6 +601,32 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         f"write '{action_name}' executed — HTTP {result.get('status')}",
     )
 
+    # T8 (layered/learning gate) — the SINGLE trust-feedback write site.
+    # After a gated write actually LANDS, append one trust-ledger row for
+    # the (workspace, pocket, action) pair. ``was_auto_approved`` is True
+    # when the system triager decided the write (``approver ==
+    # "system:triager"`` — the AUTO/OPTIMISTIC lanes' decider) and False
+    # when a human approved it. This is the ONLY place trust is recorded
+    # (MF-3): ``outcomes/service.py`` must NOT call it, so the trust loop
+    # can never self-poison by double-counting one executed write. Best-
+    # effort: a sidecar write failure degrades trust accuracy but must
+    # never fail the approve response (the write already succeeded).
+    try:
+        from pocketpaw_ee.cloud.pockets import trust_ledger
+
+        await trust_ledger.record_correction(
+            workspace_id,
+            pocket_id,
+            action_name,
+            was_auto_approved=(approver == "system:triager"),
+        )
+    except Exception:  # noqa: BLE001 — trust feedback is best-effort
+        logger.warning(
+            "approved action %s: trust feedback write failed (write succeeded)",
+            action.id,
+            exc_info=True,
+        )
+
     # RFC 09 Slice 2 — chain close on the bridge-side success path
     # (audit Producer 4 site (b)). Emit BEFORE ``emit_pocket_outcome``
     # so the outcomes-side ``decision.outcome_attached`` (RFC 07 Slice 2
@@ -622,6 +655,11 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
             actor=approver,
             via_instinct=True,
             instinct_action_id=str(action.id),
+            # gap-3 — the billable value/unit declared on the binding at
+            # author time, persisted on the parked blob and threaded here so
+            # the GOVERNED (human-approved) outcome carries a real figure.
+            outcome_value=blob.get("outcome_value"),
+            outcome_unit=blob.get("outcome_unit"),
         )
     except Exception:  # noqa: BLE001 — emit is best-effort; the write already succeeded
         logger.warning(

@@ -3,6 +3,14 @@
 Sole owner of writes to the ``Session`` Beanie document. Module-level
 ``async def`` API, no class wrapper, no Protocol-based repository.
 
+Recent change: ``auto_create_pocket_session`` now stamps the workspace's
+default ``pocketpaw`` agent (and the pocket id when known) onto the
+``Session`` it creates. The OSS chat path (home page + widget "Ask agent")
+persists through this helper; without the agent stamp those sessions had
+``agent=None`` and never surfaced in the PocketPaw DM room (which lists via
+``list_by_agent`` keyed on ``Session.agent``). Agent/pocket resolution
+degrades gracefully to the prior behaviour when no default agent exists.
+
 Public API:
 - ``create(ctx, workspace_id, body)`` — create or upsert a session
 - ``list_for_owner(ctx, workspace_id)``
@@ -30,6 +38,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from beanie import PydanticObjectId
+from beanie.operators import In
 
 from pocketpaw_ee.cloud._core.context import RequestContext, ScopeKind
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -184,6 +193,24 @@ async def create(
     return session
 
 
+def _surface_filters(surface: str | None) -> list[Any]:
+    """Build the surface predicate for a session listing.
+
+    Legacy-null-as-chat rule: rows stamped ``surface=None`` predate the
+    surface split and belong to the main /chat sidebar *only*. So a
+    ``"chat"`` request matches ``surface IN ("chat", None)`` — Mongo's
+    ``$in: [..., null]`` matches both explicit nulls and missing fields.
+    Every other surface (``"files"`` / ``"pocket_creation"`` / ``"foresight"``)
+    matches its tag *exactly*, so legacy nulls never bleed into those rails.
+    ``surface=None`` (the unfiltered default) keeps returning every row.
+    """
+    if surface == "chat":
+        return [In(_SessionDoc.surface, ["chat", None])]
+    if surface is not None:
+        return [_SessionDoc.surface == surface]
+    return []
+
+
 async def list_for_owner(
     ctx: RequestContext,
     workspace_id: str,
@@ -192,24 +219,106 @@ async def list_for_owner(
 ) -> list[DomainSession]:
     """List the caller's sessions in ``workspace_id``.
 
-    ``surface`` (when provided) restricts the listing to rows stamped with
-    that originating surface (``"chat"`` / ``"files"`` / ``"pocket_creation"``).
-    Passing ``None`` (the default) preserves legacy behavior — every row
-    returns, including pre-fix rows that have ``surface=None``.
+    ``surface`` (when provided) restricts the listing per
+    :func:`_surface_filters` — a ``"chat"`` request also includes legacy
+    ``surface=None`` rows; other surfaces match exactly. Passing ``None``
+    (the default) preserves legacy behavior — every row returns.
     """
     filters: list[Any] = [
         _SessionDoc.workspace == workspace_id,
         _SessionDoc.owner == ctx.user_id,
         _SessionDoc.deleted_at == None,  # noqa: E711
+        *_surface_filters(surface),
     ]
-    if surface is not None:
-        filters.append(_SessionDoc.surface == surface)
     docs = (
         await _SessionDoc.find(*filters)
         .sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
         .to_list()
     )
     return [_to_domain(d) for d in docs]
+
+
+def _encode_session_cursor(last_activity: datetime, oid: str) -> str:
+    """Opaque keyset cursor — composite ``{lastActivity_iso}|{oid}``.
+
+    Mirrors the audit-event cursor (``audit/service.py``). Keyed on
+    ``(lastActivity, _id)`` so pages stay stable even as sessions reorder by
+    activity between fetches.
+    """
+    return f"{last_activity.isoformat()}|{oid}"
+
+
+def _decode_session_cursor(cursor: str) -> tuple[datetime, PydanticObjectId]:
+    try:
+        at_iso, oid_str = cursor.split("|", 1)
+        return datetime.fromisoformat(at_iso), PydanticObjectId(oid_str)
+    except (ValueError, TypeError) as exc:
+        raise NotFound("session.bad_cursor", "Invalid pagination cursor") from exc
+
+
+def _surface_mongo_clause(surface: str | None) -> dict[str, Any] | None:
+    """Raw-mongo equivalent of :func:`_surface_filters` for the keyset query.
+
+    ``chat`` → ``surface IN ("chat", null)`` (``$in: [null]`` also matches
+    missing fields, i.e. legacy rows). Other surfaces match exactly. ``None``
+    → no surface clause.
+    """
+    if surface == "chat":
+        return {"surface": {"$in": ["chat", None]}}
+    if surface is not None:
+        return {"surface": surface}
+    return None
+
+
+async def list_for_owner_page(
+    ctx: RequestContext,
+    workspace_id: str,
+    *,
+    surface: str | None = None,
+    cursor: str | None = None,
+    limit: int = 50,
+) -> tuple[list[DomainSession], str | None]:
+    """Keyset-paginated session listing for one surface, newest first.
+
+    Returns ``(rows, next_cursor)`` where ``next_cursor`` is ``None`` on the
+    last page. Surface scoping follows the legacy-null-as-chat rule
+    (:func:`_surface_mongo_clause`). Backs the per-mode endpoints
+    (``GET /sessions/{chat,files,foresight,pocket-creation}``) so each mode's
+    rail paginates independently of the others.
+    """
+    clauses: list[dict[str, Any]] = [
+        {"workspace": workspace_id},
+        {"owner": ctx.user_id},
+        {"deleted_at": None},
+    ]
+    surface_clause = _surface_mongo_clause(surface)
+    if surface_clause is not None:
+        clauses.append(surface_clause)
+    if cursor:
+        c_at, c_oid = _decode_session_cursor(cursor)
+        clauses.append(
+            {
+                "$or": [
+                    {"lastActivity": {"$lt": c_at}},
+                    {"lastActivity": c_at, "_id": {"$lt": c_oid}},
+                ],
+            }
+        )
+
+    mongo_filter: dict[str, Any] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
+    docs = (
+        await _SessionDoc.find(mongo_filter)
+        .sort([("lastActivity", -1), ("_id", -1)])  # type: ignore[arg-type, list-item]
+        .limit(limit + 1)
+        .to_list()
+    )
+
+    has_more = len(docs) > limit
+    rows = [_to_domain(d) for d in docs[:limit]]
+    next_cursor = (
+        _encode_session_cursor(rows[-1].last_activity, rows[-1].id) if has_more and rows else None
+    )
+    return rows, next_cursor
 
 
 async def list_by_agent(
@@ -245,21 +354,26 @@ async def list_for_user(
     workspace_id: str,
     user_id: str,
     limit: int | None = None,
+    *,
+    surface: str | None = None,
 ) -> list[dict]:
     """Sessions in ``workspace_id`` owned by ``user_id``, newest first.
 
     Wire-dict shape so callers outside the cloud entity (e.g. surface
     preamble handlers) don't need to import the domain object. Field
     names mirror :class:`DomainSession`. ``limit`` (when provided) caps
-    the returned slice; ``None`` returns the full set. Both the
-    workspace and owner filters are applied per the cloud entity
-    tenancy rule — no global reads.
+    the returned slice; ``None`` returns the full set. ``surface`` (when
+    provided) scopes the listing per :func:`_surface_filters` — a
+    ``"chat"`` request also includes legacy ``surface=None`` rows; other
+    surfaces match exactly. Both the workspace and owner filters are
+    applied per the cloud entity tenancy rule — no global reads.
     """
     query = (
         _SessionDoc.find(
             _SessionDoc.workspace == workspace_id,
             _SessionDoc.owner == user_id,
             _SessionDoc.deleted_at == None,  # noqa: E711
+            *_surface_filters(surface),
         ).sort(-_SessionDoc.lastActivity)  # type: ignore[arg-type, operator]
     )
     if limit is not None:
@@ -626,7 +740,7 @@ async def ensure_for_agent_scope(
 
 
 async def auto_create_pocket_session(
-    session_key: str, *, workspace_id: str | None = None
+    session_key: str, *, workspace_id: str | None = None, pocket_id: str | None = None
 ) -> _SessionDoc | None:
     """Create a pocket ``Session`` doc for ``session_key`` when none exists.
 
@@ -635,6 +749,11 @@ async def auto_create_pocket_session(
     Returns ``None`` if no suitable user exists. Used by the cloud
     memory store so its adapter doesn't have to import ``Session`` /
     ``User`` directly.
+
+    Stamps the workspace's default ``pocketpaw`` agent (and ``pocket_id``
+    when supplied) so OSS-path home/widget chats land in the PocketPaw DM
+    room, which lists by ``Session.agent``. Both degrade to ``None`` when
+    resolution fails — a missing agent must never block a chat save.
     """
     from pocketpaw_ee.cloud.models.user import User as _UserDoc
 
@@ -654,15 +773,39 @@ async def auto_create_pocket_session(
     if not workspace_id:
         return None
 
+    # Resolve the workspace's default ``pocketpaw`` agent so the session
+    # surfaces in the PocketPaw DM room. Lazy import: ``chat.agent_service``
+    # imports from this module, so a top-level import would cycle (same
+    # reason ``User`` is imported function-locally above).
+    agent_id: str | None = None
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import _get_default_workspace_agent_id
+
+        agent_id = await _get_default_workspace_agent_id(workspace_id)
+    except Exception:
+        logger.warning(
+            "auto_create_pocket_session: default agent lookup failed for ws=%s",
+            workspace_id,
+            exc_info=True,
+        )
+
     doc = _SessionDoc(
         sessionId=session_key,
         context_type="pocket",
         workspace=workspace_id,
         owner=str(user.id),
         title="Chat",
+        agent=agent_id,
+        pocket=pocket_id,
     )
     await doc.insert()
-    logger.info("auto-created pocket session: sessionId=%s owner=%s", session_key, user.id)
+    logger.info(
+        "auto-created pocket session: sessionId=%s owner=%s agent=%s pocket=%s",
+        session_key,
+        user.id,
+        agent_id,
+        pocket_id,
+    )
     return doc
 
 
