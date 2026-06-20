@@ -380,6 +380,23 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.fabric_ingest_state"]
 
 [[tool.importlinter.contracts]]
+name = "Jobs — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Only ``jobs.service`` owns the WorkspaceJobDoc Beanie write. The router,
+    # dto, domain, registry, the ARQ worker entrypoint, and the built-in jobs
+    # all go through the service — none may import the Beanie doc directly.
+    "pocketpaw_ee.cloud.jobs.router",
+    "pocketpaw_ee.cloud.jobs.dto",
+    "pocketpaw_ee.cloud.jobs.domain",
+    "pocketpaw_ee.cloud.jobs.registry",
+    "pocketpaw_ee.cloud.jobs.worker",
+    "pocketpaw_ee.cloud.jobs.builtin.score_applications",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_job"]
+
+[[tool.importlinter.contracts]]
 name = "Sessions — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

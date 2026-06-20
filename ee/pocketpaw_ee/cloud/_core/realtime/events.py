@@ -31,6 +31,12 @@
 #   (edges_fired / blocked / escalated / errors / sweep_duration_ms) so
 #   audit + dashboards listen to one event per dispatch rather than N
 #   per-row events, the same shape ``BulkActionDispatched`` uses.
+# Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — added
+#   ``WorkspaceJobQueued`` (type="workspace_job.queued") and
+#   ``WorkspaceJobUpdated`` (type="workspace_job.updated") for the workspace
+#   jobs primitive. Queued is emitted at dispatch; Updated on a terminal
+#   transition by the ARQ worker. Worker-side emits route over the xproc
+#   bridge to the web bus, the same path ``PocketUpdated`` uses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -422,6 +428,27 @@ class PocketDeleted(Event):
 @dataclass
 class PocketOutcomeEvent(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.outcome"
+
+
+# Workspace jobs — pp#1459 (feat/workspace-jobs). A pocket job is a named,
+# server-side async callable run in the ARQ worker under the synthetic
+# `system:workspace_job` identity. `WorkspaceJobQueued` is emitted at dispatch
+# (the action route's kind=="job" branch); `WorkspaceJobUpdated` is emitted on
+# a terminal transition (done / failed) by the worker. Both ride the same
+# xproc bridge as `PocketUpdated` — worker-side emits route through
+# `publish_bus_envelope` to the web bus.
+#
+# Payload (`data`) for both:
+#   job_id, workspace_id, pocket_id, action, job_name
+#   status — present on WorkspaceJobUpdated only (done | failed)
+@dataclass
+class WorkspaceJobQueued(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.queued"
+
+
+@dataclass
+class WorkspaceJobUpdated(Event):
+    EVENT_TYPE: ClassVar[str] = "workspace_job.updated"
 
 
 # Tasks (Mission Control work-item primitive)

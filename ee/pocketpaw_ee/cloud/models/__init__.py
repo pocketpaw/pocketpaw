@@ -36,6 +36,11 @@ Updated: 2026-06-11 (feat/firestore-fabric-ingest) — added
 imports, ``__all__``, and ``get_all_documents()`` so the ingestion worker's
 collections are wired into ``init_beanie``. Only
 ``ee.cloud.fabric_ingest.service`` imports the doc classes directly.
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — added ``WorkspaceJobDoc``
+(the durable status record for ARQ-backed pocket jobs) to the imports,
+``__all__``, and ``get_all_documents()`` so the ``workspace_jobs`` collection is
+wired into ``init_beanie``. Only ``ee.cloud.jobs.service`` writes the doc
+directly (import-linter "Jobs" contract).
 Updated: 2026-06-18 (feat/branch-primitive-versions, BP-1) — registered the
 ``ArtifactVersion`` doc (the universal Branch-primitive version log) in
 ``get_all_documents()`` via the lazy ``_ensure_version_docs()`` helper. The doc
@@ -105,6 +110,7 @@ from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
+from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 
 # Lazy import to avoid circular imports
 FileUpload: type = None  # type: ignore[assignment]
@@ -243,6 +249,7 @@ __all__ = [
     "WidgetPosition",
     "Workspace",
     "WorkspaceConnector",
+    "WorkspaceJobDoc",
     "WorkspaceMembership",
     "WorkspaceSettings",
 ]
@@ -306,6 +313,9 @@ def get_all_documents():
         APIKey,
         BeltWorkspaceConfig,
         TaskEvent,
+        # Workspace jobs — durable status record for ARQ-backed pocket jobs
+        # (pp#1459). Only ``ee.cloud.jobs.service`` writes it.
+        WorkspaceJobDoc,
         cal_doc,
         evt_doc,
         mandate_doc,
