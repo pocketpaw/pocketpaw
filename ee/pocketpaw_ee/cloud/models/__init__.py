@@ -48,6 +48,11 @@ lives in the ``pocketpaw_ee.versions`` package (its own entity), so it is
 imported lazily here — the same out-of-models discipline the belt/mandates docs
 use — to keep ``cloud.models`` from hard-importing the versions package. Only
 ``pocketpaw_ee.versions.service`` imports the doc class directly.
+Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added ``InstinctRuleDoc``
+(the persisted, approved, workspace-scoped, owned rule discovered from exhaust) to
+the imports, ``__all__``, and ``get_all_documents()`` so the ``instinct_rules``
+collection is wired into ``init_beanie`` and the ``beanie_test_db`` fixture. Only
+``ee.cloud.rules.service`` imports the doc class directly (import-linter "Rules").
 """
 
 from __future__ import annotations
@@ -84,6 +89,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
+from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.meeting import (
@@ -214,6 +220,7 @@ __all__ = [
     "Group",
     "GroupAgent",
     "InstinctApproval",
+    "InstinctRuleDoc",
     "Invite",
     "Lead",
     "LeadSource",
@@ -278,6 +285,9 @@ def get_all_documents():
         Invite,
         Group,
         InstinctApproval,
+        # Discovered governed rules (SZD slice-2). Only ``ee.cloud.rules.service``
+        # writes it.
+        InstinctRuleDoc,
         Message,
         ReadState,
         Task,

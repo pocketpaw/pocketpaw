@@ -23,6 +23,12 @@
 # email / chat text). It compiles the text into a kb-go wiki ON-BOX via the
 # keyless ``kb convo ingest`` path (never ``kb ingest`` / ``kb build``, which
 # POST to Anthropic) and infers the OntologyDraft from the compiled articles.
+#
+# Updated 2026-06-20 (S2-R1 / feat/szd-slice2-discovery): added ``RuleDraft`` +
+# ``RuleScope`` — the pure-data shape for RULES discovery (the digester output AND
+# the editable ``rule_spec`` blob). ``when`` (CEL) + ``action`` (the template
+# literal) make an approved draft enforcement-ready; the cloud ``rules`` entity
+# persists it.
 
 from __future__ import annotations
 
@@ -41,6 +47,7 @@ from pocketpaw_ee.discovery.orchestrate import (
     assemble_discovery_pocket,
     run_discovery_and_propose,
 )
+from pocketpaw_ee.discovery.rule_models import RuleDraft, RuleScope
 from pocketpaw_ee.discovery.run import (
     DEFAULT_SAMPLE_CAP,
     DiscoveryRun,
@@ -52,6 +59,8 @@ __all__ = [
     "Digester",
     "StructuredShapeDigester",
     "KbCompileDigester",
+    "RuleDraft",
+    "RuleScope",
     "OntologyDraft",
     "DraftObjectType",
     "DraftObject",
