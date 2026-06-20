@@ -37,6 +37,22 @@
 # actually reaches the logger. The earlier tests passed while the audit was
 # silently broken (the `action` kwarg collided in AuditEvent.create and the
 # best-effort except swallowed it); this test fails if that collision returns.
+#
+# Updated: 2026-06-20 (fix/jobs-arq-enqueue-contract — live-smoke showstopper):
+#   - BUG 1 (arq enqueue contract): rewrote the enqueue assertion in
+#     ``test_dispatch_creates_doc_and_returns_job_id`` to pin the CORRECT
+#     contract (job id positional, NO ``queue``/``_queue_name`` kwarg — jobs
+#     ride the shared chat-runs default queue) instead of codifying the
+#     ``queue="paw:jobs"`` bug. Added
+#     ``test_dispatch_enqueue_does_not_forward_stray_kwarg_to_job_fn`` — a pool
+#     that mimics arq's real ``*args/**kwargs`` forwarding to the job function,
+#     so a stray kwarg raises TypeError (the regression guard the mocked-pool
+#     tests were missing).
+#   - BUG 2 (writeback honors rejection): added
+#     ``test_worker_success_writeback_rejection_marks_failed`` (merge_spec
+#     ok:False on the success path → job ``failed`` + failed-state writeback)
+#     and ``test_worker_success_writeback_ok_still_done`` (ok:True → still
+#     ``done``, no regression).
 
 from __future__ import annotations
 
@@ -255,12 +271,19 @@ async def test_dispatch_creates_doc_and_returns_job_id(mongo_db: Any, fake_pool:
     assert doc.job_name == "echo_job"
     assert doc.triggered_by == VIEWER
 
-    # The ARQ pool was asked to enqueue exactly one job, on the jobs queue.
+    # The ARQ pool was asked to enqueue exactly one job. arq 0.28's
+    # ``enqueue_job(function, *args, _job_id=None, _queue_name=None, **kwargs)``
+    # forwards ``**kwargs`` to the job FUNCTION as call args, so the enqueue
+    # must pass the job id positionally and carry NO stray kwarg. Jobs ride the
+    # shared chat-runs default queue on the one worker (single-process design),
+    # so there is no queue selector here (``_queue_name`` would be the real one,
+    # never ``queue``).
     assert len(fake_pool.calls) == 1
     (args, kwargs) = fake_pool.calls[0]
     assert args[0] == "execute_workspace_job"
     assert job_id in args
-    assert kwargs.get("queue") == "paw:jobs"
+    assert "queue" not in kwargs
+    assert "_queue_name" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -278,6 +301,74 @@ async def test_dispatch_unknown_job_raises_before_enqueue(
         )
     # Nothing enqueued — the lookup gates before the pool is touched.
     assert fake_pool.calls == []
+
+
+# ---------------------------------------------------------------------------
+# BUG 1 regression guard — the arq enqueue contract. ``_FakePool`` records
+# kwargs but never FORWARDS them, so it can't catch the real failure: arq's
+# ``enqueue_job(function, *args, **kwargs)`` passes ``**kwargs`` straight to the
+# job FUNCTION. A stray ``queue=`` kwarg therefore reaches
+# ``execute_workspace_job(ctx, job_id, queue=...)`` → TypeError, crashing the
+# worker on EVERY job. This pool mimics that forwarding so the dispatch can be
+# proven against the real arq call shape.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_enqueue_does_not_forward_stray_kwarg_to_job_fn(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001 — mongo_db forces Beanie init
+    """Reproduce the showstopper: any kwarg the dispatch passes to
+    ``enqueue_job`` (other than arq's underscore-prefixed control kwargs) is
+    forwarded to the job function and explodes it with a TypeError.
+
+    FAILS on the unfixed code (``queue=JOBS_QUEUE`` is forwarded →
+    ``TypeError: got an unexpected keyword argument 'queue'``); PASSES once the
+    dispatch drops the ``queue=`` kwarg and matches the chat-runs contract.
+    """
+    forwarded: dict[str, Any] = {}
+
+    # A stub job function with the SAME signature the real worker registers:
+    # ``execute_workspace_job(ctx, job_id)`` — no ``queue`` parameter.
+    async def _stub_execute_workspace_job(ctx: dict, job_id: str) -> None:
+        forwarded["job_id"] = job_id
+
+    class _ForwardingPool:
+        """Mimics arq.ArqRedis.enqueue_job: strips the underscore control
+        kwargs and forwards everything else to the registered job function."""
+
+        async def enqueue_job(
+            self,
+            function: str,
+            *args: Any,
+            _job_id: Any = None,
+            _queue_name: Any = None,
+            _defer_until: Any = None,
+            _defer_by: Any = None,
+            _expires: Any = None,
+            **kwargs: Any,
+        ) -> None:
+            # arq forwards (*args, **kwargs) to the job coroutine, prepending
+            # the worker ctx. A stray ``queue=`` lands in **kwargs and detonates.
+            await _stub_execute_workspace_job({}, *args, **kwargs)
+
+    async def _get_pool() -> _ForwardingPool:
+        return _ForwardingPool()
+
+    monkeypatch.setattr(jobs_service, "_get_pool", _get_pool)
+
+    # No TypeError → the dispatch passes only what the job function accepts.
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=POCKET,
+        action="run_echo",
+        job_name="echo_job",
+        params={"value": "hi"},
+        triggered_by=VIEWER,
+    )
+    assert result["ok"] is True
+    # The forwarding pool actually reached the stub job with the job id.
+    assert forwarded["job_id"] == result["job_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +499,97 @@ async def test_worker_writeback_uses_system_identity(
     # Writeback is a partial-spec merge carrying only state.
     assert captured["body"]["merge"]["state"]["echo_value"] == "hello"
 
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.status == "done"
+
+
+# ---------------------------------------------------------------------------
+# BUG 2 — the success-path writeback must HONOR merge_spec's rejection. When
+# the catalog / action-wiring gate rejects the merge, merge_spec persists
+# NOTHING and returns {ok: False, warnings: [...]}. The worker must NOT then
+# mark the job ``done`` (the button would show done while the canvas never
+# changed) — it must treat the rejected writeback as a failure: mark the job
+# ``failed`` AND write the failed-state marker so the button stops spinning.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_worker_success_writeback_rejection_marks_failed(
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """A job whose success writeback is REJECTED by merge_spec (ok:False) ends
+    ``failed`` (not ``done``), and a failed-state writeback is attempted so the
+    button un-hangs. FAILS on the unfixed worker, which discards merge_spec's
+    return and marks the job ``done`` on a write that never persisted."""
+    calls: list[dict] = []
+
+    async def _rejecting_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        calls.append(dict(body))
+        # First call is the success-path writeback — gate REJECTS it.
+        # The failure-path writeback (the second call) must still succeed so
+        # the button un-hangs; mimic merge_spec persisting the failed marker.
+        if len(calls) == 1:
+            return {"ok": False, "warnings": ["catalog: widget not allowed"]}
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _rejecting_merge_spec)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_echo",
+        job_name="echo_job",
+        params={"value": "hi"},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    # Two merge_spec calls: the rejected success writeback, then the
+    # best-effort failed-state writeback.
+    assert len(calls) == 2
+    failed_state = calls[1]["merge"]["state"]
+    assert failed_state["run_echo_status"] == "failed"
+    assert "run_echo_error" in failed_state
+
+    doc = await jobs_service.get_job(WS, job_id)
+    assert doc is not None
+    assert doc.status == "failed"
+    assert doc.error
+
+
+@pytest.mark.asyncio
+async def test_worker_success_writeback_ok_still_done(
+    mongo_db: Any, fake_pool: _FakePool, seed_pocket, monkeypatch: pytest.MonkeyPatch
+) -> None:  # noqa: ARG001
+    """Regression guard for BUG 2's fix: a writeback that merge_spec ACCEPTS
+    (ok:True) still ends the job ``done`` — the ok-check escalation fires only
+    on rejection, so the happy path is unchanged."""
+    captured: dict[str, Any] = {}
+
+    async def _accepting_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        captured["body"] = body
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _accepting_merge_spec)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    result = await jobs_service.dispatch_job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        action="run_echo",
+        job_name="echo_job",
+        params={"value": "hi"},
+        triggered_by=VIEWER,
+    )
+    job_id = result["job_id"]
+
+    await jobs_worker.execute_workspace_job({}, job_id)
+
+    assert captured["body"]["merge"]["state"]["echo_value"] == "hi"
     doc = await jobs_service.get_job(WS, job_id)
     assert doc is not None
     assert doc.status == "done"
