@@ -31,6 +31,12 @@
 #   - MINOR B: a credential NESTED under a benign key → 400.
 # A new ``seed_pocket`` fixture inserts a real Pocket doc so the worker's
 # tenancy re-check has something to fetch.
+#
+# Updated: 2026-06-20 (audit-collision fix) — adds the C12 regression test
+# ``test_lifecycle_audit_emit_succeeds`` that asserts the lifecycle audit emit
+# actually reaches the logger. The earlier tests passed while the audit was
+# silently broken (the `action` kwarg collided in AuditEvent.create and the
+# best-effort except swallowed it); this test fails if that collision returns.
 
 from __future__ import annotations
 
@@ -295,6 +301,70 @@ async def test_get_job_enforces_tenancy(mongo_db: Any, fake_pool: _FakePool) -> 
     assert await jobs_service.get_job(WS, job_id) is not None
     # Wrong workspace → None even though the id is real (router maps to 404).
     assert await jobs_service.get_job(OTHER_WS, job_id) is None
+
+
+# ---------------------------------------------------------------------------
+# C12 (audit) — the lifecycle audit emit must actually SUCCEED, not be eaten
+# by the best-effort except. Regression guard for the pp#1459 review: _audit
+# passed `action` BOTH as AuditEvent.create's explicit param AND inside
+# **context, so create() raised TypeError and every job audit record was
+# silently dropped. The earlier tests passed *because* the failure was
+# swallowed — this one asserts the success path so the collision can't return.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAuditLogger:
+    """Captures the AuditEvents that reach the logger's ``.log``."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def log(self, event: Any) -> None:
+        self.events.append(event)
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_audit_emit_succeeds(
+    mongo_db: Any,  # noqa: ARG001 — forces Beanie init
+    fake_pool: _FakePool,
+    seed_pocket,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    recorder = _RecordingAuditLogger()
+    monkeypatch.setattr(jobs_service, "get_audit_logger", lambda: recorder)
+
+    async def _fake_merge_spec(workspace_id, user_id, pocket_id, body):  # type: ignore[no-untyped-def]
+        return {"ok": True}
+
+    monkeypatch.setattr(jobs_worker, "merge_spec", _fake_merge_spec)
+
+    pocket_id = await seed_pocket(workspace=WS)
+    with caplog.at_level("WARNING"):
+        result = await jobs_service.dispatch_job(
+            workspace_id=WS,
+            pocket_id=pocket_id,
+            action="run_echo",
+            job_name="echo_job",
+            params={"value": "hi"},
+            triggered_by=VIEWER,
+        )
+        await jobs_worker.execute_workspace_job({}, result["job_id"])
+
+    # The best-effort except NEVER fired — i.e. AuditEvent.create did not raise.
+    assert "jobs: audit emit failed" not in caplog.text
+    # Both lifecycle steps audited: enqueue (success) + done.
+    assert len(recorder.events) >= 2
+    enqueue_event = recorder.events[0]
+    # The audit event-type stays the stable string; the job's own action name
+    # rides in context under `pocket_action` (renamed to dodge the create()
+    # kwarg collision), so both survive into the record.
+    assert enqueue_event.action == "workspace_job"
+    assert enqueue_event.actor == WORKSPACE_JOB_IDENTITY
+    assert enqueue_event.context.get("pocket_action") == "run_echo"
+    # The literal `action` key must be gone from context (renamed), so it can
+    # never shadow create()'s explicit param again.
+    assert "action" not in enqueue_event.context
 
 
 # ---------------------------------------------------------------------------

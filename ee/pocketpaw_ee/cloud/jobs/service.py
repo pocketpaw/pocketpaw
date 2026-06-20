@@ -243,7 +243,20 @@ async def _emit_updated(doc: WorkspaceJobDoc) -> None:
 
 def _audit(*, severity: AuditSeverity, status: str, **context: Any) -> None:
     """Emit an AuditEvent for a job lifecycle step. Best-effort — a failing
-    audit logger must never break a job's status transition."""
+    audit logger must never break a job's status transition.
+
+    Callers carry the job's own ``action`` name in ``context``, but
+    ``AuditEvent.create`` already has an explicit ``action`` param (the audit
+    event-type). Passing both collided — ``create()`` raised
+    ``TypeError: got multiple values for keyword argument 'action'`` inside the
+    ``try`` and every job audit record was silently dropped (pp#1459 review).
+    Move the job action to ``pocket_action`` (and defensively strip any other
+    reserved key) so the splat can never shadow an explicit ``create`` param.
+    """
+    if "action" in context:
+        context["pocket_action"] = context.pop("action")
+    for reserved in ("severity", "actor", "target", "status"):
+        context.pop(reserved, None)
     try:
         get_audit_logger().log(
             AuditEvent.create(
