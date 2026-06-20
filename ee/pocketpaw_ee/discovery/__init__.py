@@ -17,10 +17,17 @@
 # a DiscoveryRun's OntologyDraft into the two gated Instinct proposals (Fabric
 # objects + a starter Pocket) a human reviews, with key-confidence gating and
 # supersede-on-rerun.
+#
+# Updated 2026-06-20 (S2-K1 / feat/szd-slice2-discovery): added
+# ``KbCompileDigester`` — a second Digester for UNSTRUCTURED exhaust (ticket /
+# email / chat text). It compiles the text into a kb-go wiki ON-BOX via the
+# keyless ``kb convo ingest`` path (never ``kb ingest`` / ``kb build``, which
+# POST to Anthropic) and infers the OntologyDraft from the compiled articles.
 
 from __future__ import annotations
 
 from pocketpaw_ee.discovery.digester import Digester, StructuredShapeDigester
+from pocketpaw_ee.discovery.kb_compile import KbCompileDigester
 from pocketpaw_ee.discovery.models import (
     DraftLink,
     DraftObject,
@@ -44,6 +51,7 @@ from pocketpaw_ee.discovery.run import (
 __all__ = [
     "Digester",
     "StructuredShapeDigester",
+    "KbCompileDigester",
     "OntologyDraft",
     "DraftObjectType",
     "DraftObject",
