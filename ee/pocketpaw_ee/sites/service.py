@@ -1,6 +1,24 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1 data):
+# added the operator data-view reads ``list_site_data_tables`` and
+# ``read_site_data_table`` (backing GET /sites/by-pocket/{pocket_id}/data and
+# .../data/{table}). The table LIST comes from the dynamic pocket spec's
+# top-level ``objects`` (always available, even with no live D1); the per-table
+# read runs a bounded, PARAMETERIZED ``SELECT * FROM <table> LIMIT ?`` over the
+# per-tenant Cloudflare D1 via cloudflare_client.query_d1. SQL safety: the table
+# identifier is validated against the spec's declared object names (an unknown
+# table → 404, never interpolated), and every value binds through ``params``. A
+# NON-dynamic pocket → 400 ("sites.not_dynamic"). Local/dev mode
+# (``_local_mode()``) has no live D1, so the read DEGRADES cleanly — it returns
+# ``available=False`` / ``reason="live_on_cloudflare_only"`` with the schema still
+# listed from the spec (no error). Self-contained ``_is_dynamic`` /
+# ``_derive_d1_database_id`` helpers mirror the sibling DS-2 (feat/sites-d1-
+# bindings) branch so the READ targets the SAME D1 a deploy binds, but this branch
+# does NOT depend on DS-2's code (it reads Site.d1_database_id via getattr with an
+# empty default, else derives the id) so it builds green on its own.
+#
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
 # succeeds (when ``deployed`` flips True) — the true "last shipped" marker, not a
@@ -281,6 +299,9 @@ from pocketpaw_ee.sites.dto import (
     AuditResponse,
     DevPreviewResponse,
     DomainStatusResponse,
+    SiteDataRowsResponse,
+    SiteDataTableInfo,
+    SiteDataTablesResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
@@ -352,6 +373,86 @@ def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
 
     digest = hashlib.sha1(f"{workspace_id}:{pocket_id}".encode()).digest()
     return ObjectId(digest[:12])
+
+
+# DS-3: the row cap for a table read. The data-view lists recent records, not a
+# full export — a bounded read keeps the control-plane call cheap and the UI
+# responsive. Overridable via PAW_SITES_DATA_ROW_LIMIT.
+_DATA_ROW_LIMIT_DEFAULT = 200
+
+
+def _data_row_limit() -> int:
+    """The max rows a single table read returns (DS-3). Bounded so the operator
+    data-view stays a recent-records list, not an unbounded export. Reads
+    PAW_SITES_DATA_ROW_LIMIT (a positive int) and falls back to the default for an
+    unset / malformed value."""
+    import os
+
+    raw = os.environ.get("PAW_SITES_DATA_ROW_LIMIT")
+    try:
+        n = int(raw) if raw else _DATA_ROW_LIMIT_DEFAULT
+    except (TypeError, ValueError):
+        return _DATA_ROW_LIMIT_DEFAULT
+    return n if n > 0 else _DATA_ROW_LIMIT_DEFAULT
+
+
+def _is_dynamic(pattern: str | None, ripple_spec: dict[str, Any] | None) -> bool:
+    """Classify a pocket as a DYNAMIC site (DS-3, self-contained — does NOT depend
+    on DS-2's copy of this helper).
+
+    ``pattern == "dynamic"`` is authoritative (the create-dynamic-site tool stamps
+    it). As a safety net — for a pocket that carries dynamic bindings but was not
+    stamped — a spec declaring any top-level ``sources`` / ``actions`` (or
+    ``auth``) is also dynamic, mirroring the generator's own classifier. Anything
+    else (a static landing / brochure pocket) is NOT dynamic and has no D1 to
+    read."""
+    if pattern == "dynamic":
+        return True
+    if not isinstance(ripple_spec, dict):
+        return False
+    return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
+
+
+def _dynamic_objects(ripple_spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The declared tables (the spec's top-level ``objects``) of a dynamic site.
+
+    ``objects`` is an ARRAY of ``{name, fields, primaryKey}`` table definitions
+    (the dynamic-site authoring shape — see the create-dynamic-site skill). The D1
+    migration is derived from these, so they are the AUTHORITATIVE set of tables a
+    control-plane read may touch. Returns only well-formed entries (a dict with a
+    non-empty string ``name``); a spec with no ``objects`` returns an empty list."""
+    if not isinstance(ripple_spec, dict):
+        return []
+    raw = ripple_spec.get("objects")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for obj in raw:
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and obj.get("name"):
+            out.append(obj)
+    return out
+
+
+def _derive_d1_database_id(workspace_id: str, pocket_id: str) -> str:
+    """A STABLE D1 database id for a dynamic site, derived from
+    ``(workspace_id, pocket_id)`` (DS-3, self-contained).
+
+    DS-2 (feat/sites-d1-bindings) introduces ``Site.d1_database_id`` and an
+    identically-shaped derive helper for the DEPLOY (bind) path. This branch is
+    off dev and does NOT have DS-2 yet, so to build green on its own it resolves
+    the D1 id the SAME way: read the Site doc's ``d1_database_id`` when present
+    (via getattr with an empty default), else derive it deterministically from the
+    pair. The derivation must match DS-2's exactly so the READ targets the SAME
+    database the DEPLOY bound; both hash ``"d1:{workspace}:{pocket}"`` into a UUID.
+
+    Shaped like a Cloudflare D1 id (a UUID) so it slots into the query path
+    unchanged once a real provisioner persists Cloudflare's returned id on the
+    Site doc (the getattr read picks that up automatically)."""
+    import hashlib
+    import uuid
+
+    digest = hashlib.sha1(f"d1:{workspace_id}:{pocket_id}".encode()).digest()
+    return str(uuid.UUID(bytes=digest[:16]))
 
 
 def _capture_base() -> str:
@@ -1461,6 +1562,172 @@ async def audit_pocket(
     )
 
 
+# DS-3 — the reason string the local/dev-mode degradation surfaces. The data
+# behind a dynamic site lives in a per-tenant Cloudflare D1 reachable only on a
+# live CF deploy; local mode has no D1, so the read returns this instead of an
+# error (the schema is still listed from the spec).
+_DATA_UNAVAILABLE_LOCAL = "live_on_cloudflare_only"
+
+
+async def _dynamic_pocket_objects(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read a pocket and return ``(ripple_spec, objects)`` for a DYNAMIC site, or
+    raise (DS-3 shared resolver).
+
+    Loads the pocket via the pockets service's PUBLIC ``get`` (wire dict — entity
+    isolation; it raises NotFound / Forbidden itself for a missing / access-denied
+    pocket, mapped to 404 / 403). A NON-dynamic pocket (a static landing /
+    brochure, or a custom pocket with no data bindings) raises
+    ValidationError("sites.not_dynamic") → the router maps it to 400: there is no
+    data store to read. The returned ``objects`` are the spec's declared tables
+    (the authoritative table set a read may touch). ``workspace_id`` keeps the
+    surface tenant-uniform with the other by-pocket reads (the pockets read scopes
+    on ``user_id``; the D1 id derivation is workspace-scoped)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    pocket = await pockets_service.get(pocket_id, user_id)
+    pattern = pocket.get("pattern")
+    ripple_spec = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
+    if not _is_dynamic(pattern, ripple_spec):
+        raise ValidationError(
+            "sites.not_dynamic",
+            "This site is not a dynamic site — it has no live data store to read.",
+        )
+    return ripple_spec or {}, _dynamic_objects(ripple_spec)
+
+
+def _table_columns(obj: dict[str, Any]) -> list[str]:
+    """The declared column names of a spec ``objects`` table (DS-3). ``fields`` is
+    a {column: type} map; an absent / malformed ``fields`` yields no columns."""
+    fields = obj.get("fields")
+    return list(fields.keys()) if isinstance(fields, dict) else []
+
+
+async def list_site_data_tables(
+    *, workspace_id: str, user_id: str, pocket_id: str
+) -> SiteDataTablesResponse:
+    """List a dynamic site's tables for the operator data-view (DS-3).
+
+    Backs ``GET /sites/by-pocket/{pocket_id}/data``. The table LIST is always read
+    from the pocket spec's ``objects`` (the declared D1 tables), so it is populated
+    even when the live D1 data is not reachable. ``available`` reflects whether the
+    ROWS behind those tables can actually be read:
+      * in local/dev mode (``_local_mode()`` — PAW_SITES_LOCAL=1 or no
+        PAW_CF_ACCOUNT_ID) there is no live D1, so ``available`` is False with
+        ``reason="live_on_cloudflare_only"``; the UI still shows the schema and an
+        explanatory empty state instead of erroring;
+      * with a live Cloudflare deploy, ``available`` is True (the per-table read
+        then returns rows).
+
+    A NON-dynamic pocket raises ValidationError("sites.not_dynamic") → 400 (no data
+    store). A missing / access-denied pocket surfaces as 404 / 403 via the pockets
+    service. Tenant-scoped: the pockets read scopes on ``user_id``; the D1 id (when
+    a live read happens) is derived per (workspace, pocket)."""
+    _spec, objects = await _dynamic_pocket_objects(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+    tables = [
+        SiteDataTableInfo(
+            name=obj["name"],
+            fields=obj.get("fields") if isinstance(obj.get("fields"), dict) else {},
+            primary_key=obj.get("primaryKey") if isinstance(obj.get("primaryKey"), str) else "",
+        )
+        for obj in objects
+    ]
+    available = not _local_mode()
+    return SiteDataTablesResponse(
+        pocket_id=pocket_id,
+        available=available,
+        reason="" if available else _DATA_UNAVAILABLE_LOCAL,
+        tables=tables,
+    )
+
+
+async def read_site_data_table(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    table: str,
+    _cloudflare: Any | None = None,
+) -> SiteDataRowsResponse:
+    """Read the rows of ONE table of a dynamic site's D1 (DS-3).
+
+    Backs ``GET /sites/by-pocket/{pocket_id}/data/{table}``. The flow:
+      1. resolve the pocket's declared ``objects`` (a non-dynamic pocket → 400);
+      2. VALIDATE ``table`` against those declared names — an unknown table raises
+         NotFound("site_table") → 404. This is the SQL-safety gate: the table
+         identifier reaching the query is ALWAYS one of the spec's known object
+         names, never attacker-supplied free text, so it is safe to embed as the
+         FROM identifier (D1 / SQLite cannot bind an identifier as a placeholder).
+         Every VALUE still binds through ``params``; the only interpolated token is
+         this whitelisted identifier;
+      3. in local/dev mode (``_local_mode()``) there is NO live D1 — return a clean
+         ``available=False`` / ``reason="live_on_cloudflare_only"`` shape with the
+         table's declared ``columns`` and empty ``rows`` (the UI degrades cleanly);
+      4. otherwise derive the D1 database id (the Site doc's ``d1_database_id`` if
+         present — DS-2 forward-compat — else the deterministic
+         ``_derive_d1_database_id``) and run a bounded ``SELECT * FROM <table>
+         LIMIT ?`` via the Cloudflare D1 query API, returning the rows.
+
+    The row count is capped (``_data_row_limit()``) so the data-view stays a
+    recent-records list, not an unbounded export. Tenant-scoped: the pockets read
+    scopes on ``user_id``; the D1 id is per (workspace, pocket), and the Site doc
+    read filters on ``workspace`` — a foreign workspace cannot read another
+    tenant's data. ``_cloudflare`` is injectable so the path is unit-testable
+    without a live D1."""
+    _spec, objects = await _dynamic_pocket_objects(
+        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+    )
+
+    # SQL-safety gate: the requested table MUST be one of the spec's declared
+    # object names. An unknown table is a 404 — never reaches a query, never
+    # interpolated. ``next`` finds the matching object (for its declared columns).
+    target = next((obj for obj in objects if obj.get("name") == table), None)
+    if target is None:
+        raise NotFound("site_table", table)
+    columns = _table_columns(target)
+
+    # Local/dev mode: no live D1 to read. Degrade cleanly — list the declared
+    # columns from the spec, return no rows, and say why.
+    if _local_mode() and _cloudflare is None:
+        return SiteDataRowsResponse(
+            pocket_id=pocket_id,
+            table=table,
+            available=False,
+            reason=_DATA_UNAVAILABLE_LOCAL,
+            columns=columns,
+            rows=[],
+        )
+
+    # Resolve the D1 database id: prefer a stored id (DS-2's Site.d1_database_id,
+    # via getattr so this branch builds without DS-2), else derive it
+    # deterministically so the READ targets the SAME db a deploy bound.
+    doc = await _canonical_site_doc(workspace_id, pocket_id)
+    stored_db_id = getattr(doc, "d1_database_id", "") if doc is not None else ""
+    db_id = stored_db_id or _derive_d1_database_id(workspace_id, pocket_id)
+
+    cf = _cloudflare or _cf_client()
+    # ``table`` is whitelisted above (it equals a declared object name), so it is
+    # safe to embed as the FROM identifier — SQLite/D1 cannot bind an identifier as
+    # a placeholder. The LIMIT VALUE binds through ``params``.
+    limit = _data_row_limit()
+    rows = await cf.query_d1(
+        database_id=db_id,
+        sql=f"SELECT * FROM {table} LIMIT ?",  # noqa: S608 — table is whitelisted, value is bound
+        params=[limit],
+    )
+    return SiteDataRowsResponse(
+        pocket_id=pocket_id,
+        table=table,
+        available=True,
+        reason="",
+        columns=columns,
+        rows=rows,
+    )
+
+
 async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusResponse:
     """Derive a pocket's draft/published + is_live state from the BRANCH version
     pointers AND the real Site deploy state — NOT from "a Site doc exists".
@@ -1852,6 +2119,8 @@ __all__ = [
     "publish_pocket",
     "preview_pocket",
     "pocket_status",
+    "list_site_data_tables",
+    "read_site_data_table",
     "request_publish_pocket",
     "version_history",
     "revert_pocket_version",

@@ -695,3 +695,104 @@ async def test_revert_by_pocket_cross_tenant_is_404(beanie_test_db, monkeypatch)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.post(f"/api/v1/sites/by-pocket/pk_rev3/versions/{foreign.version_no}/revert")
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# data view (DS-3): GET /sites/by-pocket/{pocket_id}/data lists a dynamic site's
+# tables (from the spec's objects), and GET .../data/{table} reads one table's
+# rows. fabric.read; tenant-scoped; a non-dynamic pocket is a 422; an unknown
+# table is a 404; local mode degrades cleanly (available=False).
+# ---------------------------------------------------------------------------
+
+_DATA_DYNAMIC_WIRE = {
+    "name": "Guestbook",
+    "pattern": "dynamic",
+    "rippleSpec": {
+        "type": "container",
+        "objects": [
+            {
+                "name": "entry",
+                "fields": {"id": "text", "name": "text", "message": "text"},
+                "primaryKey": "id",
+            }
+        ],
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_data_tables_by_pocket_lists_schema(beanie_test_db, monkeypatch):
+    """GET .../data lists the dynamic site's tables from the spec's objects; in
+    local mode (no CF creds) available=False but the schema is still listed."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value=_DATA_DYNAMIC_WIRE),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pocket_id"] == "pk_dyn"
+    assert body["available"] is False
+    assert body["reason"] == "live_on_cloudflare_only"
+    assert [t["name"] for t in body["tables"]] == ["entry"]
+
+
+@pytest.mark.asyncio
+async def test_data_tables_by_pocket_non_dynamic_is_422(beanie_test_db, monkeypatch):
+    """A NON-dynamic pocket has no data store → 422 (not_dynamic)."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value={"name": "x", "pattern": "landing", "rippleSpec": {"type": "c"}}),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_landing/data")
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_data_rows_by_pocket_local_mode_degrades(beanie_test_db, monkeypatch):
+    """GET .../data/{table} in local mode returns the clean unavailable shape with
+    the table's declared columns listed and no rows."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value=_DATA_DYNAMIC_WIRE),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data/entry")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["table"] == "entry"
+    assert body["available"] is False
+    assert body["columns"] == ["id", "name", "message"]
+    assert body["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_data_rows_by_pocket_unknown_table_is_404(beanie_test_db, monkeypatch):
+    """An unknown table is rejected with a 404 (the SQL-safety gate)."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value=_DATA_DYNAMIC_WIRE),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data/unknown_table")
+    assert resp.status_code == 404
