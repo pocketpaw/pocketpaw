@@ -29,6 +29,11 @@
 # the editable ``rule_spec`` blob). ``when`` (CEL) + ``action`` (the template
 # literal) make an approved draft enforcement-ready; the cloud ``rules`` entity
 # persists it.
+#
+# Updated 2026-06-20 (S2-R2 / feat/szd-slice2-discovery): added ``RuleDigester``
+# — the deterministic (no-LLM, on-box) engine that reverse-engineers ``RuleDraft``s
+# from Instinct exhaust (correction history + audit), generalizing the existing
+# 3x-correction → soul-procedural promotion into structured, gate-ready drafts.
 
 from __future__ import annotations
 
@@ -47,6 +52,7 @@ from pocketpaw_ee.discovery.orchestrate import (
     assemble_discovery_pocket,
     run_discovery_and_propose,
 )
+from pocketpaw_ee.discovery.rule_digester import RuleDigester
 from pocketpaw_ee.discovery.rule_models import RuleDraft, RuleScope
 from pocketpaw_ee.discovery.run import (
     DEFAULT_SAMPLE_CAP,
@@ -59,6 +65,7 @@ __all__ = [
     "Digester",
     "StructuredShapeDigester",
     "KbCompileDigester",
+    "RuleDigester",
     "RuleDraft",
     "RuleScope",
     "OntologyDraft",
