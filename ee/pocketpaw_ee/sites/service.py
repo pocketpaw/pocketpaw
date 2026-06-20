@@ -354,6 +354,49 @@ def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
     return ObjectId(digest[:12])
 
 
+# DS-2: the Worker binding name a dynamic site reads its D1 through. Must match
+# the generator's wrangler.toml binding (``binding = "DB"``) so the compiled
+# remote functions (which reference ``env.DB``) resolve.
+_D1_BINDING_NAME = "DB"
+
+
+def _is_dynamic(pattern: str | None, ripple_spec: dict[str, Any] | None) -> bool:
+    """Classify a publish as dynamic. ``pattern == "dynamic"`` is authoritative
+    (the create-dynamic-site tool stamps it). As a safety net — for a pocket that
+    carries dynamic bindings but was not stamped — a spec declaring any top-level
+    ``sources``/``actions`` (or ``auth``) is also dynamic, mirroring the
+    generator's own classifier (paw-sites parseBindings)."""
+    if pattern == "dynamic":
+        return True
+    if not isinstance(ripple_spec, dict):
+        return False
+    return bool(ripple_spec.get("sources") or ripple_spec.get("actions") or ripple_spec.get("auth"))
+
+
+def _derive_d1_database_id(workspace_id: str, pocket_id: str) -> str:
+    """A STABLE D1 database id for a dynamic site, derived from
+    ``(workspace_id, pocket_id)``.
+
+    There is no per-tenant D1 PROVISIONER in the control plane yet (real
+    Cloudflare D1 creation is a separate deploy-time concern). Until one lands,
+    DS-2 derives a deterministic id so the deployed Worker always carries a D1
+    binding and that binding TARGET stays stable across re-publishes (the data
+    behind a live site must not move). It is stored on the Site doc on first
+    publish and REUSED thereafter; this derivation only seeds the first publish.
+    Shaped like a Cloudflare D1 id (a UUID) so it slots into the binding metadata
+    unchanged once a provisioner overwrites it with a real id.
+
+    ASSUMPTION: a real provisioner will replace this with the id Cloudflare
+    returns from the D1 create call and persist it on the Site doc; the binding
+    plumbing here is id-agnostic, so that swap needs no change to put_worker or
+    the publish flow."""
+    import hashlib
+    import uuid
+
+    digest = hashlib.sha1(f"d1:{workspace_id}:{pocket_id}".encode()).digest()
+    return str(uuid.UUID(bytes=digest[:16]))
+
+
 def _capture_base() -> str:
     import os
 
@@ -549,6 +592,7 @@ async def publish(
     name: str = "",
     engine: str = "ripple",
     source: dict[str, str] | None = None,
+    pattern: str | None = None,
     builder_origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
@@ -724,6 +768,20 @@ async def publish(
         content=version_content,
     )
 
+    # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
+    # bindings) is backed by a per-tenant Cloudflare D1, so its deployed Worker
+    # needs a D1 binding to reach that DB. Resolve the site's D1 id BEFORE deploy:
+    # reuse the id already stored on this pocket's canonical Site doc (the binding
+    # target must be stable across re-publishes), else derive a stable one. Static
+    # sites get no D1 id and no binding — the single-module upload is unchanged.
+    is_dynamic = _is_dynamic(pattern, ripple_spec)
+    d1_database_id = ""
+    if is_dynamic:
+        _prior = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+        d1_database_id = (
+            getattr(_prior, "d1_database_id", "") if _prior is not None else ""
+        ) or _derive_d1_database_id(workspace_id, pocket_id)
+
     # Local mode only when the caller did NOT inject a CF client (tests inject a
     # fake CF and expect the real branch) AND the environment selects it.
     use_local = _cloudflare is None and _local_mode()
@@ -736,7 +794,12 @@ async def publish(
     else:
         cf = _cloudflare or _cf_client()
         bundle = _bundle_reader(build.project_dir)
-        await cf.put_worker(script_name=site_id, bundle=bundle)
+        # Only a dynamic site passes bindings; a static publish passes None so the
+        # single-module upload path stays byte-for-byte unchanged (no regress).
+        bindings = (
+            [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}] if is_dynamic else None
+        )
+        await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
 
     # PERF-1: UPSERT ONE canonical Site doc per (workspace, pocket_id) keyed on the
     # stable ``_id`` (== site_id), rather than inserting a fresh row every publish.
@@ -766,6 +829,9 @@ async def publish(
             deployed_at=now,
             signed_key=signed_key,
             url=url,
+            # DS-2: persist the D1 id this dynamic site is bound to ("" for static)
+            # so a re-publish reuses the SAME binding target and DS-3 can read it.
+            d1_database_id=d1_database_id,
             # SE-2b: persist the builder origin (or "") so a component-edit republish
             # can re-apply it and the site stays editable across edits.
             builder_origin=builder_origin or "",
@@ -785,7 +851,13 @@ async def publish(
         doc.deployed = True
         doc.deployed_at = now
         doc.url = url
-        doc.builder_origin = builder_origin or ""
+        # DS-2: keep the D1 id in sync. For a dynamic site it is the (reused)
+        # stable id; a static re-publish leaves it "" (no binding). We only ever
+        # SET it for a dynamic publish — a publish that is no longer dynamic does
+        # not clear a previously-bound D1 (the data behind it must not be orphaned
+        # silently), so guard on is_dynamic.
+        if is_dynamic:
+            doc.d1_database_id = d1_database_id
         await doc.save()
     return doc
 
@@ -962,6 +1034,10 @@ async def publish_pocket(
     # instead of compiling ``rippleSpec``.
     engine = pocket.get("engine") or "ripple"
     source = pocket.get("source") if isinstance(pocket.get("source"), dict) else None
+    # DS-2: the pocket's create-pocket layout pattern. ``pattern == "dynamic"``
+    # (stamped by the create-dynamic-site tool) tells ``publish`` the site is
+    # backed by a per-tenant D1, so its deployed Worker gets a D1 binding.
+    pattern = pocket.get("pattern")
 
     return await publish(
         workspace_id=workspace_id,
@@ -971,6 +1047,7 @@ async def publish_pocket(
         theme=theme,
         engine=engine,
         source=source,
+        pattern=pattern,
         name=name or pocket.get("name", ""),
         builder_origin=builder_origin,
         preview=preview,

@@ -153,7 +153,7 @@ class _RecordingCF:
     def __init__(self):
         self.put_calls: list[str] = []
 
-    async def put_worker(self, *, script_name, bundle):
+    async def put_worker(self, *, script_name, bundle, bindings=None):
         self.put_calls.append(script_name)
         return True
 

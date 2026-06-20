@@ -47,6 +47,14 @@
 # flips True — NOT on a preview/edit/arm build and NOT on every ``updatedAt`` bump,
 # so it is a true "last shipped" marker, not a "last touched" one. Defaults None;
 # backfill is not required (pre-P2b rows read null, exposed as None on the DTOs).
+#
+# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): added ``d1_database_id`` —
+# the Cloudflare D1 database id a DYNAMIC site's deployed Worker is bound to.
+# ``service.publish`` derives a STABLE per-(workspace, pocket) id for a
+# ``pattern="dynamic"`` publish, persists it here on first publish, and REUSES the
+# stored value on every re-publish so the binding target (and the data behind it)
+# is stable across deploys. "" for static sites (no D1 binding). Defaults "", so
+# pre-DS-2 rows and every static publish read empty — no migration.
 
 from __future__ import annotations
 
@@ -86,6 +94,11 @@ class Site(TimestampedDocument):
     # Canonical deployed URL. LOCAL mode: the localhost URL the per-site static
     # server serves. CF mode: "" in v1 (reached via custom domain).
     url: str = ""
+    # DS-2: the Cloudflare D1 database id this site's deployed Worker is bound to.
+    # Set ONLY for a dynamic site (pattern == "dynamic"); "" for a static site.
+    # Stable across re-publishes (publish reuses the stored value) so the D1
+    # binding target — and the data behind it — never moves under a live site.
+    d1_database_id: str = ""
     # PERF-2: a non-destructive tombstone for duplicate Site docs the pre-PERF-1
     # per-publish ObjectId minting left behind. The dedupe migration keeps ONE
     # canonical doc per (workspace, pocket_id) active and sets this True on the

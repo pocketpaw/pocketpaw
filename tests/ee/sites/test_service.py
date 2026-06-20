@@ -39,6 +39,11 @@
 # content when no draft row exists); (4) publish promotes the current draft to a
 # published version via versions.publish; plus has_unpublished_changes when a draft
 # is newer than the published version.
+# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): coverage that a
+# pattern="dynamic" publish passes a d1 binding (name + database id) to
+# put_worker and persists that id on the Site doc (reused on re-publish), that a
+# static (landing/None) publish passes NO bindings (single-module path, regress
+# guard), and that publish_pocket threads the pocket's pattern through.
 from __future__ import annotations
 
 import pytest
@@ -58,9 +63,14 @@ class _FakeGenerator:
 class _FakeCF:
     def __init__(self):
         self.put_calls = []
+        # DS-2: capture the bindings put_worker was called with so dynamic-site
+        # tests can assert the d1 binding rode the deploy and static-site tests
+        # can assert NO bindings (the single-module path) were passed.
+        self.put_bindings = []
 
-    async def put_worker(self, *, script_name, bundle):
+    async def put_worker(self, *, script_name, bundle, bindings=None):
         self.put_calls.append(script_name)
+        self.put_bindings.append(bindings)
         return True
 
     async def create_custom_hostname(self, hostname):
@@ -753,7 +763,7 @@ class _BoomCF:
     failed deploy leaves the pocket not-live (no Site doc persisted) while the
     published version tag may still stand."""
 
-    async def put_worker(self, *, script_name, bundle):
+    async def put_worker(self, *, script_name, bundle, bindings=None):
         raise RuntimeError("cloudflare put_worker failed")
 
 
@@ -1003,3 +1013,132 @@ async def test_preview_pocket_falls_back_to_current_content_when_no_draft(beanie
         )
 
     assert res.content == current_spec
+
+
+# ---------------------------------------------------------------------------
+# DS-2 — a DYNAMIC site (Pocket.pattern == "dynamic") is backed by a per-tenant
+# Cloudflare D1. Its deployed Worker therefore needs a D1 binding so the SSR
+# remote functions can reach that DB. publish() passes the d1 binding(s) to
+# put_worker ONLY when the site is dynamic; a static (landing/None) publish
+# passes NO bindings (the single-module path stays byte-for-byte unchanged).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dynamic_publish_passes_d1_binding_to_put_worker(beanie_test_db):
+    """A pattern="dynamic" publish hands put_worker a d1 binding carrying the
+    binding name + the site's D1 database id, and persists that id on the Site
+    doc so a re-publish reuses it (and DS-3 can read the site's D1)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_dyn",
+        ripple_spec={
+            "type": "container",
+            "objects": [{"name": "signups", "fields": {"email": "text"}}],
+            "sources": [
+                {"name": "all", "kind": "data", "object": "signups", "refresh": "pocket_open"}
+            ],
+        },
+        theme={"primary": "#0A84FF"},
+        name="Guestbook",
+        pattern="dynamic",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    assert site.deployed is True
+    # put_worker received exactly one call carrying a non-empty bindings list.
+    assert len(cf.put_bindings) == 1
+    bindings = cf.put_bindings[0]
+    assert bindings, "dynamic publish must pass bindings to put_worker"
+    d1 = [b for b in bindings if b.get("type") == "d1"]
+    assert len(d1) == 1
+    assert d1[0]["name"] == "DB"
+    assert d1[0]["id"], "d1 binding must carry the database id"
+    # The id is persisted on the Site doc (re-publish reuse + DS-3 read).
+    assert site.d1_database_id == d1[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_publish_reuses_persisted_d1_id_on_republish(beanie_test_db):
+    """Re-publishing a dynamic pocket keeps the SAME D1 id (the binding target
+    must be stable across deploys — the data lives behind that id)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    kw = dict(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_dyn2",
+        ripple_spec={
+            "type": "container",
+            "objects": [{"name": "rows", "fields": {"x": "text"}}],
+            "actions": [{"name": "add", "object": "rows", "op": "insert"}],
+        },
+        theme={"primary": "#000"},
+        name="Board",
+        pattern="dynamic",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    first = await sites_service.publish(**kw)
+    second = await sites_service.publish(**kw)
+    assert first.d1_database_id
+    assert first.d1_database_id == second.d1_database_id
+
+
+@pytest.mark.asyncio
+async def test_static_publish_passes_no_bindings(beanie_test_db):
+    """A static site (pattern None / 'landing') must NOT pass bindings — the
+    single-module upload path is unchanged (regress guard)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_static",
+        ripple_spec={"type": "container"},
+        theme={"primary": "#0A84FF"},
+        name="Bright Smile",
+        pattern="landing",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    assert site.deployed is True
+    assert cf.put_bindings == [None]
+    assert site.d1_database_id == ""
+
+
+@pytest.mark.asyncio
+async def test_publish_pocket_threads_dynamic_pattern(beanie_test_db):
+    """publish_pocket reads pattern off the pocket wire dict and forwards it, so a
+    dynamic pocket published via the shared path gets the d1 binding."""
+    from unittest.mock import AsyncMock, patch
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    wire = {
+        "name": "Live Guestbook",
+        "pattern": "dynamic",
+        "rippleSpec": {
+            "type": "container",
+            "objects": [{"name": "g", "fields": {"who": "text"}}],
+            "sources": [{"name": "all", "kind": "data", "object": "g", "refresh": "pocket_open"}],
+        },
+    }
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        site = await sites_service.publish_pocket(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk_dyn3",
+            _generator=gen,
+            _cloudflare=cf,
+            _bundle_reader=lambda d: b"export default {}",
+        )
+
+    assert site.d1_database_id
+    d1 = [b for b in (cf.put_bindings[0] or []) if b.get("type") == "d1"]
+    assert len(d1) == 1

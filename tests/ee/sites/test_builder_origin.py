@@ -53,7 +53,7 @@ class _FakeCF:
     def __init__(self):
         self.put_calls = []
 
-    async def put_worker(self, *, script_name, bundle):
+    async def put_worker(self, *, script_name, bundle, bindings=None):
         self.put_calls.append(script_name)
         return True
 
