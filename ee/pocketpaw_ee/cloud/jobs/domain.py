@@ -7,6 +7,14 @@
 # gone. This module holds NO Beanie / FastAPI / I/O imports so every other
 # module in the package (and the import-linter contract) can depend on it
 # freely.
+#
+# Updated: 2026-06-20 (fix/jobs-arq-enqueue-contract) — removed the aspirational
+# ``JOBS_QUEUE = "paw:jobs"`` constant. It was wired into the enqueue as
+# ``queue=JOBS_QUEUE``, but arq's selector is ``_queue_name``, so the kwarg was
+# forwarded to the job function and crashed every job. The shared worker listens
+# only on arq's default queue anyway; jobs now ride that queue with no selector
+# (single-process design). True queue isolation is deferred to a dedicated
+# worker. See the queue note below.
 
 """Pure domain types + constants for the workspace jobs primitive."""
 
@@ -24,10 +32,16 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 WORKSPACE_JOB_IDENTITY = "system:workspace_job"
 
-# ARQ queue the jobs run on — distinct from the resumable-chat-run queue so a
-# burst of jobs can't starve interactive runs (they share the same worker
-# PROCESS, just different logical queues).
-JOBS_QUEUE = "paw:jobs"
+# Queue: workspace jobs ride arq's DEFAULT queue, the SAME one the resumable
+# chat runs use, on the single shared worker process (default #1: same worker,
+# no new deploy artifact — see ``chat/runs/worker.py`` ``WorkerSettings``, which
+# sets no ``queue_name`` and registers both ``execute_run_job`` and
+# ``execute_workspace_job`` there). There is intentionally no jobs-specific
+# queue constant: arq's queue selector is ``_queue_name``, and the enqueue in
+# ``service.py`` deliberately omits it so the job rides the default queue. True
+# queue isolation (so a burst of jobs can't starve interactive runs) needs a
+# second worker PROCESS bound to a dedicated queue — deferred to a future
+# dedicated-worker enhancement, not wired here.
 
 # Job lifecycle. `queued` on enqueue, `running` once the worker picks it up,
 # terminal as `done` / `failed`.
@@ -67,7 +81,6 @@ def failed_state_writeback(action: str, message: str) -> dict:
 
 
 __all__ = [
-    "JOBS_QUEUE",
     "JobStatus",
     "WORKSPACE_JOB_IDENTITY",
     "failed_state_writeback",

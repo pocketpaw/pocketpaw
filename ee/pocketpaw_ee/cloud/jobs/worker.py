@@ -21,6 +21,17 @@
 # marked failed with NO writeback (we cannot safely write to a pocket outside
 # the doc's workspace). The check sits ONCE near the top so it can't perturb
 # the failure path's "un-hang the button" guarantee.
+#
+# Updated: 2026-06-20 (fix/jobs-arq-enqueue-contract, BUG 2) — the SUCCESS-path
+# writeback now HONORS ``merge_spec``'s rejection. ``merge_spec`` returns
+# ``{ok: False, warnings: [...]}`` when the catalog / action-wiring gate blocks
+# the merge — it persists NOTHING in that case. The worker previously discarded
+# that return and marked the job ``done`` regardless, so a rejected writeback
+# looked successful (button done, canvas unchanged). Now ``_writeback`` returns
+# the result dict and the success path escalates ``ok: False`` into the shared
+# failure handling (mark ``failed`` + failed-state writeback). The escalation is
+# success-path-only; the failure path's writeback stays best-effort and is never
+# re-escalated, so it can't loop.
 
 """ARQ entrypoint: execute one workspace job + write the result back."""
 
@@ -122,19 +133,56 @@ async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
         await jobs_service.mark_failed(doc, error=message)
         return
 
-    # Success — write the validated state-only partial back.
-    await _writeback(workspace_id=workspace_id, pocket_id=pocket_id, partial=result)
+    # Success — write the validated state-only partial back. ``merge_spec``
+    # can still REJECT the merge (``ok: False``) when the catalog / action-
+    # wiring gate blocks it: in that case it persists NOTHING. Marking the job
+    # ``done`` on a write that never landed is a silent partial (the button
+    # shows done, the canvas never changed), so escalate a rejected writeback
+    # into the SAME failure handling — mark the job failed + write the failed-
+    # state marker so the button un-hangs. (The ok-check is success-path-only;
+    # the failure path's ``_writeback`` below stays best-effort and is NOT
+    # escalated, so it can't loop.)
+    try:
+        wb = await _writeback(workspace_id=workspace_id, pocket_id=pocket_id, partial=result)
+        if wb is not None and wb.get("ok") is False:
+            warnings = wb.get("warnings") or []
+            raise _WritebackRejectedError(
+                "writeback rejected by merge_spec: " + "; ".join(str(w) for w in warnings)
+            )
+    except Exception as exc:  # noqa: BLE001 — converge on the same failure path
+        logger.exception("jobs: job %s (%s) writeback failed/rejected", job_id, doc.job_name)
+        message = str(exc) or exc.__class__.__name__
+        # Best-effort failed-state writeback so the button stops spinning. This
+        # call is NOT ok-checked — a doubly-rejected merge must not loop.
+        await _writeback(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            partial=failed_state_writeback(action, message),
+        )
+        await jobs_service.mark_failed(doc, error=message)
+        return
+
     await jobs_service.mark_done(doc, result=result)
 
 
-async def _writeback(*, workspace_id: str, pocket_id: str, partial: dict) -> None:
+class _WritebackRejectedError(RuntimeError):
+    """Raised when ``merge_spec`` returns ``ok: False`` on the success-path
+    writeback (catalog / action-wiring gate blocked the merge), so the success
+    path converges on the shared failure handling."""
+
+
+async def _writeback(*, workspace_id: str, pocket_id: str, partial: dict) -> dict | None:
     """Merge a partial spec into the pocket under the synthetic job identity.
 
     Always ``user_id=system:workspace_job`` — never the triggering user. The
     merge fires ``PocketUpdated``; from the worker that routes over xproc to
     the web bus, so open canvases update live.
+
+    Returns ``merge_spec``'s result dict (carrying ``ok`` + ``warnings``) so the
+    SUCCESS path can detect a gate rejection (``ok: False``) and escalate to the
+    failure handling. The failure path ignores the return (best-effort).
     """
-    await merge_spec(
+    return await merge_spec(
         workspace_id,
         WORKSPACE_JOB_IDENTITY,
         pocket_id,
