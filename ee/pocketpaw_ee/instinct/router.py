@@ -1,5 +1,23 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-21 (F4 — edit-in-review PATCH proposal endpoint) — added
+#   ``PATCH /instinct/actions/{action_id}/proposal`` (``edit_proposal``). It lets a
+#   reviewer MUTATE the editable sub-fields of a PENDING discovery proposal (rename an
+#   inferred type, drop a spurious link, fix an inferred key, tighten a discovered rule's
+#   CEL) BEFORE approving — turning the gate from approve/reject-only into review-EDIT-
+#   approve. The edit NEVER flips status (Approve stays a separate click), so the chain
+#   lands ``agent.proposed → human.corrected(edited)`` with NO ``decision.completed`` (it
+#   stays OPEN for the eventual approve). Handler order: load + 404; 409 if not PENDING;
+#   tenancy gate FIRST (``_assert_*_workspace`` on the CURRENT blob); resolve the editable
+#   sub-field by blob kind (422 on kind mismatch); IMMUTABILITY PIN — copy the stored blob,
+#   overwrite ONLY the editable sub-key, force every immutable field back from the stored
+#   blob. The SECURITY CRUX: tenancy is DUPLICATED on an ``_instinct_rule`` blob — the
+#   top-level ``workspace_id`` AND the SECOND copy at ``rule_spec.scope.workspace_id``
+#   (the executor scopes the rule by the second one) — so BOTH are pinned and a client
+#   mismatch on EITHER is a 403. Re-validate per kind (``RuleDraft`` /
+#   ``CreatePocketRequest`` / fabric shape — 422, never persist broken), persist via the
+#   new status-preserving ``store.update_parameters``, then ``record_correction`` +
+#   ``_emit_human_corrected(disposition="edited")``. Returns ``{action, correction}``.
 # Updated: 2026-06-20 (S2-R4 — _instinct_rule proposal type) — wired the
 #   governed-rule-create gate kind into the FOUR-path dispatch. ``_instinct_rule_blob``
 #   + ``_assert_instinct_rule_workspace`` are the peers of the existing blob accessors
@@ -300,7 +318,7 @@ from pocketpaw_ee.cloud._core.deps import (
     current_workspace_id,
     require_plan_feature,
 )
-from pocketpaw_ee.cloud._core.errors import Forbidden
+from pocketpaw_ee.cloud._core.errors import ConflictError, Forbidden, ValidationError
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
 
@@ -771,6 +789,30 @@ class ApproveRequest(BaseModel):
     category: ActionCategory | None = None
     priority: ActionPriority | None = None
     parameters: dict[str, Any] | None = None
+
+
+class EditProposalRequest(BaseModel):
+    """Body for ``PATCH /instinct/actions/{action_id}/proposal`` (F4 — edit-in-review).
+
+    Each field is the editable sub-shape for ONE discovery proposal kind; the handler
+    edits ONLY the sub-field matching the action's blob kind and pins every immutable
+    field (tenancy, owner, schema, chain ids) back from the stored blob. Exactly one
+    of the three editable fields should be set; a payload kind that doesn't match the
+    action's blob kind is a 422.
+
+    SECURITY: ``workspace_id`` here is NOT an editable tenancy field — it exists only so
+    a client that smuggles a foreign top-level ``workspace_id`` is caught and refused
+    with 403 (mismatch). The handler always pins tenancy from the stored blob; it never
+    moves a proposal to another workspace. For ``_instinct_rule`` the SECOND tenancy copy
+    (``rule_spec.scope.workspace_id``) is pinned the same way — a mismatch there is also a
+    403 (the executor scopes the persisted rule by that copy).
+    """
+
+    rule_spec: dict[str, Any] | None = None  # _instinct_rule editable sub-shape
+    pocket_spec: dict[str, Any] | None = None  # _pocket_create editable sub-shape
+    fabric: dict[str, Any] | None = None  # _fabric_objects: {object_types?, objects?, links?}
+    # NOT editable — present only to catch a smuggled foreign tenancy (→ 403).
+    workspace_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -2281,6 +2323,299 @@ async def reject_action(
         logger.exception("customer-decision delivery after rejection failed (non-fatal)")
 
     return action
+
+
+# ---------------------------------------------------------------------------
+# F4 — edit-in-review PATCH endpoint
+# ---------------------------------------------------------------------------
+#
+# A reviewer mutates the editable sub-fields of a PENDING discovery proposal (rename an
+# inferred type, drop a spurious link, fix an inferred key, tighten a discovered rule's
+# CEL) BEFORE approving. The edit NEVER flips status — Approve stays a separate click,
+# so the Decision-Graph chain stays OPEN (``agent.proposed → human.corrected(edited)``
+# with NO ``decision.completed``).
+#
+# The security crux: tenancy is DUPLICATED on a discovery blob — the top-level
+# ``workspace_id`` (the gate reads this) AND, for ``_instinct_rule``, the SECOND copy at
+# ``rule_spec.scope.workspace_id`` (the executor scopes the persisted rule by this one).
+# The edit endpoint pins BOTH from the stored blob and refuses any client attempt to
+# change either (mismatch → 403). Miss the second copy and a tenant edits a proposal into
+# another workspace.
+
+
+def _pin_immutable(before_value: Any, request_value: Any) -> None:
+    """Raise 403 if a client tried to change an immutable (tenancy) field.
+
+    ``request_value`` is what the client sent for the field; ``before_value`` is the
+    stored value. A truthy ``request_value`` that differs from ``before_value`` is a
+    cross-workspace edit attempt — the same 403 + code the approve/reject gate raises.
+    A ``None`` / absent request value is fine: the caller pins ``before_value`` back.
+    """
+    if request_value is not None and str(request_value) != str(before_value):
+        raise Forbidden(
+            "instinct.cross_workspace_approval",
+            "This proposal belongs to a different workspace",
+        )
+
+
+@router.patch(
+    "/instinct/actions/{action_id}/proposal",
+    response_model=ApproveResponse,
+    dependencies=[Depends(require_action_any_workspace("instinct.approve"))],
+)
+async def edit_proposal(
+    action_id: str,
+    req: EditProposalRequest,
+    user: Any = Depends(current_user),
+    workspace_id: str = Depends(current_workspace_id),
+):
+    """Edit the editable sub-fields of a PENDING discovery proposal before approving.
+
+    Mutates ONLY the editable blob sub-field matching the action's kind; does NOT flip
+    status. Steps:
+
+    1. Load + guard — 404 if missing, 409 if not PENDING (its chain is closed).
+    2. Tenancy gate FIRST — the matching ``_assert_*_workspace`` against the CURRENT
+       blob, before any mutation (the same chokepoint approve/reject use).
+    3. Resolve the editable sub-field by which blob key is present; 422 if the payload's
+       kind doesn't match the action's blob kind.
+    4. Immutability pin (the core security logic) — copy the stored blob, overwrite ONLY
+       the editable sub-key, force every immutable field back from the stored blob. For
+       ``_instinct_rule`` pin BOTH ``workspace_id`` AND ``rule_spec.scope.workspace_id``;
+       a client mismatch on either → 403.
+    5. Re-validate per blob type (422, never persist broken) — ``RuleDraft`` /
+       ``CreatePocketRequest`` model_validate; fabric shape-check.
+    6. Persist the mutated parameters via ``store.update_parameters`` (status-preserving).
+    7. Learning loop — ``compute_patches`` → ``Correction`` → ``record_correction`` →
+       ``_emit_human_corrected(disposition="edited")`` (NO ``decision.completed``).
+
+    Returns ``{action, correction}`` (the same shape as approve).
+    """
+    store = _store()
+    before = await store.get_action(action_id)
+    if not before:
+        raise HTTPException(404, "Action not found")
+
+    # 1 — only a PENDING proposal can be edited. An approved / rejected / executed
+    # action's chain is closed; an edit-in-review is meaningless after the gate flipped.
+    if before.status != ActionStatus.PENDING:
+        raise ConflictError(
+            "instinct.not_pending",
+            "Only a pending proposal can be edited",
+        )
+
+    # 2 — TENANCY GATE FIRST (before any mutation), against the CURRENT blob. The same
+    # cross-workspace chokepoint the approve / reject paths run. ``require_action_any_*``
+    # only proved the caller holds ``instinct.approve`` somewhere; this binds the Action
+    # to the caller's active workspace. Non-discovery blobs are unaffected (no-op).
+    _assert_fabric_objects_workspace(before, workspace_id)
+    _assert_pocket_create_workspace(before, workspace_id)
+    _assert_instinct_rule_workspace(before, workspace_id)
+
+    # 3 — resolve the ONE editable sub-field by which discovery blob the action carries.
+    params = dict(before.parameters or {})
+    blob_key, before_blob, editable, new_blob = _resolve_editable_blob(before, req)
+
+    # 5 — re-validate the proposed sub-shape (422; runs BEFORE persist so a broken blob
+    # never lands). The pin in _resolve already forced tenancy back / 403'd a mismatch.
+    _revalidate_blob(blob_key, new_blob)
+
+    # 6 — persist the mutated parameters bag (status-preserving).
+    params[blob_key] = new_blob
+    after = await store.update_parameters(action_id, params)
+    if after is None:
+        raise HTTPException(404, "Action not found")
+
+    # 7 — learning loop. compute_patches diffs the top-level parameters.<key>; a rule_spec
+    # edit yields a patch at parameters._instinct_rule. Record the Correction, then emit
+    # human.corrected(edited) — the SAME helper approve uses — citing the agent.proposed
+    # event as causation. We do NOT emit decision.completed: the chain stays OPEN for the
+    # eventual approve click.
+    actor_id = str(user.id)
+    correction: Correction | None = None
+    patches = compute_patches(before, after)
+    if patches:
+        correction = Correction(
+            action_id=before.id,
+            pocket_id=before.pocket_id,
+            actor=actor_id,
+            patches=patches,
+            context_summary=summarize_correction(before, patches),
+            action_title=before.title,
+        )
+        await store.record_correction(correction)
+        await _forward_to_soul(correction, after)
+
+    note = correction.context_summary if correction is not None else None
+    _emit_human_corrected(
+        blob=new_blob,
+        action=after,
+        user_id=actor_id,
+        workspace_id=workspace_id,
+        disposition="edited",
+        note=note,
+        causation_override=_code_change_proposed_event_id(new_blob),
+    )
+
+    return ApproveResponse(action=after, correction=correction)
+
+
+def _resolve_editable_blob(
+    before: Action, req: EditProposalRequest
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Resolve which discovery blob the action carries, validate the payload kind matches,
+    and return ``(blob_key, before_blob, editable_subfield, new_blob)`` with EVERY
+    immutable field already pinned from ``before_blob`` (a client mismatch → 403).
+
+    422 if the action carries no editable discovery blob, or the payload's kind does not
+    match the action's blob kind.
+    """
+    fabric_before = _fabric_objects_blob(before)
+    pocket_before = _pocket_create_blob(before)
+    rule_before = _instinct_rule_blob(before)
+
+    # --- _instinct_rule -----------------------------------------------------
+    if rule_before is not None:
+        if req.rule_spec is None:
+            raise ValidationError(
+                "instinct.edit_kind_mismatch",
+                "This proposal is an instinct rule; send rule_spec",
+            )
+        # The SECOND tenancy copy lives at rule_spec.scope.workspace_id — pin it. A
+        # foreign value here would re-scope the persisted rule into another workspace.
+        before_scope_ws = (rule_before.get("rule_spec") or {}).get("scope", {}).get("workspace_id")
+        incoming_spec = dict(req.rule_spec)
+        incoming_scope = dict(incoming_spec.get("scope") or {})
+        _pin_immutable(before_scope_ws, incoming_scope.get("workspace_id"))
+        incoming_scope["workspace_id"] = before_scope_ws
+        incoming_spec["scope"] = incoming_scope
+
+        # The top-level tenancy copy — pin it (and 403 a smuggled foreign value).
+        _pin_immutable(rule_before.get("workspace_id"), req.workspace_id)
+
+        new_blob = dict(rule_before)
+        new_blob["rule_spec"] = incoming_spec
+        # Force EVERY immutable top-level field back from the stored blob.
+        for key in (
+            "workspace_id",
+            "user_id",
+            "schema",
+            "kind",
+            "correlation_id",
+            "proposed_event_id",
+            "summary",
+        ):
+            if key in rule_before:
+                new_blob[key] = rule_before[key]
+        return ("_instinct_rule", rule_before, incoming_spec, new_blob)
+
+    # --- _pocket_create -----------------------------------------------------
+    if pocket_before is not None:
+        if req.pocket_spec is None:
+            raise ValidationError(
+                "instinct.edit_kind_mismatch",
+                "This proposal creates a pocket; send pocket_spec",
+            )
+        _pin_immutable(pocket_before.get("workspace_id"), req.workspace_id)
+        # Strip any sneaked workspace / owner keys out of the editable spec at the same
+        # chokepoint the propose path uses, then force the name back if the client dropped
+        # it (CreatePocketRequest requires it; the original carried it).
+        from pocketpaw_ee.cloud.pocket_proposals.propose import _normalize_pocket_spec
+
+        before_name = (pocket_before.get("pocket_spec") or {}).get("name", "")
+        normalized = _normalize_pocket_spec(
+            ripple_spec=req.pocket_spec.get("rippleSpec") or req.pocket_spec.get("ripple_spec"),
+            name=str(req.pocket_spec.get("name") or before_name),
+            template_slug=req.pocket_spec.get("templateSlug")
+            or req.pocket_spec.get("template_slug"),
+            extra={
+                k: v
+                for k, v in req.pocket_spec.items()
+                if k not in {"rippleSpec", "ripple_spec", "name", "templateSlug", "template_slug"}
+            },
+        )
+        new_blob = dict(pocket_before)
+        new_blob["pocket_spec"] = normalized
+        for key in (
+            "workspace_id",
+            "user_id",
+            "schema",
+            "kind",
+            "correlation_id",
+            "proposed_event_id",
+            "summary",
+        ):
+            if key in pocket_before:
+                new_blob[key] = pocket_before[key]
+        return ("_pocket_create", pocket_before, normalized, new_blob)
+
+    # --- _fabric_objects ----------------------------------------------------
+    if fabric_before is not None:
+        if req.fabric is None:
+            raise ValidationError(
+                "instinct.edit_kind_mismatch",
+                "This proposal writes fabric objects; send fabric",
+            )
+        _pin_immutable(fabric_before.get("workspace_id"), req.workspace_id)
+        new_blob = dict(fabric_before)
+        # Replace ONLY the three editable lists; everything else (workspace_id, schema,
+        # kind, chain ids, summary) is left exactly as stored.
+        for sub in ("object_types", "objects", "links"):
+            if sub in req.fabric:
+                new_blob[sub] = req.fabric[sub]
+        for key in (
+            "workspace_id",
+            "schema",
+            "kind",
+            "correlation_id",
+            "proposed_event_id",
+            "summary",
+        ):
+            if key in fabric_before:
+                new_blob[key] = fabric_before[key]
+        return ("_fabric_objects", fabric_before, new_blob, new_blob)
+
+    raise ValidationError(
+        "instinct.not_editable",
+        "This action carries no editable discovery proposal",
+    )
+
+
+def _revalidate_blob(blob_key: str, new_blob: dict[str, Any]) -> None:
+    """Re-validate the mutated sub-shape per blob kind (422 on failure, never persist).
+
+    ``_instinct_rule`` parses the CEL ``when`` (a tightened-but-malformed ``when`` fails
+    HERE, exactly as the executor would); ``_pocket_create`` re-parses the
+    ``CreatePocketRequest`` body; ``_fabric_objects`` shape-checks the editable lists.
+    """
+    if blob_key == "_instinct_rule":
+        from pocketpaw_ee.discovery.rule_models import RuleDraft
+
+        try:
+            RuleDraft.model_validate(new_blob.get("rule_spec") or {})
+        except Exception as exc:  # noqa: BLE001 — surface as a clean 422
+            raise ValidationError(
+                "instinct.invalid_rule_spec", f"Edited rule is invalid: {exc}"
+            ) from exc
+    elif blob_key == "_pocket_create":
+        from pocketpaw_ee.cloud.pockets.dto import CreatePocketRequest
+
+        try:
+            CreatePocketRequest.model_validate(new_blob.get("pocket_spec") or {})
+        except Exception as exc:  # noqa: BLE001
+            raise ValidationError(
+                "instinct.invalid_pocket_spec", f"Edited pocket spec is invalid: {exc}"
+            ) from exc
+    elif blob_key == "_fabric_objects":
+        for sub in ("object_types", "objects", "links"):
+            items = new_blob.get(sub)
+            if items is None:
+                continue
+            if not isinstance(items, list) or any(not isinstance(it, dict) for it in items):
+                raise ValidationError(
+                    "instinct.invalid_fabric_objects",
+                    f"Edited fabric '{sub}' must be a list of objects",
+                )
 
 
 def _apply_edits(before: Action, req: ApproveRequest) -> tuple[Action, set[str]]:

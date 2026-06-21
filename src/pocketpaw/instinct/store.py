@@ -1,5 +1,9 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-21 (F4 — edit-in-review) — added ``update_parameters(action_id,
+#   params)``: a thin, status-preserving write of the JSON ``parameters`` bag (does NOT
+#   touch ``status``/``approved_*``), used by the router's PATCH proposal-edit endpoint
+#   to persist a re-validated, tenancy-pinned blob on a PENDING action before approval.
 # Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — ADDITIVE
 #   generic scope on the actions table. ``instinct_actions`` now carries a
 #   nullable ``scope_type`` column (additive ALTER, mirrors the assignee /
@@ -730,6 +734,28 @@ class InstinctStore:
             ) as cur:
                 row = await cur.fetchone()
                 return self._row_to_action(row) if row else None
+
+    async def update_parameters(self, action_id: str, parameters: dict[str, Any]) -> Action | None:
+        """Persist a new ``parameters`` JSON bag on an Action, status-preserving.
+
+        F4 (edit-in-review) — the PATCH proposal-edit endpoint mutates only the editable
+        sub-fields of a PENDING discovery proposal's blob and writes the re-validated,
+        tenancy-pinned ``parameters`` back here. This is a CONTENT write only: it touches
+        ``parameters`` + ``updated_at`` and NEVER ``status`` / ``approved_*`` / chain
+        terminals (the approve click stays a separate, deliberate step). Returns the
+        reloaded Action, or ``None`` if the id doesn't resolve.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                "UPDATE instinct_actions SET parameters = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (json.dumps(parameters or {}), action_id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return None
+        return await self.get_action(action_id)
 
     async def pending(
         self,
