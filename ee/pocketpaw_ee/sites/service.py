@@ -1,6 +1,16 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-20 (DS-1a — surface dynamic-site pattern): list_for_workspace()
+# and pocket_status() now carry the SOURCE pocket's authoring ``pattern``
+# ("dynamic" | "landing" | ...) on their responses so the frontend can badge
+# dynamic sites. The pattern lives on Pocket.pattern, not the Site, so it is
+# resolved via pockets_service.patterns_for_pockets — ONE batch read for the list
+# (no N+1), a single-id read for status — keeping the Pocket read on the pockets
+# side (entity isolation; this service never imports the Pocket model). _to_response
+# gained an optional ``pattern`` arg; both DTOs default it to "" (empty-safe for a
+# pocket with no pattern or a missing/cross-tenant pocket).
+#
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
 # succeeds (when ``deployed`` flips True) — the true "last shipped" marker, not a
@@ -484,7 +494,7 @@ async def _promote_pocket_draft_to_published(
         )
 
 
-def _to_response(doc: _SiteDoc) -> SiteResponse:
+def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
@@ -500,6 +510,10 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         # P2b: ISO string of the last successful live deploy, or None before the
         # first deploy (pre-P2b rows read null via the getattr default).
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" |
+        # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
+        # not the Site). "" when unset / unresolved so the gallery is empty-safe.
+        pattern=pattern,
     )
 
 
@@ -1550,6 +1564,14 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # no deployed site or the doc predates the field (a pre-P2b row).
     deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
 
+    # DS-1a: resolve the source pocket's authoring pattern so a by-pocket status
+    # read can badge a dynamic site too. ONE read, tenant-scoped; "" when the
+    # pocket has no pattern or could not be resolved (empty-safe).
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
+    pattern = patterns.get(pocket_id) or ""
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
         status=status,
@@ -1561,6 +1583,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         # dupe. None when the pocket has no deployed site.
         url=(doc.url or None) if doc is not None else None,
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        pattern=pattern,
     )
 
 
@@ -1698,11 +1721,27 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     gallery to one card per pocket. ``archived: {"$ne": True}`` (not ``False``)
     so docs predating the field — which have no ``archived`` key in Mongo — still
     count as active.
+
+    DS-1a: each card also carries its source pocket's authoring ``pattern``
+    ("dynamic" | "landing" | ...) so the frontend can badge dynamic sites. The
+    pattern lives on the source Pocket, not the Site, so it is resolved in ONE
+    batch read (``pockets_service.patterns_for_pockets`` — no N+1) keyed on the
+    listed pockets, then attached per card. A pocket with no pattern (or one that
+    could not be resolved) reads "" so the gallery is empty-safe.
     """
     cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}}).sort(
         -_SiteDoc.createdAt
     )  # type: ignore[operator]
-    return [_to_response(doc) async for doc in cursor]
+    docs = [doc async for doc in cursor]
+    # ONE cross-entity read for every card's pattern (no per-site fetch). The
+    # Pocket read stays in the pockets service (entity isolation) — this service
+    # never imports the Pocket model.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    patterns = await pockets_service.patterns_for_pockets(
+        workspace_id, [doc.pocket_id for doc in docs]
+    )
+    return [_to_response(doc, patterns.get(doc.pocket_id) or "") for doc in docs]
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:
