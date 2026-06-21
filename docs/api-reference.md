@@ -41,6 +41,14 @@ A connector READ tool still fires immediately; a WRITE tool is no longer
 refused with `code: blocked` — it is PROPOSED for human approval through the
 Instinct gate and returns `code: instinct_pending` with a `proposed_action_id`
 (the write fires only when a human approves it in The Tray).
+
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — documented the
+workspace jobs primitive: the `kind: "job"` variant of
+POST /pockets/{id}/actions/run that enqueues a server-side async job
+instead of firing an HTTP write, and the new
+GET /workspaces/{ws}/jobs/{job_id} status poll. Jobs run on the shared ARQ
+worker under the synthetic `system:workspace_job` identity and merge their
+results back into the pocket's `state` over the live update bridge.
 -->
 
 # Cloud REST API Reference
@@ -389,6 +397,97 @@ level before any call leaves PocketPaw; the connector path's outbound URL is
 bounded by the connector definition, not by a spec-supplied URL. A
 URL-taking built-in tool, when that path lands, must route through the same
 `_http_guard` SSRF boundary the read/write executors use.
+
+## Pockets — Jobs
+
+pp#1459. A read (a source) fetches data into the canvas and a write (an
+action) sends one HTTP call. A **job** is the third kind: a named,
+server-side async unit of work that runs for minutes, computes a result,
+and merges it back into the pocket's `state` so an open canvas updates
+live. Because a job runs on the shared ARQ worker rather than in the
+request, it survives the user closing the browser, and it emits its update
+over the same cross-process bridge the resumable chat runs use.
+
+A job is declared as an action with `kind: "job"` in `rippleSpec.actions`:
+
+```json
+{
+  "actions": {
+    "score_applications": {
+      "kind": "job",
+      "job": "score_applications",
+      "params": { "batch_size": 20, "connector": "snctm-api" },
+      "label": "Score Next Batch",
+      "requires_instinct": false
+    }
+  }
+}
+```
+
+The `job` value is the name of a callable registered in the workspace job
+registry. An action with no `kind` keeps the existing write-action
+behavior, so jobs are additive.
+
+### Trigger: `POST /pockets/{pocket_id}/actions/run` with `kind: "job"`
+
+The same endpoint and the same owner-or-`shared_with` access as a write
+action. When the named action's `kind` is `"job"`, the route enqueues the
+job instead of making an HTTP call.
+
+Behavior:
+
+- An unknown job name returns `400 job.unknown`.
+- The server reads the params from the **persisted action declaration**, not
+  from the request. A non-empty client `params` is rejected with
+  `400 job.params_not_accepted` so a click can never widen a job's scope.
+- A param key that looks credential-bearing (it contains `token`, `api_key`,
+  `secret`, and the like, at any nesting depth) is rejected with
+  `400 job.params_forbidden`. Jobs read workspace credentials server-side and
+  never accept tokens through params.
+- `requires_instinct: true` is rejected with
+  `400 job.instinct_not_yet_supported`. The Instinct approval path for jobs
+  lands in a later version; until then a job that asks to be gated refuses
+  rather than run ungated.
+
+Response `200` (enqueued):
+
+```json
+{ "ok": true, "code": "job_enqueued", "job_id": "665a1f2e9c3b4a0012ab34cd" }
+```
+
+The client polls the status endpoint below. The result arrives on the canvas
+as a live `state` update when the job finishes; it is not in this response
+body.
+
+### `GET /api/v1/workspaces/{workspace_id}/jobs/{job_id}`
+
+Poll a job's status. Requires workspace membership. The job document is
+re-fetched by id and its workspace is re-checked, so a job id from another
+workspace returns `404` rather than leaking its existence.
+
+Response `200`:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `job_id` | string | The job document id. |
+| `status` | string | `queued`, `running`, `done`, or `failed`. |
+| `error` | string \| null | The failure message when `status` is `failed`. |
+| `created_at` / `started_at` / `ended_at` | string \| null | Lifecycle timestamps. |
+
+The computed result is not returned here. On success the worker has already
+merged it into the pocket's `state`; on failure it writes a
+`{action}_status: "failed"` marker into `state` so the triggering button
+stops spinning without a poll.
+
+**Security.** Every job runs under the hardcoded synthetic identity
+`system:workspace_job`, never the triggering user, and that identity is not
+addressable from any request. A job result may write **only** `state`; a
+result that touches `ui`, `actions`, `sources`, or `shape` is rejected and
+the job is marked failed, so a job can never rewrite the template it runs
+under. The writeback re-asserts that the target pocket belongs to the job's
+workspace before it writes (fail-closed), and the worker enforces a timeout
+(`POCKETPAW_JOB_TIMEOUT_SECONDS`, default `900`); a timed-out job writes the
+same failed-state marker. Enqueue and failure are written to the audit log.
 
 ## Pockets — Template Reconcile
 
