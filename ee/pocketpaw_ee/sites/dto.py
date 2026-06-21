@@ -58,6 +58,23 @@
 # status response. The frontend uses it to badge dynamic sites in the gallery.
 # Default "" so the field is backward-compatible and empty-safe (a pocket with no
 # pattern, or a missing/cross-tenant pocket, reads "").
+# Updated 2026-06-20 (DS-3 — read a dynamic site's D1 data): added the read-only
+# DTOs the operator data-view (DS-4 FE) consumes:
+#   * SiteDataTableInfo — one declared table {name, fields, primary_key} from the
+#     dynamic pocket's spec ``objects``. Always available (it comes from the spec),
+#     even when the live D1 data is not reachable.
+#   * SiteDataTablesResponse — the response of
+#     GET /sites/by-pocket/{pocket_id}/data: {pocket_id, available, reason, tables}.
+#     ``available`` is False with ``reason="live_on_cloudflare_only"`` in local/dev
+#     mode (no live D1 to read), but ``tables`` is still listed from the spec so the
+#     UI degrades cleanly instead of erroring.
+#   * SiteDataRowsResponse — the response of
+#     GET /sites/by-pocket/{pocket_id}/data/{table}: {pocket_id, table, available,
+#     reason, columns, rows}. ``rows`` is the D1 rows (capped); ``columns`` is the
+#     table's declared field names. In local mode ``available`` is False and ``rows``
+#     is empty, but ``columns`` is still listed from the spec.
+# These are READ-ONLY views (no request DTO — the inputs are path params); the
+# data view never writes through this surface.
 
 from __future__ import annotations
 
@@ -217,6 +234,50 @@ class AuditResponse(BaseModel):
     pocket_id: str
     engine: str
     findings: list[AuditFinding] = []
+
+
+class SiteDataTableInfo(BaseModel):
+    """One declared table of a dynamic site, read from the pocket spec's
+    ``objects`` (DS-3). ``name`` is the table/object name; ``fields`` is the
+    column→type map (the spec's field types); ``primary_key`` is the PRIMARY KEY
+    column (empty when the spec did not declare one). This is spec-derived, so it
+    is available even when the live D1 data is not reachable (local/dev mode)."""
+
+    name: str
+    fields: dict[str, str] = {}
+    primary_key: str = ""
+
+
+class SiteDataTablesResponse(BaseModel):
+    """The tables of a dynamic site's data store, for the operator data-view
+    (DS-3; backs GET /sites/by-pocket/{pocket_id}/data). The table LIST always
+    comes from the pocket spec's ``objects``, so it is populated even when the
+    live D1 is not reachable. ``available`` is True only when the rows behind
+    those tables can actually be read (a live Cloudflare deploy); it is False in
+    local/dev mode with ``reason="live_on_cloudflare_only"`` so the UI degrades
+    cleanly — it can show the schema but explain why no rows load."""
+
+    pocket_id: str
+    available: bool
+    reason: str = ""
+    tables: list[SiteDataTableInfo] = []
+
+
+class SiteDataRowsResponse(BaseModel):
+    """The rows of ONE table of a dynamic site's data store (DS-3; backs
+    GET /sites/by-pocket/{pocket_id}/data/{table}). ``columns`` is the table's
+    declared field names (spec-derived, always present); ``rows`` is the live D1
+    rows, CAPPED (the service applies a LIMIT). ``available`` is False in local/dev
+    mode (``reason="live_on_cloudflare_only"``) and ``rows`` is then empty, but
+    ``columns`` is still listed so the UI can render the table header + an
+    explanatory empty state instead of erroring."""
+
+    pocket_id: str
+    table: str
+    available: bool
+    reason: str = ""
+    columns: list[str] = []
+    rows: list[dict[str, Any]] = []
 
 
 class DomainRequest(BaseModel):

@@ -82,6 +82,18 @@
 # the new draft as a SiteVersionResponse (the same row shape the versions timeline
 # uses). fabric.write (it creates a draft); an unknown version_no is a 404 (the
 # service raises ValueError).
+# Updated 2026-06-20 (DS-3 — read a dynamic site's D1 data): added two fabric.read
+# operator data-view endpoints over a DYNAMIC site's per-tenant Cloudflare D1.
+#   * GET /sites/by-pocket/{pocket_id}/data — list the site's tables (from the
+#     pocket spec's ``objects``). Always lists the schema; ``available`` is False
+#     with reason="live_on_cloudflare_only" in local/dev mode (no live D1).
+#   * GET /sites/by-pocket/{pocket_id}/data/{table} — read one table's rows
+#     (bounded LIMIT). ``table`` is validated against the spec's declared objects
+#     (unknown → 404, never interpolated); values bind through query params. Local
+#     mode degrades cleanly (available=False, columns still listed, no rows).
+#   Both delegate to sites_service; a NON-dynamic pocket → 422 (not_dynamic), a
+#   missing / access-denied pocket → 404 / 403 (the pockets service raises it).
+#   Tenant-scoped on ctx — the data view is read-only (no request body).
 
 from __future__ import annotations
 
@@ -98,6 +110,8 @@ from pocketpaw_ee.sites.dto import (
     MakeEditableRequest,
     PublishRequest,
     RequestPublishResponse,
+    SiteDataRowsResponse,
+    SiteDataTablesResponse,
     SitePreviewResponse,
     SiteResponse,
     SiteStatusResponse,
@@ -231,6 +245,52 @@ async def status_by_pocket(
     status, is_live}. Derived from the tenant-scoped Site deployment doc — an
     unpublished pocket (no Site) reads draft / not live (NOT a 404)."""
     return await sites_service.pocket_status(workspace_id=ctx.workspace_id, pocket_id=pocket_id)
+
+
+@router.get("/sites/by-pocket/{pocket_id}/data", response_model=SiteDataTablesResponse)
+async def site_data_tables_by_pocket(
+    pocket_id: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteDataTablesResponse:
+    """List a DYNAMIC site's data tables for the operator data-view (DS-3):
+    {pocket_id, available, reason, tables}. The table list comes from the pocket
+    spec's ``objects`` (the declared D1 tables), so it is populated even when the
+    live D1 is not reachable. ``available`` is False with
+    ``reason="live_on_cloudflare_only"`` in local/dev mode (no live D1) so the UI
+    degrades cleanly — it can show the schema but explain why no rows load.
+
+    A NON-dynamic pocket (a static landing / brochure) has no data store, so the
+    service raises ValidationError("sites.not_dynamic") → 422. A missing /
+    access-denied pocket surfaces as 404 / 403 (the pockets service raises it).
+    Tenant-scoped on ctx."""
+    return await sites_service.list_site_data_tables(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+    )
+
+
+@router.get("/sites/by-pocket/{pocket_id}/data/{table}", response_model=SiteDataRowsResponse)
+async def site_data_rows_by_pocket(
+    pocket_id: str,
+    table: str,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.read")),
+) -> SiteDataRowsResponse:
+    """Read the rows of ONE table of a DYNAMIC site's D1 (DS-3): {pocket_id,
+    table, available, reason, columns, rows}. ``rows`` is the live D1 rows (capped
+    by a LIMIT); ``columns`` is the table's declared field names.
+
+    SQL safety: ``table`` is validated against the pocket spec's declared
+    ``objects`` — an unknown table is a 404 (NotFound("site_table")), never
+    interpolated into SQL; every value binds through query params. In local/dev
+    mode (no live D1) ``available`` is False with
+    ``reason="live_on_cloudflare_only"`` and ``rows`` empty, but ``columns`` is
+    still listed from the spec. A NON-dynamic pocket → 422
+    ("sites.not_dynamic"); a missing / access-denied pocket → 404 / 403.
+    Tenant-scoped on ctx."""
+    return await sites_service.read_site_data_table(
+        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id, table=table
+    )
 
 
 @router.post("/sites/by-pocket/{pocket_id}/audit", response_model=AuditResponse)
