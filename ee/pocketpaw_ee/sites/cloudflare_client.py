@@ -25,8 +25,19 @@
 # against the site's known objects by the service BEFORE it reaches here, and all
 # values bind through ``params``. The service layer (DS-3) owns that validation;
 # this method is a thin, SQL-agnostic transport.
+# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): ``put_worker`` gained an
+# optional ``bindings`` param. A DYNAMIC Paw Site is backed by a per-tenant
+# Cloudflare D1; its deployed Worker needs a D1 binding to reach that DB. When
+# bindings are supplied, the upload switches to the Workers multipart/form-data
+# contract — a ``metadata`` JSON part (main_module + bindings + compatibility_date)
+# plus the module file part referenced by its filename. When NO bindings are
+# supplied (a static site), it keeps the prior single-module upload byte-for-byte,
+# so the static path never regresses. The fail-closed + in-memory-token handling
+# is identical on both paths.
 
 from __future__ import annotations
+
+import json
 
 import httpx
 
@@ -34,6 +45,16 @@ from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.sites.domain import CustomHostname, HostnameStatus
 
 _CF_API = "https://api.cloudflare.com/client/v4"
+
+# Filename the module part is uploaded under (and named by ``main_module`` in the
+# metadata). The Workers multipart upload references modules by filename; the
+# bundle our generator emits is a single ESM entry, so one ``*.mjs`` part suffices.
+_MAIN_MODULE = "index.mjs"
+
+# Workers compatibility date for the multipart upload's metadata. Matches the
+# date the generator bakes into the (otherwise-ignored-on-direct-API-upload)
+# wrangler.toml so the runtime semantics are identical to a wrangler deploy.
+_COMPATIBILITY_DATE = "2024-09-23"
 
 
 def _map_status(cf_status: str, ssl_status: str) -> HostnameStatus:
@@ -75,18 +96,62 @@ class CloudflareClient:
             raise ValidationError("sites.cloudflare_error", str(errs[0].get("message")))
         return body.get("result", {})
 
-    async def put_worker(self, *, script_name: str, bundle: bytes) -> bool:
-        """Upload a user Worker into the dispatch namespace. Live on 200."""
+    async def put_worker(
+        self,
+        *,
+        script_name: str,
+        bundle: bytes,
+        bindings: list[dict] | None = None,
+    ) -> bool:
+        """Upload a user Worker into the dispatch namespace. Live on 200.
+
+        ``bindings`` (DS-2) carries the Worker's runtime bindings — for a dynamic
+        Paw Site, a D1 binding ``{"type": "d1", "name": "DB", "id": <database_id>}``
+        so the deployed Worker can reach its per-tenant D1. Each binding is a dict
+        passed straight into the upload metadata's ``bindings`` array (the CF
+        Workers contract), so future binding types (queues, KV, ...) ride the same
+        param without a signature change.
+
+        When ``bindings`` is None/empty (a STATIC site), the upload is the prior
+        single-module PUT — ``content=bundle`` with a
+        ``application/javascript+module`` Content-Type, byte-for-byte unchanged, so
+        the static path never regresses. When bindings are supplied, the upload
+        switches to the Workers multipart/form-data contract: a ``metadata`` JSON
+        part naming ``main_module`` + the ``bindings`` array + ``compatibility_date``,
+        plus the module file part referenced by that filename. The
+        dispatch-namespace script upload uses the same multipart contract as a
+        normal Worker upload (metadata part named ``metadata``, module parts keyed
+        by filename)."""
         url = (
             f"{_CF_API}/accounts/{self._account_id}"
             f"/workers/dispatch/namespaces/{self._namespace}/scripts/{script_name}"
         )
         async with self._client() as client:
-            resp = await client.put(
-                url,
-                content=bundle,
-                headers={"Content-Type": "application/javascript+module"},
-            )
+            if bindings:
+                metadata = {
+                    "main_module": _MAIN_MODULE,
+                    "bindings": list(bindings),
+                    "compatibility_date": _COMPATIBILITY_DATE,
+                }
+                # httpx builds the multipart/form-data body + boundary. The
+                # ``metadata`` part is a JSON blob; the module part is named by its
+                # filename (== main_module) and typed as an ES module so CF treats
+                # it as the entrypoint, not a plain asset.
+                files = {
+                    "metadata": (None, json.dumps(metadata), "application/json"),
+                    _MAIN_MODULE: (
+                        _MAIN_MODULE,
+                        bundle,
+                        "application/javascript+module",
+                    ),
+                }
+                resp = await client.put(url, files=files)
+            else:
+                resp = await client.put(
+                    url,
+                    content=bundle,
+                    headers={"Content-Type": "application/javascript+module"},
+                )
         self._unwrap(resp)
         return True
 

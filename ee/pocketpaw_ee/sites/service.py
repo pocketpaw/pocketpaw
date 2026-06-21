@@ -18,6 +18,15 @@
 # bindings) branch so the READ targets the SAME D1 a deploy binds, but this branch
 # does NOT depend on DS-2's code (it reads Site.d1_database_id via getattr with an
 # empty default, else derives the id) so it builds green on its own.
+# Updated 2026-06-20 (DS-1a — surface dynamic-site pattern): list_for_workspace()
+# and pocket_status() now carry the SOURCE pocket's authoring ``pattern``
+# ("dynamic" | "landing" | ...) on their responses so the frontend can badge
+# dynamic sites. The pattern lives on Pocket.pattern, not the Site, so it is
+# resolved via pockets_service.patterns_for_pockets — ONE batch read for the list
+# (no N+1), a single-id read for status — keeping the Pocket read on the pockets
+# side (entity isolation; this service never imports the Pocket model). _to_response
+# gained an optional ``pattern`` arg; both DTOs default it to "" (empty-safe for a
+# pocket with no pattern or a missing/cross-tenant pocket).
 #
 # Updated 2026-06-19 (P2b-backend — "Last Deployed" + revert endpoint): publish()
 # now stamps the Site doc's ``deployed_at`` (UTC) ONLY when a non-preview deploy
@@ -375,6 +384,12 @@ def _live_object_id(workspace_id: str, pocket_id: str) -> ObjectId:
     return ObjectId(digest[:12])
 
 
+# DS-2: the Worker binding name a dynamic site reads its D1 through. Must match
+# the generator's wrangler.toml binding (``binding = "DB"``) so the compiled
+# remote functions (which reference ``env.DB``) resolve.
+_D1_BINDING_NAME = "DB"
+
+
 # DS-3: the row cap for a table read. The data-view lists recent records, not a
 # full export — a bounded read keeps the control-plane call cheap and the UI
 # responsive. Overridable via PAW_SITES_DATA_ROW_LIMIT.
@@ -585,7 +600,7 @@ async def _promote_pocket_draft_to_published(
         )
 
 
-def _to_response(doc: _SiteDoc) -> SiteResponse:
+def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
     deployed_at = getattr(doc, "deployed_at", None)
     return SiteResponse(
         id=str(doc.id),
@@ -601,6 +616,10 @@ def _to_response(doc: _SiteDoc) -> SiteResponse:
         # P2b: ISO string of the last successful live deploy, or None before the
         # first deploy (pre-P2b rows read null via the getattr default).
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        # DS-1a: the source pocket's authoring pattern ("dynamic" | "landing" |
+        # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
+        # not the Site). "" when unset / unresolved so the gallery is empty-safe.
+        pattern=pattern,
     )
 
 
@@ -650,6 +669,7 @@ async def publish(
     name: str = "",
     engine: str = "ripple",
     source: dict[str, str] | None = None,
+    pattern: str | None = None,
     builder_origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
@@ -825,6 +845,20 @@ async def publish(
         content=version_content,
     )
 
+    # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
+    # bindings) is backed by a per-tenant Cloudflare D1, so its deployed Worker
+    # needs a D1 binding to reach that DB. Resolve the site's D1 id BEFORE deploy:
+    # reuse the id already stored on this pocket's canonical Site doc (the binding
+    # target must be stable across re-publishes), else derive a stable one. Static
+    # sites get no D1 id and no binding — the single-module upload is unchanged.
+    is_dynamic = _is_dynamic(pattern, ripple_spec)
+    d1_database_id = ""
+    if is_dynamic:
+        _prior = await _SiteDoc.find_one({"_id": ObjectId(site_id), "workspace": workspace_id})
+        d1_database_id = (
+            getattr(_prior, "d1_database_id", "") if _prior is not None else ""
+        ) or _derive_d1_database_id(workspace_id, pocket_id)
+
     # Local mode only when the caller did NOT inject a CF client (tests inject a
     # fake CF and expect the real branch) AND the environment selects it.
     use_local = _cloudflare is None and _local_mode()
@@ -837,7 +871,12 @@ async def publish(
     else:
         cf = _cloudflare or _cf_client()
         bundle = _bundle_reader(build.project_dir)
-        await cf.put_worker(script_name=site_id, bundle=bundle)
+        # Only a dynamic site passes bindings; a static publish passes None so the
+        # single-module upload path stays byte-for-byte unchanged (no regress).
+        bindings = (
+            [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}] if is_dynamic else None
+        )
+        await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
 
     # PERF-1: UPSERT ONE canonical Site doc per (workspace, pocket_id) keyed on the
     # stable ``_id`` (== site_id), rather than inserting a fresh row every publish.
@@ -867,6 +906,9 @@ async def publish(
             deployed_at=now,
             signed_key=signed_key,
             url=url,
+            # DS-2: persist the D1 id this dynamic site is bound to ("" for static)
+            # so a re-publish reuses the SAME binding target and DS-3 can read it.
+            d1_database_id=d1_database_id,
             # SE-2b: persist the builder origin (or "") so a component-edit republish
             # can re-apply it and the site stays editable across edits.
             builder_origin=builder_origin or "",
@@ -886,7 +928,13 @@ async def publish(
         doc.deployed = True
         doc.deployed_at = now
         doc.url = url
-        doc.builder_origin = builder_origin or ""
+        # DS-2: keep the D1 id in sync. For a dynamic site it is the (reused)
+        # stable id; a static re-publish leaves it "" (no binding). We only ever
+        # SET it for a dynamic publish — a publish that is no longer dynamic does
+        # not clear a previously-bound D1 (the data behind it must not be orphaned
+        # silently), so guard on is_dynamic.
+        if is_dynamic:
+            doc.d1_database_id = d1_database_id
         await doc.save()
     return doc
 
@@ -1063,6 +1111,10 @@ async def publish_pocket(
     # instead of compiling ``rippleSpec``.
     engine = pocket.get("engine") or "ripple"
     source = pocket.get("source") if isinstance(pocket.get("source"), dict) else None
+    # DS-2: the pocket's create-pocket layout pattern. ``pattern == "dynamic"``
+    # (stamped by the create-dynamic-site tool) tells ``publish`` the site is
+    # backed by a per-tenant D1, so its deployed Worker gets a D1 binding.
+    pattern = pocket.get("pattern")
 
     return await publish(
         workspace_id=workspace_id,
@@ -1072,6 +1124,7 @@ async def publish_pocket(
         theme=theme,
         engine=engine,
         source=source,
+        pattern=pattern,
         name=name or pocket.get("name", ""),
         builder_origin=builder_origin,
         preview=preview,
@@ -1817,6 +1870,14 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
     # no deployed site or the doc predates the field (a pre-P2b row).
     deployed_at = getattr(doc, "deployed_at", None) if doc is not None else None
 
+    # DS-1a: resolve the source pocket's authoring pattern so a by-pocket status
+    # read can badge a dynamic site too. ONE read, tenant-scoped; "" when the
+    # pocket has no pattern or could not be resolved (empty-safe).
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    patterns = await pockets_service.patterns_for_pockets(workspace_id, [pocket_id])
+    pattern = patterns.get(pocket_id) or ""
+
     return SiteStatusResponse(
         pocket_id=pocket_id,
         status=status,
@@ -1828,6 +1889,7 @@ async def pocket_status(*, workspace_id: str, pocket_id: str) -> SiteStatusRespo
         # dupe. None when the pocket has no deployed site.
         url=(doc.url or None) if doc is not None else None,
         deployed_at=deployed_at.isoformat() if deployed_at is not None else None,
+        pattern=pattern,
     )
 
 
@@ -1965,11 +2027,27 @@ async def list_for_workspace(workspace_id: str) -> list[SiteResponse]:
     gallery to one card per pocket. ``archived: {"$ne": True}`` (not ``False``)
     so docs predating the field — which have no ``archived`` key in Mongo — still
     count as active.
+
+    DS-1a: each card also carries its source pocket's authoring ``pattern``
+    ("dynamic" | "landing" | ...) so the frontend can badge dynamic sites. The
+    pattern lives on the source Pocket, not the Site, so it is resolved in ONE
+    batch read (``pockets_service.patterns_for_pockets`` — no N+1) keyed on the
+    listed pockets, then attached per card. A pocket with no pattern (or one that
+    could not be resolved) reads "" so the gallery is empty-safe.
     """
     cursor = _SiteDoc.find({"workspace": workspace_id, "archived": {"$ne": True}}).sort(
         -_SiteDoc.createdAt
     )  # type: ignore[operator]
-    return [_to_response(doc) async for doc in cursor]
+    docs = [doc async for doc in cursor]
+    # ONE cross-entity read for every card's pattern (no per-site fetch). The
+    # Pocket read stays in the pockets service (entity isolation) — this service
+    # never imports the Pocket model.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    patterns = await pockets_service.patterns_for_pockets(
+        workspace_id, [doc.pocket_id for doc in docs]
+    )
+    return [_to_response(doc, patterns.get(doc.pocket_id) or "") for doc in docs]
 
 
 async def site_pocket_ids(workspace_id: str) -> set[str]:

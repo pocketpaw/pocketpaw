@@ -14,8 +14,13 @@ Also adds ``get_pocket_workspace`` (review fix IMPORTANT 3) — a session-free
 tenancy read the jobs worker uses to fail closed before a cross-workspace
 writeback.
 
+Updated: 2026-06-20 (DS-1a) — added ``patterns_for_pockets`` (sites surfaces a
+published site's source-pocket ``pattern`` without importing the Pocket model;
+the Pocket read stays here, the sole owner of Pocket reads — entity isolation).
+
 Public API (returns wire dicts for legacy router compatibility):
 - ``create``, ``list_pockets``, ``get``, ``update``, ``delete``
+- ``patterns_for_pockets`` — batch {pocket_id: Pocket.pattern} for a workspace
 - ``ensure_home_pocket`` — resolve-or-provision the user's home pocket
 - ``create_from_ripple_spec`` — agent-generated pockets
 - ``add_widget``, ``update_widget``, ``remove_widget``, ``reorder_widgets``
@@ -1560,6 +1565,48 @@ async def list_pockets(
             query["_id"] = {"$nin": oids}
     docs = await _PocketDoc.find(query).to_list()
     return [await _resolved_wire_dict(d, user_id) for d in docs]
+
+
+async def patterns_for_pockets(workspace_id: str, pocket_ids: list[str]) -> dict[str, str | None]:
+    """Map each given ``pocket_id`` to its ``Pocket.pattern`` in ONE query.
+
+    The sites service surfaces a published site's authoring ``pattern``
+    ("dynamic" | "landing" | ...) on its list/status responses (DS-1a), but the
+    pattern lives on the source Pocket, not the Site. This is the cross-entity
+    read sites uses WITHOUT importing the Pocket Beanie model — the Pocket read
+    stays here (the sole owner of Pocket reads, entity isolation), the same way
+    ``sites.service.site_pocket_ids`` keeps the Site read on the sites side.
+
+    ONE ``$in`` query (no N+1) projected to ``_id`` + ``pattern`` only, so a
+    long gallery resolves all its patterns in a single round-trip. Tenant-scoped
+    on ``workspace``: a pocket in another workspace is not returned even if its
+    id is passed. The result is keyed by the wire-string ``pocket_id``; a pocket
+    whose ``pattern`` is unset reads ``None`` (the caller defaults it to ""),
+    and an id with no matching pocket (deleted / cross-tenant / malformed) is
+    simply absent from the map (the caller treats absent as "" too).
+
+    Malformed ids that cannot cast to an ObjectId are skipped — they can't match
+    a stored ``_id`` anyway. An empty list is a no-op (empty map)."""
+    if not pocket_ids:
+        return {}
+    oids: list[PydanticObjectId] = []
+    for pid in pocket_ids:
+        try:
+            oids.append(PydanticObjectId(pid))
+        except (InvalidId, TypeError, ValueError):
+            continue
+    if not oids:
+        return {}
+    # Project to only the two fields we need — a pattern lookup must not pull each
+    # full (potentially large rippleSpec-carrying) doc into memory. Raw pymongo
+    # projection avoids constructing a full Beanie model per pocket; ``find`` over
+    # ``get_pymongo_collection`` is the same accessor the other reads here use.
+    collection = _PocketDoc.get_pymongo_collection()
+    rows = await collection.find(
+        {"workspace": workspace_id, "_id": {"$in": oids}},
+        {"_id": 1, "pattern": 1},
+    ).to_list(length=None)
+    return {str(row["_id"]): row.get("pattern") for row in rows}
 
 
 async def get(pocket_id: str, user_id: str) -> dict:
