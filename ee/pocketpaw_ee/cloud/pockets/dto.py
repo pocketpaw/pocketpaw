@@ -136,6 +136,13 @@ by default a partial ``ripple_spec`` body that omits instance-owned regions
 merge), so a frontend canvas-only PATCH no longer wipes instance data. A caller
 that genuinely wants to clear instance state sends ``reset_state: true`` to
 restore the old wholesale write. Wire-level ``ripple_spec`` stays ``dict | None``.
+Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened the
+``source`` value type from ``dict[str, str]`` to ``dict[str, Any]`` on
+``CreatePocketRequest`` and ``PocketResponse`` so a dynamic svelte site's
+``source`` envelope can carry its live-data bindings
+(``objects``/``sources``/``actions``/``auth``) as sibling keys alongside the
+str->str SvelteKit file entries. Static svelte pockets keep a str->str map (a
+subset); ripple pockets keep ``source=None``.
 """
 
 from __future__ import annotations
@@ -171,11 +178,13 @@ class CreatePocketRequest(BaseModel):
     # Optional; omitting it persists ``None`` (legacy behaviour).
     pattern: str | None = None
     # Paw Sites generation track (``"ripple"`` default | ``"svelte"``) and,
-    # for svelte sites, the hand-written SvelteKit source map
-    # ``{relative_path: file_contents}``. Omitting them persists the ripple
-    # defaults (``engine="ripple"``, ``source=None``).
+    # for svelte sites, the hand-written SvelteKit source ENVELOPE
+    # ``{relative_path: file_contents}``, which for a DYNAMIC svelte site also
+    # carries the live-data bindings (``objects``/``sources``/``actions``/
+    # ``auth``) as sibling keys — hence ``dict[str, Any]`` (DSV-5). Omitting them
+    # persists the ripple defaults (``engine="ripple"``, ``source=None``).
     engine: str = "ripple"
-    source: dict[str, str] | None = None
+    source: dict[str, Any] | None = None
     # Optional per-entity surface-profile override. Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
     # surface-kind default. Reuses the persisted ``PocketSurfaceProfile``
@@ -334,10 +343,13 @@ class PocketResponse(BaseModel):
     # The create-pocket layout pattern (``"landing"`` for marketing
     # sites), or ``None`` for legacy pockets.
     pattern: str | None = None
-    # Paw Sites generation track (``"ripple"`` | ``"svelte"``) and the
-    # svelte source map (or ``None`` for ripple pockets).
+    # Paw Sites generation track (``"ripple"`` | ``"svelte"``) and the svelte
+    # source envelope (or ``None`` for ripple pockets). For a dynamic svelte
+    # site the envelope carries the live-data bindings (``objects``/``sources``/
+    # ``actions``/``auth``) as siblings on the file map — hence
+    # ``dict[str, Any]`` (DSV-5).
     engine: str = "ripple"
-    source: dict[str, str] | None = None
+    source: dict[str, Any] | None = None
     # Optional per-entity surface-profile override. Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①); None = use the
     # surface-kind default. Wire alias ``surfaceProfile``.

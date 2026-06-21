@@ -280,3 +280,157 @@ class TestCreateSvelteSiteEndToEnd:
 
         assert out.get("is_error") is True
         assert "src/routes/+page.ts" in out["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# DSV-5 — DYNAMIC svelte site: bindings accepted on source + pattern="dynamic"
+# ---------------------------------------------------------------------------
+
+
+def _dynamic_source() -> dict:
+    """A §4.3-complete svelte source map PLUS the live-data bindings as SIBLING
+    keys on the same envelope (the DSV-5 dynamic contract)."""
+    src = _sample_source()
+    src["objects"] = [
+        {
+            "name": "entry",
+            "fields": {"id": "text", "name": "text", "message": "text"},
+            "primaryKey": "id",
+        }
+    ]
+    src["sources"] = [
+        {"name": "entries", "kind": "data", "object": "entry", "refresh": "pocket_open"}
+    ]
+    src["actions"] = [{"name": "sign", "object": "entry", "op": "insert"}]
+    return src
+
+
+class TestDynamicSvelteBindings:
+    def test_has_svelte_bindings_detects_dynamic(self) -> None:
+        from pocketpaw_ee.agent.mcp_servers.sites_create import _has_svelte_bindings
+
+        assert _has_svelte_bindings(_dynamic_source()) is True
+        # Static (no bindings) → not dynamic.
+        assert _has_svelte_bindings(_sample_source()) is False
+        # Present-but-empty bindings → NOT dynamic (mirrors the generator's
+        # isDynamic classifier).
+        assert _has_svelte_bindings({**_sample_source(), "objects": [], "auth": False}) is False
+        # Auth-only is dynamic.
+        assert _has_svelte_bindings({**_sample_source(), "auth": True}) is True
+
+    def test_binding_keys_pinned(self) -> None:
+        """Pin the binding sibling keys so the write contract can't silently drift
+        from the generator's parseBindings / generator_client split."""
+        from pocketpaw_ee.agent.mcp_servers.sites_create import SVELTE_BINDING_KEYS
+
+        assert set(SVELTE_BINDING_KEYS) == {"objects", "sources", "actions", "auth"}
+
+    def test_missing_keys_ignores_binding_siblings(self) -> None:
+        """The §4.3 required-file check is unaffected by binding siblings — a
+        complete file map plus bindings still validates clean."""
+        from pocketpaw_ee.agent.mcp_servers.sites_create import _missing_source_keys
+
+        assert _missing_source_keys(_dynamic_source()) == []
+
+    @pytest.mark.asyncio
+    async def test_persists_dynamic_pocket_with_bindings_and_pattern_dynamic(
+        self, beanie_test_db, recording_bus
+    ) -> None:
+        """A dynamic source envelope persists with engine=="svelte",
+        pattern=="dynamic", and the FULL envelope (files + binding siblings, with
+        non-string types intact) on ``source`` — ground truth read from Mongo."""
+        from unittest.mock import patch
+
+        from bson import ObjectId
+        from pocketpaw_ee.agent.mcp_servers import sites_create as sites_create_mcp
+        from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+        workspace_id = str(ObjectId())
+        user_id = str(ObjectId())
+        source = _dynamic_source()
+
+        with (
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
+                return_value=workspace_id,
+            ),
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
+                return_value=user_id,
+            ),
+        ):
+            out = await sites_create_mcp._create_svelte_site_handler(
+                {"source": source, "name": "Svelte Guestbook"}
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        assert body["ok"] is True
+        assert body["pocket"]["pattern"] == "dynamic"
+
+        doc = await _PocketDoc.get(ObjectId(body["pocket_id"]))
+        assert doc is not None
+        assert doc.engine == "svelte"
+        assert doc.pattern == "dynamic"
+        # The full envelope persisted — files + binding siblings.
+        assert doc.source == source
+        assert isinstance(doc.source["objects"], list)
+        assert doc.source["actions"][0]["op"] == "insert"
+
+    @pytest.mark.asyncio
+    async def test_static_svelte_still_stamps_pattern_landing(
+        self, beanie_test_db, recording_bus
+    ) -> None:
+        """A static svelte source (no bindings) keeps pattern=="landing" — DSV-5
+        does not regress the static path."""
+        from unittest.mock import patch
+
+        from bson import ObjectId
+        from pocketpaw_ee.agent.mcp_servers import sites_create as sites_create_mcp
+        from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+        with (
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
+                return_value=str(ObjectId()),
+            ),
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
+                return_value=str(ObjectId()),
+            ),
+        ):
+            out = await sites_create_mcp._create_svelte_site_handler(
+                {"source": _sample_source(), "name": "Static Svelte"}
+            )
+
+        assert not out.get("is_error"), out
+        body = json.loads(out["content"][0]["text"])
+        doc = await _PocketDoc.get(ObjectId(body["pocket_id"]))
+        assert doc is not None
+        assert doc.pattern == "landing"
+
+    @pytest.mark.asyncio
+    async def test_non_string_file_value_still_rejected(self) -> None:
+        """A non-string value under a key that is NOT a recognized binding key is
+        still rejected (only objects/sources/actions/auth are exempt from the
+        file-string check) — a typo'd component path with a list value fails."""
+        from unittest.mock import patch
+
+        from pocketpaw_ee.agent.mcp_servers import sites_create as sites_create_mcp
+
+        bad = _sample_source()
+        bad["src/lib/components/Bad.svelte"] = ["not", "a", "string"]
+        with (
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_workspace_id",
+                return_value="ws_1",
+            ),
+            patch(
+                "pocketpaw_ee.cloud.chat.agent_service.current_user_id",
+                return_value="u_1",
+            ),
+        ):
+            out = await sites_create_mcp._create_svelte_site_handler({"source": bad})
+
+        assert out.get("is_error") is True
+        assert "src/lib/components/Bad.svelte" in out["content"][0]["text"]
