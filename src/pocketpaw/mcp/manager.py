@@ -12,28 +12,122 @@ Created: 2026-02-07
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
+import secrets
+import time
 from collections.abc import Callable
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from pocketpaw.config import get_settings
 from pocketpaw.mcp.config import MCPServerConfig, load_mcp_config, save_mcp_config
 
 logger = logging.getLogger(__name__)
 
-# OAuth callback coordination: state -> Future[(code, state)]
-_oauth_pending: dict[str, asyncio.Future] = {}
+_OAUTH_STATE_TTL_SECONDS = 300
+
+
+@dataclass
+class _PendingOAuthFlow:
+    """Tracks one in-flight OAuth state and its callback Future."""
+
+    future: asyncio.Future
+    server_name: str
+    created_at: float
+    provider: str
+    user_id: str
+    upstream_state: str
+
+
+# OAuth callback coordination: state -> pending flow
+_oauth_pending: dict[str, _PendingOAuthFlow] = {}
 
 # WebSocket broadcast function injected by dashboard at startup
 _ws_broadcast: Callable | None = None
+
+_oauth_subject_id: ContextVar[str | None] = ContextVar("oauth_subject_id", default=None)
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(data: str) -> bytes:
+    return base64.urlsafe_b64decode(data + ("=" * (-len(data) % 4)))
+
+
+# def _state_signing_key() -> bytes:
+#     return (os.getenv("POCKETPAW_OAUTH_STATE_SECRET") or "dev-oauth-state-secret").encode()
+
+
+def _state_signing_key() -> bytes:
+    return get_settings().oauth_state_secret.encode()
+
+
+async def _cleanup_expired_oauth_flows() -> None:
+    now = time.time()
+    stale = [
+        k for k, v in _oauth_pending.items() if (now - v.created_at) > _OAUTH_STATE_TTL_SECONDS
+    ]
+    for k in stale:
+        _oauth_pending.pop(k, None)
+
+
+def _create_state_token(*, user_id: str, provider: str, upstream_state: str) -> tuple[str, str]:
+    issued = int(time.time())
+    state_id = secrets.token_urlsafe(16)
+    payload = {
+        "sid": state_id,
+        "uid": user_id,
+        "prv": provider,
+        "iat": issued,
+        "exp": issued + _OAUTH_STATE_TTL_SECONDS,
+        "n": secrets.token_urlsafe(32),
+        "ups": upstream_state,
+    }
+    payload_b64 = _b64url(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+    sig = _b64url(hmac.new(_state_signing_key(), payload_b64.encode(), hashlib.sha256).digest())
+    return f"{payload_b64}.{sig}", state_id
+
+
+def _verify_state_token(state_token: str) -> dict[str, Any] | None:
+    try:
+        payload_b64, sig_b64 = state_token.split(".", 1)
+        expected = hmac.new(_state_signing_key(), payload_b64.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, _b64url_decode(sig_b64)):
+            return None
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+        if int(time.time()) > int(payload["exp"]):
+            return None
+        return payload
+    except (ValueError, KeyError, UnicodeDecodeError):
+        return None
 
 
 def set_ws_broadcast(fn: Callable) -> None:
     """Set the WebSocket broadcast function (called by dashboard at startup)."""
     global _ws_broadcast
     _ws_broadcast = fn
+
+
+def set_oauth_subject_id(subject_id: str | None) -> Token[str | None]:
+    """Set current OAuth subject binding for the active request/task context.
+
+    Returns a context token that can be passed to :func:`reset_oauth_subject_id`.
+    """
+    return _oauth_subject_id.set(subject_id)
+
+
+def reset_oauth_subject_id(token: Token[str | None]) -> None:
+    """Reset OAuth subject binding using token from set_oauth_subject_id."""
+    _oauth_subject_id.reset(token)
 
 
 def set_oauth_callback_result(state: str, code: str) -> bool:
@@ -44,9 +138,30 @@ def set_oauth_callback_result(state: str, code: str) -> bool:
 
     Returns True if a pending Future was found and resolved.
     """
-    future = _oauth_pending.get(state)
-    if future and not future.done():
-        future.set_result((code, state))
+    payload = _verify_state_token(state)
+    if not payload:
+        logger.warning("Invalid OAuth state signature/format")
+        return False
+    state_id = payload.get("sid", "")
+    entry = _oauth_pending.get(state_id)
+    if not entry:
+        logger.warning("No pending OAuth flow for state=%s", state[:16])
+        return False
+
+    # Reject stale callbacks even if the state still exists in memory.
+    if (time.time() - entry.created_at) > _OAUTH_STATE_TTL_SECONDS:
+        _oauth_pending.pop(state_id, None)
+        logger.warning("Expired OAuth state for server=%s", entry.server_name)
+        return False
+
+    if not entry.future.done():
+        # Strict binding checks before resolving callback.
+        if payload.get("uid") != entry.user_id or payload.get("prv") != entry.provider:
+            _oauth_pending.pop(state_id, None)
+            logger.warning("OAuth state binding mismatch for server=%s", entry.server_name)
+            return False
+        entry.future.set_result((code, entry.upstream_state))
+        _oauth_pending.pop(state_id, None)
         return True
     logger.warning("No pending OAuth flow for state=%s", state[:16])
     return False
@@ -232,16 +347,33 @@ class MCPManager:
 
         async def redirect_handler(auth_url: str) -> None:
             """Called by SDK with the authorization URL — broadcast to frontend."""
+            await _cleanup_expired_oauth_flows()
             parsed = urlparse(auth_url)
             params = parse_qs(parsed.query)
             state_values = params.get("state", [])
-            state = state_values[0] if state_values else ""
+            upstream_state = state_values[0] if state_values else ""
 
-            if state:
+            if upstream_state:
                 loop = asyncio.get_running_loop()
                 future = loop.create_future()
-                _oauth_pending[state] = future
-                _flow_state["state"] = state
+                # user_id = "local_user"
+                user_id = _oauth_subject_id.get()
+                signed_state, state_id = _create_state_token(
+                    user_id=user_id,
+                    provider=config.name,
+                    upstream_state=upstream_state,
+                )
+                _oauth_pending[state_id] = _PendingOAuthFlow(
+                    future=future,
+                    server_name=config.name,
+                    created_at=time.time(),
+                    provider=config.name,
+                    user_id=user_id,
+                    upstream_state=upstream_state,
+                )
+                _flow_state["state"] = state_id
+                params["state"] = [signed_state]
+                auth_url = urlunparse(parsed._replace(query=urlencode(params, doseq=True)))
 
             if _ws_broadcast:
                 await _ws_broadcast(
@@ -258,10 +390,16 @@ class MCPManager:
             state = _flow_state.get("state")
             if not state or state not in _oauth_pending:
                 raise RuntimeError(f"No pending OAuth flow for server '{config.name}'")
-
-            future = _oauth_pending[state]
+            # Ensure the returning OAuth state matches the server configuration that initiated it.
+            # This prevents cross-server state reuse.
+            pending = _oauth_pending[state]
+            if pending.server_name != config.name:
+                _oauth_pending.pop(state, None)
+                raise RuntimeError(f"OAuth state/server mismatch for server '{config.name}'")
             try:
-                code, returned_state = await asyncio.wait_for(future, timeout=300)
+                code, returned_state = await asyncio.wait_for(
+                    pending.future, timeout=_OAUTH_STATE_TTL_SECONDS
+                )
                 return (code, returned_state)
             finally:
                 _oauth_pending.pop(state, None)

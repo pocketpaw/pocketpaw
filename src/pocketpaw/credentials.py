@@ -60,6 +60,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "litellm_api_key",
         "claude_code_oauth_token",
         "status_api_key",
+        "oauth_state_secret",
     }
 )
 

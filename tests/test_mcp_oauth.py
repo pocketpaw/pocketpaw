@@ -5,6 +5,8 @@ Created: 2026-02-17
 """
 
 import asyncio
+import hashlib
+import hmac
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +22,7 @@ from pocketpaw.mcp.presets import get_all_presets, get_preset, preset_to_config
 # ======================================================================
 
 
+@pytest.mark.asyncio
 class TestMCPTokenStorage:
     @pytest.fixture
     def storage(self, tmp_path):
@@ -49,6 +52,7 @@ class TestMCPTokenStorage:
         assert result is None
 
 
+@pytest.mark.asyncio
 class TestOAuthCompatProvider:
     @pytest.fixture
     def storage(self, tmp_path):
@@ -240,19 +244,35 @@ class TestOAuthCallbackCoordination:
         manager._oauth_pending.clear()
 
     def test_set_oauth_callback_result_resolves_future(self):
-        from pocketpaw.mcp.manager import set_oauth_callback_result
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
 
         loop = asyncio.new_event_loop()
         future = loop.create_future()
 
         from pocketpaw.mcp import manager
 
-        manager._oauth_pending["test_state_123"] = future
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_1"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="test_user",
+            upstream_state="upstream_state_1",
+        )
 
-        result = set_oauth_callback_result("test_state_123", "auth_code_456")
+        result = set_oauth_callback_result(state_token, "auth_code_456")
         assert result is True
         assert future.done()
-        assert future.result() == ("auth_code_456", "test_state_123")
+        assert future.result() == ("auth_code_456", "upstream_state_1")
         loop.close()
 
     def test_set_oauth_callback_result_unknown_state(self):
@@ -262,7 +282,13 @@ class TestOAuthCallbackCoordination:
         assert result is False
 
     def test_set_oauth_callback_result_already_resolved(self):
-        from pocketpaw.mcp.manager import set_oauth_callback_result
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
 
         loop = asyncio.new_event_loop()
         future = loop.create_future()
@@ -270,23 +296,226 @@ class TestOAuthCallbackCoordination:
 
         from pocketpaw.mcp import manager
 
-        manager._oauth_pending["done_state"] = future
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_2"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="test_user",
+            upstream_state="upstream_state_2",
+        )
 
-        result = set_oauth_callback_result("done_state", "new_code")
+        result = set_oauth_callback_result(state_token, "new_code")
         assert result is False
         loop.close()
 
-    def test_set_ws_broadcast(self):
-        from pocketpaw.mcp import manager
-        from pocketpaw.mcp.manager import set_ws_broadcast
+    def test_set_oauth_callback_result_rejects_expired_state_token(self, monkeypatch):
+        import time
 
-        old = manager._ws_broadcast
-        try:
-            fn = MagicMock()
-            set_ws_broadcast(fn)
-            assert manager._ws_broadcast is fn
-        finally:
-            manager._ws_broadcast = old
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
+
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+
+        from pocketpaw.mcp import manager
+
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_expired"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="test_user",
+            upstream_state="upstream_state_expired",
+        )
+
+        real_time = time.time
+        monkeypatch.setattr("pocketpaw.mcp.manager.time.time", lambda: real_time() + 3600)
+        assert set_oauth_callback_result(state_token, "code") is False
+        assert not future.done()
+        loop.close()
+
+    def test_set_oauth_callback_result_rejects_tampered_signature(self):
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
+
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        from pocketpaw.mcp import manager
+
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="test_server", upstream_state="upstream_state_sig"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="test_user",
+            upstream_state="upstream_state_sig",
+        )
+        payload_b64, sig_b64 = state_token.split(".", 1)
+        tampered_sig = ("A" if sig_b64[0] != "A" else "B") + sig_b64[1:]
+        tampered = f"{payload_b64}.{tampered_sig}"
+        assert set_oauth_callback_result(tampered, "code") is False
+        assert not future.done()
+        loop.close()
+
+    def test_set_oauth_callback_result_rejects_uid_binding_mismatch(self):
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
+
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        from pocketpaw.mcp import manager
+
+        state_token, state_id = _create_state_token(
+            user_id="token_user", provider="test_server", upstream_state="upstream_uid"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="different_pending_user",
+            upstream_state="upstream_uid",
+        )
+        assert set_oauth_callback_result(state_token, "code") is False
+        assert state_id not in manager._oauth_pending
+        assert not future.done()
+        loop.close()
+
+    def test_set_oauth_callback_result_rejects_provider_binding_mismatch(self):
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
+
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        from pocketpaw.mcp import manager
+
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="token_provider", upstream_state="upstream_prv"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="pending_provider",
+            user_id="test_user",
+            upstream_state="upstream_prv",
+        )
+        assert set_oauth_callback_result(state_token, "code") is False
+        assert state_id not in manager._oauth_pending
+        assert not future.done()
+        loop.close()
+
+    def test_set_oauth_callback_result_rejects_stale_pending_flow(self):
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _OAUTH_STATE_TTL_SECONDS,
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
+
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        from pocketpaw.mcp import manager
+
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="test_server", upstream_state="upstream_stale"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time() - (_OAUTH_STATE_TTL_SECONDS + 1),
+            provider="test_server",
+            user_id="test_user",
+            upstream_state="upstream_stale",
+        )
+        assert set_oauth_callback_result(state_token, "code") is False
+        assert state_id not in manager._oauth_pending
+        assert not future.done()
+        loop.close()
+
+    def test_set_oauth_callback_result_replay_second_call_fails(self):
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
+
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        from pocketpaw.mcp import manager
+
+        state_token, state_id = _create_state_token(
+            user_id="test_user", provider="test_server", upstream_state="upstream_replay"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="test_user",
+            upstream_state="upstream_replay",
+        )
+        assert set_oauth_callback_result(state_token, "first_code") is True
+        assert set_oauth_callback_result(state_token, "second_code") is False
+        loop.close()
+
+    def test_set_oauth_callback_result_rejects_malformed_token(self):
+        from pocketpaw.mcp.manager import set_oauth_callback_result
+
+        assert set_oauth_callback_result("missing_separator_token", "code") is False
+
+    def test_verify_state_token_rejects_non_json_payload(self):
+        from pocketpaw.mcp.manager import _b64url, _state_signing_key, _verify_state_token
+
+        payload_b64 = _b64url(b"not-json")
+        sig = _b64url(hmac.new(_state_signing_key(), payload_b64.encode(), hashlib.sha256).digest())
+        state_token = f"{payload_b64}.{sig}"
+        assert _verify_state_token(state_token) is None
+
+
+def test_set_ws_broadcast():
+    from pocketpaw.mcp import manager
+    from pocketpaw.mcp.manager import set_ws_broadcast
+
+    old = manager._ws_broadcast
+    try:
+        fn = MagicMock()
+        set_ws_broadcast(fn)
+        assert manager._ws_broadcast is fn
+    finally:
+        manager._ws_broadcast = old
 
 
 # ======================================================================

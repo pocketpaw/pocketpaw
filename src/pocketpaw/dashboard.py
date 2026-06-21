@@ -428,7 +428,7 @@ async def install_mcp_preset(request: Request):
     """Install an MCP preset by ID with user-supplied env vars."""
     from fastapi.responses import JSONResponse
 
-    from pocketpaw.mcp.manager import get_mcp_manager
+    from pocketpaw.mcp.manager import get_mcp_manager, reset_oauth_subject_id, set_oauth_subject_id
     from pocketpaw.mcp.presets import get_preset, preset_to_config
 
     data = await request.json()
@@ -451,7 +451,14 @@ async def install_mcp_preset(request: Request):
     config = preset_to_config(preset, env=env, extra_args=extra_args)
     mgr = get_mcp_manager()
     mgr.add_server_config(config)
-    connected = await mgr.start_server(config)
+    subject_id = request.cookies.get("pocketpaw_session") or request.headers.get(
+        "authorization", ""
+    )
+    token = set_oauth_subject_id(subject_id or None)
+    try:
+        connected = await mgr.start_server(config)
+    finally:
+        reset_oauth_subject_id(token)
     tools = mgr.discover_tools(config.name) if connected else []
 
     return {
