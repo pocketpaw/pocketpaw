@@ -138,3 +138,51 @@ async def test_worker_settings_exposes_execute_run_job():
     assert worker.WorkerSettings.max_tries == 1
     assert worker.WorkerSettings.on_startup is worker._startup
     assert worker.WorkerSettings.on_shutdown is worker._shutdown
+
+
+async def test_startup_registers_builtin_jobs(mongo_db, monkeypatch):  # noqa: ARG001
+    """PRODUCTION FIX — the worker boots in its OWN process, so the registry
+    ``mount_cloud`` populates for the web process is empty here. ``_startup``
+    must call ``register_builtins()`` or ``execute_workspace_job`` →
+    ``resolve_job(name)`` raises ``UnknownJobError`` for EVERY job in a real
+    deploy. Clear the registry, run ``_startup``, and assert the built-ins are
+    registered.
+    """
+    from pocketpaw_ee.cloud.jobs.registry import (
+        UnknownJobError,
+        get_job_registry,
+        resolve_job,
+    )
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    # Sweep off — we are only exercising the registration step on boot.
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    # Start from an empty registry so the assertion can ONLY pass if `_startup`
+    # registered the built-ins itself (not because the web mount happened to run
+    # earlier in the test session). Restore afterwards so the module-level dict
+    # doesn't leak state to sibling tests.
+    registry = get_job_registry()
+    saved = dict(registry)
+    registry.clear()
+    try:
+        # Pre-condition: with an empty registry the resolve raises.
+        with pytest.raises(UnknownJobError):
+            resolve_job("score_applications")
+
+        await worker._startup({})
+
+        # Post-condition: the built-in is now resolvable.
+        assert "score_applications" in registry
+        job = resolve_job("score_applications")
+        assert job.name == "score_applications"
+    finally:
+        registry.clear()
+        registry.update(saved)
