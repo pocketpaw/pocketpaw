@@ -1,5 +1,12 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-06-22 (feat/jobs-custom-job-entrypoints) — ``_startup`` now also
+calls ``load_entrypoint_jobs()`` right after ``register_builtins()`` so the
+worker registers WORKSPACE-CUSTOM jobs (declared under the ``pocketpaw.jobs``
+entry-point group) in its own process. Without this a custom job would resolve
+in the web process but raise ``UnknownJobError`` in the worker that runs it.
+No-op when no custom-job package is installed.
+
 Updated: 2026-06-22 (feat/jobs-worker-register-and-connector-read) — PRODUCTION
 FIX: ``_startup`` now calls ``register_builtins()`` AFTER ``init_realtime()`` so
 the worker process populates the process-wide job registry on boot. The registry
@@ -93,6 +100,16 @@ async def _startup(ctx: dict[str, Any]) -> None:
     from pocketpaw_ee.cloud.jobs.builtin import register_builtins
 
     register_builtins()
+    # Discover + register WORKSPACE-CUSTOM jobs from installed packages' entry
+    # points (group ``pocketpaw.jobs``). The worker runs in its OWN process, so
+    # like the built-ins these must be registered here too — otherwise a custom
+    # job dispatched by the web app would ``resolve_job`` fine there but raise
+    # ``UnknownJobError`` in the worker that actually runs it. Called AFTER
+    # ``register_builtins()`` (same ordering as ``mount_cloud``). No-op when no
+    # custom-job package is installed.
+    from pocketpaw_ee.cloud.jobs.plugins import load_entrypoint_jobs
+
+    load_entrypoint_jobs()
     if not _boot_sweep_enabled():
         logger.info("worker boot: stale-run sweep disabled (%s)", _BOOT_SWEEP_ENV)
         return

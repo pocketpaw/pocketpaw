@@ -385,12 +385,14 @@ type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
     # Only ``jobs.service`` owns the WorkspaceJobDoc Beanie write. The router,
-    # dto, domain, registry, the ARQ worker entrypoint, and the built-in jobs
-    # all go through the service — none may import the Beanie doc directly.
+    # dto, domain, registry, the entry-point plugin loader, the ARQ worker
+    # entrypoint, and the built-in jobs all go through the service — none may
+    # import the Beanie doc directly.
     "pocketpaw_ee.cloud.jobs.router",
     "pocketpaw_ee.cloud.jobs.dto",
     "pocketpaw_ee.cloud.jobs.domain",
     "pocketpaw_ee.cloud.jobs.registry",
+    "pocketpaw_ee.cloud.jobs.plugins",
     "pocketpaw_ee.cloud.jobs.worker",
     "pocketpaw_ee.cloud.jobs.builtin.score_applications",
 ]
