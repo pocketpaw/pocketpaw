@@ -95,13 +95,17 @@ _BRIDGE_REGISTERED = False
 # Map free-form writer categories (``pocket_backend_config``,
 # ``pocket_embed``, ``skills_config``, ``pocket_router``, …) to the strict
 # ``AuditEntry.category`` literal set
-# (``decision`` / ``data`` / ``config`` / ``security``). The original value
-# is preserved in ``metadata.source_category`` so nothing is lost.
+# (``decision`` / ``data`` / ``config`` / ``security`` / ``tool``). The
+# original value is preserved in ``metadata.source_category`` so nothing
+# is lost.
 _CATEGORY_MAP: dict[str, str] = {
     "pocket_backend_config": "config",
     "pocket_embed": "config",
     "skills_config": "config",
     "pocket_router": "decision",
+    "pocket_tool_run": "tool",
+    "pocket_action_run": "tool",
+    "pocket_source_run": "tool",
 }
 
 # Writer ``status`` values from ``AuditEvent`` are free-form
@@ -130,7 +134,7 @@ def _coerce_category(raw: Any) -> str:
     """
     if isinstance(raw, str) and raw in _CATEGORY_MAP:
         return _CATEGORY_MAP[raw]
-    if isinstance(raw, str) and raw in ("decision", "data", "config", "security"):
+    if isinstance(raw, str) and raw in ("decision", "data", "config", "security", "tool"):
         return raw
     return "config"
 
@@ -182,6 +186,14 @@ def _mirror_to_store(event_dict: dict) -> None:
         workspace_id = ctx.get("workspace_id")
 
         source_category = ctx.pop("category", None)
+        # Use action-based category when no explicit writer category is set.
+        # This catches tool_use/tool_error events from the agent loop's tool
+        # registry (which calls audit.log_tool_use() without a category).
+        if source_category is None and action in (
+            "tool_use",
+            "tool_error",
+        ):
+            source_category = "pocket_tool_run"
         category = _coerce_category(source_category)
         status = _coerce_status(event_dict.get("status"))
 

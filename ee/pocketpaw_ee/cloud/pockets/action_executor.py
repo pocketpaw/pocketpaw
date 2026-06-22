@@ -569,7 +569,7 @@ def _audit_action_run(
     """Write an audit-log entry for a write-action run.
 
     Mirrors ``source_executor._audit_source_run`` — category
-    ``pocket_backend_config``, severity WARNING. The token is NEVER passed;
+    ``pocket_action_run``, severity WARNING. The token is NEVER passed;
     ``base_url`` is query-stripped before it is logged. ``workspace_id`` is
     logged so write-action entries are tenant-filterable, the same way the
     backend-config audit entries already are. A rejected write (allowlist
@@ -598,13 +598,37 @@ def _audit_action_run(
                 action="pocket.actions.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_action_run",
                 workspace_id=workspace_id,
                 **fields,
             )
         )
     except Exception:  # noqa: BLE001 — audit must never break the run
         logger.warning("pocket action-run audit-log write failed", exc_info=True)
+
+    # Also record to the workspace audit (MongoDB) so action executions
+    # appear in the rich-activity feed.
+    try:
+        import asyncio
+
+        from pocketpaw_ee.cloud.audit import service as _audit_service
+
+        asyncio.ensure_future(
+            _audit_service.record(
+                workspace_id=workspace_id,
+                actor_id=actor,
+                action="workspace.agent.action_executed",
+                target_type="pocket",
+                target_id=pocket_id,
+                metadata={
+                    "pocket_action": action,
+                    "status": status,
+                    "source": "pocket_page",
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the run
+        logger.warning("pocket action-run workspace-audit record failed", exc_info=True)
 
 
 def _error(action: str, message: str, code: str, on_error: list[dict]) -> dict:
