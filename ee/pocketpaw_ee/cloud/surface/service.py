@@ -135,6 +135,13 @@ _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_prop
 # import could cycle with the agent layer, and ``resolve_profile`` is on the hot
 # path. A failed import degrades to no MCP restriction so tool-scoping can never
 # break chat.
+# Changes: 2026-06-22 (feat/surface-registry-backend, SR-1) — ``_load_handlers``
+# now builds its ``SurfaceKind -> build_preamble`` dispatch table by LOOPING over
+# the declarative ``SURFACES`` registry (``surface.surface_registry``) instead of a
+# hand-written literal dict. Behavior is unchanged: same kinds, same handlers, same
+# lazy-import-on-first-call + memoization, same GENERIC fall-back. Profiles are NOT
+# touched here — ``_build_profiles`` / ``resolve_profile`` / ``compose_entity_profile``
+# remain the profile source of truth until SR-2 migrates them onto the registry rows.
 _PROFILE_CACHE: dict[str, Any] | None = None
 
 
@@ -343,70 +350,26 @@ _HANDLERS: dict[SurfaceKind, Any] | None = None
 
 
 def _load_handlers() -> dict[SurfaceKind, Any]:
-    """Lazy import every per-kind handler. Missing handlers are skipped.
+    """Build the ``SurfaceKind -> build_preamble`` dispatch table.
 
-    We tolerate missing handler modules instead of raising at import time
-    because the surface module ships independently of the surfaces it
-    knows about — a fresh deploy that drops a handler module shouldn't
-    take the whole chat path down.
+    The table is derived by LOOPING over the declarative ``SURFACES``
+    registry (SR-1) rather than a hand-maintained literal dict — one
+    ``SurfaceSpec`` row per surface is the single source of truth, so adding
+    a surface means adding a row, not editing two parallel structures.
+
+    ``SURFACES`` is imported lazily here (not at module top) so a broken
+    handler-module import still can't take the whole chat path down at
+    import time. We tolerate missing handler modules instead of raising
+    because the surface module ships independently of the surfaces it knows
+    about — a fresh deploy that drops a handler module shouldn't break
+    dispatch. A fresh mutable dict is returned on every call (tests
+    monkeypatch entries on the returned dict), and any ``SurfaceKind``
+    without a row still degrades to the ``GENERIC`` fall-back in
+    ``resolve_surface_context``.
     """
-    from pocketpaw_ee.cloud.surface.handlers import (
-        activity,
-        audit,
-        belt,
-        calendar,
-        code,
-        files,
-        generic,
-        home,
-        knowledge,
-        mission_control,
-        pocket,
-        pocket_widget,
-        pockets_list,
-        quickask,
-        settings,
-        sidepanel,
-        sites,
-        studio,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        agent as agent_handler,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        agents as agents_handler,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        chat as chat_handler,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        foresight as foresight_handler,
-    )
+    from pocketpaw_ee.cloud.surface.surface_registry import SURFACES
 
-    return {
-        SurfaceKind.HOME: home.build_preamble,
-        SurfaceKind.POCKETS_LIST: pockets_list.build_preamble,
-        SurfaceKind.POCKET: pocket.build_preamble,
-        SurfaceKind.POCKET_WIDGET: pocket_widget.build_preamble,
-        SurfaceKind.MISSION_CONTROL: mission_control.build_preamble,
-        SurfaceKind.FILES: files.build_preamble,
-        SurfaceKind.AUDIT: audit.build_preamble,
-        SurfaceKind.ACTIVITY: activity.build_preamble,
-        SurfaceKind.AGENTS: agents_handler.build_preamble,
-        SurfaceKind.AGENT: agent_handler.build_preamble,
-        SurfaceKind.KNOWLEDGE: knowledge.build_preamble,
-        SurfaceKind.CALENDAR: calendar.build_preamble,
-        SurfaceKind.CHAT: chat_handler.build_preamble,
-        SurfaceKind.QUICKASK: quickask.build_preamble,
-        SurfaceKind.SETTINGS: settings.build_preamble,
-        SurfaceKind.SIDEPANEL: sidepanel.build_preamble,
-        SurfaceKind.FORESIGHT: foresight_handler.build_preamble,
-        SurfaceKind.SITES: sites.build_preamble,
-        SurfaceKind.STUDIO: studio.build_preamble,
-        SurfaceKind.CODE: code.build_preamble,
-        SurfaceKind.BELT: belt.build_preamble,
-        SurfaceKind.GENERIC: generic.build_preamble,
-    }
+    return {spec.kind: spec.build_preamble for spec in SURFACES}
 
 
 def _resolve_kind(value: str | None) -> SurfaceKind:
