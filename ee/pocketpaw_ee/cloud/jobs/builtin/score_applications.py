@@ -139,9 +139,7 @@ def _heuristic_score(row: dict[str, Any]) -> int:
         score += 15  # referral / social signal
 
     # Sparsity penalty — a record with almost nothing in it is low-signal.
-    populated = sum(
-        1 for v in row.values() if v is not None and str(v).strip() != ""
-    )
+    populated = sum(1 for v in row.values() if v is not None and str(v).strip() != "")
     if populated <= 1:
         score -= 20
     elif populated == 2:
