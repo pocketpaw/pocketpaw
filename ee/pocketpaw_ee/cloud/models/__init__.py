@@ -100,6 +100,7 @@ from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
+from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
@@ -233,6 +234,7 @@ __all__ = [
     "Project",
     "Reaction",
     "ReadState",
+    "RequestLog",
     "Session",
     "Site",
     "SiteDomain",
@@ -280,6 +282,7 @@ def get_all_documents():
         InstinctApproval,
         Message,
         ReadState,
+        RequestLog,
         Task,
         TaskAttachment,
         TemporalSweepStateDoc,
