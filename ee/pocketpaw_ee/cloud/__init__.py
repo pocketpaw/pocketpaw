@@ -203,6 +203,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.request_log.router import router as request_log_router
+    from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
@@ -231,6 +232,7 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
     app.include_router(request_log_router, prefix="/api/v1")
+    app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")

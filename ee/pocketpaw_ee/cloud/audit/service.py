@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import datetime
 from typing import Any
 
@@ -220,25 +219,7 @@ async def list_events(workspace_id: str, query: AuditQueryRequest | dict) -> Aud
     # one. ``$and`` of leaf clauses composes safely.
     clauses: list[dict[str, Any]] = [{"workspace": workspace_id}]
     if body.action:
-        # Support glob-like patterns: "deep_work.*" matches all actions
-        # starting with "deep_work.", and comma-separated values are treated
-        # as an $in list. Non-glob single values match literally.
-        action_values = [a.strip() for a in body.action.split(",") if a.strip()]
-        if len(action_values) == 1 and action_values[0].endswith(".*"):
-            prefix = re.escape(action_values[0][:-2])
-            clauses.append({"action": {"$regex": f"^{prefix}"}})
-        elif len(action_values) > 1 or (len(action_values) == 1 and "*" in action_values[0]):
-            # Mixed glob + literal values — build $or per value
-            or_clauses: list[dict[str, Any]] = []
-            for av in action_values:
-                if av.endswith(".*"):
-                    prefix = re.escape(av[:-2])
-                    or_clauses.append({"action": {"$regex": f"^{prefix}"}})
-                else:
-                    or_clauses.append({"action": av})
-            clauses.append({"$or": or_clauses} if len(or_clauses) > 1 else or_clauses[0])
-        else:
-            clauses.append({"action": action_values[0]})
+        clauses.append({"action": body.action})
     if body.actor:
         clauses.append({"actor_id": body.actor})
 

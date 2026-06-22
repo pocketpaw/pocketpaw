@@ -100,10 +100,10 @@ def _record_deep_work_audit(
     """
     import asyncio
 
-    from pocketpaw_ee.cloud.audit import service as _audit_service
+    from pocketpaw_ee.cloud.deep_work_log import service as _dw_log_service
 
     asyncio.ensure_future(
-        _audit_service.record(
+        _dw_log_service.record(
             workspace_id=workspace_id,
             actor_id=actor_id,
             action=action,
