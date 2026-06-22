@@ -202,13 +202,12 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.agents.router import router as agents_router
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
-    from pocketpaw_ee.cloud.request_log.router import router as request_log_router
-    from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
@@ -220,6 +219,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
+    from pocketpaw_ee.cloud.request_log.router import router as request_log_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router

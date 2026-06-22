@@ -13,8 +13,12 @@ from typing import Any
 from beanie import PydanticObjectId
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
-from pocketpaw_ee.cloud.request_log.dto import RequestLogOut, RequestLogPageResponse, RequestLogQuery
 from pocketpaw_ee.cloud.models.request_log import RequestLog as _RequestLogDoc
+from pocketpaw_ee.cloud.request_log.dto import (
+    RequestLogOut,
+    RequestLogPageResponse,
+    RequestLogQuery,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +60,10 @@ def _parse_iso(value: str, field_name: str) -> datetime:
     try:
         return datetime.fromisoformat(value)
     except ValueError as exc:
-        raise ValidationError("request_log.bad_timestamp", f"Invalid ISO-8601 in {field_name!r}") from exc
+        raise ValidationError(
+            "request_log.bad_timestamp",
+            f"Invalid ISO-8601 in {field_name!r}",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -150,11 +157,7 @@ async def list_events(
         )
 
     mongo_filter: dict[str, Any] = (
-        clauses[0]
-        if len(clauses) == 1
-        else {"$and": clauses}
-        if clauses
-        else {}
+        clauses[0] if len(clauses) == 1 else {"$and": clauses} if clauses else {}
     )
 
     docs = (

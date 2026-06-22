@@ -63,6 +63,7 @@ from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTar
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
+from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
     FabricIngestState,
@@ -100,7 +101,6 @@ from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
-from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
