@@ -87,184 +87,89 @@ logger = logging.getLogger(__name__)
 # Surface profile resolution (the "ripple-default bias" policy table)
 #
 # A SurfaceProfile is the per-surface behavioral policy the chat agent
-# applies. ``resolve_profile`` resolves it from the surface kind (+ meta) via
-# a static table, special-casing /sites. Keep this a PURE function (no I/O):
-# it runs once per request on the hot chat path and must not block on Mongo or
-# a handler.
+# applies. ``resolve_profile`` resolves it from the surface kind (+ meta) by
+# reading the ``SurfaceSpec`` for that kind off the declarative ``SURFACES``
+# registry (SR-2): ``spec.profile_resolver(meta)`` if the row carries one (the
+# meta-aware /sites row and the rows that need the lazily-loaded per-mode MCP
+# tool ids), else the static ``spec.profile``, else ``_DEFAULT_PROFILE``. Keep
+# this a PURE function (no I/O): it runs once per request on the hot chat path
+# and must not block on Mongo or a handler.
 #
-# Non-sites surfaces use the static table below; only ones whose policy DIFFERS
-# from the default appear there. /sites is META-AWARE (three modes — see
-# ``resolve_profile``). Everything else — and any unmapped/future kind — gets
+# Only rows whose policy DIFFERS from the default carry a ``profile`` /
+# ``profile_resolver``; everything else — and any unmapped/future kind — gets
 # ``_DEFAULT_PROFILE`` (ripple on, no denies, no skills), which is exactly
-# today's behavior. That is the zero-regression guarantee.
+# today's behavior. That is the zero-regression guarantee. The lazy + memoized
+# MCP-tool-id load and the per-row profile builders live in
+# ``surface_registry`` now (the single source of truth for surfaces).
 # ---------------------------------------------------------------------------
 
 # Ripple on, no surface-specific policy. The behavior every surface had
 # before this primitive existed. Also the profile for the /sites ripple-create
 # and refine modes (both author/edit a ripple landing spec, so they KEEP ripple
-# and deny nothing).
+# and deny nothing) — those are built by the registry's ``_sites_profile``.
+# Changes: 2026-06-22 (feat/surface-registry-backend, SR-1) — ``_load_handlers``
+# now builds its ``SurfaceKind -> build_preamble`` dispatch table by LOOPING over
+# the declarative ``SURFACES`` registry (``surface.surface_registry``) instead of a
+# hand-written literal dict.
+# Changes: 2026-06-22 (feat/surface-registry-backend-profiles, SR-2) —
+# ``resolve_profile`` now SOURCES profiles from the same ``SURFACES`` registry
+# instead of a local ``_build_profiles`` table: it indexes the row for the kind
+# and applies ``profile_resolver(meta)`` / ``profile`` / ``_DEFAULT_PROFILE`` in
+# that order. Behavior is byte-identical for every ``(kind, meta)`` (the /sites
+# meta-fork and the lazy + memoized MCP-tool-id load moved verbatim into
+# ``surface_registry``). ``compose_entity_profile`` is unchanged.
 _DEFAULT_PROFILE = SurfaceProfile(ripple_mode="on")
 
-# The two ripple-authoring MCP tool ids the /sites SVELTE-CREATE mode forbids.
-# Spelled out here (the EE layer is the source of truth); they cross to the OSS
-# backend as a plain ``frozenset[str]`` via ``deny_mcp_tool_ids`` — never as an
-# imported ``pocketpaw_ee`` symbol (import-linter forbids EE→OSS imports).
-_SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
-    {
-        "mcp__pocketpaw_sites_manager__create_landing_site",
-        "mcp__pocketpaw_pocket_specialist__create",
-    }
-)
-
-# The Instinct gate tool the /belt develop station proposes its diff through.
-# Spelled as a LITERAL because its canonical constant
-# (``BELT_PROPOSE_CHANGE_TOOL_ID`` / ``BELT_TOOL_IDS``) lives in a SIBLING
-# branch's ``ee/pocketpaw_ee/agent/mcp_servers/belt.py`` — not importable on this
-# base. When both PRs land, swap this literal for the imported constant (same
-# None-degrade path as the loom/media imports below). Do NOT drift the id.
-_BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
-
-# Per-mode MCP-tool allow-lists keep a mode's agent context lean: only the
-# mode's SPECIALIZED tools are named here. The "general everywhere" set — ripple
-# widgets, the pocket lifecycle (read/create/edit/plan), and connectors
-# (composio) — is kept by the OSS backend itself, so a scoped mode still renders
-# UI, makes pockets, and uses connectors. Chat (and any unmapped kind) stays
-# unrestricted (``allow_mcp_tool_ids=None``).
-#
-# Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
-# import could cycle with the agent layer, and ``resolve_profile`` is on the hot
-# path. A failed import degrades to no MCP restriction so tool-scoping can never
-# break chat.
-_PROFILE_CACHE: dict[str, Any] | None = None
+# Cached ``SurfaceKind -> SurfaceSpec`` index, built once on first
+# ``resolve_profile`` from the lazily-imported registry (the same deferral
+# ``_load_handlers`` uses so a broken handler import can't break import time).
+_SPEC_BY_KIND: dict[SurfaceKind, Any] | None = None
 
 
-def _build_profiles() -> dict[str, Any]:
-    loaded = True
-    foresight_allow: frozenset[str] | None
-    sites_allow: frozenset[str] | None
-    studio_allow: frozenset[str] | None
-    belt_allow: frozenset[str] | None
-    try:
-        from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
-        from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
-        from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
-        from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
+def _spec_by_kind() -> dict[SurfaceKind, Any]:
+    global _SPEC_BY_KIND
+    if _SPEC_BY_KIND is None:
+        from pocketpaw_ee.cloud.surface.surface_registry import SURFACES
 
-        foresight_allow = frozenset(FORESIGHT_TOOL_IDS)
-        sites_allow = frozenset(SITES_TOOL_IDS)
-        # /studio scopes to the media-generation tools (image + video). Crossed
-        # over from the EE mcp-server module as a plain frozenset[str] — never an
-        # imported pocketpaw_ee symbol leaks into the OSS surface service.
-        studio_allow = frozenset(MEDIA_TOOL_IDS)
-        # /belt (the develop station) scopes to the loom orientation tools (so
-        # the agent grounds itself before coding) UNION the Instinct gate tool
-        # (so it proposes the diff through the gate). LOOM_TOOL_IDS is importable
-        # on this base; the gate tool id is the literal _BELT_GATE_TOOL_IDS until
-        # its sibling-branch constant lands.
-        belt_allow = frozenset(LOOM_TOOL_IDS) | _BELT_GATE_TOOL_IDS
-    except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
-        logger.warning(
-            "surface: could not load mcp tool ids; per-mode MCP scoping disabled",
-            exc_info=True,
-        )
-        loaded = False
-        foresight_allow = None
-        sites_allow = None
-        studio_allow = None
-        belt_allow = None
-
-    return {
-        "by_kind": {
-            # Foresight: its scenario tools + the general-everywhere set.
-            SurfaceKind.FORESIGHT: SurfaceProfile(
-                ripple_mode="on", allow_mcp_tool_ids=foresight_allow
-            ),
-            # Files names no specialized MCP tools — document scaffolding rides
-            # the built-in Read/Write/Edit tools (never filtered). Empty allow =
-            # general-everywhere only; None when the import degraded.
-            SurfaceKind.FILES: SurfaceProfile(
-                ripple_mode="on",
-                allow_mcp_tool_ids=frozenset() if loaded else None,
-            ),
-            # Studio: media generation (image + video). Ripple OFF so the agent
-            # generates media instead of defaulting to a ripple ui-spec dashboard;
-            # scoped to the media MCP tools (+ general-everywhere); the `studio`
-            # skill carries the generate→gallery flow.
-            SurfaceKind.STUDIO: SurfaceProfile(
-                ripple_mode="off",
-                allow_mcp_tool_ids=studio_allow,
-                skill_names=frozenset({"studio"}),
-            ),
-            # Code: edit + run code. Ripple OFF so the agent edits code instead of
-            # building a dashboard; the SDK-tool allowlist scopes it to the coding
-            # built-ins; the `code` skill carries the edit→run→verify loop.
-            SurfaceKind.CODE: SurfaceProfile(
-                ripple_mode="off",
-                skill_names=frozenset({"code"}),
-                allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
-            ),
-            # Belt: the develop station (orient→develop→propose via gate). Ripple
-            # OFF so the agent runs the station loop instead of building a
-            # dashboard. SDK-tool allowlist scopes it to the coding built-ins; the
-            # `belt` skill carries the station playbook; the MCP allow-list is the
-            # loom orientation tools (ground first) UNION the Instinct gate tool
-            # (propose the diff). belt_allow is None when the import degraded.
-            SurfaceKind.BELT: SurfaceProfile(
-                ripple_mode="off",
-                skill_names=frozenset({"belt"}),
-                allowed_sdk_tools=frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"}),
-                allow_mcp_tool_ids=belt_allow,
-            ),
-        },
-        # /sites is meta-aware (below). Both modes scope to the sites authoring
-        # tools + general. svelte-create additionally denies the two ripple-create
-        # tools (deny runs AFTER allow) and drops ripple + surfaces the svelte skill.
-        "sites_default": SurfaceProfile(ripple_mode="on", allow_mcp_tool_ids=sites_allow),
-        "sites_svelte_create": SurfaceProfile(
-            ripple_mode="off",
-            deny_mcp_tool_ids=_SITES_SVELTE_CREATE_DENY,
-            allow_mcp_tool_ids=sites_allow,
-            skill_names=frozenset({"create-svelte-site"}),
-        ),
-    }
-
-
-def _profiles() -> dict[str, Any]:
-    global _PROFILE_CACHE
-    if _PROFILE_CACHE is None:
-        _PROFILE_CACHE = _build_profiles()
-    return _PROFILE_CACHE
+        _SPEC_BY_KIND = {spec.kind: spec for spec in SURFACES}
+    return _SPEC_BY_KIND
 
 
 def resolve_profile(surface_kind: SurfaceKind, meta: SurfaceMeta) -> SurfaceProfile:
     """Resolve a ``SurfaceKind`` (+ ``meta``) to its behavioral ``SurfaceProfile``.
 
     Pure lookup — no I/O, safe to call once per request on the hot chat path.
+    Sourced from the declarative ``SURFACES`` registry (SR-2): the row for the
+    kind supplies the profile via ``profile_resolver(meta)`` (meta-aware rows
+    and rows that need the lazily-loaded per-mode MCP tool ids), else its static
+    ``profile``, else ``_DEFAULT_PROFILE``.
 
-    /sites is META-AWARE — it carries three modes, and only the svelte-CREATE
-    one loses ripple:
+    /sites is META-AWARE — its row carries a ``profile_resolver`` that branches
+    on ``meta`` across three modes, and only the svelte-CREATE one loses ripple:
 
       * refine (``meta.pocket_id`` set, ANY engine) edits the existing ripple
-        landing spec → KEEP ripple (``_DEFAULT_PROFILE``). Refine WINS over
-        engine: a ``pocket_id`` present means refine even if ``engine="svelte"``.
+        landing spec → KEEP ripple. Refine WINS over engine: a ``pocket_id``
+        present means refine even if ``engine="svelte"``.
       * create + svelte (``meta.engine == "svelte"``, no ``pocket_id``)
         hand-authors SvelteKit → DROP ripple, deny the two ripple-create tools,
-        surface the create-svelte-site skill (``_SITES_SVELTE_CREATE_PROFILE``).
+        surface the create-svelte-site skill.
       * create + ripple (``engine`` None/"ripple", no ``pocket_id``) authors a
-        ripple landing page → KEEP ripple (``_DEFAULT_PROFILE``).
+        ripple landing page → KEEP ripple.
 
-    Every other kind (and any unmapped/future kind, and every kind whose policy
-    matches the default) returns ``_DEFAULT_PROFILE`` (``ripple_mode="on"``), so
-    the only surface that deviates from today's behavior is /sites svelte-create.
+    Every other kind (and any unmapped/future kind, and every kind whose row
+    carries no profile) returns ``_DEFAULT_PROFILE`` (``ripple_mode="on"``), so
+    the only surface that deviates from a plain ripple-on default is /sites
+    svelte-create plus the explicitly-scoped FORESIGHT / FILES / STUDIO / CODE /
+    BELT rows — exactly today's behavior.
     """
-    profiles = _profiles()
-    if surface_kind == SurfaceKind.SITES:
-        # refine (pocket_id) edits the existing ripple landing spec → keep ripple.
-        # It wins over engine, so check it FIRST.
-        if meta.pocket_id is None and meta.engine == "svelte":
-            return profiles["sites_svelte_create"]
-        return profiles["sites_default"]
-    return profiles["by_kind"].get(surface_kind, _DEFAULT_PROFILE)
+    spec = _spec_by_kind().get(surface_kind)
+    if spec is None:
+        return _DEFAULT_PROFILE
+    if spec.profile_resolver is not None:
+        return spec.profile_resolver(meta)
+    if spec.profile is not None:
+        return spec.profile
+    return _DEFAULT_PROFILE
 
 
 def compose_entity_profile(base: SurfaceProfile, override: dict[str, Any] | None) -> SurfaceProfile:
@@ -343,70 +248,26 @@ _HANDLERS: dict[SurfaceKind, Any] | None = None
 
 
 def _load_handlers() -> dict[SurfaceKind, Any]:
-    """Lazy import every per-kind handler. Missing handlers are skipped.
+    """Build the ``SurfaceKind -> build_preamble`` dispatch table.
 
-    We tolerate missing handler modules instead of raising at import time
-    because the surface module ships independently of the surfaces it
-    knows about — a fresh deploy that drops a handler module shouldn't
-    take the whole chat path down.
+    The table is derived by LOOPING over the declarative ``SURFACES``
+    registry (SR-1) rather than a hand-maintained literal dict — one
+    ``SurfaceSpec`` row per surface is the single source of truth, so adding
+    a surface means adding a row, not editing two parallel structures.
+
+    ``SURFACES`` is imported lazily here (not at module top) so a broken
+    handler-module import still can't take the whole chat path down at
+    import time. We tolerate missing handler modules instead of raising
+    because the surface module ships independently of the surfaces it knows
+    about — a fresh deploy that drops a handler module shouldn't break
+    dispatch. A fresh mutable dict is returned on every call (tests
+    monkeypatch entries on the returned dict), and any ``SurfaceKind``
+    without a row still degrades to the ``GENERIC`` fall-back in
+    ``resolve_surface_context``.
     """
-    from pocketpaw_ee.cloud.surface.handlers import (
-        activity,
-        audit,
-        belt,
-        calendar,
-        code,
-        files,
-        generic,
-        home,
-        knowledge,
-        mission_control,
-        pocket,
-        pocket_widget,
-        pockets_list,
-        quickask,
-        settings,
-        sidepanel,
-        sites,
-        studio,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        agent as agent_handler,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        agents as agents_handler,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        chat as chat_handler,
-    )
-    from pocketpaw_ee.cloud.surface.handlers import (
-        foresight as foresight_handler,
-    )
+    from pocketpaw_ee.cloud.surface.surface_registry import SURFACES
 
-    return {
-        SurfaceKind.HOME: home.build_preamble,
-        SurfaceKind.POCKETS_LIST: pockets_list.build_preamble,
-        SurfaceKind.POCKET: pocket.build_preamble,
-        SurfaceKind.POCKET_WIDGET: pocket_widget.build_preamble,
-        SurfaceKind.MISSION_CONTROL: mission_control.build_preamble,
-        SurfaceKind.FILES: files.build_preamble,
-        SurfaceKind.AUDIT: audit.build_preamble,
-        SurfaceKind.ACTIVITY: activity.build_preamble,
-        SurfaceKind.AGENTS: agents_handler.build_preamble,
-        SurfaceKind.AGENT: agent_handler.build_preamble,
-        SurfaceKind.KNOWLEDGE: knowledge.build_preamble,
-        SurfaceKind.CALENDAR: calendar.build_preamble,
-        SurfaceKind.CHAT: chat_handler.build_preamble,
-        SurfaceKind.QUICKASK: quickask.build_preamble,
-        SurfaceKind.SETTINGS: settings.build_preamble,
-        SurfaceKind.SIDEPANEL: sidepanel.build_preamble,
-        SurfaceKind.FORESIGHT: foresight_handler.build_preamble,
-        SurfaceKind.SITES: sites.build_preamble,
-        SurfaceKind.STUDIO: studio.build_preamble,
-        SurfaceKind.CODE: code.build_preamble,
-        SurfaceKind.BELT: belt.build_preamble,
-        SurfaceKind.GENERIC: generic.build_preamble,
-    }
+    return {spec.kind: spec.build_preamble for spec in SURFACES}
 
 
 def _resolve_kind(value: str | None) -> SurfaceKind:
