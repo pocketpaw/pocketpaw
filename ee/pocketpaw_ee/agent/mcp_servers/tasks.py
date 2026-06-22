@@ -34,7 +34,7 @@ import json
 import logging
 from typing import Any
 
-from ._audit import record_tool_call
+from ._audit import record_system_event, record_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,14 @@ async def _claim_task_handler(args: dict) -> dict:
         status="ok",
         ok=True,
     )
+    record_system_event(
+        workspace_id=workspace_id,
+        actor_id=agent_id or "agent",
+        event_type="agent.task.claim",
+        description="Agent claimed task",
+        status="completed",
+        metadata={"task_id": args.get("task_id", "")},
+    )
 
     task_id = args.get("task_id")
     if not isinstance(task_id, str) or not task_id:
@@ -208,6 +216,17 @@ async def _complete_task_handler(args: dict) -> dict:
         tool_name="_complete_task",
         status="ok",
         ok=True,
+    )
+    record_system_event(
+        workspace_id=workspace_id,
+        actor_id=agent_id or "agent",
+        event_type="agent.task.complete",
+        description="Agent completed task",
+        status="completed",
+        metadata={
+            "task_id": args.get("task_id", ""),
+            "next_action": args.get("next_action", "archive"),
+        },
     )
 
     task_id = args.get("task_id")
@@ -268,6 +287,14 @@ async def _create_task_handler(args: dict) -> dict:
         tool_name="_create_task",
         status="ok",
         ok=True,
+    )
+    record_system_event(
+        workspace_id=workspace_id,
+        actor_id=agent_id or "agent",
+        event_type="agent.task.create",
+        description="Agent created task: " + (args.get("title", "") or "")[:60],
+        status="completed",
+        metadata={"title": args.get("title", ""), "assignee": args.get("assignee_id", "")},
     )
 
     title = args.get("title")

@@ -336,6 +336,23 @@ def _emit_parked_policy_evaluated(
             scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
             payload=payload,
         )
+        # Fire a workspace audit event for this decision.
+        from pocketpaw_ee.agent.mcp_servers._audit import record_decision
+
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id="system",
+            pocket_id=pocket_id,
+            decision_action="policy.evaluated",
+            outcome="parked",
+            metadata={
+                "policy": instinct_policy,
+                "passed": False,
+                "reason": "parked_for_human_approval",
+                "action_id": action_id,
+                "correlation_id": str(correlation_id),
+            },
+        )
         return entry.id
     except Exception:  # noqa: BLE001 — chain emit is best-effort
         logger.warning(
@@ -718,6 +735,22 @@ def _emit_bridge_chain_close(
             actor=actor,
             scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
             payload=payload,
+        )
+        # Fire a workspace audit event for the decision completion.
+        from pocketpaw_ee.agent.mcp_servers._audit import record_decision
+
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="decision.completed",
+            outcome=action_outcome or "completed",
+            metadata={
+                "passed": passed,
+                "action_outcome": action_outcome or "",
+                "error_class": error_class or "",
+                "correlation_id": str(correlation_id),
+            },
         )
     except Exception:  # noqa: BLE001 — chain close is best-effort
         logger.warning(

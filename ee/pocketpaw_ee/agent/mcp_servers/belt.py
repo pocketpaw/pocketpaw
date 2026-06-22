@@ -74,7 +74,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from ._audit import record_tool_call
+from ._audit import record_decision, record_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +308,23 @@ def _emit_agent_proposed(
             scope=[f"workspace:{workspace_id}"],
             payload=payload,
         )
+        # Fire a workspace audit event for this decision (best-effort).
+        try:
+            record_decision(
+                workspace_id=workspace_id,
+                actor_id=user_id or "agent",
+                pocket_id=workspace_id,
+                decision_action="agent.proposed",
+                outcome="proposed",
+                metadata={
+                    "proposal_kind": "code_change",
+                    "repo": repo_name,
+                    "summary": summary[:100] if summary else "",
+                    "correlation_id": str(correlation_id),
+                },
+            )
+        except Exception:  # noqa: BLE001 — must not break the caller
+            logger.warning("belt record_decision failed", exc_info=True)
         return entry.id
     except Exception:  # noqa: BLE001 — chain emit is best-effort
         logger.warning(
