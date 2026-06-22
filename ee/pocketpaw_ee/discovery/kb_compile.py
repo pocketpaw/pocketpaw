@@ -7,19 +7,27 @@
 # it compiles the text into a kb-go wiki ON-BOX, reads the compiled articles back,
 # and infers the OntologyDraft from them.
 #
-# F2 (2026-06-21 / feat/szd-finish-core) — ON-BOX CATEGORIZATION. ``kb convo
-# ingest`` hardcodes every article's category to "conversation" (kb-go
+# F2 (2026-06-21 / feat/szd-finish-core) — DISCOVERY-MODEL CATEGORIZATION.
+# ``kb convo ingest`` hardcodes every article's category to "conversation" (kb-go
 # convo.go:625), so on real text the ontology collapses to a single
 # objects-only type. F2 routes unstructured exhaust through kb's AGENT MODE
-# (``kb prepare`` → on-box Ollama model → ``kb accept``) WHEN an on-box model is
-# configured, so real text gets DOMAIN categories (SupportTicket, RefundRequest,
-# ...). ``kb prepare`` / ``kb accept`` are keyless (no network); the only model
-# call is the per-prompt compile, hard-pinned to the tenant's local Ollama via
-# F3's ``_refine.resolve_on_box_client`` (``force_provider="ollama"``). When no
+# (``kb prepare`` → discovery model → ``kb accept``) WHEN a model is configured,
+# so real text gets DOMAIN categories (SupportTicket, RefundRequest, ...).
+# ``kb prepare`` / ``kb accept`` are keyless (no network); the only model call is
+# the per-prompt compile, whose client + model NAME come from F3's
+# ``_refine.resolve_on_box_client`` / ``resolve_discovery_model_name``. When no
 # model is configured (or resolution fails), ``_compile_blobs`` falls back to the
 # original ``kb convo ingest`` path — graceful degrade to today's behavior, never
 # an error. The chosen path is logged ("prepare/accept" vs "convo ingest") so a
 # silent regression to the conversation-only bucket is visible.
+#
+# MODEL-LANE SOVEREIGNTY POSTURE (2026-06-22, shared with F3): WHICH model the
+# per-prompt compile reaches is governed by ``settings.discovery_sovereign_model``
+# (default True → on-box Ollama only, ``api_key is None``; False → the
+# workspace's configured provider, a cloud model allowed — the tenant's explicit
+# opt-in). The resolution lives once in ``_refine``; this digester just consumes
+# it. The kb ingest/build TRIPWIRE below is INDEPENDENT of that posture and stays
+# UNCONDITIONAL.
 #
 # Contract: ``digest(records, connector_meta=None) -> OntologyDraft`` — the same
 # sync Digester Protocol StructuredShapeDigester satisfies. Here ``records`` are
@@ -38,10 +46,12 @@
 # SOVEREIGNTY (load-bearing, encoded as tests): every kb command is keyless and
 # on-box (``prepare`` / ``accept`` / ``convo ingest`` / ``list`` / ``show`` /
 # ``graph``), and the F2 categorization model call resolves through
-# ``resolve_on_box_client`` (Ollama only — ``api_key is None``). The digester
-# must NEVER call ``kb ingest`` / ``kb build``, which POST raw tenant text to the
-# Anthropic API (kb.go:1349) — the ``_kb`` seam asserts this on every call. The
-# seam clones ``cloud/agents/knowledge.py`` (binary resolution + subprocess +
+# ``resolve_on_box_client`` — Ollama-only by default, or the configured provider
+# under the explicit opt-in posture. INDEPENDENT of that posture, the digester
+# must NEVER call ``kb ingest`` / ``kb build`` (which POST raw tenant text to the
+# Anthropic KB API, kb.go:1349) — the ``_kb`` seam asserts this on EVERY call,
+# unconditionally; sovereign or opt-in, that path is never correct. The seam
+# clones ``cloud/agents/knowledge.py`` (binary resolution + subprocess +
 # timeout) and is the seam the unit tests mock.
 #
 # Sync → async bridge: ``digest()`` is sync (Digester Protocol) but the on-box
@@ -70,7 +80,10 @@ from pathlib import Path
 from typing import Any
 
 from pocketpaw.fabric.models import PropertyDef
-from pocketpaw_ee.discovery._refine import resolve_on_box_client
+from pocketpaw_ee.discovery._refine import (
+    resolve_discovery_model_name,
+    resolve_on_box_client,
+)
 from pocketpaw_ee.discovery.models import (
     DraftLink,
     DraftObject,
@@ -399,11 +412,14 @@ class KbCompileDigester:
         )
 
     def _resolve_model_client(self) -> Any | None:
-        """Resolve the on-box model client, or ``None`` if not available.
+        """Resolve the discovery-model client, or ``None`` if not available.
 
         ``None`` when no ``settings`` was supplied (no model configured) OR when
-        the on-box resolve fails (Ollama not set up). Either way the caller
-        degrades to the deterministic ``convo ingest`` path — never an error.
+        the resolve fails (the chosen provider isn't set up). Either way the
+        caller degrades to the deterministic ``convo ingest`` path — never an
+        error. WHICH provider this resolves (on-box Ollama vs. the configured
+        provider) is governed by ``settings.discovery_sovereign_model``; see
+        ``_refine.resolve_on_box_client``.
         """
         if self._settings is None:
             return None
@@ -411,9 +427,23 @@ class KbCompileDigester:
             return resolve_on_box_client(self._settings)
         except Exception as exc:  # noqa: BLE001 — unavailable model ⇒ graceful degrade
             logger.warning(
-                "kb-compile: on-box model unavailable (%s); falling back to convo ingest", exc
+                "kb-compile: discovery model unavailable (%s); falling back to convo ingest",
+                exc,
             )
             return None
+
+    def _discovery_model_name(self) -> str:
+        """Resolve the model name for the categorize one-shot — posture-aware.
+
+        Delegates to ``_refine.resolve_discovery_model_name`` when ``settings``
+        carries the posture flag; falls back to ``settings.ollama_model`` for the
+        minimal settings stubs that only expose ``ollama_model``. Backward
+        compatible: a stub without ``discovery_sovereign_model`` keeps the
+        original on-box model name.
+        """
+        if getattr(self._settings, "discovery_sovereign_model", True):
+            return self._settings.ollama_model
+        return resolve_discovery_model_name(self._settings)
 
     def _compile_via_agent_mode(
         self, scope: str, label: str, blobs: Sequence[str], client: Any
@@ -490,15 +520,19 @@ class KbCompileDigester:
         return out
 
     async def _call_model(self, client: Any, prompt: str) -> Any:
-        """One on-box chat completion → parsed article JSON (or ``None``).
+        """One discovery-model chat completion → parsed article JSON (or ``None``).
 
-        SOVEREIGNTY: ``client`` is bound to the local Ollama endpoint
-        (``resolve_on_box_client`` hard-pins ``force_provider="ollama"`` —
-        ``api_key is None``). ``response_format={"type":"json_object"}`` makes the
-        model return a single JSON object — the compiled article.
+        SOVEREIGNTY POSTURE: ``client`` comes from ``resolve_on_box_client``,
+        which pins the local Ollama endpoint (``force_provider="ollama"`` —
+        ``api_key is None``) when ``settings.discovery_sovereign_model`` is True
+        (the default) and honors the workspace's configured provider (cloud
+        allowed) when the tenant has explicitly opted out. The model NAME is
+        resolved the same posture-aware way via ``resolve_discovery_model_name``.
+        ``response_format={"type":"json_object"}`` makes the model return a single
+        JSON object — the compiled article.
         """
         resp = await client.chat.completions.create(
-            model=self._settings.ollama_model,
+            model=self._discovery_model_name(),
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
         )
