@@ -74,6 +74,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_belt"
@@ -385,6 +387,15 @@ async def _propose_change_handler(args: dict) -> dict:
             "belt_propose_change requires workspace and user context "
             "(call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_belt",
+        tool_name="_propose_change",
+        status="ok",
+        ok=True,
+    )
 
     repo = args.get("repo")
     base_branch = args.get("base_branch")

@@ -48,6 +48,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_media"
@@ -268,6 +270,15 @@ async def _image_generate_handler(args: dict) -> dict:
             "image_generate requires workspace and user context (call from a cloud chat session)."
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_media",
+        tool_name="_image_generate",
+        status="ok",
+        ok=True,
+    )
+
     prompt = args.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return _error_response("image_generate requires a non-empty `prompt`.")
@@ -356,6 +367,15 @@ async def _video_generate_handler(args: dict) -> dict:
         return _error_response(
             "video_generate requires workspace and user context (call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_media",
+        tool_name="_video_generate",
+        status="ok",
+        ok=True,
+    )
 
     prompt = args.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():

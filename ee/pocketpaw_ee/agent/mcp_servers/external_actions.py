@@ -51,6 +51,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_external_actions"
@@ -117,6 +119,15 @@ async def _propose_external_action_handler(args: dict) -> dict:
             "propose_external_action requires workspace and user context "
             "(call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_external_actions",
+        tool_name="_propose_external_action",
+        status="ok",
+        ok=True,
+    )
 
     connector = args.get("connector")
     action = args.get("action")

@@ -46,6 +46,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_sites_manager"
@@ -117,6 +119,15 @@ async def _publish_handler(args: dict) -> dict:
         return _error_response(
             "publish requires workspace and user context (call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites_manager",
+        tool_name="_publish",
+        status="ok",
+        ok=True,
+    )
 
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:
