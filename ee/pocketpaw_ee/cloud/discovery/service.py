@@ -1,4 +1,10 @@
 # Discovery — service (cloud 4-file rule §5).
+# Updated: 2026-06-22 (feat/szd-finish-followups) — the trigger now mints the
+#   ``run_id`` ONCE and threads it BOTH into the 202 response AND into
+#   ``run_discovery_and_propose(run_id=...)``, so the staged proposals' discovery
+#   markers carry the SAME id the 202 handed the client. The previously-distinct
+#   "optimistic dispatch token vs. internal proposal run_id" split is gone — the
+#   client can now correlate its 202 ``run_id`` to the proposals it produced.
 # Created: 2026-06-21 (SZD finish slice F1 / feat/szd-finish-core) — the
 #   workspace-discovery TRIGGER. ``run(workspace_id, user_id, body)`` is the
 #   front door that today only a script could reach: it enumerates the
@@ -8,9 +14,9 @@
 #   (``asyncio.create_task``, mirroring chat/router's fire-and-forget) so the
 #   HTTP request returns 202 immediately instead of blocking on connector
 #   sampling + digest. The orchestrator stages its proposals durably as pending
-#   Instinct Actions, so the trigger's response only needs the optimistic
+#   Instinct Actions, so the trigger's response only needs the
 #   ``run_id`` — the action ids surface separately in the pending-actions list
-#   the ApprovalsPanel already polls.
+#   the ApprovalsPanel already polls, and the marker on each carries this run_id.
 #
 #   Sovereignty / tenancy: validate the body at entry (rule §6); pass the
 #   resolved ``workspace_id`` / ``user_id`` straight into the orchestrator,
@@ -80,8 +86,10 @@ async def run(
 
     Returns a wire dict (rule §5) shaped like ``DiscoveryRunResponse``. Because
     the run is fire-and-forget, the action-id fields are EMPTY in the response;
-    ``run_id`` is a dispatch token for optimistic UI confirmation (distinct from
-    the orchestrator's internal proposal run_id, which tags the staged Actions).
+    ``run_id`` is the dispatch token for optimistic UI confirmation AND the same
+    id the orchestrator tags onto the staged proposals' discovery markers (it is
+    passed in via ``run_discovery_and_propose(run_id=...)``), so a client can
+    correlate the 202 response to the proposals it produced.
     """
     # Lazy import to avoid a router→service→connectors import cycle at module load.
     from pocketpaw_ee.cloud.connectors import service as connectors_service
@@ -96,10 +104,14 @@ async def run(
 
     opts = DiscoveryRunOptions(sample_cap=body.sample_cap or DiscoveryRunOptions().sample_cap)
 
+    # Mint the run_id ONCE here and thread it BOTH into the 202 response AND into
+    # the orchestrator, so the client's dispatch token tags the staged proposals'
+    # discovery markers. A client can then correlate the 202 ``run_id`` to the
+    # proposals it produced when they surface in the pending-actions list.
     run_id = uuid4().hex
 
     task = asyncio.create_task(
-        run_discovery_and_propose(workspace_id, user_id, connector_ids, opts)
+        run_discovery_and_propose(workspace_id, user_id, connector_ids, opts, run_id=run_id)
     )
     task.add_done_callback(_log_task_result)
 

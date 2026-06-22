@@ -1,5 +1,11 @@
 # tests/ee/test_szd2_finish_e2e.py — F5: the FINISH end-to-end test.
 #
+# Updated: 2026-06-22 (feat/szd-finish-followups) — the F1 trigger now mints the
+# run_id once and threads it into ``run_discovery_and_propose(run_id=...)``. The
+# delegating-orchestrator stub accepts + forwards the new keyword, and STEP 3 now
+# also asserts the 202 ``trigger_resp["run_id"]`` equals the proposals' marker
+# run_id (the correlation followup-1 adds).
+#
 # Created: 2026-06-21 (F5 / feat/szd-finish-enforce). This is the headline proof
 # that the WHOLE finished Sovereign Zero-Setup Discovery feature works as ONE
 # coherent flow — every stage F1→F6 wired together and driven through the REAL
@@ -559,13 +565,16 @@ async def test_szd_finish_trigger_to_edit_to_approve_to_enforce_sovereign(
 
     captured: dict[str, Any] = {}
 
-    async def _delegating_orchestrator(ws_id, u_id, connector_ids, run_opts=None):  # noqa: ARG001
+    async def _delegating_orchestrator(ws_id, u_id, connector_ids, run_opts=None, *, run_id=None):  # noqa: ARG001
         # (a) record what the F1 trigger resolved — the enabled-only enumeration.
         captured["connector_ids"] = list(connector_ids)
         captured["workspace_id"] = ws_id
         captured["user_id"] = u_id
+        captured["run_id"] = run_id
         # (b) drive the REAL finished orchestrator with our injected run + opts so
-        #     the deterministic flow exercises F2 (categorize) + F3 (refine).
+        #     the deterministic flow exercises F2 (categorize) + F3 (refine). Thread
+        #     the trigger's run_id through so the proposals' markers correlate to the
+        #     202 dispatch token.
         try:
             result = await orchestrate.run_discovery_and_propose(
                 ws_id,
@@ -573,6 +582,7 @@ async def test_szd_finish_trigger_to_edit_to_approve_to_enforce_sovereign(
                 connector_ids,
                 opts,
                 discovery_run=_make_discovery_run(registry, settings),
+                run_id=run_id,
             )
         except BaseException as exc:  # noqa: BLE001 — surface the swallowed task error
             captured["error"] = exc
@@ -644,6 +654,9 @@ async def test_szd_finish_trigger_to_edit_to_approve_to_enforce_sovereign(
     ir_marker = _find_discovery_marker(rule_action.parameters)
     assert fo_marker and pc_marker and ir_marker
     assert fo_marker["run_id"] == pc_marker["run_id"] == ir_marker["run_id"] == result.run_id
+    # CORRELATION (followup-1) — the 202 trigger run_id is the SAME id tagging the
+    # proposals' markers, so a client can match its 202 to the proposals it made.
+    assert trigger_resp["run_id"] == result.run_id == captured["run_id"]
 
     # ── STEP 4 — EDIT (F4). PATCH the rule proposal to TIGHTEN its CEL `when`. The
     #    edit re-validates, records an `edited` correction, and keeps PENDING. We

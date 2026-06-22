@@ -29,6 +29,15 @@
 #   * ``test_patch_edits_rule_when_then_still_pending`` — a valid edit to the rule
 #     ``when`` persists and status stays PENDING.
 #
+# Updated: 2026-06-22 (feat/szd-finish-followups) — happy-path edit coverage for the
+# OTHER two blob kinds the PATCH endpoint handles (the rule kind already had it):
+#   * ``test_patch_pocket_create_renames_pocket`` — rename a pending ``_pocket_create``
+#     proposal → re-validates (CreatePocketRequest), persists, status stays PENDING,
+#     top-level tenancy/owner pinned.
+#   * ``test_patch_fabric_objects_drops_a_link`` — drop a spurious link on a pending
+#     ``_fabric_objects`` proposal → re-validates the lists, persists, status stays
+#     PENDING, ``workspace_id`` pinned.
+#
 # The 403/409/422 tests are sync and drive the router over HTTP via ``TestClient`` (the
 # guard fires BEFORE any executor/DB touch, mirroring test_instinct_rule_router). The
 # tests that assert chain emits / persistence are async (``AsyncClient`` +
@@ -53,8 +62,10 @@ from httpx import ASGITransport, AsyncClient  # noqa: E402
 from pocketpaw_ee.cloud._core.deps import current_workspace_id  # noqa: E402
 from pocketpaw_ee.cloud._core.http import add_error_handler  # noqa: E402
 from pocketpaw_ee.cloud.auth import current_active_user  # noqa: E402
+from pocketpaw_ee.cloud.fabric_proposals import FABRIC_OBJECTS_PARAM_KEY  # noqa: E402
 from pocketpaw_ee.cloud.instinct_rule_proposals import INSTINCT_RULE_PARAM_KEY  # noqa: E402
 from pocketpaw_ee.cloud.license import require_license  # noqa: E402
+from pocketpaw_ee.cloud.pocket_proposals import POCKET_CREATE_PARAM_KEY  # noqa: E402
 from pocketpaw_ee.instinct.router import router  # noqa: E402
 
 from pocketpaw.instinct.store import InstinctStore  # noqa: E402
@@ -110,6 +121,74 @@ def _rule_blob(workspace_id: str, *, name: str = "rule") -> dict:
     }
 
 
+def _pocket_blob(workspace_id: str, *, name: str = "Discovered data") -> dict:
+    """The ``_pocket_create`` blob the propose helper stores. Tenancy / owner are SEPARATE
+    top-level fields; the editable ``pocket_spec`` is a CreatePocketRequest body (the
+    rippleSpec rides under the ``rippleSpec`` camelCase alias)."""
+    return {
+        "kind": "pocket_create",
+        "schema": 1,
+        "workspace_id": workspace_id,
+        "user_id": "user-A",
+        "pocket_spec": {
+            "name": name,
+            "rippleSpec": {
+                "version": "1.0",
+                "root": {"id": "root", "type": "container", "props": {}, "children": []},
+                "state": {},
+            },
+        },
+        "summary": f"Create the starter Pocket {name!r}.",
+        "correlation_id": None,
+        "proposed_event_id": None,
+    }
+
+
+def _fabric_blob(workspace_id: str) -> dict:
+    """The ``_fabric_objects`` blob the propose helper stores. Tenancy is a SEPARATE
+    top-level field; the editable shape is the three lists object_types / objects / links.
+    Seeded with TWO links so a happy-path edit can drop the spurious one."""
+    return {
+        "kind": "fabric_objects",
+        "schema": 1,
+        "workspace_id": workspace_id,
+        "object_types": [
+            {"type_name": "Customer", "description": "", "properties": []},
+            {"type_name": "Order", "description": "", "properties": []},
+        ],
+        "objects": [
+            {
+                "type_name": "Customer",
+                "properties": {"name": "Ada"},
+                "source_connector": "discovery:Customer",
+                "source_id": "cust-1",
+            },
+            {
+                "type_name": "Order",
+                "properties": {"total": 42},
+                "source_connector": "discovery:Order",
+                "source_id": "ord-1",
+            },
+        ],
+        "links": [
+            {
+                "from": {"source_connector": "discovery:Customer", "source_id": "cust-1"},
+                "to": {"source_connector": "discovery:Order", "source_id": "ord-1"},
+                "link_type": "placed",
+            },
+            {
+                # A SPURIOUS link the reviewer drops in the happy-path edit.
+                "from": {"source_connector": "discovery:Customer", "source_id": "cust-1"},
+                "to": {"source_connector": "discovery:Order", "source_id": "ord-1"},
+                "link_type": "bogus",
+            },
+        ],
+        "summary": "Create 2 Fabric object(s) across 2 type(s) and 2 link(s).",
+        "correlation_id": None,
+        "proposed_event_id": None,
+    }
+
+
 @pytest.fixture
 def edit_store(tmp_path: Path) -> InstinctStore:
     return InstinctStore(tmp_path / "instinct_proposal_edit.db")
@@ -150,6 +229,38 @@ def _propose_rule_action(client: TestClient, *, workspace_id: str, name: str = "
     return resp.json()["id"]
 
 
+def _propose_pocket_action(
+    client: TestClient, *, workspace_id: str, name: str = "Discovered data"
+) -> str:
+    """Seed a PENDING Action carrying a ``_pocket_create`` blob over HTTP, return its id."""
+    resp = client.post(
+        "/instinct/actions",
+        json={
+            "pocket_id": workspace_id,
+            "title": f"starter pocket {name}",
+            "trigger": TRIGGER,
+            "parameters": {POCKET_CREATE_PARAM_KEY: _pocket_blob(workspace_id, name=name)},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+def _propose_fabric_action(client: TestClient, *, workspace_id: str) -> str:
+    """Seed a PENDING Action carrying a ``_fabric_objects`` blob over HTTP, return its id."""
+    resp = client.post(
+        "/instinct/actions",
+        json={
+            "pocket_id": workspace_id,
+            "title": "fabric ontology",
+            "trigger": TRIGGER,
+            "parameters": {FABRIC_OBJECTS_PARAM_KEY: _fabric_blob(workspace_id)},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
 def _action_by_id(client: TestClient, action_id: str) -> dict[str, Any]:
     resp = client.get("/instinct/actions", params={"limit": 500})
     assert resp.status_code == 200, resp.text
@@ -161,6 +272,14 @@ def _action_by_id(client: TestClient, action_id: str) -> dict[str, Any]:
 
 def _stored_rule_blob(client: TestClient, action_id: str) -> dict[str, Any]:
     return _action_by_id(client, action_id)["parameters"][INSTINCT_RULE_PARAM_KEY]
+
+
+def _stored_pocket_blob(client: TestClient, action_id: str) -> dict[str, Any]:
+    return _action_by_id(client, action_id)["parameters"][POCKET_CREATE_PARAM_KEY]
+
+
+def _stored_fabric_blob(client: TestClient, action_id: str) -> dict[str, Any]:
+    return _action_by_id(client, action_id)["parameters"][FABRIC_OBJECTS_PARAM_KEY]
 
 
 # ===========================================================================
@@ -300,6 +419,68 @@ def test_patch_edits_rule_when_then_still_pending(edit_store: InstinctStore, mon
         assert blob["rule_spec"]["when"] == "object.amount > 25000"
         assert blob["workspace_id"] == "ws-A"
         assert blob["rule_spec"]["scope"]["workspace_id"] == "ws-A"
+        assert _action_by_id(client, action_id)["status"] == "pending"
+
+
+def test_patch_pocket_create_renames_pocket(edit_store: InstinctStore, monkeypatch) -> None:
+    """A valid edit to a ``_pocket_create`` proposal renames the staged Pocket: it
+    re-validates (CreatePocketRequest), persists, status stays PENDING, and the top-level
+    tenancy / owner stay pinned (they live OUTSIDE the editable pocket_spec)."""
+    client = _make_client(edit_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=edit_store):
+        action_id = _propose_pocket_action(client, workspace_id="ws-A", name="Discovered data")
+        # Rename the pocket; carry the rippleSpec along so CreatePocketRequest re-validates.
+        edited_spec = {
+            "name": "Renamed dashboard",
+            "rippleSpec": {
+                "version": "1.0",
+                "root": {"id": "root", "type": "container", "props": {}, "children": []},
+                "state": {},
+            },
+        }
+        resp = client.patch(
+            f"/instinct/actions/{action_id}/proposal",
+            json={"pocket_spec": edited_spec},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action"]["status"] == "pending"
+        assert resp.json()["correction"] is not None
+
+        # The new name PERSISTED; tenancy/owner pinned; status still PENDING.
+        blob = _stored_pocket_blob(client, action_id)
+        assert blob["pocket_spec"]["name"] == "Renamed dashboard"
+        assert blob["workspace_id"] == "ws-A"
+        assert blob["user_id"] == "user-A"
+        assert _action_by_id(client, action_id)["status"] == "pending"
+
+
+def test_patch_fabric_objects_drops_a_link(edit_store: InstinctStore, monkeypatch) -> None:
+    """A valid edit to a ``_fabric_objects`` proposal drops a spurious link: it re-validates
+    the editable lists, persists, status stays PENDING, and the top-level ``workspace_id``
+    stays pinned (it lives OUTSIDE the editable lists)."""
+    client = _make_client(edit_store, _FakeUser("user-A", "ws-A"), monkeypatch)
+    with patch("pocketpaw_ee.instinct.router._store", return_value=edit_store):
+        action_id = _propose_fabric_action(client, workspace_id="ws-A")
+        before = _stored_fabric_blob(client, action_id)
+        assert len(before["links"]) == 2  # seeded with the real link + the spurious one
+
+        # Keep ONLY the legitimate link (drop the "bogus" one).
+        kept_links = [link for link in before["links"] if link["link_type"] == "placed"]
+        resp = client.patch(
+            f"/instinct/actions/{action_id}/proposal",
+            json={"fabric": {"links": kept_links}},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["action"]["status"] == "pending"
+        assert resp.json()["correction"] is not None
+
+        # The spurious link is GONE; objects/types untouched; tenancy pinned; still PENDING.
+        blob = _stored_fabric_blob(client, action_id)
+        assert len(blob["links"]) == 1
+        assert blob["links"][0]["link_type"] == "placed"
+        assert {ot["type_name"] for ot in blob["object_types"]} == {"Customer", "Order"}
+        assert len(blob["objects"]) == 2
+        assert blob["workspace_id"] == "ws-A"
         assert _action_by_id(client, action_id)["status"] == "pending"
 
 

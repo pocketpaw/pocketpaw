@@ -1,6 +1,13 @@
 # tests/ee/test_discovery_propose.py — SZD-6 integration: wire DiscoveryRun → the
 # two gated proposals + the starter-Pocket assembler + supersede-on-rerun.
 #
+# Updated: 2026-06-22 (feat/szd-finish-followups) — added two tests for the new
+# OPTIONAL ``run_id`` parameter on ``run_discovery_and_propose``:
+#   * ``test_passed_run_id_tags_proposal_markers`` — a caller-provided run_id tags
+#     the proposals' discovery markers (the F1 trigger's 202 token correlates);
+#   * ``test_omitted_run_id_mints_fresh_marker`` — the default path still mints a
+#     fresh uuid4 (backward-compatible).
+#
 # Created: 2026-06-19 (SZD-6 / feat/szd-6-integration). Covers the integration
 # entry point ``run_discovery_and_propose`` end to end, with the connector read
 # MOCKED (no live network) and real-but-isolated InstinctStore + FabricStore +
@@ -268,6 +275,64 @@ async def test_run_files_two_tagged_pending_proposals(store, fabric):
         "$source": "fabric.objects",
         "type_name": "Customer",
     }
+
+
+# ---------------------------------------------------------------------------
+# A caller-provided run_id tags the proposals' markers (followup-1: lets the F1
+# trigger correlate its 202 dispatch token to the proposals it produced).
+# ---------------------------------------------------------------------------
+
+
+async def test_passed_run_id_tags_proposal_markers(store, fabric):
+    """When ``run_discovery_and_propose`` is called with an explicit ``run_id``, the
+    staged proposals carry THAT exact id in their discovery markers (not a freshly
+    minted one) — so the F1 trigger's 202 ``run_id`` correlates to its proposals."""
+    adapters = {
+        "crm": _MockAdapter(schemas=[], data_by_action={"list_customers": _customers(2)}),
+    }
+    opts = _opts_for({"crm": [ReadAction(action="list_customers", type_name="Customer")]})
+
+    pinned_run_id = "deadbeefcafebabe0123456789abcdef"
+    result = await run_discovery_and_propose(
+        workspace_id="w1",
+        user_id="u1",
+        connector_ids=["crm"],
+        opts=opts,
+        discovery_run=_mock_run(adapters),
+        run_id=pinned_run_id,
+    )
+
+    # The result carries the caller's id (not a fresh uuid4).
+    assert result.run_id == pinned_run_id
+
+    # And BOTH proposals' markers carry that exact id.
+    fabric_action = await store.get_action(result.fabric_objects_action_id)
+    pocket_action = await store.get_action(result.pocket_action_id)
+    fo_marker = _find_discovery_marker(fabric_action.parameters)
+    pc_marker = _find_discovery_marker(pocket_action.parameters)
+    assert fo_marker is not None and pc_marker is not None
+    assert fo_marker["run_id"] == pc_marker["run_id"] == pinned_run_id
+
+
+async def test_omitted_run_id_mints_fresh_marker(store, fabric):
+    """The default path (no ``run_id``) still mints a fresh uuid4 — backward-compatible."""
+    adapters = {
+        "crm": _MockAdapter(schemas=[], data_by_action={"list_customers": _customers(2)}),
+    }
+    opts = _opts_for({"crm": [ReadAction(action="list_customers", type_name="Customer")]})
+
+    result = await run_discovery_and_propose(
+        workspace_id="w1",
+        user_id="u1",
+        connector_ids=["crm"],
+        opts=opts,
+        discovery_run=_mock_run(adapters),
+    )
+    # A minted run_id is a non-empty uuid4 hex (32 chars), and the markers carry it.
+    assert result.run_id and len(result.run_id) == 32
+    fabric_action = await store.get_action(result.fabric_objects_action_id)
+    fo_marker = _find_discovery_marker(fabric_action.parameters)
+    assert fo_marker is not None and fo_marker["run_id"] == result.run_id
 
 
 # ---------------------------------------------------------------------------

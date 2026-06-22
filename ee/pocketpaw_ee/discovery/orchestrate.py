@@ -51,6 +51,13 @@
 # reason "superseded by discovery run <id>") before filing the new set. Approved /
 # rejected / executed proposals are left alone — only the still-open ones collapse.
 #
+# Updated 2026-06-22 (feat/szd-finish-followups): ``run_discovery_and_propose`` now
+# takes an OPTIONAL keyword ``run_id``. When provided it tags this run's proposal
+# markers instead of minting a fresh one, so the F1 trigger can hand the SAME id
+# back in its 202 response AND pass it here — letting a client CORRELATE the 202
+# dispatch token to the proposals it produced. Default ``None`` mints as before
+# (backward-compatible).
+#
 # Async orchestration; depends on the SZD-4 DiscoveryRun + the SZD-5a/5b propose
 # helpers + the OSS InstinctStore (for the supersede sweep). No direct Fabric /
 # Pocket writes.
@@ -424,6 +431,7 @@ async def run_discovery_and_propose(
     opts: DiscoveryRunOptions | None = None,
     *,
     discovery_run: DiscoveryRun | None = None,
+    run_id: str | None = None,
 ) -> DiscoveryProposalResult:
     """Run discovery for a workspace and stage the two gated proposals.
 
@@ -449,6 +457,11 @@ async def run_discovery_and_propose(
         opts: discovery-run knobs (sampling cap, explicit read actions, ...).
         discovery_run: an injected ``DiscoveryRun`` (tests pass a mock-registry
             run); defaults to a fresh one driving the local-runtime registry.
+        run_id: an OPTIONAL pre-minted discovery-run id. When provided it tags this
+            run's proposal markers (so a caller that already handed a client a
+            dispatch token — the F1 trigger's 202 ``run_id`` — can CORRELATE that
+            token to the staged proposals). When ``None`` (the default) a fresh
+            ``uuid4().hex`` is minted as before — backward-compatible.
     """
     from pocketpaw_ee.cloud.fabric_proposals.propose import propose_fabric_objects
     from pocketpaw_ee.cloud.pocket_proposals.propose import propose_pocket
@@ -468,8 +481,11 @@ async def run_discovery_and_propose(
     )
 
     # The shared discovery-run marker — both proposals carry it so the NEXT run can
-    # find + supersede this still-open pair.
-    run_id = uuid4().hex
+    # find + supersede this still-open pair. When the caller pre-minted a run_id
+    # (the F1 trigger hands the same id back to the client in its 202), reuse it so
+    # the 202 dispatch token CORRELATES to these staged proposals; otherwise mint a
+    # fresh one (backward-compatible default).
+    run_id = run_id or uuid4().hex
 
     from pocketpaw.stores import get_instinct_store
 
