@@ -32,6 +32,19 @@
 # failure handling (mark ``failed`` + failed-state writeback). The escalation is
 # success-path-only; the failure path's writeback stays best-effort and is never
 # re-escalated, so it can't loop.
+#
+# Updated: 2026-06-22 (fix/jobs-real-builtin-and-status, BUG B) — the WORKER now
+# owns the generic ``<action>_status`` flag on BOTH the success and failure
+# paths. Previously the success status came from the built-in, which HARDCODED
+# ``score_applications_status``, so a status-bound widget + the frontend's
+# optimistic ``<action>_status:"running"`` only lined up when the action
+# happened to be named ``score_applications``. The failure path already stamped
+# ``<action>_status`` (via ``failed_state_writeback(action, ...)``); the success
+# path now stamps ``result["state"]["<action>_status"] = "done"`` from
+# ``doc.action`` BEFORE the writeback. Built-ins no longer return any status
+# key. The stamp happens before the ok:false → failed escalation, so a rejected
+# writeback still escalates correctly (the failed-state marker overwrites the
+# optimistic "done" the same way the rejection path always has).
 
 """ARQ entrypoint: execute one workspace job + write the result back."""
 
@@ -132,6 +145,18 @@ async def execute_workspace_job(ctx: dict[str, Any], job_id: str) -> None:
         )
         await jobs_service.mark_failed(doc, error=message)
         return
+
+    # Stamp the generic status flag the triggering button reads. The WORKER
+    # owns ``<action>_status`` on BOTH paths (the failure path already stamps it
+    # via ``failed_state_writeback(action, ...)``): the built-in returns only its
+    # domain state (``scored_rows`` etc.), never a status key, so a status-bound
+    # widget + the frontend's optimistic ``<action>_status:"running"`` line up
+    # for ANY action name — not just one that happens to match the built-in.
+    # Done here, before the writeback + the ok:false escalation, so a rejected
+    # writeback still overwrites this "done" with the failed-state marker.
+    result.setdefault("state", {})
+    if isinstance(result["state"], dict):
+        result["state"][f"{action}_status"] = "done"
 
     # Success — write the validated state-only partial back. ``merge_spec``
     # can still REJECT the merge (``ok: False``) when the catalog / action-

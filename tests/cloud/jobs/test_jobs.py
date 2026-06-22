@@ -498,6 +498,11 @@ async def test_worker_writeback_uses_system_identity(
     assert captured["pocket_id"] == pocket_id
     # Writeback is a partial-spec merge carrying only state.
     assert captured["body"]["merge"]["state"]["echo_value"] == "hello"
+    # Bug B — the WORKER (not the built-in) owns the success status flag, keyed
+    # by the job's ACTION name. `echo_job` returns no status key; the worker
+    # stamps `run_echo_status: "done"` so a status-bound widget lines up for any
+    # action name.
+    assert captured["body"]["merge"]["state"]["run_echo_status"] == "done"
 
     doc = await jobs_service.get_job(WS, job_id)
     assert doc is not None
@@ -842,12 +847,15 @@ async def test_score_applications_strips_pii() -> None:
         project_row,
     )
 
-    # The pure projection drops any non-allowlisted field — notably PII.
+    # The pure projection drops any non-allowlisted field — notably PII. `band`
+    # is now part of the allowlist (the heuristic emits a Strong/Moderate/Weak
+    # band alongside the score).
     projected = project_row(
         {
             "id": "a1",
             "name": "Jordan",
-            "score": 6,
+            "score": 60,
+            "band": "Moderate",
             "stage": "scored",
             "email": "jordan@example.com",
             "phone": "+1-555-0100",
@@ -857,9 +865,18 @@ async def test_score_applications_strips_pii() -> None:
     assert "email" not in projected
     assert "phone" not in projected
     assert "ssn" not in projected
-    assert projected == {"id": "a1", "name": "Jordan", "score": 6, "stage": "scored"}
+    assert projected == {
+        "id": "a1",
+        "name": "Jordan",
+        "score": 60,
+        "band": "Moderate",
+        "stage": "scored",
+    }
 
-    # End-to-end through the job: a row carrying PII never reaches the result.
+    # End-to-end through the job (params.rows fallback): a row carrying PII
+    # never reaches the result. The built-in NO LONGER returns a status key —
+    # Bug B moved `<action>_status` ownership to the worker — so the result is
+    # exactly `scored_rows` + the scored count.
     job = ScoreApplicationsJob()
     result = await job(
         workspace_id=WS,
@@ -869,7 +886,15 @@ async def test_score_applications_strips_pii() -> None:
     )
     rows = result["state"]["scored_rows"]
     assert rows and all("email" not in r and "phone" not in r for r in rows)
-    assert result["state"]["score_applications_status"] == "done"
+    # The built-in itself stamps NO status key (the worker owns it now).
+    assert "score_applications_status" not in result["state"]
+    assert result["state"]["score_applications_scored_count"] == 1
+    # The scored row carries the heuristic's score + band + stage.
+    scored = rows[0]
+    assert scored["id"] == "a1"
+    assert isinstance(scored["score"], int) and 0 <= scored["score"] <= 100
+    assert scored["band"] in ("Strong", "Moderate", "Weak")
+    assert scored["stage"] == "scored"
 
 
 # ---------------------------------------------------------------------------
@@ -1042,3 +1067,202 @@ async def test_route_no_kind_does_not_enqueue_job(
     assert res.json()["error"]["code"] == "pocket_backend.not_configured"
     # Crucially — no job was enqueued and no job_enqueued response was produced.
     assert fake_pool.calls == []
+
+
+# ---------------------------------------------------------------------------
+# CHANGE 2 — score_applications is a REAL data-backed job. With a
+# `source_collection` it reads LIVE records from that Mongo collection in the
+# cloud DB, scores the NEW ones with the real heuristic, SKIPS records already
+# in the pocket's `scored_rows` (idempotent batch advancement), accumulates the
+# rows so the canvas grows by a batch per run, and strips PII before broadcast.
+# Seeds the source via the `mongo_db` fixture handle (Beanie is initialized
+# against it, so the built-in's shared DB handle resolves to the same database).
+# ---------------------------------------------------------------------------
+
+
+async def _seed_source(mongo_db: Any, collection: str, records: list[dict]) -> None:
+    """Insert raw source records into a Mongo collection in the test DB."""
+    for rec in records:
+        await mongo_db[collection].insert_one(dict(rec))
+
+
+async def _seed_pocket_with_scored_rows(*, workspace: str, scored_rows: list[dict]) -> str:
+    """Insert a pocket whose rippleSpec.state.scored_rows is pre-populated, so
+    the built-in's idempotent dedup has an existing batch to skip against."""
+    from pocketpaw_ee.cloud.models.pocket import Pocket as _PocketDoc
+
+    doc = _PocketDoc(
+        workspace=workspace,
+        name="score-apps-pocket",
+        owner="owner-1",
+        rippleSpec={"version": "1.0", "state": {"scored_rows": list(scored_rows)}},
+    )
+    await doc.insert()
+    return str(doc.id)
+
+
+@pytest.mark.asyncio
+async def test_score_applications_source_backed_scores_new_records(
+    mongo_db: Any,
+) -> None:
+    """A `source_collection`-backed run reads live records and scores the next
+    `batch_size`, emitting a real heuristic score + band + stage per row."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {
+                "id": "app-1",
+                "name": "Jordan Strong",
+                "email": "jordan@acme.com",
+                "message": "x" * 150,
+                "referral": "linkedin.com/in/jordan",
+            },
+            {"id": "app-2", "name": "Sam Sparse"},
+            {
+                "id": "app-3",
+                "name": "Casey Throwaway",
+                "email": "casey@mailinator.com",
+            },
+        ],
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-src-1",
+        params={"source_collection": "applications", "batch_size": 20},
+    )
+
+    rows = result["state"]["scored_rows"]
+    assert {r["id"] for r in rows} == {"app-1", "app-2", "app-3"}
+    assert result["state"]["score_applications_scored_count"] == 3
+    by_id = {r["id"]: r for r in rows}
+    # The complete, referral-bearing record outscores the disposable-email one.
+    assert by_id["app-1"]["band"] == "Strong"
+    assert by_id["app-3"]["score"] < by_id["app-1"]["score"]
+    assert all(r["stage"] == "scored" for r in rows)
+    # No status key from the built-in (the worker owns it).
+    assert "score_applications_status" not in result["state"]
+
+
+@pytest.mark.asyncio
+async def test_score_applications_source_backed_is_idempotent(
+    mongo_db: Any,
+) -> None:
+    """Re-running SKIPS records already in the pocket's `scored_rows` and pulls
+    the NEXT batch, accumulating onto the existing rows (the canvas grows by a
+    batch per run rather than re-scoring the same records)."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {"id": "app-1", "name": "One", "email": "one@acme.com"},
+            {"id": "app-2", "name": "Two", "email": "two@acme.com"},
+            {"id": "app-3", "name": "Three", "email": "three@acme.com"},
+        ],
+    )
+    # app-1 is already scored on the pocket.
+    pocket_id = await _seed_pocket_with_scored_rows(
+        workspace=WS,
+        scored_rows=[
+            {"id": "app-1", "name": "One", "score": 40, "band": "Moderate", "stage": "scored"}
+        ],
+    )
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-src-2",
+        params={"source_collection": "applications", "batch_size": 1},
+    )
+
+    rows = result["state"]["scored_rows"]
+    ids = [r["id"] for r in rows]
+    # app-1 (already scored) is preserved untouched; exactly ONE new record was
+    # added (batch_size=1) — and it is NOT app-1.
+    assert ids[0] == "app-1"
+    assert len(rows) == 2
+    new_id = ids[1]
+    assert new_id in ("app-2", "app-3")
+    assert new_id != "app-1"
+    # The preserved row keeps its original score (not re-scored).
+    assert rows[0]["score"] == 40
+    assert result["state"]["score_applications_scored_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_score_applications_source_backed_strips_pii(
+    mongo_db: Any,
+) -> None:
+    """The broadcast rows from a source-backed run carry ONLY the allowlist —
+    no email / phone / raw source field reaches `state`."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    await _seed_source(
+        mongo_db,
+        "applications",
+        [
+            {
+                "id": "app-1",
+                "name": "Jordan",
+                "email": "jordan@acme.com",
+                "phone": "+1-555-0100",
+                "ssn": "000-00-0000",
+                "message": "Hello there, here is my note.",
+            }
+        ],
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-src-3",
+        params={"source_collection": "applications", "batch_size": 20},
+    )
+
+    rows = result["state"]["scored_rows"]
+    assert rows
+    row = rows[0]
+    assert "email" not in row
+    assert "phone" not in row
+    assert "ssn" not in row
+    assert "message" not in row
+    assert set(row.keys()) <= {"id", "name", "score", "band", "stage"}
+
+
+@pytest.mark.asyncio
+async def test_score_applications_missing_source_collection_returns_empty(
+    mongo_db: Any,
+) -> None:
+    """A source collection that doesn't exist reads as 'no records' (the read
+    is best-effort) — the job returns the existing rows unchanged, not a crash."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    pocket_id = await _seed_pocket_with_scored_rows(
+        workspace=WS,
+        scored_rows=[
+            {"id": "app-1", "name": "One", "score": 40, "band": "Moderate", "stage": "scored"}
+        ],
+    )
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-src-4",
+        params={"source_collection": "does_not_exist", "batch_size": 20},
+    )
+
+    rows = result["state"]["scored_rows"]
+    # Existing batch preserved; nothing new added.
+    assert [r["id"] for r in rows] == ["app-1"]
