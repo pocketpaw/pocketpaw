@@ -145,6 +145,42 @@ class S3StorageAdapter(StorageAdapter):
         except Exception:
             return None
 
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """Return the unique "sub-folder" names under ``prefix``.
+
+        Uses ``list_objects_v2`` with a ``/`` delimiter so that nested
+        keys are collapsed into CommonPrefixes — the same way S3 console
+        shows folders. Only returns the next path segment after ``prefix``.
+
+        Example::
+
+            prefix = "projects/ws1/user1/"
+            keys:   "projects/ws1/user1/foo/file.py"
+                    "projects/ws1/user1/bar/main.go"
+            result: ["foo", "bar"]
+        """
+        if not prefix.endswith("/"):
+            prefix += "/"
+        try:
+            resp = await asyncio.to_thread(
+                self._client.list_objects_v2,
+                Bucket=self._bucket,
+                Prefix=prefix,
+                Delimiter="/",
+                MaxKeys=1000,
+            )
+        except Exception:
+            return []
+        common = resp.get("CommonPrefixes", [])
+        names: list[str] = []
+        for cp in common:
+            cp_prefix = cp.get("Prefix", "")
+            # Strip the prefix to get just the immediate child name
+            relative = cp_prefix[len(prefix) :].rstrip("/")
+            if relative:
+                names.append(relative)
+        return names
+
 
 def _is_missing_key(exc: Exception) -> bool:
     """True if ``exc`` looks like an S3 404. Keeps the module importable even

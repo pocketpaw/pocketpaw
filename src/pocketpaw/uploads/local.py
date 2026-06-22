@@ -85,3 +85,22 @@ class LocalStorageAdapter(StorageAdapter):
         # Local disk can't mint a public URL. Callers fall back to the
         # HMAC-signed ``/uploads/{id}?t=...`` proxy.
         return None
+
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """Return child names (files and directories) under ``prefix``.
+
+        Non-recursive — only the immediate children. Returns an empty list
+        when the prefix path does not exist or is not a directory.
+        """
+        try:
+            parent = self._resolve(prefix)
+        except Exception:
+            return []
+        if not parent.is_dir():
+            return []
+        names: list[str] = []
+        for entry in parent.iterdir():
+            if entry.name.startswith("."):
+                continue
+            names.append(entry.name)
+        return sorted(names)

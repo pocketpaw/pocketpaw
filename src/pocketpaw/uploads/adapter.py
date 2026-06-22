@@ -56,3 +56,14 @@ class StorageAdapter(Protocol):
         Adapters that don't (local disk) return ``None``; the caller should
         fall back to its own signing scheme.
         """
+
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """List every key that starts with ``prefix`` (non-recursive, one level).
+
+        Returns the unique "sub-directory" names (the next path segment after
+        ``prefix``). S3 adapters return the CommonPrefixes from a
+        delimiter'd ``list_objects_v2``. Local adapters return the child
+        file/directory names.
+
+        Adapters that don't support prefix listing return ``[]``.
+        """

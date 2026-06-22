@@ -18,6 +18,10 @@
 #   OG link previews. Serves in both OSS and cloud since the core mount runs
 #   in both; the path is collision-free with ee/cloud's /files/* routes.
 #
+# Updated: 2026-06-22 (feat/code/cloud) — Added the Cloud Projects router
+#   (POST /api/v1/cloud/projects) for creating S3-backed project folders
+#   from the /code route's "New Cloud Project" card.
+#
 # mount_v1_routers(app) registers all domain routers at /api/v1/ (canonical).
 # Existing dashboard.py endpoints at /api/ remain as backward-compat aliases.
 
@@ -70,6 +74,7 @@ _V1_ROUTERS: list[tuple[str, str, str]] = [
     ("pocketpaw.api.v1.oauth_integrations", "router", "OAuth Integrations"),
     ("pocketpaw.api.v1.uploads", "router", "Uploads"),
     ("pocketpaw.api.v1.terminal", "router", "Terminal"),
+    ("pocketpaw.api.v1.cloud_projects", "router", "Cloud Projects"),
     ("pocketpaw.audit.router", "router", "Audit"),
     # Cluster C / PR4 — canonical runtime audit surface. `/audit` stays as
     # a deprecated alias in audit.router and `/instinct/audit` stays in
