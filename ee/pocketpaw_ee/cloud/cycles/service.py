@@ -149,6 +149,35 @@ def _require_workspace(ctx: RequestContext) -> str:
     return ctx.workspace_id
 
 
+def _record_deep_work_audit(
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Fire-and-forget audit recording for deep work operations.
+
+    Never raises — failures are logged and swallowed so an audit outage
+    cannot block a legitimate operation.
+    """
+    import asyncio
+
+    from pocketpaw_ee.cloud.audit import service as _audit_service
+
+    asyncio.ensure_future(
+        _audit_service.record(
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata or {},
+        )
+    )
+
+
 async def _fetch_in_workspace(workspace_id: str, cycle_id: str) -> _CycleDoc:
     """Fetch a cycle scoped to the caller's workspace; raise NotFound if
     the id is malformed, the doc is missing, or it lives in another
@@ -446,6 +475,14 @@ async def agent_start_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse
 
     response = _to_response(_to_domain(doc))
     await emit(CycleUpdated(data=response.model_dump()))
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.started",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"name": doc.name, "pocket_id": str(doc.pocket_id) if doc.pocket_id else None},
+    )
     return response
 
 
@@ -476,6 +513,19 @@ async def agent_close_cycle(ctx: RequestContext, cycle_id: str) -> CycleResponse
     response = _to_response(_to_domain(doc))
     payload = {**response.model_dump(), "rolled_count": rolled}
     await emit(CycleClosed(data=payload))
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.completed",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={
+            "name": doc.name,
+            "rolled_count": rolled,
+            "completed": doc.completed,
+            "scope": doc.scope,
+        },
+    )
     return response
 
 
@@ -517,6 +567,14 @@ async def agent_delete_cycle(ctx: RequestContext, cycle_id: str) -> dict[str, An
     await doc.delete()
 
     logger.info("Cycle %s deleted by user %s", cycle_id, ctx.user_id)
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.deleted",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"name": doc.name, "scope": doc.scope},
+    )
     return {"deleted": cycle_id}
 
 

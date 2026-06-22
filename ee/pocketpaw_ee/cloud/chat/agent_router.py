@@ -220,12 +220,24 @@ async def post_agent_chat(
         cursor = "0"
         while True:
             saw_terminal = False
-            async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
+            # Short block timeout so cancellation is checked promptly
+            # when the executor hasn't yet written a terminal event
+            # (e.g. blocked on pool.get / build_knowledge_context before
+            # its is_cancelled loop). If the cancel flag is set while
+            # read_events is waiting, we detect it between blocks.
+            async for ev in transport.read_events(run_id, after=cursor, block_ms=2000):
                 cursor = ev.entry_id
                 yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
                 if ev.is_terminal:
                     saw_terminal = True
             if saw_terminal:
+                return
+            # Check if the executor set the cancel flag (via /agent/stop).
+            # If so, yield a terminal event so the client sees the stream
+            # end, even if the executor hasn't written one yet (e.g. it
+            # is blocked before its cancellation loop).
+            if await transport.is_cancelled(run_id):
+                yield _sse("interrupted", {"reason": "user_cancelled"})
                 return
             yield b": ping\n\n"
 
