@@ -1,6 +1,23 @@
 """Mission Control Task Executor.
 
 Created: 2026-02-05
+Updated: 2026-06-23 — Self-Verifying Loop (SVL-3): a no-progress / oscillation
+  guard now runs INSIDE the PARTIAL / NOT_SOLVED branch, BEFORE the SVL-2
+  budget-bounded requeue decision. When there is a prior attempt to compare
+  against, it builds the current unmet-criteria fingerprint
+  (``frozenset(cr.criterion for cr in unmet)``) and the previous attempt's
+  fingerprint from the last ``verify_feedback`` record. If the task is making
+  no progress — the SAME criteria still failing (``current == prev``,
+  oscillation/stuck) OR the unmet count not shrinking (``len(current) >=
+  len(prev)``, divergence) — it escalates to BLOCKED EARLY with
+  ``verify_escalation_reason="no_progress"`` instead of burning the whole
+  requeue budget circling a dead end (``should_retry`` stays False so the
+  existing escalation cascade handles it). A task that IS progressing (strictly
+  shrinking, different unmet set) falls through to the unchanged SVL-2 requeue
+  path. The escalation cascade branch now reads ``verify_escalation_reason`` off
+  the task and tailors the operator-facing activity/broadcast to the actual
+  cause (budget_exhausted vs no_progress) rather than assuming budget burn. Flag
+  off ⇒ behaviour is byte-for-byte unchanged.
 Updated: 2026-06-23 — Self-Verifying Loop (SVL-2): the completion hook now
   ACTS on the SVL-1 verdict. A SOLVED / UNKNOWN result still passes through as
   DONE (a passing or uncheckable result is never requeued or mutated). A
@@ -328,7 +345,42 @@ class MCTaskExecutor:
                         # share a budget.
                         n = task_fresh.metadata.get("verify_requeue_count", 0)
                         max_requeues = get_settings().deep_work_verify_max_requeues
-                        if n < max_requeues:
+
+                        # SVL-3 no-progress / oscillation guard: a task can fail
+                        # the SAME criteria attempt after attempt and burn the
+                        # whole requeue budget circling a dead end. Before the
+                        # budget-bounded requeue decision, compare THIS attempt's
+                        # unmet set against the PREVIOUS attempt's. If it is
+                        # making no progress — the exact same criteria still
+                        # failing (oscillation/stuck), OR the unmet count not
+                        # shrinking (divergence) — escalate to BLOCKED EARLY
+                        # rather than wait for the budget. A task that is making
+                        # progress (strictly shrinking, different set) falls
+                        # through to the existing SVL-2 requeue logic unchanged.
+                        prior_feedback = task_fresh.metadata.get("verify_feedback")
+                        no_progress = False
+                        if prior_feedback:
+                            current = frozenset(cr.criterion for cr in unmet)
+                            prev = frozenset(
+                                item["criterion"]
+                                for item in prior_feedback[-1].get("unmet_criteria", [])
+                            )
+                            no_progress = current == prev or len(current) >= len(prev)
+
+                        if no_progress:
+                            # Same/non-shrinking unmet set: stuck. Escalate to
+                            # the SAME BLOCKED status + cascade branch as a
+                            # budget exhaustion, distinguished only by the
+                            # reason. should_retry stays False so the escalation
+                            # cascade — not the requeue path — handles it.
+                            new_task_status = TaskStatus.BLOCKED
+                            task_fresh.metadata["verify_escalation_reason"] = "no_progress"
+                            logger.info(
+                                "Task %s made no progress across requeues (unmet set "
+                                "unchanged/not shrinking); escalating to BLOCKED",
+                                task_id,
+                            )
+                        elif n < max_requeues:
                             # Append this attempt's unmet criteria to the
                             # CUMULATIVE feedback log so attempt N sees the
                             # rejections from attempts 1..N-1.
@@ -442,20 +494,26 @@ class MCTaskExecutor:
                     )
 
             elif final_status == "completed" and new_task_status == TaskStatus.BLOCKED:
-                # SVL-2 verify-escalation: the result never met its criteria and
-                # the requeue budget is spent. Surface it as a needs-review
-                # escalation in the activity feed — NOT a completion — and
-                # broadcast so an operator sees it.
+                # Verify-escalation: the result never met its criteria. Surface
+                # it as a needs-review escalation in the activity feed — NOT a
+                # completion — and broadcast so an operator sees it. The
+                # escalation has two causes (SVL-2 budget exhaustion, SVL-3
+                # no-progress); read the actual reason off the task so the
+                # operator sees WHY it stuck rather than assuming budget burn.
                 verify_n = task_fresh.metadata.get("verify_requeue_count", 0) if task_fresh else 0
                 verify_max = get_settings().deep_work_verify_max_requeues
+                escalation_reason = (
+                    task_fresh.metadata.get("verify_escalation_reason") if task_fresh else None
+                )
+                if escalation_reason == "no_progress":
+                    cause = "output kept failing the same success criteria with no progress"
+                else:
+                    cause = f"output failed its success criteria after {verify_max} requeue(s)"
                 await self._log_activity(
                     ActivityType.TASK_UPDATED,
                     agent_id=agent_id,
                     task_id=task_id,
-                    message=(
-                        f"{agent.name} escalated '{task.title}' — output failed its "
-                        f"success criteria after {verify_max} requeue(s); needs review"
-                    ),
+                    message=(f"{agent.name} escalated '{task.title}' — {cause}; needs review"),
                 )
                 await self._broadcast_event(
                     "mc_task_blocked",
@@ -463,6 +521,7 @@ class MCTaskExecutor:
                         "task_id": task_id,
                         "agent_id": agent_id,
                         "reason": "verify_escalation",
+                        "escalation_reason": escalation_reason,
                         "verify_requeue_count": verify_n,
                         "verify_max_requeues": verify_max,
                         "timestamp": now_iso(),
