@@ -1,6 +1,13 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-23: Added the deep_work Self-Verifying Loop flags (SVL-1) —
+    ``deep_work_verify_loop_enabled`` (default False; kill-switch — when
+    False deep_work tasks complete exactly as before) and
+    ``deep_work_verify_max_requeues`` (default 2; the requeue bound read by
+    SVL-2, landed here so later slices don't touch config). SVL-1 only reads
+    the enable flag to stamp an observe-only OutcomeVerdict on a completing
+    task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
   - 2026-06-18: Added the four layered/learning Instinct gate defaults —
     ``instinct_approval_level`` (default "ASK", dormant),
     ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
@@ -428,6 +435,30 @@ class Settings(BaseSettings):
             "whenever its confidence in the cheap tier falls below this "
             "threshold. High by default — a wrong skip produces a broken "
             "pocket, so the router is deliberately conservative."
+        ),
+    )
+    deep_work_verify_loop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch for the deep_work Self-Verifying Loop. When False "
+            "(default) deep_work tasks complete exactly as before — no outcome "
+            "verification, byte-for-byte today's behaviour. When True, every "
+            "task that completes successfully has its result checked against "
+            "the success_criteria captured at intake and the resulting "
+            "OutcomeVerdict is stamped on the task's metadata "
+            "(``verify_verdict``) and logged. The verdict is observe-only in "
+            "this slice (SVL-1): the task's status is NOT changed by the "
+            "verification — that is the requeue slice (SVL-2)."
+        ),
+    )
+    deep_work_verify_max_requeues: int = Field(
+        default=2,
+        description=(
+            "Max verify-driven requeues a single deep_work task may take "
+            "before the loop stops requeuing and escalates instead. Used by "
+            "the requeue slice (SVL-2); landed here so later slices don't have "
+            "to touch config. SVL-1 only READS deep_work_verify_loop_enabled "
+            "and ignores this bound."
         ),
     )
     auto_install_bundled_skills: bool = Field(

@@ -1,6 +1,13 @@
 """Mission Control Task Executor.
 
 Created: 2026-02-05
+Updated: 2026-06-23 — Self-Verifying Loop (SVL-1): when
+  ``deep_work_verify_loop_enabled`` is set, a successfully-completing task has
+  its output checked against the ``success_criteria`` in its metadata via a
+  DeterministicVerdictProvider, and the resulting OutcomeVerdict is stamped on
+  ``task.metadata["verify_verdict"]`` and logged. Observe-only — the task's
+  status is unchanged (no requeue here; that is SVL-2). Flag off ⇒ behaviour
+  is byte-for-byte unchanged.
 Updated: 2026-02-26 — Deep Work v2: Added task retry, timeout, output storage,
   and project-wide stop. Tasks now store output on task.output field. Failed tasks
   auto-retry up to max_retries. Tasks with timeout_minutes get asyncio.wait_for.
@@ -54,6 +61,7 @@ from pocketpaw.agents.router import AgentRouter  # noqa: E402
 from pocketpaw.bus.events import SystemEvent  # noqa: E402
 from pocketpaw.bus.queue import get_message_bus  # noqa: E402
 from pocketpaw.config import get_settings  # noqa: E402
+from pocketpaw.instinct.verdict_provider import DeterministicVerdictProvider  # noqa: E402
 from pocketpaw.mission_control.manager import get_mission_control_manager  # noqa: E402
 from pocketpaw.mission_control.models import (  # noqa: E402
     Activity,
@@ -262,6 +270,26 @@ class MCTaskExecutor:
             should_retry = False
             if final_status == "completed":
                 new_task_status = TaskStatus.DONE
+
+                # Self-Verifying Loop (SVL-1): when the loop is enabled, check
+                # the completed task's result against the success_criteria
+                # captured at intake and STAMP the verdict on the task — the
+                # "verify" half. This is observe-only: the verdict is recorded
+                # and logged, but the status stays DONE (no requeue in this
+                # slice — that lands in SVL-2). When the flag is off this whole
+                # block is skipped and behaviour is byte-for-byte unchanged.
+                if get_settings().deep_work_verify_loop_enabled and task_fresh:
+                    success_criteria = task_fresh.metadata.get("success_criteria", [])
+                    verdict = DeterministicVerdictProvider().verify(
+                        task_fresh.output, success_criteria
+                    )
+                    task_fresh.metadata["verify_verdict"] = verdict.model_dump()
+                    logger.info(
+                        "Task %s verify verdict: %s (%s)",
+                        task_id,
+                        verdict.status,
+                        verdict.summary,
+                    )
             elif final_status in ("error", "timeout") and task_fresh:
                 # Check if we should retry
                 if task_fresh.retry_count < task_fresh.max_retries:

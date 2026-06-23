@@ -1,5 +1,11 @@
 # End-to-end tests for the Deep Work interactive intake mode (issue #1161).
 # Created: 2026-05-21 (feat/deep-work-intake)
+# Updated: 2026-06-23 (feat/svl-1-verify-stamp) — added
+#   TestVerifyOnCompletion: drives the MC executor to completion with the
+#   Self-Verifying-Loop flag on and asserts the OutcomeVerdict stamped on
+#   ``task.metadata["verify_verdict"]`` matches a direct ``verify_outcome``
+#   call, plus a flag-off case proving the verdict is absent and behaviour is
+#   unchanged.
 #
 # These exercise the full intake → planning path against a real
 # DeepWorkSession + real GoalParser + real PlannerAgent + real
@@ -13,6 +19,8 @@
 #   - The collected answers are folded into the goal that planning sees.
 #   - Planning runs to completion and produces a project + MC tasks.
 #   - The resulting MC tasks carry the intake-captured ``success_criteria``.
+#   - With the verify loop ON, a completing task is stamped with its verdict;
+#     with it OFF, the verdict is absent (SVL-1).
 
 import json
 import tempfile
@@ -353,3 +361,152 @@ class TestIntakeOneShotPath:
 
         tasks = await manager.get_project_tasks(project.id)
         assert len(tasks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Self-Verifying Loop — verify-on-completion stamp (SVL-1)
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+import pocketpaw.mission_control.store as store_module  # noqa: E402
+from pocketpaw.agents.protocol import AgentEvent  # noqa: E402
+from pocketpaw.config import get_settings  # noqa: E402
+from pocketpaw.instinct.verification import verify_outcome  # noqa: E402
+from pocketpaw.mission_control import TaskPriority, TaskStatus  # noqa: E402
+from pocketpaw.mission_control.executor import (  # noqa: E402
+    get_mc_task_executor,
+    reset_mc_task_executor,
+)
+
+# Output the mock agent "produces" — text that satisfies the criteria below.
+# The deterministic verifier passes a criterion when every content word of it
+# appears in the result, so this output is crafted to MEET both criteria.
+_SUCCESS_OUTPUT = (
+    "Produced a list of overdue invoices, each 30+ days past due. "
+    "Every row carries an amount and a customer email address."
+)
+_SUCCESS_CRITERIA = [
+    "A list of invoices each 30+ days past due is produced",
+    "Every row has an amount and a customer email",
+]
+
+
+@pytest.fixture
+def svl_singletons(temp_store_path):
+    """Reset MC singletons and wire them all to a shared temp store.
+
+    The executor reaches the store via the module singletons (not the
+    intake ``manager`` fixture), so the verify-on-completion tests inject the
+    store the same way ``test_mission_control_executor.py`` does.
+    """
+    reset_mission_control_store()
+    reset_mission_control_manager()
+    reset_mc_task_executor()
+
+    test_store = FileMissionControlStore(temp_store_path)
+    store_module._store_instance = test_store
+
+    yield test_store
+
+    reset_mission_control_store()
+    reset_mission_control_manager()
+    reset_mc_task_executor()
+
+
+def _svl_mock_router():
+    """A mock AgentRouter that yields the success output then 'done'."""
+
+    async def mock_run(prompt):  # noqa: ARG001
+        yield AgentEvent(type="message", content=_SUCCESS_OUTPUT)
+        yield AgentEvent(type="done", content="")
+        await asyncio.sleep(0)
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    return router
+
+
+def _settings_with_verify(enabled: bool):
+    """A Settings copy with the verify-loop flag forced to ``enabled``."""
+    return get_settings().model_copy(update={"deep_work_verify_loop_enabled": enabled})
+
+
+class TestVerifyOnCompletion:
+    """SVL-1: a completing task is stamped with its outcome verdict when the
+    Self-Verifying-Loop flag is on, and left untouched when it is off."""
+
+    async def _run_one_task(self, svl_singletons, *, verify_enabled: bool):
+        """Create an agent + a task with success_criteria, run it to
+        completion through the executor with the flag set, and return the
+        reloaded task."""
+        from pocketpaw.mission_control import get_mission_control_manager
+
+        manager = get_mission_control_manager()
+        executor = get_mc_task_executor()
+
+        agent = await manager.create_agent(
+            name="FinanceBot",
+            role="Finance Assistant",
+            description="Chases overdue invoices",
+            backend="claude_agent_sdk",
+        )
+        task = await manager.create_task(
+            title="Pull the list of overdue invoices",
+            description="Query accounting for invoices 30+ days overdue",
+            priority=TaskPriority.HIGH,
+        )
+        # Stamp the intake success_criteria the planner would have captured.
+        task.metadata["success_criteria"] = list(_SUCCESS_CRITERIA)
+        await manager.save_task(task)
+        await manager.assign_task(task.id, [agent.id])
+
+        mock_router = _svl_mock_router()
+        with (
+            patch(
+                "pocketpaw.mission_control.executor.AgentRouter",
+                return_value=mock_router,
+            ),
+            patch(
+                "pocketpaw.mission_control.executor.get_settings",
+                return_value=_settings_with_verify(verify_enabled),
+            ),
+            patch("pocketpaw.mission_control.executor.get_message_bus") as mock_bus,
+        ):
+            mock_bus.return_value.publish_system = AsyncMock()
+            result = await executor.execute_task(task.id, agent.id)
+
+        assert result["status"] == "completed"
+        reloaded = await manager.get_task(task.id)
+        assert reloaded is not None
+        return reloaded
+
+    @pytest.mark.asyncio
+    async def test_flag_on_stamps_verdict_matching_direct_verify(self, svl_singletons):
+        """With the flag enabled, a successfully-completing task whose criteria
+        are met carries a ``verify_verdict`` whose status matches a direct
+        ``verify_outcome`` call on the same output + criteria."""
+        task = await self._run_one_task(svl_singletons, verify_enabled=True)
+
+        # Task still completed normally — status is DONE, not changed by verify.
+        assert task.status == TaskStatus.DONE
+
+        verdict = task.metadata.get("verify_verdict")
+        assert verdict is not None, "verify_verdict was not stamped with the flag on"
+
+        # The stamped verdict matches an independent verify_outcome call.
+        expected = verify_outcome(task.output, _SUCCESS_CRITERIA)
+        assert verdict["status"] == expected.status.value
+        # Criteria met → SOLVED.
+        assert verdict["status"] == "solved"
+
+    @pytest.mark.asyncio
+    async def test_flag_off_leaves_no_verdict_and_unchanged_behaviour(self, svl_singletons):
+        """With the flag off (default), no verdict is stamped and the task
+        completes exactly as before — status DONE, output intact."""
+        task = await self._run_one_task(svl_singletons, verify_enabled=False)
+
+        assert task.status == TaskStatus.DONE
+        assert task.output and "overdue invoices" in task.output
+        assert "verify_verdict" not in task.metadata
