@@ -27,6 +27,16 @@
 # ``__all__``) so ``init_beanie`` wires the ``credit_balances`` /
 # ``credit_ledger`` collections. Only ``cloud.credits.service`` imports these
 # doc classes (entity-isolation boundary, mirroring the pockets entity).
+#
+# Changed 2026-06-24 (BC-1 reconcile fix): ``CreditLedgerEntry`` gains two
+# fields — ``applied`` (the balance ``$inc`` for this entry has landed) and
+# ``conditional`` (this is a STRICT debit that must reject on insufficient
+# funds). They let ``reconcile`` distinguish an entry whose effect landed from a
+# phantom (committed-but-unapplied) entry, and re-drive each phantom the right
+# way instead of blindly counting it. Also corrected the ``CreditBalance``
+# invariant: the balance MAY go slightly negative from metered compute overage
+# (BC-3) — the no-overdraft guarantee is enforced at run-start, not by clamping
+# the balance to >= 0 here.
 
 from __future__ import annotations
 
@@ -49,8 +59,13 @@ class CreditBalance(TimestampedDocument):
     # UNIQUE — one balance row per workspace. The grant path upserts on this
     # key; the debit path CAS-updates the matching row.
     workspace: Indexed(str, unique=True)  # type: ignore[valid-type]
-    # Integer credits; 1 credit == $0.01. Never negative — the debit CAS only
-    # decrements a row that already holds >= the debit amount.
+    # Integer credits; 1 credit == $0.01. Usually >= 0 — a STRICT debit CAS only
+    # decrements a row that already holds >= the debit amount. It MAY go slightly
+    # negative from a metered ``allow_negative`` compute-spend debit (BC-3): a
+    # completed run is always billed, the spend already happened, so the overage
+    # is recorded as a legitimate negative balance rather than dropped. The
+    # no-overdraft guarantee is enforced at run-start (a later task) — NOT by
+    # clamping this field to >= 0. Always integer; never a float.
     balance_credits: int = 0
 
     class Settings:
@@ -69,7 +84,20 @@ class CreditLedgerEntry(TimestampedDocument):
     ``amount_delta`` is signed (positive for grant/genesis, negative for
     spend). ``balance_after`` is the wallet balance once this entry's effect
     landed — stamped after the atomic ``$inc`` returns the new balance.
-    ``reconcile`` recomputes ``balance == sum(amount_delta)`` over these rows.
+    ``reconcile`` recomputes ``balance == sum(amount_delta)`` over the rows whose
+    effect actually landed (``applied is True``).
+
+    ``applied`` closes the crash window. An entry is inserted FIRST (the
+    idempotency guard), then the balance ``$inc`` runs; ``applied`` flips to True
+    ONLY after that ``$inc`` lands. A committed entry left at ``applied is False``
+    is a phantom — its effect never reached the balance — so ``reconcile`` must
+    re-drive it, not count it.
+
+    ``conditional`` records HOW to re-drive a phantom. True only for a STRICT
+    debit (one that must reject on insufficient funds): reconcile re-drives it
+    with the ``$gte`` conditional ``$inc`` and VOIDS it if the funds aren't there
+    (it was never authorized to land). False for grants and for ``allow_negative``
+    metered debits: reconcile re-drives those with an unconditional ``$inc``.
     """
 
     # Tenant scope. Indexed (non-unique) — many entries per workspace.
@@ -80,6 +108,16 @@ class CreditLedgerEntry(TimestampedDocument):
     amount_delta: int
     # Wallet balance once this entry's effect landed. Stamped after the $inc.
     balance_after: int = 0
+    # The balance $inc for this entry has LANDED. False is the crash-window
+    # state: the entry committed but its effect never reached the balance.
+    # ``reconcile`` re-drives every ``applied is False`` entry, then sums only the
+    # applied ones. Set True in the grant / debit success paths after the $inc.
+    applied: bool = False
+    # True only for a STRICT debit (must reject on insufficient funds). False for
+    # grants and ``allow_negative`` debits. Tells ``reconcile`` whether to re-drive
+    # a phantom with the conditional $gte $inc (and void it on insufficiency) or
+    # an unconditional $inc.
+    conditional: bool = False
     # The workspace member responsible, when known (None for system grants).
     member_id: str | None = None
     # Business reason, e.g. ``top_up`` | ``subscription_grant`` | ``promo`` |

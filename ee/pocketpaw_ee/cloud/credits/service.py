@@ -51,18 +51,34 @@
 #   write, and it runs before the balance ever changed, so invariant (b) holds.
 #
 #   3. The new ``balance_after`` (returned by the atomic ``$inc``) is written
-#      back onto the ledger entry so the audit row is self-describing.
+#      back onto the ledger entry, and ``applied`` is flipped to True, so the
+#      audit row is self-describing AND ``reconcile`` can tell a landed entry
+#      from a phantom.
 #
 #   The only crash window is between the step-1 insert and the step-2 $inc: a
-#   committed ledger entry whose effect never landed on the balance.
-#   ``reconcile`` closes it — balance is defined as ``sum(amount_delta)`` over
-#   the committed ledger, so re-summing repairs any drift.
+#   committed ledger entry whose effect never landed on the balance — i.e. one
+#   left at ``applied is False``. ``reconcile`` closes it by RE-DRIVING every
+#   unapplied entry (not by blindly summing the whole ledger, which would count
+#   the phantom as if it had applied).
 #
 # Rule 9 — ``emit(CreditMovement(...))`` fires after each SUCCESSFUL grant /
 # debit (never on a no-op replay). Rule 10 — raise ``InsufficientCredits``
 # (CloudError), never HTTPException.
 #
 # Created 2026-06-23 (integration/billing-credits, BC-1): new entity.
+# Changed 2026-06-24 (BC-1 reconcile fix): an adversarial review found
+# ``reconcile`` summed ``amount_delta`` over ALL committed entries with no notion
+# of whether each entry's $inc actually LANDED, so a phantom (committed but
+# unapplied) debit drove the balance to a fabricated value. Three changes close
+# it: (1) every entry now carries an ``applied`` flag flipped True only after its
+# $inc lands; (2) ``debit`` gains ``allow_negative`` — an unconditional debit for
+# metered compute spend (BC-3) that may drive the balance below zero (a completed
+# run is always billed); a strict debit is tagged ``conditional=True``; (3)
+# ``reconcile`` now RE-DRIVES every ``applied is False`` entry (re-applying grants
+# and allow_negative debits unconditionally, re-applying strict debits with the
+# $gte guard and VOIDING them if the funds aren't there) and then sums only the
+# applied entries. The balance is NEVER clamped to >= 0 — a legitimate negative
+# from metered overage is preserved.
 
 from __future__ import annotations
 
@@ -158,12 +174,16 @@ async def grant(
     if not idempotency_key:
         raise ValidationError("credits.invalid_key", "idempotency_key is required")
 
-    # Step 1 — insert the ledger entry FIRST (the exactly-once guard).
+    # Step 1 — insert the ledger entry FIRST (the exactly-once guard). It starts
+    # ``applied=False`` (the crash-window state) and ``conditional=False`` (a
+    # grant is always re-driven unconditionally).
     entry = CreditLedgerEntry(
         workspace=workspace,
         kind=kind,
         amount_delta=amount,
         balance_after=0,  # stamped after the $inc returns the new balance
+        applied=False,
+        conditional=False,
         member_id=member_id,
         cause=cause,
         ref=dict(ref or {}),
@@ -190,8 +210,10 @@ async def grant(
     )
     new_balance = int(updated["balance_credits"])
 
-    # Step 3 — write balance_after back onto the audit row.
+    # Step 3 — the $inc landed: stamp balance_after and mark the entry applied so
+    # reconcile counts it (and never re-drives it as a phantom).
     entry.balance_after = new_balance
+    entry.applied = True
     await entry.save()
 
     await _emit_movement(entry)
@@ -207,14 +229,28 @@ async def debit(
     member_id: str | None = None,
     ref: dict | None = None,
     kind: str = "spend",
+    allow_negative: bool = False,
 ) -> int:
     """Remove ``amount`` credits from the workspace wallet. Atomic + idempotent.
 
-    Returns the new balance. Raises ``InsufficientCredits`` (402) when the
-    wallet holds fewer than ``amount`` credits — with ZERO side effects (no
-    ledger entry, no balance change). A retried call with the same
-    ``(workspace, idempotency_key)`` is a no-op that returns the current
-    balance.
+    Returns the new balance. A retried call with the same
+    ``(workspace, idempotency_key)`` is a no-op that returns the current balance.
+
+    Two modes, selected by ``allow_negative``:
+
+    * ``allow_negative=False`` (STRICT, the default): a CONDITIONAL
+      ``$inc: -amount`` filtered on ``balance_credits >= amount``. If the wallet
+      holds fewer than ``amount`` credits the movement is REJECTED with ZERO side
+      effects (the inserted ledger entry is rolled back) and ``InsufficientCredits``
+      (402) is raised. The entry is tagged ``conditional=True`` so a crashed
+      phantom is re-driven with the same funds guard (and voided if the funds
+      aren't there).
+    * ``allow_negative=True``: an UNCONDITIONAL ``$inc: -amount`` that may drive
+      the balance to or below zero and NEVER raises ``InsufficientCredits``. This
+      is metered compute spend (BC-3): a completed run is always billed — the
+      spend already happened — so the overage is recorded as a legitimate
+      negative balance. The no-overdraft guarantee is enforced at run-start, not
+      here. The entry is tagged ``conditional=False``.
     """
     # Rule 6 — validate at entry.
     if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
@@ -225,12 +261,17 @@ async def debit(
         raise ValidationError("credits.invalid_key", "idempotency_key is required")
 
     # Step 1 — insert the ledger entry FIRST (the exactly-once guard). The delta
-    # is signed negative for a debit.
+    # is signed negative for a debit. It starts ``applied=False`` (the
+    # crash-window state); ``conditional`` records whether this is a STRICT debit
+    # (must reject on insufficient funds) so reconcile re-drives a phantom the
+    # right way.
     entry = CreditLedgerEntry(
         workspace=workspace,
         kind=kind,
         amount_delta=-amount,
         balance_after=0,  # stamped after the $inc returns the new balance
+        applied=False,
+        conditional=not allow_negative,
         member_id=member_id,
         cause=cause,
         ref=dict(ref or {}),
@@ -242,28 +283,46 @@ async def debit(
         # This movement was already applied — return the current balance.
         return await _current_balance(workspace)
 
-    # Step 2 — apply the effect: CONDITIONAL $inc filtered on
-    # ``balance_credits >= amount`` so two racing debits can never both pass the
-    # funds check (compare-and-swap, not read-then-write). NO upsert — a wallet
-    # that doesn't exist yet has zero credits and cannot satisfy the filter.
     coll = CreditBalance.get_pymongo_collection()
-    updated = await coll.find_one_and_update(
-        {"workspace": workspace, "balance_credits": {"$gte": amount}},
-        {"$inc": {"balance_credits": -amount}, "$currentDate": {"updatedAt": True}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if updated is None:
-        # Insufficient funds. Roll back the ledger entry we inserted in step 1 so
-        # the rejected debit leaves NO trace (invariant b) and a retry with the
-        # same key can re-evaluate cleanly (the key is free again).
-        await entry.delete()
-        available = await _current_balance(workspace)
-        raise InsufficientCredits(amount, available)
+    if allow_negative:
+        # Step 2 (metered) — UNCONDITIONAL $inc: the balance may go to or below
+        # zero. Upsert so a never-seen wallet still records the spend (it lands
+        # at -amount, a legitimate negative). Never raises InsufficientCredits.
+        updated = await coll.find_one_and_update(
+            {"workspace": workspace},
+            {
+                "$inc": {"balance_credits": -amount},
+                "$setOnInsert": {"createdAt": datetime.now(UTC)},
+                "$currentDate": {"updatedAt": True},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    else:
+        # Step 2 (strict) — CONDITIONAL $inc filtered on
+        # ``balance_credits >= amount`` so two racing debits can never both pass
+        # the funds check (compare-and-swap, not read-then-write). NO upsert — a
+        # wallet that doesn't exist yet has zero credits and cannot satisfy the
+        # filter.
+        updated = await coll.find_one_and_update(
+            {"workspace": workspace, "balance_credits": {"$gte": amount}},
+            {"$inc": {"balance_credits": -amount}, "$currentDate": {"updatedAt": True}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated is None:
+            # Insufficient funds. Roll back the ledger entry we inserted in step
+            # 1 so the rejected debit leaves NO trace (invariant b) and a retry
+            # with the same key can re-evaluate cleanly (the key is free again).
+            await entry.delete()
+            available = await _current_balance(workspace)
+            raise InsufficientCredits(amount, available)
 
     new_balance = int(updated["balance_credits"])
 
-    # Step 3 — write balance_after back onto the audit row.
+    # Step 3 — the $inc landed: stamp balance_after and mark the entry applied so
+    # reconcile counts it (and never re-drives it as a phantom).
     entry.balance_after = new_balance
+    entry.applied = True
     await entry.save()
 
     await _emit_movement(entry)
@@ -316,29 +375,125 @@ async def history(
 
 
 async def reconcile(workspace: str) -> int:
-    """Recompute the balance from the ledger and repair the CreditBalance doc.
+    """Re-drive unapplied ledger entries, then repair the CreditBalance doc.
 
-    Balance is DEFINED as ``sum(amount_delta)`` over the workspace's committed
-    ledger. This re-sums every entry and writes the result back onto the
-    CreditBalance doc when it has drifted (covers a crash between a ledger
-    insert and its balance ``$inc``). Returns the reconciled balance.
+    The balance is DEFINED as ``sum(amount_delta)`` over the entries whose effect
+    actually LANDED (``applied is True``) — NOT over every committed row. A
+    committed-but-unapplied entry is a PHANTOM: it survived the step-1 insert but
+    crashed before its balance ``$inc``, so summing it blind would invent a
+    balance the wallet never held (the review repro: grant 100 + a phantom debit
+    -1000 must not yield -950).
 
-    Idempotent: a wallet already in agreement is left untouched (and the call
-    still returns the correct balance).
+    This runs in two phases:
+
+    1. RE-DRIVE every ``applied is False`` entry, oldest first, applying its
+       effect for real:
+         * a STRICT debit (``conditional is True``) re-drives with the same
+           ``balance_credits >= amount`` conditional ``$inc``. If the funds aren't
+           there it was never authorized to land — the entry is VOIDED (deleted),
+           NOT counted, and NO negative is invented.
+         * a grant or ``allow_negative`` debit (``conditional is False``)
+           re-drives with an unconditional ``$inc`` (upserting the row).
+       Each successfully re-driven entry is stamped ``balance_after`` and marked
+       ``applied=True``.
+    2. Set ``balance_credits = sum(amount_delta)`` over the now-applied entries
+       and write it back when it has drifted. The result is NEVER clamped to
+       >= 0 — a legitimately negative balance (from ``allow_negative`` metered
+       overage) is preserved as-is.
+
+    Returns the reconciled balance. Idempotent: a wallet with no phantoms and a
+    balance already in agreement is left untouched.
     """
     if not workspace:
         raise ValidationError("credits.invalid_workspace", "workspace is required")
 
-    entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == workspace).to_list()
-    computed = sum(int(e.amount_delta) for e in entries)
-
     coll = CreditBalance.get_pymongo_collection()
+
+    # Phase 1 — re-drive every unapplied (phantom) entry, oldest first so the
+    # conditional debit guards re-evaluate against the same balance order the
+    # original calls would have seen.
+    unapplied = (
+        await CreditLedgerEntry.find(
+            CreditLedgerEntry.workspace == workspace,
+            CreditLedgerEntry.applied == False,  # noqa: E712 — Beanie field equality, not `is`
+        )
+        .sort("+_id")
+        .to_list()
+    )
+    for entry in unapplied:
+        if entry.conditional:
+            # Strict debit: re-apply only if the funds are there. ``amount_delta``
+            # is negative, so the required balance is ``-amount_delta``.
+            required = -int(entry.amount_delta)
+            updated = await coll.find_one_and_update(
+                {"workspace": workspace, "balance_credits": {"$gte": required}},
+                {
+                    "$inc": {"balance_credits": int(entry.amount_delta)},
+                    "$currentDate": {"updatedAt": True},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if updated is None:
+                # Never authorized to land — void it. Do NOT invent a negative.
+                logger.warning(
+                    "credits.reconcile: workspace=%s voiding unapplied strict debit "
+                    "(key=%s, delta=%d) — insufficient funds, never authorized",
+                    workspace,
+                    entry.idempotency_key,
+                    int(entry.amount_delta),
+                )
+                await entry.delete()
+                continue
+        else:
+            # Grant or allow_negative debit: unconditional $inc (upsert so a lost
+            # balance row is recreated). The balance may legitimately go negative.
+            updated = await coll.find_one_and_update(
+                {"workspace": workspace},
+                {
+                    "$inc": {"balance_credits": int(entry.amount_delta)},
+                    "$setOnInsert": {"createdAt": datetime.now(UTC)},
+                    "$currentDate": {"updatedAt": True},
+                },
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+
+        # The re-drive landed: stamp and mark applied.
+        entry.balance_after = int(updated["balance_credits"])
+        entry.applied = True
+        await entry.save()
+        logger.warning(
+            "credits.reconcile: workspace=%s re-drove unapplied entry (key=%s, delta=%d) "
+            "→ balance_after=%d",
+            workspace,
+            entry.idempotency_key,
+            int(entry.amount_delta),
+            entry.balance_after,
+        )
+
+    # Phase 2 — the canonical balance is the sum over the APPLIED entries.
+    applied_entries = await CreditLedgerEntry.find(
+        CreditLedgerEntry.workspace == workspace,
+        CreditLedgerEntry.applied == True,  # noqa: E712 — Beanie field equality, not `is`
+    ).to_list()
+    computed = sum(int(e.amount_delta) for e in applied_entries)
+
+    if computed < 0:
+        # Not an error — a metered allow_negative overage legitimately drives the
+        # balance below zero. Log it for visibility, but NEVER alter the value.
+        logger.warning(
+            "credits.reconcile: workspace=%s reconciled to a negative balance (%d) — "
+            "metered overage; preserving as-is",
+            workspace,
+            computed,
+        )
+
     bal_doc = await CreditBalance.find_one(CreditBalance.workspace == workspace)
     if bal_doc is None:
         if computed == 0:
-            # No wallet and no movements — nothing to repair.
+            # No wallet and no applied movements — nothing to repair.
             return 0
-        # A ledger exists but the balance row was lost — recreate it.
+        # Applied entries exist but the balance row was lost — recreate it.
         await coll.update_one(
             {"workspace": workspace},
             {
@@ -349,7 +504,8 @@ async def reconcile(workspace: str) -> int:
             upsert=True,
         )
         logger.warning(
-            "credits.reconcile: workspace=%s had ledger sum=%d but no balance row; recreated",
+            "credits.reconcile: workspace=%s had applied-ledger sum=%d but no balance row; "
+            "recreated",
             workspace,
             computed,
         )
@@ -357,7 +513,8 @@ async def reconcile(workspace: str) -> int:
 
     if int(bal_doc.balance_credits) != computed:
         logger.warning(
-            "credits.reconcile: workspace=%s balance drifted (stored=%d, ledger=%d); repaired",
+            "credits.reconcile: workspace=%s balance drifted (stored=%d, applied-ledger=%d); "
+            "repaired",
             workspace,
             int(bal_doc.balance_credits),
             computed,

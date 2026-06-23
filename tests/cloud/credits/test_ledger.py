@@ -11,6 +11,11 @@
 # calls never raise.
 #
 # Created 2026-06-23 (integration/billing-credits, BC-1): new test module.
+# Changed 2026-06-24 (BC-1 reconcile fix): added four tests covering the
+# applied/conditional fix — ``allow_negative`` metered debit driving the balance
+# below zero, reconcile re-driving an unapplied (phantom) grant, reconcile
+# re-driving-or-voiding an unapplied strict debit, and the exact review repro
+# proving reconcile never invents a balance from a phantom entry.
 
 from __future__ import annotations
 
@@ -269,3 +274,145 @@ async def test_genesis_kind_seeds_wallet(mongo_db):
     assert bal == 1000
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     assert entries[0].kind == "genesis"
+
+
+# ---------------------------------------------------------------------------
+# BC-1 reconcile fix — applied/conditional semantics.
+# ---------------------------------------------------------------------------
+
+
+async def test_allow_negative_debit_can_go_below_zero(mongo_db):
+    """A metered ``allow_negative`` debit may drive the balance below zero (a
+    completed run is always billed); a STRICT debit of the same would reject."""
+    await credits.grant(WS, 100, cause="top_up", idempotency_key="g1")
+
+    new_balance = await credits.debit(
+        WS, 300, cause="compute_spend", idempotency_key="meter", allow_negative=True
+    )
+    assert new_balance == -200
+    assert await credits.balance(WS) == -200
+
+    # The spend row records the negative balance, is applied, and is NOT
+    # conditional (so reconcile re-drives it unconditionally).
+    entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
+    spend = [e for e in entries if e.idempotency_key == "meter"][0]
+    assert spend.amount_delta == -300
+    assert spend.balance_after == -200
+    assert spend.applied is True
+    assert spend.conditional is False
+    assert spend.kind == "spend"
+
+    # A STRICT debit (the default) for the same amount on a negative wallet still
+    # rejects — the no-overdraft guard is intact for non-metered debits.
+    with pytest.raises(InsufficientCredits):
+        await credits.debit(WS, 300, cause="compute_spend", idempotency_key="strict")
+    assert await credits.balance(WS) == -200  # unchanged by the rejected strict debit
+
+
+async def test_reconcile_redrives_unapplied_grant(mongo_db):
+    """A phantom grant (entry committed, balance never inc'd) is re-driven by
+    reconcile: the grant applies and the balance becomes correct."""
+    # Real grant lands normally.
+    await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")
+    assert await credits.balance(WS) == 500
+
+    # Simulate the crash window for a SECOND grant: insert the ledger entry but
+    # never run its balance $inc (applied stays False).
+    phantom = CreditLedgerEntry(
+        workspace=WS,
+        kind="grant",
+        amount_delta=250,
+        balance_after=0,
+        applied=False,
+        conditional=False,
+        cause="promo",
+        ref={},
+        idempotency_key="phantom_grant",
+    )
+    await phantom.insert()
+    assert await credits.balance(WS) == 500  # phantom not yet applied
+
+    repaired = await credits.reconcile(WS)
+    assert repaired == 750  # 500 + re-driven 250
+    assert await credits.balance(WS) == 750
+
+    reloaded = await CreditLedgerEntry.get(phantom.id)
+    assert reloaded.applied is True
+    assert reloaded.balance_after == 750
+
+
+async def test_reconcile_redrives_or_voids_unapplied_strict_debit(mongo_db):
+    """A phantom STRICT debit that exceeds funds is VOIDED by reconcile (no
+    negative invented); a phantom strict debit within funds is APPLIED."""
+    await credits.grant(WS, 100, cause="top_up", idempotency_key="g1")
+
+    # Phantom strict debit that EXCEEDS the balance — should be voided.
+    over = CreditLedgerEntry(
+        workspace=WS,
+        kind="spend",
+        amount_delta=-1000,
+        balance_after=0,
+        applied=False,
+        conditional=True,
+        cause="compute_spend",
+        ref={},
+        idempotency_key="phantom_over",
+    )
+    await over.insert()
+
+    repaired = await credits.reconcile(WS)
+    assert repaired == 100  # over-funds phantom voided, never counted
+    assert await credits.balance(WS) == 100
+    # The voided entry no longer exists.
+    assert await CreditLedgerEntry.get(over.id) is None
+
+    # Phantom strict debit WITHIN funds — should be applied.
+    within = CreditLedgerEntry(
+        workspace=WS,
+        kind="spend",
+        amount_delta=-40,
+        balance_after=0,
+        applied=False,
+        conditional=True,
+        cause="compute_spend",
+        ref={},
+        idempotency_key="phantom_within",
+    )
+    await within.insert()
+
+    repaired2 = await credits.reconcile(WS)
+    assert repaired2 == 60  # 100 - re-driven 40
+    assert await credits.balance(WS) == 60
+    reloaded = await CreditLedgerEntry.get(within.id)
+    assert reloaded.applied is True
+    assert reloaded.balance_after == 60
+
+
+async def test_reconcile_never_invents_balance_from_phantom(mongo_db):
+    """The exact review repro: grant 100 + a phantom (unapplied) conditional
+    debit -1000 must NOT persist -950. The over-funds strict phantom is voided,
+    so the balance stays 100."""
+    await credits.grant(WS, 100, cause="top_up", idempotency_key="g1")
+
+    # The phantom conditional debit that the old reconcile would have blindly
+    # summed (100 + -1000 = -900, or the review's -950 with a stale row).
+    phantom = CreditLedgerEntry(
+        workspace=WS,
+        kind="spend",
+        amount_delta=-1000,
+        balance_after=0,
+        applied=False,
+        conditional=True,
+        cause="compute_spend",
+        ref={},
+        idempotency_key="phantom_debit",
+    )
+    await phantom.insert()
+
+    repaired = await credits.reconcile(WS)
+    assert repaired == 100, "reconcile must not invent a balance from a phantom debit"
+    assert repaired != -950
+    assert repaired != -900
+    assert await credits.balance(WS) == 100
+    # The phantom strict debit was never authorized to land — voided, not counted.
+    assert await CreditLedgerEntry.get(phantom.id) is None
