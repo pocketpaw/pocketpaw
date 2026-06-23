@@ -44,6 +44,7 @@ class CreateCloudProjectResponse(BaseModel):
     ok: bool
     project_name: str
     path: str
+    local_path: str
     workspace_id: str
     user_id: str
 
@@ -124,10 +125,22 @@ async def create_cloud_project(
         user_id,
     )
 
+    # Compute a filesystem-accessible path for the /code IDE's tree.
+    # The local adapter stores blobs under _ROOT, so a key like
+    # "projects/{ws}/{uid}/{name}/" lives at ~/.pocketpaw/uploads/… .
+    # For remote adapters (S3) local_path returns None — the frontend falls
+    # back to displaying the abstract path (no in-editor file tree access).
+    raw_local = _ADAPTER.local_path(project_key)
+    if raw_local is not None:
+        filesystem_path = f"~/{raw_local.relative_to(Path.home()).as_posix()}"
+    else:
+        filesystem_path = ""
+
     return CreateCloudProjectResponse(
         ok=True,
         project_name=name,
         path=project_key,
+        local_path=filesystem_path,
         workspace_id=workspace_id,
         user_id=user_id,
     )
@@ -167,10 +180,18 @@ async def list_cloud_projects(
         return projects
 
     for name in names:
+        project_key = f"{prefix}{name}/"
+        # Filesystem-accessible path for the /code IDE tree.
+        raw_local = _ADAPTER.local_path(project_key)
+        if raw_local is not None:
+            filesystem_path = f"~/{raw_local.relative_to(Path.home()).as_posix()}"
+        else:
+            filesystem_path = ""
         projects.append(
             {
                 "project_name": name,
-                "path": f"{prefix}{name}/",
+                "path": project_key,
+                "local_path": filesystem_path,
             }
         )
     return projects
