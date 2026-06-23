@@ -19,7 +19,7 @@ import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from pocketpaw.uploads.adapter import StorageAdapter, StoredObject
+from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
 from pocketpaw.uploads.errors import NotFound, StorageFailure
 
 logger = logging.getLogger(__name__)
@@ -180,6 +180,71 @@ class S3StorageAdapter(StorageAdapter):
             if relative:
                 names.append(relative)
         return names
+
+    async def browse(self, prefix: str) -> list[StorageItem]:
+        """List one directory level, returning both files and sub-folders.
+
+        Uses ``list_objects_v2`` with a ``/`` delimiter. Sub-directories
+        come from ``CommonPrefixes``, files from ``Contents`` (skipping
+        the directory marker object at ``prefix`` itself).
+        """
+        if not prefix.endswith("/"):
+            prefix += "/"
+        try:
+            resp = await asyncio.to_thread(
+                self._client.list_objects_v2,
+                Bucket=self._bucket,
+                Prefix=prefix,
+                Delimiter="/",
+                MaxKeys=1000,
+            )
+        except Exception:
+            return []
+
+        seen: set[str] = set()
+        items: list[StorageItem] = []
+
+        # Sub-directories (CommonPrefixes)
+        for cp in resp.get("CommonPrefixes", []):
+            cp_prefix = cp.get("Prefix", "")
+            name = cp_prefix[len(prefix) :].rstrip("/")
+            if name and name not in seen:
+                seen.add(name)
+                items.append(StorageItem(name=name, is_dir=True))
+
+        # Files (Contents) — skip the directory marker (exact match of prefix)
+        for obj in resp.get("Contents", []):
+            key = obj.get("Key", "")
+            if key == prefix:
+                continue  # skip directory marker
+            name = key[len(prefix) :]
+            if "/" in name or name in seen:
+                continue  # nested inside a sub-folder or already listed
+            seen.add(name)
+            items.append(
+                StorageItem(
+                    name=name,
+                    is_dir=False,
+                    size=obj.get("Size", 0),
+                )
+            )
+
+        items.sort(key=lambda x: (not x.is_dir, x.name.lower()))
+        return items
+
+    async def rename_key(self, old_key: str, new_key: str) -> None:
+        """Rename by copy + delete."""
+        try:
+            copy_source = {"Bucket": self._bucket, "Key": old_key}
+            await asyncio.to_thread(
+                self._client.copy_object,
+                Bucket=self._bucket,
+                CopySource=copy_source,
+                Key=new_key,
+            )
+            await self.delete(old_key)
+        except Exception as exc:
+            raise StorageFailure(f"rename_key failed: {exc}") from exc
 
 
 def _is_missing_key(exc: Exception) -> bool:

@@ -8,7 +8,7 @@ from pathlib import Path
 import aiofiles
 import aiofiles.os
 
-from pocketpaw.uploads.adapter import StorageAdapter, StoredObject
+from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
 from pocketpaw.uploads.errors import AccessDenied, NotFound, StorageFailure
 
 _CHUNK_SIZE = 64 * 1024
@@ -104,3 +104,36 @@ class LocalStorageAdapter(StorageAdapter):
                 continue
             names.append(entry.name)
         return sorted(names)
+
+    async def browse(self, prefix: str) -> list[StorageItem]:
+        """List one directory level, returning files + sub-folders with metadata."""
+        try:
+            parent = self._resolve(prefix)
+        except Exception:
+            return []
+        if not parent.is_dir():
+            return []
+        items: list[StorageItem] = []
+        for entry in parent.iterdir():
+            if entry.name.startswith("."):
+                continue
+            try:
+                st = entry.stat()
+                items.append(
+                    StorageItem(
+                        name=entry.name,
+                        is_dir=entry.is_dir(),
+                        size=st.st_size if entry.is_file() else 0,
+                    )
+                )
+            except OSError:
+                items.append(StorageItem(name=entry.name, is_dir=entry.is_dir()))
+        items.sort(key=lambda x: (not x.is_dir, x.name.lower()))
+        return items
+
+    async def rename_key(self, old_key: str, new_key: str) -> None:
+        """Rename a key on disk (atomic rename within the same filesystem)."""
+        old_path = self._resolve(old_key)
+        new_path = self._resolve(new_key)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        await aiofiles.os.rename(str(old_path), str(new_path))
