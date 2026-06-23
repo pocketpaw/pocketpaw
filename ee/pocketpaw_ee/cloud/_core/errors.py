@@ -66,6 +66,17 @@ class SeatLimitError(CloudError):
         super().__init__(402, "billing.seat_limit", f"Seat limit of {seats} reached")
 
 
+class InsufficientCredits(CloudError):
+    """Credit wallet has too few credits for the requested debit (402)."""
+
+    def __init__(self, requested: int, available: int) -> None:
+        super().__init__(
+            402,
+            "credits.insufficient",
+            f"Insufficient credits: requested {requested}, available {available}",
+        )
+
+
 class RateLimited(CloudError):
     """Rate limit exceeded (429)."""
 
@@ -96,6 +107,7 @@ __all__ = [
     "CloudError",
     "ConflictError",
     "Forbidden",
+    "InsufficientCredits",
     "Internal",
     "NotFound",
     "RateLimited",

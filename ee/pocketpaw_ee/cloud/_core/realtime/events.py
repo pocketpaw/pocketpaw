@@ -451,6 +451,25 @@ class WorkspaceJobUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "workspace_job.updated"
 
 
+# Credit ledger (BC-1, the Ledger primitive). Emitted by
+# ``credits.service`` after EVERY successful grant / debit on a workspace's
+# credit wallet (EE cloud rule 9 — emit on every write). A no-op idempotent
+# replay does NOT re-emit (the movement was already applied + emitted on the
+# first call). Listeners (billing dashboard, low-balance alerts, usage meter)
+# key off this single event per movement.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id      — tenancy.
+#   kind              — genesis | grant | spend | transfer.
+#   amount_delta      — signed credits this movement applied (+grant / -spend).
+#   balance_after     — the wallet balance once this movement landed.
+#   cause             — business reason (top_up | compute_spend | promo | ...).
+#   idempotency_key   — the caller's exactly-once key for this movement.
+@dataclass
+class CreditMovement(Event):
+    EVENT_TYPE: ClassVar[str] = "credits.movement"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

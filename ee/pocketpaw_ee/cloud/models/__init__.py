@@ -62,6 +62,7 @@ from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
@@ -198,6 +199,8 @@ __all__ = [
     "CommentAuthor",
     "CommentTarget",
     "ComposioConnection",
+    "CreditBalance",
+    "CreditLedgerEntry",
     "Cycle",
     "CycleDailyPoint",
     "FabricIngestConfig",
@@ -275,6 +278,10 @@ def get_all_documents():
         Workspace,
         WorkspaceConnector,
         ComposioConnection,
+        # Credit ledger (BC-1) — workspace-scoped wallet + append-only audit.
+        # Only ``ee.cloud.credits.service`` writes these.
+        CreditBalance,
+        CreditLedgerEntry,
         Invite,
         Group,
         InstinctApproval,
