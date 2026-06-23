@@ -1,6 +1,25 @@
 """Mission Control Task Executor.
 
 Created: 2026-02-05
+Updated: 2026-06-23 — Self-Verifying Loop (SVL-2): the completion hook now
+  ACTS on the SVL-1 verdict. A SOLVED / UNKNOWN result still passes through as
+  DONE (a passing or uncheckable result is never requeued or mutated). A
+  PARTIAL / NOT_SOLVED result is requeued: the SPECIFIC unmet criteria (+ their
+  details) are appended to a cumulative ``verify_feedback`` log, the task is set
+  back to ASSIGNED and re-dispatched via the EXISTING error-retry mechanism
+  (``should_retry`` lever + ``execute_task_background``), bounded by
+  ``deep_work_verify_max_requeues`` via a SEPARATE ``verify_requeue_count``
+  counter (independent of the error ``retry_count``). When the budget is
+  exhausted the task escalates to BLOCKED with
+  ``verify_escalation_reason="budget_exhausted"``. ``_build_task_prompt`` now
+  renders a "## Why the last attempt was rejected" section from
+  ``verify_feedback`` so the re-dispatched agent sees exactly what to fix. The
+  DONE side-effects (TASK_COMPLETED activity + deliverable save) are gated on
+  the RESOLVED ``new_task_status == DONE``, so neither a verify-requeue
+  (ASSIGNED) nor a verify-escalation (BLOCKED) marks failing work as completed
+  or saves its rejected output; an escalation logs a needs-review activity and
+  broadcasts ``mc_task_blocked`` instead. Flag off ⇒ behaviour is byte-for-byte
+  unchanged.
 Updated: 2026-06-23 — Self-Verifying Loop (SVL-1): when
   ``deep_work_verify_loop_enabled`` is set, a successfully-completing task has
   its output checked against the ``success_criteria`` in its metadata via a
@@ -61,6 +80,7 @@ from pocketpaw.agents.router import AgentRouter  # noqa: E402
 from pocketpaw.bus.events import SystemEvent  # noqa: E402
 from pocketpaw.bus.queue import get_message_bus  # noqa: E402
 from pocketpaw.config import get_settings  # noqa: E402
+from pocketpaw.instinct.models import OutcomeStatus  # noqa: E402
 from pocketpaw.instinct.verdict_provider import DeterministicVerdictProvider  # noqa: E402
 from pocketpaw.mission_control.manager import get_mission_control_manager  # noqa: E402
 from pocketpaw.mission_control.models import (  # noqa: E402
@@ -271,13 +291,14 @@ class MCTaskExecutor:
             if final_status == "completed":
                 new_task_status = TaskStatus.DONE
 
-                # Self-Verifying Loop (SVL-1): when the loop is enabled, check
-                # the completed task's result against the success_criteria
-                # captured at intake and STAMP the verdict on the task — the
-                # "verify" half. This is observe-only: the verdict is recorded
-                # and logged, but the status stays DONE (no requeue in this
-                # slice — that lands in SVL-2). When the flag is off this whole
-                # block is skipped and behaviour is byte-for-byte unchanged.
+                # Self-Verifying Loop: when the loop is enabled, check the
+                # completed task's result against the success_criteria captured
+                # at intake and STAMP the verdict on the task — the "verify"
+                # half (SVL-1). SVL-2 then ACTS on the verdict: a result that
+                # does NOT meet its criteria is requeued with the specific unmet
+                # criteria fed back, up to a budget, then escalated to BLOCKED.
+                # When the flag is off this whole block is skipped and behaviour
+                # is byte-for-byte unchanged.
                 if get_settings().deep_work_verify_loop_enabled and task_fresh:
                     success_criteria = task_fresh.metadata.get("success_criteria", [])
                     verdict = DeterministicVerdictProvider().verify(
@@ -290,6 +311,69 @@ class MCTaskExecutor:
                         verdict.status,
                         verdict.summary,
                     )
+
+                    # SVL-2: act on the verdict. SOLVED / UNKNOWN pass through
+                    # as DONE — a passing (or uncheckable) result is NEVER
+                    # requeued or mutated. PARTIAL / NOT_SOLVED means the output
+                    # missed at least one captured criterion: requeue the task
+                    # with the unmet criteria fed back, bounded by
+                    # deep_work_verify_max_requeues, then escalate to BLOCKED.
+                    if verdict.status in (
+                        OutcomeStatus.PARTIAL,
+                        OutcomeStatus.NOT_SOLVED,
+                    ):
+                        unmet = [cr for cr in verdict.criteria_results if not cr.met]
+                        # Verify-specific counter, SEPARATE from the error
+                        # retry_count so verify requeues and error retries never
+                        # share a budget.
+                        n = task_fresh.metadata.get("verify_requeue_count", 0)
+                        max_requeues = get_settings().deep_work_verify_max_requeues
+                        if n < max_requeues:
+                            # Append this attempt's unmet criteria to the
+                            # CUMULATIVE feedback log so attempt N sees the
+                            # rejections from attempts 1..N-1.
+                            task_fresh.metadata.setdefault("verify_feedback", []).append(
+                                {
+                                    "attempt": n + 1,
+                                    "status": verdict.status.value,
+                                    "summary": verdict.summary,
+                                    "unmet_criteria": [
+                                        {
+                                            "criterion": cr.criterion,
+                                            "detail": cr.detail,
+                                        }
+                                        for cr in unmet
+                                    ],
+                                }
+                            )
+                            task_fresh.metadata["verify_requeue_count"] = n + 1
+                            # Mirror the error-retry branch: ASSIGNED + the
+                            # should_retry lever drive the re-dispatch and the
+                            # callback-skip; no new dispatch machinery.
+                            new_task_status = TaskStatus.ASSIGNED
+                            should_retry = True
+                            logger.info(
+                                "Task %s failed verify (%s); requeue %d/%d with "
+                                "%d unmet criterion(s)",
+                                task_id,
+                                verdict.status,
+                                n + 1,
+                                max_requeues,
+                                len(unmet),
+                            )
+                        else:
+                            # Budget exhausted — escalate to BLOCKED (the status
+                            # the manual-retry endpoint already admits) and stamp
+                            # the reason so the operator sees why it stuck.
+                            new_task_status = TaskStatus.BLOCKED
+                            task_fresh.metadata["verify_escalation_reason"] = "budget_exhausted"
+                            logger.info(
+                                "Task %s failed verify (%s) after %d requeue(s); "
+                                "escalating to BLOCKED (budget exhausted)",
+                                task_id,
+                                verdict.status,
+                                n,
+                            )
             elif final_status in ("error", "timeout") and task_fresh:
                 # Check if we should retry
                 if task_fresh.retry_count < task_fresh.max_retries:
@@ -331,8 +415,16 @@ class MCTaskExecutor:
                 },
             )
 
-            # Log completion activity
-            if final_status == "completed":
+            # Log completion activity. The DONE side-effects (completion log +
+            # deliverable save) must run ONLY when the task actually landed
+            # DONE. SVL-2 keeps final_status == "completed" while diverting a
+            # failing result to either ASSIGNED (verify-requeue) or BLOCKED
+            # (verify-escalation), so this branch is gated on the resolved
+            # ``new_task_status`` — not on ``final_status`` alone. SOLVED /
+            # UNKNOWN / flag-off all resolve to DONE and enter here unchanged; a
+            # requeued or escalated failing result never logs "completed" or
+            # saves its rejected output as a deliverable.
+            if final_status == "completed" and new_task_status == TaskStatus.DONE:
                 await self._log_activity(
                     ActivityType.TASK_COMPLETED,
                     agent_id=agent_id,
@@ -349,30 +441,91 @@ class MCTaskExecutor:
                         task_title=task.title,
                     )
 
-            elif should_retry:
+            elif final_status == "completed" and new_task_status == TaskStatus.BLOCKED:
+                # SVL-2 verify-escalation: the result never met its criteria and
+                # the requeue budget is spent. Surface it as a needs-review
+                # escalation in the activity feed — NOT a completion — and
+                # broadcast so an operator sees it.
+                verify_n = task_fresh.metadata.get("verify_requeue_count", 0) if task_fresh else 0
+                verify_max = get_settings().deep_work_verify_max_requeues
                 await self._log_activity(
                     ActivityType.TASK_UPDATED,
                     agent_id=agent_id,
                     task_id=task_id,
                     message=(
-                        f"{agent.name} retrying '{task.title}' "
-                        f"(attempt {task_fresh.retry_count}/{task_fresh.max_retries}): "
-                        f"{error_message}"
+                        f"{agent.name} escalated '{task.title}' — output failed its "
+                        f"success criteria after {verify_max} requeue(s); needs review"
                     ),
                 )
-                # Broadcast retry event for frontend
                 await self._broadcast_event(
-                    "mc_task_retry",
+                    "mc_task_blocked",
                     {
                         "task_id": task_id,
                         "agent_id": agent_id,
-                        "retry_count": task_fresh.retry_count if task_fresh else 0,
-                        "max_retries": task_fresh.max_retries if task_fresh else 0,
-                        "error": error_message,
+                        "reason": "verify_escalation",
+                        "verify_requeue_count": verify_n,
+                        "verify_max_requeues": verify_max,
                         "timestamp": now_iso(),
                     },
                 )
-                # Re-dispatch for retry
+
+            elif should_retry:
+                # should_retry is set by two paths: the error/timeout auto-retry
+                # branch (carries error_message + the error retry_count) and the
+                # SVL-2 verify requeue (no error_message; tracked by the separate
+                # verify_requeue_count). Pick the message + counters per path so
+                # an operator sees the right story.
+                is_verify_requeue = final_status == "completed"
+                if is_verify_requeue:
+                    verify_n = (
+                        task_fresh.metadata.get("verify_requeue_count", 0) if task_fresh else 0
+                    )
+                    verify_max = get_settings().deep_work_verify_max_requeues
+                    await self._log_activity(
+                        ActivityType.TASK_UPDATED,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        message=(
+                            f"{agent.name} requeuing '{task.title}' — result did not "
+                            f"meet its success criteria "
+                            f"(verify requeue {verify_n}/{verify_max})"
+                        ),
+                    )
+                    await self._broadcast_event(
+                        "mc_task_retry",
+                        {
+                            "task_id": task_id,
+                            "agent_id": agent_id,
+                            "reason": "verify_requeue",
+                            "verify_requeue_count": verify_n,
+                            "verify_max_requeues": verify_max,
+                            "timestamp": now_iso(),
+                        },
+                    )
+                else:
+                    await self._log_activity(
+                        ActivityType.TASK_UPDATED,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        message=(
+                            f"{agent.name} retrying '{task.title}' "
+                            f"(attempt {task_fresh.retry_count}/{task_fresh.max_retries}): "
+                            f"{error_message}"
+                        ),
+                    )
+                    # Broadcast retry event for frontend
+                    await self._broadcast_event(
+                        "mc_task_retry",
+                        {
+                            "task_id": task_id,
+                            "agent_id": agent_id,
+                            "retry_count": task_fresh.retry_count if task_fresh else 0,
+                            "max_retries": task_fresh.max_retries if task_fresh else 0,
+                            "error": error_message,
+                            "timestamp": now_iso(),
+                        },
+                    )
+                # Re-dispatch for retry / requeue — same mechanism for both.
                 asyncio.create_task(self.execute_task_background(task_id, agent_id))
 
             elif final_status in ("error", "timeout"):
@@ -739,6 +892,35 @@ class MCTaskExecutor:
         sim_tick = task.metadata.get("simulation_tick")
         if sim_tick is not None:
             prompt_parts.append(f"**Simulation Tick:** {sim_tick}")
+
+        # Self-Verifying Loop (SVL-2): if a prior attempt was rejected because
+        # its output missed one or more success criteria, surface the SPECIFIC
+        # unmet criteria so the re-dispatched agent sees exactly what to fix
+        # rather than a bare "try again". The feedback log is cumulative across
+        # attempts (attempt N carries 1..N-1), so render every prior attempt's
+        # rejections — most recent first.
+        verify_feedback = task.metadata.get("verify_feedback")
+        if verify_feedback:
+            prompt_parts.extend(
+                [
+                    "",
+                    "## Why the last attempt was rejected",
+                    "A previous attempt did NOT meet the success criteria below. "
+                    "Address each unmet criterion in your work this time:",
+                ]
+            )
+            for record in reversed(verify_feedback):
+                attempt = record.get("attempt")
+                summary = record.get("summary", "")
+                header = f"**Attempt {attempt}** ({summary}):" if attempt else f"**{summary}**:"
+                prompt_parts.append(header)
+                for item in record.get("unmet_criteria", []):
+                    criterion = item.get("criterion", "")
+                    detail = item.get("detail", "")
+                    line = f"- {criterion}"
+                    if detail:
+                        line += f" — {detail}"
+                    prompt_parts.append(line)
 
         prompt_parts.extend(
             [
