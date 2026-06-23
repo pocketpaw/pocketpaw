@@ -10,11 +10,17 @@ this as a folder in their UI; the local-disk adapter creates an empty
 directory marker file.
 
 Created: 2026-06-22
+Updated: 2026-06-23 — added POST /cloud/projects/clone (git clone into project).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import mimetypes
+import os
+import re
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -57,6 +63,12 @@ class CreateCloudProjectResponse(BaseModel):
     local_path: str
     workspace_id: str
     user_id: str
+
+
+class CloneGitRepoRequest(BaseModel):
+    """Request body for cloning a git repository into a new cloud project."""
+
+    repo_url: str
 
 
 async def _empty_stream() -> AsyncIterator[bytes]:
@@ -111,6 +123,104 @@ async def _project_filesystem_path(workspace_id: str, user_id: str, project_name
     if raw_local is not None:
         return f"~/{raw_local.relative_to(Path.home()).as_posix()}"
     return ""
+
+
+# ── Git clone helpers ──────────────────────────────────────────────────────────
+
+
+def _extract_project_name(repo_url: str) -> str:
+    """Derive a safe project name from a git repository URL.
+
+    Strips protocol/authentication and normalises the path into a
+    single identifier — e.g. ``user/repo`` → ``user-repo``.
+
+    Examples::
+
+        https://github.com/user/repo.git        → user-repo
+        git@github.com:user/repo.git             → user-repo
+        https://github.com/user/repo             → user-repo
+        https://github.com/user/repo.git         → user-repo
+        https://gitlab.com/group/subgroup/repo   → subgroup-repo
+    """
+    url = repo_url.strip()
+
+    # Strip trailing .git
+    url = re.sub(r"\.git$", "", url)
+
+    # Extract the path component: everything after the host.
+    # Handles https://*, http://*, git@*, ssh://git@*
+    if "://" in url:
+        path_part = url.split("://", 1)[1]
+    elif "@" in url:
+        path_part = url.split("@", 1)[1]
+    else:
+        path_part = url
+
+    # Remove the host:port portion (first segment before a slash)
+    if "/" in path_part:
+        # ``path_part`` is something like ``github.com/user/repo`` or
+        # ``git@github.com:user/repo`` (but we already stripped the ``@`` part).
+        # Split on the first slash and take everything after.
+        segments = path_part.split("/", 1)
+        if len(segments) > 1:
+            path_part = segments[1]
+        else:
+            path_part = segments[0]
+
+    # Normalise colon separators (git@ style) to slashes.
+    path_part = path_part.replace(":", "/")
+
+    # Split into parts, filter empties, take the last two meaningful segments.
+    parts = [p for p in path_part.split("/") if p]
+    if len(parts) >= 2:
+        return f"{parts[-2]}-{parts[-1]}"
+    return parts[-1] if parts else "cloned-repo"
+
+
+async def _upload_directory(local_dir: str, project_key: str) -> None:
+    """Recursively upload a local directory tree into the storage adapter.
+
+    Skips the ``.git`` directory. Small files are read in one shot; larger
+    files stream through 64 KiB chunks so we don't buffer the whole repo in
+    memory.
+    """
+    base = Path(local_dir)
+
+    for root, dirs, files in os.walk(base):
+        # Skip the .git directory entirely.
+        dirs[:] = [d for d in dirs if d != ".git"]
+
+        for file_name in files:
+            local_path = Path(root) / file_name
+            relative = local_path.relative_to(base).as_posix()
+            full_key = f"{project_key}{relative}"
+
+            mime, _ = mimetypes.guess_type(str(local_path))
+
+            async def _stream(path: Path = local_path) -> AsyncIterator[bytes]:
+                with open(path, "rb") as fh:
+                    while True:
+                        chunk = fh.read(65536)
+                        if not chunk:
+                            break
+                        yield chunk
+
+            try:
+                await _ADAPTER.put(
+                    full_key,
+                    _stream(),
+                    mime or "application/octet-stream",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to upload %s to cloud project: %s",
+                    relative,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to upload {relative}: {exc}",
+                ) from exc
 
 
 @router.post("/cloud/projects")
@@ -173,6 +283,108 @@ async def create_cloud_project(
     return CreateCloudProjectResponse(
         ok=True,
         project_name=name,
+        path=project_key,
+        local_path=filesystem_path,
+        workspace_id=workspace_id,
+        user_id=user_id,
+    )
+
+
+@router.post("/cloud/projects/clone")
+async def clone_git_repo(
+    req: CloneGitRepoRequest,
+    http_request: Request,
+) -> CreateCloudProjectResponse:
+    """Clone a git repository into a new cloud project.
+
+    The repo is shallow-cloned (``--depth=1``) into a temporary directory,
+    then every file is uploaded to the cloud project's storage prefix.
+    The ``.git`` directory is excluded from the upload.
+
+    The project name is derived from the repository URL
+    (e.g. ``https://github.com/user/repo.git`` → ``user-repo``).
+    Returns 409 if a project with the same derived name already exists.
+    """
+    url = req.repo_url.strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="repo_url must not be empty")
+
+    project_name = _extract_project_name(url)
+
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = f"projects/{workspace_id}/{user_id}/{project_name}/"
+
+    # Idempotency check — reject if a project with this derived name exists.
+    try:
+        if await _ADAPTER.exists(project_key):
+            raise HTTPException(
+                status_code=409,
+                detail="A project for this repository already exists",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    # Create the project folder marker.
+    try:
+        await _ADAPTER.put(project_key, _empty_stream(), "application/x-directory")
+    except Exception as exc:
+        logger.exception("Failed to create cloud project folder for clone")
+        raise HTTPException(status_code=500, detail=f"Failed to create project: {exc}") from exc
+
+    # Shallow-clone into a temporary directory, then upload the tree.
+    try:
+        with tempfile.TemporaryDirectory(prefix="paw-clone-") as tmpdir:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "clone",
+                "--depth=1",
+                url,
+                tmpdir,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode != 0:
+                err = stderr.decode(errors="replace").strip()
+                # Clean up the project marker so a retry is possible.
+                await _ADAPTER.delete(project_key)
+                logger.warning("Git clone failed: url=%s  err=%s", url, err)
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Git clone failed: {err}",
+                )
+
+            await _upload_directory(tmpdir, project_key)
+    except TimeoutError:
+        await _ADAPTER.delete(project_key)
+        raise HTTPException(status_code=504, detail="Git clone timed out (120s)")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Best-effort cleanup on unexpected errors.
+        try:
+            await _ADAPTER.delete(project_key)
+        except Exception:
+            pass
+        logger.exception("Unexpected error during git clone")
+        raise HTTPException(status_code=500, detail=f"Clone failed: {exc}") from exc
+
+    logger.info(
+        "Cloned repo into cloud project: url=%s  key=%s  workspace=%s  user=%s",
+        url,
+        project_key,
+        workspace_id,
+        user_id,
+    )
+
+    filesystem_path = await _project_filesystem_path(workspace_id, user_id, project_name)
+
+    return CreateCloudProjectResponse(
+        ok=True,
+        project_name=project_name,
         path=project_key,
         local_path=filesystem_path,
         workspace_id=workspace_id,
