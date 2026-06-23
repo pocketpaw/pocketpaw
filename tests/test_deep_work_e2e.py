@@ -510,3 +510,325 @@ class TestVerifyOnCompletion:
         assert task.status == TaskStatus.DONE
         assert task.output and "overdue invoices" in task.output
         assert "verify_verdict" not in task.metadata
+
+
+# ---------------------------------------------------------------------------
+# SVL-2: requeue loop with diagnostic feedback + budget
+# ---------------------------------------------------------------------------
+
+# Output that DOES NOT satisfy either criterion in _SUCCESS_CRITERIA — the
+# deterministic verifier needs every content token of a criterion to appear in
+# the result, so a result about something unrelated yields NOT_SOLVED.
+_FAILING_OUTPUT = "I looked into the request but could not find the data needed."
+
+
+def _svl_failing_router():
+    """A mock AgentRouter whose output FAILS the success criteria every time."""
+
+    async def mock_run(prompt):  # noqa: ARG001
+        yield AgentEvent(type="message", content=_FAILING_OUTPUT)
+        yield AgentEvent(type="done", content="")
+        await asyncio.sleep(0)
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    return router
+
+
+def _svl_converging_router(fail_times: int, *, captured_prompts: list[str] | None = None):
+    """A mock AgentRouter that FAILS its criteria ``fail_times`` times, then
+    succeeds — to prove the loop converges once the agent finally satisfies the
+    criteria. Optionally records each prompt it was handed so a test can assert
+    the rejection feedback was injected on the requeue."""
+    state = {"calls": 0}
+
+    async def mock_run(prompt):
+        if captured_prompts is not None:
+            captured_prompts.append(prompt)
+        state["calls"] += 1
+        content = _FAILING_OUTPUT if state["calls"] <= fail_times else _SUCCESS_OUTPUT
+        yield AgentEvent(type="message", content=content)
+        yield AgentEvent(type="done", content="")
+        await asyncio.sleep(0)
+
+    router = MagicMock()
+    router.run = mock_run
+    router.stop = AsyncMock()
+    return router
+
+
+def _settings_with_verify_budget(enabled: bool, max_requeues: int):
+    """A Settings copy with the verify-loop flag and requeue budget forced."""
+    return get_settings().model_copy(
+        update={
+            "deep_work_verify_loop_enabled": enabled,
+            "deep_work_verify_max_requeues": max_requeues,
+        }
+    )
+
+
+class TestVerifyRequeueLoop:
+    """SVL-2: a completed task whose result does NOT meet its success_criteria
+    is requeued with the specific unmet criteria fed back, bounded by
+    ``deep_work_verify_max_requeues``, then escalated to BLOCKED."""
+
+    async def _make_agent_and_task(self):
+        from pocketpaw.mission_control import get_mission_control_manager
+
+        manager = get_mission_control_manager()
+        agent = await manager.create_agent(
+            name="FinanceBot",
+            role="Finance Assistant",
+            description="Chases overdue invoices",
+            backend="claude_agent_sdk",
+        )
+        task = await manager.create_task(
+            title="Pull the list of overdue invoices",
+            description="Query accounting for invoices 30+ days overdue",
+            priority=TaskPriority.HIGH,
+        )
+        task.metadata["success_criteria"] = list(_SUCCESS_CRITERIA)
+        await manager.save_task(task)
+        await manager.assign_task(task.id, [agent.id])
+        return manager, agent, task
+
+    async def _run_once(self, executor, task_id, agent_id, mock_router, settings):
+        """Run a single execute_task pass with the verify settings patched.
+
+        Mirrors exactly what the production re-dispatch
+        (``execute_task_background`` → ``execute_task``) invokes, but driven
+        synchronously so transitions can be asserted step by step."""
+        with (
+            patch(
+                "pocketpaw.mission_control.executor.AgentRouter",
+                return_value=mock_router,
+            ),
+            patch(
+                "pocketpaw.mission_control.executor.get_settings",
+                return_value=settings,
+            ),
+            patch("pocketpaw.mission_control.executor.get_message_bus") as mock_bus,
+        ):
+            mock_bus.return_value.publish_system = AsyncMock()
+            return await executor.execute_task(task_id, agent_id)
+
+    @pytest.mark.asyncio
+    async def test_failing_task_requeues_then_escalates_to_blocked(self, svl_singletons):
+        """A task whose output never meets its criteria is requeued at most
+        ``deep_work_verify_max_requeues`` times (each requeue back to ASSIGNED),
+        then lands BLOCKED with the escalation reason stamped. The verify
+        counter is separate from the error retry_count."""
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        max_requeues = 2
+        settings = _settings_with_verify_budget(True, max_requeues)
+        router = _svl_failing_router()
+
+        # First two passes requeue (status back to ASSIGNED), counter climbs.
+        for expected_n in (1, 2):
+            await self._run_once(executor, task.id, agent.id, router, settings)
+            reloaded = await manager.get_task(task.id)
+            assert reloaded.status == TaskStatus.ASSIGNED, (
+                f"pass {expected_n} should requeue to ASSIGNED, got {reloaded.status}"
+            )
+            assert reloaded.metadata["verify_requeue_count"] == expected_n
+            # Verify counter must NOT bleed into the error retry_count.
+            assert reloaded.retry_count == 0
+            assert "verify_escalation_reason" not in reloaded.metadata
+
+        # Third pass: budget exhausted → BLOCKED + reason stamped.
+        await self._run_once(executor, task.id, agent.id, router, settings)
+        blocked = await manager.get_task(task.id)
+        assert blocked.status == TaskStatus.BLOCKED
+        assert blocked.metadata["verify_escalation_reason"] == "budget_exhausted"
+        # Bounded: never exceeded the budget.
+        assert blocked.metadata["verify_requeue_count"] == max_requeues
+        # Cumulative feedback records every rejected attempt.
+        feedback = blocked.metadata["verify_feedback"]
+        assert len(feedback) == max_requeues
+        # The error retry path was never touched.
+        assert blocked.retry_count == 0
+
+    @pytest.mark.asyncio
+    async def test_escalation_does_not_mark_done_or_save_deliverable(self, svl_singletons):
+        """The whole point of the loop is "don't mark failing work as done". A
+        budget-exhausted escalation must NOT log a TASK_COMPLETED activity and
+        must NOT save the rejected output as a deliverable — it must instead log
+        a needs-review escalation activity."""
+        from pocketpaw.mission_control import ActivityType
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        max_requeues = 1  # exhaust quickly: one requeue, then escalate
+        settings = _settings_with_verify_budget(True, max_requeues)
+        router = _svl_failing_router()
+
+        # Spy on the deliverable save across every pass — it must never fire for
+        # this task, since the output never passes its criteria.
+        with patch.object(executor, "_save_task_deliverable", new=AsyncMock()) as deliverable_spy:
+            # Pass 1: requeue. Pass 2: budget (1) exhausted → escalate to BLOCKED.
+            await self._run_once(executor, task.id, agent.id, router, settings)
+            await self._run_once(executor, task.id, agent.id, router, settings)
+
+        blocked = await manager.get_task(task.id)
+        assert blocked.status == TaskStatus.BLOCKED
+        assert blocked.metadata["verify_escalation_reason"] == "budget_exhausted"
+
+        # The failing output was NEVER saved as a deliverable.
+        deliverable_spy.assert_not_called()
+        # And no DELIVERABLE document exists for the task.
+        docs = await manager.get_task_documents(task.id)
+        assert docs == [] or all(d.type.value != "deliverable" for d in docs)
+
+        # No TASK_COMPLETED activity was logged for this task; an escalation
+        # (TASK_UPDATED, "escalated ... needs review") was.
+        feed = await manager.get_activity_feed(limit=100)
+        task_activities = [a for a in feed if a.task_id == task.id]
+        assert all(a.type != ActivityType.TASK_COMPLETED for a in task_activities), (
+            "an escalated task must not log a TASK_COMPLETED activity"
+        )
+        escalations = [
+            a
+            for a in task_activities
+            if a.type == ActivityType.TASK_UPDATED and "escalated" in a.message
+        ]
+        assert escalations, "expected a needs-review escalation activity"
+        assert "needs review" in escalations[0].message
+
+    @pytest.mark.asyncio
+    async def test_requeue_prompt_carries_the_unmet_criteria(self, svl_singletons):
+        """The rebuilt prompt for a requeued attempt names the SPECIFIC unmet
+        criteria so the re-dispatched agent sees exactly what to fix."""
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_budget(True, 2)
+
+        captured: list[str] = []
+        router = _svl_converging_router(fail_times=99, captured_prompts=captured)
+
+        # First pass fails → requeue. Second pass rebuilds the prompt.
+        await self._run_once(executor, task.id, agent.id, router, settings)
+        await self._run_once(executor, task.id, agent.id, router, settings)
+
+        # The first prompt had no rejection section; the second one does.
+        assert "Why the last attempt was rejected" not in captured[0]
+        second = captured[1]
+        assert "Why the last attempt was rejected" in second
+        # The specific unmet criteria text appears in the feedback section.
+        for criterion in _SUCCESS_CRITERIA:
+            assert criterion in second
+
+    @pytest.mark.asyncio
+    async def test_loop_converges_when_agent_finally_succeeds(self, svl_singletons):
+        """If the agent fails once then produces a passing result on the
+        requeue, the task converges to DONE within budget — no escalation."""
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_budget(True, 2)
+        router = _svl_converging_router(fail_times=1)
+
+        # Pass 1: fails → requeue to ASSIGNED.
+        await self._run_once(executor, task.id, agent.id, router, settings)
+        mid = await manager.get_task(task.id)
+        assert mid.status == TaskStatus.ASSIGNED
+        assert mid.metadata["verify_requeue_count"] == 1
+
+        # Pass 2: now passes → DONE, no escalation, counter unchanged.
+        await self._run_once(executor, task.id, agent.id, router, settings)
+        done = await manager.get_task(task.id)
+        assert done.status == TaskStatus.DONE
+        assert done.metadata["verify_verdict"]["status"] == "solved"
+        assert "verify_escalation_reason" not in done.metadata
+        assert done.metadata["verify_requeue_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_solved_task_goes_straight_to_done_no_requeue(self, svl_singletons):
+        """A passing (SOLVED) result is NEVER requeued or mutated: status DONE,
+        no requeue counter, no feedback, no escalation."""
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_budget(True, 2)
+        router = _svl_mock_router()  # always emits the passing output
+
+        result = await self._run_once(executor, task.id, agent.id, router, settings)
+        assert result["status"] == "completed"
+
+        done = await manager.get_task(task.id)
+        assert done.status == TaskStatus.DONE
+        assert done.metadata["verify_verdict"]["status"] == "solved"
+        assert done.metadata.get("verify_requeue_count", 0) == 0
+        assert "verify_feedback" not in done.metadata
+        assert "verify_escalation_reason" not in done.metadata
+
+    @pytest.mark.asyncio
+    async def test_flag_off_never_requeues_a_failing_task(self, svl_singletons):
+        """With the flag OFF a failing result completes DONE exactly as before —
+        no verdict, no requeue, no escalation. SVL-2 is fully inert."""
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        settings = _settings_with_verify_budget(False, 2)
+        router = _svl_failing_router()
+
+        result = await self._run_once(executor, task.id, agent.id, router, settings)
+        assert result["status"] == "completed"
+
+        done = await manager.get_task(task.id)
+        assert done.status == TaskStatus.DONE
+        assert "verify_verdict" not in done.metadata
+        assert "verify_requeue_count" not in done.metadata
+        assert "verify_feedback" not in done.metadata
+        assert "verify_escalation_reason" not in done.metadata
+
+    @pytest.mark.asyncio
+    async def test_real_redispatch_chain_auto_requeues_to_blocked(self, svl_singletons):
+        """End-to-end through the REAL re-dispatch path: launch via
+        ``execute_task_background`` and let the production
+        ``asyncio.create_task`` chain run. The loop must auto-requeue itself and
+        settle on BLOCKED without the test driving each pass."""
+
+        manager, agent, task = await self._make_agent_and_task()
+        executor = get_mc_task_executor()
+        max_requeues = 2
+        settings = _settings_with_verify_budget(True, max_requeues)
+        router = _svl_failing_router()
+
+        with (
+            patch(
+                "pocketpaw.mission_control.executor.AgentRouter",
+                return_value=router,
+            ),
+            patch(
+                "pocketpaw.mission_control.executor.get_settings",
+                return_value=settings,
+            ),
+            patch("pocketpaw.mission_control.executor.get_message_bus") as mock_bus,
+        ):
+            mock_bus.return_value.publish_system = AsyncMock()
+            launched = await executor.execute_task_background(task.id, agent.id)
+            assert launched is True
+
+            # Poll until the self-requeuing chain settles on a terminal state.
+            for _ in range(200):
+                await asyncio.sleep(0.02)
+                current = await manager.get_task(task.id)
+                if (
+                    current.status == TaskStatus.BLOCKED
+                    and current.id not in executor._running_tasks
+                ):
+                    break
+            else:  # pragma: no cover - only hit if the loop never settles
+                pytest.fail(
+                    f"requeue chain did not settle; last status={current.status}, "
+                    f"requeues={current.metadata.get('verify_requeue_count')}"
+                )
+
+        settled = await manager.get_task(task.id)
+        assert settled.status == TaskStatus.BLOCKED
+        assert settled.metadata["verify_escalation_reason"] == "budget_exhausted"
+        assert settled.metadata["verify_requeue_count"] == max_requeues
