@@ -10,6 +10,10 @@
 # Updated 2026-06-24 (BC-7): added ``CreateSubscriptionRequest`` /
 #   ``CreateSubscriptionResponse`` for ``POST /billing/subscribe`` — open a
 #   recurring checkout for a plan tier. Same hosted-url-out shape as top-up.
+# Updated 2026-06-24 (S1 review fix): ``CreateTopupRequest.amount_credits`` now
+#   carries an upper bound (``le=1_000_000`` == $10,000). Without a ceiling a
+#   typo'd / hostile amount could open a checkout for an absurd sum; over-ceiling
+#   now 422s at the DTO before the service is reached.
 
 from __future__ import annotations
 
@@ -20,10 +24,16 @@ class CreateTopupRequest(BaseModel):
     """Body of ``POST /billing/topup`` — buy ``amount_credits`` of credits.
 
     ``amount_credits`` is integer credits (1 credit == $0.01); it must be a
-    positive integer. The service validates again at entry (defence in depth).
+    positive integer at or below the ceiling. The service validates again at
+    entry (defence in depth).
     """
 
-    amount_credits: int = Field(..., gt=0, description="Credits to buy (1 credit == $0.01).")
+    amount_credits: int = Field(
+        ...,
+        gt=0,
+        le=1_000_000,
+        description="Credits to buy (1 credit == $0.01). Capped at 1,000,000 credits ($10,000).",
+    )
 
 
 class CreateTopupResponse(BaseModel):

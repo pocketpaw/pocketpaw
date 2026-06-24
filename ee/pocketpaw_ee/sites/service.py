@@ -1,6 +1,12 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-24 (C1 review fix — _cf_client guard): ``_cf_client`` reads the
+# PAW_CF_* vars with ``os.environ.get`` and raises a ``ValidationError``
+# (CloudError → 422) when any is missing, instead of a raw ``KeyError`` (an
+# unhandled 500). ``add_domain`` calls it directly, so an unconfigured Cloudflare
+# now returns a clean "Cloudflare is not configured" error.
+#
 # Updated 2026-06-24 (BC-9 — per-site annual plan + publish entitlement gate):
 # ``publish_pocket`` gained ``site_plan_key`` (the per-site tier from
 # ``billing.site_plans``, defaulting to the base tier) and now — after a LIVE
@@ -550,15 +556,28 @@ def _default_allowed_origins() -> list[str]:
 
 
 def _cf_client():
-    """Build the real Cloudflare client from settings (env). Injected in tests."""
+    """Build the real Cloudflare client from settings (env). Injected in tests.
+
+    C1 review fix — reads the required vars with ``os.environ.get`` and raises a
+    ``ValidationError`` (CloudError → 422, mapped by the cloud error handler) when
+    any is missing, instead of a raw ``KeyError`` (which surfaces as an unhandled
+    500). ``add_domain`` calls this directly, so an unconfigured Cloudflare now
+    returns a clean "Cloudflare is not configured" error rather than a 500.
+    """
     import os
 
     from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
 
+    account_id = os.environ.get("PAW_CF_ACCOUNT_ID")
+    api_token = os.environ.get("PAW_CF_API_TOKEN")
+    zone_id = os.environ.get("PAW_CF_ZONE_ID")
+    if not (account_id and api_token and zone_id):
+        raise ValidationError("sites.cloudflare_unconfigured", "Cloudflare is not configured")
+
     return CloudflareClient(
-        account_id=os.environ["PAW_CF_ACCOUNT_ID"],
-        api_token=os.environ["PAW_CF_API_TOKEN"],
-        zone_id=os.environ["PAW_CF_ZONE_ID"],
+        account_id=account_id,
+        api_token=api_token,
+        zone_id=zone_id,
         dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
     )
 

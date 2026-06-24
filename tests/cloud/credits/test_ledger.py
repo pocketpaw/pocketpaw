@@ -35,8 +35,9 @@ WS = "ws_credit_test"
 
 
 async def test_grant_raises_balance(mongo_db):
-    new_balance = await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")
-    assert new_balance == 500
+    result = await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")
+    assert result.balance == 500
+    assert result.created is True
     assert await credits.balance(WS) == 500
 
     # A second, distinct grant accumulates.
@@ -100,8 +101,10 @@ async def test_over_debit_raises_and_has_no_side_effects(mongo_db):
 async def test_duplicate_idempotency_key_is_noop_for_grant(mongo_db):
     first = await credits.grant(WS, 400, cause="top_up", idempotency_key="dup")
     second = await credits.grant(WS, 400, cause="top_up", idempotency_key="dup")
-    assert first == 400
-    assert second == 400  # returns current balance, does NOT re-apply
+    assert first.balance == 400
+    assert first.created is True  # the first call NEWLY applied the grant
+    assert second.balance == 400  # returns current balance, does NOT re-apply
+    assert second.created is False  # B1 — the replay is detected via created, not a delta
     assert await credits.balance(WS) == 400
 
     # Exactly one ledger row for the key.
@@ -263,15 +266,21 @@ async def test_grant_emits_credit_movement(mongo_db, recording_bus):
 
 
 async def test_duplicate_replay_does_not_re_emit(mongo_db, recording_bus):
-    await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")
-    await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")  # replay
+    first = await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")
+    replay = await credits.grant(WS, 500, cause="top_up", idempotency_key="g1")  # replay
+    # B1 — the replay reports created=False (the authoritative replay signal the
+    # billing webhook gates its capture emit on), and does NOT re-emit.
+    assert first.created is True
+    assert replay.created is False
+    assert replay.balance == 500  # current balance, not re-applied
     movements = [e for e in recording_bus.events if e.type == "credits.movement"]
     assert len(movements) == 1  # the no-op replay did not re-emit
 
 
 async def test_genesis_kind_seeds_wallet(mongo_db):
-    bal = await credits.grant(WS, 1000, cause="genesis", idempotency_key="gen", kind="genesis")
-    assert bal == 1000
+    result = await credits.grant(WS, 1000, cause="genesis", idempotency_key="gen", kind="genesis")
+    assert result.balance == 1000
+    assert result.created is True
     entries = await CreditLedgerEntry.find(CreditLedgerEntry.workspace == WS).to_list()
     assert entries[0].kind == "genesis"
 

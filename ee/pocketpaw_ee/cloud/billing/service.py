@@ -40,6 +40,13 @@
 #   also upgrades ``Workspace.plan``; ``subscription.cancelled`` reverts the plan
 #   to ``free`` WITHOUT clawing back granted credits. The Subscription doc tracks
 #   the gateway lifecycle alongside the per-renewal BC-1 grants.
+# Updated 2026-06-24 (B1 review fix): the capture-event emit (BillingTopupCaptured
+#   / BillingSubscriptionGranted) is now gated on ``credits.grant``'s ``created``
+#   flag, NOT the prior balance-delta heuristic (``new_balance == before +
+#   amount``). Under concurrency a racing grant could shift the balance so a
+#   genuine first grant looked like a replay (emit wrongly suppressed) or a replay
+#   looked genuine (spurious emit). ``grant`` now returns a ``GrantResult``; the
+#   created-flag is the authoritative "this grant actually applied" signal.
 # Updated 2026-06-24 (BC-9, per-site annual plan): the subscription webhook
 #   dispatch now FORKS on a ``site_id`` in the verified event metadata. A delivery
 #   WITH a ``site_id`` is a PER-SITE annual sub (each published site has its own
@@ -234,9 +241,9 @@ async def handle_webhook(
 
     EXACTLY-ONCE: every grant keys on the webhook ``event_id`` (BC-1's unique
     ``(workspace, idempotency_key)`` index), so a replayed delivery re-grants
-    nothing. We detect the replay (same balance before/after the grant) to avoid
-    a spurious capture emit, and the ``Payment`` row's own unique index keeps the
-    record single too.
+    nothing. We detect the replay via ``credits.grant``'s ``created`` flag
+    (False on a duplicate-key replay) to avoid a spurious capture emit, and the
+    ``Payment`` row's own unique index keeps the record single too.
     """
     prov = provider or _default_provider()
 
@@ -286,17 +293,19 @@ async def handle_webhook(
 
     # Grant EXACTLY ONCE — idempotency is keyed on the webhook event id. A replay
     # collides on BC-1's unique (workspace, idempotency_key) index and no-ops.
-    balance_before = await credits_service.balance(event.workspace_id)
-    new_balance = await credits_service.grant(
+    result = await credits_service.grant(
         workspace=event.workspace_id,
         amount=event.amount_credits,
         cause="top_up",
         idempotency_key=event.event_id,
         ref={"gateway": _GATEWAY, "event_id": event.event_id},
     )
-    # A genuine first grant moved the balance up by amount_credits; a replay
-    # returns the unchanged current balance.
-    applied = new_balance == balance_before + event.amount_credits
+    new_balance = result.balance
+    # A genuine first grant reports ``created=True``; a replay reports False. We
+    # gate the capture emit on this authoritative flag, NOT a balance delta — a
+    # delta heuristic mis-fires under concurrency (a racing grant could mask a
+    # genuine grant as a replay or vice versa).
+    applied = result.created
 
     # Record the payment (idempotently — the unique gateway+event_id index keeps
     # a replay from inserting a second row). The ledger entry is the money guard;
@@ -439,8 +448,7 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         # on the per-renewal event id. A replay of THIS event collides on BC-1's
         # unique (workspace, idempotency_key) index and no-ops; each NEW month's
         # renewal carries a fresh event id and grants again.
-        balance_before = await credits_service.balance(event.workspace_id)
-        new_balance = await credits_service.grant(
+        result = await credits_service.grant(
             workspace=event.workspace_id,
             amount=tier.monthly_credit_allotment,
             cause="subscription_grant",
@@ -452,7 +460,11 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
                 "subscription_id": event.subscription_id,
             },
         )
-        applied = new_balance == balance_before + tier.monthly_credit_allotment
+        new_balance = result.balance
+        # Gate the grant emit on the authoritative created-flag (True on a real
+        # first grant, False on a duplicate-key replay), NOT a balance delta — the
+        # delta heuristic races under concurrency.
+        applied = result.created
 
     # subscription.active upgrades the entitlement to the subscribed tier.
     if event.type == _SUB_ACTIVE:
@@ -570,10 +582,26 @@ async def _upsert_subscription(event: SubscriptionEvent, *, status: str, plan_ke
 
     Keyed on the unique ``(gateway, gateway_subscription_id)`` index: a first
     activation inserts, a renewal / cancellation of a known subscription updates
-    the existing row's status / plan. A missing ``subscription_id`` (the gateway
-    didn't carry one) is recorded with an empty id rather than crashing the
-    webhook — the BC-1 grant is the money guard, this row is only the audit trail.
+    the existing row's status / plan.
+
+    B2 review fix — a missing / falsy ``subscription_id`` is SKIPPED (logged), not
+    recorded with an empty id. Two different workspaces whose verified events both
+    carry no subscription_id would otherwise collide on the unique
+    ``(gateway, "")`` key — the second delivery would overwrite the FIRST
+    workspace's audit row (cross-tenant corruption). The grant + plan change still
+    proceed in the caller (the BC-1 ledger is the money guard); only this
+    audit-trail row is skipped. The index is intentionally left unchanged.
     """
+    if not event.subscription_id:
+        logger.warning(
+            "billing.webhook: %s for workspace=%s carried no subscription_id "
+            "(event_id=%s) — skipping Subscription audit upsert (grant/plan still applied)",
+            event.type,
+            event.workspace_id,
+            event.event_id,
+        )
+        return
+
     existing = await Subscription.find_one(
         Subscription.gateway == _GATEWAY,
         Subscription.gateway_subscription_id == event.subscription_id,

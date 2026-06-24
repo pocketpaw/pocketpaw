@@ -20,6 +20,9 @@
 # Updated 2026-06-24 (security): add test_non_usd_event_does_not_grant (the
 #   USD-only grant guard) and test_dodo_secrets_are_in_secret_fields (the Dodo
 #   secrets are on the encrypted-persistence allowlist).
+# Updated 2026-06-24 (S1 review fix): add test_topup_request_rejects_over_ceiling /
+#   _accepts_ceiling — CreateTopupRequest.amount_credits is capped at 1,000,000
+#   credits ($10,000); an over-ceiling amount is a 422 at the DTO.
 
 from __future__ import annotations
 
@@ -396,6 +399,35 @@ async def test_create_topup_product_unconfigured_raises(mongo_db):
     with pytest.raises(ValidationError) as exc:
         await billing.create_topup(workspace_id=WS, user_id="u1", amount_credits=100, provider=prov)
     assert exc.value.code == "billing.product_unconfigured"
+
+
+# ---------------------------------------------------------------------------
+# S1 review fix — the top-up amount has an upper ceiling (1,000,000 credits ==
+# $10,000). Over-ceiling is a 422 at the DTO before the service is reached.
+# ---------------------------------------------------------------------------
+
+
+def test_topup_request_rejects_over_ceiling():
+    from pocketpaw_ee.cloud.billing.dto import CreateTopupRequest
+    from pydantic import ValidationError as PydanticValidationError
+
+    with pytest.raises(PydanticValidationError):
+        CreateTopupRequest(amount_credits=1_000_001)  # one over the $10,000 cap
+
+
+def test_topup_request_accepts_ceiling_and_below():
+    from pocketpaw_ee.cloud.billing.dto import CreateTopupRequest
+
+    assert CreateTopupRequest(amount_credits=1_000_000).amount_credits == 1_000_000
+    assert CreateTopupRequest(amount_credits=1).amount_credits == 1
+
+
+def test_topup_request_still_rejects_non_positive():
+    from pocketpaw_ee.cloud.billing.dto import CreateTopupRequest
+    from pydantic import ValidationError as PydanticValidationError
+
+    with pytest.raises(PydanticValidationError):
+        CreateTopupRequest(amount_credits=0)
 
 
 # ---------------------------------------------------------------------------

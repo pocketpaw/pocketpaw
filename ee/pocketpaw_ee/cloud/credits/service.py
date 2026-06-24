@@ -4,7 +4,11 @@
 # module imports ``models.credit``).
 #
 # Module-level ``async def`` API (NOT a class, per EE cloud rule). Public API:
-#   * ``grant``     — add credits, idempotent. Returns the new balance.
+#   * ``grant``     — add credits, idempotent. Returns a ``GrantResult`` carrying
+#                     the new balance AND ``created`` (True on a real first grant,
+#                     False on a duplicate-key replay) so callers gate side
+#                     effects on the authoritative created-flag, not a balance
+#                     delta that races under concurrency.
 #   * ``debit``     — remove credits, idempotent + atomic. Raises
 #                     ``InsufficientCredits`` (402) on over-debit, with ZERO
 #                     side effects. Returns the new balance.
@@ -88,6 +92,13 @@
 # it BEFORE create_run/submit, but ONLY when ``settings.billing_enforced`` is on,
 # so OSS/self-host (flag default False) is unaffected and IN-FLIGHT runs are never
 # touched. Kept flag-free here so the check stays reusable.
+# Changed 2026-06-24 (B1 review fix): ``grant`` now returns a ``GrantResult``
+# (balance + ``created``) instead of a bare int. ``created`` is True only when the
+# ledger entry was NEWLY inserted, False on the ``DuplicateKeyError`` replay path.
+# Billing's webhook keyed its capture-event emit on a balance-delta heuristic
+# (``new_balance == before + amount``) that is wrong under concurrency — a racing
+# grant could suppress a genuine emit or fire a spurious one. The created-flag is
+# the authoritative replay signal; callers gate the emit on it.
 
 from __future__ import annotations
 
@@ -102,7 +113,7 @@ from pymongo.errors import DuplicateKeyError
 from pocketpaw_ee.cloud._core.errors import InsufficientCredits, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CreditMovement
-from pocketpaw_ee.cloud.credits.domain import LedgerEntry
+from pocketpaw_ee.cloud.credits.domain import GrantResult, LedgerEntry
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 
 logger = logging.getLogger(__name__)
@@ -164,12 +175,15 @@ async def grant(
     member_id: str | None = None,
     ref: dict | None = None,
     kind: str = "grant",
-) -> int:
+) -> GrantResult:
     """Add ``amount`` credits to the workspace wallet. Idempotent.
 
-    Returns the new balance. A retried call with the same
-    ``(workspace, idempotency_key)`` is a no-op that returns the current
-    balance — the movement already applied.
+    Returns a ``GrantResult`` of ``(balance, created)``. ``created`` is True when
+    this call NEWLY applied the grant; a retried call with the same
+    ``(workspace, idempotency_key)`` is a no-op that returns the current balance
+    with ``created=False`` — the movement already applied. Callers gate their
+    "money moved" side effects (e.g. a capture-event emit) on ``created``, never
+    on a balance delta, which is unreliable under concurrency.
 
     ``kind`` defaults to ``"grant"``; pass ``"genesis"`` to seed a fresh
     wallet's first credits (the ledger origin row).
@@ -201,8 +215,10 @@ async def grant(
     try:
         await entry.insert()
     except DuplicateKeyError:
-        # This movement was already applied — return the current balance.
-        return await _current_balance(workspace)
+        # This movement was already applied — return the current balance and
+        # signal a replay (created=False) so the caller suppresses any
+        # money-moved side effect (e.g. a capture-event emit).
+        return GrantResult(balance=await _current_balance(workspace), created=False)
 
     # Step 2 — apply the effect: unconditional $inc with upsert (creates the
     # balance row at 0 then increments in one atomic call).
@@ -226,7 +242,7 @@ async def grant(
     await entry.save()
 
     await _emit_movement(entry)
-    return new_balance
+    return GrantResult(balance=new_balance, created=True)
 
 
 async def debit(
@@ -404,6 +420,17 @@ async def history(
 async def reconcile(workspace: str) -> int:
     """Re-drive unapplied ledger entries, then repair the CreditBalance doc.
 
+    WARNING — MANUAL RECOVERY TOOL, RUN QUIESCENT ONLY (B4). This is an operator
+    repair path for the rare crash-window drift (a committed ledger entry whose
+    balance ``$inc`` never landed), NOT a hot-path routine. It re-drives unapplied
+    entries and re-sums the ledger in MULTIPLE non-atomic steps, so it MUST run
+    with writes to this workspace's wallet PAUSED (quiescent). A concurrent grant
+    or debit racing a reconcile can interleave with the re-drive / re-sum and
+    corrupt the balance. Do NOT call it on every request, do NOT wire it into the
+    grant/debit path, and do NOT "rebuild" it into an always-on reconciler —
+    grant/debit are already individually atomic + idempotent; reconcile only exists
+    to repair the crash-window phantom after the fact, under operator control.
+
     The balance is DEFINED as ``sum(amount_delta)`` over the entries whose effect
     actually LANDED (``applied is True``) — NOT over every committed row. A
     committed-but-unapplied entry is a PHANTOM: it survived the step-1 insert but
@@ -554,6 +581,7 @@ async def reconcile(workspace: str) -> int:
 
 
 __all__ = [
+    "GrantResult",
     "balance",
     "check_balance",
     "debit",

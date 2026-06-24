@@ -24,6 +24,12 @@
 # — the credit wallet is keyed on the workspace id string the same way.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-7): new test module.
+# Updated 2026-06-24 (B2 review fix): added
+#   test_empty_subscription_id_does_not_corrupt_cross_tenant — two workspaces whose
+#   verified active events both carry an EMPTY subscription_id must NOT collide on
+#   the unique (gateway, "") Subscription index. The fix SKIPS the audit upsert on
+#   a falsy subscription_id, so the second workspace never overwrites the first's
+#   row; the grant + plan change still apply for both.
 
 from __future__ import annotations
 
@@ -400,3 +406,54 @@ async def test_provider_reverse_maps_product_id_when_plan_key_missing():
     headers = _sign(body, msg_id="evt_reverse_1")
     event = _provider().verify_and_parse_webhook(payload=body.encode(), headers=headers)
     assert event.plan_key == "business"  # recovered from product_id reverse-map
+
+
+# ---------------------------------------------------------------------------
+# B2 review fix — an empty subscription_id must NOT collide two workspaces on the
+# unique (gateway, gateway_subscription_id) Subscription index. The fix skips the
+# audit upsert on a falsy subscription_id; the grant + plan change still apply.
+# ---------------------------------------------------------------------------
+
+
+async def test_empty_subscription_id_does_not_corrupt_cross_tenant(mongo_db):
+    # Distinct starting plans → distinct workspace slugs (the helper derives the
+    # slug from the plan, and slug is uniquely indexed). Both are below business,
+    # so the active event upgrades each to business.
+    ws_a = await _make_workspace(plan="free")
+    ws_b = await _make_workspace(plan="team")
+    allotment = plans.get_plan("business").monthly_credit_allotment
+    assert allotment > 0
+
+    # Two DIFFERENT workspaces each get a verified active event carrying an EMPTY
+    # subscription_id (the gateway didn't send one). Before the fix the second
+    # would overwrite the first's Subscription row via the (dodo, "") unique key.
+    body_a = _subscription_body(
+        event_type="subscription.active", workspace_id=ws_a, subscription_id=""
+    )
+    res_a = await billing.handle_webhook(
+        payload=body_a.encode(),
+        headers=_sign(body_a, msg_id="evt_empty_sub_a"),
+        provider=_provider(),
+    )
+    body_b = _subscription_body(
+        event_type="subscription.active", workspace_id=ws_b, subscription_id=""
+    )
+    res_b = await billing.handle_webhook(
+        payload=body_b.encode(),
+        headers=_sign(body_b, msg_id="evt_empty_sub_b"),
+        provider=_provider(),
+    )
+
+    # The grant + plan change still happen for BOTH (the money path is unaffected).
+    assert res_a == {"ok": True, "granted": True}
+    assert res_b == {"ok": True, "granted": True}
+    assert await credits.balance(ws_a) == allotment
+    assert await credits.balance(ws_b) == allotment
+    assert (await entitlements.resolve_entitlements(ws_a)).plan == "business"
+    assert (await entitlements.resolve_entitlements(ws_b)).plan == "business"
+
+    # And NO Subscription audit row was written for either (the upsert is skipped
+    # on a falsy id), so there is no cross-tenant overwrite — workspace A's audit
+    # trail is never replaced by workspace B's.
+    subs = await Subscription.find().to_list()
+    assert subs == []

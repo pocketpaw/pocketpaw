@@ -13,8 +13,9 @@
 #                                POCKETPAW_CREDIT_USD).
 #   * ``bill_run(run_doc)``    — compute credits and debit the wallet once, keyed
 #                                on ``run:{run_id}`` (BC-1's idempotency guard),
-#                                then flip ``run_doc.billed`` True. Returns a
-#                                ``BillResult``.
+#                                then mark the run billed via
+#                                ``chat.runs.service.mark_billed`` (the doc's
+#                                owner). Returns a ``BillResult``.
 #
 # COST AUTHORITY: the production backend runs keyless / OAuth, so it frequently
 # emits ``total_cost_usd = None`` or ``0`` even though tokens were consumed. The
@@ -36,13 +37,22 @@
 # path; an unknown-model run bills 0, it does not error). Rule 6 — the meter
 # tolerates a missing / malformed usage dict (treats it as no usage).
 #
+# ENTITY BOUNDARY (EE Rule 2): metering READS ``run_doc.usage`` (a value read is
+# fine), but the ``billed`` flag WRITE belongs to the chat.runs entity (the sole
+# owner of ``ChatRunDoc``). ``bill_run`` calls ``chat.runs.service.mark_billed``
+# rather than mutating + saving the foreign document itself.
+#
 # Created 2026-06-24 (integration/billing-credits, BC-3): new entity.
+# Updated 2026-06-24 (B3 review fix): ``bill_run`` no longer does
+# ``run_doc.billed=True; run_doc.save()`` directly (a foreign cross-entity write).
+# It now delegates the flag write to ``chat.runs.service.mark_billed(run_id)``.
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+from pocketpaw_ee.cloud.chat.runs import service as chat_runs_service
 from pocketpaw_ee.cloud.credits import service as credits_service
 from pocketpaw_ee.cloud.metering.domain import ComputeCost, RateCard
 from pocketpaw_ee.cloud.metering.dto import BillResult
@@ -148,9 +158,11 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
     credits (empty usage / unknown model / sub-credit cost) NO debit is written —
     but the run is STILL marked ``billed`` so the sweeper never re-visits it.
 
-    The ``billed`` flag is flipped True and saved AFTER the debit lands. A crash
-    between the debit and the flag write is harmless: the next sweep re-bills,
-    BC-1's ``run:{run_id}`` key makes that debit a no-op, and the flag is then set.
+    The ``billed`` flag is flipped True AFTER the debit lands, via
+    ``chat.runs.service.mark_billed`` (the chat.runs entity owns ChatRunDoc — EE
+    Rule 2; metering never writes the foreign doc). A crash between the debit and
+    the flag write is harmless: the next sweep re-bills, BC-1's ``run:{run_id}``
+    key makes that debit a no-op, and the flag is then set.
 
     ``rate_card`` may be injected (tests / a future per-workspace card); it
     defaults to the settings-derived card.
@@ -201,10 +213,11 @@ async def bill_run(run_doc: ChatRunDoc, *, rate_card: RateCard | None = None) ->
             cost.source,
         )
 
-    # Flip the flag last. Idempotent by construction — a racing flag write that
-    # loses is harmless because the ledger key already prevented a double debit.
-    run_doc.billed = True
-    await run_doc.save()
+    # Flip the flag last, through the chat.runs entity that OWNS ChatRunDoc (EE
+    # Rule 2 — metering never writes a foreign document). Idempotent by
+    # construction — a racing flag write that loses is harmless because the ledger
+    # key already prevented a double debit.
+    await chat_runs_service.mark_billed(run_id)
 
     return BillResult(
         run_id=run_id,
