@@ -1,0 +1,654 @@
+"""Daytona workspace router — manage Daytona sandboxes for cloud projects.
+
+These endpoints are mounted at ``/api/v1/`` (alongside the other v1 routers)
+and provide a project-scoped API for provisioning, syncing, and managing
+Daytona sandboxes (VMs/containers) that back cloud project execution.
+
+Every endpoint requires a cloud project to exist first (created via
+``POST /api/v1/cloud/projects`` or ``POST /api/v1/cloud/projects/clone``).
+The Daytona sandbox is an optional compute layer on top of the S3-backed
+project storage.
+
+Endpoints:
+
+  POST   /cloud/projects/{name}/workspace    — Provision Daytona sandbox
+  GET    /cloud/projects/{name}/workspace     — Get sandbox status
+  DELETE /cloud/projects/{name}/workspace     — Destroy sandbox
+  POST   /cloud/projects/{name}/workspace/sync-to-sandbox   — S3 → Sandbox
+  POST   /cloud/projects/{name}/workspace/sync-to-s3        — Sandbox → S3
+  GET    /cloud/projects/{name}/workspace/terminal           — Get web terminal URL
+
+Key integration points:
+  • ``pocketpaw_ee.cloud.daytona.client.DaytonaClient`` — wraps the official ``daytona`` SDK
+  • The storage adapter (S3/local) for project file access --
+    from OSS ``pocketpaw.api.v1.cloud_projects``
+  • The project key pattern: ``projects/{workspace_id}/{user_id}/{name}/``
+
+Moved from OSS to EE: 2026-06-24
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+
+from pocketpaw.api.v1.cloud_projects import _ADAPTER, _require_project, _resolve_ids
+from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
+from pocketpaw_ee.cloud.daytona.config import daytona_enabled
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(tags=["Daytona Workspaces"])
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+# In-memory mapping: project_key -> sandbox_id
+# This maps a cloud project to its Daytona sandbox so we don't re-provision.
+# Persisted to ~/.pocketpaw/daytona_workspace_map.json
+_workspace_map: dict[str, dict] = {}
+_MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_map.json"
+
+
+def _load_workspace_map() -> dict[str, dict]:
+    """Load the workspace mapping from disk."""
+    if _workspace_map:
+        return _workspace_map
+    try:
+        if _MAP_PATH.exists():
+            with open(_MAP_PATH) as f:
+                data = json.load(f)
+                _workspace_map.update(data)
+    except Exception as exc:
+        logger.warning("Failed to load Daytona workspace map: %s", exc)
+    return _workspace_map
+
+
+def _save_workspace_map() -> None:
+    """Persist the workspace mapping to disk."""
+    try:
+        _MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_MAP_PATH, "w") as f:
+            json.dump(_workspace_map, f, indent=2)
+    except Exception as exc:
+        logger.warning("Failed to save Daytona workspace map: %s", exc)
+
+
+def _get_sandbox_id(project_key: str) -> str | None:
+    """Get the sandbox ID for a project key, or None."""
+    mapping = _load_workspace_map()
+    entry = mapping.get(project_key)
+    return entry.get("sandbox_id") if entry else None
+
+
+def _set_sandbox_id(project_key: str, sandbox_id: str, sandbox_name: str) -> None:
+    """Record the sandbox ID for a project key."""
+    mapping = _load_workspace_map()
+    mapping[project_key] = {"sandbox_id": sandbox_id, "sandbox_name": sandbox_name}
+    _save_workspace_map()
+
+
+def _remove_sandbox_id(project_key: str) -> None:
+    """Remove the sandbox mapping for a project key."""
+    mapping = _load_workspace_map()
+    mapping.pop(project_key, None)
+    _save_workspace_map()
+
+
+async def _require_daytona() -> DaytonaClient:
+    """Return the Daytona client or raise 501 if not configured."""
+    if not daytona_enabled():
+        raise HTTPException(
+            status_code=501,
+            detail="Daytona is not configured. Set DAYTONA_API_URL and DAYTONA_API_KEY.",
+        )
+    client = get_daytona_client()
+    if client is None:
+        raise HTTPException(status_code=501, detail="Daytona client is not available")
+    return client
+
+
+# ── Storage adapter walking ──────────────────────────────────────────────
+
+
+async def _walk_adapter_files(prefix: str) -> list[tuple[str, str]]:
+    """Recursively walk the storage adapter tree under *prefix*.
+
+    Returns ``(full_key, relative_path)`` tuples for every file found.
+    """
+    files: list[tuple[str, str]] = []
+    stack = [("", prefix)]
+
+    while stack:
+        rel_dir, dir_key = stack.pop()
+        try:
+            items = await _ADAPTER.browse(dir_key)
+        except Exception:
+            continue
+
+        for item in items:
+            rel_path = f"{rel_dir}/{item.name}" if rel_dir else item.name
+            if item.is_dir:
+                stack.append((rel_path, f"{dir_key}{item.name}/"))
+            else:
+                files.append((f"{dir_key}{item.name}", rel_path))
+
+    return files
+
+
+# ── Sync: S3 → Sandbox ──────────────────────────────────────────────────
+
+
+async def _sync_directory_from_s3_to_sandbox(
+    client: DaytonaClient,
+    sandbox_id: str,
+    project_key: str,
+    sandbox_dir: str,
+) -> None:
+    """Sync all files from S3 (storage adapter) into the sandbox.
+
+    Uses the SDK's ``upload_bytes`` for each file — no temp directory or
+    tar archive needed.
+    """
+    logger.info(
+        "Syncing files from S3 to sandbox: project=%s sandbox=%s sandbox_dir=%s",
+        project_key,
+        sandbox_id,
+        sandbox_dir,
+    )
+
+    files = await _walk_adapter_files(project_key)
+    if not files:
+        logger.info("No files to sync for project %s", project_key)
+        return
+
+    uploaded = 0
+    for full_key, rel_path in files:
+        remote_path = f"{sandbox_dir}/{rel_path}"
+
+        try:
+            # Read file content from adapter (streaming).
+            chunks: list[bytes] = []
+            async for chunk in _ADAPTER.open(full_key):
+                chunks.append(chunk)
+            content = b"".join(chunks)
+
+            if not content:
+                continue
+
+            # Create parent directory in sandbox.
+            parent = os.path.dirname(remote_path)
+            try:
+                await client.create_folder(sandbox_id, parent)
+            except Exception:
+                pass
+
+            # Upload via SDK — handles HTTP/streaming internally.
+            await client.upload_bytes(sandbox_id, content, remote_path)
+            uploaded += 1
+
+        except Exception as exc:
+            logger.warning("Failed to sync file %s to sandbox: %s", rel_path, exc)
+
+    logger.info("Synced %d files from S3 to sandbox %s", uploaded, sandbox_id)
+
+
+# ── Sync: Sandbox → S3 ──────────────────────────────────────────────────
+
+
+async def _sync_directory_from_sandbox_to_s3(
+    client: DaytonaClient,
+    sandbox_id: str,
+    project_key: str,
+    sandbox_dir: str,
+) -> None:
+    """Sync all files from the sandbox back to S3 (storage adapter).
+
+    Walks the sandbox filesystem using the SDK's ``list_files``, downloads
+    each file via ``download_file``, and uploads to the adapter.
+    """
+    logger.info(
+        "Syncing files from sandbox to S3: sandbox=%s sandbox_dir=%s project=%s",
+        sandbox_id,
+        sandbox_dir,
+        project_key,
+    )
+
+    # Recursively list all files in the sandbox directory.
+    files_to_download: list[str] = []
+    stack = [sandbox_dir]
+
+    while stack:
+        current_dir = stack.pop()
+        try:
+            entries = await client.list_files(sandbox_id, current_dir)
+        except Exception as exc:
+            logger.warning("Failed to list sandbox dir %s: %s", current_dir, exc)
+            continue
+
+        for entry in entries:
+            # FileInfo has .name and .is_dir
+            entry_path = (
+                f"{current_dir}/{entry.name}"
+                if current_dir != sandbox_dir
+                else f"{sandbox_dir}/{entry.name}"
+            )
+            if entry.is_dir:
+                stack.append(entry_path)
+            else:
+                files_to_download.append(entry_path)
+
+    # Download each file and upload to S3.
+    uploaded = 0
+    for remote_path in files_to_download:
+        # Compute relative path within the project.
+        if remote_path.startswith(sandbox_dir):
+            relative = remote_path[len(sandbox_dir) :].lstrip("/")
+        else:
+            relative = remote_path
+        storage_key = f"{project_key}{relative}"
+
+        try:
+            # Download via SDK (returns bytes).
+            data = await client.download_file(sandbox_id, remote_path)
+
+            # Upload to adapter.
+            async def _stream_file(content: bytes = data):
+                yield content
+
+            import mimetypes
+
+            mime, _ = mimetypes.guess_type(relative)
+            await _ADAPTER.put(storage_key, _stream_file(data), mime or "application/octet-stream")
+            uploaded += 1
+
+        except Exception as exc:
+            logger.warning("Failed to sync file %s from sandbox: %s", remote_path, exc)
+
+    logger.info("Synced %d files from sandbox %s to S3", uploaded, sandbox_id)
+
+
+# ── Sandbox state helpers ────────────────────────────────────────────────
+
+
+def _sandbox_status_detail(state: str) -> str:
+    """Return a human-readable status detail for a sandbox state."""
+    details = {
+        "creating": "Provisioning the workspace VM...",
+        "started": "Running",
+        "stopped": "Stopped",
+        "starting": "Starting...",
+        "stopping": "Stopping...",
+        "error": "Error — check logs",
+        "build_failed": "Build failed",
+        "destroyed": "Destroyed",
+        "destroying": "Destroying...",
+        "archived": "Archived",
+        "paused": "Paused",
+        "unknown": "Unknown",
+    }
+    return details.get(state, f"Unknown state: {state}")
+
+
+# ── Request/Response models ──────────────────────────────────────────────
+
+
+class ProvisionWorkspaceResponse(BaseModel):
+    ok: bool
+    project_name: str
+    sandbox_id: str
+    sandbox_name: str
+    state: str
+    state_detail: str
+    toolbox_url: str = ""
+    project_dir: str = ""
+
+
+class WorkspaceStatusResponse(BaseModel):
+    ok: bool
+    project_name: str
+    has_workspace: bool
+    sandbox_id: str = ""
+    sandbox_name: str = ""
+    state: str = ""
+    state_detail: str = ""
+    toolbox_url: str = ""
+    project_dir: str = ""
+
+
+class WorkspaceTerminalResponse(BaseModel):
+    ok: bool
+    web_terminal_url: str = ""
+    sandbox_id: str = ""
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────
+
+
+@router.post("/cloud/projects/{project_name}/workspace")
+async def provision_workspace(
+    project_name: str,
+    http_request: Request,
+) -> ProvisionWorkspaceResponse:
+    """Provision a Daytona sandbox for a cloud project.
+
+    Creates a new sandbox (VM/container) for the given project. Files from
+    the project's S3 storage are synced into the sandbox after provisioning.
+
+    Returns immediately with the sandbox ID. The sandbox takes ~30-60 seconds
+    to provision — poll ``GET .../workspace`` until ``state == "started"``.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    client = await _require_daytona()
+
+    # Idempotency: check if a sandbox already exists for this project.
+    existing_id = _get_sandbox_id(project_key)
+    if existing_id:
+        try:
+            existing = await client.get_sandbox_by_id(existing_id)
+            if existing.state not in ("destroyed", "error"):
+                # Sandbox already exists — return it.
+                project_dir = ""
+                try:
+                    project_dir = await client.get_project_dir(existing.id)
+                except Exception:
+                    pass
+                return ProvisionWorkspaceResponse(
+                    ok=True,
+                    project_name=project_name,
+                    sandbox_id=existing.id,
+                    sandbox_name=existing.name,
+                    state=existing.state,
+                    state_detail=_sandbox_status_detail(existing.state),
+                    project_dir=project_dir,
+                )
+        except Exception:
+            # Sandbox might have been deleted externally — clean up.
+            _remove_sandbox_id(project_key)
+
+    # Create a new sandbox.
+    sandbox_name = f"paw-{project_name}-{workspace_id[:8]}"
+    try:
+        info = await client.create_sandbox(
+            name=sandbox_name,
+            cpu=2,
+            memory=4,
+            disk=10,
+        )
+    except Exception as exc:
+        logger.exception("Failed to create Daytona sandbox")
+        raise HTTPException(status_code=502, detail=f"Failed to create workspace: {exc}")
+
+    # Record the mapping.
+    _set_sandbox_id(project_key, info.id, sandbox_name)
+
+    # Kick off background provisioning + sync.
+    asyncio.create_task(_provision_and_sync(client, info.id, project_key))
+
+    return ProvisionWorkspaceResponse(
+        ok=True,
+        project_name=project_name,
+        sandbox_id=info.id,
+        sandbox_name=sandbox_name,
+        state=info.state,
+        state_detail=_sandbox_status_detail(info.state),
+        toolbox_url="",
+        project_dir="",
+    )
+
+
+async def _provision_and_sync(client: DaytonaClient, sandbox_id: str, project_key: str) -> None:
+    """Wait for sandbox to start, then sync files from S3."""
+    try:
+        await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=120)
+
+        # Get project directory from sandbox.
+        project_dir = await client.get_project_dir(sandbox_id)
+
+        # Sync files from S3 to sandbox.
+        await _sync_directory_from_s3_to_sandbox(
+            client,
+            sandbox_id,
+            project_key,
+            project_dir,
+        )
+        logger.info(
+            "Provisioning complete for sandbox %s on project %s",
+            sandbox_id,
+            project_key,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to provision sandbox %s for project %s: %s",
+            sandbox_id,
+            project_key,
+            exc,
+        )
+
+
+@router.get("/cloud/projects/{project_name}/workspace")
+async def get_workspace_status(
+    project_name: str,
+    http_request: Request,
+) -> WorkspaceStatusResponse:
+    """Get the Daytona sandbox status for a cloud project.
+
+    Returns ``has_workspace: false`` if no sandbox has been provisioned.
+    When a sandbox exists, returns its state, toolbox URL, and project dir.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = _get_sandbox_id(project_key)
+    if not sandbox_id:
+        return WorkspaceStatusResponse(
+            ok=True,
+            project_name=project_name,
+            has_workspace=False,
+        )
+
+    if not daytona_enabled():
+        return WorkspaceStatusResponse(
+            ok=True,
+            project_name=project_name,
+            has_workspace=True,
+            sandbox_id=sandbox_id,
+            state="config_error",
+            state_detail="Daytona API is not configured",
+        )
+
+    try:
+        client = get_daytona_client()
+        if client is None:
+            raise HTTPException(status_code=501, detail="Daytona not available")
+        info = await client.get_sandbox_by_id(sandbox_id)
+
+        project_dir = ""
+        if info.state == "started":
+            try:
+                project_dir = await client.get_project_dir(info.id)
+            except Exception:
+                pass
+
+        return WorkspaceStatusResponse(
+            ok=True,
+            project_name=project_name,
+            has_workspace=True,
+            sandbox_id=info.id,
+            sandbox_name=info.name,
+            state=info.state,
+            state_detail=_sandbox_status_detail(info.state),
+            toolbox_url="",
+            project_dir=project_dir,
+        )
+    except Exception:
+        # Sandbox might have been deleted externally.
+        _remove_sandbox_id(project_key)
+        return WorkspaceStatusResponse(
+            ok=True,
+            project_name=project_name,
+            has_workspace=False,
+        )
+
+
+@router.delete("/cloud/projects/{project_name}/workspace")
+async def delete_workspace(
+    project_name: str,
+    http_request: Request,
+) -> dict:
+    """Delete the Daytona sandbox for a cloud project.
+
+    The project files in S3 are preserved. Only the compute sandbox is destroyed.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = _get_sandbox_id(project_key)
+    if not sandbox_id:
+        return {"ok": True, "message": "No workspace to delete"}
+
+    try:
+        client = await _require_daytona()
+        await client.delete_sandbox(sandbox_id)
+    except Exception as exc:
+        logger.warning("Failed to delete sandbox %s: %s", sandbox_id, exc)
+
+    _remove_sandbox_id(project_key)
+    return {"ok": True, "message": "Workspace deleted"}
+
+
+@router.post("/cloud/projects/{project_name}/workspace/sync-to-sandbox")
+async def sync_to_sandbox(
+    project_name: str,
+    http_request: Request,
+) -> dict:
+    """Sync project files from S3 to the Daytona sandbox.
+
+    One-directional: S3 → Sandbox. Overwrites files in the sandbox
+    with the current state from S3.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = _get_sandbox_id(project_key)
+    if not sandbox_id:
+        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
+
+    client = await _require_daytona()
+
+    # Ensure sandbox is running.
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        if info.state in ("stopped", "paused"):
+            await client.start_sandbox(sandbox_id)
+            await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=60)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Sandbox is in state '{info.state}' — cannot sync until started",
+            )
+
+    project_dir = await client.get_project_dir(sandbox_id)
+
+    await _sync_directory_from_s3_to_sandbox(
+        client,
+        sandbox_id,
+        project_key,
+        project_dir,
+    )
+
+    return {"ok": True, "message": "Files synced from S3 to sandbox"}
+
+
+@router.post("/cloud/projects/{project_name}/workspace/sync-to-s3")
+async def sync_to_s3(
+    project_name: str,
+    http_request: Request,
+) -> dict:
+    """Sync project files from the Daytona sandbox back to S3.
+
+    One-directional: Sandbox → S3. Overwrites files in S3 with the
+    current state from the sandbox (including .git, build artifacts, etc.).
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = _get_sandbox_id(project_key)
+    if not sandbox_id:
+        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
+
+    client = await _require_daytona()
+
+    # Ensure sandbox is running.
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        if info.state in ("stopped", "paused"):
+            await client.start_sandbox(sandbox_id)
+            await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=60)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Sandbox is in state '{info.state}' — cannot sync until started",
+            )
+
+    project_dir = await client.get_project_dir(sandbox_id)
+
+    await _sync_directory_from_sandbox_to_s3(
+        client,
+        sandbox_id,
+        project_key,
+        project_dir,
+    )
+
+    # Update the last synced timestamp.
+    mapping = _load_workspace_map()
+    if project_key in mapping:
+        mapping[project_key]["last_synced_at"] = datetime.utcnow().isoformat()
+        _save_workspace_map()
+
+    return {"ok": True, "message": "Files synced from sandbox to S3"}
+
+
+@router.get("/cloud/projects/{project_name}/workspace/terminal")
+async def get_workspace_terminal(
+    project_name: str,
+    http_request: Request,
+) -> WorkspaceTerminalResponse:
+    """Get the web terminal URL for a Daytona sandbox.
+
+    Returns the preview URL for port 22222 — the built-in web terminal
+    provided by Daytona. The frontend can open this URL in a new tab.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = _get_sandbox_id(project_key)
+    if not sandbox_id:
+        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
+
+    client = await _require_daytona()
+
+    # Ensure sandbox is running.
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Sandbox is in state '{info.state}' — must be 'started' for terminal access",
+        )
+
+    # Get the web terminal URL via the SDK (preview link on port 22222).
+    web_terminal_url = await client.get_web_terminal_url(sandbox_id)
+
+    return WorkspaceTerminalResponse(
+        ok=True,
+        web_terminal_url=web_terminal_url,
+        sandbox_id=sandbox_id,
+    )

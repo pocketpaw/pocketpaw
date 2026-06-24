@@ -69,6 +69,7 @@ class CloneGitRepoRequest(BaseModel):
     """Request body for cloning a git repository into a new cloud project."""
 
     repo_url: str
+    include_git: bool = False
 
 
 async def _empty_stream() -> AsyncIterator[bytes]:
@@ -177,18 +178,20 @@ def _extract_project_name(repo_url: str) -> str:
     return parts[-1] if parts else "cloned-repo"
 
 
-async def _upload_directory(local_dir: str, project_key: str) -> None:
+async def _upload_directory(local_dir: str, project_key: str, include_git: bool = False) -> None:
     """Recursively upload a local directory tree into the storage adapter.
 
-    Skips the ``.git`` directory. Small files are read in one shot; larger
-    files stream through 64 KiB chunks so we don't buffer the whole repo in
-    memory.
+    By default skips the ``.git`` directory. Pass ``include_git=True`` to
+    preserve it (needed for git operations inside cloud projects).
+    Small files are read in one shot; larger files stream through 64 KiB
+    chunks so we don't buffer the whole repo in memory.
     """
     base = Path(local_dir)
 
     for root, dirs, files in os.walk(base):
-        # Skip the .git directory entirely.
-        dirs[:] = [d for d in dirs if d != ".git"]
+        # Skip the .git directory by default.
+        if not include_git:
+            dirs[:] = [d for d in dirs if d != ".git"]
 
         for file_name in files:
             local_path = Path(root) / file_name
@@ -357,7 +360,7 @@ async def clone_git_repo(
                     detail=f"Git clone failed: {err}",
                 )
 
-            await _upload_directory(tmpdir, project_key)
+            await _upload_directory(tmpdir, project_key, include_git=req.include_git)
     except TimeoutError:
         await _ADAPTER.delete(project_key)
         raise HTTPException(status_code=504, detail="Git clone timed out (120s)")
