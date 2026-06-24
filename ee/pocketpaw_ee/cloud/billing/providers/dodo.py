@@ -70,6 +70,12 @@
 #   return a ``SubscriptionEvent`` for a verified ``subscription.*`` delivery
 #   (plan_key from metadata, with a product_id reverse-map fallback off the
 #   configured plan->product mapping).
+# Updated 2026-06-24 (BC-9): ``verify_and_parse_webhook`` now also reads
+#   ``data.metadata.site_id`` onto the ``SubscriptionEvent`` — the discriminator
+#   that tells a PER-SITE annual sub (each published site has its own plan) from a
+#   WORKSPACE-plan sub. A per-site subscribe stamps ``site_id`` on the metadata;
+#   the service routes a delivery with one to the site, without one to the
+#   workspace path. No new SDK call — site subs reuse ``create_subscription``.
 
 from __future__ import annotations
 
@@ -360,6 +366,11 @@ class DodoProvider:
             product_id = str(data.get("product_id") or "")
             plan_key = str(meta.get("plan_key") or "") or self._plan_key_for_product(product_id)
             subscription_id = str(data.get("subscription_id") or "")
+            # BC-9: a per-site annual sub stamps ``site_id`` on its metadata; a
+            # workspace-plan sub does not. This is the discriminator the service
+            # routes on — a delivery WITH a site_id updates the SITE, one WITHOUT
+            # it follows the BC-7 workspace path. Pull it straight off metadata.
+            site_id = str(meta.get("site_id") or "")
             return SubscriptionEvent(
                 event_id=event_id,
                 type=event_type,
@@ -367,6 +378,7 @@ class DodoProvider:
                 plan_key=plan_key,
                 product_id=product_id,
                 subscription_id=subscription_id,
+                site_id=site_id,
                 raw=verified,
             )
 

@@ -492,6 +492,17 @@ class BillingSubscriptionGranted(Event):
     EVENT_TYPE: ClassVar[str] = "billing.subscription.granted"
 
 
+# Sites — a pocket was published as a live Paw Site on a per-site annual plan
+# (BC-9, the per-site plan layer). Emitted by ``sites.service.publish_pocket``
+# after the Site doc is inserted/upserted with its ``plan_tier`` stamped. Fires
+# once per publish. data: {workspace_id, site_id, pocket_id, owner, plan_tier}.
+# Listeners (billing dashboard, site-plan analytics, BC-10 Cloudflare
+# provisioner) key off this to react to a new published site at a tier.
+@dataclass
+class SitePublished(Event):
+    EVENT_TYPE: ClassVar[str] = "site.published"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

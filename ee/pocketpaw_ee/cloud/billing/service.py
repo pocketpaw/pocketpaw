@@ -40,10 +40,21 @@
 #   also upgrades ``Workspace.plan``; ``subscription.cancelled`` reverts the plan
 #   to ``free`` WITHOUT clawing back granted credits. The Subscription doc tracks
 #   the gateway lifecycle alongside the per-renewal BC-1 grants.
+# Updated 2026-06-24 (BC-9, per-site annual plan): the subscription webhook
+#   dispatch now FORKS on a ``site_id`` in the verified event metadata. A delivery
+#   WITH a ``site_id`` is a PER-SITE annual sub (each published site has its own
+#   plan) and routes to ``_handle_site_subscription_event``, which updates the
+#   SITE's ``subscription_status`` / ``annual_renewal_date`` (active/renewed →
+#   active; cancelled → cancelled) via the sites service — it NEVER grants
+#   workspace credits and NEVER changes ``Workspace.plan``. A delivery WITHOUT a
+#   ``site_id`` is the unchanged BC-7 workspace-plan path. Same verified-signature
+#   + idempotency guards apply (the per-site path is reached only AFTER
+#   ``verify_and_parse_webhook`` succeeds).
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 
 from pymongo.errors import DuplicateKeyError
 
@@ -361,6 +372,14 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
     Returns ``{"ok": True, "granted": <bool>}`` (``granted`` is only ever True for
     a grant-bearing event that actually applied, never a replay).
     """
+    # BC-9: a PER-SITE annual sub carries a ``site_id`` on its metadata; a
+    # workspace-plan sub does not. Route a per-site delivery to the SITE (update
+    # its subscription_status / renewal date) instead of the workspace path (which
+    # grants credits / changes Workspace.plan). The site_id is the sole
+    # discriminator — everything below stays the unchanged BC-7 workspace path.
+    if event.site_id:
+        return await _handle_site_subscription_event(event)
+
     # Lazy import — keeps this service free of the heavy workspace.service import
     # (Beanie) at module load, mirroring the entitlements resolver.
     from pocketpaw_ee.cloud.workspace import service as workspace_service
@@ -475,6 +494,75 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
         )
 
     return {"ok": True, "granted": applied}
+
+
+async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
+    """Act on a VERIFIED PER-SITE ``subscription.*`` webhook (BC-9).
+
+    A per-site annual sub (each published site has its OWN recurring plan) is
+    distinguished from a workspace-plan sub by the ``site_id`` on its metadata.
+    This path updates the SITE's lifecycle ONLY — it NEVER grants workspace
+    credits and NEVER changes ``Workspace.plan`` (the two grant/plan side effects
+    of the BC-7 workspace path). The site write is delegated to the sites service
+    (entity isolation — billing never imports the Site model):
+
+      * ``subscription.active`` / ``subscription.renewed`` → mark the site sub
+        ``active`` and advance its annual renewal date (one year out).
+      * ``subscription.cancelled`` → mark the site sub ``cancelled``.
+      * any other subscription.* delivery → acked, no action.
+
+    Returns ``{"ok": True, "granted": False}`` always — a per-site sub never
+    moves the workspace credit wallet, so ``granted`` is never True here.
+    """
+    # Lazy import — keeps billing free of an eager sites-service import at module
+    # load, mirroring the workspace-service lazy import in the BC-7 path.
+    from pocketpaw_ee.cloud._core.errors import NotFound
+    from pocketpaw_ee.sites import service as sites_service
+
+    if event.type == _SUB_CANCELLED:
+        status, renewal = "cancelled", None
+    elif event.type in _SUB_GRANT_EVENTS:
+        # active | renewed → the site sub is active; advance the annual renewal
+        # date one year from this verified event (the next charge cycle).
+        status, renewal = "active", datetime.now(UTC) + timedelta(days=365)
+    else:
+        # on_hold / paused / failed / expired / plan_changed / updated — acked,
+        # no site-state action in v1.
+        logger.info(
+            "billing.webhook: ignoring per-site subscription event type=%s (site=%s)",
+            event.type,
+            event.site_id,
+        )
+        return {"ok": True, "granted": False}
+
+    try:
+        await sites_service.mark_site_subscription(
+            workspace_id=event.workspace_id,
+            site_id=event.site_id,
+            status=status,
+            subscription_id=event.subscription_id or None,
+            annual_renewal_date=renewal,
+        )
+    except NotFound:
+        # A verified delivery for a site that doesn't exist for this workspace
+        # (deleted, or a stale/cross-tenant id) — ack (200) so Dodo stops
+        # retrying, but take no action. Nothing to update.
+        logger.warning(
+            "billing.webhook: per-site %s for unknown site=%s (event_id=%s) — ignoring",
+            event.type,
+            event.site_id,
+            event.event_id,
+        )
+        return {"ok": True, "granted": False}
+
+    logger.info(
+        "billing.webhook: per-site %s for site=%s → %s (event_id=%s)",
+        event.type,
+        event.site_id,
+        status,
+        event.event_id,
+    )
+    return {"ok": True, "granted": False}
 
 
 async def _upsert_subscription(event: SubscriptionEvent, *, status: str, plan_key: str) -> None:

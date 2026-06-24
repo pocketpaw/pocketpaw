@@ -21,6 +21,12 @@
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
 # Updated 2026-06-24 (BC-7): added ``SubscriptionCheckout`` + ``SubscriptionEvent``
 #   for the recurring-subscription flow (subscribe + renewal credit grant).
+# Updated 2026-06-24 (BC-9): added ``site_id`` to ``SubscriptionEvent`` — the
+#   discriminator that tells a PER-SITE annual sub (each published site has its own
+#   plan) from a WORKSPACE-plan sub. The provider populates it from the
+#   subscription metadata's ``site_id`` (stamped at per-site subscribe time); a
+#   workspace-plan sub carries no ``site_id`` (""), so the webhook routes it to the
+#   workspace path. Defaults "" so a BC-7 workspace-plan delivery is unchanged.
 
 from __future__ import annotations
 
@@ -90,6 +96,14 @@ class SubscriptionEvent:
     product id (the reverse-map fallback when metadata lacks ``plan_key``).
     ``subscription_id`` is the gateway subscription this event belongs to. ``raw``
     is the parsed body, retained for audit (it carries no secret).
+
+    ``site_id`` (BC-9) is the discriminator that tells a PER-SITE annual sub (each
+    published site has its OWN plan) from a WORKSPACE-plan sub: a per-site
+    subscribe stamps ``site_id`` on the metadata, a workspace-plan subscribe does
+    not. The webhook routes a delivery WITH a ``site_id`` to the SITE (update the
+    site's subscription_status / renewal date) and a delivery WITHOUT one to the
+    workspace path (grant credits / change the workspace plan). Defaults "" so a
+    BC-7 workspace-plan delivery is unchanged.
     """
 
     event_id: str
@@ -98,4 +112,5 @@ class SubscriptionEvent:
     plan_key: str
     product_id: str
     subscription_id: str
+    site_id: str = ""
     raw: dict = field(default_factory=dict)
