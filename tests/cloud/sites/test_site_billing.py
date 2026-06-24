@@ -202,6 +202,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
         site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
     )
     fake_provider = _FakeBillingProvider()
+    fake_cf = _FakeCF()
 
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
@@ -209,15 +210,19 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
         pocket_id=pocket_id,
         site_plan_key="pro",
         _generator=_FakeGenerator(),
-        _cloudflare=_FakeCF(),
+        _cloudflare=fake_cf,
         _bundle_reader=lambda d: b"x",
         _billing_provider=fake_provider,
     )
 
-    # The site was stamped with its per-site tier + subscription id.
+    # charge-first: a PAID tier (pro) is published as PENDING — stamped with its
+    # tier + subscription id, but NOT deployed live until subscription.active.
     assert doc.plan_tier == "pro"
     assert doc.subscription_id == SITE_SUB_ID
     assert doc.subscription_status == "pending"
+    assert doc.deployed is False
+    # The deploy was DEFERRED — the generator/Cloudflare were not invoked.
+    assert fake_cf.put_calls == []
 
     # The per-site Dodo sub was opened with the site_id on its metadata (the
     # discriminator the renewal webhook routes on).
@@ -228,20 +233,16 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
     assert call["metadata"]["site_id"] == str(doc.id)
     assert call["metadata"]["workspace_id"] == ws
 
-    # The persisted doc reflects the stamp.
+    # The persisted doc reflects the pending stamp.
     persisted = await Site.find_one(Site.id == doc.id)
     assert persisted is not None
     assert persisted.plan_tier == "pro"
+    assert persisted.deployed is False
 
-    # SitePublished was emitted with the per-site payload.
+    # charge-first: SitePublished is DEFERRED to activation (the site is not live
+    # yet) — it is NOT emitted at publish time for a paid pending site.
     published = [e for e in recording_bus.events if e.type == "site.published"]
-    assert len(published) == 1
-    data = published[0].data
-    assert data["workspace_id"] == ws
-    assert data["site_id"] == str(doc.id)
-    assert data["pocket_id"] == pocket_id
-    assert data["owner"] == "u1"
-    assert data["plan_tier"] == "pro"
+    assert published == []
 
 
 async def test_publish_degrades_gracefully_when_dodo_unconfigured(mongo_db, recording_bus):
@@ -319,7 +320,18 @@ async def test_publish_without_entitlement_is_forbidden_and_creates_no_site(mong
 
 
 async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monkeypatch):
-    # Publish a site (business workspace, pro tier) so there's a Site doc to update.
+    # charge-first: a paid (pro) publish creates a PENDING site; the
+    # subscription.active webhook deploys it live + marks the sub active. Force
+    # local deploy mode and fake the generator/local-server so the webhook-driven
+    # activation needs no Bun/workerd/Cloudflare.
+    monkeypatch.setenv("PAW_SITES_LOCAL", "1")
+    monkeypatch.setattr(sites_service, "GeneratorClient", _FakeGenerator)
+    from pocketpaw_ee.sites import local_server
+
+    monkeypatch.setattr(
+        local_server, "deploy_local", lambda site_id, project_dir: f"http://local/{site_id}/"
+    )
+
     ws = await _make_workspace(plan="business")
     pocket_id = await _make_pocket(workspace_id=ws)
     monkeypatch.setattr(
@@ -331,11 +343,12 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
         pocket_id=pocket_id,
         site_plan_key="pro",
         _generator=_FakeGenerator(),
-        _cloudflare=_FakeCF(),
-        _bundle_reader=lambda d: b"x",
         _billing_provider=_FakeBillingProvider(),
     )
     site_id = str(doc.id)
+    # Published PENDING — not yet deployed.
+    assert doc.deployed is False
+    assert doc.subscription_status == "pending"
 
     # The workspace plan + credit balance BEFORE the webhook.
     from pocketpaw_ee.cloud.workspace import service as workspace_service
@@ -360,9 +373,11 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
     # The workspace plan is UNCHANGED (per-site subs don't touch Workspace.plan).
     assert await workspace_service.get_workspace_plan(ws) == plan_before
 
-    # The SITE's subscription_status flipped to active + a renewal date was set.
+    # charge-first: the SITE is now DEPLOYED live + its sub flipped to active + a
+    # renewal date was set.
     updated = await Site.find_one(Site.id == doc.id)
     assert updated is not None
+    assert updated.deployed is True
     assert updated.subscription_status == "active"
     assert updated.annual_renewal_date is not None
 

@@ -75,6 +75,13 @@
 #     is empty, but ``columns`` is still listed from the spec.
 # These are READ-ONLY views (no request DTO — the inputs are path params); the
 # data view never writes through this surface.
+# Updated 2026-06-24 (feat/charge-first-sites): ``SiteResponse`` gains
+# ``checkout_url`` — the Dodo annual-checkout link a PAID-tier publish returns.
+# A paid publish defers the live deploy: it creates the site as PENDING
+# (deployed=False) and returns this link the caller redirects the buyer to; the
+# site deploys + goes live only when the ``subscription.active`` webhook confirms
+# payment. None for a free/base publish (which deploys immediately) and for any
+# non-publish response (default None, backward-compatible).
 # Updated 2026-06-24 (S2 review fix): ``DomainRequest.hostname`` now carries a
 # permissive DNS-hostname validator (label-dot-label, letters/digits/hyphens, no
 # leading/trailing/double dots, total length capped) so an obviously-malformed
@@ -126,6 +133,12 @@ class SiteResponse(BaseModel):
     # the pocket has no pattern or could not be resolved. Lets the frontend badge
     # dynamic sites in the gallery without a second fetch.
     pattern: str = ""
+    # charge-first: the Dodo annual-checkout link for a PAID-tier publish. A paid
+    # publish creates the site as PENDING (deployed=False) and returns this link
+    # the caller redirects the buyer to; the site deploys + goes live only after
+    # the ``subscription.active`` webhook confirms payment. None for a free/base
+    # publish (which deploys immediately) and for any non-publish response.
+    checkout_url: str | None = None
 
 
 class SitePreviewResponse(BaseModel):
