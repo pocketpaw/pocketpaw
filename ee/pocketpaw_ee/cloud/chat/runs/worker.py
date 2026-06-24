@@ -1,5 +1,22 @@
 """arq worker entry point for Tier 2 run execution.
 
+Updated: 2026-06-22 (feat/jobs-custom-job-entrypoints) — ``_startup`` now also
+calls ``load_entrypoint_jobs()`` right after ``register_builtins()`` so the
+worker registers WORKSPACE-CUSTOM jobs (declared under the ``pocketpaw.jobs``
+entry-point group) in its own process. Without this a custom job would resolve
+in the web process but raise ``UnknownJobError`` in the worker that runs it.
+No-op when no custom-job package is installed.
+
+Updated: 2026-06-22 (feat/jobs-worker-register-and-connector-read) — PRODUCTION
+FIX: ``_startup`` now calls ``register_builtins()`` AFTER ``init_realtime()`` so
+the worker process populates the process-wide job registry on boot. The registry
+is a module-level dict; the worker runs in a SEPARATE process from the web
+``mount_cloud`` that registered the built-ins there, so without this the
+worker's registry was EMPTY and ``execute_workspace_job`` → ``resolve_job(name)``
+raised ``UnknownJobError`` for EVERY job in a real deploy. Mirrors the ordering
+in ``ee/pocketpaw_ee/cloud/__init__.py:mount_cloud`` (register after
+init_realtime so a job's writeback emit has a bus to publish onto).
+
 Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — registered the workspace
 jobs entrypoint ``execute_workspace_job`` into ``WorkerSettings.functions``
 (default #1: SAME worker process, no new deploy artifact). It is wrapped with
@@ -81,6 +98,26 @@ async def _startup(ctx: dict[str, Any]) -> None:
     mongo_uri = os.environ.get("CLOUD_MONGODB_URI", "mongodb://localhost:27017/paw-enterprise")
     await init_cloud_db(mongo_uri)
     init_realtime()
+    # Register the built-in workspace jobs into the process-wide registry. The
+    # registry is a module-level dict and the worker runs in its OWN process, so
+    # the registration ``mount_cloud`` does for the web process does NOT carry
+    # over here. Without this the worker's registry is empty and
+    # ``execute_workspace_job`` → ``resolve_job(name)`` raises ``UnknownJobError``
+    # for every job. Called AFTER ``init_realtime()`` (same ordering as
+    # ``mount_cloud``) so a job's writeback emit has a bus to publish onto.
+    from pocketpaw_ee.cloud.jobs.builtin import register_builtins
+
+    register_builtins()
+    # Discover + register WORKSPACE-CUSTOM jobs from installed packages' entry
+    # points (group ``pocketpaw.jobs``). The worker runs in its OWN process, so
+    # like the built-ins these must be registered here too — otherwise a custom
+    # job dispatched by the web app would ``resolve_job`` fine there but raise
+    # ``UnknownJobError`` in the worker that actually runs it. Called AFTER
+    # ``register_builtins()`` (same ordering as ``mount_cloud``). No-op when no
+    # custom-job package is installed.
+    from pocketpaw_ee.cloud.jobs.plugins import load_entrypoint_jobs
+
+    load_entrypoint_jobs()
     if not _boot_sweep_enabled():
         logger.info("worker boot: stale-run sweep disabled (%s)", _BOOT_SWEEP_ENV)
         return

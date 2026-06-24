@@ -2,6 +2,14 @@
 # Created: 2026-03-02
 # SoulBootstrapProvider implements BootstrapProviderProtocol.
 # SoulBridge provides high-level observe/recall for the agent loop.
+#
+# Changelog:
+# 2026-06-24 (SVL-4): get_context auto-recall now includes PROCEDURAL memories
+#   alongside SEMANTIC. Minted correction-rules (CorrectionSoulBridge stores
+#   them as PROCEDURAL) and session-learned procedural how-tos were previously
+#   structurally excluded from the bootstrap system-prompt injection — they
+#   only surfaced when the agent voluntarily called a recall tool. They now
+#   auto-recall into the bootstrap knowledge context.
 
 from __future__ import annotations
 
@@ -80,21 +88,24 @@ class SoulBootstrapProvider:
             except Exception:
                 pass
 
-        # Cross-session soul memory — inject general semantic facts the soul has
-        # learned so the agent carries persistent context across chat sessions.
+        # Cross-session soul memory — inject general semantic facts AND
+        # procedural rules the soul has learned so the agent carries persistent
+        # context across chat sessions. PROCEDURAL covers minted
+        # correction-rules (CorrectionSoulBridge) and session-learned how-tos,
+        # which were previously excluded from bootstrap injection.
         try:
             from soul_protocol import MemoryType
 
-            semantic_memories = await soul.recall(
+            recalled_memories = await soul.recall(
                 query="",
-                types=[MemoryType.SEMANTIC],
+                types=[MemoryType.SEMANTIC, MemoryType.PROCEDURAL],
                 limit=5,
             )
-            if semantic_memories:
-                for m in semantic_memories:
+            if recalled_memories:
+                for m in recalled_memories:
                     knowledge.append(f"[{m.type.value}] {m.content}")
         except Exception:
-            logger.debug("Soul semantic recall failed for bootstrap context", exc_info=True)
+            logger.debug("Soul memory recall failed for bootstrap context", exc_info=True)
 
         return BootstrapContext(
             name=soul.name if hasattr(soul, "name") else "Paw",

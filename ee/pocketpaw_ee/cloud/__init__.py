@@ -11,6 +11,11 @@ Modified: 2026-06-24 (integration/billing-credits, BC-2) — Mounts the Billing
     checkout) and, SEPARATELY with NO auth dependency, the public
     ``/billing/webhooks/dodo`` router (Standard-Webhooks-signed; verified before
     the payload is trusted, then grants credits exactly once via BC-1).
+Modified: 2026-06-22 (feat/jobs-custom-job-entrypoints) — After
+    ``register_builtins()`` the mount now calls ``load_entrypoint_jobs()`` to
+    discover + register WORKSPACE-CUSTOM jobs declared by installed packages
+    under the ``pocketpaw.jobs`` entry-point group (SAFE plugin path; no runtime
+    import of user code). No-op when no custom-job package is installed.
 Modified: 2026-06-20 (feat/workspace-jobs, pp#1459) — Mounts the workspace-jobs
     status router (``GET /workspaces/{ws}/jobs/{job_id}``) and registers the
     built-in jobs into the process-wide registry via ``register_builtins()``
@@ -635,6 +640,16 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.jobs.builtin import register_builtins
 
     register_builtins()
+
+    # Discover + register WORKSPACE-CUSTOM jobs declared by installed packages
+    # under the ``pocketpaw.jobs`` entry-point group (the SAFE plugin path — no
+    # runtime import of user-supplied code, just installed-package metadata).
+    # Runs AFTER ``register_builtins()`` so a custom job may overwrite a built-in
+    # of the same name (last-writer-wins). Degrades to a no-op when no custom job
+    # package is installed — same as the OSS core's optional-provider discovery.
+    from pocketpaw_ee.cloud.jobs.plugins import load_entrypoint_jobs
+
+    load_entrypoint_jobs()
 
     # Bridge ``AuditLogger`` (JSONL) writes into ``AuditStore`` (SQLite).
     # Cloud writers across the EE codebase (pockets/action_executor,

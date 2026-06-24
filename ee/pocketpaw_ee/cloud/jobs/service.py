@@ -23,6 +23,17 @@
 # is the SHARED one Beanie was initialized against — pulled off
 # ``WorkspaceJobDoc.get_pymongo_collection().database`` — so tests (mongomock)
 # and production resolve the same database with no extra connection.
+#
+# Updated: 2026-06-22 (feat/jobs-worker-register-and-connector-read) — added
+# ``execute_connector_action``, the jobs entity's ONLY door to the connectors
+# entity. A data-backed built-in (e.g. ``score_applications`` connector source
+# mode) reads its batch from a workspace's BOUND connector through THIS service
+# so the import-linter "Jobs reaches connectors via service" contract stays
+# clean (the built-in never imports the connectors service directly). The call
+# runs under ``WORKSPACE_JOB_IDENTITY`` with ``pocket_id=None`` (workspace-scope
+# credentials, never tokens through params) and unwraps the connector's data
+# payload; a non-success response raises ``CloudError(code="job.connector_error")``
+# so the worker's failure path marks the job failed + un-hangs the button.
 
 """Workspace-jobs service — Beanie writes + dispatch + lifecycle."""
 
@@ -38,6 +49,7 @@ from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
 
 from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     WorkspaceJobQueued,
@@ -225,6 +237,61 @@ async def read_source_records(collection: str, *, limit: int) -> list[dict[str, 
         return []
 
 
+async def execute_connector_action(
+    workspace_id: str,
+    connector_name: str,
+    action: str,
+    params: dict | None = None,
+) -> list[dict] | dict:
+    """Run one read action on a workspace's BOUND connector and return its data.
+
+    The jobs entity's ONLY door to the connectors entity: a data-backed built-in
+    (e.g. ``score_applications`` connector source mode) reads its batch from a
+    bound connector through HERE so the import-linter "Jobs reaches connectors
+    via service" contract stays clean — the built-in never imports the
+    connectors service directly.
+
+    The call runs under :data:`WORKSPACE_JOB_IDENTITY` with workspace-scope
+    credentials (``pocket_id=None``): a job NEVER receives tokens through
+    ``params`` — connector calls use the workspace's stored creds. On a
+    non-success response (or any raised connectors error) this raises
+    :class:`CloudError` (code ``job.connector_error``), which the worker's
+    failure path turns into a ``failed`` job + a failed-state writeback so the
+    triggering button never hangs.
+
+    Returns the connector's ``data`` payload (the records) — a ``list[dict]``
+    for a list-shaped action, or a single ``dict`` for a scalar one.
+    """
+    # Lazy import — keeps the jobs service free of a connectors dependency at
+    # module load (and the import graph acyclic).
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.connectors.dto import ExecuteActionRequest
+
+    try:
+        response = await connectors_service.execute(
+            workspace_id,
+            connector_name,
+            ExecuteActionRequest(action=action, params=params or {}, pocket_id=None),
+            user_id=WORKSPACE_JOB_IDENTITY,
+        )
+    except CloudError:
+        # A connectors-side CloudError (NotFound, Forbidden, local-agent 503, …)
+        # already carries a precise code; re-raise as the jobs-contract error so
+        # the worker's failure path handles it uniformly and the button un-hangs.
+        raise CloudError(
+            502,
+            "job.connector_error",
+            f"connector '{connector_name}' action '{action}' failed",
+        ) from None
+    if not response.success:
+        raise CloudError(
+            502,
+            "job.connector_error",
+            f"connector '{connector_name}' action '{action}' returned an error",
+        )
+    return response.data
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle transitions (worker-driven)
 # ---------------------------------------------------------------------------
@@ -329,6 +396,7 @@ def _audit(*, severity: AuditSeverity, status: str, **context: Any) -> None:
 
 __all__ = [
     "dispatch_job",
+    "execute_connector_action",
     "get_job",
     "get_job_by_id",
     "mark_done",
