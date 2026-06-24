@@ -16,7 +16,7 @@ from pocketpaw.connectors.protocol import (
 
 def test_metadata():
     c = GoogleDriveConnector()
-    assert c.name == "drive"
+    assert c.name == "google_drive"
     assert c.display_name == "Google Drive"
     assert c.type == "knowledge"
 
@@ -84,5 +84,5 @@ def test_registry_returns_drive_connector():
     """Native adapter wins over the YAML-only DirectRESTAdapter."""
     from pocketpaw.connectors.registry import _create_native_adapter
 
-    adapter = _create_native_adapter("drive")
+    adapter = _create_native_adapter("google_drive")
     assert isinstance(adapter, GoogleDriveConnector)

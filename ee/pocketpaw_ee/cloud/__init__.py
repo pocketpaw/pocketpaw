@@ -1,5 +1,27 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-24 (integration/billing-credits, BC-6) — Mounts the
+    Entitlements resolver router (``GET /entitlements`` -> the caller workspace's
+    plan + features + monthly credit allotment). The plan CATALOG read
+    (``GET /billing/plans``) is added to the billing router; both build on the
+    declarative plan catalog (``billing.plans``) over the existing
+    ``PLAN_FEATURES`` / ``Workspace.plan`` tiers.
+Modified: 2026-06-24 (integration/billing-credits, BC-2) — Mounts the Billing
+    Gateway primitive: the authenticated ``/billing/topup`` router (Dodo hosted
+    checkout) and, SEPARATELY with NO auth dependency, the public
+    ``/billing/webhooks/dodo`` router (Standard-Webhooks-signed; verified before
+    the payload is trusted, then grants credits exactly once via BC-1).
+Modified: 2026-06-22 (feat/jobs-custom-job-entrypoints) — After
+    ``register_builtins()`` the mount now calls ``load_entrypoint_jobs()`` to
+    discover + register WORKSPACE-CUSTOM jobs declared by installed packages
+    under the ``pocketpaw.jobs`` entry-point group (SAFE plugin path; no runtime
+    import of user code). No-op when no custom-job package is installed.
+Modified: 2026-06-20 (feat/workspace-jobs, pp#1459) — Mounts the workspace-jobs
+    status router (``GET /workspaces/{ws}/jobs/{job_id}``) and registers the
+    built-in jobs into the process-wide registry via ``register_builtins()``
+    AFTER ``init_realtime()`` (so a job's writeback emit has a bus to publish
+    onto). Jobs are TRIGGERED through the existing
+    ``POST /pockets/{id}/actions/run`` kind=="job" branch.
 Modified: 2026-06-13 (feat/patrol-engine) — Registers the mandate cadence
     SCHEDULER lifespan pair next to the autopilot pair, under the same
     POCKETPAW_CLOUD_SCHEDULER_ENABLED gate: ``reconcile_scheduler`` at startup
@@ -188,11 +210,16 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
+    from pocketpaw_ee.cloud.billing.router import router as billing_router
+    from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
+    from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
+    from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
     from pocketpaw_ee.cloud.meetings.providers.recall.webhooks import (
         router as meetings_webhooks_router,
@@ -216,6 +243,21 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
+    # Credit ledger (BC-1) — the workspace-scoped wallet read surface
+    # (GET /credits/balance, GET /credits/history). Grant / debit are
+    # in-process only (the billing subsystem calls the service directly).
+    app.include_router(credits_router, prefix="/api/v1")
+    # Billing (BC-2, the Gateway primitive) — the authenticated top-up surface
+    # (POST /billing/topup → Dodo hosted checkout). The PUBLIC inbound webhook
+    # (POST /billing/webhooks/dodo) is mounted SEPARATELY just below with NO auth
+    # dependency — Dodo is the caller; trust is the Standard-Webhooks signature.
+    app.include_router(billing_router, prefix="/api/v1")
+    app.include_router(billing_webhooks_router, prefix="/api/v1")
+    # Entitlements (BC-6, the Entitlement primitive) — the workspace-scoped
+    # resolver (GET /entitlements -> the workspace's plan + features + monthly
+    # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
+    # billing router above; this router carries only the per-workspace resolve.
+    app.include_router(entitlements_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
@@ -229,6 +271,12 @@ def mount_cloud(app: FastAPI) -> None:
     # same surface as live cycles. Persistence lands in the
     # ``foresight_runs`` Mongo collection via ``ee.cloud.foresight.service``.
     app.include_router(foresight_router, prefix="/api/v1")
+    # Workspace jobs — pp#1459. The status-poll surface
+    # (GET /workspaces/{ws}/jobs/{job_id}); jobs are TRIGGERED through the
+    # existing POST /pockets/{id}/actions/run kind=="job" branch, so there is
+    # no dispatch route here. Built-in jobs are registered after init_realtime
+    # below.
+    app.include_router(jobs_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
@@ -532,7 +580,9 @@ def mount_cloud(app: FastAPI) -> None:
                 "_id": str(u.id),
                 "email": u.email,
                 "name": u.full_name,
+                "fullName": u.full_name,
                 "avatar": u.avatar,
+                "profilePic": u.avatar,
                 "status": u.status,
             }
             for u in users
@@ -583,6 +633,23 @@ def mount_cloud(app: FastAPI) -> None:
     # first service that calls ``emit(...)`` fails with "EventBus not
     # initialized".
     init_realtime()
+
+    # Register built-in workspace jobs (pp#1459) into the process-wide job
+    # registry. Must run AFTER ``init_realtime`` so a job's writeback emit has
+    # a bus to publish onto — same lifecycle ordering as the listeners below.
+    from pocketpaw_ee.cloud.jobs.builtin import register_builtins
+
+    register_builtins()
+
+    # Discover + register WORKSPACE-CUSTOM jobs declared by installed packages
+    # under the ``pocketpaw.jobs`` entry-point group (the SAFE plugin path — no
+    # runtime import of user-supplied code, just installed-package metadata).
+    # Runs AFTER ``register_builtins()`` so a custom job may overwrite a built-in
+    # of the same name (last-writer-wins). Degrades to a no-op when no custom job
+    # package is installed — same as the OSS core's optional-provider discovery.
+    from pocketpaw_ee.cloud.jobs.plugins import load_entrypoint_jobs
+
+    load_entrypoint_jobs()
 
     # Bridge ``AuditLogger`` (JSONL) writes into ``AuditStore`` (SQLite).
     # Cloud writers across the EE codebase (pockets/action_executor,

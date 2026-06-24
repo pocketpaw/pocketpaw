@@ -477,19 +477,33 @@ async def _auth_dispatch(request: Request) -> Response | None:
 
     is_auth_optional = any(path.startswith(p) for p in auth_optional_prefixes)
 
-    # Rate limiting — pick tier based on path
+    # Rate limiting.
+    #
+    # /api/auth/session is a master-token-exchange endpoint — keep its per-IP
+    # auth_limiter guard HERE, before auth, alongside the login / qr brute-force
+    # buckets above. An attacker hitting it has no valid token yet, so a per-IP
+    # cap is exactly right.
+    #
+    # The GENERAL per-IP api_limiter is deferred until AFTER the auth cascade
+    # below (P1b). It used to fire here, keyed solely on client_ip, which meant
+    # the paw-enterprise desktop editor — every /api/v1/* call coming from the
+    # single localhost IP (127.0.0.1) — shared ONE 30-token bucket and tripped
+    # 429 "Too many requests" under moderate editing. Authenticated full-access
+    # traffic is already trusted; api-key traffic has its own per-key bucket;
+    # only UNauthenticated /api callers still need the per-IP cap. So we run the
+    # api_limiter once full_access / is_valid are known. See the deferred block
+    # after step 6 below.
     client_ip = request.client.host if request.client else "unknown"
-    is_auth_path = request.url.path == "/api/auth/session"
-    limiter = auth_limiter if is_auth_path else api_limiter
-    rl_info = limiter.check(client_ip)
-    if not rl_info.allowed:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Too many requests"},
-            headers=rl_info.headers(),
-        )
-    # Stash rate limit info to add response headers later
-    request.state.rate_limit_headers = rl_info.headers()
+    if request.url.path == "/api/auth/session":
+        rl_info = auth_limiter.check(client_ip)
+        if not rl_info.allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests"},
+                headers=rl_info.headers(),
+            )
+        # Stash rate limit info to add response headers later
+        request.state.rate_limit_headers = rl_info.headers()
 
     # Check for token in query or header
     token = request.query_params.get("token")
@@ -617,6 +631,30 @@ async def _auth_dispatch(request: Request) -> Response | None:
         or request.url.path.startswith("/uploads/")
     ):
         return None  # allow through
+
+    # Deferred general per-IP api_limiter (P1b).
+    #
+    # Runs now that the auth cascade above has set is_valid / full_access.
+    # Authenticated callers are EXEMPT from this per-IP bucket:
+    #   - full_access (master token / dashboard session / genuine localhost) is
+    #     already fully trusted — and is the bug we're fixing: the desktop
+    #     editor fans many /api/v1/* calls out of the single localhost IP, which
+    #     used to drain one shared 30-token bucket and 429.
+    #   - api-key callers already passed their own per-key limiter above
+    #     (apikey:<id>); the per-IP bucket would only double-limit them.
+    #   - oauth callers authenticated by token, not by IP.
+    # UNauthenticated /api (and any other non-exempt) traffic still hits the
+    # per-IP api_limiter, so the brute-force / abuse cap is preserved. The
+    # separate login / auth-session / qr buckets are untouched.
+    if not is_valid:
+        rl_info = api_limiter.check(client_ip)
+        if not rl_info.allowed:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests"},
+                headers=rl_info.headers(),
+            )
+        request.state.rate_limit_headers = rl_info.headers()
 
     # Require auth for ALL remaining paths — not only /api* and /ws*.
     # Previously only API/WS paths were gated here, meaning any non-exempt

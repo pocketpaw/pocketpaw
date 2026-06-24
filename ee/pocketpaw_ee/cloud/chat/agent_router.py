@@ -4,6 +4,31 @@ Streams a typed SSE sequence in the response body while persisting the user
 message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
+
+Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
+run-start. This module is the SINGLE chokepoint that starts a new chat run
+(``create_run`` + executor submit), so the credit gate sits here, right after
+scope resolution and BEFORE any DB write. When ``settings.billing_enforced`` is
+on, a workspace at balance <= 0 gets 402 (``credits.insufficient``) and NO run /
+user message is persisted; in-flight runs (already past this point) are never
+affected. The flag is OFF by default so OSS / self-host (no ledger) are
+unaffected. See ``credits.service.check_balance``.
+
+Changes: 2026-06-18 (PERF-6, feat/sites-minimal-context) — window the history
+fed to the agent on the SITES EDIT/REFINE surface only. The sites builder got
+progressively slower per edit because ``load_history_for_scope`` loads the FULL
+accumulating scope history every turn, so the LLM re-processed ever-more context
+per refine. ``_window_history_for_surface`` now caps the loaded history to the
+last ``SITES_REFINE_HISTORY_TURNS`` turns (kept for pronoun referents like "make
+it bigger") when ``_is_sites_refine_surface`` matches (kind=sites + a refine
+``pocket_id`` in the surface meta — the same discriminator the sites preamble /
+profile resolver use). Every other surface (general pocket/dm/group chat, the
+sites-create gallery, legacy clients with no surface hint) keeps the FULL
+history — the windowing is a strict no-op off the sites-refine surface. The
+``<pocket-summary>`` block already carries the pocket's current state to the
+agent, so injecting the raw component source is intentionally left out of this
+change (it would add a build/DB read on the shared chat path); the windowing is
+the core latency win.
 """
 
 from __future__ import annotations
@@ -17,6 +42,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import (
@@ -32,7 +58,11 @@ from pocketpaw_ee.cloud.chat.runs.executor import get_executor
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
-from pocketpaw_ee.cloud.surface import resolve_surface_context
+from pocketpaw_ee.cloud.surface import (
+    SurfaceContext,
+    SurfaceKind,
+    resolve_surface_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +70,55 @@ router = APIRouter(tags=["Cloud Agent Chat"], dependencies=[Depends(require_lice
 
 
 Scope = Literal["dm", "group", "pocket", "session"]
+
+# PERF-6: how many trailing TURNS of history to keep on the sites EDIT/REFINE
+# surface. A "turn" is one user request plus its assistant reply (2 stored
+# ``Message`` rows), so the window keeps the last
+# ``2 * SITES_REFINE_HISTORY_TURNS`` rows — enough to resolve a pronoun referent
+# ("make IT bigger", "now the SAME for the footer") without re-feeding the whole
+# accumulating edit log to the LLM every refine. Kept as a module constant so
+# the window size is tunable in one place.
+SITES_REFINE_HISTORY_TURNS = 2
+_SITES_REFINE_HISTORY_ROWS = 2 * SITES_REFINE_HISTORY_TURNS
+
+
+def _is_sites_refine_surface(surface_context: SurfaceContext | None) -> bool:
+    """True only for the /sites EDIT/REFINE chat surface.
+
+    The refine surface is identified the SAME way the sites preamble
+    (``surface/handlers/sites.py``) and the profile resolver
+    (``surface/service.resolve_profile``) identify it: ``kind == SITES`` AND the
+    surface meta carries a ``pocket_id`` (the source pocket being edited). The
+    /sites gallery CREATE surface is ``kind == SITES`` with NO ``pocket_id``, and
+    a general pocket chat is ``kind == POCKET`` — both return ``False`` so the
+    windowing never touches general chat. A ``None`` surface context (legacy
+    client that sent no surface hint) is never refine.
+    """
+    if surface_context is None:
+        return False
+    return surface_context.kind == SurfaceKind.SITES and bool(
+        getattr(surface_context.meta, "pocket_id", None)
+    )
+
+
+def _window_history_for_surface(
+    history: list[dict[str, str]], surface_context: SurfaceContext | None
+) -> list[dict[str, str]]:
+    """Cap ``history`` to the last ``SITES_REFINE_HISTORY_TURNS`` turns on the
+    sites-refine surface; return it unchanged everywhere else.
+
+    This is the PERF-6 fix: on the sites builder each refine fed the FULL
+    growing scope history to the agent, so the LLM re-processed ever-more context
+    per edit. For the refine surface we keep only the trailing turns (enough for
+    pronoun referents); for EVERY other surface — general pocket/dm/group chat,
+    the sites-create gallery, legacy no-surface clients — the history passes
+    through untouched, so general chat behavior is byte-identical.
+    """
+    if not _is_sites_refine_surface(surface_context):
+        return history
+    if len(history) <= _SITES_REFINE_HISTORY_ROWS:
+        return history
+    return history[-_SITES_REFINE_HISTORY_ROWS:]
 
 
 def _sse(event: str, data: dict[str, Any], *, entry_id: str | None = None) -> bytes:
@@ -63,6 +142,20 @@ async def post_agent_chat(
         ctx.intent = body.intent
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
+
+    # BC-4 run-start hard-block. Sit the credit gate at the SINGLE run-start
+    # chokepoint — BEFORE any DB write (no user message, no ChatRunDoc) and
+    # BEFORE the executor submit — so a blocked run leaves no trace and
+    # IN-FLIGHT runs (already past this point) are never killed. Flag-gated:
+    # OFF by default (OSS / self-host run no ledger), ON for the cloud via
+    # ``POCKETPAW_BILLING_ENFORCED``. ``check_balance`` raises
+    # ``InsufficientCredits`` (402, credits.insufficient), which the CloudError
+    # handler maps to the wire — we never raise HTTPException here. Imported
+    # locally to keep the credits package off this hot module's import graph.
+    if get_settings().billing_enforced:
+        from pocketpaw_ee.cloud.credits import service as credits_service
+
+        await credits_service.check_balance(workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved
@@ -90,6 +183,11 @@ async def post_agent_chat(
 
     # Load history BEFORE persisting the new user message so it excludes this turn.
     history = await load_history_for_scope(ctx)
+    # PERF-6: on the sites EDIT/REFINE surface, window the loaded history to the
+    # last few turns so the LLM stops re-processing the whole accumulating edit
+    # log on every refine (the progressive-slowdown cause). No-op for general
+    # chat — see ``_window_history_for_surface`` / ``_is_sites_refine_surface``.
+    history = _window_history_for_surface(history, ctx.surface_context)
     user_message_id = await _persist_user_message(ctx, body)
 
     # Resolve the sidebar Session up-front so ``message.persisted`` carries

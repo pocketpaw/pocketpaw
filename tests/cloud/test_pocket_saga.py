@@ -444,6 +444,57 @@ async def test_parked_forward_step_rolls_back_prior_steps(monkeypatch, _capture_
 
 
 # ---------------------------------------------------------------------------
+# T10 — a dry-run step is treated as not-committed → prior steps roll back.
+# A `instinct_dry_run` result has ok:True but the write never fired, so the
+# saga must treat it like a park (a sequence failure that rolls back the
+# already-committed steps) — never advance past it as if it had landed.
+# ---------------------------------------------------------------------------
+
+
+async def test_dry_run_step_rolls_back_prior_steps(monkeypatch, _capture_outcomes):
+    """T-32 / T10: a forward step that comes back `instinct_dry_run` is a
+    non-commit — the saga rolls back the prior committed step and records the
+    dry-run as the failure."""
+    rec = _Recorder({("POST", "/refund"): 200})
+
+    # Wrap run_action so the second step ("charge") returns the dry-run
+    # sentinel (ok:True, code:instinct_dry_run) — the shape the executor
+    # returns when dry_run=True. The first step ("reserve") fires normally.
+    real_run_action = action_executor.run_action
+
+    async def _maybe_dry_run(**kwargs):
+        if kwargs.get("action") == "charge":
+            return {
+                "ok": True,
+                "code": "instinct_dry_run",
+                "action": "charge",
+                "_park": {"action": "charge", "method": "POST", "path": "/charge"},
+                "on_success": [],
+                "on_error": [],
+            }
+        return await real_run_action(**kwargs)
+
+    monkeypatch.setattr(action_executor, "run_action", _maybe_dry_run)
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.saga.run_action", _maybe_dry_run)
+
+    steps = [
+        _step("reserve", "POST", "/reserve", compensate={"method": "POST", "path": "/refund"}),
+        _step("charge", "POST", "/charge", compensate={"method": "POST", "path": "/refund"}),
+    ]
+    result = await _run(steps, monkeypatch, rec)
+
+    assert result.ok is False
+    assert result.failed_action == "charge"
+    assert result.failure["code"] == "instinct_dry_run"
+    assert result.completed == ["reserve"]
+    # reserve rolled back.
+    assert [c.action for c in result.compensations] == ["reserve"]
+    assert result.compensations[0].status == "compensated"
+    # /charge never hit the backend (it was a dry run).
+    assert ("POST", "/charge") not in rec.calls
+
+
+# ---------------------------------------------------------------------------
 # Edge: first step fails → nothing committed, nothing to compensate
 # ---------------------------------------------------------------------------
 

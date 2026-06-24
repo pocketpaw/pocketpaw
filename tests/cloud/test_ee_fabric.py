@@ -43,6 +43,17 @@
 #   result, NOT an error), a single-hop fan-out exceeding MAX_FRONTIER (clean
 #   ValueError, never a SQLite bound-variable crash), and a path deeper than
 #   MAX_HOPS rejected at FabricQuery construction.
+# Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — reworked
+#   TestStatsWorkspaceScoping and TestTypeNameUniqueIndex for the new per-type
+#   tenancy. fabric_object_types now carries its OWN workspace_id, so scoped
+#   list_types / stats filter on the type's column (own rows + legacy NULL)
+#   instead of inferring visibility from object rows. Concretely: define_type
+#   takes a workspace_id and a type stamped for ws-b is invisible to ws-a;
+#   an owner's EMPTY (object-less) type IS now visible to its owner (the old
+#   "omit empty types" rule was an artifact of the join-through-objects
+#   approach and is inverted here); the unique index is now
+#   (workspace_id, LOWER(name)) named idx_object_types_ws_name_unique, and the
+#   race guard is exercised within a single workspace.
 
 from __future__ import annotations
 
@@ -416,19 +427,20 @@ class TestWorkspaceScoping:
 
 
 class TestStatsWorkspaceScoping:
-    """fix/fabric-stats-workspace-scope — scoped stats() and list_types().
+    """Scoped stats() and list_types() (fix/fabric-stats-workspace-scope, SZD-2).
 
-    The last two W4a reads were left instance-wide. On a shared ``fabric.db``
-    that leaked: a tenant's chat called fabric_stats and got back another
-    context's experimental type names (``Lease`` / ``Lease2``), and the global
-    object count (13) disagreed with what the workspace-scoped query actually
-    saw (11). These tests pin both: scoped counts mirror ``query()`` exactly,
-    and a scoped type list never names a type only another tenant has rows for.
+    On a shared ``fabric.db`` an unscoped read leaked across tenants: a tenant's
+    chat called fabric_stats and got back another context's experimental type
+    names (``Lease`` / ``Lease2``), and the global object count disagreed with
+    what the workspace-scoped query actually saw. These tests pin both: scoped
+    counts mirror ``query()`` exactly, and a scoped type list never names
+    another tenant's type.
 
-    Subtlety being guarded: ``fabric_object_types`` has NO workspace column —
-    type DEFINITIONS are global. So a scoped type list cannot come from the
-    type table; it must be derived from types with at least one object row
-    VISIBLE to the workspace.
+    SZD-2 changed the mechanism: ``fabric_object_types`` now carries its OWN
+    ``workspace_id``, so a scoped type list filters on the type table directly
+    (own rows + legacy NULL), not by inferring visibility from object rows. A
+    type is therefore isolated by who DEFINED it, not by who has rows of it —
+    and an owner's empty type is visible to its owner.
     """
 
     @pytest.mark.asyncio
@@ -460,15 +472,13 @@ class TestStatsWorkspaceScoping:
     async def test_scoped_type_list_excludes_other_tenant_type_names(
         self, store: FabricStore
     ) -> None:
-        # The exact live leak: ws-b defines "Lease" / "Lease2" and only B has
-        # rows of them. ws-a, which only models "Customer", must NOT see those
-        # type names — even though the type DEFINITIONS are global.
-        customer = await store.define_type(name="Customer", properties=[])
-        lease = await store.define_type(name="Lease", properties=[])
-        lease2 = await store.define_type(name="Lease2", properties=[])
-        await store.create_object(customer.id, {"name": "A1"}, workspace_id="ws-a")
-        await store.create_object(lease.id, {"tenant": "B-co"}, workspace_id="ws-b")
-        await store.create_object(lease2.id, {"tenant": "B-co"}, workspace_id="ws-b")
+        # The exact live leak: ws-b defines "Lease" / "Lease2". ws-a, which only
+        # models "Customer", must NOT see those type names. SZD-2 — isolation is
+        # by who DEFINED the type (its own workspace_id), so types are stamped on
+        # define_type.
+        await store.define_type(name="Customer", properties=[], workspace_id="ws-a")
+        await store.define_type(name="Lease", properties=[], workspace_id="ws-b")
+        await store.define_type(name="Lease2", properties=[], workspace_id="ws-b")
 
         a_types = {t.name for t in await store.list_types(workspace_id="ws-a")}
         assert a_types == {"Customer"}
@@ -482,10 +492,8 @@ class TestStatsWorkspaceScoping:
     async def test_stats_types_count_matches_scoped_type_list(self, store: FabricStore) -> None:
         # stats["types"] is the count of types VISIBLE to the workspace — it
         # must equal len(list_types(workspace_id)), not the global type count.
-        customer = await store.define_type(name="Customer", properties=[])
-        lease = await store.define_type(name="Lease", properties=[])
-        await store.create_object(customer.id, {"name": "A1"}, workspace_id="ws-a")
-        await store.create_object(lease.id, {"tenant": "B-co"}, workspace_id="ws-b")
+        await store.define_type(name="Customer", properties=[], workspace_id="ws-a")
+        await store.define_type(name="Lease", properties=[], workspace_id="ws-b")
 
         a_stats = await store.stats(workspace_id="ws-a")
         a_types = await store.list_types(workspace_id="ws-a")
@@ -533,35 +541,48 @@ class TestStatsWorkspaceScoping:
         assert names == {"Customer", "Lease"}
 
     @pytest.mark.asyncio
-    async def test_scoped_type_with_no_visible_rows_is_omitted(self, store: FabricStore) -> None:
-        # A defined type with zero visible rows (even the caller's own empty
-        # type) is omitted, and reappears the moment a visible object exists.
-        empty = await store.define_type(name="Empty", properties=[])
-        assert {t.name for t in await store.list_types(workspace_id="ws-a")} == set()
-
-        await store.create_object(empty.id, {"k": "v"}, workspace_id="ws-a")
+    async def test_owner_sees_own_empty_type(self, store: FabricStore) -> None:
+        # SZD-2: an owner's EMPTY (object-less) type IS visible to its owner —
+        # type definitions are first-class tenant data now, not inferred from
+        # object rows (this inverts the pre-SZD-2 "omit empty types" rule). A
+        # type owned by ws-a remains invisible to ws-b regardless of objects.
+        await store.define_type(name="Empty", properties=[], workspace_id="ws-a")
         assert {t.name for t in await store.list_types(workspace_id="ws-a")} == {"Empty"}
+        assert (await store.stats(workspace_id="ws-a"))["types"] == 1
+        # ws-b never defined it -> does not see it.
+        assert {t.name for t in await store.list_types(workspace_id="ws-b")} == set()
+        assert (await store.stats(workspace_id="ws-b"))["types"] == 0
 
 
 class TestTypeNameUniqueIndex:
-    """A UNIQUE index on fabric_object_types(name) closes the ensure_type race."""
+    """A UNIQUE index on fabric_object_types(workspace_id, name) closes the
+    ensure_type race PER workspace (SZD-2 — was a global LOWER(name) index)."""
 
     @pytest.mark.asyncio
     async def test_concurrent_same_name_defines_one_type(self, store: FabricStore) -> None:
-        # Two concurrent define_type calls for the same name must not leave two
-        # type rows. The UNIQUE index makes the second INSERT fail rather than
-        # silently splitting the same logical type across two ids.
+        # Two concurrent define_type calls for the same name WITHIN one workspace
+        # must not leave two type rows. The UNIQUE (workspace_id, name) index
+        # makes the second INSERT fail rather than silently splitting the same
+        # logical type across two ids.
         results = await asyncio.gather(
-            store.define_type(name="Customer", properties=[]),
-            store.define_type(name="Customer", properties=[]),
+            store.define_type(name="Customer", properties=[], workspace_id="ws-a"),
+            store.define_type(name="Customer", properties=[], workspace_id="ws-a"),
             return_exceptions=True,
         )
         # At least one succeeded; any second one either errored or was rejected.
         ok = [r for r in results if not isinstance(r, Exception)]
         assert ok, "at least one define_type must succeed"
 
-        types = [t for t in await store.list_types() if t.name == "Customer"]
+        types = [t for t in await store.list_types(workspace_id="ws-a") if t.name == "Customer"]
         assert len(types) == 1, "the unique index must prevent a duplicate type row"
+
+    @pytest.mark.asyncio
+    async def test_two_workspaces_may_define_same_name(self, store: FabricStore) -> None:
+        # SZD-2: the uniqueness key includes workspace_id, so the SAME name in
+        # two different workspaces is allowed — each tenant gets its own type.
+        a = await store.define_type(name="Customer", properties=[], workspace_id="ws-a")
+        b = await store.define_type(name="Customer", properties=[], workspace_id="ws-b")
+        assert a.id != b.id
 
     @pytest.mark.asyncio
     async def test_unique_index_exists(self, store: FabricStore) -> None:
@@ -573,7 +594,9 @@ class TestTypeNameUniqueIndex:
                 " AND tbl_name='fabric_object_types'"
             ) as cur:
                 names = {row["name"] async for row in cur}
-        assert "idx_object_types_name_unique" in names
+        assert "idx_object_types_ws_name_unique" in names
+        # The old global index must NOT exist (it was dropped in the migration).
+        assert "idx_object_types_name_unique" not in names
 
     @pytest.mark.asyncio
     async def test_preexisting_duplicate_names_are_deduped(self, tmp_path: Path) -> None:

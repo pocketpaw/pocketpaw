@@ -601,6 +601,32 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         f"write '{action_name}' executed — HTTP {result.get('status')}",
     )
 
+    # T8 (layered/learning gate) — the SINGLE trust-feedback write site.
+    # After a gated write actually LANDS, append one trust-ledger row for
+    # the (workspace, pocket, action) pair. ``was_auto_approved`` is True
+    # when the system triager decided the write (``approver ==
+    # "system:triager"`` — the AUTO/OPTIMISTIC lanes' decider) and False
+    # when a human approved it. This is the ONLY place trust is recorded
+    # (MF-3): ``outcomes/service.py`` must NOT call it, so the trust loop
+    # can never self-poison by double-counting one executed write. Best-
+    # effort: a sidecar write failure degrades trust accuracy but must
+    # never fail the approve response (the write already succeeded).
+    try:
+        from pocketpaw_ee.cloud.pockets import trust_ledger
+
+        await trust_ledger.record_correction(
+            workspace_id,
+            pocket_id,
+            action_name,
+            was_auto_approved=(approver == "system:triager"),
+        )
+    except Exception:  # noqa: BLE001 — trust feedback is best-effort
+        logger.warning(
+            "approved action %s: trust feedback write failed (write succeeded)",
+            action.id,
+            exc_info=True,
+        )
+
     # RFC 09 Slice 2 — chain close on the bridge-side success path
     # (audit Producer 4 site (b)). Emit BEFORE ``emit_pocket_outcome``
     # so the outcomes-side ``decision.outcome_attached`` (RFC 07 Slice 2
