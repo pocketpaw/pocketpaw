@@ -1,5 +1,11 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-24 (integration/billing-credits, BC-6) — Mounts the
+    Entitlements resolver router (``GET /entitlements`` -> the caller workspace's
+    plan + features + monthly credit allotment). The plan CATALOG read
+    (``GET /billing/plans``) is added to the billing router; both build on the
+    declarative plan catalog (``billing.plans``) over the existing
+    ``PLAN_FEATURES`` / ``Workspace.plan`` tiers.
 Modified: 2026-06-24 (integration/billing-credits, BC-2) — Mounts the Billing
     Gateway primitive: the authenticated ``/billing/topup`` router (Dodo hosted
     checkout) and, SEPARATELY with NO auth dependency, the public
@@ -206,6 +212,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
@@ -241,6 +248,11 @@ def mount_cloud(app: FastAPI) -> None:
     # dependency — Dodo is the caller; trust is the Standard-Webhooks signature.
     app.include_router(billing_router, prefix="/api/v1")
     app.include_router(billing_webhooks_router, prefix="/api/v1")
+    # Entitlements (BC-6, the Entitlement primitive) — the workspace-scoped
+    # resolver (GET /entitlements -> the workspace's plan + features + monthly
+    # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
+    # billing router above; this router carries only the per-workspace resolve.
+    app.include_router(entitlements_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
