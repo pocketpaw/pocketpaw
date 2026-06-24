@@ -47,6 +47,17 @@ leaf domain module) and is imported here. This lets ``pockets.dto`` import the
 same class from ``surface.domain`` instead of from ``models.pocket``, which
 the OSS-EE boundary contract forbids. No schema change — the embedded BSON
 shape is identical, so no Mongo migration.
+Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened
+``Pocket.source`` from ``dict[str, str] | None`` to ``dict[str, Any] | None``
+so a DYNAMIC svelte site's ``source`` envelope can carry its live-data bindings
+(``objects`` = a list of D1 table defs, ``sources`` / ``actions`` = lists,
+``auth`` = a bool) as SIBLING keys alongside the ``{relative_path:
+file_contents}`` SvelteKit file entries on the SAME dict. Keeping the bindings
+inside ``source`` means they ride the versioned content (``version_content =
+source`` for svelte → draft/publish/revert capture the full dynamic spec), and
+the DSV-2b read resolves ``objects`` off this same envelope. A STATIC svelte
+pocket's ``source`` stays a ``str -> str`` file map — the looser ``Any`` is a
+superset, so no behaviour change and no Mongo migration.
 """
 
 from __future__ import annotations
@@ -141,11 +152,18 @@ class Pocket(TimestampedDocument):
     # the pocket so the generator + any later refine pick the same track.
     # Legacy pockets default to ``"ripple"`` — additive, no migration.
     engine: str = "ripple"
-    # The svelte-track source map: ``{relative_path: file_contents}`` for a
-    # SvelteKit project (e.g. ``"src/routes/+page.svelte"`` → contents). The
-    # svelte analog of ``rippleSpec`` — the generator writes these files onto
-    # the paw-sites skeleton and prerenders. ``None`` for ripple pockets.
-    source: dict[str, str] | None = None
+    # The svelte-track source CONTENT ENVELOPE. Carries the
+    # ``{relative_path: file_contents}`` SvelteKit files (e.g.
+    # ``"src/routes/+page.svelte"`` → contents) the generator writes onto the
+    # paw-sites skeleton and prerenders — the svelte analog of ``rippleSpec``.
+    # For a DYNAMIC svelte site it ALSO carries the live-data bindings as
+    # SIBLING keys on the same dict: ``objects`` (a list of D1 table defs),
+    # ``sources`` / ``actions`` (lists), and ``auth`` (a bool). Hence
+    # ``dict[str, Any]`` (DSV-5): the values are file-content strings for the
+    # path entries and lists/bools for the binding entries. ``None`` for ripple
+    # pockets; a STATIC svelte pocket carries only the str->str file map (a
+    # subset of the looser type — no behaviour change).
+    source: dict[str, Any] | None = None
     # Default "workspace": new pockets are visible to every workspace member.
     # Owner can tighten to "private" (owner-only + explicit shared_with) via
     # the visibility toggle in the pocket UI.

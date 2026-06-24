@@ -30,6 +30,12 @@ typed-rippleSpec transition. ``service._pocket_to_domain`` promotes the stored
 flat dict to a typed ``RippleSpec`` on read (promote-on-read; the Beanie field
 stays ``dict``, no document migration), falling back to the raw value on a
 corrupt/unpromotable spec. Every reader downstream is dual-path.
+Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — loosened the
+domain ``Pocket.source`` value type from ``dict[str, str]`` to
+``dict[str, Any]`` so a dynamic svelte site's ``source`` envelope can carry its
+live-data bindings (``objects``/``sources``/``actions``/``auth``) as sibling
+keys alongside the str->str SvelteKit file entries, matching the loosened Beanie
+``Pocket.source``. Static svelte pockets keep a str->str map (a subset).
 """
 
 from __future__ import annotations
@@ -133,10 +139,13 @@ class Pocket:
     # Paw Sites generation track: ``"ripple"`` (default) compiles
     # ``ripple_spec``; ``"svelte"`` materializes ``source`` instead.
     engine: str = "ripple"
-    # The svelte-track source map ``{relative_path: file_contents}`` — the
-    # SvelteKit files the generator writes onto the skeleton. ``None`` for
-    # ripple pockets.
-    source: dict[str, str] | None = None
+    # The svelte-track source content envelope. Carries the
+    # ``{relative_path: file_contents}`` SvelteKit files the generator writes
+    # onto the skeleton AND, for a DYNAMIC svelte site, the live-data bindings
+    # (``objects``/``sources``/``actions``/``auth``) as sibling keys on the same
+    # dict — hence ``dict[str, Any]`` (DSV-5). ``None`` for ripple pockets; a
+    # static svelte pocket carries only the str->str file map (a subset).
+    source: dict[str, Any] | None = None
     # Optional per-entity surface-profile override (the JSON-shaped dict that
     # mirrors the surface-domain ``SurfaceProfile``). Consumed by the
     # entity-aware resolve_profile (entity-rooms chunk ①). ``None`` = use the
