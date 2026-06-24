@@ -1702,16 +1702,19 @@ async def activate_site(
 
     inputs = doc.pending_deploy_inputs or {}
     if not inputs:
-        # No captured deploy inputs — cannot run the deferred deploy from the
-        # webhook. Advance the status so the lifecycle is consistent, but log the
-        # gap (a site that reached "active" with nothing to deploy is unexpected).
-        logger.warning(
+        # No captured deploy inputs — we cannot run the deferred deploy from the
+        # webhook (it carries no pocket scope). This is an unexpected/corrupt state:
+        # every charge-first pending site captures its inputs at publish, and they
+        # are only cleared on a SUCCESSFUL deploy. Do NOT advance to "active" — that
+        # would be a lie (active + deployed=False = a paid site that 404s). Leave it
+        # PENDING and log loudly so an operator investigates; the site never claims
+        # to be live without an actual deploy.
+        logger.error(
             "sites.activate: pending site %s has no captured deploy inputs — "
-            "marking active without a deploy (unexpected state)",
+            "leaving it PENDING (cannot deploy from the webhook); operator "
+            "intervention required",
             site_id,
         )
-        doc.subscription_status = "active"
-        await doc.save()
         return doc
 
     pocket_id = doc.pocket_id
