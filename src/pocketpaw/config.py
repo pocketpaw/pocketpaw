@@ -1426,6 +1426,31 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Billing — compute-cost metering rate card (BC-3, the Meter + Price
+    # primitives). A completed chat run is billed by its real compute cost times
+    # a flat markup, converted from USD into integer credits. These two settings
+    # ARE the rate card: keeping them declarative (a flat multiplier + the credit
+    # denomination) leaves room for a tiered card later without changing the
+    # debit path. ``credits = round(cost_usd * markup / credit_usd)``.
+    billing_markup: float = Field(
+        default=2.5,
+        description=(
+            "Flat markup applied to a chat run's real compute cost before it is "
+            "billed to the workspace wallet (covers infra + margin). The metered "
+            "credit charge is round(cost_usd * billing_markup / credit_usd). Set "
+            "via POCKETPAW_BILLING_MARKUP."
+        ),
+    )
+    credit_usd: float = Field(
+        default=0.01,
+        description=(
+            "USD value of one credit (1 credit == $0.01 == 1 cent, the lowest "
+            "currency denomination — the same denomination Dodo top-ups use). "
+            "Divides the marked-up compute cost to yield integer credits. Set via "
+            "POCKETPAW_CREDIT_USD."
+        ),
+    )
+
     # Pocket data-source refresh — cost controls (RFC 04 M3).
     # A pocket source binding may declare an `interval` or `webhook` refresh
     # trigger. Both are AUTO-refresh: they re-run a source without a human in

@@ -19,6 +19,13 @@ multi-replica would interrupt sibling workers' in-flight runs), sweep any
 ``queued``/``running`` leftovers as ``interrupted``. LLM streams can't resume
 mid-generation; the partial already streamed remains visible, the user
 retries manually. HA deploys rely on the 10-minute heartbeat sweeper instead.
+
+Updated: 2026-06-24 (integration/billing-credits, BC-3) — the boot sweep now
+also runs the compute-cost metering sweep (``sweep_unbilled_runs``) so any
+terminal runs the prior worker left unbilled are charged on restart. The
+metering sweep is idempotent (billed flag + ``run:{run_id}`` ledger key), so it
+is safe even when the boot stale-run sweep is disabled — it just bills the
+already-terminal backlog.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from pocketpaw_ee.cloud.chat.runs.run_core import execute_run
 from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
 from pocketpaw_ee.cloud.jobs.domain import job_timeout_seconds
 from pocketpaw_ee.cloud.jobs.worker import execute_workspace_job
+from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
 from pocketpaw_ee.cloud.shared.db import close_cloud_db, init_cloud_db
 
 logger = logging.getLogger(__name__)
@@ -82,6 +90,16 @@ async def _startup(ctx: dict[str, Any]) -> None:
             logger.info("worker boot: marked %d orphaned runs as interrupted", swept)
     except Exception:
         logger.exception("worker boot: stale-run sweep failed")
+    # BC-3 metering: bill any terminal runs the prior worker left unbilled (the
+    # boot sweep above just turned this boot's orphans terminal, and earlier
+    # finished runs may never have been billed). Own try so a metering failure
+    # can't abort worker startup.
+    try:
+        billed = await sweep_unbilled_runs()
+        if billed:
+            logger.info("worker boot: billed %d unbilled terminal runs", billed)
+    except Exception:
+        logger.exception("worker boot: compute-cost metering sweep failed")
 
 
 async def _shutdown(ctx: dict[str, Any]) -> None:
