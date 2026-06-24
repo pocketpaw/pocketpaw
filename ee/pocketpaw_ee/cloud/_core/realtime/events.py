@@ -470,6 +470,16 @@ class CreditMovement(Event):
     EVENT_TYPE: ClassVar[str] = "credits.movement"
 
 
+# Billing — top-up payment captured (BC-2, the Gateway primitive). Emitted by
+# ``billing.service`` after a VERIFIED ``payment.succeeded`` webhook drove a
+# credit grant. data: {workspace_id, gateway, gateway_ref, event_id,
+# amount_credits, currency}. Fires once per delivery (a replayed webhook is a
+# no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingTopupCaptured(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.topup.captured"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

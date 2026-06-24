@@ -48,6 +48,10 @@ lives in the ``pocketpaw_ee.versions`` package (its own entity), so it is
 imported lazily here — the same out-of-models discipline the belt/mandates docs
 use — to keep ``cloud.models`` from hard-importing the versions package. Only
 ``pocketpaw_ee.versions.service`` imports the doc class directly.
+Updated: 2026-06-24 (integration/billing-credits, BC-2) — added ``Payment``
+(the top-up payment record captured via a verified Dodo webhook) to the imports,
+``__all__``, and ``get_all_documents()`` so the ``billing_payments`` collection
+is wired into ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
 """
 
 from __future__ import annotations
@@ -96,6 +100,7 @@ from pocketpaw_ee.cloud.models.meeting import (
 from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
+from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
@@ -230,6 +235,7 @@ __all__ = [
     "Notification",
     "NotificationSource",
     "OAuthAccount",
+    "Payment",
     "PlanSession",
     "PlanSessionAgentGap",
     "Pocket",
@@ -282,6 +288,9 @@ def get_all_documents():
         # Only ``ee.cloud.credits.service`` writes these.
         CreditBalance,
         CreditLedgerEntry,
+        # Billing payments (BC-2) — top-up payment records captured via a
+        # gateway webhook. Only ``ee.cloud.billing.service`` writes this.
+        Payment,
         Invite,
         Group,
         InstinctApproval,

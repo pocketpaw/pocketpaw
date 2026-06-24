@@ -120,6 +120,17 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Payments gateway (BC-2 — the Gateway primitive) ---
+    # Dodo is the only gateway for v1, behind the IPaymentsProvider abstraction
+    # in ee/pocketpaw_ee/cloud/billing/providers/ so Razorpay can drop in later.
+    # PINNED to 1.105.0: the supply-chain rule on this machine enforces a 7-day
+    # minimum release age. The newest dodopayments (1.105.1) was published
+    # 2026-06-18 (<7 days ago) so it is BLOCKED; 1.105.0 (released 2026-06-16)
+    # is the latest version that satisfies the age guard. The ``[webhooks]``
+    # extra pulls ``standardwebhooks<2,>=1.0.1`` (stable since 2024) — the
+    # Standard Webhooks HMAC-SHA256 verifier the inbound webhook route uses to
+    # prove a payload came from Dodo before any credits are granted.
+    "dodopayments[webhooks]==1.105.0",
 ]
 
 [project.optional-dependencies]

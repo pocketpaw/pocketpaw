@@ -1385,6 +1385,47 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
+    # The only payment gateway in v1; a provider abstraction
+    # (``ee.cloud.billing.providers``) keeps Razorpay et al. a later swap.
+    # All three are optional so a non-billing deployment boots fine; the Dodo
+    # provider raises a clear ValidationError when a billing call is made
+    # without the key configured.
+    dodo_payments_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments API bearer token, used to authenticate the server-side "
+            "DodoPayments client when creating a one-time top-up checkout. Set via "
+            "POCKETPAW_DODO_PAYMENTS_API_KEY. None disables Dodo top-ups."
+        ),
+    )
+    dodo_environment: str = Field(
+        default="test_mode",
+        description=(
+            "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
+            "Selects the API base URL the DodoPayments client targets. Set via "
+            "POCKETPAW_DODO_ENVIRONMENT."
+        ),
+    )
+    dodo_webhook_secret: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments webhook signing secret (Standard Webhooks / 'whsec_…'). "
+            "Used to VERIFY the signature on every inbound /billing/webhooks/dodo "
+            "POST before the payload is trusted. Set via "
+            "POCKETPAW_DODO_WEBHOOK_SECRET. NEVER logged."
+        ),
+    )
+    dodo_credit_product_id: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the credits SKU. A one-time top-up adds this "
+            "product to the cart with a pay-what-you-want amount equal to the "
+            "purchased credits (1 credit == $0.01 == 1 cent, the currency's lowest "
+            "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
+        ),
+    )
+
     # Pocket data-source refresh — cost controls (RFC 04 M3).
     # A pocket source binding may declare an `interval` or `webhook` refresh
     # trigger. Both are AUTO-refresh: they re-run a source without a human in

@@ -1,5 +1,10 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-24 (integration/billing-credits, BC-2) — Mounts the Billing
+    Gateway primitive: the authenticated ``/billing/topup`` router (Dodo hosted
+    checkout) and, SEPARATELY with NO auth dependency, the public
+    ``/billing/webhooks/dodo`` router (Standard-Webhooks-signed; verified before
+    the payload is trusted, then grants credits exactly once via BC-1).
 Modified: 2026-06-20 (feat/workspace-jobs, pp#1459) — Mounts the workspace-jobs
     status router (``GET /workspaces/{ws}/jobs/{job_id}``) and registers the
     built-in jobs into the process-wide registry via ``register_builtins()``
@@ -194,6 +199,8 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
+    from pocketpaw_ee.cloud.billing.router import router as billing_router
+    from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
@@ -228,6 +235,12 @@ def mount_cloud(app: FastAPI) -> None:
     # (GET /credits/balance, GET /credits/history). Grant / debit are
     # in-process only (the billing subsystem calls the service directly).
     app.include_router(credits_router, prefix="/api/v1")
+    # Billing (BC-2, the Gateway primitive) — the authenticated top-up surface
+    # (POST /billing/topup → Dodo hosted checkout). The PUBLIC inbound webhook
+    # (POST /billing/webhooks/dodo) is mounted SEPARATELY just below with NO auth
+    # dependency — Dodo is the caller; trust is the Standard-Webhooks signature.
+    app.include_router(billing_router, prefix="/api/v1")
+    app.include_router(billing_webhooks_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
