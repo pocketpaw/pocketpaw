@@ -25,7 +25,13 @@
 # SECURITY: the provider verifies the signature before this module trusts any
 # field. The webhook secret / API key are never logged.
 #
+# CURRENCY: the 1-credit==1-cent mapping is USD-only, so ``handle_webhook`` gates
+# the grant on ``currency == "USD"`` — a verified non-USD success event is acked
+# but never granted (it would otherwise credit 1:1 against the wrong denomination).
+#
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
+# Updated 2026-06-24 (security): enforce USD before granting; correct the
+#   bad-signature docstring (raises ``BadRequest`` → 400, not ``ValidationError``).
 
 from __future__ import annotations
 
@@ -113,7 +119,7 @@ async def handle_webhook(
 ) -> dict:
     """Verify + parse a gateway webhook, granting credits on a success event.
 
-    Returns ``{"ok": True, "granted": <bool>}``. Raises ``ValidationError``
+    Returns ``{"ok": True, "granted": <bool>}``. Raises ``BadRequest``
     (→ 400 via the cloud error handler) when the signature does not verify — the
     payload is NEVER trusted before then.
 
@@ -126,7 +132,7 @@ async def handle_webhook(
     prov = provider or _default_provider()
 
     # SECURITY: signature is verified inside the provider BEFORE the body is
-    # parsed. A bad signature raises ValidationError here → 400, no grant.
+    # parsed. A bad signature raises BadRequest here → 400, no grant.
     event: GatewayEvent = prov.verify_and_parse_webhook(payload=payload, headers=headers)
 
     # Only a success event grants. Everything else (failed / processing / refund
@@ -146,6 +152,20 @@ async def handle_webhook(
     if event.amount_credits <= 0:
         logger.warning(
             "billing.webhook: payment.succeeded had non-positive amount (event_id=%s) — ignoring",
+            event.event_id,
+        )
+        return {"ok": True, "granted": False}
+    # USD-ONLY: the 1-credit==1-cent mapping holds only for USD. A verified
+    # non-USD charge would be credited 1:1 against the wrong denomination (a
+    # ¥750 charge wrongly granting 750 credits == $7.50). Until the gateway
+    # carries an FX-normalized amount, gate the grant on currency == USD; any
+    # other currency is acked (200) so Dodo stops retrying, but grants nothing.
+    if event.currency.upper() != "USD":
+        # Log the event id + currency only — never the amount (PII / money).
+        logger.warning(
+            "billing.webhook: payment.succeeded in non-USD currency=%s (event_id=%s) — "
+            "not granting (USD-only)",
+            event.currency,
             event.event_id,
         )
         return {"ok": True, "granted": False}

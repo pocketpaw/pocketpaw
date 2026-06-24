@@ -10,12 +10,14 @@
 #
 # On a verified ``payment.succeeded`` the service grants credits EXACTLY ONCE
 # (BC-1's idempotent grant, keyed on the webhook event id). A bad signature
-# raises ``ValidationError`` → 400 via the cloud error handler — no grant.
+# raises ``BadRequest`` → 400 via the cloud error handler — no grant.
 #
 # SECURITY: read RAW bytes (the signature is over the exact bytes — never
 # re-serialize). Never log the secret or customer PII.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
+# Updated 2026-06-24 (security): correct the bad-signature docstring — the
+#   provider raises ``BadRequest`` (400), not ``ValidationError`` (422).
 
 from __future__ import annotations
 
@@ -41,7 +43,7 @@ async def dodo_webhook(request: Request) -> WebhookAck:
     on a ``payment.succeeded`` event grants the purchased credits to the
     workspace named in the payment metadata — EXACTLY ONCE (a replay is a no-op).
     Returns 200 with ``{ok, granted}``; a signature that does not verify raises
-    ``ValidationError`` → 400 (no grant).
+    ``BadRequest`` → 400 (no grant).
     """
     raw = await request.body()
     # Starlette headers are case-insensitive; hand the service a plain dict (the

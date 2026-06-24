@@ -17,6 +17,9 @@
 # on the captured events.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new test module.
+# Updated 2026-06-24 (security): add test_non_usd_event_does_not_grant (the
+#   USD-only grant guard) and test_dodo_secrets_are_in_secret_fields (the Dodo
+#   secrets are on the encrypted-persistence allowlist).
 
 from __future__ import annotations
 
@@ -337,6 +340,28 @@ async def test_success_event_without_workspace_id_does_not_grant(mongo_db):
     assert result == {"ok": True, "granted": False}
 
 
+async def test_non_usd_event_does_not_grant(mongo_db, recording_bus):
+    """A validly-signed payment.succeeded in a non-USD currency is acked (200)
+    but grants NOTHING — the 1-credit==1-cent mapping is USD-only, so crediting a
+    ¥750 charge 1:1 would wrongly grant 750 credits ($7.50). The USD-only guard
+    must short-circuit before the grant."""
+    body = _payment_succeeded_body(workspace_id=WS, total_amount=750, currency="JPY")
+    headers = _sign(body, msg_id="evt_jpy_1")
+
+    assert await credits.balance(WS) == 0
+    result = await billing.handle_webhook(
+        payload=body.encode(), headers=headers, provider=_provider()
+    )
+
+    # Acked but not granted — same shape as the other non-grant branches.
+    assert result == {"ok": True, "granted": False}
+    # Balance unchanged: NO credits granted for the non-USD charge.
+    assert await credits.balance(WS) == 0
+    # No Payment row and no capture event for a charge that never granted.
+    assert await Payment.find(Payment.workspace == WS).to_list() == []
+    assert [e for e in recording_bus.events if e.type == "billing.topup.captured"] == []
+
+
 # ---------------------------------------------------------------------------
 # Provider unit checks — verify_and_parse_webhook normalization + config guards.
 # ---------------------------------------------------------------------------
@@ -371,3 +396,18 @@ async def test_create_topup_product_unconfigured_raises(mongo_db):
     with pytest.raises(ValidationError) as exc:
         await billing.create_topup(workspace_id=WS, user_id="u1", amount_credits=100, provider=prov)
     assert exc.value.code == "billing.product_unconfigured"
+
+
+# ---------------------------------------------------------------------------
+# Secret-persistence guard — the Dodo API key and webhook signing secret MUST be
+# on the encrypted-persistence allowlist, or a dashboard-set value would be
+# written PLAINTEXT to ~/.pocketpaw/config.json (signing secret in plaintext == a
+# trust-boundary leak). This fast guard fails the build if either is dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_dodo_secrets_are_in_secret_fields():
+    from pocketpaw.credentials import SECRET_FIELDS
+
+    assert "dodo_payments_api_key" in SECRET_FIELDS
+    assert "dodo_webhook_secret" in SECRET_FIELDS

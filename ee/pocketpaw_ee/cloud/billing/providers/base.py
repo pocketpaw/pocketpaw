@@ -12,6 +12,8 @@
 # whole point of the port.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
+# Updated 2026-06-24 (security): name the bad-signature exception in the port
+#   docstring — ``BadRequest`` (400), not ``ValidationError`` (422).
 
 from __future__ import annotations
 
@@ -56,8 +58,9 @@ class IPaymentsProvider(ABC):
 
         The signature is checked FIRST, against the RAW ``payload`` bytes. On a
         bad / missing signature (or malformed headers / stale timestamp) the
-        implementation RAISES — it never returns an unverified event. Only after
-        verification passes is the body parsed and normalized. ``event_id`` is the
-        gateway's unique delivery id (the idempotency key the grant uses).
+        implementation RAISES ``BadRequest`` (→ 400, an untrusted request — not
+        ``ValidationError`` / 422) — it never returns an unverified event. Only
+        after verification passes is the body parsed and normalized. ``event_id``
+        is the gateway's unique delivery id (the idempotency key the grant uses).
         """
         raise NotImplementedError

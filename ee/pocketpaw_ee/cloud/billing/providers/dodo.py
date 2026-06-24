@@ -38,6 +38,9 @@
 # secret and the API key are NEVER logged.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new module.
+# Updated 2026-06-24 (security): warn (don't silently swallow) when a
+#   payment.succeeded event carries a non-int / missing ``total_amount`` — the
+#   safe-coerce-to-0 behavior is unchanged, but ops now get a log to triage.
 
 from __future__ import annotations
 
@@ -223,7 +226,20 @@ class DodoProvider:
         # ``total_amount`` is the lowest denomination (cents for USD). 1 credit ==
         # 1 cent, so cents map 1:1 back onto credits.
         raw_amount = data.get("total_amount")
-        amount_credits = int(raw_amount) if isinstance(raw_amount, int) else 0
+        if isinstance(raw_amount, int):
+            amount_credits = int(raw_amount)
+        else:
+            # Safe-coerce to 0 (the service's amount<=0 guard then no-ops the
+            # grant), but warn so ops can triage a malformed/missing amount on
+            # a success event. No money value to leak here — it isn't a number.
+            amount_credits = 0
+            if event_type == "payment.succeeded":
+                logger.warning(
+                    "billing.webhook: payment.succeeded had non-int total_amount "
+                    "(type=%s, event_id=%s) — coercing to 0, grant will no-op",
+                    type(raw_amount).__name__,
+                    event_id,
+                )
         currency = str(data.get("currency") or "")
 
         return GatewayEvent(
