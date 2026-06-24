@@ -1,6 +1,11 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-24: Added ``billing_enforced`` (default False, env
+    POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
+    True the cloud rejects STARTING a new chat run on a zero-or-negative
+    credit balance with HTTP 402; in-flight runs are untouched. Off by
+    default so OSS / self-host stay unaffected.
   - 2026-06-18: Added the four layered/learning Instinct gate defaults —
     ``instinct_approval_level`` (default "ASK", dormant),
     ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
@@ -1448,6 +1453,17 @@ class Settings(BaseSettings):
             "currency denomination — the same denomination Dodo top-ups use). "
             "Divides the marked-up compute cost to yield integer credits. Set via "
             "POCKETPAW_CREDIT_USD."
+        ),
+    )
+    billing_enforced: bool = Field(
+        default=False,
+        description=(
+            "Run-start hard-block (BC-4). When True, STARTING a new chat run on a "
+            "workspace whose credit balance is <= 0 is rejected with HTTP 402 "
+            "(credits.insufficient) BEFORE any run row is written; in-flight runs "
+            "are never killed. Default False so OSS / self-host deployments (which "
+            "run no credit ledger) are unaffected; the cloud turns it on via "
+            "POCKETPAW_BILLING_ENFORCED."
         ),
     )
 

@@ -9,6 +9,9 @@
 #                     ``InsufficientCredits`` (402) on over-debit, with ZERO
 #                     side effects. Returns the new balance.
 #   * ``balance``   — read the current spendable balance (tenant-scoped).
+#   * ``check_balance`` — raise ``InsufficientCredits`` when the wallet is
+#                     out of credits (balance <= 0). The pure, flag-free
+#                     assertion behind BC-4's run-start hard-block.
 #   * ``history``   — page the append-only ledger, newest first.
 #   * ``reconcile`` — recompute ``balance == sum(amount_delta)`` and repair the
 #                     CreditBalance doc if it drifted (covers a crash between
@@ -79,6 +82,12 @@
 # $gte guard and VOIDING them if the funds aren't there) and then sums only the
 # applied entries. The balance is NEVER clamped to >= 0 — a legitimate negative
 # from metered overage is preserved.
+# Changed 2026-06-24 (BC-4 run-start hard-block): added ``check_balance`` — a
+# pure, flag-free read that raises ``InsufficientCredits`` (402) when the wallet
+# is at or below zero. The chat run-start chokepoint (chat/agent_router.py) calls
+# it BEFORE create_run/submit, but ONLY when ``settings.billing_enforced`` is on,
+# so OSS/self-host (flag default False) is unaffected and IN-FLIGHT runs are never
+# touched. Kept flag-free here so the check stays reusable.
 
 from __future__ import annotations
 
@@ -341,6 +350,24 @@ async def balance(workspace: str) -> int:
     return await _current_balance(workspace)
 
 
+async def check_balance(workspace: str) -> None:
+    """Raise ``InsufficientCredits`` when the wallet is out of credits.
+
+    The run-start hard-block (BC-4): a workspace whose balance is ``<= 0`` may
+    not START a new chat run. A pure, reusable assertion — it carries NO flag
+    logic (the caller decides whether enforcement is on), so it stays usable by
+    any future gate (e.g. a pre-flight estimate check) without coupling to the
+    ``billing_enforced`` setting. A no-op for any positive balance; raises a 402
+    ``credits.insufficient`` (mapped by the CloudError handler) at zero or below.
+    The reported ``requested`` is 1 — the minimum a new run will consume — and
+    ``available`` is the clamped non-negative balance so the message reads
+    sensibly even on a metered-overage negative wallet.
+    """
+    bal = await balance(workspace)
+    if bal <= 0:
+        raise InsufficientCredits(1, max(bal, 0))
+
+
 async def history(
     workspace: str,
     *,
@@ -528,6 +555,7 @@ async def reconcile(workspace: str) -> int:
 
 __all__ = [
     "balance",
+    "check_balance",
     "debit",
     "grant",
     "history",
