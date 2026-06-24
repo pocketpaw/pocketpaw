@@ -17,6 +17,9 @@
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
 # Updated 2026-06-24 (BC-6): added GET /billing/plans (the plan catalog read).
+# Updated 2026-06-24 (BC-7): added POST /billing/subscribe — open a recurring
+#   checkout for a plan tier (returns a hosted url; the plan upgrade + first credit
+#   grant land on the verified subscription.active webhook, not here).
 
 from __future__ import annotations
 
@@ -24,7 +27,12 @@ from fastapi import APIRouter, Depends
 
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import service as billing_service
-from pocketpaw_ee.cloud.billing.dto import CreateTopupRequest, CreateTopupResponse
+from pocketpaw_ee.cloud.billing.dto import (
+    CreateSubscriptionRequest,
+    CreateSubscriptionResponse,
+    CreateTopupRequest,
+    CreateTopupResponse,
+)
 from pocketpaw_ee.cloud.entitlements.dto import PlanCatalogResponse, plan_tier_to_dto
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
@@ -61,3 +69,24 @@ async def create_topup(
         amount_credits=body.amount_credits,
     )
     return CreateTopupResponse(checkout_url=result["checkout_url"])
+
+
+@router.post("/subscribe", response_model=CreateSubscriptionResponse)
+async def create_subscription(
+    body: CreateSubscriptionRequest,
+    workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
+) -> CreateSubscriptionResponse:
+    """Subscribe the caller's workspace to ``plan_key`` — recurring checkout.
+
+    Returns the hosted-checkout url the buyer is redirected to. The plan is NOT
+    upgraded and credits are NOT granted here — both land when Dodo posts a
+    verified ``subscription.active`` to the public webhook; each renewal then
+    grants the tier's monthly allotment additively (unused credits roll over).
+    """
+    result = await billing_service.subscribe(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        plan_key=body.plan_key,
+    )
+    return CreateSubscriptionResponse(checkout_url=result["checkout_url"])

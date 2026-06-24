@@ -19,6 +19,11 @@ Public API:
 - ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
   the plan-feature gate dependency; returns "team" on any failure so the
   dep fails open on plan rather than crashing with a 500.
+- ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
+  tier (BC-7). The billing subscription webhook is the only caller: a
+  verified ``subscription.active`` upgrades to the subscribed tier and a
+  ``subscription.cancelled`` reverts to ``free``. Returns True on a write,
+  False when the workspace is missing/soft-deleted.
 
 Changes: added get_workspace_plan helper for plan-feature gate dep; added
 slug_reason() (format + reserved + uniqueness) backing the live
@@ -1627,6 +1632,33 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     if doc is None or doc.deleted_at is not None:
         return None
     return doc.plan
+
+
+async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
+    """Set a workspace's plan tier (BC-7 subscription lifecycle).
+
+    The ONLY caller is the billing subscription webhook: a verified
+    ``subscription.active`` upgrades the workspace to the subscribed tier, and a
+    ``subscription.cancelled`` reverts it to ``free``. Idempotent — writing the
+    same plan the workspace already holds is a harmless no-op write.
+
+    Returns True when the plan was written, False when the workspace is missing /
+    soft-deleted / has a malformed id (so the webhook can log-and-ack rather than
+    500 on an unroutable event). Does NOT touch credits — the per-renewal grant is
+    BC-1's job, keyed on the webhook event id; this only moves the entitlement.
+    """
+    if not plan:
+        raise ValidationError("workspace.invalid_plan", "plan is required")
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return False
+    doc.plan = plan
+    await doc.save()
+    return True
 
 
 # ---------------------------------------------------------------------------

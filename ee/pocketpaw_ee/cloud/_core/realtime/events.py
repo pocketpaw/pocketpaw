@@ -480,6 +480,18 @@ class BillingTopupCaptured(Event):
     EVENT_TYPE: ClassVar[str] = "billing.topup.captured"
 
 
+# Billing — subscription renewal grant (BC-7, the Subscription primitive).
+# Emitted by ``billing.service`` after a VERIFIED ``subscription.active`` /
+# ``subscription.renewed`` webhook drove a credit grant of the tier's monthly
+# allotment. The grant is ADDITIVE (unused credits roll over), keyed on the
+# per-renewal webhook event id. data: {workspace_id, gateway, event_id,
+# plan_key, subscription_id, amount_credits, balance_after}. Fires once per
+# delivery (a replayed renewal is a no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingSubscriptionGranted(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.subscription.granted"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

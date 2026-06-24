@@ -52,6 +52,11 @@ Updated: 2026-06-24 (integration/billing-credits, BC-2) — added ``Payment``
 (the top-up payment record captured via a verified Dodo webhook) to the imports,
 ``__all__``, and ``get_all_documents()`` so the ``billing_payments`` collection
 is wired into ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
+Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription``
+(the recurring plan subscription record captured via a verified Dodo
+``subscription.active`` webhook) to the imports, ``__all__``, and
+``get_all_documents()`` so the ``billing_subscriptions`` collection is wired into
+``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
 """
 
 from __future__ import annotations
@@ -110,6 +115,7 @@ from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
 from pocketpaw_ee.cloud.models.task_event import TaskEvent
@@ -246,6 +252,7 @@ __all__ = [
     "Site",
     "SiteDomain",
     "SiteRateCounter",
+    "Subscription",
     "WorkspaceSensePreference",
     "Task",
     "TaskAssignee",
@@ -291,6 +298,10 @@ def get_all_documents():
         # Billing payments (BC-2) — top-up payment records captured via a
         # gateway webhook. Only ``ee.cloud.billing.service`` writes this.
         Payment,
+        # Billing subscriptions (BC-7) — recurring plan subscription records
+        # captured via verified ``subscription.*`` webhooks. Only
+        # ``ee.cloud.billing.service`` writes this.
+        Subscription,
         Invite,
         Group,
         InstinctApproval,

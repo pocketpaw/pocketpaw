@@ -7,6 +7,9 @@
 # the signature is over the exact bytes) and returns a tiny ack envelope.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-2): new entity.
+# Updated 2026-06-24 (BC-7): added ``CreateSubscriptionRequest`` /
+#   ``CreateSubscriptionResponse`` for ``POST /billing/subscribe`` — open a
+#   recurring checkout for a plan tier. Same hosted-url-out shape as top-up.
 
 from __future__ import annotations
 
@@ -25,6 +28,23 @@ class CreateTopupRequest(BaseModel):
 
 class CreateTopupResponse(BaseModel):
     """Hosted-checkout url the caller redirects the buyer to."""
+
+    checkout_url: str
+
+
+class CreateSubscriptionRequest(BaseModel):
+    """Body of ``POST /billing/subscribe`` — subscribe to ``plan_key``.
+
+    ``plan_key`` is a plan-catalog tier key (e.g. ``team`` / ``business`` /
+    ``enterprise``). The service validates it against the catalog and resolves the
+    Dodo recurring product before opening a checkout.
+    """
+
+    plan_key: str = Field(..., min_length=1, description="Plan tier key to subscribe to.")
+
+
+class CreateSubscriptionResponse(BaseModel):
+    """Hosted recurring-checkout url the caller redirects the buyer to."""
 
     checkout_url: str
 

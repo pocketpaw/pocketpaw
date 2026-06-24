@@ -34,6 +34,29 @@
 #     buyer's metadata lives at ``data.metadata`` and the money amount at
 #     ``data.total_amount`` (lowest denomination) with ``data.currency``.
 #
+# SUBSCRIPTIONS (BC-7), again adapting the real SDK:
+#
+#   * ``create_subscription`` — calls ``client.subscriptions.create(...)`` with a
+#     single ``product_id`` (NOT a product_cart — the SDK's subscription create
+#     takes one recurring product id + a ``quantity``, unlike the one-time cart),
+#     ``payment_link=True`` for a HOSTED checkout, and ``metadata={"workspace_id",
+#     "plan_key"}`` so the renewal webhook can route the grant to the right wallet
+#     at the right tier. The hosted url is ``response.payment_link``; the gateway
+#     subscription ref is ``response.subscription_id``.
+#
+#   * ``cancel_subscription`` — calls ``client.subscriptions.update(<id>,
+#     status="cancelled")`` (the SDK has no ``.cancel`` — cancellation is a status
+#     PATCH). The entitlement revert is driven by the resulting webhook, not here.
+#
+#   * ``verify_and_parse_webhook`` ALSO recognizes the subscription event family.
+#     The real Dodo event names (verified against the SDK's WebhookEventType
+#     literal in ``types/webhook_event_type.py``) are ``subscription.active``,
+#     ``subscription.renewed``, ``subscription.cancelled`` (among others). The
+#     event body is ``{business_id, data: Subscription, timestamp, type}``; the
+#     buyer's metadata lives at ``data.metadata`` (carrying ``workspace_id`` +
+#     ``plan_key``), the recurring product at ``data.product_id`` (the reverse-map
+#     fallback for the tier), and the subscription id at ``data.subscription_id``.
+#
 # SECURITY: the signature is verified before the payload is parsed. The webhook
 # secret and the API key are NEVER logged.
 #
@@ -41,6 +64,12 @@
 # Updated 2026-06-24 (security): warn (don't silently swallow) when a
 #   payment.succeeded event carries a non-int / missing ``total_amount`` — the
 #   safe-coerce-to-0 behavior is unchanged, but ops now get a log to triage.
+# Updated 2026-06-24 (BC-7): implemented the subscription surface
+#   (``create_subscription`` + ``cancel_subscription``) over
+#   ``client.subscriptions.*``, and extended ``verify_and_parse_webhook`` to
+#   return a ``SubscriptionEvent`` for a verified ``subscription.*`` delivery
+#   (plan_key from metadata, with a product_id reverse-map fallback off the
+#   configured plan->product mapping).
 
 from __future__ import annotations
 
@@ -49,9 +78,20 @@ import logging
 from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import BadRequest, ValidationError
-from pocketpaw_ee.cloud.billing.domain import GatewayEvent, OneTimeCheckout
+from pocketpaw_ee.cloud.billing.domain import (
+    GatewayEvent,
+    OneTimeCheckout,
+    SubscriptionCheckout,
+    SubscriptionEvent,
+)
 
 logger = logging.getLogger(__name__)
+
+# The verified subscription event families this provider normalizes. Other
+# subscription.* deliveries (on_hold / paused / failed / expired / plan_changed /
+# updated) are still parsed into a SubscriptionEvent — the service decides which
+# ones act — but these three are the ones BC-7's grant/revert logic keys on.
+_SUBSCRIPTION_EVENT_PREFIX = "subscription."
 
 # Default billing country for the hosted checkout. Dodo requires a country on
 # the billing address; the buyer can change it on the hosted page. "US" is a
@@ -73,6 +113,7 @@ class DodoProvider:
         environment: str,
         webhook_secret: str | None,
         credit_product_id: str | None,
+        plan_products: dict[str, str] | None = None,
     ) -> None:
         # Stored, not validated here — a deployment may construct the provider
         # with billing disabled. Each call validates the inputs IT needs, so a
@@ -81,16 +122,37 @@ class DodoProvider:
         self._environment = environment or "test_mode"
         self._webhook_secret = webhook_secret
         self._credit_product_id = credit_product_id
+        # plan_key -> recurring product_id (BC-7). Used only for the REVERSE map
+        # at webhook-parse time (product_id -> plan_key) when a subscription
+        # delivery's metadata lacks plan_key; the forward direction (picking a
+        # product for a tier) is the service's job, passed in to create_subscription.
+        self._plan_products = dict(plan_products or {})
 
     @classmethod
     def from_settings(cls, settings: Any) -> DodoProvider:
         """Build a provider from a ``pocketpaw.config.Settings`` instance."""
+        plan_products = getattr(settings, "dodo_plan_products", None)
         return cls(
             api_key=getattr(settings, "dodo_payments_api_key", None),
             environment=getattr(settings, "dodo_environment", "test_mode"),
             webhook_secret=getattr(settings, "dodo_webhook_secret", None),
             credit_product_id=getattr(settings, "dodo_credit_product_id", None),
+            plan_products=plan_products if isinstance(plan_products, dict) else None,
         )
+
+    def _plan_key_for_product(self, product_id: str) -> str:
+        """Reverse-resolve a tier key from a recurring product id, or ''.
+
+        The plan->product config is the forward map; this inverts it so a
+        subscription webhook whose metadata is missing ``plan_key`` can still be
+        routed by the product id Dodo always sends on ``data.product_id``.
+        """
+        if not product_id:
+            return ""
+        for key, pid in self._plan_products.items():
+            if pid == product_id:
+                return str(key)
+        return ""
 
     # ------------------------------------------------------------------ #
     # Checkout
@@ -168,6 +230,71 @@ class DodoProvider:
         return OneTimeCheckout(checkout_url=str(checkout_url), gateway_ref=str(gateway_ref))
 
     # ------------------------------------------------------------------ #
+    # Subscriptions (BC-7)
+    # ------------------------------------------------------------------ #
+
+    async def create_subscription(
+        self,
+        *,
+        plan_key: str,
+        product_id: str,
+        workspace_id: str,
+        customer_email: str | None,
+        metadata: dict,
+    ) -> SubscriptionCheckout:
+        if not plan_key:
+            raise ValidationError("billing.invalid_plan", "plan_key is required")
+        if not workspace_id:
+            raise ValidationError("billing.invalid_workspace", "workspace_id is required")
+        if not product_id:
+            raise ValidationError(
+                "billing.plan_product_unconfigured",
+                f"No Dodo recurring product id is configured for plan '{plan_key}' "
+                "(POCKETPAW_DODO_PLAN_PRODUCTS).",
+            )
+
+        # workspace_id AND plan_key MUST ride on metadata so the renewal webhook
+        # can route the grant to the right wallet at the right tier. The provider
+        # stamps both authoritatively, overriding any caller value.
+        meta = {k: str(v) for k, v in dict(metadata or {}).items()}
+        meta["workspace_id"] = str(workspace_id)
+        meta["plan_key"] = str(plan_key)
+
+        # The SDK's subscription create takes a SINGLE recurring product_id +
+        # quantity (NOT a product_cart like the one-time path). payment_link=True
+        # returns a HOSTED checkout url on ``response.payment_link``.
+        client = self._client()
+        response = await client.subscriptions.create(
+            billing={"country": _DEFAULT_BILLING_COUNTRY},
+            customer={"email": customer_email or _PLACEHOLDER_EMAIL},
+            product_id=product_id,
+            quantity=1,
+            payment_link=True,
+            metadata=meta,
+        )
+
+        checkout_url = getattr(response, "payment_link", None)
+        subscription_id = getattr(response, "subscription_id", "") or ""
+        if not checkout_url:
+            # payment_link is only populated when payment_link=True succeeds.
+            raise ValidationError(
+                "billing.no_checkout_url",
+                "Dodo did not return a hosted payment link for the subscription.",
+            )
+        return SubscriptionCheckout(
+            checkout_url=str(checkout_url), subscription_id=str(subscription_id)
+        )
+
+    async def cancel_subscription(self, subscription_id: str) -> None:
+        if not subscription_id:
+            raise ValidationError("billing.invalid_subscription", "subscription_id is required")
+        # The SDK has no ``.cancel`` — cancellation is a status PATCH via
+        # ``subscriptions.update(<id>, status="cancelled")``. Dodo emits the
+        # ``subscription.cancelled`` webhook that drives the entitlement revert.
+        client = self._client()
+        await client.subscriptions.update(subscription_id, status="cancelled")
+
+    # ------------------------------------------------------------------ #
     # Webhook
     # ------------------------------------------------------------------ #
 
@@ -176,7 +303,7 @@ class DodoProvider:
         *,
         payload: bytes,
         headers: dict[str, str],
-    ) -> GatewayEvent:
+    ) -> GatewayEvent | SubscriptionEvent:
         if not self._webhook_secret:
             raise ValidationError(
                 "billing.webhook_unconfigured",
@@ -222,6 +349,26 @@ class DodoProvider:
 
         meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
         workspace_id = str(meta.get("workspace_id") or "")
+
+        # SUBSCRIPTION family (BC-7) — a ``subscription.*`` delivery normalizes to
+        # a ``SubscriptionEvent``, NOT a GatewayEvent. The tier comes from the
+        # metadata's ``plan_key`` (stamped at subscribe time); if it's missing,
+        # fall back to reverse-mapping the recurring ``data.product_id`` through
+        # the configured plan->product mapping. No money amount on the wire here —
+        # the grant uses the catalog's allotment, not an event amount.
+        if event_type.startswith(_SUBSCRIPTION_EVENT_PREFIX):
+            product_id = str(data.get("product_id") or "")
+            plan_key = str(meta.get("plan_key") or "") or self._plan_key_for_product(product_id)
+            subscription_id = str(data.get("subscription_id") or "")
+            return SubscriptionEvent(
+                event_id=event_id,
+                type=event_type,
+                workspace_id=workspace_id,
+                plan_key=plan_key,
+                product_id=product_id,
+                subscription_id=subscription_id,
+                raw=verified,
+            )
 
         # ``total_amount`` is the lowest denomination (cents for USD). 1 credit ==
         # 1 cent, so cents map 1:1 back onto credits.

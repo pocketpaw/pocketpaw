@@ -1,6 +1,12 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
+    POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
+    tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
+    recurring checkout; the subscription webhook reverses it (product_id ->
+    plan key) to know which tier renewed. A before-validator degrades a
+    malformed env string to {} so a typo can't crash settings load.
   - 2026-06-24: Added ``billing_enforced`` (default False, env
     POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
     True the cloud rejects STARTING a new chat run on a zero-or-negative
@@ -1430,6 +1436,19 @@ class Settings(BaseSettings):
             "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
         ),
     )
+    dodo_plan_products: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of plan tier key -> Dodo RECURRING product id (BC-7 "
+            "subscriptions). ``subscribe(plan_key)`` looks the product up here to "
+            "open a recurring checkout; the inbound subscription webhook reverses "
+            "the lookup (product_id -> plan key) to know which tier renewed (and "
+            "thus the monthly credit allotment from the plan catalog). Set via "
+            "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
+            '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
+            "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
 
     # Billing — compute-cost metering rate card (BC-3, the Meter + Price
     # primitives). A completed chat run is billed by its real compute cost times
@@ -1680,6 +1699,28 @@ class Settings(BaseSettings):
             "instead of a raw URL in the chat. Set False to disable if detection is brittle."
         ),
     )
+
+    @field_validator("dodo_plan_products", mode="before")
+    @classmethod
+    def _parse_dodo_plan_products(cls, v: object) -> object:
+        """Accept a JSON-object env string for the plan->product map.
+
+        pydantic-settings parses JSON for dict fields, but a hand-set
+        ``POCKETPAW_DODO_PLAN_PRODUCTS`` that isn't valid JSON (or isn't an
+        object) should degrade to an empty mapping — subscriptions then fail
+        loudly at ``subscribe`` time with a clear ``plan_unconfigured`` error
+        rather than crashing the entire settings load at boot. A dict passes
+        straight through.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return v
 
     @field_validator("composio_toolkits", mode="before")
     @classmethod
