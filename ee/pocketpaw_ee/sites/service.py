@@ -1,6 +1,26 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-24 (feat/billing-lifecycle — charge-first hardening, review
+# loose ends A+B):
+#   * (A) ``_publish_pending_site`` now CAPS the serialized deploy-input size
+#     before persisting. A new module constant ``_MAX_PENDING_DEPLOY_INPUT_BYTES``
+#     (4MB, well under Mongo's 16MB per-doc limit) bounds the rippleSpec / svelte
+#     source snapshot captured on ``Site.pending_deploy_inputs``; an oversized
+#     payload raises ``ValidationError("sites.deploy_inputs_too_large")`` BEFORE
+#     any write or billing, instead of bloating the Site doc.
+#   * (B) ``_publish_pending_site`` reordered to CHECKOUT-BEFORE-PERSIST. The
+#     per-site Dodo checkout is opened FIRST (the ``site_id`` is deterministic via
+#     ``_live_object_id``, so it rides the subscription metadata with no doc), then
+#     the PENDING Site doc is upserted with ``subscription_id`` already set. A
+#     checkout failure now PROPAGATES and creates NO pending doc — never an orphan
+#     pending row with no ``subscription_id`` (the buyer retries). The existing-doc
+#     signed_key reuse is preserved (read for the key only; not mutated/persisted
+#     until checkout succeeds).
+#   The companion (C) pending-reconciliation sweeper lives in the sibling
+#   ``pending_sweeper.py`` (wired into the same heartbeat as the chat-runs sweeper)
+#   for operator visibility of sites stuck pending past a threshold.
+#
 # Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
 # a PAID site tier (positive ``annual_price_usd`` AND a configured
 # ``dodo_product_id``) is now CHARGE-FIRST — published as PENDING and NOT deployed
@@ -349,6 +369,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 from collections.abc import Callable
@@ -396,6 +417,15 @@ _VERSION_SCOPE_TYPE = "pocket"
 # resource. require_sites_plan() closes that asymmetry at the service chokepoint
 # so the in-process write paths are gated identically to HTTP.
 _SITES_PLAN_FEATURE = "fabric"
+
+# charge-first (review fix A): cap the serialized size of the deploy inputs a
+# PENDING paid site stores on ``Site.pending_deploy_inputs``. A pathological
+# rippleSpec / svelte source map (e.g. a huge inlined data blob) could otherwise
+# bloat the Site doc toward Mongo's 16MB per-document hard limit. We reject well
+# under that ceiling (4MB) so the captured snapshot — plus every other field on the
+# Site doc — always fits, and the failure surfaces as a clear 422 at publish time
+# rather than an opaque BSON write error (or a doc that can never be updated again).
+_MAX_PENDING_DEPLOY_INPUT_BYTES = 4_000_000
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -1537,25 +1567,33 @@ async def _publish_pending_site(
     then bill, it:
       1. resolves the STABLE per-(workspace, pocket) identity (the same ``site_id``
          a live publish would use, and the existing signed_key when the pocket was
-         published before) so a later ``activate_site`` deploys at the same id/URL;
-      2. UPSERTS a PENDING canonical Site doc — ``deployed=False``,
-         ``subscription_status="pending"``, ``plan_tier=<tier>`` — and persists the
-         DEPLOY INPUTS (rippleSpec / theme / engine / source / pattern /
-         builder_origin / name) on ``pending_deploy_inputs`` so the webhook-time
-         activation can deploy WITHOUT re-reading the pocket (the webhook carries
-         only workspace_id + site_id, and the pocket's draft may have moved on);
-      3. opens the per-site annual Dodo subscription (the SAME ``create_subscription``
-         + ``metadata={workspace_id, site_id, plan_key}`` the live path uses) and
-         captures the checkout_url, which it stashes on the returned doc's transient
-         ``_checkout_url`` for the router to surface.
+         published before) so a later ``activate_site`` deploys at the same id/URL.
+         The ``site_id`` is deterministic (``_live_object_id``), so it can be passed
+         in the subscription metadata WITHOUT the Site doc existing yet;
+      2. caps the serialized size of the captured DEPLOY INPUTS (review fix A) —
+         a pathological rippleSpec / source map that would bloat the Site doc past
+         ``_MAX_PENDING_DEPLOY_INPUT_BYTES`` raises ``ValidationError`` BEFORE
+         anything is persisted or billed;
+      3. opens the per-site annual Dodo subscription FIRST (review fix B —
+         checkout-before-persist) with ``metadata={workspace_id, site_id, plan_key}``,
+         so a checkout failure NEVER leaves an orphan pending Site doc with no
+         ``subscription_id``: the error propagates and the user can retry, and no
+         Site doc was written at all (or, on a re-publish, the prior doc is left
+         untouched);
+      4. only THEN upserts the PENDING canonical Site doc — ``deployed=False``,
+         ``subscription_status="pending"``, ``plan_tier=<tier>``, ``subscription_id``
+         already set — persisting the DEPLOY INPUTS (rippleSpec / theme / engine /
+         source / pattern / builder_origin / name) on ``pending_deploy_inputs`` so
+         the webhook-time activation can deploy WITHOUT re-reading the pocket (the
+         webhook carries only workspace_id + site_id, and the pocket's draft may
+         have moved on);
+      5. stashes the checkout_url on the returned doc's transient ``_checkout_url``
+         for the router to surface.
 
     It does NOT run the generator, does NOT deploy, does NOT promote the pocket's
     draft to published (the site is not live yet), and does NOT emit
     ``SitePublished`` — all of that happens in ``activate_site`` when the
-    ``subscription.active`` webhook confirms payment. If opening the checkout fails
-    AFTER the pending doc is persisted, the pending doc stands (status="pending",
-    no checkout_url) so the operator can see the attempt and retry — the deploy is
-    never taken without payment.
+    ``subscription.active`` webhook confirms payment.
     """
     site_name = (name or "").strip()
     if not site_name:
@@ -1570,14 +1608,6 @@ async def _publish_pending_site(
     site_id = str(oid)
     plan_key = tier.key
 
-    # Reuse the stored signed_key when the pocket was published before, so the
-    # eventual deploy bakes a key that matches the doc the capture endpoint
-    # verifies against; mint one for a first publish.
-    signed_key = f"site_key_{secrets.token_urlsafe(24)}"
-    existing = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
-    if existing is not None and existing.signed_key:
-        signed_key = existing.signed_key
-
     # The deploy inputs the webhook-time activation needs (the webhook carries only
     # workspace_id + site_id). Stored on the pending doc so activation never re-reads
     # the pocket (whose draft may have advanced).
@@ -1591,6 +1621,54 @@ async def _publish_pending_site(
         "name": site_name,
     }
 
+    # Review fix A — cap the serialized deploy-input size BEFORE any persist or
+    # billing. A pathological rippleSpec / svelte source map must not bloat the
+    # Site doc toward Mongo's 16MB ceiling. Fail closed with a clear 422.
+    serialized_len = len(json.dumps(pending_inputs, default=str))
+    if serialized_len > _MAX_PENDING_DEPLOY_INPUT_BYTES:
+        raise ValidationError(
+            "sites.deploy_inputs_too_large",
+            (
+                "This site's content is too large to publish on a paid plan "
+                f"({serialized_len} bytes captured, max "
+                f"{_MAX_PENDING_DEPLOY_INPUT_BYTES}). Trim large inlined data or "
+                "images from the page and try again."
+            ),
+        )
+
+    # Reuse the stored signed_key when the pocket was published before, so the
+    # eventual deploy bakes a key that matches the doc the capture endpoint
+    # verifies against; mint one for a first publish. Read the existing doc ONLY
+    # for the signed_key here — we do NOT mutate or persist it yet (review fix B:
+    # the checkout must open before any persist), so a checkout failure leaves a
+    # previously-published doc untouched.
+    signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+    existing = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if existing is not None and existing.signed_key:
+        signed_key = existing.signed_key
+
+    # Review fix B — open the per-site annual Dodo subscription FIRST, before
+    # persisting the pending doc. The site_id is deterministic, so the checkout
+    # metadata carries it without the doc existing yet. If opening the checkout
+    # raises, it PROPAGATES (no swallow) and NO pending doc is created — never an
+    # orphan pending row with no subscription_id. The buyer can simply retry.
+    prov = provider or _default_billing_provider()
+    checkout = await prov.create_subscription(
+        plan_key=plan_key,
+        product_id=tier.dodo_product_id,
+        workspace_id=workspace_id,
+        customer_email=None,
+        metadata={
+            "workspace_id": workspace_id,
+            "site_id": site_id,
+            "plan_key": plan_key,
+        },
+    )
+    checkout_url: str | None = checkout.checkout_url or None
+    subscription_id: str | None = checkout.subscription_id or None
+
+    # Checkout opened — NOW upsert the PENDING canonical Site doc with the
+    # subscription_id already set (review fix B). The size cap (A) already ran.
     if existing is None:
         doc = _SiteDoc(
             id=oid,
@@ -1604,6 +1682,7 @@ async def _publish_pending_site(
             url="",
             builder_origin=builder_origin or "",
             plan_tier=plan_key,
+            subscription_id=subscription_id,
             subscription_status="pending",
             pending_deploy_inputs=pending_inputs,
             allowed_origins=_default_allowed_origins(),
@@ -1619,41 +1698,9 @@ async def _publish_pending_site(
         doc.owner = user_id
         doc.name = site_name
         doc.plan_tier = plan_key
+        doc.subscription_id = subscription_id
         doc.subscription_status = "pending"
         doc.pending_deploy_inputs = pending_inputs
-        await doc.save()
-
-    # Open the per-site annual Dodo subscription and capture the checkout link the
-    # caller redirects the buyer to. A failure here leaves the pending doc standing
-    # (no checkout_url) — never deploy without payment.
-    checkout_url: str | None = None
-    subscription_id: str | None = None
-    try:
-        prov = provider or _default_billing_provider()
-        checkout = await prov.create_subscription(
-            plan_key=plan_key,
-            product_id=tier.dodo_product_id,
-            workspace_id=workspace_id,
-            customer_email=None,
-            metadata={
-                "workspace_id": workspace_id,
-                "site_id": site_id,
-                "plan_key": plan_key,
-            },
-        )
-        checkout_url = checkout.checkout_url or None
-        subscription_id = checkout.subscription_id or None
-    except Exception:  # noqa: BLE001 — a billing hiccup must not crash the publish
-        logger.warning(
-            "sites.publish: per-site checkout init failed for pending site %s "
-            "(tier=%s) — site stays pending, no checkout opened",
-            site_id,
-            plan_key,
-            exc_info=True,
-        )
-
-    if subscription_id is not None:
-        doc.subscription_id = subscription_id
         await doc.save()
 
     # Stash the checkout link on the transient PrivateAttr so the router can surface

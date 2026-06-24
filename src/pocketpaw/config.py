@@ -1516,6 +1516,19 @@ class Settings(BaseSettings):
             "POCKETPAW_BILLING_ENFORCED."
         ),
     )
+    site_pending_alert_hours: float = Field(
+        default=24.0,
+        description=(
+            "Charge-first reconciliation threshold. A PAID Paw Site is created "
+            "PENDING and deployed only when its subscription.active webhook "
+            "confirms payment; the pending-site sweeper logs at WARNING any site "
+            "still pending (not deployed) longer than this many hours, so an "
+            "operator can investigate a lost / delayed webhook. Visibility only — "
+            "the sweep never auto-deploys or auto-cancels. Tuned above Dodo's "
+            "webhook retry window so a transient delay is not flagged. Set via "
+            "POCKETPAW_SITE_PENDING_ALERT_HOURS."
+        ),
+    )
 
     # Pocket data-source refresh — cost controls (RFC 04 M3).
     # A pocket source binding may declare an `interval` or `webhook` refresh
