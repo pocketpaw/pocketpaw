@@ -57,6 +57,16 @@
 #   ``site_id`` is the unchanged BC-7 workspace-plan path. Same verified-signature
 #   + idempotency guards apply (the per-site path is reached only AFTER
 #   ``verify_and_parse_webhook`` succeeds).
+# Updated 2026-06-24 (feat/charge-first-sites): the per-site ``subscription.active``
+#   delivery now drives CHARGE-FIRST ACTIVATION. A paid-tier site is published as
+#   PENDING (created but NOT deployed live); on the verified ``subscription.active``
+#   the per-site path calls ``sites_service.activate_site``, which runs the deferred
+#   deploy (generate + smoke-gate + Cloudflare/local deploy) and marks the sub
+#   active — so a paid site goes live ONLY after payment confirms. ``activate_site``
+#   is idempotent (an already-active/deployed site is a no-op), so a replayed
+#   ``active`` does not re-deploy. ``renewed`` just refreshes the renewal date (the
+#   site is already live), ``cancelled`` marks the site cancelled WITHOUT undeploying
+#   it in v1.
 
 from __future__ import annotations
 
@@ -509,18 +519,27 @@ async def _handle_subscription_event(event: SubscriptionEvent) -> dict:
 
 
 async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
-    """Act on a VERIFIED PER-SITE ``subscription.*`` webhook (BC-9).
+    """Act on a VERIFIED PER-SITE ``subscription.*`` webhook (BC-9 + charge-first).
 
     A per-site annual sub (each published site has its OWN recurring plan) is
     distinguished from a workspace-plan sub by the ``site_id`` on its metadata.
     This path updates the SITE's lifecycle ONLY — it NEVER grants workspace
     credits and NEVER changes ``Workspace.plan`` (the two grant/plan side effects
-    of the BC-7 workspace path). The site write is delegated to the sites service
+    of the BC-7 workspace path). All site writes are delegated to the sites service
     (entity isolation — billing never imports the Site model):
 
-      * ``subscription.active`` / ``subscription.renewed`` → mark the site sub
-        ``active`` and advance its annual renewal date (one year out).
-      * ``subscription.cancelled`` → mark the site sub ``cancelled``.
+      * ``subscription.active`` → CHARGE-FIRST ACTIVATION. A paid-tier site was
+        published as PENDING (created but NOT deployed live) and is deployed + goes
+        live only now that payment is confirmed: ``sites_service.activate_site``
+        runs the deferred deploy (generate + smoke-gate + Cloudflare/local deploy)
+        and marks the sub active. It is idempotent — an already-active/deployed
+        site is a no-op, so a replayed delivery (or a renewal that arrives as
+        ``active``) does not re-deploy.
+      * ``subscription.renewed`` → the site is already live; just refresh the
+        renewal date (one year out) via ``mark_site_subscription`` — no re-deploy.
+      * ``subscription.cancelled`` → mark the site sub ``cancelled``. The live site
+        is NOT undeployed in v1 (a cancelled annual plan keeps serving until the
+        paid period would lapse; an undeploy/teardown is a follow-up).
       * any other subscription.* delivery → acked, no action.
 
     Returns ``{"ok": True, "granted": False}`` always — a per-site sub never
@@ -531,30 +550,44 @@ async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
     from pocketpaw_ee.cloud._core.errors import NotFound
     from pocketpaw_ee.sites import service as sites_service
 
-    if event.type == _SUB_CANCELLED:
-        status, renewal = "cancelled", None
-    elif event.type in _SUB_GRANT_EVENTS:
-        # active | renewed → the site sub is active; advance the annual renewal
-        # date one year from this verified event (the next charge cycle).
-        status, renewal = "active", datetime.now(UTC) + timedelta(days=365)
-    else:
-        # on_hold / paused / failed / expired / plan_changed / updated — acked,
-        # no site-state action in v1.
-        logger.info(
-            "billing.webhook: ignoring per-site subscription event type=%s (site=%s)",
-            event.type,
-            event.site_id,
-        )
-        return {"ok": True, "granted": False}
-
     try:
-        await sites_service.mark_site_subscription(
-            workspace_id=event.workspace_id,
-            site_id=event.site_id,
-            status=status,
-            subscription_id=event.subscription_id or None,
-            annual_renewal_date=renewal,
-        )
+        if event.type == _SUB_ACTIVE:
+            # CHARGE-FIRST: payment confirmed → deploy the pending site live and
+            # mark the sub active. Idempotent for at-least-once delivery.
+            await sites_service.activate_site(
+                workspace_id=event.workspace_id,
+                site_id=event.site_id,
+            )
+            status = "active"
+        elif event.type == _SUB_RENEWED:
+            # Already live — just refresh the annual renewal date (no re-deploy).
+            await sites_service.mark_site_subscription(
+                workspace_id=event.workspace_id,
+                site_id=event.site_id,
+                status="active",
+                subscription_id=event.subscription_id or None,
+                annual_renewal_date=datetime.now(UTC) + timedelta(days=365),
+            )
+            status = "active"
+        elif event.type == _SUB_CANCELLED:
+            # Mark cancelled; do NOT undeploy the live site in v1.
+            await sites_service.mark_site_subscription(
+                workspace_id=event.workspace_id,
+                site_id=event.site_id,
+                status="cancelled",
+                subscription_id=event.subscription_id or None,
+                annual_renewal_date=None,
+            )
+            status = "cancelled"
+        else:
+            # on_hold / paused / failed / expired / plan_changed / updated — acked,
+            # no site-state action in v1.
+            logger.info(
+                "billing.webhook: ignoring per-site subscription event type=%s (site=%s)",
+                event.type,
+                event.site_id,
+            )
+            return {"ok": True, "granted": False}
     except NotFound:
         # A verified delivery for a site that doesn't exist for this workspace
         # (deleted, or a stale/cross-tenant id) — ack (200) so Dodo stops

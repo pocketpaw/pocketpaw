@@ -1,6 +1,34 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
+# a PAID site tier (positive ``annual_price_usd`` AND a configured
+# ``dodo_product_id``) is now CHARGE-FIRST — published as PENDING and NOT deployed
+# live until payment confirms; a FREE/base tier still deploys instantly.
+#   * Extracted ``_deploy_site_doc`` — the generate + smoke-gate + Cloudflare/local
+#     deploy + upsert-and-stamp-deployed half of ``publish``. ``publish`` (free
+#     path) calls it as before; the charge-first activation reuses it at webhook
+#     time. ``publish``'s preview branch is unchanged (it builds inline + returns a
+#     transient doc, no deploy).
+#   * ``publish_pocket`` resolves the per-site tier BEFORE deploy and branches:
+#     PAID + chargeable → ``_publish_pending_site`` (create a PENDING Site doc with
+#     ``deployed=False`` / ``subscription_status="pending"`` / ``plan_tier`` and the
+#     captured deploy inputs on ``Site.pending_deploy_inputs``, open the Dodo annual
+#     checkout, return the checkout_url — NO deploy); FREE/base → live publish as
+#     today, then ``_apply_site_plan`` stamps the tier. A "paid" tier whose Dodo
+#     product is UNCONFIGURED can't open a checkout, so it DEGRADES to an immediate
+#     live publish (never strands the user).
+#   * ``activate_site(site_id)`` — loads the PENDING site, runs ``_deploy_site_doc``
+#     from the stored ``pending_deploy_inputs`` (the webhook carries only
+#     workspace_id + site_id, and the pocket's draft may have advanced), marks the
+#     sub active, promotes the draft to published, and emits ``SitePublished``. The
+#     per-site ``subscription.active`` webhook calls it. Idempotent — an
+#     already-active/deployed site is a no-op.
+#   * The publish response carries ``checkout_url`` (``SiteResponse.checkout_url``):
+#     the Dodo link for a paid publish, None for a free publish. It rides the
+#     returned Site doc on a TRANSIENT ``_checkout_url`` PrivateAttr (never
+#     persisted); ``_to_response`` reads it via getattr.
+#
 # Updated 2026-06-24 (C1 review fix — _cf_client guard): ``_cf_client`` reads the
 # PAW_CF_* vars with ``os.environ.get`` and raises a ``ValidationError``
 # (CloudError → 422) when any is missing, instead of a raw ``KeyError`` (an
@@ -324,7 +352,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -665,6 +693,11 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
         # ...), resolved by the caller from Pocket.pattern (it lives on the pocket,
         # not the Site). "" when unset / unresolved so the gallery is empty-safe.
         pattern=pattern,
+        # charge-first: the Dodo checkout link a PAID-tier publish returns, read
+        # from the transient ``_checkout_url`` PrivateAttr (never persisted). None
+        # for a free/live publish and for any list/status read (those docs are
+        # loaded from Mongo, where the PrivateAttr defaults to None).
+        checkout_url=getattr(doc, "_checkout_url", None),
     )
 
 
@@ -740,7 +773,9 @@ async def publish(
     deploy); a CF-only preview build is still generated and smoke-gated but is not
     PUT into the dispatch namespace.
 
-    Deploy has two branches:
+    The generate + deploy + upsert half lives in ``_deploy_site_doc`` (extracted so
+    the charge-first webhook ``activate_site`` can run the SAME deferred deploy at
+    payment-confirm time). It has two branches:
       * REAL Cloudflare (default when creds are present, or when a CF client is
         injected): PUT the Worker bundle into the dispatch namespace.
       * LOCAL fake-deploy (no CF creds / PAW_SITES_LOCAL=1, and no injected CF
@@ -808,47 +843,35 @@ async def publish(
         if _existing is not None and _existing.signed_key:
             signed_key = _existing.signed_key
 
-    build = await generator.build(
-        ripple_spec=ripple_spec,
-        theme=theme,
-        site_id=site_id,
-        title=site_name,
-        capture_api_base=_capture_base(),
-        capture_signed_key=signed_key,
-        engine=engine,
-        source=source,
-        builder_origin=builder_origin,
-        # PERF-3: build into the STABLE per-pocket working dir so node_modules
-        # persists and `bun install` is cached across builds (preview AND publish),
-        # cutting the dominant per-edit cost. A fresh site_id is minted per publish,
-        # but a pocket's working dir is reused across its publishes/previews.
-        pocket_id=pocket_id,
-        # P0a (was PERF-4): ``smoke`` now toggles ONLY the workerd SSR FAIL-gate,
-        # NOT whether ``bun run build`` runs. ``bun run build`` (the static-output
-        # step) runs on BOTH preview and publish (``static_build`` defaults to True),
-        # because this site is SERVED via deploy_local and persist_site copies
-        # whatever the build leaves on disk — skipping it served a STALE anchorless
-        # build (the #1 bug: no hover edit-pill). A preview/edit/arm build
-        # (preview=True) skips only the SSR fail-gate (smoke=False) — it still BUILDS
-        # fresh + anchored output; a live publish (preview=False) keeps the SSR gate
-        # (smoke=True) so the gate + the rollback below are unchanged. A preview that
-        # would fail the SSR render is not blocked — the live publish still gates +
-        # rolls back, so a broken edit never reaches the live deploy.
-        smoke=not preview,
-    )
-
-    # PREVIEW MODE (Branch primitive — EDIT/arm path): the build above already ran
-    # the smoke gate (a broken edit is still caught BEFORE it can be served), but a
-    # preview must NOT take the edit live. Serve the built dir from localhost so the
-    # builder iframe can frame the working copy, then return a TRANSIENT Site-shaped
-    # object (NOT persisted, ``deployed=False``) carrying that preview URL. The
-    # pocket's draft version is left untouched (no promote → ``get_draft`` stays
-    # non-None, the ``published`` pointer does not move), so the draft is reviewable
-    # and ``request_publish_pocket`` can submit it. The canonical live Site doc and
-    # its URL are not claimed or overwritten — only an approved review (the real
-    # ``publish``, ``preview=False``) deploys live + promotes.
+    # PREVIEW MODE (Branch primitive — EDIT/arm path): build + smoke-gate + locally
+    # serve a DRAFT preview but do NOT take the edit live. The build runs the smoke
+    # gate (a broken edit is caught BEFORE it can be served), then we serve the built
+    # dir from localhost and return a TRANSIENT Site-shaped object (NOT persisted,
+    # ``deployed=False``) carrying that preview URL. The pocket's draft version is
+    # left untouched (no promote → ``get_draft`` stays non-None, the ``published``
+    # pointer does not move), so the draft is reviewable and ``request_publish_pocket``
+    # can submit it. The canonical live Site doc and its URL are not claimed or
+    # overwritten — only an approved review (the real ``publish``, ``preview=False``)
+    # deploys live + promotes.
     if preview:
         from pocketpaw_ee.sites import local_server
+
+        build = await generator.build(
+            ripple_spec=ripple_spec,
+            theme=theme,
+            site_id=site_id,
+            title=site_name,
+            capture_api_base=_capture_base(),
+            capture_signed_key=signed_key,
+            engine=engine,
+            source=source,
+            builder_origin=builder_origin,
+            pocket_id=pocket_id,
+            # A preview/edit/arm build skips only the SSR fail-gate (smoke=False); a
+            # live publish keeps it (see _deploy_site_doc). It still BUILDS fresh +
+            # anchored output either way.
+            smoke=False,
+        )
 
         # Serve at a STABLE per-pocket preview id (NOT the freshly-minted ObjectId)
         # so repeated preview builds overwrite the same dir and serve at the SAME
@@ -875,19 +898,101 @@ async def publish(
         )
 
     # BP-2 / #1345: promote the pocket's current draft version to ``published``
-    # BEFORE deploy. The build (which runs the smoke gate) has succeeded, so the
-    # version being published is known-good; the published pointer is the durable
-    # "this is what was published" record even if the deploy below fails
-    # (published != live — a failed deploy just leaves the Site doc un-persisted,
-    # so the pocket reads not-live while the published tag stands). The snapshot
-    # for the promote is the engine's content: the rippleSpec for a ripple site,
-    # the {path: contents} source map for a svelte site.
+    # BEFORE deploy. ``_deploy_site_doc`` runs the smoke gate, so the version being
+    # published is known-good; the published pointer is the durable "this is what
+    # was published" record even if the deploy below fails (published != live — a
+    # failed deploy just leaves the Site doc un-persisted, so the pocket reads
+    # not-live while the published tag stands). The snapshot for the promote is the
+    # engine's content: the rippleSpec for a ripple site, the {path: contents}
+    # source map for a svelte site.
     version_content: dict[str, Any] = (source if engine == "svelte" else ripple_spec) or {}
     await _promote_pocket_draft_to_published(
         pocket_id=pocket_id,
         workspace_id=workspace_id,
         author=user_id,
         content=version_content,
+    )
+
+    # Generate + deploy + upsert the live Site doc. Extracted into a reusable helper
+    # so the charge-first webhook (``activate_site``) can run the SAME deferred
+    # deploy at payment-confirm time. ``publish`` (free path) calls it now.
+    return await _deploy_site_doc(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        site_id=site_id,
+        signed_key=signed_key,
+        site_name=site_name,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        engine=engine,
+        source=source,
+        pattern=pattern,
+        builder_origin=builder_origin,
+        generator=generator,
+        cloudflare=_cloudflare,
+        bundle_reader=_bundle_reader,
+        local_deploy=_local_deploy,
+    )
+
+
+async def _deploy_site_doc(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_id: str,
+    signed_key: str,
+    site_name: str,
+    ripple_spec: dict[str, Any] | None,
+    theme: dict[str, Any],
+    engine: str = "ripple",
+    source: dict[str, str] | None = None,
+    pattern: str | None = None,
+    builder_origin: str | None = None,
+    generator: GeneratorClient | None = None,
+    cloudflare: Any | None = None,
+    bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    local_deploy: Callable[[str, str], str] | None = None,
+) -> _SiteDoc:
+    """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
+
+    The deploy half of ``publish`` — extracted so the charge-first webhook
+    (``activate_site``) can run the SAME deferred deploy at payment-confirm time
+    using the inputs captured on the pending Site doc. It runs
+    ``generator.build`` (with the SSR smoke fail-gate ON — a broken site is
+    rejected before it deploys), deploys via the LOCAL static server or Cloudflare
+    Workers-for-Platforms, and upserts ONE canonical Site doc per (workspace,
+    pocket_id) keyed on the stable ``_id`` (== ``site_id``), flipping
+    ``deployed=True`` + stamping ``deployed_at``.
+
+    Identity (``site_id`` / ``signed_key`` / ``site_name``) is resolved by the
+    caller so the same values flow through a publish and a later activation (the
+    deploy folder / URL / CF worker / Site doc id stay stable). On an upsert it
+    PRESERVES domain/allowed_origins/signed_key and CLEARS any
+    ``pending_deploy_inputs`` (the site is now live, not pending). Raises
+    ``SmokeGateFailed`` (from generator_client) if the SSR render fails — nothing
+    is deployed and no doc is flipped to deployed.
+    """
+    gen = generator or GeneratorClient()
+    build = await gen.build(
+        ripple_spec=ripple_spec,
+        theme=theme,
+        site_id=site_id,
+        title=site_name,
+        capture_api_base=_capture_base(),
+        capture_signed_key=signed_key,
+        engine=engine,
+        source=source,
+        builder_origin=builder_origin,
+        # PERF-3: build into the STABLE per-pocket working dir so node_modules
+        # persists and `bun install` is cached across builds, cutting the dominant
+        # per-edit cost.
+        pocket_id=pocket_id,
+        # A live deploy keeps the SSR fail-gate (smoke=True) so the gate + the
+        # rollback in edit_svelte_component are unchanged — a broken edit never
+        # reaches the live deploy.
+        smoke=True,
     )
 
     # DS-2: a DYNAMIC site (pattern == "dynamic", or a spec carrying live
@@ -906,16 +1011,16 @@ async def publish(
 
     # Local mode only when the caller did NOT inject a CF client (tests inject a
     # fake CF and expect the real branch) AND the environment selects it.
-    use_local = _cloudflare is None and _local_mode()
+    use_local = cloudflare is None and _local_mode()
     url = ""
     if use_local:
         from pocketpaw_ee.sites import local_server
 
-        deploy = _local_deploy or local_server.deploy_local
+        deploy = local_deploy or local_server.deploy_local
         url = deploy(site_id, build.project_dir)
     else:
-        cf = _cloudflare or _cf_client()
-        bundle = _bundle_reader(build.project_dir)
+        cf = cloudflare or _cf_client()
+        bundle = bundle_reader(build.project_dir)
         # Only a dynamic site passes bindings; a static publish passes None so the
         # single-module upload path stays byte-for-byte unchanged (no regress).
         bindings = (
@@ -932,11 +1037,10 @@ async def publish(
     # re-publish; only a first insert seeds the defaults. ``signed_key`` is likewise
     # kept stable across re-publishes (the capture endpoint verifies against it).
     oid = ObjectId(site_id)
-    # P2b: this branch runs ONLY on a successful non-preview deploy (a preview
-    # returned earlier), so ``deployed`` flips True HERE — stamp the live-deploy
-    # time alongside it. A re-publish refreshes it (it is "last shipped", not
-    # "first shipped"). It is NOT set on a preview/edit build and NOT a plain
-    # updatedAt bump, so it stays a true "last deployed" marker.
+    # P2b: this runs ONLY on a successful deploy, so ``deployed`` flips True HERE —
+    # stamp the live-deploy time alongside it. A re-publish refreshes it (it is
+    # "last shipped", not "first shipped"). It is NOT a plain updatedAt bump, so it
+    # stays a true "last deployed" marker.
     now = datetime.now(UTC)
     doc = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
     if doc is None:
@@ -973,6 +1077,9 @@ async def publish(
         doc.deployed = True
         doc.deployed_at = now
         doc.url = url
+        # charge-first: a live deploy clears any captured pending inputs — the site
+        # is no longer pending payment, so the snapshot is no longer needed.
+        doc.pending_deploy_inputs = {}
         # DS-2: keep the D1 id in sync. For a dynamic site it is the (reused)
         # stable id; a static re-publish leaves it "" (no binding). We only ever
         # SET it for a dynamic publish — a publish that is no longer dynamic does
@@ -1223,6 +1330,71 @@ async def publish_pocket(
     # backed by a per-tenant D1, so its deployed Worker gets a D1 binding.
     pattern = pocket.get("pattern")
 
+    # charge-first: a PREVIEW publish never persists a Site doc and never bills, so
+    # it stays the unchanged Branch-primitive preview path — build + smoke-gate +
+    # locally serve a transient draft, no tier/sub/event.
+    if preview:
+        return await publish(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            engine=engine,
+            source=source,
+            pattern=pattern,
+            name=name or pocket.get("name", ""),
+            builder_origin=builder_origin,
+            preview=True,
+            _generator=_generator,
+            _cloudflare=_cloudflare,
+            _bundle_reader=_bundle_reader,
+            _local_deploy=_local_deploy,
+        )
+
+    # charge-first: resolve the per-site tier BEFORE deploy, then branch.
+    #   * a PAID tier (positive annual price AND a configured Dodo product) DEFERS
+    #     the live deploy — create the Site as PENDING, open the annual checkout,
+    #     return the checkout_url, and let the ``subscription.active`` webhook deploy
+    #     it live once payment is confirmed (``_publish_pending_site``).
+    #   * a FREE/base tier — OR a "paid" tier whose Dodo product is NOT configured
+    #     (a paid tier can't open a checkout, so don't strand the user) — publishes
+    #     LIVE immediately, exactly as before, then stamps the (free/degraded) tier.
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
+        site_plans.BASE_SITE_PLAN_KEY
+    )
+    is_paid = tier is not None and tier.annual_price_usd > 0
+    dodo_configured = tier is not None and bool(tier.dodo_product_id)
+
+    if is_paid and not dodo_configured:
+        # A paid tier whose Dodo product is unconfigured can't open a checkout —
+        # fall back to publishing LIVE immediately so the user is never stranded.
+        logger.warning(
+            "sites.publish: paid tier %s has no configured Dodo product — publishing "
+            "live immediately (charge-first fallback, no checkout)",
+            tier.key if tier is not None else site_plan_key,
+        )
+
+    if is_paid and dodo_configured:
+        # PAID + chargeable → defer the deploy until subscription.active.
+        return await _publish_pending_site(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            ripple_spec=ripple_spec,
+            theme=theme,
+            engine=engine,
+            source=source,
+            pattern=pattern,
+            name=name or pocket.get("name", ""),
+            builder_origin=builder_origin,
+            tier=tier,
+            provider=_billing_provider,
+        )
+
+    # FREE/base (or paid-but-unconfigured fallback) → publish LIVE now.
     doc = await publish(
         workspace_id=workspace_id,
         user_id=user_id,
@@ -1234,20 +1406,16 @@ async def publish_pocket(
         pattern=pattern,
         name=name or pocket.get("name", ""),
         builder_origin=builder_origin,
-        preview=preview,
+        preview=False,
         _generator=_generator,
         _cloudflare=_cloudflare,
         _bundle_reader=_bundle_reader,
         _local_deploy=_local_deploy,
     )
 
-    # BC-9: a PREVIEW publish never persists a Site doc, so there is no per-site
-    # plan to stamp / sub to open / event to emit — return the transient doc as-is.
-    if preview:
-        return doc
-
-    # A LIVE publish: stamp the per-site annual plan, open the per-site Dodo sub
-    # (degrading gracefully when Dodo is unconfigured), and emit SitePublished.
+    # Stamp the per-site annual plan, open the per-site Dodo sub (degrading
+    # gracefully when Dodo is unconfigured), and emit SitePublished. No checkout_url
+    # on this path — the site is already live.
     return await _apply_site_plan(
         doc=doc,
         workspace_id=workspace_id,
@@ -1345,6 +1513,269 @@ async def _apply_site_plan(
         )
     )
     return doc
+
+
+async def _publish_pending_site(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    ripple_spec: dict[str, Any] | None,
+    theme: dict[str, Any],
+    engine: str,
+    source: dict[str, str] | None,
+    pattern: str | None,
+    name: str,
+    builder_origin: str | None,
+    tier: Any,
+    provider: Any | None,
+) -> _SiteDoc:
+    """Charge-first: create a PAID-tier site as PENDING and open its checkout,
+    WITHOUT deploying it live.
+
+    The paid-tier half of ``publish_pocket``. Rather than generate + deploy and
+    then bill, it:
+      1. resolves the STABLE per-(workspace, pocket) identity (the same ``site_id``
+         a live publish would use, and the existing signed_key when the pocket was
+         published before) so a later ``activate_site`` deploys at the same id/URL;
+      2. UPSERTS a PENDING canonical Site doc — ``deployed=False``,
+         ``subscription_status="pending"``, ``plan_tier=<tier>`` — and persists the
+         DEPLOY INPUTS (rippleSpec / theme / engine / source / pattern /
+         builder_origin / name) on ``pending_deploy_inputs`` so the webhook-time
+         activation can deploy WITHOUT re-reading the pocket (the webhook carries
+         only workspace_id + site_id, and the pocket's draft may have moved on);
+      3. opens the per-site annual Dodo subscription (the SAME ``create_subscription``
+         + ``metadata={workspace_id, site_id, plan_key}`` the live path uses) and
+         captures the checkout_url, which it stashes on the returned doc's transient
+         ``_checkout_url`` for the router to surface.
+
+    It does NOT run the generator, does NOT deploy, does NOT promote the pocket's
+    draft to published (the site is not live yet), and does NOT emit
+    ``SitePublished`` — all of that happens in ``activate_site`` when the
+    ``subscription.active`` webhook confirms payment. If opening the checkout fails
+    AFTER the pending doc is persisted, the pending doc stands (status="pending",
+    no checkout_url) so the operator can see the attempt and retry — the deploy is
+    never taken without payment.
+    """
+    site_name = (name or "").strip()
+    if not site_name:
+        from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+        _pocket = await pockets_service.get(pocket_id, user_id)
+        site_name = (_pocket.get("name") or "").strip()
+    if not site_name:
+        site_name = "Untitled site"
+
+    oid = _live_object_id(workspace_id, pocket_id)
+    site_id = str(oid)
+    plan_key = tier.key
+
+    # Reuse the stored signed_key when the pocket was published before, so the
+    # eventual deploy bakes a key that matches the doc the capture endpoint
+    # verifies against; mint one for a first publish.
+    signed_key = f"site_key_{secrets.token_urlsafe(24)}"
+    existing = await _SiteDoc.find_one({"_id": oid, "workspace": workspace_id})
+    if existing is not None and existing.signed_key:
+        signed_key = existing.signed_key
+
+    # The deploy inputs the webhook-time activation needs (the webhook carries only
+    # workspace_id + site_id). Stored on the pending doc so activation never re-reads
+    # the pocket (whose draft may have advanced).
+    pending_inputs: dict[str, Any] = {
+        "ripple_spec": ripple_spec,
+        "theme": theme,
+        "engine": engine,
+        "source": source,
+        "pattern": pattern,
+        "builder_origin": builder_origin,
+        "name": site_name,
+    }
+
+    if existing is None:
+        doc = _SiteDoc(
+            id=oid,
+            workspace=workspace_id,
+            pocket_id=pocket_id,
+            owner=user_id,
+            name=site_name,
+            script_name=site_id,
+            deployed=False,  # PENDING — not deployed until payment confirms
+            signed_key=signed_key,
+            url="",
+            builder_origin=builder_origin or "",
+            plan_tier=plan_key,
+            subscription_status="pending",
+            pending_deploy_inputs=pending_inputs,
+            allowed_origins=_default_allowed_origins(),
+            event_mapping=_DEFAULT_EVENT_MAPPING,
+        )
+        await doc.insert()
+    else:
+        # Re-publish of a pocket onto a paid tier: refresh the pending intent in
+        # place. A previously-live site is taken back to pending until the new
+        # annual sub confirms — but the deploy fields are LEFT as-is until the
+        # activation re-deploys (we don't tear down a live site before payment).
+        doc = existing
+        doc.owner = user_id
+        doc.name = site_name
+        doc.plan_tier = plan_key
+        doc.subscription_status = "pending"
+        doc.pending_deploy_inputs = pending_inputs
+        await doc.save()
+
+    # Open the per-site annual Dodo subscription and capture the checkout link the
+    # caller redirects the buyer to. A failure here leaves the pending doc standing
+    # (no checkout_url) — never deploy without payment.
+    checkout_url: str | None = None
+    subscription_id: str | None = None
+    try:
+        prov = provider or _default_billing_provider()
+        checkout = await prov.create_subscription(
+            plan_key=plan_key,
+            product_id=tier.dodo_product_id,
+            workspace_id=workspace_id,
+            customer_email=None,
+            metadata={
+                "workspace_id": workspace_id,
+                "site_id": site_id,
+                "plan_key": plan_key,
+            },
+        )
+        checkout_url = checkout.checkout_url or None
+        subscription_id = checkout.subscription_id or None
+    except Exception:  # noqa: BLE001 — a billing hiccup must not crash the publish
+        logger.warning(
+            "sites.publish: per-site checkout init failed for pending site %s "
+            "(tier=%s) — site stays pending, no checkout opened",
+            site_id,
+            plan_key,
+            exc_info=True,
+        )
+
+    if subscription_id is not None:
+        doc.subscription_id = subscription_id
+        await doc.save()
+
+    # Stash the checkout link on the transient PrivateAttr so the router can surface
+    # it on SiteResponse.checkout_url (never persisted).
+    doc._checkout_url = checkout_url
+    return doc
+
+
+async def activate_site(
+    *,
+    workspace_id: str,
+    site_id: str,
+    _generator: GeneratorClient | None = None,
+    _cloudflare: Any | None = None,
+    _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
+    _local_deploy: Callable[[str, str], str] | None = None,
+) -> _SiteDoc:
+    """Deploy + activate a PENDING charge-first site (charge-first activation).
+
+    Called from the per-site ``subscription.active`` webhook once payment is
+    confirmed. Loads the PENDING Site doc (tenant-scoped via ``_load`` — a missing /
+    cross-tenant id raises NotFound, which the webhook acks without a write), reads
+    the DEPLOY INPUTS captured on it at publish time (``pending_deploy_inputs``),
+    and runs the SAME deferred deploy a live publish would have (``_deploy_site_doc``
+    — generate + smoke-gate + deploy + upsert ``deployed=True`` + stamp
+    ``deployed_at``). It then marks ``subscription_status="active"``, promotes the
+    pocket's draft to published (the durable "this was published" record, mirroring
+    the live publish), and emits ``SitePublished``.
+
+    Idempotent for the webhook's at-least-once delivery: an already-active /
+    already-deployed site is returned unchanged (no re-deploy, no re-emit) — a
+    replayed or out-of-order ``subscription.active`` is a no-op.
+
+    If the pending doc carries NO ``pending_deploy_inputs`` (an unexpected state —
+    e.g. a site that was never a charge-first pending publish), it cannot be
+    deployed from the webhook; the status is still advanced to active and the doc
+    returned, and the gap is logged. ``_generator`` / ``_cloudflare`` / etc. are
+    injectable so the path is unit-testable without Bun / workerd / Cloudflare.
+    """
+    doc = await _load(workspace_id, site_id)
+
+    # Idempotent: an already-deployed+active site is a no-op (replayed / out-of-order
+    # delivery). We treat "deployed and active" as the terminal live state.
+    if doc.deployed and doc.subscription_status == "active":
+        return doc
+
+    inputs = doc.pending_deploy_inputs or {}
+    if not inputs:
+        # No captured deploy inputs — we cannot run the deferred deploy from the
+        # webhook (it carries no pocket scope). This is an unexpected/corrupt state:
+        # every charge-first pending site captures its inputs at publish, and they
+        # are only cleared on a SUCCESSFUL deploy. Do NOT advance to "active" — that
+        # would be a lie (active + deployed=False = a paid site that 404s). Leave it
+        # PENDING and log loudly so an operator investigates; the site never claims
+        # to be live without an actual deploy.
+        logger.error(
+            "sites.activate: pending site %s has no captured deploy inputs — "
+            "leaving it PENDING (cannot deploy from the webhook); operator "
+            "intervention required",
+            site_id,
+        )
+        return doc
+
+    pocket_id = doc.pocket_id
+    # Deploy live using the inputs captured at publish time (NOT a fresh pocket read
+    # — the webhook has no pocket scope, and the pocket's draft may have advanced).
+    deployed = await _deploy_site_doc(
+        workspace_id=workspace_id,
+        user_id=doc.owner,
+        pocket_id=pocket_id,
+        site_id=site_id,
+        signed_key=doc.signed_key,
+        site_name=inputs.get("name") or doc.name,
+        ripple_spec=inputs.get("ripple_spec"),
+        theme=inputs.get("theme") or {},
+        engine=inputs.get("engine") or "ripple",
+        source=inputs.get("source"),
+        pattern=inputs.get("pattern"),
+        builder_origin=inputs.get("builder_origin"),
+        generator=_generator,
+        cloudflare=_cloudflare,
+        bundle_reader=_bundle_reader,
+        local_deploy=_local_deploy,
+    )
+
+    # The deploy flipped ``deployed=True`` and cleared pending_deploy_inputs; now
+    # mark the per-site sub active and advance the annual renewal date (one year out
+    # — the next charge cycle), mirroring the renewed path.
+    deployed.subscription_status = "active"
+    deployed.annual_renewal_date = datetime.now(UTC) + timedelta(days=365)
+    await deployed.save()
+
+    # Promote the pocket's draft to published — the durable "this was published"
+    # record, mirroring the live publish path (best-effort; versioning never gates
+    # the deploy/activation).
+    version_content: dict[str, Any] = (
+        inputs.get("source") if (inputs.get("engine") == "svelte") else inputs.get("ripple_spec")
+    ) or {}
+    await _promote_pocket_draft_to_published(
+        pocket_id=pocket_id,
+        workspace_id=workspace_id,
+        author=doc.owner,
+        content=version_content,
+    )
+
+    # Emit SitePublished now that the site is actually live (deferred from the
+    # pending publish — a charge-first site is "published" only once it deploys).
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import SitePublished
+
+    await emit(
+        SitePublished(
+            data={
+                "workspace_id": workspace_id,
+                "site_id": site_id,
+                "pocket_id": pocket_id,
+                "owner": doc.owner,
+                "plan_tier": deployed.plan_tier or "",
+            }
+        )
+    )
+    return deployed
 
 
 def _default_billing_provider() -> Any:
@@ -2418,6 +2849,7 @@ __all__ = [
     "apply_edits",
     "publish",
     "publish_pocket",
+    "activate_site",
     "preview_pocket",
     "pocket_status",
     "list_site_data_tables",
