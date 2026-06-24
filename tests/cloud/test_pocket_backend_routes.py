@@ -30,6 +30,12 @@
 # `pocket_backend.not_configured` error (200) when a runnable source IS
 # authored. The single stale test is replaced by two that pin both arms; the
 # selection + error shape run for real (`selected_source_keys` is not mocked).
+# Updated: 2026-06-15 (feat/invoke-tool-v1) — the backend response now carries
+# `allowed_tools`; the configure assertion updated. Added coverage for the new
+# owner-only route:
+#   PUT /pockets/{id}/backend/tool-policy — set the tool allowlist
+# (owner sets the grants; empty list valid; empty tool name 422'd; non-owner
+# 403 before the service runs).
 
 from __future__ import annotations
 
@@ -135,6 +141,9 @@ def test_put_backend_configures(monkeypatch, client):
         # RFC 05 M2a: the response now carries the write allowlist —
         # empty by default (fail-closed).
         "allowed_writes": [],
+        # feat/invoke-tool-v1: the response carries the tool allowlist —
+        # empty by default (fail-closed).
+        "allowed_tools": [],
         # RFC 05 M2b.1: the response carries the gated-write approval
         # route — None by default (the pocket owner approves).
         "approval_route": None,
@@ -413,6 +422,112 @@ def test_put_write_policy_empty_list_is_valid(monkeypatch, client):
     res = client.put("/pockets/pocket-1/backend/write-policy", json={"allowed_writes": []})
     assert res.status_code == 200, res.text
     assert res.json()["allowed_writes"] == []
+
+
+# ---------------------------------------------------------------------------
+# PUT /pockets/{id}/backend/tool-policy — feat/invoke-tool-v1
+# ---------------------------------------------------------------------------
+
+
+def test_put_tool_policy_sets_allowlist(monkeypatch, client):
+    """An owner sets the tool allowlist; the route forwards the grants to the
+    service and echoes them back. `require_pocket_owner` is overridden to allow
+    (owner)."""
+    captured = {}
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_tools):
+        captured.update(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            allowed_tools=allowed_tools,
+        )
+        return {
+            "base_url": "",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_tools": allowed_tools,
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_tool_policy", _set_policy)
+
+    res = client.put(
+        "/pockets/pocket-1/backend/tool-policy",
+        json={"allowed_tools": [{"tool": "connector:github:list_issues"}, {"tool": "web_fetch"}]},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["allowed_tools"] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+    # The route forwarded the right identity + grants to the service.
+    assert captured["workspace_id"] == FAKE_WORKSPACE
+    assert captured["user_id"] == FAKE_USER
+    assert captured["pocket_id"] == "pocket-1"
+    assert captured["allowed_tools"] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+
+
+def test_put_tool_policy_empty_list_is_valid(monkeypatch, client):
+    """An empty allowlist revokes every tool — a valid request (fail-closed)."""
+
+    async def _set_policy(workspace_id, user_id, pocket_id, allowed_tools):
+        return {
+            "base_url": "",
+            "auth_type": "none",
+            "configured": True,
+            "allowed_tools": [],
+        }
+
+    monkeypatch.setattr(pockets_service, "set_pocket_tool_policy", _set_policy)
+    res = client.put("/pockets/pocket-1/backend/tool-policy", json={"allowed_tools": []})
+    assert res.status_code == 200, res.text
+    assert res.json()["allowed_tools"] == []
+
+
+def test_put_tool_policy_rejects_empty_tool_name(client):
+    """`tool` has `min_length=1` — an empty grant is a 422 at parse time, before
+    the service is touched."""
+    res = client.put(
+        "/pockets/pocket-1/backend/tool-policy",
+        json={"allowed_tools": [{"tool": ""}]},
+    )
+    assert res.status_code == 422
+
+
+def test_put_tool_policy_forbidden_for_non_owner(monkeypatch):
+    """The tool-policy route is owner-only — `require_pocket_owner` denies a
+    non-owner with 403 before the service is reached."""
+    from pocketpaw_ee.cloud._core.errors import Forbidden
+    from pocketpaw_ee.cloud._core.http import add_error_handler
+
+    a = FastAPI()
+    add_error_handler(a)
+    a.include_router(router)
+    a.dependency_overrides[require_license] = lambda: None
+    a.dependency_overrides[current_user_id] = lambda: FAKE_USER
+    a.dependency_overrides[current_workspace_id] = lambda: FAKE_WORKSPACE
+
+    def _deny():
+        raise Forbidden("pocket.owner_required", "owner access required")
+
+    a.dependency_overrides[require_pocket_owner] = _deny
+
+    # If the guard ever let a non-owner through, the service would be hit — make
+    # that a loud failure rather than a silent pass.
+    async def _should_not_run(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("set_pocket_tool_policy must not run for a non-owner")
+
+    monkeypatch.setattr(pockets_service, "set_pocket_tool_policy", _should_not_run)
+
+    res = TestClient(a).put(
+        "/pockets/pocket-1/backend/tool-policy",
+        json={"allowed_tools": [{"tool": "web_fetch"}]},
+    )
+    assert res.status_code == 403
 
 
 # ---------------------------------------------------------------------------

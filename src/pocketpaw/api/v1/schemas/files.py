@@ -54,7 +54,77 @@ class RecentFilesResponse(BaseModel):
 
 
 class WriteFileRequest(BaseModel):
-    """Request to overwrite a file's content."""
+    """Request to overwrite (or create) a file's content."""
 
     path: str
     content: str
+
+
+class CreateFileRequest(BaseModel):
+    """Request to create a new file with optional initial content."""
+
+    path: str
+    content: str = ""
+
+
+class MkdirRequest(BaseModel):
+    """Request to create a directory."""
+
+    path: str
+    parents: bool = False
+
+
+class RenameRequest(BaseModel):
+    """Request to rename or move a file or directory."""
+
+    path: str
+    new_path: str
+
+
+class DeleteRequest(BaseModel):
+    """Request to delete a file or directory."""
+
+    path: str
+    recursive: bool = False
+
+
+class FileActionResponse(BaseModel):
+    """Generic response for file mutation operations."""
+
+    ok: bool
+    path: str | None = None
+    error: str | None = None
+
+
+class GitStatusEntry(BaseModel):
+    """A single file entry in git status output."""
+
+    path: str
+    status: str  # ' M' = modified unstaged, 'M ' = staged, '?? ' = untracked, etc.
+    # "modified", "staged", "untracked", "added", "deleted", "renamed"
+    label: str = "modified"
+
+
+class GitStatusResponse(BaseModel):
+    """Response for git status queries."""
+
+    branch: str | None = None
+    entries: list[GitStatusEntry] = []
+    is_git_repo: bool = False
+    error: str | None = None
+
+
+class GitDiffLineChange(BaseModel):
+    """A single line-level change in a git diff."""
+
+    type: str  # "added" | "modified"
+
+
+class GitDiffResponse(BaseModel):
+    """Response for git diff queries — per-file line-level changes."""
+
+    file_path: str
+    branch: str | None = None
+    line_changes: dict[str, str] = {}  # line_number → "added" | "modified"
+    is_git_repo: bool = False
+    error: str | None = None

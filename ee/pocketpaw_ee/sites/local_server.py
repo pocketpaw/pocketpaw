@@ -5,6 +5,16 @@
 # that tree over HTTP so the published site has a real openable localhost URL
 # (what the cmux smoke + Phase 5 open).
 #
+# Updated 2026-06-19 (fix/sites-preview-fresh-build, P1a — fail soft on a missing
+# build dir): ``deploy_local`` no longer lets a missing ``.svelte-kit/cloudflare/``
+# escape as a bare FileNotFoundError → 500. If the build dir is absent but a PRIOR
+# deploy of the same site is still on disk, it keeps the prior deploy and returns
+# its URL plus a logged warning (the caller serves the last-good site instead of
+# erroring). Only when there is no prior deploy either does it raise
+# ``MissingBuildOutput`` (a clear, typed error the caller can surface). With the
+# P0a fix ``bun run build`` always runs, so a missing build dir should no longer
+# happen on the normal path — this is a defensive backstop, not the happy path.
+#
 # Design:
 #   * One server per process, rooted at the sites home (~/.pocketpaw/sites by
 #     default, override with PAW_SITES_LOCAL_DIR). A request for /<site_id>/
@@ -24,6 +34,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import threading
@@ -31,9 +42,17 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # The control plane reads the deployable static site adapter-cloudflare emits
 # here (same dir the real path reads _worker.js from).
 _CLOUDFLARE_BUILD_REL = ".svelte-kit/cloudflare"
+
+
+class MissingBuildOutput(RuntimeError):
+    """Raised by deploy_local when there is no built static site to serve AND no
+    prior deploy to fall back to. A clear, typed error the caller can surface as a
+    meaningful message instead of a bare 500 (P1a)."""
 
 
 def sites_home() -> Path:
@@ -100,9 +119,40 @@ def local_url_for(site_id: str) -> str:
 
 def deploy_local(site_id: str, project_dir: str) -> str:
     """Persist the built site and return its served localhost URL. The one call
-    the service makes in local mode in place of cf.put_worker()."""
+    the service makes in local mode in place of cf.put_worker().
+
+    Fails SOFT on a missing build dir (P1a): if ``.svelte-kit/cloudflare/`` is not
+    present (a build that produced no output), this does NOT raise a bare
+    FileNotFoundError → 500. When a PRIOR deploy of the same site is still on disk
+    it keeps that deploy and returns its URL with a logged warning (serve the
+    last-good site rather than break the page); only when there is no prior deploy
+    EITHER does it raise ``MissingBuildOutput`` — a clear, typed error the caller
+    can surface. With the P0a fix ``bun run build`` always runs, so a missing build
+    dir should not happen on the normal path; this is a defensive backstop."""
+    src = Path(project_dir, _CLOUDFLARE_BUILD_REL)
+    if not src.is_dir():
+        dest = sites_home() / site_id
+        if dest.is_dir():
+            logger.warning(
+                "sites: no fresh build at %s — serving the PRIOR deploy at %s "
+                "(the build produced no static output)",
+                src,
+                dest,
+            )
+            return local_url_for(site_id)
+        raise MissingBuildOutput(
+            f"no built static site at {src} and no prior deploy for {site_id} — "
+            "the build produced no static output to serve."
+        )
     persist_site(site_id, project_dir)
     return local_url_for(site_id)
 
 
-__all__ = ["sites_home", "persist_site", "ensure_server", "local_url_for", "deploy_local"]
+__all__ = [
+    "sites_home",
+    "persist_site",
+    "ensure_server",
+    "local_url_for",
+    "deploy_local",
+    "MissingBuildOutput",
+]

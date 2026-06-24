@@ -40,7 +40,7 @@ class _FakeGenerator:
 
 
 class _FakeCF:
-    async def put_worker(self, *, script_name, bundle):
+    async def put_worker(self, *, script_name, bundle, bindings=None):
         return True
 
 

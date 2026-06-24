@@ -115,16 +115,16 @@ class _SubprocessAgentRef:
         pass
 
     async def stop(self) -> None:
-        """Send SIGTERM and wait up to 10 s for graceful exit."""
+        """Send SIGTERM and wait up to 30 s for graceful exit."""
         if self._process.returncode is not None:
             return  # already terminated
         try:
             self._process.terminate()
             try:
-                await asyncio.wait_for(self._process.wait(), timeout=10)
+                await asyncio.wait_for(self._process.wait(), timeout=30)
             except TimeoutError:
                 logger.warning(
-                    "Agent subprocess for room %s did not exit in 10s, killing",
+                    "Agent subprocess for room %s did not exit in 30s, killing",
                     self.room_name,
                 )
                 self._process.kill()

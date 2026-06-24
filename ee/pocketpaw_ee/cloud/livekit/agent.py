@@ -129,23 +129,32 @@ class CallMeetingAgent:
         # Disconnect RTC room first (stops audio streams)
         await self._disconnect_rtc()
 
-        # Cancel monitor task
+        # Cancel monitor task — do NOT await; the task's CancelledError
+        # propagates at its next await point and asyncio.run() handles
+        # cleanup.  Avoiding the await here means _finalize_notes() is
+        # called promptly even when Deepgram/AudioStream cleanup is slow.
         if self._monitor_task:
             self._monitor_task.cancel()
-            try:
-                await self._monitor_task
-            except asyncio.CancelledError:
-                pass
 
-        # Cancel transcribe task
+        # Cancel transcribe task — same rationale: don't block on
+        # AudioStream/Deepgram pipe cleanup, especially for long meetings
+        # with many participants where cleanup can take many seconds.
         if self._transcribe_task:
             self._transcribe_task.cancel()
-            try:
-                await self._transcribe_task
-            except asyncio.CancelledError:
-                pass
 
         await self._finalize_notes()
+
+        # Brief drain for cancelled tasks so they don't leak
+        if self._transcribe_task and not self._transcribe_task.done():
+            try:
+                await asyncio.wait_for(self._transcribe_task, timeout=3)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
+        if self._monitor_task and not self._monitor_task.done():
+            try:
+                await asyncio.wait_for(self._monitor_task, timeout=1)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
 
         logger.info(
             "CallMeetingAgent stopped for room %s (group %s)",
@@ -626,11 +635,28 @@ class CallMeetingAgent:
 
             transcript_text = "\n".join(transcript_lines)
 
+            # Truncate long transcripts before sending to the LLM so the
+            # API call finishes within the process-grace-period window.
+            # Limit to ~5K chars (~1K tokens) which captures enough context
+            # for a useful summary while keeping latency predictable.
+            # The full transcript is still included in the meeting notes payload.
+            llm_transcript = transcript_text
+            if len(transcript_text) > 5000:
+                logger.info(
+                    "Agent: truncating long transcript for LLM (%d chars → 5000)",
+                    len(transcript_text),
+                )
+                llm_transcript = (
+                    transcript_text[:2500]
+                    + "\n\n[... transcript truncated at 5000 chars ...]\n\n"
+                    + transcript_text[-2500:]
+                )
+
             # Generate AI summary — non-fatal if it fails; notes still post
             # with raw transcript (or a fallback message).
             try:
                 summary, action_items = await self._generate_summary(
-                    transcript_text,
+                    llm_transcript,
                 )
             except Exception:
                 logger.exception("Agent: AI summarization failed — posting notes without summary")
@@ -908,12 +934,17 @@ if __name__ == "__main__":
                 logger.info("Agent: SIGTERM — finalising notes")
                 agent._running = False
                 await agent._disconnect_rtc()
+                # Cancel transcribe task but do NOT await it here —
+                # waiting for cleanup of AudioStreams + Deepgram pipes
+                # can be slow for long meetings. The parent process
+                # waits up to 30s for this process to exit; we want to
+                # spend that time on _finalize_notes, not on teardown.
                 if agent._transcribe_task:
                     agent._transcribe_task.cancel()
-                    try:
-                        await agent._transcribe_task
-                    except asyncio.CancelledError:
-                        pass
+                # Cancel the monitor task so it doesn't block exit with
+                # its 5s sleep interval.
+                if agent._monitor_task:
+                    agent._monitor_task.cancel()
                 await agent._finalize_notes()
                 # Do NOT clean up the room here — the parent process
                 # (end_room) handles room deletion after the agent exits.
@@ -923,14 +954,17 @@ if __name__ == "__main__":
 
             await asyncio.sleep(1)
 
-        # Wait for the monitor task (natural end) to finish its finalise
-        # + cleanup chain before exiting. Without this, asyncio.run()
-        # cancels pending tasks the moment _main() returns, which kills
-        # the monitor task mid-_finalize_notes().
+        # Give cancelled tasks a moment to drain, then let _main()
+        # return so asyncio.run() can clean up.
+        if agent._transcribe_task and not agent._transcribe_task.done():
+            try:
+                await asyncio.wait_for(agent._transcribe_task, timeout=3)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
         if agent._monitor_task and not agent._monitor_task.done():
             try:
-                await agent._monitor_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(agent._monitor_task, timeout=1)
+            except (asyncio.CancelledError, TimeoutError):
                 pass
 
     asyncio.run(_main())

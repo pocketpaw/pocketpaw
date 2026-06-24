@@ -39,6 +39,14 @@ under any of several invented keys (``interval`` / ``interval_seconds``
 to a positive int, writes it as ``refresh_interval_seconds`` on the
 lifted source, and appends ``"interval"`` to its refresh policy. The
 interval scheduler floors a sub-minimum value at run time.
+
+Changes: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER.
+``normalize_ripple_spec`` now accepts ``RippleSpec | dict | None``. A typed
+``RippleSpec`` is flattened to its BSON-equivalent dict via ``to_flat_dict``
+at entry; the function ALWAYS returns a flat dict (never a ``RippleSpec``) so
+the persisted document and the wire stay ``Record<string, any>`` — the
+no-migration / byte-equivalent invariant. All existing tree repairs operate
+on the flat dict, unchanged.
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ import logging
 import secrets
 import urllib.parse
 from typing import Any
+
+from pocketpaw.bundled_templates.schema import RippleSpec
 
 log = logging.getLogger(__name__)
 
@@ -628,13 +638,24 @@ def _walk_and_fix(node: Any) -> Any:
     return node
 
 
-def normalize_ripple_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
+def normalize_ripple_spec(
+    spec: RippleSpec | dict[str, Any] | None,
+) -> dict[str, Any] | None:
     """Normalize AI-generated rippleSpec before persistence.
 
     Ensures envelope fields (version, intent, lifecycle.id).
     Passes through UISpec and multi-pane specs with minimal changes.
     Generates widget IDs if missing for flat widget specs.
+
+    Phase-2 dual-path: accepts a typed ``RippleSpec`` or a legacy flat dict.
+    A ``RippleSpec`` is flattened to its BSON-equivalent dict via
+    ``to_flat_dict`` BEFORE normalization, and the result is ALWAYS a flat
+    dict (never a ``RippleSpec``) — the persisted document and the wire shape
+    stay ``Record<string, any>`` (no migration, byte-equivalent). The
+    normalizer's tree repairs operate on the flat dict exactly as before.
     """
+    if isinstance(spec, RippleSpec):
+        spec = spec.to_flat_dict()
     if not spec or not isinstance(spec, dict):
         return None
 

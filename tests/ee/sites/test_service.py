@@ -30,6 +30,20 @@
 # "Untitled site" only when the pocket has no name. Also pins the end-to-end
 # publish_pocket path: a pocket named "Flower Shop Landing Page" published with no
 # name lands a Site named "Flower Shop Landing Page".
+# Updated 2026-06-18 (feat/branch-primitive-sites-draft, BP-2 / pocketpaw#1345):
+# branch-aware publish/preview/status coverage over the BP-1 versions spine —
+# (1) a pocket with only a draft version reads draft / not live; (2) is_live is
+# True ONLY after a successful deploy and stays not-live when the deploy fails (the
+# Site doc is not persisted) while the published version tag still stands;
+# (3) preview_pocket serves the DRAFT VERSION's content (and falls back to current
+# content when no draft row exists); (4) publish promotes the current draft to a
+# published version via versions.publish; plus has_unpublished_changes when a draft
+# is newer than the published version.
+# Updated 2026-06-20 (DS-2 — dynamic-site D1 bindings): coverage that a
+# pattern="dynamic" publish passes a d1 binding (name + database id) to
+# put_worker and persists that id on the Site doc (reused on re-publish), that a
+# static (landing/None) publish passes NO bindings (single-module path, regress
+# guard), and that publish_pocket threads the pocket's pattern through.
 from __future__ import annotations
 
 import pytest
@@ -49,12 +63,17 @@ class _FakeGenerator:
 class _FakeCF:
     def __init__(self):
         self.put_calls = []
+        # DS-2: capture the bindings put_worker was called with so dynamic-site
+        # tests can assert the d1 binding rode the deploy and static-site tests
+        # can assert NO bindings (the single-module path) were passed.
+        self.put_bindings = []
 
-    async def put_worker(self, *, script_name, bundle):
+    async def put_worker(self, *, script_name, bundle, bindings=None):
         self.put_calls.append(script_name)
+        self.put_bindings.append(bindings)
         return True
 
-    async def create_custom_hostname(self, hostname):
+    async def create_custom_hostname(self, hostname, *, features=None):
         return CustomHostname(
             id="ch_1",
             hostname=hostname,
@@ -582,3 +601,544 @@ async def test_publish_pocket_no_name_lands_site_with_pocket_name(beanie_test_db
         )
 
     assert site.name == "Flower Shop Landing Page"
+
+
+# ---------------------------------------------------------------------------
+# preview_pocket — the DRAFT-content reader backing
+# GET /sites/by-pocket/{pocket_id}/preview. Reads the source pocket via the
+# pockets service (the wire-dict reader, which raises NotFound itself) and
+# returns {pocket_id, engine, content}: the rippleSpec for a ripple pocket, or
+# the {path: contents} source map for a svelte pocket. Mirrors publish_pocket's
+# pocket-read + engine logic so the preview matches what publish would build.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_ripple_returns_ripple_spec():
+    """A ripple pocket previews its rippleSpec verbatim, with engine='ripple'."""
+    from unittest.mock import AsyncMock, patch
+
+    spec = {"type": "container", "ui": {"children": []}, "theme": {"primary": "#0A84FF"}}
+    wire = {"name": "Bright Smile", "engine": "ripple", "rippleSpec": spec}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ) as mock_get:
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    mock_get.assert_awaited_once_with("pk1", "u1")
+    assert res.pocket_id == "pk1"
+    assert res.engine == "ripple"
+    assert res.content == spec
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_defaults_engine_to_ripple():
+    """A pocket with no explicit engine previews as ripple (the default track)."""
+    from unittest.mock import AsyncMock, patch
+
+    spec = {"type": "container"}
+    wire = {"name": "x", "rippleSpec": spec}  # no engine key
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    assert res.engine == "ripple"
+    assert res.content == spec
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_svelte_returns_source_map():
+    """A svelte pocket previews its {path: contents} source map, engine='svelte'."""
+    from unittest.mock import AsyncMock, patch
+
+    source = {
+        "src/routes/+page.svelte": "<h1>Hello</h1>",
+        "src/lib/Hero.svelte": "<section>hero</section>",
+    }
+    wire = {"name": "x", "engine": "svelte", "source": source, "rippleSpec": {}}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        res = await sites_service.preview_pocket(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    assert res.engine == "svelte"
+    assert res.content == source
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_propagates_not_found():
+    """A missing / access-denied pocket surfaces NotFound (router → 404), not a
+    swallowed empty preview."""
+    from unittest.mock import AsyncMock, patch
+
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    ):
+        with pytest.raises(NotFound):
+            await sites_service.preview_pocket(
+                workspace_id="ws1", user_id="u1", pocket_id="pk_missing"
+            )
+
+
+# ---------------------------------------------------------------------------
+# pocket_status — the draft/published + is_live reader backing
+# GET /sites/by-pocket/{pocket_id}/status. Derives the lifecycle from the Site
+# deployment doc for the pocket (tenant-scoped on workspace): a Site doc means
+# published (is_live == doc.deployed); no Site doc means draft / not live.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_no_site_is_draft_not_live(beanie_test_db):
+    """A pocket that has never been published has no Site doc → draft, not live."""
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_unpublished")
+    assert res.pocket_id == "pk_unpublished"
+    assert res.status == "draft"
+    assert res.is_live is False
+    assert res.site_id is None
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_published_site_is_live(beanie_test_db):
+    """A pocket with a deployed Site doc reads published + live, and carries the
+    site id."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_live",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_live")
+    assert res.pocket_id == "pk_live"
+    assert res.status == "published"
+    assert res.is_live is True
+    assert res.site_id == str(site.id)
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_is_tenant_scoped(beanie_test_db):
+    """A Site published in another workspace does not leak into this workspace's
+    status read — a different workspace sees the pocket as draft / not live."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    await sites_service.publish(
+        workspace_id="ws_owner",
+        user_id="u1",
+        pocket_id="pk_x",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    res = await sites_service.pocket_status(workspace_id="ws_intruder", pocket_id="pk_x")
+    assert res.status == "draft"
+    assert res.is_live is False
+    assert res.site_id is None
+
+
+# ---------------------------------------------------------------------------
+# BP-2 / #1345 — branch-aware publish/preview/status over the BP-1 versions
+# spine. The bug: a site was stamped ``deployed`` (→ published + live) the
+# instant a Site doc existed, so the "Live" badge lied and the preview pointed
+# at the live URL. These pin the fix: status derives from the version pointers +
+# real deploy state, preview serves the DRAFT version, publish promotes the draft
+# to a published version before deploy.
+# ---------------------------------------------------------------------------
+
+
+class _BoomCF:
+    """A Cloudflare client whose deploy (put_worker) FAILS — used to prove a
+    failed deploy leaves the pocket not-live (no Site doc persisted) while the
+    published version tag may still stand."""
+
+    async def put_worker(self, *, script_name, bundle, bindings=None):
+        raise RuntimeError("cloudflare put_worker failed")
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_draft_version_only_is_draft_not_live(beanie_test_db):
+    """A pocket that has a DRAFT version but was never published reads draft / not
+    live, with has_unpublished_changes True (there is a draft to ship)."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id="pk_draft_only",
+        workspace_id="ws1",
+        content={"type": "container"},
+    )
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_draft_only")
+    assert res.status == "draft"
+    assert res.is_live is False
+    assert res.has_unpublished_changes is True
+    assert res.site_id is None
+
+
+@pytest.mark.asyncio
+async def test_publish_promotes_draft_to_published_version(beanie_test_db):
+    """publish() promotes the pocket's current draft to a PUBLISHED version
+    (versions.publish) before deploy, so a published pointer exists afterwards and
+    the pocket reads published + live with no unpublished changes."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    # A draft exists (as the pocket merge hook would have written).
+    draft = await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id="pk_promote",
+        workspace_id="ws1",
+        content={"type": "container", "v": 1},
+    )
+    assert draft.status == "draft"
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_promote",
+        ripple_spec={"type": "container", "v": 1},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    assert site.deployed is True
+
+    # The draft was promoted: a published version pointer now exists, pointing at
+    # the same version row (no NEW draft was created, the existing one flipped).
+    published = await versions_service.get_published(scope_type="pocket", scope_id="pk_promote")
+    assert published is not None
+    assert str(published.id) == str(draft.id)
+    assert published.status == "published"
+
+    # Status derives published + live from the pointer + real deploy state.
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_promote")
+    assert res.status == "published"
+    assert res.is_live is True
+    assert res.has_unpublished_changes is False
+    assert res.site_id == str(site.id)
+
+
+@pytest.mark.asyncio
+async def test_publish_with_no_draft_writes_then_publishes_a_version(beanie_test_db):
+    """A pocket published WITHOUT a pre-existing draft row (never went through
+    merge_spec) still lands a published version: publish() writes a draft snapshot
+    of the engine content, then promotes it."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    assert await versions_service.get_published(scope_type="pocket", scope_id="pk_fresh") is None
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_fresh",
+        ripple_spec={"type": "container", "fresh": True},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    published = await versions_service.get_published(scope_type="pocket", scope_id="pk_fresh")
+    assert published is not None
+    assert published.content == {"type": "container", "fresh": True}
+
+
+@pytest.mark.asyncio
+async def test_publish_failed_deploy_leaves_pocket_not_live(beanie_test_db, monkeypatch):
+    """is_live ONLY after a successful deploy: when the deploy raises, no Site doc
+    is persisted (so pocket_status reads not-live), but the published version tag
+    may still stand (published != live)."""
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+    from pocketpaw_ee.versions import service as versions_service
+
+    # Force the REAL deploy branch (injected CF) and make it blow up.
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    gen = _FakeGenerator()
+    boom_cf = _BoomCF()
+
+    with pytest.raises(RuntimeError):
+        await sites_service.publish(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk_fail",
+            ripple_spec={"type": "container"},
+            theme={},
+            name="x",
+            _generator=gen,
+            _cloudflare=boom_cf,
+            _bundle_reader=lambda d: b"x",
+        )
+
+    # No Site doc was persisted — the deploy failed before the insert.
+    assert await _SiteDoc.find_one({"workspace": "ws1", "pocket_id": "pk_fail"}) is None
+
+    # The pocket is NOT live (the only thing that earns a Live badge is a real
+    # successful deploy, which never happened).
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_fail")
+    assert res.is_live is False
+
+    # The published version tag was set BEFORE the deploy, so it may stand:
+    # published is true at the Branch layer even though the site is not live.
+    published = await versions_service.get_published(scope_type="pocket", scope_id="pk_fail")
+    assert published is not None
+    assert res.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_draft_newer_than_published_has_unpublished_changes(beanie_test_db):
+    """After publishing, a NEW draft (a later edit) makes the pocket read published
+    + live AND has_unpublished_changes — the edits a re-publish would ship."""
+    from pocketpaw_ee.versions import service as versions_service
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_edit",
+        ripple_spec={"type": "container", "v": 1},
+        theme={},
+        name="x",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"x",
+    )
+    # Right after publish: published, live, no unpublished changes.
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_edit")
+    assert res.status == "published"
+    assert res.is_live is True
+    assert res.has_unpublished_changes is False
+
+    # A later edit writes a NEW draft (as the merge hook would) newer than the
+    # published version.
+    await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id="pk_edit",
+        workspace_id="ws1",
+        content={"type": "container", "v": 2},
+    )
+    res2 = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_edit")
+    assert res2.status == "published"  # still live on the published version
+    assert res2.is_live is True
+    assert res2.has_unpublished_changes is True  # but there is a newer draft
+    assert res2.site_id == str(site.id)
+
+
+@pytest.mark.asyncio
+async def test_pocket_status_legacy_deployed_site_without_versions_reads_published(
+    beanie_test_db,
+):
+    """Backward compat: a Site deployed BEFORE BP-1 has a deployed Site doc but no
+    version rows — it must still read published + live, not regress to draft."""
+    from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
+
+    legacy = _SiteDoc(
+        workspace="ws1",
+        pocket_id="pk_legacy",
+        owner="u1",
+        name="Legacy",
+        script_name="legacy",
+        deployed=True,
+    )
+    await legacy.insert()
+    res = await sites_service.pocket_status(workspace_id="ws1", pocket_id="pk_legacy")
+    assert res.status == "published"
+    assert res.is_live is True
+    assert res.has_unpublished_changes is False
+    assert res.site_id == str(legacy.id)
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_serves_draft_version_content(beanie_test_db):
+    """preview_pocket serves the DRAFT VERSION's content (the unpublished working
+    copy), NOT the pocket's currently-stored rippleSpec, so the Preview tab shows
+    what publish WOULD build."""
+    from unittest.mock import AsyncMock, patch
+
+    from pocketpaw_ee.versions import service as versions_service
+
+    # The pocket's CURRENT stored spec (e.g. what was last published / saved).
+    current_spec = {"type": "container", "v": "current"}
+    # A newer DRAFT version — the working copy the preview must serve.
+    draft_spec = {"type": "container", "v": "draft"}
+    await versions_service.write_draft(
+        scope_type="pocket",
+        scope_id="pk_preview",
+        workspace_id="ws1",
+        content=draft_spec,
+    )
+
+    wire = {"name": "x", "engine": "ripple", "rippleSpec": current_spec}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        res = await sites_service.preview_pocket(
+            workspace_id="ws1", user_id="u1", pocket_id="pk_preview"
+        )
+
+    assert res.engine == "ripple"
+    # The draft snapshot wins over the pocket's current stored spec.
+    assert res.content == draft_spec
+
+
+@pytest.mark.asyncio
+async def test_preview_pocket_falls_back_to_current_content_when_no_draft(beanie_test_db):
+    """When no draft version row exists (a pre-BP-1 pocket, or a svelte pocket whose
+    source map BP-1 does not version), preview falls back to the pocket's current
+    content so the preview is never empty when content exists."""
+    from unittest.mock import AsyncMock, patch
+
+    current_spec = {"type": "container", "v": "current"}
+    wire = {"name": "x", "engine": "ripple", "rippleSpec": current_spec}
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        res = await sites_service.preview_pocket(
+            workspace_id="ws1", user_id="u1", pocket_id="pk_no_draft"
+        )
+
+    assert res.content == current_spec
+
+
+# ---------------------------------------------------------------------------
+# DS-2 — a DYNAMIC site (Pocket.pattern == "dynamic") is backed by a per-tenant
+# Cloudflare D1. Its deployed Worker therefore needs a D1 binding so the SSR
+# remote functions can reach that DB. publish() passes the d1 binding(s) to
+# put_worker ONLY when the site is dynamic; a static (landing/None) publish
+# passes NO bindings (the single-module path stays byte-for-byte unchanged).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dynamic_publish_passes_d1_binding_to_put_worker(beanie_test_db):
+    """A pattern="dynamic" publish hands put_worker a d1 binding carrying the
+    binding name + the site's D1 database id, and persists that id on the Site
+    doc so a re-publish reuses it (and DS-3 can read the site's D1)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_dyn",
+        ripple_spec={
+            "type": "container",
+            "objects": [{"name": "signups", "fields": {"email": "text"}}],
+            "sources": [
+                {"name": "all", "kind": "data", "object": "signups", "refresh": "pocket_open"}
+            ],
+        },
+        theme={"primary": "#0A84FF"},
+        name="Guestbook",
+        pattern="dynamic",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    assert site.deployed is True
+    # put_worker received exactly one call carrying a non-empty bindings list.
+    assert len(cf.put_bindings) == 1
+    bindings = cf.put_bindings[0]
+    assert bindings, "dynamic publish must pass bindings to put_worker"
+    d1 = [b for b in bindings if b.get("type") == "d1"]
+    assert len(d1) == 1
+    assert d1[0]["name"] == "DB"
+    assert d1[0]["id"], "d1 binding must carry the database id"
+    # The id is persisted on the Site doc (re-publish reuse + DS-3 read).
+    assert site.d1_database_id == d1[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_publish_reuses_persisted_d1_id_on_republish(beanie_test_db):
+    """Re-publishing a dynamic pocket keeps the SAME D1 id (the binding target
+    must be stable across deploys — the data lives behind that id)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    kw = dict(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_dyn2",
+        ripple_spec={
+            "type": "container",
+            "objects": [{"name": "rows", "fields": {"x": "text"}}],
+            "actions": [{"name": "add", "object": "rows", "op": "insert"}],
+        },
+        theme={"primary": "#000"},
+        name="Board",
+        pattern="dynamic",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    first = await sites_service.publish(**kw)
+    second = await sites_service.publish(**kw)
+    assert first.d1_database_id
+    assert first.d1_database_id == second.d1_database_id
+
+
+@pytest.mark.asyncio
+async def test_static_publish_passes_no_bindings(beanie_test_db):
+    """A static site (pattern None / 'landing') must NOT pass bindings — the
+    single-module upload path is unchanged (regress guard)."""
+    gen, cf = _FakeGenerator(), _FakeCF()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_static",
+        ripple_spec={"type": "container"},
+        theme={"primary": "#0A84FF"},
+        name="Bright Smile",
+        pattern="landing",
+        _generator=gen,
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+    )
+    assert site.deployed is True
+    assert cf.put_bindings == [None]
+    assert site.d1_database_id == ""
+
+
+@pytest.mark.asyncio
+async def test_publish_pocket_threads_dynamic_pattern(beanie_test_db):
+    """publish_pocket reads pattern off the pocket wire dict and forwards it, so a
+    dynamic pocket published via the shared path gets the d1 binding."""
+    from unittest.mock import AsyncMock, patch
+
+    gen, cf = _FakeGenerator(), _FakeCF()
+    wire = {
+        "name": "Live Guestbook",
+        "pattern": "dynamic",
+        "rippleSpec": {
+            "type": "container",
+            "objects": [{"name": "g", "fields": {"who": "text"}}],
+            "sources": [{"name": "all", "kind": "data", "object": "g", "refresh": "pocket_open"}],
+        },
+    }
+    with patch(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        new=AsyncMock(return_value=wire),
+    ):
+        site = await sites_service.publish_pocket(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk_dyn3",
+            _generator=gen,
+            _cloudflare=cf,
+            _bundle_reader=lambda d: b"export default {}",
+        )
+
+    assert site.d1_database_id
+    d1 = [b for b in (cf.put_bindings[0] or []) if b.get("type") == "d1"]
+    assert len(d1) == 1

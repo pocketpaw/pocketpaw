@@ -1,6 +1,31 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
+    POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
+    tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
+    recurring checkout; the subscription webhook reverses it (product_id ->
+    plan key) to know which tier renewed. A before-validator degrades a
+    malformed env string to {} so a typo can't crash settings load.
+  - 2026-06-24: Added ``billing_enforced`` (default False, env
+    POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
+    True the cloud rejects STARTING a new chat run on a zero-or-negative
+    credit balance with HTTP 402; in-flight runs are untouched. Off by
+    default so OSS / self-host stay unaffected.
+  - 2026-06-23: Added the deep_work Self-Verifying Loop flags (SVL-1) —
+    ``deep_work_verify_loop_enabled`` (default False; kill-switch — when
+    False deep_work tasks complete exactly as before) and
+    ``deep_work_verify_max_requeues`` (default 2; the requeue bound read by
+    SVL-2, landed here so later slices don't touch config). SVL-1 only reads
+    the enable flag to stamp an observe-only OutcomeVerdict on a completing
+    task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
+  - 2026-06-18: Added the four layered/learning Instinct gate defaults —
+    ``instinct_approval_level`` (default "ASK", dormant),
+    ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
+    (False), ``instinct_optimistic_ttl_seconds`` (300). Global host-wide
+    defaults for the 4-lane triage router; per-workspace overrides land
+    with the gate integration layer. Dormant on ship (ASK escalates
+    everything). Env: POCKETPAW_INSTINCT_* .
   - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
@@ -421,6 +446,30 @@ class Settings(BaseSettings):
             "whenever its confidence in the cheap tier falls below this "
             "threshold. High by default — a wrong skip produces a broken "
             "pocket, so the router is deliberately conservative."
+        ),
+    )
+    deep_work_verify_loop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch for the deep_work Self-Verifying Loop. When False "
+            "(default) deep_work tasks complete exactly as before — no outcome "
+            "verification, byte-for-byte today's behaviour. When True, every "
+            "task that completes successfully has its result checked against "
+            "the success_criteria captured at intake and the resulting "
+            "OutcomeVerdict is stamped on the task's metadata "
+            "(``verify_verdict``) and logged. The verdict is observe-only in "
+            "this slice (SVL-1): the task's status is NOT changed by the "
+            "verification — that is the requeue slice (SVL-2)."
+        ),
+    )
+    deep_work_verify_max_requeues: int = Field(
+        default=2,
+        description=(
+            "Max verify-driven requeues a single deep_work task may take "
+            "before the loop stops requeuing and escalates instead. Used by "
+            "the requeue slice (SVL-2); landed here so later slices don't have "
+            "to touch config. SVL-1 only READS deep_work_verify_loop_enabled "
+            "and ignores this bound."
         ),
     )
     auto_install_bundled_skills: bool = Field(
@@ -1330,6 +1379,144 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Layered/learning Instinct gate — GLOBAL DEFAULTS (2026-06-18 design).
+    # These are the host-wide defaults for the 4-lane triage router that
+    # turns the binary escalate/execute Instinct gate into a learning gate.
+    # They are DORMANT by default: `instinct_approval_level="ASK"` makes the
+    # lane classifier always escalate, so shipping these changes zero
+    # behavior. A per-workspace override (a field on the workspace document)
+    # lands with the integration layer; until an admin opts a workspace into
+    # "TRIAGE", the global default governs and every escalate goes to a
+    # human. A support engineer setting the env var changes the default for
+    # NEW workspaces only — it cannot silently upgrade existing tenants.
+    instinct_approval_level: str = Field(
+        default="ASK",
+        description=(
+            "Global default triager activation level for the layered Instinct "
+            "gate: 'ASK' (dormant — every escalate goes to a human), 'TRIAGE' "
+            "(triager active — auto/optimistic/batch lanes live), or 'TRUSTED' "
+            "(reserved; treated as TRIAGE today). Per-workspace overrides live "
+            "on the workspace document. Set via POCKETPAW_INSTINCT_APPROVAL_LEVEL."
+        ),
+    )
+    instinct_auto_approve_threshold: float = Field(
+        default=0.9,
+        description=(
+            "Trust-score bar (0.0-1.0) a (pocket, action) pair must reach for "
+            "the AUTO/OPTIMISTIC lanes. A score below this escalates. Money- "
+            "moving and DELETE actions never AUTO regardless of score (a hard "
+            "blast-radius floor). Set via POCKETPAW_INSTINCT_AUTO_APPROVE_THRESHOLD."
+        ),
+    )
+    instinct_dry_run_mode: bool = Field(
+        default=False,
+        description=(
+            "When true, the Instinct gate routes escalating writes to the "
+            "DRY_RUN lane: the write is resolved and audited but never sent to "
+            "the backend (a governance rehearsal). BLOCK verdicts still block. "
+            "Set via POCKETPAW_INSTINCT_DRY_RUN_MODE."
+        ),
+    )
+    instinct_optimistic_ttl_seconds: int = Field(
+        default=300,
+        description=(
+            "Seconds an OPTIMISTIC-lane compensation handle stays live before "
+            "hard expiry. On expiry the registry fires an ALERT audit event and "
+            "persists the expired handle (no heartbeat extension). Set via "
+            "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
+        ),
+    )
+
+    # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
+    # The only payment gateway in v1; a provider abstraction
+    # (``ee.cloud.billing.providers``) keeps Razorpay et al. a later swap.
+    # All three are optional so a non-billing deployment boots fine; the Dodo
+    # provider raises a clear ValidationError when a billing call is made
+    # without the key configured.
+    dodo_payments_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments API bearer token, used to authenticate the server-side "
+            "DodoPayments client when creating a one-time top-up checkout. Set via "
+            "POCKETPAW_DODO_PAYMENTS_API_KEY. None disables Dodo top-ups."
+        ),
+    )
+    dodo_environment: str = Field(
+        default="test_mode",
+        description=(
+            "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
+            "Selects the API base URL the DodoPayments client targets. Set via "
+            "POCKETPAW_DODO_ENVIRONMENT."
+        ),
+    )
+    dodo_webhook_secret: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments webhook signing secret (Standard Webhooks / 'whsec_…'). "
+            "Used to VERIFY the signature on every inbound /billing/webhooks/dodo "
+            "POST before the payload is trusted. Set via "
+            "POCKETPAW_DODO_WEBHOOK_SECRET. NEVER logged."
+        ),
+    )
+    dodo_credit_product_id: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the credits SKU. A one-time top-up adds this "
+            "product to the cart with a pay-what-you-want amount equal to the "
+            "purchased credits (1 credit == $0.01 == 1 cent, the currency's lowest "
+            "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
+        ),
+    )
+    dodo_plan_products: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of plan tier key -> Dodo RECURRING product id (BC-7 "
+            "subscriptions). ``subscribe(plan_key)`` looks the product up here to "
+            "open a recurring checkout; the inbound subscription webhook reverses "
+            "the lookup (product_id -> plan key) to know which tier renewed (and "
+            "thus the monthly credit allotment from the plan catalog). Set via "
+            "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
+            '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
+            "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
+
+    # Billing — compute-cost metering rate card (BC-3, the Meter + Price
+    # primitives). A completed chat run is billed by its real compute cost times
+    # a flat markup, converted from USD into integer credits. These two settings
+    # ARE the rate card: keeping them declarative (a flat multiplier + the credit
+    # denomination) leaves room for a tiered card later without changing the
+    # debit path. ``credits = round(cost_usd * markup / credit_usd)``.
+    billing_markup: float = Field(
+        default=2.5,
+        description=(
+            "Flat markup applied to a chat run's real compute cost before it is "
+            "billed to the workspace wallet (covers infra + margin). The metered "
+            "credit charge is round(cost_usd * billing_markup / credit_usd). Set "
+            "via POCKETPAW_BILLING_MARKUP."
+        ),
+    )
+    credit_usd: float = Field(
+        default=0.01,
+        description=(
+            "USD value of one credit (1 credit == $0.01 == 1 cent, the lowest "
+            "currency denomination — the same denomination Dodo top-ups use). "
+            "Divides the marked-up compute cost to yield integer credits. Set via "
+            "POCKETPAW_CREDIT_USD."
+        ),
+    )
+    billing_enforced: bool = Field(
+        default=False,
+        description=(
+            "Run-start hard-block (BC-4). When True, STARTING a new chat run on a "
+            "workspace whose credit balance is <= 0 is rejected with HTTP 402 "
+            "(credits.insufficient) BEFORE any run row is written; in-flight runs "
+            "are never killed. Default False so OSS / self-host deployments (which "
+            "run no credit ledger) are unaffected; the cloud turns it on via "
+            "POCKETPAW_BILLING_ENFORCED."
+        ),
+    )
+
     # Pocket data-source refresh — cost controls (RFC 04 M3).
     # A pocket source binding may declare an `interval` or `webhook` refresh
     # trigger. Both are AUTO-refresh: they re-run a source without a human in
@@ -1543,6 +1730,28 @@ class Settings(BaseSettings):
             "instead of a raw URL in the chat. Set False to disable if detection is brittle."
         ),
     )
+
+    @field_validator("dodo_plan_products", mode="before")
+    @classmethod
+    def _parse_dodo_plan_products(cls, v: object) -> object:
+        """Accept a JSON-object env string for the plan->product map.
+
+        pydantic-settings parses JSON for dict fields, but a hand-set
+        ``POCKETPAW_DODO_PLAN_PRODUCTS`` that isn't valid JSON (or isn't an
+        object) should degrade to an empty mapping — subscriptions then fail
+        loudly at ``subscribe`` time with a clear ``plan_unconfigured`` error
+        rather than crashing the entire settings load at boot. A dict passes
+        straight through.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return v
 
     @field_validator("composio_toolkits", mode="before")
     @classmethod
