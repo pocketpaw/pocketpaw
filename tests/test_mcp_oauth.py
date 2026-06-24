@@ -240,19 +240,35 @@ class TestOAuthCallbackCoordination:
         manager._oauth_pending.clear()
 
     def test_set_oauth_callback_result_resolves_future(self):
-        from pocketpaw.mcp.manager import set_oauth_callback_result
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
 
         loop = asyncio.new_event_loop()
         future = loop.create_future()
 
         from pocketpaw.mcp import manager
 
-        manager._oauth_pending["test_state_123"] = future
+        state_token, state_id = _create_state_token(
+            user_id="local_user", provider="test_server", upstream_state="upstream_state_1"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="local_user",
+            upstream_state="upstream_state_1",
+        )
 
-        result = set_oauth_callback_result("test_state_123", "auth_code_456")
+        result = set_oauth_callback_result(state_token, "auth_code_456")
         assert result is True
         assert future.done()
-        assert future.result() == ("auth_code_456", "test_state_123")
+        assert future.result() == ("auth_code_456", "upstream_state_1")
         loop.close()
 
     def test_set_oauth_callback_result_unknown_state(self):
@@ -262,7 +278,13 @@ class TestOAuthCallbackCoordination:
         assert result is False
 
     def test_set_oauth_callback_result_already_resolved(self):
-        from pocketpaw.mcp.manager import set_oauth_callback_result
+        import time
+
+        from pocketpaw.mcp.manager import (
+            _create_state_token,
+            _PendingOAuthFlow,
+            set_oauth_callback_result,
+        )
 
         loop = asyncio.new_event_loop()
         future = loop.create_future()
@@ -270,9 +292,19 @@ class TestOAuthCallbackCoordination:
 
         from pocketpaw.mcp import manager
 
-        manager._oauth_pending["done_state"] = future
+        state_token, state_id = _create_state_token(
+            user_id="local_user", provider="test_server", upstream_state="upstream_state_2"
+        )
+        manager._oauth_pending[state_id] = _PendingOAuthFlow(
+            future=future,
+            server_name="test_server",
+            created_at=time.time(),
+            provider="test_server",
+            user_id="local_user",
+            upstream_state="upstream_state_2",
+        )
 
-        result = set_oauth_callback_result("done_state", "new_code")
+        result = set_oauth_callback_result(state_token, "new_code")
         assert result is False
         loop.close()
 

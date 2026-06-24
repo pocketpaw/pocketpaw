@@ -73,6 +73,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -204,9 +205,35 @@ def validate_api_keys(settings: Settings) -> list[str]:
     return warnings
 
 
+def get_or_generate_secret() -> str:
+    # 1. Try to get it from the environment first (Best practice for Docker/Prod)
+    secret = os.getenv("POCKETPAW_OAUTH_STATE_SECRET")
+    if secret:
+        return secret
+
+    # 2. Define a path for a local secret file
+    secret_file = Path(".pocketpaw_secret")
+
+    # 3. If file exists, read it
+    if secret_file.exists():
+        return secret_file.read_text().strip()
+
+    # 4. If not, generate a new one and save it (First-time setup)
+    new_secret = secrets.token_hex(32)
+    secret_file.write_text(new_secret)
+
+    # Restrict file permissions so only the owner can read it (Security best practice)
+    os.chmod(secret_file, 0o600)
+
+    return new_secret
+
+
 class Settings(BaseSettings):
     """PocketPaw settings with env and file support."""
 
+    oauth_state_secret: str = Field(
+        default=get_or_generate_secret, env="POCKETPAW_OAUTH_STATE_SECRET"
+    )
     model_config = SettingsConfigDict(
         env_prefix="POCKETPAW_",
         env_file=".env",
