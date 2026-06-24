@@ -91,6 +91,7 @@ _xproc_consumer_task: asyncio.Task[None] | None = None
 
 async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
 
     while True:
         try:
@@ -100,15 +101,30 @@ async def _sweeper_loop() -> None:
             raise
         except Exception:
             _run_sweeper_logger.exception("sweep_stale_runs tick failed")
+        # BC-3 metering: bill every newly-terminal run's compute cost on the same
+        # heartbeat. Kept in its own try so a metering failure can't suppress the
+        # stale-run sweep (or vice versa) on the next tick.
+        try:
+            await sweep_unbilled_runs()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_unbilled_runs tick failed")
 
 
 async def start_run_sweeper() -> None:
-    """Sweep once on boot, then tick every 5 minutes until shutdown."""
+    """Sweep once on boot, then tick every 5 minutes until shutdown.
+
+    Boot runs both the stale-run sweep (interrupt orphaned runs) and the BC-3
+    compute-cost metering sweep (bill any terminal runs left unbilled by the
+    prior process); the 5-minute loop then ticks both.
+    """
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
 
     global _sweeper_task
     with suppress(Exception):
         await sweep_stale_runs()
+    with suppress(Exception):
+        await sweep_unbilled_runs()
     _sweeper_task = asyncio.create_task(_sweeper_loop())
 
 

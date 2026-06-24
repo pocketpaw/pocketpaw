@@ -75,16 +75,27 @@
 #     is empty, but ``columns`` is still listed from the spec.
 # These are READ-ONLY views (no request DTO — the inputs are path params); the
 # data view never writes through this surface.
+# Updated 2026-06-24 (S2 review fix): ``DomainRequest.hostname`` now carries a
+# permissive DNS-hostname validator (label-dot-label, letters/digits/hyphens, no
+# leading/trailing/double dots, total length capped) so an obviously-malformed
+# host is rejected at the DTO (422) before it reaches Cloudflare. Kept permissive
+# — it accepts any real registrable hostname, it only blocks garbage.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class PublishRequest(BaseModel):
+    # ``site_plan_key`` (BC-10) is the OPTIONAL per-site plan tier the site is
+    # published on (basic | pro | business — see ``billing.site_plans``). Omitted
+    # defaults to the base tier in ``publish_pocket``; a higher tier resells its
+    # Cloudflare features when a custom domain is later added.
     pocket_id: str
+    site_plan_key: str | None = None
 
 
 class MakeEditableRequest(BaseModel):
@@ -280,8 +291,33 @@ class SiteDataRowsResponse(BaseModel):
     rows: list[dict[str, Any]] = []
 
 
+# A permissive DNS hostname: one or more dot-separated labels, each 1-63 chars of
+# letters/digits/hyphens (not starting or ending with a hyphen), at least two
+# labels (a registrable name has a TLD). Case-insensitive. This is deliberately
+# loose — it accepts any real hostname and only rejects obvious garbage (spaces,
+# leading/trailing/double dots, illegal characters, empty labels).
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$"
+)
+
+
 class DomainRequest(BaseModel):
     hostname: str
+
+    @field_validator("hostname")
+    @classmethod
+    def _validate_hostname(cls, v: str) -> str:
+        """Reject an obviously-malformed hostname before it reaches Cloudflare.
+
+        Permissive: any real registrable hostname passes; only garbage (spaces,
+        bad characters, leading/trailing/double dots, single-label names) fails.
+        The trailing-dot FQDN form is normalized away first so ``example.com.``
+        is accepted.
+        """
+        host = (v or "").strip().rstrip(".")
+        if not _HOSTNAME_RE.match(host):
+            raise ValueError("hostname is not a valid DNS hostname")
+        return host
 
 
 class DomainStatusResponse(BaseModel):

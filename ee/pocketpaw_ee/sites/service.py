@@ -1,6 +1,38 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-24 (C1 review fix — _cf_client guard): ``_cf_client`` reads the
+# PAW_CF_* vars with ``os.environ.get`` and raises a ``ValidationError``
+# (CloudError → 422) when any is missing, instead of a raw ``KeyError`` (an
+# unhandled 500). ``add_domain`` calls it directly, so an unconfigured Cloudflare
+# now returns a clean "Cloudflare is not configured" error.
+#
+# Updated 2026-06-24 (BC-9 — per-site annual plan + publish entitlement gate):
+# ``publish_pocket`` gained ``site_plan_key`` (the per-site tier from
+# ``billing.site_plans``, defaulting to the base tier) and now — after a LIVE
+# publish persists the Site doc — stamps ``Site.plan_tier`` + ``Site.subscription_id``,
+# opens a PER-SITE annual Dodo subscription via BC-7's ``create_subscription`` with
+# ``metadata={workspace_id, site_id, plan_key}`` (the ``site_id`` is how the
+# renewal webhook tells a per-site sub from a workspace-plan sub), and emits
+# ``SitePublished``. When the site tier has no configured Dodo recurring product
+# (v1 default) the sub init DEGRADES gracefully — the tier is recorded without a
+# live charge, never crashing the publish. The publish ENTITLEMENT gate is the
+# existing ``require_sites_plan`` (the "fabric" plan feature) ``publish`` already
+# runs FIRST, before any Site insert — a workspace lacking it raises Forbidden and
+# no Site is created. New seam ``_billing_provider`` on ``publish_pocket`` injects
+# a mock subscription provider in tests. A PREVIEW publish skips all of BC-9 (it
+# never persists a Site doc).
+#
+# Updated 2026-06-24 (BC-10 — resell Cloudflare features by site-plan tier):
+# ``add_domain`` now resolves the site's ``plan_tier`` → its
+# ``site_plans.get_site_plan(...).cloudflare_features`` and passes that set to
+# ``CloudflareClient.create_custom_hostname(hostname, features=...)``. So adding a
+# custom domain to a HIGHER-tier site provisions its resold Cloudflare paid
+# features (WAF / edge-cache / strict TLS) at hostname-create time; a base-tier
+# (or unset-tier) site resolves to an empty set and stays on the basic create
+# path, unchanged. ``site_plans`` is imported lazily inside ``add_domain``,
+# mirroring ``publish_pocket``.
+#
 # Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1 data):
 # added the operator data-view reads ``list_site_data_tables`` and
 # ``read_site_data_table`` (backing GET /sites/by-pocket/{pocket_id}/data and
@@ -524,15 +556,28 @@ def _default_allowed_origins() -> list[str]:
 
 
 def _cf_client():
-    """Build the real Cloudflare client from settings (env). Injected in tests."""
+    """Build the real Cloudflare client from settings (env). Injected in tests.
+
+    C1 review fix — reads the required vars with ``os.environ.get`` and raises a
+    ``ValidationError`` (CloudError → 422, mapped by the cloud error handler) when
+    any is missing, instead of a raw ``KeyError`` (which surfaces as an unhandled
+    500). ``add_domain`` calls this directly, so an unconfigured Cloudflare now
+    returns a clean "Cloudflare is not configured" error rather than a 500.
+    """
     import os
 
     from pocketpaw_ee.sites.cloudflare_client import CloudflareClient
 
+    account_id = os.environ.get("PAW_CF_ACCOUNT_ID")
+    api_token = os.environ.get("PAW_CF_API_TOKEN")
+    zone_id = os.environ.get("PAW_CF_ZONE_ID")
+    if not (account_id and api_token and zone_id):
+        raise ValidationError("sites.cloudflare_unconfigured", "Cloudflare is not configured")
+
     return CloudflareClient(
-        account_id=os.environ["PAW_CF_ACCOUNT_ID"],
-        api_token=os.environ["PAW_CF_API_TOKEN"],
-        zone_id=os.environ["PAW_CF_ZONE_ID"],
+        account_id=account_id,
+        api_token=api_token,
+        zone_id=zone_id,
         dispatch_namespace=os.environ.get("PAW_CF_DISPATCH_NAMESPACE", "paw-sites"),
     )
 
@@ -952,6 +997,38 @@ async def _load(workspace_id: str, site_id: str) -> _SiteDoc:
     return doc
 
 
+async def mark_site_subscription(
+    *,
+    workspace_id: str,
+    site_id: str,
+    status: str,
+    subscription_id: str | None = None,
+    annual_renewal_date: datetime | None = None,
+) -> _SiteDoc | None:
+    """Advance a site's per-site annual subscription lifecycle (BC-9).
+
+    The entity-isolation write the billing webhook calls when a verified PER-SITE
+    ``subscription.*`` delivery (one carrying a ``site_id``) lands: billing owns
+    the Workspace / credits writes, the sites service owns the Site write, so the
+    per-site sub state is updated HERE, not by billing reaching into the Site
+    model. Sets ``subscription_status`` (active | cancelled), and on an
+    activation/renewal also advances ``annual_renewal_date``. Reuses the stored
+    ``subscription_id`` when the caller passes one (a renewal may re-confirm it).
+
+    Tenant-scoped on ``workspace`` via ``_load`` (a missing / cross-tenant /
+    malformed site id raises NotFound → the webhook acks without a write). Returns
+    the updated doc, or raises NotFound when the site does not exist for the
+    workspace (the caller — a verified webhook — treats that as nothing to do)."""
+    site = await _load(workspace_id, site_id)
+    site.subscription_status = status
+    if subscription_id:
+        site.subscription_id = subscription_id
+    if annual_renewal_date is not None:
+        site.annual_renewal_date = annual_renewal_date
+    await site.save()
+    return site
+
+
 async def _canonical_site_doc(workspace_id: str, pocket_id: str) -> _SiteDoc | None:
     """The ONE canonical Site doc for (workspace, pocket_id), or None (PERF-1).
 
@@ -996,9 +1073,19 @@ async def add_domain(
 ) -> DomainStatusResponse:
     """Register a custom hostname with Cloudflare for SaaS and store it on the
     site. Returns the ONE CNAME the client pastes at their registrar."""
+    # BC-10: a higher site-plan tier resells Cloudflare paid features (WAF /
+    # edge-cache / strict TLS). Lazy import mirrors publish_pocket's site_plans
+    # use — keeps the billing catalog off the module-import path.
+    from pocketpaw_ee.cloud.billing import site_plans
+
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
-    ch = await cf.create_custom_hostname(hostname)
+    # Resolve the site's tier → its cloudflare_features and provision them on the
+    # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
+    # create_custom_hostname stays on the basic path.
+    plan = site_plans.get_site_plan(site.plan_tier)
+    features = set(plan.cloudflare_features) if plan else set()
+    ch = await cf.create_custom_hostname(hostname, features=features)
     site.domains.append(
         _SiteDomainDoc(
             hostname=ch.hostname,
@@ -1057,15 +1144,35 @@ async def publish_pocket(
     user_id: str,
     pocket_id: str,
     name: str = "",
+    site_plan_key: str | None = None,
     builder_origin: str | None = None,
     preview: bool = False,
     _generator: GeneratorClient | None = None,
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
+    _billing_provider: Any | None = None,
 ) -> _SiteDoc:
     """Publish a pocket as a site by id — the shared path for the REST router
     and the in-process MCP tool.
+
+    BC-9 (per-site annual plan — the Webflow model): a published site carries its
+    OWN recurring annual plan on a tier. ``site_plan_key`` selects the tier from
+    the site-plan catalog (``billing.site_plans``); it defaults to the base tier.
+    After a LIVE publish (not a preview) inserts the Site doc, this:
+      * GATES on the workspace's Sites entitlement (already enforced first via
+        ``publish`` → ``require_sites_plan`` — a workspace lacking it never reaches
+        the Site insert);
+      * stamps ``Site.plan_tier`` + ``Site.subscription_id`` for the tier;
+      * initiates a PER-SITE annual Dodo subscription (BC-7's ``create_subscription``)
+        with ``metadata={workspace_id, site_id, plan_key}`` — the ``site_id`` is how
+        the renewal webhook tells a per-site sub from a workspace-plan sub. When
+        Dodo is not configured (no recurring product for the site tier), this
+        DEGRADES gracefully: it records the intended tier without a live charge
+        (``subscription_id`` stays None), never crashing the publish;
+      * emits ``SitePublished`` ({workspace_id, site_id, pocket_id, owner,
+        plan_tier}).
+    A preview publish skips all of this (it never persists a Site doc).
 
     ``preview`` (Branch primitive — EDIT/arm path) is forwarded straight to
     ``publish``: ``True`` builds + smoke-gates + locally serves a DRAFT preview
@@ -1116,7 +1223,7 @@ async def publish_pocket(
     # backed by a per-tenant D1, so its deployed Worker gets a D1 binding.
     pattern = pocket.get("pattern")
 
-    return await publish(
+    doc = await publish(
         workspace_id=workspace_id,
         user_id=user_id,
         pocket_id=pocket_id,
@@ -1133,6 +1240,122 @@ async def publish_pocket(
         _bundle_reader=_bundle_reader,
         _local_deploy=_local_deploy,
     )
+
+    # BC-9: a PREVIEW publish never persists a Site doc, so there is no per-site
+    # plan to stamp / sub to open / event to emit — return the transient doc as-is.
+    if preview:
+        return doc
+
+    # A LIVE publish: stamp the per-site annual plan, open the per-site Dodo sub
+    # (degrading gracefully when Dodo is unconfigured), and emit SitePublished.
+    return await _apply_site_plan(
+        doc=doc,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        site_plan_key=site_plan_key,
+        provider=_billing_provider,
+    )
+
+
+async def _apply_site_plan(
+    *,
+    doc: _SiteDoc,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    site_plan_key: str | None,
+    provider: Any | None,
+) -> _SiteDoc:
+    """Stamp the per-site annual plan on a freshly published Site doc, open its
+    per-site Dodo subscription, and emit ``SitePublished`` (BC-9).
+
+    The site tier resolves from the site-plan catalog (``billing.site_plans``);
+    an unknown / missing key falls back to the base tier so a publish never fails
+    on a typo'd tier (the gate that matters — Sites entitlement — already ran in
+    ``publish``). The subscription is opened through BC-7's provider
+    (``create_subscription``) with ``metadata={workspace_id, site_id, plan_key}``;
+    the ``site_id`` is what the renewal webhook routes on to tell a per-site sub
+    from a workspace-plan sub. When the tier has no configured Dodo recurring
+    product (v1 default), this DEGRADES gracefully — it records the tier without a
+    live charge (``subscription_id`` stays None) and never crashes the publish.
+
+    Lazy imports (billing catalog / provider / emit) keep the sites service free
+    of an eager billing import at module load."""
+    from pocketpaw_ee.cloud._core.realtime.emit import emit
+    from pocketpaw_ee.cloud._core.realtime.events import SitePublished
+    from pocketpaw_ee.cloud.billing import site_plans
+
+    # Resolve the tier; fall back to the base tier for a None / unknown key so a
+    # publish is never blocked by a bad tier string (the entitlement gate is the
+    # one that matters and already ran).
+    tier = site_plans.get_site_plan(site_plan_key) or site_plans.get_site_plan(
+        site_plans.BASE_SITE_PLAN_KEY
+    )
+    plan_key = tier.key if tier is not None else site_plans.BASE_SITE_PLAN_KEY
+
+    site_id = str(doc.id)
+    subscription_id: str | None = None
+    # Open a PER-SITE annual Dodo subscription when the tier has a configured
+    # recurring product. metadata.site_id is the per-site discriminator the
+    # webhook routes on. No product configured (v1 default) → record the tier
+    # without a live charge; never crash the publish.
+    if tier is not None and tier.dodo_product_id:
+        try:
+            prov = provider or _default_billing_provider()
+            checkout = await prov.create_subscription(
+                plan_key=plan_key,
+                product_id=tier.dodo_product_id,
+                workspace_id=workspace_id,
+                customer_email=None,
+                metadata={
+                    "workspace_id": workspace_id,
+                    "site_id": site_id,
+                    "plan_key": plan_key,
+                },
+            )
+            subscription_id = checkout.subscription_id or None
+        except Exception:  # noqa: BLE001 — a billing hiccup must not undo the deploy
+            logger.warning(
+                "sites.publish: per-site subscription init failed for site %s "
+                "(tier=%s) — recording the tier without a live charge",
+                site_id,
+                plan_key,
+                exc_info=True,
+            )
+
+    # Stamp the per-site plan on the (already persisted) canonical Site doc.
+    doc.plan_tier = plan_key
+    doc.subscription_id = subscription_id
+    # A live sub starts pending until Dodo posts a verified subscription.active;
+    # an unconfigured (no-charge) tier has no live sub to activate, so it stays
+    # "none". The per-site webhook advances "pending" → "active".
+    doc.subscription_status = "pending" if subscription_id else "none"
+    await doc.save()
+
+    await emit(
+        SitePublished(
+            data={
+                "workspace_id": workspace_id,
+                "site_id": site_id,
+                "pocket_id": pocket_id,
+                "owner": user_id,
+                "plan_tier": plan_key,
+            }
+        )
+    )
+    return doc
+
+
+def _default_billing_provider() -> Any:
+    """Build the default payments provider (Dodo) for a per-site subscription.
+
+    Lazy so importing the sites service never constructs an SDK client; tests
+    inject their own provider via ``publish_pocket(_billing_provider=...)``."""
+    from pocketpaw.config import get_settings
+    from pocketpaw_ee.cloud.billing.providers.dodo import DodoProvider
+
+    return DodoProvider.from_settings(get_settings())
 
 
 def apply_edits(source: str, edits: list[dict[str, str]]) -> str:

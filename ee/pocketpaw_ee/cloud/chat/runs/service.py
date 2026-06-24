@@ -10,6 +10,12 @@ Changes:
   token-usage dict it assembles from the backend's ``token_usage`` event, so
   each finished run carries its real prompt / completion / cached token counts.
   ``None`` leaves the stored usage untouched (legacy callers / no-usage runs).
+- 2026-06-24 (B3 review fix — metering boundary) — added ``mark_billed(run_id)``.
+  The metering service (BC-3) previously wrote ``run_doc.billed=True`` +
+  ``run_doc.save()`` directly, a FOREIGN write across the chat.runs entity
+  boundary (EE Rule 2 — only this module touches ``ChatRunDoc``). ``bill_run`` now
+  calls ``mark_billed`` instead. Reading ``run_doc.usage`` in metering stays fine;
+  only the WRITE moves here, the owner of the document.
 """
 
 from __future__ import annotations
@@ -116,6 +122,16 @@ async def mark_terminal(
     if usage:
         doc.usage = usage
     doc.ended_at = _utcnow()
+    await doc.save()
+
+
+async def mark_billed(run_id: str) -> None:
+    """Flag a run as billed (BC-3). The owner of ``ChatRunDoc`` makes this write
+    so the metering service never writes a foreign entity's document (EE Rule 2).
+    Idempotent — re-flagging an already-billed run is harmless; the ledger key is
+    the real double-debit guard, this flag just keeps the sweeper bounded."""
+    doc = await get_run(run_id)
+    doc.billed = True
     await doc.save()
 
 

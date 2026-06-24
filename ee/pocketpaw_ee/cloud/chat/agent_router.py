@@ -5,6 +5,15 @@ message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
 
+Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
+run-start. This module is the SINGLE chokepoint that starts a new chat run
+(``create_run`` + executor submit), so the credit gate sits here, right after
+scope resolution and BEFORE any DB write. When ``settings.billing_enforced`` is
+on, a workspace at balance <= 0 gets 402 (``credits.insufficient``) and NO run /
+user message is persisted; in-flight runs (already past this point) are never
+affected. The flag is OFF by default so OSS / self-host (no ledger) are
+unaffected. See ``credits.service.check_balance``.
+
 Changes: 2026-06-18 (PERF-6, feat/sites-minimal-context) — window the history
 fed to the agent on the SITES EDIT/REFINE surface only. The sites builder got
 progressively slower per edit because ``load_history_for_scope`` loads the FULL
@@ -33,6 +42,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import (
@@ -132,6 +142,20 @@ async def post_agent_chat(
         ctx.intent = body.intent
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
+
+    # BC-4 run-start hard-block. Sit the credit gate at the SINGLE run-start
+    # chokepoint — BEFORE any DB write (no user message, no ChatRunDoc) and
+    # BEFORE the executor submit — so a blocked run leaves no trace and
+    # IN-FLIGHT runs (already past this point) are never killed. Flag-gated:
+    # OFF by default (OSS / self-host run no ledger), ON for the cloud via
+    # ``POCKETPAW_BILLING_ENFORCED``. ``check_balance`` raises
+    # ``InsufficientCredits`` (402, credits.insufficient), which the CloudError
+    # handler maps to the wire — we never raise HTTPException here. Imported
+    # locally to keep the credits package off this hot module's import graph.
+    if get_settings().billing_enforced:
+        from pocketpaw_ee.cloud.credits import service as credits_service
+
+        await credits_service.check_balance(workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved

@@ -48,6 +48,15 @@ lives in the ``pocketpaw_ee.versions`` package (its own entity), so it is
 imported lazily here — the same out-of-models discipline the belt/mandates docs
 use — to keep ``cloud.models`` from hard-importing the versions package. Only
 ``pocketpaw_ee.versions.service`` imports the doc class directly.
+Updated: 2026-06-24 (integration/billing-credits, BC-2) — added ``Payment``
+(the top-up payment record captured via a verified Dodo webhook) to the imports,
+``__all__``, and ``get_all_documents()`` so the ``billing_payments`` collection
+is wired into ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
+Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription``
+(the recurring plan subscription record captured via a verified Dodo
+``subscription.active`` webhook) to the imports, ``__all__``, and
+``get_all_documents()`` so the ``billing_subscriptions`` collection is wired into
+``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
 """
 
 from __future__ import annotations
@@ -62,6 +71,7 @@ from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
@@ -95,6 +105,7 @@ from pocketpaw_ee.cloud.models.meeting import (
 from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
+from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
@@ -104,6 +115,7 @@ from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
 from pocketpaw_ee.cloud.models.task_event import TaskEvent
@@ -198,6 +210,8 @@ __all__ = [
     "CommentAuthor",
     "CommentTarget",
     "ComposioConnection",
+    "CreditBalance",
+    "CreditLedgerEntry",
     "Cycle",
     "CycleDailyPoint",
     "FabricIngestConfig",
@@ -227,6 +241,7 @@ __all__ = [
     "Notification",
     "NotificationSource",
     "OAuthAccount",
+    "Payment",
     "PlanSession",
     "PlanSessionAgentGap",
     "Pocket",
@@ -237,6 +252,7 @@ __all__ = [
     "Site",
     "SiteDomain",
     "SiteRateCounter",
+    "Subscription",
     "WorkspaceSensePreference",
     "Task",
     "TaskAssignee",
@@ -275,6 +291,17 @@ def get_all_documents():
         Workspace,
         WorkspaceConnector,
         ComposioConnection,
+        # Credit ledger (BC-1) — workspace-scoped wallet + append-only audit.
+        # Only ``ee.cloud.credits.service`` writes these.
+        CreditBalance,
+        CreditLedgerEntry,
+        # Billing payments (BC-2) — top-up payment records captured via a
+        # gateway webhook. Only ``ee.cloud.billing.service`` writes this.
+        Payment,
+        # Billing subscriptions (BC-7) — recurring plan subscription records
+        # captured via verified ``subscription.*`` webhooks. Only
+        # ``ee.cloud.billing.service`` writes this.
+        Subscription,
         Invite,
         Group,
         InstinctApproval,

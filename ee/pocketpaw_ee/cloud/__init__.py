@@ -1,5 +1,16 @@
 """PocketPaw Enterprise Cloud — domain-driven architecture.
 
+Modified: 2026-06-24 (integration/billing-credits, BC-6) — Mounts the
+    Entitlements resolver router (``GET /entitlements`` -> the caller workspace's
+    plan + features + monthly credit allotment). The plan CATALOG read
+    (``GET /billing/plans``) is added to the billing router; both build on the
+    declarative plan catalog (``billing.plans``) over the existing
+    ``PLAN_FEATURES`` / ``Workspace.plan`` tiers.
+Modified: 2026-06-24 (integration/billing-credits, BC-2) — Mounts the Billing
+    Gateway primitive: the authenticated ``/billing/topup`` router (Dodo hosted
+    checkout) and, SEPARATELY with NO auth dependency, the public
+    ``/billing/webhooks/dodo`` router (Standard-Webhooks-signed; verified before
+    the payload is trusted, then grants credits exactly once via BC-1).
 Modified: 2026-06-22 (feat/jobs-custom-job-entrypoints) — After
     ``register_builtins()`` the mount now calls ``load_entrypoint_jobs()`` to
     discover + register WORKSPACE-CUSTOM jobs declared by installed packages
@@ -199,10 +210,14 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.audit.router import router as audit_router
     from pocketpaw_ee.cloud.audit.router import workspace_router as audit_workspace_router
     from pocketpaw_ee.cloud.auth.router import router as auth_router
+    from pocketpaw_ee.cloud.billing.router import router as billing_router
+    from pocketpaw_ee.cloud.billing.webhooks import router as billing_webhooks_router
     from pocketpaw_ee.cloud.chat.router import router as chat_router
     from pocketpaw_ee.cloud.chat.runs.router import router as runs_router
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
+    from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
     from pocketpaw_ee.cloud.license import get_license_info
@@ -228,6 +243,21 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
+    # Credit ledger (BC-1) — the workspace-scoped wallet read surface
+    # (GET /credits/balance, GET /credits/history). Grant / debit are
+    # in-process only (the billing subsystem calls the service directly).
+    app.include_router(credits_router, prefix="/api/v1")
+    # Billing (BC-2, the Gateway primitive) — the authenticated top-up surface
+    # (POST /billing/topup → Dodo hosted checkout). The PUBLIC inbound webhook
+    # (POST /billing/webhooks/dodo) is mounted SEPARATELY just below with NO auth
+    # dependency — Dodo is the caller; trust is the Standard-Webhooks signature.
+    app.include_router(billing_router, prefix="/api/v1")
+    app.include_router(billing_webhooks_router, prefix="/api/v1")
+    # Entitlements (BC-6, the Entitlement primitive) — the workspace-scoped
+    # resolver (GET /entitlements -> the workspace's plan + features + monthly
+    # credit allotment). The plan CATALOG read (GET /billing/plans) is on the
+    # billing router above; this router carries only the per-workspace resolve.
+    app.include_router(entitlements_router, prefix="/api/v1")
     app.include_router(pockets_router, prefix="/api/v1")
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")

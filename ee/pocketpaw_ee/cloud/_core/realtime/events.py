@@ -451,6 +451,58 @@ class WorkspaceJobUpdated(Event):
     EVENT_TYPE: ClassVar[str] = "workspace_job.updated"
 
 
+# Credit ledger (BC-1, the Ledger primitive). Emitted by
+# ``credits.service`` after EVERY successful grant / debit on a workspace's
+# credit wallet (EE cloud rule 9 — emit on every write). A no-op idempotent
+# replay does NOT re-emit (the movement was already applied + emitted on the
+# first call). Listeners (billing dashboard, low-balance alerts, usage meter)
+# key off this single event per movement.
+#
+# Payload (carried under ``Event.data``):
+#   workspace_id      — tenancy.
+#   kind              — genesis | grant | spend | transfer.
+#   amount_delta      — signed credits this movement applied (+grant / -spend).
+#   balance_after     — the wallet balance once this movement landed.
+#   cause             — business reason (top_up | compute_spend | promo | ...).
+#   idempotency_key   — the caller's exactly-once key for this movement.
+@dataclass
+class CreditMovement(Event):
+    EVENT_TYPE: ClassVar[str] = "credits.movement"
+
+
+# Billing — top-up payment captured (BC-2, the Gateway primitive). Emitted by
+# ``billing.service`` after a VERIFIED ``payment.succeeded`` webhook drove a
+# credit grant. data: {workspace_id, gateway, gateway_ref, event_id,
+# amount_credits, currency}. Fires once per delivery (a replayed webhook is a
+# no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingTopupCaptured(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.topup.captured"
+
+
+# Billing — subscription renewal grant (BC-7, the Subscription primitive).
+# Emitted by ``billing.service`` after a VERIFIED ``subscription.active`` /
+# ``subscription.renewed`` webhook drove a credit grant of the tier's monthly
+# allotment. The grant is ADDITIVE (unused credits roll over), keyed on the
+# per-renewal webhook event id. data: {workspace_id, gateway, event_id,
+# plan_key, subscription_id, amount_credits, balance_after}. Fires once per
+# delivery (a replayed renewal is a no-op grant, so it does NOT re-emit).
+@dataclass
+class BillingSubscriptionGranted(Event):
+    EVENT_TYPE: ClassVar[str] = "billing.subscription.granted"
+
+
+# Sites — a pocket was published as a live Paw Site on a per-site annual plan
+# (BC-9, the per-site plan layer). Emitted by ``sites.service.publish_pocket``
+# after the Site doc is inserted/upserted with its ``plan_tier`` stamped. Fires
+# once per publish. data: {workspace_id, site_id, pocket_id, owner, plan_tier}.
+# Listeners (billing dashboard, site-plan analytics, BC-10 Cloudflare
+# provisioner) key off this to react to a new published site at a tier.
+@dataclass
+class SitePublished(Event):
+    EVENT_TYPE: ClassVar[str] = "site.published"
+
+
 # Tasks (Mission Control work-item primitive)
 @dataclass
 class TaskProposed(Event):

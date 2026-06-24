@@ -1,6 +1,17 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
+    POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
+    tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
+    recurring checkout; the subscription webhook reverses it (product_id ->
+    plan key) to know which tier renewed. A before-validator degrades a
+    malformed env string to {} so a typo can't crash settings load.
+  - 2026-06-24: Added ``billing_enforced`` (default False, env
+    POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
+    True the cloud rejects STARTING a new chat run on a zero-or-negative
+    credit balance with HTTP 402; in-flight runs are untouched. Off by
+    default so OSS / self-host stay unaffected.
   - 2026-06-23: Added the deep_work Self-Verifying Loop flags (SVL-1) —
     ``deep_work_verify_loop_enabled`` (default False; kill-switch — when
     False deep_work tasks complete exactly as before) and
@@ -1416,6 +1427,96 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
+    # The only payment gateway in v1; a provider abstraction
+    # (``ee.cloud.billing.providers``) keeps Razorpay et al. a later swap.
+    # All three are optional so a non-billing deployment boots fine; the Dodo
+    # provider raises a clear ValidationError when a billing call is made
+    # without the key configured.
+    dodo_payments_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments API bearer token, used to authenticate the server-side "
+            "DodoPayments client when creating a one-time top-up checkout. Set via "
+            "POCKETPAW_DODO_PAYMENTS_API_KEY. None disables Dodo top-ups."
+        ),
+    )
+    dodo_environment: str = Field(
+        default="test_mode",
+        description=(
+            "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
+            "Selects the API base URL the DodoPayments client targets. Set via "
+            "POCKETPAW_DODO_ENVIRONMENT."
+        ),
+    )
+    dodo_webhook_secret: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments webhook signing secret (Standard Webhooks / 'whsec_…'). "
+            "Used to VERIFY the signature on every inbound /billing/webhooks/dodo "
+            "POST before the payload is trusted. Set via "
+            "POCKETPAW_DODO_WEBHOOK_SECRET. NEVER logged."
+        ),
+    )
+    dodo_credit_product_id: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the credits SKU. A one-time top-up adds this "
+            "product to the cart with a pay-what-you-want amount equal to the "
+            "purchased credits (1 credit == $0.01 == 1 cent, the currency's lowest "
+            "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
+        ),
+    )
+    dodo_plan_products: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of plan tier key -> Dodo RECURRING product id (BC-7 "
+            "subscriptions). ``subscribe(plan_key)`` looks the product up here to "
+            "open a recurring checkout; the inbound subscription webhook reverses "
+            "the lookup (product_id -> plan key) to know which tier renewed (and "
+            "thus the monthly credit allotment from the plan catalog). Set via "
+            "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
+            '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
+            "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
+
+    # Billing — compute-cost metering rate card (BC-3, the Meter + Price
+    # primitives). A completed chat run is billed by its real compute cost times
+    # a flat markup, converted from USD into integer credits. These two settings
+    # ARE the rate card: keeping them declarative (a flat multiplier + the credit
+    # denomination) leaves room for a tiered card later without changing the
+    # debit path. ``credits = round(cost_usd * markup / credit_usd)``.
+    billing_markup: float = Field(
+        default=2.5,
+        description=(
+            "Flat markup applied to a chat run's real compute cost before it is "
+            "billed to the workspace wallet (covers infra + margin). The metered "
+            "credit charge is round(cost_usd * billing_markup / credit_usd). Set "
+            "via POCKETPAW_BILLING_MARKUP."
+        ),
+    )
+    credit_usd: float = Field(
+        default=0.01,
+        description=(
+            "USD value of one credit (1 credit == $0.01 == 1 cent, the lowest "
+            "currency denomination — the same denomination Dodo top-ups use). "
+            "Divides the marked-up compute cost to yield integer credits. Set via "
+            "POCKETPAW_CREDIT_USD."
+        ),
+    )
+    billing_enforced: bool = Field(
+        default=False,
+        description=(
+            "Run-start hard-block (BC-4). When True, STARTING a new chat run on a "
+            "workspace whose credit balance is <= 0 is rejected with HTTP 402 "
+            "(credits.insufficient) BEFORE any run row is written; in-flight runs "
+            "are never killed. Default False so OSS / self-host deployments (which "
+            "run no credit ledger) are unaffected; the cloud turns it on via "
+            "POCKETPAW_BILLING_ENFORCED."
+        ),
+    )
+
     # Pocket data-source refresh — cost controls (RFC 04 M3).
     # A pocket source binding may declare an `interval` or `webhook` refresh
     # trigger. Both are AUTO-refresh: they re-run a source without a human in
@@ -1629,6 +1730,28 @@ class Settings(BaseSettings):
             "instead of a raw URL in the chat. Set False to disable if detection is brittle."
         ),
     )
+
+    @field_validator("dodo_plan_products", mode="before")
+    @classmethod
+    def _parse_dodo_plan_products(cls, v: object) -> object:
+        """Accept a JSON-object env string for the plan->product map.
+
+        pydantic-settings parses JSON for dict fields, but a hand-set
+        ``POCKETPAW_DODO_PLAN_PRODUCTS`` that isn't valid JSON (or isn't an
+        object) should degrade to an empty mapping — subscriptions then fail
+        loudly at ``subscribe`` time with a clear ``plan_unconfigured`` error
+        rather than crashing the entire settings load at boot. A dict passes
+        straight through.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return v
 
     @field_validator("composio_toolkits", mode="before")
     @classmethod
