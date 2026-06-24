@@ -84,7 +84,12 @@ from pydantic import BaseModel
 
 
 class PublishRequest(BaseModel):
+    # ``site_plan_key`` (BC-10) is the OPTIONAL per-site plan tier the site is
+    # published on (basic | pro | business — see ``billing.site_plans``). Omitted
+    # defaults to the base tier in ``publish_pocket``; a higher tier resells its
+    # Cloudflare features when a custom domain is later added.
     pocket_id: str
+    site_plan_key: str | None = None
 
 
 class MakeEditableRequest(BaseModel):

@@ -73,7 +73,7 @@ class _FakeCF:
         self.put_bindings.append(bindings)
         return True
 
-    async def create_custom_hostname(self, hostname):
+    async def create_custom_hostname(self, hostname, *, features=None):
         return CustomHostname(
             id="ch_1",
             hostname=hostname,

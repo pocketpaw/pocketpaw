@@ -20,6 +20,10 @@
 # Updated 2026-06-24 (BC-7): added POST /billing/subscribe — open a recurring
 #   checkout for a plan tier (returns a hosted url; the plan upgrade + first credit
 #   grant land on the verified subscription.active webhook, not here).
+# Updated 2026-06-24 (BC-10): added GET /billing/site-plans — the PER-SITE plan
+#   catalog (each tier -> annual price + the Cloudflare features it resells). Like
+#   /billing/plans it is tenant-independent (no workspace scoping); the frontend
+#   (BC-11) reads it to render the publish tier picker.
 
 from __future__ import annotations
 
@@ -27,13 +31,19 @@ from fastapi import APIRouter, Depends
 
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import service as billing_service
+from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
 from pocketpaw_ee.cloud.billing.dto import (
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
     CreateTopupRequest,
     CreateTopupResponse,
 )
-from pocketpaw_ee.cloud.entitlements.dto import PlanCatalogResponse, plan_tier_to_dto
+from pocketpaw_ee.cloud.entitlements.dto import (
+    PlanCatalogResponse,
+    SitePlanCatalogResponse,
+    plan_tier_to_dto,
+    site_plan_tier_to_dto,
+)
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import current_user_id, current_workspace_id
 
@@ -49,6 +59,19 @@ async def list_billing_plans() -> PlanCatalogResponse:
     constants). Cheapest tier first.
     """
     return PlanCatalogResponse(plans=[plan_tier_to_dto(t) for t in plan_catalog.list_plans()])
+
+
+@router.get("/site-plans", response_model=SitePlanCatalogResponse)
+async def list_billing_site_plans() -> SitePlanCatalogResponse:
+    """List the PER-SITE plan catalog — every tier with its annual price + the
+    Cloudflare features it resells (BC-10 provisions those when a domain is added).
+
+    Tenant-independent: the per-site catalog is the same for every workspace, so
+    no workspace scoping (mirrors GET /billing/plans). Cheapest tier first.
+    """
+    return SitePlanCatalogResponse(
+        site_plans=[site_plan_tier_to_dto(t) for t in site_plan_catalog.list_site_plans()]
+    )
 
 
 @router.post("/topup", response_model=CreateTopupResponse)

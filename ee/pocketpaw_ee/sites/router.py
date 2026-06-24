@@ -140,6 +140,7 @@ async def publish_site(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
+        site_plan_key=body.site_plan_key,
     )
     return sites_service._to_response(doc)
 

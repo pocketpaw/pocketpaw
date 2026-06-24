@@ -17,6 +17,16 @@
 # a mock subscription provider in tests. A PREVIEW publish skips all of BC-9 (it
 # never persists a Site doc).
 #
+# Updated 2026-06-24 (BC-10 — resell Cloudflare features by site-plan tier):
+# ``add_domain`` now resolves the site's ``plan_tier`` → its
+# ``site_plans.get_site_plan(...).cloudflare_features`` and passes that set to
+# ``CloudflareClient.create_custom_hostname(hostname, features=...)``. So adding a
+# custom domain to a HIGHER-tier site provisions its resold Cloudflare paid
+# features (WAF / edge-cache / strict TLS) at hostname-create time; a base-tier
+# (or unset-tier) site resolves to an empty set and stays on the basic create
+# path, unchanged. ``site_plans`` is imported lazily inside ``add_domain``,
+# mirroring ``publish_pocket``.
+#
 # Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1 data):
 # added the operator data-view reads ``list_site_data_tables`` and
 # ``read_site_data_table`` (backing GET /sites/by-pocket/{pocket_id}/data and
@@ -1044,9 +1054,19 @@ async def add_domain(
 ) -> DomainStatusResponse:
     """Register a custom hostname with Cloudflare for SaaS and store it on the
     site. Returns the ONE CNAME the client pastes at their registrar."""
+    # BC-10: a higher site-plan tier resells Cloudflare paid features (WAF /
+    # edge-cache / strict TLS). Lazy import mirrors publish_pocket's site_plans
+    # use — keeps the billing catalog off the module-import path.
+    from pocketpaw_ee.cloud.billing import site_plans
+
     cf = _cloudflare or _cf_client()
     site = await _load(workspace_id, site_id)
-    ch = await cf.create_custom_hostname(hostname)
+    # Resolve the site's tier → its cloudflare_features and provision them on the
+    # custom hostname. A base-tier (or unknown) site resolves to an empty set, so
+    # create_custom_hostname stays on the basic path.
+    plan = site_plans.get_site_plan(site.plan_tier)
+    features = set(plan.cloudflare_features) if plan else set()
+    ch = await cf.create_custom_hostname(hostname, features=features)
     site.domains.append(
         _SiteDomainDoc(
             hostname=ch.hostname,
