@@ -120,6 +120,17 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Payments gateway (BC-2 — the Gateway primitive) ---
+    # Dodo is the only gateway for v1, behind the IPaymentsProvider abstraction
+    # in ee/pocketpaw_ee/cloud/billing/providers/ so Razorpay can drop in later.
+    # PINNED to 1.105.0: the supply-chain rule on this machine enforces a 7-day
+    # minimum release age. The newest dodopayments (1.105.1) was published
+    # 2026-06-18 (<7 days ago) so it is BLOCKED; 1.105.0 (released 2026-06-16)
+    # is the latest version that satisfies the age guard. The ``[webhooks]``
+    # extra pulls ``standardwebhooks<2,>=1.0.1`` (stable since 2024) — the
+    # Standard Webhooks HMAC-SHA256 verifier the inbound webhook route uses to
+    # prove a payload came from Dodo before any credits are granted.
+    "dodopayments[webhooks]==1.105.0",
 ]
 
 [project.optional-dependencies]
@@ -266,6 +277,12 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # feat/invoke-tool-v1 — the click-driven tool executor. It dispatches a
+    # connector-action grant through ``connectors.service.execute`` and
+    # receives the per-pocket allowlist by parameter from the router. It must
+    # NEVER import a Beanie document class directly (no ``models.pocket_backend``):
+    # the router/service own Beanie access.
+    "pocketpaw_ee.cloud.pockets.tool_executor",
     # P2.4 Template Reconcile — the reconcile service resolves the pocket
     # (spec + slug) and writes the reconciled spec entirely through
     # `pockets.service`; it must never import the Pocket Beanie model.
@@ -308,6 +325,16 @@ source_modules = [
     # ``outcomes.service``. Receives backend creds + bindings by
     # parameter — never imports a Beanie document class directly.
     "pocketpaw_ee.cloud.pockets.saga",
+    # Layered/learning Instinct gate foundation (2026-06-18 design). Three
+    # pure helper modules for the 4-lane triage router. None writes a
+    # Beanie document: ``instinct_triage`` is a pure classifier (no I/O),
+    # ``trust_ledger`` reads/writes a JSONL sidecar under ~/.pocketpaw, and
+    # ``instinct_compensation_registry`` is an in-memory TTL registry that
+    # persists expired handles to a JSONL sidecar. The gate's Beanie writes
+    # still go exclusively through ``instinct_approvals.service``.
+    "pocketpaw_ee.cloud.pockets.instinct_triage",
+    "pocketpaw_ee.cloud.pockets.trust_ledger",
+    "pocketpaw_ee.cloud.pockets.instinct_compensation_registry",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
@@ -362,6 +389,25 @@ source_modules = [
     "pocketpaw_ee.cloud.fabric_ingest.firestore_reader",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.fabric_ingest_state"]
+
+[[tool.importlinter.contracts]]
+name = "Jobs — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Only ``jobs.service`` owns the WorkspaceJobDoc Beanie write. The router,
+    # dto, domain, registry, the entry-point plugin loader, the ARQ worker
+    # entrypoint, and the built-in jobs all go through the service — none may
+    # import the Beanie doc directly.
+    "pocketpaw_ee.cloud.jobs.router",
+    "pocketpaw_ee.cloud.jobs.dto",
+    "pocketpaw_ee.cloud.jobs.domain",
+    "pocketpaw_ee.cloud.jobs.registry",
+    "pocketpaw_ee.cloud.jobs.plugins",
+    "pocketpaw_ee.cloud.jobs.worker",
+    "pocketpaw_ee.cloud.jobs.builtin.score_applications",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_job"]
 
 [[tool.importlinter.contracts]]
 name = "Sessions — Beanie writes only from service.py"

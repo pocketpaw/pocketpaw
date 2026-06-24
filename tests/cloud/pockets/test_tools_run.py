@@ -1,19 +1,22 @@
-# tests/cloud/pockets/test_tools_run.py — #1206 part a (invoke_tool wire).
-# Created: 2026-05-24 — Integration coverage for the new tool-run route:
+# tests/cloud/pockets/test_tools_run.py — #1206 invoke_tool route coverage.
+# Created: 2026-05-24 — Integration coverage for the tool-run route:
 #
 #   POST /pockets/{id}/tools/run — invoke a named server-side tool with the
-#                                  resolved args from the new invoke_tool
-#                                  Ripple action verb.
+#                                  resolved args from the invoke_tool Ripple
+#                                  action verb.
 #
-# Part (a) intentionally ships an empty allowlist so every tool call is
-# rejected with `code:"not_allowed"`. These tests pin the wire-level
-# contract (auth gate, tenancy scoping, structured error shape) so part
-# (b) — the home-grid `onEvent` plumbing — can rely on a stable surface.
+# Updated: 2026-06-15 (feat/invoke-tool-v1) — the route now reads the
+# per-pocket allowlist off the credential row via
+# `get_pocket_backend_for_executor` (the `get_pocket_allowed_tools` stub was
+# RETIRED), so the tests that used to monkeypatch that stub now stub the
+# backend reader instead. The allowlist lives at the 9th tuple element. The
+# executor's own dispatch/gating is covered in test_tool_executor.py; these
+# tests pin the ROUTE wiring (body parsing, status codes, response shape,
+# allowlist read-and-flatten, auth + tenancy gates).
 #
-# The pocket service + tool executor are monkeypatched, so the tests pin
-# the route wiring (request body parsing, status codes, response shape)
-# without a Mongo connection or real outbound HTTP. Auth + license guards
-# are overridden — same pattern as test_pocket_backend_routes.py.
+# The pocket service + tool executor are monkeypatched, so the tests pin the
+# route wiring without a Mongo connection or real outbound HTTP. Auth +
+# license guards are overridden — same pattern as test_pocket_backend_routes.py.
 
 from __future__ import annotations
 
@@ -34,6 +37,23 @@ from pocketpaw_ee.cloud.shared.deps import (
 
 FAKE_USER = "user-alice"
 FAKE_WORKSPACE = "ws-alpha"
+
+
+def _creds_with_tools(*tool_names: str) -> tuple:
+    """Build the 9-tuple `get_pocket_backend_for_executor` returns, with the
+    given tool names as the `allowed_tools` (9th) element. Mirrors a connector
+    backend with no token; only the trailing allowlist matters to the route."""
+    return (
+        "",  # base_url
+        "none",  # auth_type
+        None,  # auth_header
+        "",  # token
+        [],  # allowed_writes
+        None,  # approval_route
+        "connector",  # backend_type
+        "github",  # connector_name
+        [{"tool": name} for name in tool_names],  # allowed_tools (9th)
+    )
 
 
 @pytest.fixture
@@ -63,15 +83,19 @@ def client(app: FastAPI) -> TestClient:
 # ---------------------------------------------------------------------------
 
 
-def test_run_tool_empty_allowlist_returns_not_allowed(monkeypatch, client):
-    """Part (a) ships with no tools enabled. Every POST returns ok:false
-    with code:not_allowed so the wire is locked down until the captain
-    explicitly enables a tool per pocket."""
+def test_run_tool_no_backend_returns_not_allowed(monkeypatch, client):
+    """A pocket with no backend configured reads as an EMPTY allowlist, so
+    every POST returns ok:false with code:not_allowed — fail-closed, the wire
+    stays locked until an owner sets a tool policy."""
 
     async def _get_pocket(pocket_id, user_id):
         return {"_id": pocket_id}
 
+    async def _no_creds(workspace_id, pocket_id):
+        return None  # no backend configured
+
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _no_creds)
 
     res = client.post(
         "/pockets/pocket-1/tools/run",
@@ -89,62 +113,88 @@ def test_run_tool_empty_allowlist_returns_not_allowed(monkeypatch, client):
     assert body["on_error"] == []
 
 
-def test_run_tool_threads_workspace_user_pocket_to_executor(monkeypatch, client):
-    """The route forwards tenancy + caller identity into the executor so
-    a future audit log + per-(pocket, user) rate limit can plumb in
-    without touching the route signature."""
+def test_run_tool_empty_grant_list_returns_not_allowed(monkeypatch, client):
+    """A pocket WITH a backend but an empty tool policy also fails closed —
+    an empty `allowed_tools` revokes every tool."""
 
     async def _get_pocket(pocket_id, user_id):
         return {"_id": pocket_id}
 
+    async def _empty_grants(workspace_id, pocket_id):
+        return _creds_with_tools()  # backend present, zero grants
+
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _empty_grants)
+
+    res = client.post(
+        "/pockets/pocket-1/tools/run",
+        json={"tool": "connector:github:list_issues", "args": {}},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["ok"] is False
+    assert body["code"] == "not_allowed"
+
+
+def test_run_tool_reads_allowlist_off_row_and_threads_identity(monkeypatch, client):
+    """The route reads `allowed_tools` off the credential row (9th tuple
+    element), FLATTENS the wire grants to bare names, and forwards tenancy +
+    caller identity into the executor — so the executor stays Beanie-free and
+    a future audit log / rate limit can plumb in without touching the route."""
+
+    async def _get_pocket(pocket_id, user_id):
+        return {"_id": pocket_id}
 
     captured: dict[str, object] = {}
+
+    async def _creds(workspace_id, pocket_id):
+        captured.setdefault("creds_args", []).append((workspace_id, pocket_id))
+        return _creds_with_tools("connector:gmail:gmail_search", "web_fetch")
 
     async def _run_tool(**kwargs):
         captured.update(kwargs)
         return {"ok": False, "tool": kwargs["tool"], "code": "not_allowed"}
 
-    async def _allowlist(workspace_id, pocket_id):
-        captured.setdefault("allowlist_args", []).append((workspace_id, pocket_id))
-        return []
-
+    monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _creds)
     monkeypatch.setattr(tool_executor, "run_tool", _run_tool)
-    monkeypatch.setattr(tool_executor, "get_pocket_allowed_tools", _allowlist)
 
     res = client.post(
         "/pockets/pocket-1/tools/run",
-        json={"tool": "GMAIL_FETCH_EMAILS", "args": {"label": "INBOX"}},
+        json={"tool": "connector:gmail:gmail_search", "args": {"label": "INBOX"}},
     )
     assert res.status_code == 200, res.text
     assert captured["workspace_id"] == FAKE_WORKSPACE
     assert captured["pocket_id"] == "pocket-1"
     assert captured["user_id"] == FAKE_USER
-    assert captured["tool"] == "GMAIL_FETCH_EMAILS"
+    assert captured["tool"] == "connector:gmail:gmail_search"
     assert captured["args"] == {"label": "INBOX"}
-    assert captured["allowed_tools"] == []
-    # The allowlist lookup is workspace-scoped.
-    assert captured["allowlist_args"] == [(FAKE_WORKSPACE, "pocket-1")]
+    # Flattened to bare names from the `{tool}` wire grants — the executor
+    # never sees the dict form.
+    assert captured["allowed_tools"] == ["connector:gmail:gmail_search", "web_fetch"]
+    # The backend read is workspace + pocket scoped.
+    assert captured["creds_args"] == [(FAKE_WORKSPACE, "pocket-1")]
 
 
 def test_run_tool_returns_unknown_tool_when_allowlisted_but_unregistered(monkeypatch, client):
-    """An allowlist with the tool name but no registry implementation
-    yet returns `code:unknown_tool` — the wire surface is in place so
-    the follow-up that adds Composio / WebFetch routing replaces this
-    branch without changing the response shape."""
+    """A non-connector grant on the allowlist but with no registry
+    implementation yet returns `code:unknown_tool` — the wire surface is
+    stable so the built-in (WebFetch / Composio) follow-up replaces this
+    branch without changing the response shape. Exercises the REAL executor
+    (no executor monkeypatch)."""
 
     async def _get_pocket(pocket_id, user_id):
         return {"_id": pocket_id}
 
-    async def _allowlist(workspace_id, pocket_id):
-        return ["GMAIL_FETCH_EMAILS"]
+    async def _creds(workspace_id, pocket_id):
+        return _creds_with_tools("web_fetch")
 
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
-    monkeypatch.setattr(tool_executor, "get_pocket_allowed_tools", _allowlist)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _creds)
 
     res = client.post(
         "/pockets/pocket-1/tools/run",
-        json={"tool": "GMAIL_FETCH_EMAILS", "args": {}},
+        json={"tool": "web_fetch", "args": {}},
     )
     assert res.status_code == 200, res.text
     body = res.json()
@@ -224,6 +274,9 @@ def test_run_tool_args_default_to_empty_dict(monkeypatch, client):
     async def _get_pocket(pocket_id, user_id):
         return {"_id": pocket_id}
 
+    async def _creds(workspace_id, pocket_id):
+        return _creds_with_tools("WebFetch")
+
     captured: dict[str, object] = {}
 
     async def _run_tool(**kwargs):
@@ -231,6 +284,7 @@ def test_run_tool_args_default_to_empty_dict(monkeypatch, client):
         return {"ok": False, "tool": kwargs["tool"], "code": "not_allowed"}
 
     monkeypatch.setattr(pockets_service, "get", _get_pocket)
+    monkeypatch.setattr(pockets_service, "get_pocket_backend_for_executor", _creds)
     monkeypatch.setattr(tool_executor, "run_tool", _run_tool)
 
     res = client.post("/pockets/pocket-1/tools/run", json={"tool": "WebFetch"})

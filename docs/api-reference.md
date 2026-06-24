@@ -30,6 +30,25 @@ Outcome Metering section: the binding-level `outcome` / `outcome_value` /
 and the new `GET /outcomes/meter` aggregation surface that sums billable
 value by unit per workspace over a since/until window. Invoicing /
 payment / pricing-rules / clawback remain deferred.
+
+Updated: 2026-06-15 (feat/invoke-tool-v1) — documented the now-live
+POST /pockets/{id}/tools/run (was a fail-closed stub) and the new
+owner-only PUT /pockets/{id}/backend/tool-policy. The backend summary now
+carries `allowed_tools` (the per-pocket tool allowlist) alongside
+`allowed_writes`.
+Updated: 2026-06-15 (feat/invoke-tool-v1, v2) — the WRITE path is now live.
+A connector READ tool still fires immediately; a WRITE tool is no longer
+refused with `code: blocked` — it is PROPOSED for human approval through the
+Instinct gate and returns `code: instinct_pending` with a `proposed_action_id`
+(the write fires only when a human approves it in The Tray).
+
+Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — documented the
+workspace jobs primitive: the `kind: "job"` variant of
+POST /pockets/{id}/actions/run that enqueues a server-side async job
+instead of firing an HTTP write, and the new
+GET /workspaces/{ws}/jobs/{job_id} status poll. Jobs run on the shared ARQ
+worker under the synthetic `system:workspace_job` identity and merge their
+results back into the pocket's `state` over the live update bridge.
 -->
 
 # Cloud REST API Reference
@@ -68,14 +87,18 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": []
+  "allowed_writes": [],
+  "allowed_tools": []
 }
 ```
 
 The token is never echoed back. A non-https or internal `base_url` yields
 a `400`. `allowed_writes` is the per-pocket write allowlist (RFC 05 M2a) —
 empty by default, so no write action can fire until an owner sets a policy
-via `PUT /pockets/{id}/backend/write-policy`.
+via `PUT /pockets/{id}/backend/write-policy`. `allowed_tools` is the
+per-pocket tool allowlist (feat/invoke-tool-v1) — also empty by default, so
+no `invoke_tool` can fire until an owner sets a policy via
+`PUT /pockets/{id}/backend/tool-policy`.
 
 For `basic` auth, send `auth_token` as the raw `user:pass` credential —
 the server base64-encodes it into the `Authorization: Basic` header. Do
@@ -94,13 +117,15 @@ Response `200`:
   "base_url": "https://api.example.com",
   "auth_type": "bearer",
   "configured": true,
-  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }]
+  "allowed_writes": [{ "method": "POST", "path_pattern": "/leases/*/renew" }],
+  "allowed_tools": [{ "tool": "connector:github:list_issues" }]
 }
 ```
 
 Returns `404` when the pocket has no backend configured. The token is
 never included in the response. `allowed_writes` carries the current
-write allowlist (RFC 05 M2a).
+write allowlist (RFC 05 M2a); `allowed_tools` carries the current tool
+allowlist (feat/invoke-tool-v1).
 
 ### `DELETE /pockets/{pocket_id}/backend`
 
@@ -249,6 +274,220 @@ and a write-specific rate limit — 20 writes per `(pocket, user)` per
 minute, a **separate** counter from the read budget. Every run (including
 every rejection) is written to the audit log; the credential token is
 never logged.
+
+## Pockets — Tool Invocations (`invoke_tool`)
+
+feat/invoke-tool-v1. `invoke_tool` is the click-driven tool verb for pocket
+FLOW-BUTTONs. A button fires `{action: "invoke_tool", tool, args}`; Ripple
+resolves the `args` client-side and the host POSTs to the route below. Like
+write actions, it carries a per-pocket allowlist that lives **outside**
+`rippleSpec` — a human authorizes which tools a pocket may run, so a
+compromised or hallucinated spec cannot grant itself a tool.
+
+A grant's `tool` is one of:
+
+- a connector action, `connector:<name>:<action>` (e.g.
+  `connector:github:list_issues`), or
+- a built-in tool name (e.g. `web_fetch`) — reserved; the built-in registry
+  dispatch is a v1.x follow-up, so a built-in grant currently returns
+  `code: unknown_tool`.
+
+**Read/write split.** A connector grant is dispatched through the shared
+connector executor (`connectors.service.execute`). A **read** action
+(`trust=auto`) fires immediately and returns its data. A **write** action
+(`trust=confirm`/`restricted`) **never** runs inline — it is **proposed for
+human approval** through the Instinct gate. The route files a pending Instinct
+Action (via `propose_external_action`) and returns `code: instinct_pending`
+with a `proposed_action_id`; the connector write fires only when a human
+approves the Action in The Tray, at which point the instinct router runs the
+existing execute-on-approve path (`execute_approved_external_action` →
+`connectors.service.execute`, re-validated for workspace + params + idempotency).
+The client's `on_success` handler branches on `code == "instinct_pending"` to
+show a "sent for approval" state and can watch the `proposed_action_id`.
+
+### `PUT /pockets/{pocket_id}/backend/tool-policy`
+
+Set the pocket's tool allowlist. Requires pocket **owner** access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `allowed_tools` | array | List of `{tool}` grants. Replaces the whole list. An empty list is valid — it revokes every tool (fail-closed). |
+
+Each grant: `tool` is a built-in tool name or a connector action
+`connector:<name>:<action>` (`min_length=1`). Omitting a tool means that
+tool can never fire.
+
+Response `200`: the backend summary, including the updated `allowed_tools`.
+
+Returns `400` when the pocket has no backend configured — a tool policy with
+no backend to apply it to is meaningless. The change is audit-logged
+(`pocket.backend.tool_policy`).
+
+### `POST /pockets/{pocket_id}/tools/run`
+
+Invoke a named tool with the resolved args. Access is **owner or explicit
+`shared_with` only** — a tool invocation has the same blast radius as a write
+binding, so a workspace-visible pocket does **not** grant run access.
+
+Request body:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `tool` | string | Required (`min_length=1`). The tool name — a built-in name or `connector:<name>:<action>`. |
+| `args` | object | Optional. The resolved tool arguments (Ripple's `{...}` resolver runs client-side at click time). |
+
+The allowlist is read server-side off the backend-credential row, never from
+the spec. A pocket with no backend, no grants, or a tool not on the list
+returns `code: not_allowed` — fail-closed.
+
+Response `200` (connector read fired):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:list_issues",
+  "status": 200,
+  "response": [{ "number": 1, "title": "first issue" }],
+  "on_success": [],
+  "on_error": []
+}
+```
+
+Response `202` (write proposed for approval):
+
+```json
+{
+  "ok": true,
+  "tool": "connector:github:create_issue",
+  "status": 202,
+  "code": "instinct_pending",
+  "proposed_action_id": "act-7f3c…",
+  "response": {
+    "action_id": "act-7f3c…",
+    "proposed_action_id": "act-7f3c…",
+    "status": "pending_approval",
+    "connector": "github",
+    "action": "create_issue"
+  }
+}
+```
+
+The write does **not** run at this point. The pending Action appears in The
+Tray; on approve, the instinct router fires the connector write through the
+existing execute-on-approve path. On reject, the write never runs.
+
+Other rejection codes (`ok: false`): `not_allowed` (tool not on the
+allowlist / no backend), `not_reachable` (connector not bound to this
+pocket), `unknown_tool` (the connector has no such action, or a built-in
+grant has no registry implementation yet), `bad_grant` (malformed
+`connector:` grant), `propose_failed` (the write could not be filed for
+approval — e.g. the Instinct store was unavailable; the write is **not** run
+inline as a fallback), plus any connector-side `CloudError` code. The result
+is delivered **in this response body** — there is no `pocket_mutation` SSE
+emit; the client applies the `on_success` / `on_error` reconcile handlers.
+
+Returns `403` when the caller is neither the owner nor in `shared_with`;
+`404` when the pocket is not in the caller's scope.
+
+**Security.** A connector grant re-checks the pocket/workspace bind
+(`is_connector_bound_to_pocket`, the tenant boundary) and the action's trust
+level before any call leaves PocketPaw; the connector path's outbound URL is
+bounded by the connector definition, not by a spec-supplied URL. A
+URL-taking built-in tool, when that path lands, must route through the same
+`_http_guard` SSRF boundary the read/write executors use.
+
+## Pockets — Jobs
+
+pp#1459. A read (a source) fetches data into the canvas and a write (an
+action) sends one HTTP call. A **job** is the third kind: a named,
+server-side async unit of work that runs for minutes, computes a result,
+and merges it back into the pocket's `state` so an open canvas updates
+live. Because a job runs on the shared ARQ worker rather than in the
+request, it survives the user closing the browser, and it emits its update
+over the same cross-process bridge the resumable chat runs use.
+
+A job is declared as an action with `kind: "job"` in `rippleSpec.actions`:
+
+```json
+{
+  "actions": {
+    "score_applications": {
+      "kind": "job",
+      "job": "score_applications",
+      "params": { "batch_size": 20, "connector": "snctm-api" },
+      "label": "Score Next Batch",
+      "requires_instinct": false
+    }
+  }
+}
+```
+
+The `job` value is the name of a callable registered in the workspace job
+registry. An action with no `kind` keeps the existing write-action
+behavior, so jobs are additive.
+
+### Trigger: `POST /pockets/{pocket_id}/actions/run` with `kind: "job"`
+
+The same endpoint and the same owner-or-`shared_with` access as a write
+action. When the named action's `kind` is `"job"`, the route enqueues the
+job instead of making an HTTP call.
+
+Behavior:
+
+- An unknown job name returns `400 job.unknown`.
+- The server reads the params from the **persisted action declaration**, not
+  from the request. A non-empty client `params` is rejected with
+  `400 job.params_not_accepted` so a click can never widen a job's scope.
+- A param key that looks credential-bearing (it contains `token`, `api_key`,
+  `secret`, and the like, at any nesting depth) is rejected with
+  `400 job.params_forbidden`. Jobs read workspace credentials server-side and
+  never accept tokens through params.
+- `requires_instinct: true` is rejected with
+  `400 job.instinct_not_yet_supported`. The Instinct approval path for jobs
+  lands in a later version; until then a job that asks to be gated refuses
+  rather than run ungated.
+
+Response `200` (enqueued):
+
+```json
+{ "ok": true, "code": "job_enqueued", "job_id": "665a1f2e9c3b4a0012ab34cd" }
+```
+
+The client polls the status endpoint below. The result arrives on the canvas
+as a live `state` update when the job finishes; it is not in this response
+body.
+
+### `GET /api/v1/workspaces/{workspace_id}/jobs/{job_id}`
+
+Poll a job's status. Requires workspace membership. The job document is
+re-fetched by id and its workspace is re-checked, so a job id from another
+workspace returns `404` rather than leaking its existence.
+
+Response `200`:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `job_id` | string | The job document id. |
+| `status` | string | `queued`, `running`, `done`, or `failed`. |
+| `error` | string \| null | The failure message when `status` is `failed`. |
+| `created_at` / `started_at` / `ended_at` | string \| null | Lifecycle timestamps. |
+
+The computed result is not returned here. On success the worker has already
+merged it into the pocket's `state`; on failure it writes a
+`{action}_status: "failed"` marker into `state` so the triggering button
+stops spinning without a poll.
+
+**Security.** Every job runs under the hardcoded synthetic identity
+`system:workspace_job`, never the triggering user, and that identity is not
+addressable from any request. A job result may write **only** `state`; a
+result that touches `ui`, `actions`, `sources`, or `shape` is rejected and
+the job is marked failed, so a job can never rewrite the template it runs
+under. The writeback re-asserts that the target pocket belongs to the job's
+workspace before it writes (fail-closed), and the worker enforces a timeout
+(`POCKETPAW_JOB_TIMEOUT_SECONDS`, default `900`); a timed-out job writes the
+same failed-state marker. Enqueue and failure are written to the audit log.
 
 ## Pockets — Template Reconcile
 

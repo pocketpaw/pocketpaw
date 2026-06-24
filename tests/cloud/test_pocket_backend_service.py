@@ -22,6 +22,13 @@
 # (rejects unknown connector / missing name / bad backend_type); the executor
 # tuple carries them with no token; switching http->connector clears the stale
 # credential; and a legacy row (no backend_type) reads back as http.
+# Updated: 2026-06-15 (feat/invoke-tool-v1) — the summaries now carry
+# `allowed_tools` and the executor tuple is a 9-tuple (trailing tool
+# allowlist). Updated the shape assertions and added set_pocket_tool_policy
+# coverage: grants persist + read back via the executor path, an empty list
+# revokes every tool, the not-configured guard fires, and the mutation is
+# audit-logged (pocket.backend.tool_policy). The legacy-row test now also
+# asserts allowed_tools reads back as [] (back-compat, no migration).
 #
 # What this pins:
 #   - set_pocket_backend then get_pocket_backend returns configured:true
@@ -79,6 +86,9 @@ async def test_set_then_get_backend(mongo_db):
         "auth_type": "bearer",
         "configured": True,
         "allowed_writes": [],
+        # feat/invoke-tool-v1: the summary now carries the tool allowlist —
+        # empty by default (fail-closed).
+        "allowed_tools": [],
         "approval_route": None,
     }
     assert "token" not in summary
@@ -114,8 +124,8 @@ async def test_get_for_executor_decrypts_token(mongo_db):
     )
     creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
     assert creds is not None
-    # connector-as-backend: the executor tuple is now an 8-tuple — trailing
-    # `backend_type` / `connector_name` after the write allowlist + route.
+    # feat/invoke-tool-v1: the executor tuple is now a 9-tuple — trailing
+    # `allowed_tools` after backend_type / connector_name.
     (
         base_url,
         auth_type,
@@ -125,6 +135,7 @@ async def test_get_for_executor_decrypts_token(mongo_db):
         approval_route,
         backend_type,
         connector_name,
+        allowed_tools,
     ) = creds
     assert base_url == "https://api.example.com"
     assert auth_type == "api_key"
@@ -135,6 +146,8 @@ async def test_get_for_executor_decrypts_token(mongo_db):
     assert approval_route is None
     assert backend_type == "http"
     assert connector_name is None
+    # feat/invoke-tool-v1: no tool policy set → empty (fail-closed).
+    assert allowed_tools == []
 
 
 async def test_get_for_executor_none_when_unset(mongo_db):
@@ -152,16 +165,27 @@ async def test_get_for_executor_no_token_for_none_auth(mongo_db):
     )
     creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
     assert creds is not None
-    # connector-as-backend: the executor tuple is now an 8-tuple — trailing
+    # feat/invoke-tool-v1: the executor tuple is now a 9-tuple — trailing
     # elements are write allowlist, approval route, backend_type,
-    # connector_name.
-    _, auth_type, _, token, allowed_writes, approval_route, backend_type, connector_name = creds
+    # connector_name, tool allowlist.
+    (
+        _,
+        auth_type,
+        _,
+        token,
+        allowed_writes,
+        approval_route,
+        backend_type,
+        connector_name,
+        allowed_tools,
+    ) = creds
     assert auth_type == "none"
     assert token == ""
     assert allowed_writes == []
     assert approval_route is None
     assert backend_type == "http"
     assert connector_name is None
+    assert allowed_tools == []
 
 
 async def test_set_backend_upserts(mongo_db):
@@ -191,6 +215,77 @@ async def test_set_backend_upserts(mongo_db):
     creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
     assert creds[0] == "https://new.example.com"
     assert creds[3] == "new-token"
+
+
+# ---------------------------------------------------------------------------
+# T12 / T-37 — a backend credential change invalidates earned trust.
+# A pocket that swapped its backend must not inherit the prior backend's
+# auto-approve trust (anti-gaming, design M-5). The reset fires only when an
+# EXISTING row's base_url actually changes — not on first-time configuration
+# (nothing earned yet) and not on an unchanged re-save.
+# ---------------------------------------------------------------------------
+
+
+def _capture_trust_reset(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    async def _reset(workspace_id, pocket_id):
+        calls.append((workspace_id, pocket_id))
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.trust_ledger.reset_pocket_trust", _reset)
+    return calls
+
+
+async def test_backend_url_change_resets_trust(mongo_db, monkeypatch):
+    """T-37: changing the base_url on an existing backend resets the pocket's
+    trust ledger (the new backend earns its own trust from zero)."""
+    calls = _capture_trust_reset(monkeypatch)
+
+    # First-time set — NO reset (no prior trust to invalidate).
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://old.example.com",
+        auth_type="bearer",
+        auth_token="old-token",
+    )
+    assert calls == [], "first-time backend config must not reset trust"
+
+    # Swap the base_url — this is the credential change that invalidates trust.
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://new.example.com",
+        auth_type="bearer",
+        auth_token="new-token",
+    )
+    assert calls == [("w1", "pocket-1")]
+
+
+async def test_backend_unchanged_resave_does_not_reset_trust(mongo_db, monkeypatch):
+    """Re-saving the SAME base_url (e.g. a token rotation that keeps the URL)
+    must not reset trust — the backend identity (the URL) did not change."""
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="bearer",
+        auth_token="token-1",
+    )
+    calls = _capture_trust_reset(monkeypatch)
+    # Same URL, different token.
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="bearer",
+        auth_token="token-2",
+    )
+    assert calls == [], "an unchanged base_url must not reset trust"
 
 
 async def test_set_backend_rejects_http_url(mongo_db):
@@ -263,6 +358,8 @@ async def test_set_connector_backend_summary(mongo_db):
         "auth_type": "none",
         "configured": True,
         "allowed_writes": [],
+        # feat/invoke-tool-v1: the summary carries the tool allowlist too.
+        "allowed_tools": [],
         "approval_route": None,
     }
     assert "token" not in summary
@@ -333,12 +430,16 @@ async def test_connector_backend_for_executor_tuple(mongo_db):
     )
     creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
     assert creds is not None
-    base_url, auth_type, _hdr, token, _aw, _route, backend_type, connector_name = creds
+    # feat/invoke-tool-v1: 9-tuple — trailing allowed_tools.
+    base_url, auth_type, _hdr, token, _aw, _route, backend_type, connector_name, allowed_tools = (
+        creds
+    )
     assert backend_type == "connector"
     assert connector_name == "github"
     assert base_url == ""
     assert auth_type == "none"
     assert token == ""
+    assert allowed_tools == []
 
 
 async def test_switch_http_to_connector_clears_credential(mongo_db):
@@ -404,6 +505,10 @@ async def test_legacy_row_reads_as_http_backend(mongo_db):
     assert creds is not None
     assert creds[6] == "http"  # backend_type
     assert creds[7] is None  # connector_name
+    # feat/invoke-tool-v1: a legacy row (no allowed_tools attr) reads as []
+    # via the getattr default in _allowed_tools_wire — fail-closed, no migration.
+    assert creds[8] == []  # allowed_tools
+    assert summary["allowed_tools"] == []
 
 
 async def test_set_backend_requires_token_for_auth(mongo_db):
@@ -547,3 +652,103 @@ async def test_set_approval_route_rejects_when_no_backend(mongo_db):
         await pockets_service.set_pocket_approval_route(
             "w1", "u1", "missing-pocket", {"mode": "user", "user_id": "x"}
         )
+
+
+# ---------------------------------------------------------------------------
+# feat/invoke-tool-v1 — set_pocket_tool_policy (the tool allowlist)
+# ---------------------------------------------------------------------------
+
+
+async def test_set_tool_policy_persists_and_reads_back_via_executor(mongo_db):
+    """An owner sets a tool policy; the grants persist on the credential row
+    and are read back by get_pocket_backend_for_executor (the 9th element) —
+    the path the run-tool route uses to source the allowlist."""
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="none",
+        auth_token="",
+    )
+
+    result = await pockets_service.set_pocket_tool_policy(
+        "w1",
+        "u1",
+        "pocket-1",
+        [{"tool": "connector:github:list_issues"}, {"tool": "web_fetch"}],
+    )
+    # The summary echoes the stored grants.
+    assert result["allowed_tools"] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+
+    # Read back through the executor path — the grants survive the round-trip.
+    creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
+    assert creds is not None
+    assert creds[8] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+    # And via the owner-facing summary too.
+    summary = await pockets_service.get_pocket_backend("w1", "pocket-1")
+    assert summary["allowed_tools"] == [
+        {"tool": "connector:github:list_issues"},
+        {"tool": "web_fetch"},
+    ]
+
+
+async def test_set_tool_policy_empty_list_revokes_every_tool(mongo_db):
+    """An empty list is valid and revokes every tool — fail-closed, the same
+    semantics as the write policy."""
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="none",
+        auth_token="",
+    )
+    # Grant one, then revoke all.
+    await pockets_service.set_pocket_tool_policy(
+        "w1", "u1", "pocket-1", [{"tool": "connector:github:list_issues"}]
+    )
+    result = await pockets_service.set_pocket_tool_policy("w1", "u1", "pocket-1", [])
+    assert result["allowed_tools"] == []
+
+    creds = await pockets_service.get_pocket_backend_for_executor("w1", "pocket-1")
+    assert creds is not None
+    assert creds[8] == []
+
+
+async def test_set_tool_policy_rejects_when_no_backend(mongo_db):
+    """A tool policy with no backend to apply it to is meaningless — rejected
+    with pocket_backend.not_configured, never silently stored."""
+    with pytest.raises(ValidationError) as excinfo:
+        await pockets_service.set_pocket_tool_policy(
+            "w1", "u1", "missing-pocket", [{"tool": "web_fetch"}]
+        )
+    assert excinfo.value.code == "pocket_backend.not_configured"
+
+
+async def test_set_tool_policy_audit_logs(mongo_db, monkeypatch):
+    """The tool-policy mutation writes an audit-log entry with the
+    pocket.backend.tool_policy action — same audit path as write-policy."""
+    captured: list = []
+
+    def _fake_audit(*, actor, action, workspace_id, pocket_id, base_url, auth_type):
+        captured.append((actor, action, workspace_id, pocket_id))
+
+    monkeypatch.setattr(pockets_service, "_audit_backend_config", _fake_audit)
+
+    await pockets_service.set_pocket_backend(
+        workspace_id="w1",
+        user_id="u1",
+        pocket_id="pocket-1",
+        base_url="https://api.example.com",
+        auth_type="none",
+        auth_token="",
+    )
+    await pockets_service.set_pocket_tool_policy("w1", "u1", "pocket-1", [{"tool": "web_fetch"}])
+    assert ("u1", "pocket.backend.tool_policy", "w1", "pocket-1") in captured

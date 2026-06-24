@@ -59,11 +59,35 @@ class ValidationError(CloudError):
         super().__init__(422, code, message)
 
 
+class BadRequest(CloudError):
+    """Malformed / untrusted request (400).
+
+    Distinct from ``ValidationError`` (422, a well-formed request that fails a
+    field-level rule): a 400 is for a request that can't be trusted at all — a
+    webhook whose signature doesn't verify, a body that isn't parseable. Used by
+    the billing webhook so an unverifiable Dodo delivery returns 400, not 422.
+    """
+
+    def __init__(self, code: str, message: str = "Bad request") -> None:
+        super().__init__(400, code, message)
+
+
 class SeatLimitError(CloudError):
     """Seat/billing limit reached (402)."""
 
     def __init__(self, seats: int) -> None:
         super().__init__(402, "billing.seat_limit", f"Seat limit of {seats} reached")
+
+
+class InsufficientCredits(CloudError):
+    """Credit wallet has too few credits for the requested debit (402)."""
+
+    def __init__(self, requested: int, available: int) -> None:
+        super().__init__(
+            402,
+            "credits.insufficient",
+            f"Insufficient credits: requested {requested}, available {available}",
+        )
 
 
 class RateLimited(CloudError):
@@ -93,9 +117,11 @@ def with_cause(error: CloudError, cause: BaseException) -> CloudError:
 
 
 __all__ = [
+    "BadRequest",
     "CloudError",
     "ConflictError",
     "Forbidden",
+    "InsufficientCredits",
     "Internal",
     "NotFound",
     "RateLimited",
