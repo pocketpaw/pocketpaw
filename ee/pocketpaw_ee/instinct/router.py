@@ -52,6 +52,29 @@
 #   of BP-3 also added an additive ``scope_type`` to ``ProposeRequest`` /
 #   ``propose_action`` so an Action can be scoped to a generic artifact.
 #   TODO(BP-4): revert/discard semantics deepen in the executor + a history view.
+# Updated: 2026-06-16 (feat/instinct-smart-triage) — ``propose_action`` now runs
+#   a smart-approval auto-triage hook (``_run_auto_triage``) synchronously after
+#   ``store.propose`` succeeds and BEFORE the response returns. The hook calls
+#   the cheap-model classifier in ``ee.instinct.auto_triage``; on an APPROVE
+#   verdict it auto-approves the Action via ``store.auto_approve`` (writing the
+#   hash-chained ``action_auto_approved`` ledger row with the triager's verdict +
+#   reasoning, ``actor="system:triager"``) and emits the same Decision-Graph
+#   chain events a human approval emits, then returns the auto-approved Action so
+#   the human is not notified. Otherwise the original proposal is returned
+#   unchanged and the route falls through to the existing human path
+#   byte-for-byte. The feature is OFF BY DEFAULT: the approval level defaults to
+#   ``ASK`` (triager not invoked) until a workspace opts in to TRIAGE / TRUSTED.
+#   The hook is fail-safe (any triager error / low confidence → ESCALATE; v1 has
+#   no auto-reject, so a bad action is escalated, never silently killed) and
+#   best-effort — a wiring failure can never break the propose response, and an
+#   audit-ledger failure (``AuditChainError``) is logged LOUD at ERROR and leaves
+#   the proposal PENDING. The classifier reuses the mandate-foreman
+#   ``ClaudeCliLlm`` shell-out pattern (``claude -p --output-format json``) —
+#   agent mode has NO ANTHROPIC_API_KEY, so ``AsyncAnthropic`` is deliberately
+#   NOT used. KNOWN LIMITATION (v1): the ``rule_flagged`` safety signal is read
+#   from a caller-supplied ``Action.parameters._triage`` hint (an internal-caller
+#   trust input), not re-resolved from the pocket's standing rules here — see the
+#   ``_run_auto_triage`` docstring for the rationale + the v2 TODO.
 # Updated: 2026-06-11 (feat/external-action-proposal) — added the THIRD gated
 #   proposal kind: a gated external-action connector call. ``_external_action_blob``
 #   + ``_assert_external_action_workspace`` are the peers of the ``_code_change``
@@ -277,6 +300,7 @@ from pocketpaw.instinct.models import (
     ActionTrigger,
     AuditEntry,
 )
+from pocketpaw.instinct.store import AuditChainError
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 from pocketpaw_ee.cloud._core.deps import (
     current_user,
@@ -301,6 +325,139 @@ from pocketpaw_ee.instinct.chain_emitters import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_auto_triage(action: Any, workspace_id: str) -> Any:
+    """Smart-approval auto-triage hook (feat/instinct-smart-triage).
+
+    Sits between ``store.propose`` succeeding and the propose response. Runs the
+    cheap-model triager over the freshly proposed Action; on an APPROVE verdict
+    the Action is auto-approved AND audited (``store.auto_approve`` →
+    ``action_auto_approved`` ledger row), and the auto-approved Action is
+    returned so the route skips the human-notification path. On ESCALATE / DENY
+    (the common, safe case) the ORIGINAL Action is returned unchanged so the
+    route falls through to today's human path byte-for-byte.
+
+    SAFETY:
+      * ``ASK`` level → the triager is never invoked; today's behaviour exactly.
+        ASK is the DEFAULT (off-by-default per the PRD): with no workspace /
+        pocket / env opt-in ``resolve_approval_level`` returns ASK, so this hook
+        returns the original proposal untouched until a workspace turns it on.
+      * A ``_triage`` hint carrying ``rule_flagged=true`` (a template
+        ESCALATE_APPROVAL / BLOCK match) is NEVER auto-approved.
+      * Any triager failure fails SAFE to ESCALATE (handled inside the module).
+      * The whole hook is wrapped best-effort: a triager wiring failure must
+        NEVER break the propose response — it falls back to the human path with
+        the original Action.
+
+    The hint object the caller may attach under ``Action.parameters._triage``:
+      ``{"rule_flagged": bool, "instinct_rules": [...], "approval_level":
+      "ASK"|"TRIAGE"|"TRUSTED" (per-pocket override), "reasoning_trace": {...},
+      "fabric_snapshots": [...]}``. All optional.
+
+    KNOWN LIMITATION (v1) — the ``rule_flagged`` safety signal is HINT-DEPENDENT:
+    it is read from the caller-supplied ``_triage`` hint, not resolved here from
+    the pocket's standing rules. The generic ``propose_action`` endpoint receives
+    a free-form Action (title / description / recommendation / parameters) and
+    does NOT carry the template ``action_name`` + per-row ``row_context`` that
+    ``bundled_templates.resolve_instinct`` needs, so the router cannot cheaply
+    re-derive the verdict at this seam. The correct owner of the flag is the
+    PROPOSING path that already holds the template + verdict (e.g.
+    ``ee.cloud.pockets.instinct_dispatch.gate_action``), which should stamp
+    ``rule_flagged`` (and the matched ``instinct_rules``) onto the hint. This is
+    sound as long as that path is the only one that turns the level above ASK —
+    and ASK-by-default means an un-stamped proposal is never auto-approved
+    anyway. The hint is therefore a trust input from an INTERNAL caller, not from
+    the wire.
+    TODO(instinct-triage v2): resolve ``rule_flagged`` + ``instinct_rules``
+    directly from the store via ``action.pocket_id`` (load the pocket's template,
+    map the Action back to its template ``action_name`` + ``row_context``, call
+    ``resolve_instinct``) so the gate no longer trusts the caller. Tracked as the
+    follow-up to this slice.
+    """
+    try:
+        from pocketpaw_ee.instinct.auto_triage import (
+            TriageContext,
+            maybe_auto_approve,
+            resolve_approval_level,
+        )
+
+        params = getattr(action, "parameters", None)
+        params = params if isinstance(params, dict) else {}
+        hint = params.get("_triage")
+        hint = hint if isinstance(hint, dict) else {}
+
+        level = resolve_approval_level(pocket_level=hint.get("approval_level"))
+
+        # Resolve the parked-operation blob (one of the gated kinds), if any —
+        # it gives the triager the concrete method/path/params to judge and the
+        # Decision-Graph correlation id to close the chain on auto-approve.
+        parked_blob = (
+            _pocket_write_blob(action)
+            or _code_change_blob(action)
+            or _external_action_blob(action)
+            or {}
+        )
+
+        # The reasoning trace + fabric snapshots were attached at propose time
+        # and persisted into the audit row; surface what the caller passed on
+        # the params hint so the triager sees the same decision inputs.
+        reasoning_trace = hint.get("reasoning_trace")
+        fabric_snapshots = hint.get("fabric_snapshots")
+
+        context = TriageContext(
+            workspace_id=str(workspace_id or ""),
+            pocket_id=str(getattr(action, "pocket_id", "") or ""),
+            action_id=str(getattr(action, "id", "") or ""),
+            title=str(getattr(action, "title", "") or ""),
+            description=str(getattr(action, "description", "") or ""),
+            recommendation=str(getattr(action, "recommendation", "") or ""),
+            rule_flagged=bool(hint.get("rule_flagged", False)),
+            parked_blob=parked_blob if isinstance(parked_blob, dict) else {},
+            reasoning_trace=reasoning_trace if isinstance(reasoning_trace, dict) else {},
+            fabric_snapshots=fabric_snapshots if isinstance(fabric_snapshots, list) else [],
+            instinct_rules=(
+                hint.get("instinct_rules") if isinstance(hint.get("instinct_rules"), list) else []
+            ),
+        )
+
+        outcome = await maybe_auto_approve(
+            store=_store(),
+            action=action,
+            context=context,
+            level=level,
+        )
+        if outcome.auto_approved:
+            logger.info(
+                "instinct auto-triage AUTO-APPROVED action=%s (workspace=%s, level=%s)",
+                context.action_id,
+                workspace_id,
+                level.value,
+            )
+        return outcome.action
+    except AuditChainError:
+        # The tamper-evident ledger append failed (``maybe_auto_approve`` already
+        # catches this in the common path, but a chain failure in a chain-emit
+        # import or a future store seam could still surface here). This is a
+        # ledger-integrity event, NOT a routine triager wiring failure — log
+        # LOUD at ERROR with a distinct message. Still fail-safe: return the
+        # original PENDING proposal so the human reviews it.
+        logger.error(
+            "instinct auto-triage hit an audit-ledger failure for action=%s — "
+            "ledger-integrity event (distinct from an LLM failure); leaving the "
+            "proposal PENDING for the human",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
+    except Exception:  # noqa: BLE001 — the hook must NEVER break propose
+        logger.warning(
+            "instinct auto-triage hook failed for action=%s — falling back to "
+            "the human path with the original proposal",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
 
 
 def _code_change_blob(action: Any) -> dict[str, Any] | None:
@@ -814,8 +971,20 @@ async def propose_action(
     caller's active workspace so the cross-tenant decision leak is closed at
     the write side: later list/pending/audit reads scoped to a tenant only
     surface that tenant's actions.
+
+    Smart-approval auto-triage (feat/instinct-smart-triage) — after the
+    proposal is created, a cheap-model classifier runs synchronously (the
+    ``_run_auto_triage`` hook). On an APPROVE verdict the Action is
+    auto-approved AND written to the hash-chained audit ledger
+    (``action_auto_approved``, ``actor="system:triager"``), and the
+    auto-approved Action is returned (the human is not notified). On
+    ESCALATE / DENY — and at the ``ASK`` approval level, where the triager is
+    never invoked — the original proposal is returned unchanged and the route
+    behaves exactly as before. The hook is fail-safe and best-effort: any
+    triager failure escalates to the human, and a wiring failure can never
+    break this propose response.
     """
-    return await _store().propose(
+    action = await _store().propose(
         pocket_id=req.pocket_id,
         title=req.title,
         description=req.description,
@@ -829,6 +998,7 @@ async def propose_action(
         workspace_id=workspace_id,
         scope_type=req.scope_type,
     )
+    return await _run_auto_triage(action, workspace_id)
 
 
 @router.get(

@@ -13,6 +13,14 @@
 #   non-scoped read and still match the plain pocket_id filter. ``scope_type`` is
 #   a READ FILTER + a write column only — it is NOT folded into the W2b audit
 #   hash (the chain stays content-bound + global).
+# Updated: 2026-06-16 (feat/instinct-smart-triage) — added the additive
+#   ``auto_approve(action_id, *, verdict, reasoning, confidence=None)`` method
+#   for the EE smart-approval auto-triage path (``instinct.auto_triage``). It is
+#   a sibling of ``approve``: same atomic ``_update_status`` chokepoint, same
+#   hash-chained W2b audit append, but it writes ``event="action_auto_approved"``
+#   with ``actor="system:triager"`` and packs the triager's verdict + reasoning
+#   into the audit ``context`` so a machine approval is as auditable as a human
+#   one. Purely additive — no existing method's behaviour changed.
 # Updated: 2026-06-10 (sov/r2a review fixes) — two store-level fixes:
 #   FIX 1 — added ``get_audit_entry(audit_id, workspace_id=None)``: a direct
 #     single-row SELECT by id with the same ``workspace_id = ? OR workspace_id
@@ -510,6 +518,53 @@ class InstinctStore:
             approved_at=datetime.now().isoformat(),
             event="action_approved",
             actor=approver,
+        )
+
+    async def auto_approve(
+        self,
+        action_id: str,
+        *,
+        approver: str = "system:triager",
+        verdict: str,
+        reasoning: str,
+        confidence: float | None = None,
+    ) -> Action | None:
+        """Auto-approve an action on a triager verdict, fully audited.
+
+        Additive sibling of :meth:`approve` for the smart-approval auto-triage
+        path (EE ``instinct.auto_triage``). The only differences from a human
+        approval are:
+
+        * ``event="action_auto_approved"`` (distinct from ``action_approved``
+          so the audit/ledger query surface can tell a machine approval from a
+          human one), and
+        * the triager's ``verdict`` + ``reasoning`` (+ optional ``confidence``)
+          are packed into the audit ``context`` so an auto-approval carries the
+          same "why" an auditor or insurer needs — every auto-approval is as
+          auditable as a human one.
+
+        The actor defaults to ``system:triager``. The write goes through the
+        SAME ``_update_status`` chokepoint as ``approve`` / ``reject``, so the
+        row flip and the hash-chained audit append land atomically and the
+        tamper-evident chain (W2b) covers auto-approvals identically to human
+        approvals. ``require_status=PENDING`` guards against double-flipping an
+        action that a concurrent path already resolved.
+        """
+        audit_context: dict[str, Any] = {
+            "triager_verdict": verdict,
+            "triager_reasoning": reasoning,
+        }
+        if confidence is not None:
+            audit_context["triager_confidence"] = confidence
+        return await self._update_status(
+            action_id,
+            ActionStatus.APPROVED,
+            approved_by=approver,
+            approved_at=datetime.now().isoformat(),
+            event="action_auto_approved",
+            actor=approver,
+            require_status=ActionStatus.PENDING,
+            audit_context=audit_context,
         )
 
     async def reject(
