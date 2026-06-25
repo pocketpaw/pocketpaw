@@ -60,6 +60,18 @@
 # (or unset-tier) site resolves to an empty set and stays on the basic create
 # path, unchanged. ``site_plans`` is imported lazily inside ``add_domain``,
 # mirroring ``publish_pocket``.
+# Updated 2026-06-21 (DSV-2b — engine-appropriate objects read for svelte dynamic
+# sites): the data-read resolver ``_dynamic_pocket_objects`` now selects the
+# pocket's CONTENT ENVELOPE by engine before classifying / extracting ``objects``
+# — for ``engine == "svelte"`` it reads the dynamic bindings
+# (``objects``/``sources``/``actions``/``auth``) from the svelte ``source``
+# envelope, for ripple (the default) from ``rippleSpec``, mirroring the
+# ``version_content = (source if engine == "svelte" else ripple_spec)`` switch the
+# publish/promote path already uses. Without this a dynamic SVELTE pocket (whose
+# bindings live on ``source``, not ``rippleSpec``) showed NO tables in the Data
+# tab. ``_is_dynamic`` / ``_dynamic_objects`` are unchanged — they already operate
+# on "a content dict", so passing the engine-selected envelope is all that's
+# needed; ripple dynamic sites keep reading from ``rippleSpec`` (no regress).
 #
 # Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1 data):
 # added the operator data-view reads ``list_site_data_tables`` and
@@ -2276,18 +2288,49 @@ async def audit_pocket(
 _DATA_UNAVAILABLE_LOCAL = "live_on_cloudflare_only"
 
 
+def _dynamic_content_envelope(pocket: dict[str, Any]) -> dict[str, Any]:
+    """The ENGINE-APPROPRIATE content envelope a dynamic site's bindings live on
+    (DSV-2b).
+
+    A dynamic pocket carries its live-data bindings — ``objects`` (the D1 tables),
+    ``sources`` (reads), ``actions`` (writes), optional ``auth`` — as SIBLING KEYS
+    on its content. WHICH content holds them depends on the generation engine, and
+    must match the publish/promote switch (``version_content = source if engine ==
+    "svelte" else ripple_spec``):
+
+      * ``engine == "svelte"`` → the bindings are siblings on the svelte ``source``
+        envelope (the same dict that also carries the ``{path: contents}``
+        hand-written SvelteKit files). This is the CONTRACT the create-svelte brain
+        + the generator must store to: ``objects``/``sources``/``actions``/``auth``
+        sit alongside the file entries on ``source``.
+      * any other engine (``"ripple"``, the default) → the bindings are siblings on
+        ``rippleSpec`` (the ripple-track precedent the create-dynamic-site tool
+        already stamps).
+
+    Returns the selected dict (``{}`` when absent / malformed), so the
+    engine-agnostic ``_is_dynamic`` / ``_dynamic_objects`` helpers can read the
+    bindings off it without caring which engine produced it."""
+    engine = pocket.get("engine") or "ripple"
+    key = "source" if engine == "svelte" else "rippleSpec"
+    content = pocket.get(key)
+    return content if isinstance(content, dict) else {}
+
+
 async def _dynamic_pocket_objects(
     *, workspace_id: str, user_id: str, pocket_id: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Read a pocket and return ``(ripple_spec, objects)`` for a DYNAMIC site, or
-    raise (DS-3 shared resolver).
+    """Read a pocket and return ``(content_envelope, objects)`` for a DYNAMIC site,
+    or raise (DS-3 shared resolver; DSV-2b made it engine-aware).
 
     Loads the pocket via the pockets service's PUBLIC ``get`` (wire dict — entity
     isolation; it raises NotFound / Forbidden itself for a missing / access-denied
-    pocket, mapped to 404 / 403). A NON-dynamic pocket (a static landing /
+    pocket, mapped to 404 / 403). The dynamic bindings (``objects`` and friends)
+    are read off the ENGINE-APPROPRIATE content envelope (DSV-2b): a svelte site's
+    bindings live on its ``source`` map, a ripple site's on its ``rippleSpec`` —
+    see ``_dynamic_content_envelope``. A NON-dynamic pocket (a static landing /
     brochure, or a custom pocket with no data bindings) raises
     ValidationError("sites.not_dynamic") → the router maps it to 400: there is no
-    data store to read. The returned ``objects`` are the spec's declared tables
+    data store to read. The returned ``objects`` are the envelope's declared tables
     (the authoritative table set a read may touch). ``workspace_id`` keeps the
     surface tenant-uniform with the other by-pocket reads (the pockets read scopes
     on ``user_id``; the D1 id derivation is workspace-scoped)."""
@@ -2295,13 +2338,13 @@ async def _dynamic_pocket_objects(
 
     pocket = await pockets_service.get(pocket_id, user_id)
     pattern = pocket.get("pattern")
-    ripple_spec = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
-    if not _is_dynamic(pattern, ripple_spec):
+    content = _dynamic_content_envelope(pocket)
+    if not _is_dynamic(pattern, content):
         raise ValidationError(
             "sites.not_dynamic",
             "This site is not a dynamic site — it has no live data store to read.",
         )
-    return ripple_spec or {}, _dynamic_objects(ripple_spec)
+    return content, _dynamic_objects(content)
 
 
 def _table_columns(obj: dict[str, Any]) -> list[str]:
