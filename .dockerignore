@@ -55,3 +55,13 @@ idocs
 # Logs
 *.log
 temp
+
+# Vendored Paw Sites publish toolchain (DEP-1/DEP-2). The `dist`/`build` patterns
+# above are root-anchored, so they do NOT exclude the nested deploy/paw-sites/dist
+# tree (verified) — but keep these explicit negations so a future `**/dist`-style
+# pattern can't silently strip the vendored generator + ripple tarball the
+# PAW_SITES_SOURCE=vendor / RIPPLE_SOURCE=vendor build COPYs from the context.
+!deploy/paw-sites
+!deploy/paw-sites/**
+!deploy/ripple
+!deploy/ripple/**
