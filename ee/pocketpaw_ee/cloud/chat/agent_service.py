@@ -124,6 +124,23 @@ type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
 now sanitizes at the source (the get_pocket ``_summary`` path) — it never
 trusts a hand-built dict. Capped lists render honest "+N more" markers
 from the summarizer's new ``*_omitted`` counters.
+Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
+and the three resolvers gained ``expected_workspace_id``: the authenticated,
+route-validated workspace the run worker threads from ``spec.workspace_id``.
+The new ``_reconcile_workspace_id`` helper makes it tenant-safe: a NON-EMPTY
+doc ``workspace`` stays authoritative AND a disagreeing ``expected_workspace_id``
+raises ``Forbidden`` (the cross-tenant guard — the ``_get_pocket`` / ``_get_session``
+finders look up by ``_id`` alone, not tenant-scoped, so a spec for workspace B
+can load workspace A's doc); an EMPTY/missing doc workspace FALLS BACK to the
+trusted ``expected_workspace_id``. This fixes the worker throwing away the
+authenticated ``spec.workspace_id`` and re-deriving tenancy from a doc that can
+be empty — which blanked the identity contextvar and made the sites-create MCP
+tool raise "requires workspace and user context (call from a cloud chat
+session)". ``expected_workspace_id is None`` (legacy / non-worker callers)
+preserves today's doc-only behavior. Defense-in-depth: ``attach_agent_identity``
+now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
+instead of binding ``""``, so any future caller that loses tenancy fails loudly
+at the seam, not deep inside an MCP tool.
 """
 
 from __future__ import annotations
@@ -151,7 +168,7 @@ from pocketpaw.ripple import (
     get_pocket_prompts,
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
-from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
 
 logger = logging.getLogger(__name__)
@@ -205,7 +222,22 @@ def attach_agent_identity(
     is streaming through — used by ``create_pocket`` to link the active
     session to the freshly-created pocket. ``pocket_id`` is the room the chat
     is anchored to (when any) — read by the connector-execution MCP server to
-    scope ``list_connector_actions`` / ``connector_execute`` to this pocket."""
+    scope ``list_connector_actions`` / ``connector_execute`` to this pocket.
+
+    Defense-in-depth (fix/worker-trusts-spec-workspace): REJECT an empty
+    ``workspace_id`` / ``user_id`` instead of binding ``""`` to the contextvar.
+    A blank tenancy here silently propagated to every in-process MCP tool —
+    the sites-create tool surfaced it as "requires workspace and user context
+    (call from a cloud chat session)" deep inside the tool, far from the seam
+    that lost the id. Failing loudly at the bind makes any future caller that
+    drops tenancy break at the source instead. Every real caller (the SSE chat
+    path, the group/DM bridge, the in-process test harnesses) already passes
+    non-empty ids, so this is a guard, not a behavior change for them."""
+    if not workspace_id or not user_id:
+        raise ValueError(
+            "attach_agent_identity requires a non-empty workspace_id and user_id "
+            f"(got workspace_id={workspace_id!r}, user_id={user_id!r})"
+        )
     return (
         _active_workspace_id.set(workspace_id),
         _active_user_id.set(user_id),
@@ -730,16 +762,69 @@ async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _reconcile_workspace_id(doc_workspace_id: str, expected_workspace_id: str | None) -> str:
+    """Resolve the AUTHORITATIVE workspace for a scope, given the workspace the
+    scope DOC carries and the ``expected_workspace_id`` the authenticated caller
+    asserts (the worker threads ``spec.workspace_id`` here — fix/worker-trusts-
+    spec-workspace).
+
+    Rules (tenant-safe by construction):
+
+    * Doc workspace NON-EMPTY:
+        - it stays AUTHORITATIVE, AND
+        - if ``expected_workspace_id`` is also non-empty and DISAGREES, raise a
+          ``Forbidden`` — never silently trust a mismatched caller assertion.
+          The scope finders look the doc up by ``_id`` alone (not tenant-scoped),
+          so a spec for workspace B CAN load workspace A's doc; this mismatch
+          check is the actual cross-tenant guard, not just belt-and-suspenders.
+    * Doc workspace EMPTY/missing (a legacy / partially-stamped doc):
+        - FALL BACK to the trusted ``expected_workspace_id`` when present. This
+          is the fix: the worker stops blanking tenancy when the doc's workspace
+          field is empty, and uses the authenticated id the HTTP route already
+          validated (the ``current_workspace_id`` dependency rejects an empty
+          workspace with 400 before the spec is ever built).
+        - ``""`` when neither is usable — the caller (``execute_run``) then
+          raises a clean error rather than attaching an empty identity.
+
+    ``expected_workspace_id is None`` (legacy / non-worker callers that don't
+    thread it) preserves today's behavior exactly: the doc workspace passes
+    through untouched.
+    """
+    doc_ws = (doc_workspace_id or "").strip()
+    expected = (expected_workspace_id or "").strip()
+    if doc_ws:
+        if expected and expected != doc_ws:
+            raise Forbidden(
+                "scope.workspace_mismatch",
+                "Scope belongs to a different workspace than the authenticated request",
+            )
+        return doc_ws
+    return expected
+
+
 async def resolve_scope_context(
-    *, scope: str, scope_id: str, user_id: str, agent_id_hint: str | None
+    *,
+    scope: str,
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
 ) -> ScopeContext:
     """Resolve a ``ScopeContext`` for a cloud agent chat request.
+
+    ``expected_workspace_id`` is the authoritative, authenticated workspace the
+    caller asserts (the run worker threads ``spec.workspace_id`` here). It is
+    used to (a) FALL BACK to trusted tenancy when the scope doc's ``workspace``
+    field is empty/missing and (b) REJECT a caller whose workspace DISAGREES
+    with a non-empty doc workspace (cross-tenant guard). Defaults to ``None`` —
+    legacy / non-worker callers keep today's doc-only behavior.
 
     Raises:
         InvalidScope: ``scope`` is not one of dm/group/pocket/session.
         NotFound: the group, pocket, or session doesn't exist.
-        CloudError: caller is not a member, no agent is in scope, or the
-            caller must disambiguate ``agent_id`` for a multi-agent group.
+        CloudError: caller is not a member, no agent is in scope, the caller
+            must disambiguate ``agent_id`` for a multi-agent group, or the
+            asserted workspace disagrees with the scope's (``Forbidden``).
     """
     try:
         kind = ScopeKind(scope)
@@ -747,19 +832,33 @@ async def resolve_scope_context(
         raise InvalidScope(scope) from e
 
     if kind is ScopeKind.POCKET:
-        return await _resolve_pocket(scope_id, user_id, agent_id_hint)
+        return await _resolve_pocket(scope_id, user_id, agent_id_hint, expected_workspace_id)
     if kind is ScopeKind.SESSION:
-        return await _resolve_session(scope_id, user_id, agent_id_hint)
-    return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint)
+        return await _resolve_session(scope_id, user_id, agent_id_hint, expected_workspace_id)
+    return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint, expected_workspace_id)
 
 
-async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | None) -> ScopeContext:
+async def _resolve_session(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
     session = await _get_session(scope_id)
     if session is None or getattr(session, "deleted_at", None) is not None:
         raise NotFound("session", scope_id)
 
     if getattr(session, "owner", None) != user_id:
         raise CloudError(403, "session.forbidden", "Caller does not own this session")
+
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace). Reconciled FIRST so the home-summary lookup and the
+    # returned ctx both use the authoritative id, and a cross-tenant mismatch
+    # raises before any further reads.
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(session, "workspace", "")), expected_workspace_id
+    )
 
     # When the session lives inside a pocket, hydrate the pocket's tool specs
     # so a chat routed through ``session`` scope still gets the pocket-scoped
@@ -781,16 +880,13 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
             # active session id is honored). Surface the home pocket's
             # backend summary here too so the home agent inlines it whether
             # the chat routed through pocket or session scope.
-            backend_summary = await _home_backend_summary(
-                pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
-            )
+            backend_summary = await _home_backend_summary(pocket_type, workspace_id, str(pocket_id))
             # Pocket orientation for ALL pocket types — built from the doc
             # we already fetched, no extra read. Mirrors the pocket-scope
             # path so the agent sees the same <pocket-summary> block
             # whichever scope the frontend routed the chat through.
             pocket_summary = _pocket_summary_data(pocket)
 
-    workspace_id = str(getattr(session, "workspace", ""))
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
         # Sessions created via ``createPocketSession`` don't yet pin an agent
@@ -825,7 +921,11 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
 
 
 async def _resolve_group_like(
-    kind: ScopeKind, scope_id: str, user_id: str, agent_id_hint: str | None
+    kind: ScopeKind,
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
 ) -> ScopeContext:
     group = await _get_group(scope_id)
     if group is None:
@@ -851,7 +951,12 @@ async def _resolve_group_like(
 
     target = _pick_target_agent(agent_ids, agent_id_hint)
 
-    workspace_id = str(getattr(group, "workspace", ""))
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace).
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(group, "workspace", "")), expected_workspace_id
+    )
     # Orient the agent to the calling member (pp#1367) — pre-rendered capped
     # block, ``None`` when the member has no Person.
     about_member_block = await _resolve_about_member(workspace_id, user_id)
@@ -868,7 +973,12 @@ async def _resolve_group_like(
     )
 
 
-async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None) -> ScopeContext:
+async def _resolve_pocket(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
     pocket = await _get_pocket(scope_id)
     if pocket is None:
         raise NotFound("pocket", scope_id)
@@ -883,7 +993,12 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
     # For workspace/public we still require the caller be a workspace member;
     # the route-level dependency ``current_workspace_id`` already enforced that.
 
-    workspace_id = str(getattr(pocket, "workspace", ""))
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace).
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(pocket, "workspace", "")), expected_workspace_id
+    )
 
     agents = list(getattr(pocket, "agents", []) or [])
     agent_ids = [a if isinstance(a, str) else getattr(a, "id", None) for a in agents]
