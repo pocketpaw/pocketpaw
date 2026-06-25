@@ -92,6 +92,7 @@ _xproc_consumer_task: asyncio.Task[None] | None = None
 async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
+    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
     while True:
         try:
@@ -108,23 +109,35 @@ async def _sweeper_loop() -> None:
             await sweep_unbilled_runs()
         except Exception:
             _run_sweeper_logger.exception("sweep_unbilled_runs tick failed")
+        # Charge-first (review fix C): surface PAID sites stuck pending past the
+        # threshold (a lost/delayed subscription.active webhook). VISIBILITY ONLY —
+        # logs at WARNING, never auto-deploys or auto-cancels. Its own try so a
+        # failure here can't suppress the other sweeps (or vice versa).
+        try:
+            await sweep_pending_sites()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_pending_sites tick failed")
 
 
 async def start_run_sweeper() -> None:
     """Sweep once on boot, then tick every 5 minutes until shutdown.
 
-    Boot runs both the stale-run sweep (interrupt orphaned runs) and the BC-3
-    compute-cost metering sweep (bill any terminal runs left unbilled by the
-    prior process); the 5-minute loop then ticks both.
+    Boot runs the stale-run sweep (interrupt orphaned runs), the BC-3 compute-cost
+    metering sweep (bill any terminal runs left unbilled by the prior process), and
+    the charge-first pending-site reconciliation sweep (surface paid sites stuck
+    pending); the 5-minute loop then ticks all three.
     """
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
+    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
     global _sweeper_task
     with suppress(Exception):
         await sweep_stale_runs()
     with suppress(Exception):
         await sweep_unbilled_runs()
+    with suppress(Exception):
+        await sweep_pending_sites()
     _sweeper_task = asyncio.create_task(_sweeper_loop())
 
 

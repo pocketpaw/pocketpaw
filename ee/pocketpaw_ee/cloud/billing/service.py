@@ -571,6 +571,13 @@ async def _handle_site_subscription_event(event: SubscriptionEvent) -> dict:
             status = "active"
         elif event.type == _SUB_CANCELLED:
             # Mark cancelled; do NOT undeploy the live site in v1.
+            # TODO(billing-lapse): a cancelled per-site sub is recorded but the live
+            # site keeps serving. Full lapse / teardown / dunning — grace-period
+            # length, undeploy-vs-grace, buyer notifications — is a DELIBERATE
+            # follow-up pending a product decision on the grace policy. Until that
+            # lands, cancellation is visibility-only: the status flips to
+            # "cancelled" and the site stays up. Do NOT add an undeploy here without
+            # that policy.
             await sites_service.mark_site_subscription(
                 workspace_id=event.workspace_id,
                 site_id=event.site_id,
