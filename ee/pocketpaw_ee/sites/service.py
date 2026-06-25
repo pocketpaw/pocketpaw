@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-25 (feat/paw-sites-prod-deploy, DEP-3 — graceful generator
+# failure): the publish path shells out to the paw-sites generator + bun, which in
+# a misconfigured deploy (an image missing the toolchain) raised a bare
+# FileNotFoundError / RuntimeError / SmokeGateFailed that escaped publish() as an
+# UNHANDLED 500 (the cloud error handler maps ONLY CloudError). New helper
+# ``_build_or_cloud_error`` wraps EVERY generator.build() call in the publish path
+# (the live build in ``_deploy_site_doc`` and the preview build in ``publish``) and
+# maps those build/install/smoke failures to ``Internal("sites.generator_failed")``
+# (a clean 5xx envelope with a reason), chaining the cause for logs. A CloudError
+# raised inside the build (an injected fake, the existing SmokeGateFailed-driven
+# rollback callers) is re-raised unchanged so its own status/code stand.
+#
 # Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
 # a PAID site tier (positive ``annual_price_usd`` AND a configured
 # ``dodo_product_id``) is now CHARGE-FIRST — published as PENDING and NOT deployed
@@ -371,7 +383,14 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    Forbidden,
+    Internal,
+    NotFound,
+    ValidationError,
+    with_cause,
+)
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
@@ -412,6 +431,66 @@ _SITES_PLAN_FEATURE = "fabric"
 
 def _default_bundle_reader(project_dir: str) -> bytes:
     return Path(project_dir, _WORKER_BUNDLE_REL).read_bytes()
+
+
+async def _build_or_cloud_error(
+    generator: GeneratorClient, *, map_smoke_gate: bool = True, **build_kwargs: Any
+) -> Any:
+    """Run ``generator.build(...)`` and map any build/install/smoke failure to a
+    ``CloudError`` so a publish never escapes as an UNHANDLED 500 (DEP-3).
+
+    The generator shells out to the paw-sites generator (paw-sites-gen) + bun. In a
+    misconfigured deploy (e.g. an image missing the toolchain — the bug this fix
+    addresses) ``build()`` raises a bare ``FileNotFoundError`` (no such binary on
+    PATH); on a non-zero generator step it raises ``RuntimeError``; a failed install
+    or the workerd SSR fail-gate raises ``SmokeGateFailed`` (a ``RuntimeError``
+    subclass). None of those are ``CloudError`` subclasses, so the cloud error
+    handler (which maps ONLY ``CloudError``) would let them surface as an opaque 500
+    with no machine-readable code. This maps them to ``Internal`` (``CloudError`` →
+    500 with code ``sites.generator_failed``) so the API returns a clean envelope
+    with a reason instead — and chains the cause for log context (the cause is never
+    leaked in the client envelope). ``CloudError`` raised inside the build is
+    re-raised unchanged so its own status/code/message stand.
+
+    ``map_smoke_gate`` (default True) controls whether ``SmokeGateFailed`` is mapped
+    too. The LIVE publish path (``_deploy_site_doc``) maps it — nothing downstream
+    catches it there, so it would escape as a 500. The PREVIEW/edit path passes
+    ``map_smoke_gate=False`` so ``SmokeGateFailed`` propagates RAW: the edit caller
+    (``edit_svelte_component``) catches it to roll the component source back to its
+    prior contents, a contract that must be preserved (mapping it to ``Internal``
+    would silently break that rollback)."""
+    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    try:
+        return await generator.build(**build_kwargs)
+    except CloudError:
+        # Already a clean envelope — let it stand (status/code/message preserved).
+        raise
+    except SmokeGateFailed as exc:
+        if not map_smoke_gate:
+            # Preview/edit path: let the caller's rollback-on-SmokeGateFailed run.
+            raise
+        logger.error("sites.publish: generator smoke gate failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.generator_failed",
+                "Site generation failed — the publishing toolchain is unavailable "
+                "or the build did not complete. See server logs for details.",
+            ),
+            exc,
+        ) from exc
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        # Missing toolchain / non-zero generator step → a real server-side infra
+        # failure, so a 5xx with a reason (not a 4xx — the request was well-formed).
+        logger.error("sites.publish: generator build failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.generator_failed",
+                "Site generation failed — the publishing toolchain is unavailable "
+                "or the build did not complete. See server logs for details.",
+            ),
+            exc,
+        ) from exc
 
 
 def _preview_id(pocket_id: str) -> str:
@@ -868,7 +947,13 @@ async def publish(
     if preview:
         from pocketpaw_ee.sites import local_server
 
-        build = await generator.build(
+        # DEP-3: map a missing-toolchain / non-zero generator failure to a clean
+        # CloudError so the preview/edit/arm path never 500s opaquely either, BUT
+        # leave SmokeGateFailed RAW (map_smoke_gate=False) so edit_svelte_component's
+        # rollback-on-SmokeGateFailed contract is preserved on this preview path.
+        build = await _build_or_cloud_error(
+            generator,
+            map_smoke_gate=False,
             ripple_spec=ripple_spec,
             theme=theme,
             site_id=site_id,
@@ -987,7 +1072,13 @@ async def _deploy_site_doc(
     is deployed and no doc is flipped to deployed.
     """
     gen = generator or GeneratorClient()
-    build = await gen.build(
+    # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
+    # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
+    # instead of letting a bare FileNotFoundError / RuntimeError / SmokeGateFailed
+    # escape as an unhandled 500. A misconfigured image (no paw-sites-gen / bun on
+    # PATH) is the bug this guards.
+    build = await _build_or_cloud_error(
+        gen,
         ripple_spec=ripple_spec,
         theme=theme,
         site_id=site_id,

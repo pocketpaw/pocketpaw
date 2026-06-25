@@ -226,6 +226,15 @@ jobs:
     #   COOLIFY_API_TOKEN   — a Coolify API token with deploy permission
     # While the secrets are unset the job warns and exits green, so dev CI
     # doesn't go red before the one-time Coolify setup is done.
+    #
+    # Paw Sites toolchain (feat/paw-sites-prod-deploy, DEP-4): Dockerfile.enterprise
+    # bundles bun + the paw-sites generator + the @ripple-ui/svelte tarball so a live
+    # publish works. The vendored trees (deploy/paw-sites/, deploy/ripple/) are
+    # gitignored, so they are NOT in Coolify's clone — the Coolify app's build config
+    # MUST set the CLONE source for both:
+    #     PAW_SITES_SOURCE=clone   RIPPLE_SOURCE=clone
+    # (Coolify owns the docker build; this job only fires the webhook, so the args
+    # live in Coolify's app settings, not here.) See deploy/README-build.md.
     name: Deploy to Coolify
     runs-on: ubuntu-latest
     needs: [lint, build, test-oss, test, import-linter]
