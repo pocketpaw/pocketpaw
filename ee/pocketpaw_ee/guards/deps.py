@@ -95,7 +95,9 @@ def require_plan_feature(feature: str) -> _GuardDep:
 
     async def _guard(request: Request) -> None:
         _get_user_context(request)  # enforce authentication
-        plan = getattr(request.state, "workspace_plan", "team")
+        # Default to the base/free floor when the middleware didn't set a plan —
+        # fail SAFE (free has no paid features) rather than granting a paid tier.
+        plan = getattr(request.state, "workspace_plan", "free")
         allowed = PLAN_FEATURES.get(plan, set())
         if feature not in allowed:
             raise HTTPException(
@@ -133,7 +135,7 @@ def require_policy(action: str) -> _GuardDep:
             action=action,
             resource_id=request.query_params.get("resource_id"),
             resource_type=request.query_params.get("resource_type"),
-            plan=getattr(request.state, "workspace_plan", "team"),
+            plan=getattr(request.state, "workspace_plan", "free"),
             agent_id=agent_id,
             agent_creator_role=agent_creator_role,
         )

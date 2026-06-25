@@ -57,7 +57,7 @@
 # ``SitePublished``. When the site tier has no configured Dodo recurring product
 # (v1 default) the sub init DEGRADES gracefully — the tier is recorded without a
 # live charge, never crashing the publish. The publish ENTITLEMENT gate is the
-# existing ``require_sites_plan`` (the "fabric" plan feature) ``publish`` already
+# existing ``require_sites_plan`` (the "sites" plan feature) ``publish`` already
 # runs FIRST, before any Site insert — a workspace lacking it raises Forbidden and
 # no Site is created. New seam ``_billing_provider`` on ``publish_pocket`` injects
 # a mock subscription provider in tests. A PREVIEW publish skips all of BC-9 (it
@@ -148,10 +148,10 @@
 # fresh per publish — only the on-disk build dir is reused per pocket.
 #
 # Updated 2026-06-17 (fix/sites-plan-gate-asymmetry): added require_sites_plan()
-# and call it at the top of publish() AND publish_pocket(). Sites is the "fabric"
-# plan feature; the REST router gates it with require_plan_feature("fabric"), but
-# the chat agent created + published sites IN-PROCESS via the sites_manager MCP
-# tools, which bypass the HTTP router. A team-plan workspace could therefore
+# and call it at the top of publish() AND publish_pocket(). Sites is the "sites"
+# plan feature (go+); the REST router gates it with require_plan_feature("sites"),
+# but the chat agent created + published sites IN-PROCESS via the sites_manager MCP
+# tools, which bypass the HTTP router. A free-plan workspace could therefore
 # deploy a live site that GET /sites then 403'd (write path ungated, read path
 # gated). The guard reads the plan from workspace_service.get_workspace_plan
 # against guards.abac.PLAN_FEATURES (same source of truth as the HTTP gate) and
@@ -418,15 +418,18 @@ _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
 # scope is the pocket it is published from.
 _VERSION_SCOPE_TYPE = "pocket"
 
-# Sites is a plan-gated feature: it unlocks with the "fabric" plan feature
-# (business+). The REST router (sites/router.py) gates every endpoint with
-# require_plan_feature("fabric"), but the chat agent creates + publishes sites
-# IN-PROCESS via the sites_manager MCP tools, which never pass through that HTTP
-# router. Without a service-level gate a team-plan workspace could create and
-# deploy a live site that GET /sites then 403'd — a created-but-invisible
-# resource. require_sites_plan() closes that asymmetry at the service chokepoint
-# so the in-process write paths are gated identically to HTTP.
-_SITES_PLAN_FEATURE = "fabric"
+# Sites is a plan-gated feature: it unlocks with the "sites" plan feature (go+ on
+# the consumer ladder — Paw Go gets a site). NOTE: this used to be the "fabric"
+# flag, but that flag was overloaded (it also gated the enterprise-only Fabric
+# ontology), so Sites + Leads were decoupled onto their own "sites" flag. The REST
+# router (sites/router.py) gates every endpoint with require_plan_feature("sites"),
+# but the chat agent creates + publishes sites IN-PROCESS via the sites_manager MCP
+# tools, which never pass through that HTTP router. Without a service-level gate a
+# free-plan workspace could create and deploy a live site that GET /sites then
+# 403'd — a created-but-invisible resource. require_sites_plan() closes that
+# asymmetry at the service chokepoint so the in-process write paths are gated
+# identically to HTTP.
+_SITES_PLAN_FEATURE = "sites"
 
 
 def _default_bundle_reader(project_dir: str) -> bytes:
@@ -794,13 +797,13 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
 
 async def require_sites_plan(workspace_id: str) -> None:
     """Raise cloud Forbidden('plan.feature_denied') unless the workspace's plan
-    includes the Sites ("fabric") feature.
+    includes the Sites ("sites") feature.
 
     The shared plan gate for the in-process site write paths (publish + the
     create MCP handlers). Reads the plan with the SAME source of truth
     (``workspace_service.get_workspace_plan``) and the SAME feature table
-    (``guards.abac.PLAN_FEATURES``) as the HTTP ``require_plan_feature("fabric")``
-    dependency, so a team-plan caller is denied identically whether it arrives
+    (``guards.abac.PLAN_FEATURES``) as the HTTP ``require_plan_feature("sites")``
+    dependency, so a free-plan caller is denied identically whether it arrives
     over REST or through the chat agent. A missing workspace surfaces as NotFound
     (mirroring the HTTP gate), and the error message names the minimum plan that
     unlocks Sites. Imports are local to keep the sites service importable without
@@ -813,13 +816,15 @@ async def require_sites_plan(workspace_id: str) -> None:
         raise NotFound("workspace", workspace_id)
     if _SITES_PLAN_FEATURE not in PLAN_FEATURES.get(plan, set()):
         # Name the minimum plan that unlocks the feature, like the HTTP gate.
+        # Walks the consumer ladder cheapest-first; ``sites`` lives on go+, so
+        # this resolves to "Go".
         needed = next(
             (
                 p
-                for p in ("team", "business", "enterprise")
+                for p in ("free", "go", "pro", "pro_max", "enterprise")
                 if _SITES_PLAN_FEATURE in PLAN_FEATURES.get(p, set())
             ),
-            "business",
+            "go",
         )
         raise Forbidden(
             "plan.feature_denied",
@@ -888,14 +893,14 @@ async def publish(
     republish can re-apply it. ``None`` (the default) publishes a normal,
     non-editable site (empty ``builder_origin`` on the doc, no bridge).
 
-    Gated on the workspace's plan: Sites is the "fabric" feature, so a team-plan
-    workspace is rejected with Forbidden('plan.feature_denied') here — BEFORE any
-    pocket read, generation, or deploy. Both ``publish_pocket`` (REST + MCP) and
-    direct service callers funnel through ``publish``, so this one gate covers
-    every in-process publish path."""
+    Gated on the workspace's plan: Sites is the "sites" feature (go+), so a
+    free-plan workspace is rejected with Forbidden('plan.feature_denied') here —
+    BEFORE any pocket read, generation, or deploy. Both ``publish_pocket`` (REST +
+    MCP) and direct service callers funnel through ``publish``, so this one gate
+    covers every in-process publish path."""
     # Plan gate FIRST — before any pocket read, name resolution, generation, or
-    # deploy — so a team-plan caller is denied identically to the HTTP router's
-    # require_plan_feature("fabric") gate. Every in-process publish path (REST,
+    # deploy — so a free-plan caller is denied identically to the HTTP router's
+    # require_plan_feature("sites") gate. Every in-process publish path (REST,
     # MCP publish, direct callers) funnels through here.
     await require_sites_plan(workspace_id)
 

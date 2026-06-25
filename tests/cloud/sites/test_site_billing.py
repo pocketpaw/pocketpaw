@@ -12,8 +12,8 @@
 #      credits, and does NOT change Workspace.plan.
 #
 # The Sites publish entitlement gate is the EXISTING ``require_sites_plan`` (the
-# "fabric" plan feature, business+), which ``publish`` runs FIRST — before any
-# Site insert. business HAS fabric; team does NOT, so the negative case is a real
+# "sites" plan feature, go+), which ``publish`` runs FIRST — before any
+# Site insert. go+ HAS sites; free does NOT, so the negative case is a real
 # end-to-end gate test (no patching of the gate). Real Workspace + Pocket docs are
 # seeded so the gate, the pocket read, and the per-site sub all run against live
 # Beanie. The Dodo subscription provider is injected (a mock) so no network call
@@ -193,8 +193,8 @@ def test_get_site_plan_resolves_and_rejects():
 
 
 async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recording_bus, monkeypatch):
-    # business HAS the "fabric" (Sites) feature → the gate passes.
-    ws = await _make_workspace(plan="business")
+    # pro HAS the "sites" (Sites) feature → the gate passes.
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     # Configure a Dodo product for the "pro" site tier so the per-site sub fires.
@@ -248,7 +248,7 @@ async def test_publish_with_entitlement_stamps_plan_and_emits(mongo_db, recordin
 async def test_publish_degrades_gracefully_when_dodo_unconfigured(mongo_db, recording_bus):
     """With no Dodo product configured for the tier (v1 default), publish records
     the intended tier WITHOUT a live charge — no subscription_id, no crash."""
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     doc = await sites_service.publish_pocket(
@@ -271,7 +271,7 @@ async def test_publish_degrades_gracefully_when_dodo_unconfigured(mongo_db, reco
 
 async def test_publish_defaults_to_base_tier(mongo_db):
     """An omitted site_plan_key falls back to the base tier."""
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     doc = await sites_service.publish_pocket(
@@ -293,8 +293,8 @@ async def test_publish_defaults_to_base_tier(mongo_db):
 async def test_publish_without_entitlement_is_forbidden_and_creates_no_site(mongo_db):
     from pocketpaw_ee.cloud._core.errors import Forbidden
 
-    # team does NOT have the "fabric" (Sites) feature → the gate denies.
-    ws = await _make_workspace(plan="team")
+    # free does NOT have the "sites" (Sites) feature → the gate denies.
+    ws = await _make_workspace(plan="free")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     with pytest.raises(Forbidden) as exc:
@@ -332,7 +332,7 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
         local_server, "deploy_local", lambda site_id, project_dir: f"http://local/{site_id}/"
     )
 
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     monkeypatch.setattr(
         site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
@@ -383,7 +383,7 @@ async def test_per_site_active_webhook_updates_site_not_workspace(mongo_db, monk
 
 
 async def test_per_site_cancelled_webhook_marks_site_cancelled(mongo_db, monkeypatch):
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     monkeypatch.setattr(
         site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
@@ -420,7 +420,7 @@ async def test_workspace_plan_sub_still_routes_to_workspace_path(mongo_db):
     from pocketpaw_ee.cloud.billing import plans
 
     ws = await _make_workspace(plan="free")
-    allotment = plans.get_plan("business").monthly_credit_allotment
+    allotment = plans.get_plan("pro").monthly_credit_allotment
 
     body = json.dumps(
         {
@@ -429,9 +429,9 @@ async def test_workspace_plan_sub_still_routes_to_workspace_path(mongo_db):
             "timestamp": datetime.now(UTC).isoformat(),
             "data": {
                 "subscription_id": "sub_ws_plan",
-                "product_id": "prod_business_recurring",
+                "product_id": "prod_pro_recurring",
                 # NO site_id → workspace-plan path.
-                "metadata": {"workspace_id": ws, "plan_key": "business"},
+                "metadata": {"workspace_id": ws, "plan_key": "pro"},
             },
         }
     )

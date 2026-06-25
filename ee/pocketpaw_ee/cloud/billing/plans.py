@@ -19,6 +19,15 @@
 # drift from the policy gate.
 #
 # Created 2026-06-24 (integration/billing-credits, BC-6): new module.
+# Updated 2026-06-25 (feat/consumer-plan-ladder) — rekeyed the catalog to the
+#   approved CONSUMER ladder {free, go, pro, pro_max, enterprise} (was {free, team,
+#   business, enterprise}); reset ``_MONTHLY_CREDIT_ALLOTMENT`` + ``_TIER_ORDER``
+#   to the new keys; ADDED user-facing display + price metadata (``_PLAN_DISPLAY``)
+#   so the billing UI can show ChatGPT/Claude-style "usage" wording (display_name,
+#   usage_label, usage_detail) and INR/USD monthly+annual prices instead of raw
+#   credits. ``monthly_credit_allotment`` stays in the catalog as a back-office
+#   field; it is NOT the headline the UI shows. Enterprise prices are None ("talk
+#   to us").
 
 from __future__ import annotations
 
@@ -31,27 +40,98 @@ from pocketpaw_ee.guards.abac import PLAN_FEATURES
 # ---------------------------------------------------------------------------
 #
 # Integer credits, 1 credit == $0.01 (the same denomination the ledger and Dodo
-# top-ups use). These are the per-renewal grant amounts BC-7 will apply on a
-# subscription cycle. Defaults are deliberately round and modest — a real price
-# sheet tunes them, but the SHAPE (free=0, then a growing ladder) is the
-# contract. Picked so the ladder is obvious: free grants nothing, each paid tier
-# is a clear step up.
+# top-ups use). These are the per-renewal grant amounts BC-7 applies on a
+# subscription cycle. The SHAPE (free=0, then a growing ladder) is the contract:
+# free grants nothing, each paid tier is a clear step up. These are a BACK-OFFICE
+# field — the UI headlines the ``usage_label`` from ``_PLAN_DISPLAY`` instead.
 #
-#   free        =      0 credits  ($0)      — no recurring grant
-#   team        = 50_000 credits  ($500)
-#   business    = 200_000 credits ($2,000)
-#   enterprise  = 1_000_000 credits ($10,000)
+#   free        =         0 credits  — no recurring grant
+#   go          =     1_500 credits  — everyday usage
+#   pro         =     7_500 credits  — ~5x the everyday usage
+#   pro_max     =    30_000 credits  — ~20x the usage
+#   enterprise  = 1_000_000 credits  — custom / effectively uncapped
 _MONTHLY_CREDIT_ALLOTMENT: dict[str, int] = {
     "free": 0,
-    "team": 50_000,
-    "business": 200_000,
+    "go": 1_500,
+    "pro": 7_500,
+    "pro_max": 30_000,
     "enterprise": 1_000_000,
 }
 
 # Order the catalog is listed in — the price ladder, cheapest first. Any tier in
 # PLAN_FEATURES not named here is appended afterwards (so a new tier never
 # silently drops out of the catalog).
-_TIER_ORDER: tuple[str, ...] = ("free", "team", "business", "enterprise")
+_TIER_ORDER: tuple[str, ...] = ("free", "go", "pro", "pro_max", "enterprise")
+
+# ---------------------------------------------------------------------------
+# User-facing DISPLAY + PRICE metadata.
+# ---------------------------------------------------------------------------
+#
+# What the billing UI actually shows. ``usage_label`` is the ChatGPT/Claude-style
+# headline ("Everyday", "5x the usage", ...) the UI renders INSTEAD of raw
+# credits; ``usage_detail`` is one supporting line. Prices are integers in the
+# tier's natural denomination (INR rupees, USD dollars), monthly + annual.
+# ``free`` is all-zero; ``enterprise`` prices are None ("talk to us").
+_PLAN_DISPLAY: dict[str, dict[str, object]] = {
+    "free": {
+        "display_name": "Free",
+        "usage_label": "Limited",
+        "usage_detail": "Chat + pockets to get started",
+        "price_inr_monthly": 0,
+        "price_inr_annual": 0,
+        "price_usd_monthly": 0,
+        "price_usd_annual": 0,
+    },
+    "go": {
+        "display_name": "Paw Go",
+        "usage_label": "Everyday",
+        "usage_detail": "Everyday agent + site usage",
+        "price_inr_monthly": 399,
+        "price_inr_annual": 3990,
+        "price_usd_monthly": 9,
+        "price_usd_annual": 90,
+    },
+    "pro": {
+        "display_name": "Paw Pro",
+        "usage_label": "5× the usage",
+        "usage_detail": "5× the everyday usage — for daily drivers",
+        "price_inr_monthly": 1499,
+        "price_inr_annual": 14990,
+        "price_usd_monthly": 19,
+        "price_usd_annual": 190,
+    },
+    "pro_max": {
+        "display_name": "Paw Pro Max",
+        "usage_label": "20× the usage",
+        "usage_detail": "20× the usage — uncapped power users",
+        "price_inr_monthly": 4999,
+        "price_inr_annual": 49990,
+        "price_usd_monthly": 49,
+        "price_usd_annual": 490,
+    },
+    "enterprise": {
+        "display_name": "Enterprise",
+        "usage_label": "Custom",
+        "usage_detail": "Custom usage, SSO, audit — talk to us",
+        "price_inr_monthly": None,
+        "price_inr_annual": None,
+        "price_usd_monthly": None,
+        "price_usd_annual": None,
+    },
+}
+
+# A safe display default for a tier that has no ``_PLAN_DISPLAY`` row (a tier
+# added to PLAN_FEATURES but not yet given UI copy). Keeps the catalog readable
+# rather than NPE-ing on a missing key.
+_DISPLAY_FALLBACK: dict[str, object] = {
+    "display_name": "",
+    "usage_label": "",
+    "usage_detail": "",
+    "price_inr_monthly": None,
+    "price_inr_annual": None,
+    "price_usd_monthly": None,
+    "price_usd_annual": None,
+}
 
 
 @dataclass(frozen=True)
@@ -62,14 +142,27 @@ class PlanTier:
     ``features`` is a copy of the tier's ``PLAN_FEATURES`` set (the source of
     truth), so a caller can read it without reaching into the policy module.
     ``monthly_credit_allotment`` is integer credits (1 credit == $0.01) granted
-    per renewal. ``dodo_product_id`` is the recurring-product id, or None until
-    BC-7 / config populates it.
+    per renewal — a BACK-OFFICE field, NOT the headline. ``dodo_product_id`` is
+    the recurring-product id, or None until BC-7 / config populates it.
+
+    The display + price fields are what the billing UI renders: ``display_name``
+    ("Paw Pro"), ``usage_label`` (the ChatGPT/Claude-style "5x the usage" headline
+    shown instead of credits), ``usage_detail`` (one supporting line), and the
+    INR/USD monthly+annual prices (integers; ``free`` = 0; ``enterprise`` = None
+    ⇒ "talk to us").
     """
 
     key: str
     monthly_credit_allotment: int
     dodo_product_id: str | None
     features: frozenset[str]
+    display_name: str
+    usage_label: str
+    usage_detail: str
+    price_inr_monthly: int | None
+    price_inr_annual: int | None
+    price_usd_monthly: int | None
+    price_usd_annual: int | None
 
 
 def _dodo_product_for(key: str) -> str | None:
@@ -98,15 +191,25 @@ def _build(key: str) -> PlanTier:
     """Construct a ``PlanTier`` for ``key`` from the live PLAN_FEATURES + config.
 
     ``features`` is copied from PLAN_FEATURES (referenced, not duplicated) so the
-    catalog can never drift from the policy gate. An unknown ``key`` yields an
-    empty feature set and a 0 allotment — but callers go through ``get_plan`` /
-    ``list_plans``, which only ever pass known keys.
+    catalog can never drift from the policy gate. The display + price fields come
+    from ``_PLAN_DISPLAY`` (a missing row degrades to ``_DISPLAY_FALLBACK`` rather
+    than NPE-ing). An unknown ``key`` yields an empty feature set and a 0
+    allotment — but callers go through ``get_plan`` / ``list_plans``, which only
+    ever pass known keys.
     """
+    display = _PLAN_DISPLAY.get(key, _DISPLAY_FALLBACK)
     return PlanTier(
         key=key,
         monthly_credit_allotment=_MONTHLY_CREDIT_ALLOTMENT.get(key, 0),
         dodo_product_id=_dodo_product_for(key),
         features=frozenset(PLAN_FEATURES.get(key, set())),
+        display_name=str(display["display_name"]),
+        usage_label=str(display["usage_label"]),
+        usage_detail=str(display["usage_detail"]),
+        price_inr_monthly=display["price_inr_monthly"],  # type: ignore[arg-type]
+        price_inr_annual=display["price_inr_annual"],  # type: ignore[arg-type]
+        price_usd_monthly=display["price_usd_monthly"],  # type: ignore[arg-type]
+        price_usd_annual=display["price_usd_annual"],  # type: ignore[arg-type]
     )
 
 

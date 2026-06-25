@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 class LicensePayload(BaseModel):
     org: str
-    plan: str = "team"  # team | business | enterprise
+    plan: str = "go"  # consumer ladder: free | go | pro | pro_max | enterprise
     seats: int = 5
     exp: str  # ISO date "2027-01-01"
     features: list[str] = Field(default_factory=list)  # optional feature flags

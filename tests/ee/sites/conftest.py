@@ -115,6 +115,6 @@ def _default_sites_plan(request: pytest.FixtureRequest):
 
     with patch(
         "pocketpaw_ee.cloud.workspace.service.get_workspace_plan",
-        new=AsyncMock(return_value="business"),
+        new=AsyncMock(return_value="go"),
     ):
         yield
