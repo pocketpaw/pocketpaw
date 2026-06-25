@@ -68,6 +68,19 @@
 # ``_workers_deploy`` test-injection seam threads ``publish`` → ``_deploy_site_doc``
 # (mirrors ``_local_deploy``/``_cloudflare``). Billing/charge-first logic untouched.
 #
+# Updated 2026-06-25 (feat/sites-cf-dispatch-worker — wire the published URL for the
+# WfP serving layer): a user worker uploaded into the `paw-sites` dispatch namespace
+# is NOT directly URL-addressable in Workers for Platforms — it serves only when the
+# new Dynamic Dispatch Worker (ee/pocketpaw_ee/sites/cloudflare/dispatch-worker)
+# routes `<site_id>.<PAW_CF_SITES_DOMAIN>` to it. So the CF branch of
+# ``_deploy_site_doc`` now, AFTER ``put_worker`` succeeds, stamps the public URL as
+# ``https://{site_id}.{PAW_CF_SITES_DOMAIN}`` when ``PAW_CF_SITES_DOMAIN`` is set; if
+# it is unset it leaves ``url=""`` (the worker IS uploaded — the deploy succeeded —
+# it is just unreachable until the operator deploys the dispatch worker + sets the
+# domain) and logs a warning. The LOCAL branch is untouched. v1 is subdomain routing
+# only; a connected custom hostname needs a hostname→site_id map in the dispatch
+# worker (follow-up).
+#
 # Updated 2026-06-25 (feat/paw-sites-prod-deploy, DEP-3 — graceful generator
 # failure): the publish path shells out to the paw-sites generator + bun, which in
 # a misconfigured deploy (an image missing the toolchain) raised a bare
@@ -1383,6 +1396,25 @@ async def _deploy_site_doc(
             [{"type": "d1", "name": _D1_BINDING_NAME, "id": d1_database_id}] if is_dynamic else None
         )
         await cf.put_worker(script_name=site_id, bundle=bundle, bindings=bindings)
+        # CF-DISPATCH: the worker is now in the `paw-sites` dispatch namespace, but
+        # a user worker in a WfP dispatch namespace is NOT directly URL-addressable
+        # — it only serves when the dispatch worker
+        # (ee/pocketpaw_ee/sites/cloudflare/dispatch-worker) routes
+        # `<site_id>.<PAW_CF_SITES_DOMAIN>` to it. So the public URL is the
+        # per-site subdomain, NOT a *.workers.dev address. When PAW_CF_SITES_DOMAIN
+        # is configured, stamp it; when it is not, leave url="" (the deploy still
+        # succeeded — the worker is uploaded — it is just unreachable until the
+        # operator deploys the dispatch worker + sets the domain) and warn.
+        import os
+
+        domain = os.environ.get("PAW_CF_SITES_DOMAIN", "").strip()
+        if domain:
+            url = f"https://{site_id}.{domain}"
+        else:
+            logger.warning(
+                "PAW_CF_SITES_DOMAIN unset — published site has no public URL "
+                "(set it + deploy the dispatch worker)"
+            )
 
     # PERF-1: UPSERT ONE canonical Site doc per (workspace, pocket_id) keyed on the
     # stable ``_id`` (== site_id), rather than inserting a fresh row every publish.
