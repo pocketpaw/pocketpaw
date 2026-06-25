@@ -28,6 +28,7 @@ from daytona import (
     DaytonaConfig,
     ExecuteResponse,
     FileUpload,
+    Image,
     PtySize,
     Resources,
 )
@@ -35,6 +36,7 @@ from daytona._async.filesystem import AsyncFileSystem, FileInfo
 from daytona._async.git import GitStatus
 
 from pocketpaw_ee.cloud.daytona.config import daytona_api_key, daytona_api_url
+from pocketpaw_ee.cloud.daytona.image import resolve_sandbox_image
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +135,7 @@ class DaytonaClient:
     async def create_sandbox(
         self,
         name: str,
-        image: str = "ubuntu:latest",
+        image: str | None = None,
         language: str | None = None,
         cpu: int = 2,
         memory: int = 4,
@@ -145,9 +147,18 @@ class DaytonaClient:
         Returns immediately; call ``wait_for_sandbox()`` to block until
         the sandbox reaches the ``started`` state.
 
+        The *image* parameter can be:
+
+          * ``None`` — uses the pre-built Paw development image (Python,
+            Node.js, GCC, Docker, UV, and common CLI tools).  See
+            :func:`resolve_sandbox_image` for override logic.
+          * A ``str`` — a regular Docker image reference (e.g.
+            ``"ubuntu:latest"``, ``"python:3.12"``).
+          * An ``Image`` object — dynamically built via the Daytona SDK.
+
         Args:
             name: Sandbox name.
-            image: Docker image to use (default ``ubuntu:latest``).
+            image: Image to use.  ``None`` → pre-built Paw dev image.
             language: Optional code language hint (``python``, ``typescript``, etc.).
             cpu: Number of CPUs.
             memory: Memory in GB.
@@ -156,10 +167,18 @@ class DaytonaClient:
         """
         daytona = await self._ensure_daytona()
 
+        # Resolve the image — use the pre-built Paw dev image when none
+        # is explicitly given.
+        resolved_image: str | Image
+        if image is None:
+            resolved_image = resolve_sandbox_image()
+        else:
+            resolved_image = image
+
         logger.info(
             "Creating Daytona sandbox: name=%s image=%s cpu=%d mem=%d disk=%d",
             name,
-            image,
+            resolved_image if isinstance(resolved_image, str) else "<dynamic-image>",
             cpu,
             memory,
             disk,
@@ -167,7 +186,7 @@ class DaytonaClient:
 
         params = CreateSandboxFromImageParams(
             name=name,
-            image=image,
+            image=resolved_image,
             resources=Resources(cpu=cpu, memory=memory, disk=disk),
             auto_stop_interval=auto_stop_interval,
         )
