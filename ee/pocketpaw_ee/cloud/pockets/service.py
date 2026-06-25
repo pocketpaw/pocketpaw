@@ -3977,7 +3977,7 @@ async def agent_create(
     color: str = "",
     ripple_spec: dict | None = None,
     engine: str = "ripple",
-    source: dict[str, str] | None = None,
+    source: dict[str, Any] | None = None,
     trusted: bool = False,
 ) -> tuple[dict | None, str | None, str | None]:
     """Insert a brand-new pocket owned by ``owner_id`` in ``workspace_id``.
@@ -3997,14 +3997,18 @@ async def agent_create(
     ``engine`` / ``source`` select the Paw Sites generation track. The
     default ``engine="ripple"`` compiles ``ripple_spec`` into the site;
     ``engine="svelte"`` materializes ``source`` (a hand-written SvelteKit
-    source map ``{relative_path: file_contents}``) instead — the svelte
+    source envelope ``{relative_path: file_contents}``) instead — the svelte
     analog of ``ripple_spec``. The svelte-site create flow
     (``create_svelte_site`` / ``pocketpaw-create-svelte-site``) passes
     ``engine="svelte"`` + ``source=<map>`` with ``ripple_spec=None`` and
     ``trusted=True`` (the source is author-controlled component files, not
-    LLM-drafted ripple JSON, so there is no catalog gate to run). Both keep
-    today's defaults (``engine="ripple"``, ``source=None``) for ripple
-    callers — additive, no Mongo migration.
+    LLM-drafted ripple JSON, so there is no catalog gate to run). For a
+    DYNAMIC svelte site (DSV-5) the ``source`` envelope ALSO carries the
+    live-data bindings (``objects``/``sources``/``actions``/``auth``) as
+    SIBLING keys alongside the file entries — hence ``dict[str, Any]``; they
+    ride the versioned content and the generator extracts them at publish.
+    Both keep today's defaults (``engine="ripple"``, ``source=None``) for
+    ripple callers — additive, no Mongo migration.
 
     ``trusted=True`` skips the STRICT catalog gate — use it ONLY for a
     code-assembled spec the caller fully controls (the deterministic Paw Site
