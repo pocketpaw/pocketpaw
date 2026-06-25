@@ -1,6 +1,18 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-25 (fix/worker-trusts-spec-workspace) — ``execute_run`` now threads
+  the authenticated ``spec.workspace_id`` into ``resolve_scope_context`` via the
+  new ``expected_workspace_id`` kwarg, then raises a clean
+  ``CloudError("scope.no_workspace")`` if the resolved ``ctx.workspace_id`` is
+  STILL empty — instead of letting ``_drive_agent_loop`` attach an empty
+  identity. The worker used to re-derive tenancy from the scope doc alone and
+  discard the trusted, route-validated spec workspace; when the doc's
+  ``workspace`` field was empty the identity contextvar became ``""`` and the
+  sites-create MCP tool raised "requires workspace and user context (call from a
+  cloud chat session)". The resolver now falls back to the trusted spec
+  workspace (and rejects a spec that disagrees with a non-empty doc workspace —
+  the cross-tenant guard); this seam adds the loud, scope-specific failure.
 - 2026-06-13 (feat/claude-sdk-prewarm) — ``execute_run`` now fires
   ``_prewarm_session(ctx)`` as a fire-and-forget ``asyncio.create_task`` right
   after the entity-aware profile is resolved, so the agent's Claude CLI
@@ -120,6 +132,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
+from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -1049,12 +1062,33 @@ async def execute_run(spec: RunSpec) -> None:
     persistence purposes (no assistant message created).
     """
     transport = get_stream_transport()
+    # Thread the authenticated, route-validated workspace from the spec into
+    # scope resolution (fix/worker-trusts-spec-workspace). The HTTP route stamps
+    # ``spec.workspace_id`` from the ``current_workspace_id`` dependency (which
+    # rejects an empty workspace with 400), so it is the trusted tenancy. The
+    # resolver uses it to FALL BACK when the scope doc's ``workspace`` field is
+    # empty/missing and to REJECT a spec whose workspace disagrees with a
+    # non-empty doc workspace. Before this, the worker re-derived tenancy from
+    # the doc alone and a blank doc workspace blanked the whole identity — the
+    # sites-create MCP tool then raised "requires workspace and user context".
     ctx = await resolve_scope_context(
         scope=spec.context_type,
         scope_id=spec.scope_id,
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
+        expected_workspace_id=spec.workspace_id,
     )
+    # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
+    # must fail cleanly here — never attach an empty identity downstream (the
+    # contextvar-reading MCP tools would surface a confusing error deep inside
+    # the tool instead of at this seam). ``attach_agent_identity`` also rejects
+    # empties as defense-in-depth; this gives a scope-specific code first.
+    if not ctx.workspace_id:
+        raise CloudError(
+            400,
+            "scope.no_workspace",
+            "Could not resolve a workspace for this run's scope",
+        )
     ctx.intent = spec.intent
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
