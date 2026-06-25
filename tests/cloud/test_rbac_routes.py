@@ -312,7 +312,7 @@ class TestAdminAccess:
             name="Updated Name",
             slug="pocketpaw",
             owner="user-admin-1",
-            plan="team",
+            plan="go",
             seats=5,
             created_at=datetime.now(UTC),
         )
@@ -441,7 +441,7 @@ class TestRoleBoundary:
             name="Owner Update",
             slug="owner-ws",
             owner="user-owner-1",
-            plan="team",
+            plan="go",
             seats=5,
             created_at=datetime.now(UTC),
         )

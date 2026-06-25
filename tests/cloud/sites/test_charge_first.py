@@ -102,7 +102,7 @@ def _provider() -> DodoProvider:
     )
 
 
-async def _make_workspace(plan: str = "business") -> str:
+async def _make_workspace(plan: str = "pro") -> str:
     from pocketpaw_ee.cloud.models.workspace import Workspace
 
     ws = Workspace(
@@ -170,7 +170,7 @@ async def test_paid_publish_is_pending_and_returns_checkout_url(
     monkeypatch.setattr(
         site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
     )
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     gen = _RecordingGenerator()
@@ -247,7 +247,7 @@ async def test_active_webhook_deploys_pending_site(mongo_db, recording_bus, monk
 
     monkeypatch.setattr(local_server, "deploy_local", _fake_deploy_local)
 
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
@@ -305,7 +305,7 @@ async def test_active_webhook_is_idempotent(mongo_db, monkeypatch):
         local_server, "deploy_local", lambda site_id, project_dir: f"http://local/{site_id}/"
     )
 
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
@@ -341,7 +341,7 @@ async def test_activate_site_invokes_cloudflare(mongo_db, monkeypatch):
     monkeypatch.setattr(
         site_plans, "_dodo_product_for", lambda key: {"pro": "prod_site_pro"}.get(key)
     )
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
     doc = await sites_service.publish_pocket(
         workspace_id=ws,
@@ -378,7 +378,7 @@ async def test_activate_site_invokes_cloudflare(mongo_db, monkeypatch):
 
 
 async def test_free_publish_deploys_immediately(mongo_db, recording_bus):
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     gen = _RecordingGenerator()
@@ -423,7 +423,7 @@ async def test_paid_tier_without_dodo_product_publishes_live(mongo_db):
     assert site_plans.get_site_plan("pro").annual_price_usd > 0
     assert site_plans.get_site_plan("pro").dodo_product_id is None
 
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     gen = _RecordingGenerator()

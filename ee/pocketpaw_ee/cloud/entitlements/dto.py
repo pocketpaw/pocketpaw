@@ -15,6 +15,11 @@
 #   annual price + the Cloudflare features it resells). ``cloudflare_features`` is a
 #   SORTED list (deterministic JSON, same rule as ``features`` above). The frontend
 #   (BC-11) reads this to render the publish tier picker.
+# Updated 2026-06-25 (feat/consumer-plan-ladder): ``PlanTierResponse`` now carries
+#   the user-facing display + price fields (display_name, usage_label, usage_detail,
+#   INR/USD monthly+annual prices) so the billing UI can render ChatGPT/Claude-style
+#   "usage" wording instead of raw credits. ``monthly_credit_allotment`` stays as a
+#   back-office field; ``enterprise`` prices serialize as null ("talk to us").
 
 from __future__ import annotations
 
@@ -28,15 +33,26 @@ from pocketpaw_ee.cloud.entitlements.domain import Entitlements
 class PlanTierResponse(BaseModel):
     """One row of the plan catalog on the wire — mirrors ``plans.PlanTier``.
 
-    ``monthly_credit_allotment`` is integer credits (1 credit == $0.01).
-    ``features`` is a sorted list (deterministic JSON). ``dodo_product_id`` is
-    None until BC-7 / config populates it.
+    ``monthly_credit_allotment`` is integer credits (1 credit == $0.01) — a
+    BACK-OFFICE field, NOT the headline. The UI renders ``usage_label`` (the
+    ChatGPT/Claude-style "5x the usage" wording) + ``usage_detail`` instead, with
+    ``display_name`` as the tier name and the INR/USD monthly+annual prices.
+    ``enterprise`` prices arrive as null ("talk to us"). ``features`` is a sorted
+    list (deterministic JSON). ``dodo_product_id`` is None until BC-7 / config
+    populates it.
     """
 
     key: str
     monthly_credit_allotment: int
     dodo_product_id: str | None = None
     features: list[str] = Field(default_factory=list)
+    display_name: str = ""
+    usage_label: str = ""
+    usage_detail: str = ""
+    price_inr_monthly: int | None = None
+    price_inr_annual: int | None = None
+    price_usd_monthly: int | None = None
+    price_usd_annual: int | None = None
 
 
 class PlanCatalogResponse(BaseModel):
@@ -64,6 +80,13 @@ def plan_tier_to_dto(tier: PlanTier) -> PlanTierResponse:
         monthly_credit_allotment=tier.monthly_credit_allotment,
         dodo_product_id=tier.dodo_product_id,
         features=sorted(tier.features),
+        display_name=tier.display_name,
+        usage_label=tier.usage_label,
+        usage_detail=tier.usage_detail,
+        price_inr_monthly=tier.price_inr_monthly,
+        price_inr_annual=tier.price_inr_annual,
+        price_usd_monthly=tier.price_usd_monthly,
+        price_usd_annual=tier.price_usd_annual,
     )
 
 

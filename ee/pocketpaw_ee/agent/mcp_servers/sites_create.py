@@ -4,12 +4,15 @@
 # Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — both create handlers now
 # call _require_sites_plan_or_error(workspace_id) right after input validation,
 # delegating to the shared sites.service.require_sites_plan gate. Sites is the
-# "fabric" plan feature; these create tools reach agent_create directly and
-# bypassed the REST router's require_plan_feature("fabric") gate, so a team-plan
+# "sites" plan feature (go+); these create tools reach agent_create directly and
+# bypassed the REST router's require_plan_feature("sites") gate, so a free-plan
 # workspace could create + (then publish) a live site that GET /sites 403'd. On a
 # disallowed plan the handler now returns the plan.feature_denied MCP error
-# ("Sites requires the Business plan — upgrade, or switch workspace") so the chat
+# ("Sites requires the Go plan — upgrade, or switch workspace") so the chat
 # agent surfaces the upgrade message instead of a phantom-created site.
+# Updated: 2026-06-25 (decouple-sites-from-fabric) — the gate moved off the
+# overloaded "fabric" flag onto the dedicated "sites" flag (go+); the Fabric
+# ontology keeps "fabric" (enterprise-only).
 #
 # Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
 # create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
@@ -191,14 +194,14 @@ def _identity() -> tuple[str | None, str | None]:
 
 async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
     """Gate the create on the workspace's plan. Returns an MCP ``_error_response``
-    when the plan lacks the Sites ("fabric") feature (so the agent surfaces the
+    when the plan lacks the Sites ("sites") feature (so the agent surfaces the
     upgrade message instead of a phantom-created site), or ``None`` when the plan
     is allowed.
 
     Delegates to the SHARED service gate (``sites.service.require_sites_plan``) so
     the in-process create path is gated by the SAME plan check + feature table as
-    the publish path and the HTTP ``require_plan_feature("fabric")`` dependency. A
-    team-plan workspace was the bug: create + publish ran in-process and bypassed
+    the publish path and the HTTP ``require_plan_feature("sites")`` dependency. A
+    free-plan workspace was the bug: create + publish ran in-process and bypassed
     the router gate, deploying a live site that GET /sites then 403'd."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites.service import require_sites_plan
@@ -266,8 +269,8 @@ async def _create_landing_site_handler(args: dict) -> dict:
             "contact, footer). You provide copy only; the tool builds the page."
         )
 
-    # Plan gate (Sites = "fabric"): reject a team-plan workspace here so the
-    # create can't bypass the router's require_plan_feature("fabric") gate.
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
     if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
         return gate
 
@@ -458,8 +461,8 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "and at least one section component."
         )
 
-    # Plan gate (Sites = "fabric"): reject a team-plan workspace here so the
-    # create can't bypass the router's require_plan_feature("fabric") gate.
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
     if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
         return gate
 

@@ -18,9 +18,14 @@
 #
 # Updated 2026-05-30 (follow-up item 4): added GET /sites/{site_id}/domains — an
 # authed, tenant-scoped read of the site's domains + statuses (same
-# require_plan_feature("fabric") router gate + require_action_any_workspace
+# require_plan_feature("sites") router gate + require_action_any_workspace
 # scoping as the other authed sites reads) so the Domains tab can rehydrate on
 # reload. A site in another workspace surfaces as a 404 (via the service _load).
+#
+# Updated 2026-06-25 (decouple-sites-from-fabric): the router plan gate moved from
+# require_plan_feature("fabric") to require_plan_feature("sites") — Sites now
+# unlocks on the consumer "sites" flag (go+), decoupled from the enterprise-only
+# Fabric ontology, which keeps the "fabric" flag.
 #
 # Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
 # added GET /sites/by-pocket/{pocket_id}/preview and
@@ -121,7 +126,7 @@ from pocketpaw_ee.sites.dto import (
 
 router = APIRouter(
     tags=["Sites"],
-    dependencies=[Depends(require_plan_feature("fabric"))],
+    dependencies=[Depends(require_plan_feature("sites"))],
 )
 
 

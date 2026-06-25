@@ -86,7 +86,7 @@ class Workspace(TimestampedDocument):
     name: str
     slug: Indexed(str, unique=True)  # type: ignore[valid-type]
     owner: str  # User ID (admin who created it)
-    plan: str = "team"  # from license: team | business | enterprise
+    plan: str = "free"  # consumer ladder: free | go | pro | pro_max | enterprise
     seats: int = 5
     settings: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     # Per-tenant white-label branding (WB-1). Top-level identity field, NOT

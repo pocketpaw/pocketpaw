@@ -17,8 +17,9 @@ Public API:
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
 - ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
-  the plan-feature gate dependency; returns "team" on any failure so the
-  dep fails open on plan rather than crashing with a 500.
+  the plan-feature gate dependency; returns None when the workspace is
+  missing/soft-deleted/malformed (the gate maps that to a 404) and
+  re-raises DB errors rather than silently downgrading a paying customer.
 - ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
   tier (BC-7). The billing subscription webhook is the only caller: a
   verified ``subscription.active`` upgrades to the subscribed tier and a

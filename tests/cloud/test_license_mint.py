@@ -68,11 +68,11 @@ def test_minted_key_verifies_with_dev_key():
 
 def test_minted_claims_match_request():
     key = mint.mint_license(
-        org="globex", plan="business", seats=42, exp="2030-12-31", features=["foo", "bar"]
+        org="globex", plan="pro", seats=42, exp="2030-12-31", features=["foo", "bar"]
     )
     payload = lic_mod.validate_license_key(key)
     assert payload.org == "globex"
-    assert payload.plan == "business"
+    assert payload.plan == "pro"
     assert payload.seats == 42
     assert payload.exp == "2030-12-31"
     assert payload.features == ["foo", "bar"]
@@ -122,7 +122,7 @@ def test_expired_key_rejected_at_gate(monkeypatch):
     from pocketpaw_ee.cloud._dev_license_key import DEV_PRIVATE_KEY_HEX
 
     past = (datetime.now(UTC) - timedelta(days=10)).strftime("%Y-%m-%d")
-    payload_str = json.dumps({"org": "acme", "plan": "team", "seats": 5, "exp": past})
+    payload_str = json.dumps({"org": "acme", "plan": "go", "seats": 5, "exp": past})
     sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(DEV_PRIVATE_KEY_HEX))
     sig = sk.sign(payload_str.encode()).hex()
     expired_key = base64.b64encode(f"{payload_str}.{sig}".encode()).decode()
@@ -184,7 +184,7 @@ def test_private_key_resolution_precedence(monkeypatch, tmp_path):
 
 
 def test_cli_mint_emits_verifiable_key(capsys, monkeypatch):
-    rc = mint.main(["mint", "--org", "acme", "--plan", "team", "--seats", "7", "--days", "30"])
+    rc = mint.main(["mint", "--org", "acme", "--plan", "go", "--seats", "7", "--days", "30"])
     assert rc == 0
     out = capsys.readouterr().out.strip()
     payload = lic_mod.validate_license_key(out)
@@ -193,7 +193,7 @@ def test_cli_mint_emits_verifiable_key(capsys, monkeypatch):
 
 
 def test_cli_verify_roundtrip(capsys):
-    key = mint.mint_license(org="acme", plan="team", seats=5, days=30)
+    key = mint.mint_license(org="acme", plan="go", seats=5, days=30)
     rc = mint.main(["verify", key])
     assert rc == 0
     assert "VALID" in capsys.readouterr().out

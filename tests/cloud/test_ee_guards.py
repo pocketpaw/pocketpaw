@@ -1,5 +1,10 @@
 # Tests for ee/guards RBAC + ABAC module.
 # Created: 2026-04-10
+# Updated 2026-06-25 (feat/consumer-plan-ladder): rekeyed plan strings under test
+#   from {team, business, enterprise} to the consumer ladder {free, go, pro,
+#   pro_max, enterprise}. PolicyContext.plan now defaults to "free" (the base
+#   floor) instead of "team"; the PLAN_FEATURES table sanity checks assert the new
+#   superset ladder (free < go < pro < pro_max < enterprise).
 
 from __future__ import annotations
 
@@ -184,14 +189,14 @@ class TestPolicyContext:
         with pytest.raises((AttributeError, TypeError)):
             ctx.user_id = "u2"  # type: ignore[misc]
 
-    def test_defaults_plan_is_team(self):
+    def test_defaults_plan_is_free(self):
         ctx = PolicyContext(
             user_id="u1",
             workspace_id="ws1",
             role=WorkspaceRole.MEMBER,
             action="pocket.create",
         )
-        assert ctx.plan == "team"
+        assert ctx.plan == "free"
 
     def test_defaults_optional_fields_are_none(self):
         ctx = PolicyContext(
@@ -217,26 +222,26 @@ class TestEvaluatePolicy:
 
     # --- Plan feature gates ---
 
-    def test_plan_gate_allows_team_feature_pockets(self):
+    def test_plan_gate_allows_base_feature_pockets(self):
         ctx = PolicyContext(
             user_id="u1",
             workspace_id="ws1",
             role=WorkspaceRole.ADMIN,
             action="pocket.create",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is True
 
     def test_plan_gate_blocks_missing_feature_automations(self):
         # "automation.*" prefix maps to the "automations" feature,
-        # which requires business/enterprise plan.
+        # which requires the pro plan or higher.
         ctx = PolicyContext(
             user_id="u1",
             workspace_id="ws1",
             role=WorkspaceRole.ADMIN,
             action="automation.create",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is False
@@ -267,7 +272,7 @@ class TestEvaluatePolicy:
             workspace_id="ws1",
             role=WorkspaceRole.MEMBER,
             action="pocket.create",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is True
@@ -309,7 +314,7 @@ class TestEvaluatePolicy:
             workspace_id="ws1",
             role=WorkspaceRole.ADMIN,
             action="pocket.create",
-            plan="team",
+            plan="go",
             agent_id="agent-99",
             agent_creator_role=WorkspaceRole.ADMIN,
         )
@@ -325,7 +330,7 @@ class TestEvaluatePolicy:
             workspace_id="ws1",
             role=WorkspaceRole.MEMBER,
             action="custom.unknown_action",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is True
@@ -339,7 +344,7 @@ class TestEvaluatePolicy:
             workspace_id="ws1",
             role=WorkspaceRole.MEMBER,
             action="tool.shell",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is False
@@ -352,7 +357,7 @@ class TestEvaluatePolicy:
             workspace_id="ws1",
             role=WorkspaceRole.MEMBER,
             action="tool.web_search",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is True
@@ -364,7 +369,7 @@ class TestEvaluatePolicy:
             workspace_id="ws1",
             role=WorkspaceRole.ADMIN,
             action="tool.shell",
-            plan="team",
+            plan="go",
         )
         result = evaluate_policy(ctx)
         assert result.allowed is True
@@ -395,16 +400,37 @@ class TestPolicyResult:
 
 
 class TestPlanFeatureTable:
-    """Validate the PLAN_FEATURES table contract."""
+    """Validate the PLAN_FEATURES table contract (consumer ladder)."""
 
-    def test_team_has_core_four(self):
-        assert {"pockets", "sessions", "agents", "memory"} <= PLAN_FEATURES["team"]
+    def test_free_is_chat_and_pockets_only(self):
+        assert PLAN_FEATURES["free"] == {"pockets", "sessions"}
 
-    def test_business_superset_of_team(self):
-        assert PLAN_FEATURES["team"] <= PLAN_FEATURES["business"]
+    def test_go_has_core_four(self):
+        assert {"pockets", "sessions", "agents", "memory"} <= PLAN_FEATURES["go"]
 
-    def test_enterprise_superset_of_business(self):
-        assert PLAN_FEATURES["business"] <= PLAN_FEATURES["enterprise"]
+    def test_pro_has_automations_and_sites(self):
+        assert "automations" in PLAN_FEATURES["pro"]
+        assert "sites" in PLAN_FEATURES["pro"]
+
+    def test_sites_flag_is_go_onward(self):
+        # Sites/Leads gate on the dedicated "sites" flag (go+), NOT "fabric".
+        assert "sites" not in PLAN_FEATURES["free"]
+        for tier in ("go", "pro", "pro_max", "enterprise"):
+            assert "sites" in PLAN_FEATURES[tier], tier
+
+    def test_fabric_ontology_flag_is_enterprise_only(self):
+        # After decoupling, the "fabric" flag gates the enterprise-only ontology.
+        for tier in ("free", "go", "pro", "pro_max"):
+            assert "fabric" not in PLAN_FEATURES[tier], tier
+        assert "fabric" in PLAN_FEATURES["enterprise"]
+
+    def test_consumer_ladder_nests_on_capability(self):
+        # go ⊆ pro ⊆ pro_max ⊆ enterprise still holds (each tier only ADDS), even
+        # though "fabric" is enterprise-only — enterprise adds it on top of pro_max.
+        assert PLAN_FEATURES["free"] <= PLAN_FEATURES["go"]
+        assert PLAN_FEATURES["go"] <= PLAN_FEATURES["pro"]
+        assert PLAN_FEATURES["pro"] <= PLAN_FEATURES["pro_max"]
+        assert PLAN_FEATURES["pro_max"] <= PLAN_FEATURES["enterprise"]
 
     def test_enterprise_has_audit_and_sso(self):
         assert "audit" in PLAN_FEATURES["enterprise"]
@@ -456,7 +482,7 @@ def _inject_workspace_state(
     user_id: str = "u1",
     workspace_id: str = "ws1",
     role: str = "admin",
-    plan: str = "team",
+    plan: str = "go",
 ) -> None:
     """Populate request.state with the fields deps.py reads.
 
@@ -471,7 +497,7 @@ def _inject_workspace_state(
 def _role_check_app(
     *,
     role: str = "admin",
-    plan: str = "team",
+    plan: str = "go",
     workspace_id: str = "ws1",
     minimum_role: str = "admin",
 ) -> FastAPI:
@@ -497,7 +523,7 @@ def _role_check_app(
 
 def _feature_check_app(
     *,
-    plan: str = "team",
+    plan: str = "go",
     feature: str = "automations",
     workspace_id: str = "ws1",
 ) -> FastAPI:
@@ -593,7 +619,7 @@ class TestRequirePlanFeatureDep:
     """Tests for the require_plan_feature FastAPI dependency."""
 
     def test_passes_when_plan_has_feature(self):
-        app = _feature_check_app(plan="business", feature="automations")
+        app = _feature_check_app(plan="pro", feature="automations")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/feature-check",
@@ -602,7 +628,7 @@ class TestRequirePlanFeatureDep:
         assert resp.status_code == 200
 
     def test_returns_403_when_plan_lacks_feature(self):
-        app = _feature_check_app(plan="team", feature="automations")
+        app = _feature_check_app(plan="go", feature="automations")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get(
             "/feature-check",
@@ -666,7 +692,7 @@ class TestRequirePolicyDep:
         assert resp.status_code == 200
 
     def test_blocks_plan_feature(self):
-        app = _policy_check_app(role="admin", plan="team", action="automation.create")
+        app = _policy_check_app(role="admin", plan="go", action="automation.create")
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/policy-check", headers={"X-Workspace-Id": "ws1"})
         assert resp.status_code == 403
