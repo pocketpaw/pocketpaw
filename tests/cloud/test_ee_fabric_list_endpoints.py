@@ -7,6 +7,10 @@
 # Updated: 2026-05-07 (fix/test-fixtures-auth-context) — seed auth context in
 #   the client fixture so route tests pass against the workspace RBAC guards
 #   added in #1059 and the require_plan_feature("fabric") gate added in #1060.
+# Updated: 2026-06-25 (decouple-sites-from-fabric) — the Fabric ONTOLOGY API
+#   stays gated on require_plan_feature("fabric"), which is now ENTERPRISE-ONLY
+#   (Sites/Leads were decoupled onto the "sites" flag). The fixture therefore
+#   patches get_workspace_plan to "enterprise" so the ontology gate passes.
 
 from __future__ import annotations
 
@@ -47,9 +51,10 @@ def client(tmp_path: Path, monkeypatch) -> TestClient:
       - require_license: no-op so license validation doesn't gate tests.
       - current_active_user: returns a fake member of ws-test.
       - current_workspace_id: returns 'ws-test'.
-      - workspace_service.get_workspace_plan: returns 'business' so the
-        require_plan_feature('fabric') gate added in #1060 passes (fabric
-        is a business+ feature in PLAN_FEATURES).
+      - workspace_service.get_workspace_plan: returns 'enterprise' so the
+        require_plan_feature('fabric') gate passes (the Fabric ontology is an
+        ENTERPRISE-only feature in PLAN_FEATURES after Sites/Leads were
+        decoupled onto the 'sites' flag).
     """
     # Point the module-level store at the tmp db. The router always calls
     # _store() lazily so setattr is enough.
@@ -58,7 +63,7 @@ def client(tmp_path: Path, monkeypatch) -> TestClient:
 
     import pocketpaw_ee.cloud.workspace.service as ws_svc
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="business"))
+    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="enterprise"))
 
     fake_user = _FakeUser()
     app = FastAPI()

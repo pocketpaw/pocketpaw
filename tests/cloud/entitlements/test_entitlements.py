@@ -16,6 +16,11 @@
 # with a TestClient + overridden deps (license waived, workspace pinned).
 #
 # Created 2026-06-24 (integration/billing-credits, BC-6): new test module.
+# Updated 2026-06-25 (feat/consumer-plan-ladder): rekeyed the plan strings under
+#   test from {free, team, business, enterprise} to the consumer ladder
+#   {free, go, pro, pro_max, enterprise}. The business-tier assertions now target
+#   ``pro`` (its consumer-ladder successor: the tier that carries fabric +
+#   automations + knowledge_base). Fallback-to-free invariants are unchanged.
 
 from __future__ import annotations
 
@@ -51,20 +56,20 @@ def patch_plan(monkeypatch: pytest.MonkeyPatch):
 # ---------------------------------------------------------------------------
 
 
-async def test_business_plan_resolves_business_features_and_allotment(patch_plan):
-    patch_plan("business")
+async def test_pro_plan_resolves_pro_features_and_allotment(patch_plan):
+    patch_plan("pro")
     ent = await entitlements.resolve_entitlements(WS)
     assert ent.workspace_id == WS
-    assert ent.plan == "business"
-    assert set(ent.features) == PLAN_FEATURES["business"]
+    assert ent.plan == "pro"
+    assert set(ent.features) == PLAN_FEATURES["pro"]
     assert ent.monthly_credit_allotment > 0
-    # The catalog's business allotment is exactly what resolves.
+    # The catalog's pro allotment is exactly what resolves.
     from pocketpaw_ee.cloud.billing import plans
 
-    assert ent.monthly_credit_allotment == plans.get_plan("business").monthly_credit_allotment
+    assert ent.monthly_credit_allotment == plans.get_plan("pro").monthly_credit_allotment
 
 
-@pytest.mark.parametrize("plan", ["free", "team", "business", "enterprise"])
+@pytest.mark.parametrize("plan", ["free", "go", "pro", "pro_max", "enterprise"])
 async def test_every_known_plan_resolves_its_own_features(patch_plan, plan):
     patch_plan(plan)
     ent = await entitlements.resolve_entitlements(WS)
@@ -112,7 +117,7 @@ async def test_resolve_reads_real_workspace_plan_and_isolates_tenants(mongo_db):
     """Two workspaces with different plans each resolve their OWN plan only."""
     from pocketpaw_ee.cloud.models.workspace import Workspace
 
-    biz_ws = Workspace(name="Acme", slug="acme-biz", owner="u-owner", plan="business")
+    biz_ws = Workspace(name="Acme", slug="acme-pro", owner="u-owner", plan="pro")
     await biz_ws.insert()
     free_ws = Workspace(name="Beta", slug="beta-free", owner="u-owner2", plan="free")
     await free_ws.insert()
@@ -121,11 +126,11 @@ async def test_resolve_reads_real_workspace_plan_and_isolates_tenants(mongo_db):
     free_ent = await entitlements.resolve_entitlements(str(free_ws.id))
 
     # Each resolves its OWN plan — no cross-tenant leak.
-    assert biz_ent.plan == "business"
-    assert set(biz_ent.features) == PLAN_FEATURES["business"]
+    assert biz_ent.plan == "pro"
+    assert set(biz_ent.features) == PLAN_FEATURES["pro"]
     assert free_ent.plan == "free"
     assert set(free_ent.features) == PLAN_FEATURES["free"]
-    # The free tenant did NOT pick up the business tenant's paid features.
+    # The free tenant did NOT pick up the pro tenant's paid features.
     assert "fabric" not in free_ent.features
 
 
@@ -154,13 +159,13 @@ def entitlements_client() -> TestClient:
 
 
 def test_get_entitlements_returns_resolved_entitlements(entitlements_client, patch_plan):
-    patch_plan("business")
+    patch_plan("pro")
     resp = entitlements_client.get("/entitlements")
     assert resp.status_code == 200
     body = resp.json()
     assert body["workspace_id"] == WS
-    assert body["plan"] == "business"
-    assert set(body["features"]) == PLAN_FEATURES["business"]
+    assert body["plan"] == "pro"
+    assert set(body["features"]) == PLAN_FEATURES["pro"]
     assert body["features"] == sorted(body["features"])  # deterministic JSON
     assert body["monthly_credit_allotment"] > 0
 

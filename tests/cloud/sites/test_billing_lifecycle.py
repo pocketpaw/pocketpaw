@@ -93,7 +93,7 @@ class _FailingBillingProvider:
         raise RuntimeError("dodo checkout open failed")
 
 
-async def _make_workspace(plan: str = "business") -> str:
+async def _make_workspace(plan: str = "pro") -> str:
     from pocketpaw_ee.cloud.models.workspace import Workspace
 
     ws = Workspace(
@@ -136,7 +136,7 @@ async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monke
     big_blob = "x" * (sites_service._MAX_PENDING_DEPLOY_INPUT_BYTES + 1)
     ripple_spec = {"bloat": big_blob}
 
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws, ripple_spec=ripple_spec)
 
     provider = _RecordingBillingProvider()
@@ -167,7 +167,7 @@ async def test_oversized_deploy_inputs_raise_and_persist_nothing(mongo_db, monke
 
 async def test_pending_publish_persists_doc_with_subscription_id(mongo_db, monkeypatch):
     _enable_pro_product(monkeypatch)
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     provider = _RecordingBillingProvider()
@@ -196,7 +196,7 @@ async def test_pending_publish_persists_doc_with_subscription_id(mongo_db, monke
 
 async def test_checkout_failure_leaves_no_orphan_doc(mongo_db, monkeypatch):
     _enable_pro_product(monkeypatch)
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     provider = _FailingBillingProvider()
@@ -219,7 +219,7 @@ async def test_checkout_failure_leaves_no_orphan_doc(mongo_db, monkeypatch):
 
 
 async def test_free_publish_still_works(mongo_db):
-    ws = await _make_workspace(plan="business")
+    ws = await _make_workspace(plan="pro")
     pocket_id = await _make_pocket(workspace_id=ws)
 
     gen = _RecordingGenerator()

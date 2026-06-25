@@ -8,6 +8,22 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-21 (DSV-5 — dynamic svelte sites write-side): build() now SPLITS
+# a svelte pocket's ``source`` content envelope before sending it to the generator.
+# A DYNAMIC svelte pocket stores its live-data bindings
+# (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the same
+# ``source`` dict that holds the ``{path: contents}`` SvelteKit files (the contract
+# DSV-2b's read assumes). The generator's DSV-1 ``GenerateInput`` expects the
+# bindings as FLAT siblings alongside ``source`` (``input.objects`` /
+# ``input.sources`` / ``input.actions`` / ``input.auth`` — what ``parseBindings``
+# reads), NOT nested inside ``source`` (``materializeSource`` writes every
+# ``source`` key to disk as a file, so a binding key mixed in would break the
+# build). ``_split_svelte_source`` peels the binding keys out: the file map goes on
+# ``input.source`` and the bindings spread as flat siblings. A STATIC svelte pocket
+# carries no binding keys, so the split is a no-op and the wire bytes are unchanged.
+# ``build``/``_build_one``'s ``source`` param is widened to ``dict[str, Any]`` to
+# carry the (list/bool) binding values.
+#
 # Updated 2026-06-19 (fix/sites-preview-fresh-build, P0a + P1a — the #1 Paw Sites
 # bug: the editable PREVIEW served STALE anchorless HTML so the hover edit-pill
 # never appeared). ROOT CAUSE: PERF-4 overloaded the ``smoke`` flag — it gated
@@ -152,6 +168,44 @@ _INSTALL_INPUT_FILES = ("package.json", "bun.lock", "bun.lockb", "package-lock.j
 # LIVE publish fail-gates on these; a preview build tolerates them (the live
 # publish still gates + rolls back, so a broken edit can never go live).
 _WORKERD_SSR_MARKERS = ("window is not defined", "document is not defined", "No such module")
+
+# DSV-5: a DYNAMIC svelte pocket stores its live-data bindings as SIBLING keys on
+# the same ``source`` content envelope that carries the ``{path: contents}``
+# SvelteKit files (DSV-2b reads ``objects`` off exactly this envelope, and the
+# publish/promote switch versions the whole ``source`` dict). These are the
+# binding keys the generator's DSV-1 ``GenerateInput`` expects as FLAT siblings
+# alongside ``source`` (not nested inside it): ``objects`` (the D1 table defs),
+# ``sources`` (reads), ``actions`` (writes) — lists — and ``auth`` — a bool.
+_SVELTE_BINDING_KEYS = ("objects", "sources", "actions", "auth")
+
+
+def _split_svelte_source(
+    source: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a svelte ``source`` content envelope into ``(files, bindings)``
+    (DSV-5).
+
+    A dynamic svelte pocket persists its live-data bindings
+    (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the SAME
+    dict that holds the ``{relative_path: file_contents}`` SvelteKit files. The
+    generator can't receive them mixed together: ``materializeSource`` writes
+    EVERY ``source`` key to disk as a file (``writeFile(path, contents)`` keyed on
+    the key), so a binding key like ``objects`` (a list value) would be treated as
+    a file path and break the build. DSV-1's ``parseBindings`` instead reads the
+    bindings as FLAT siblings on ``GenerateInput`` (``input.objects`` /
+    ``input.sources`` / ``input.actions`` / ``input.auth``), NOT nested under
+    ``input.source``.
+
+    So this peels the binding keys OUT of the envelope: it returns the file map
+    (everything that is NOT a recognized binding key — written to ``input.source``)
+    and the bindings dict (only the recognized keys that are present — spread as
+    flat siblings on ``GenerateInput``). A STATIC svelte pocket carries no binding
+    keys, so ``bindings`` is empty and ``files`` is the unchanged source map — the
+    pre-DSV-5 wire bytes are preserved exactly."""
+    src = source or {}
+    files = {k: v for k, v in src.items() if k not in _SVELTE_BINDING_KEYS}
+    bindings = {k: src[k] for k in _SVELTE_BINDING_KEYS if k in src}
+    return files, bindings
 
 
 def reap_build_workerd(project_dir: str) -> int:
@@ -446,7 +500,7 @@ class GeneratorClient:
         capture_api_base: str,
         capture_signed_key: str,
         engine: str = "ripple",
-        source: dict[str, str] | None = None,
+        source: dict[str, Any] | None = None,
         builder_origin: str | None = None,
         pocket_id: str | None = None,
         smoke: bool = True,
@@ -462,6 +516,18 @@ class GeneratorClient:
         carries ``rippleSpec`` and OMITS ``source`` (gaining only the
         ``engine: "ripple"`` tag). ``siteConfig`` + ``theme`` are sent on both
         tracks unchanged. Stages 1, 3-8 (install/smoke/...) are track-agnostic.
+
+        DSV-5: a DYNAMIC svelte pocket's ``source`` envelope ALSO carries its
+        live-data bindings (``objects``/``sources``/``actions``/``auth``) as
+        SIBLING keys on the same dict as the files. build() SPLITS the envelope
+        (``_split_svelte_source``) before sending: the file map goes on
+        ``input.source`` and the bindings are spread as FLAT siblings on the
+        generator input (``input.objects`` / ``input.sources`` / ``input.actions``
+        / ``input.auth``) — the exact shape DSV-1's ``parseBindings`` reads, NOT
+        nested under ``source`` (materializeSource would otherwise try to write a
+        binding key as a file and break the build). A STATIC svelte pocket carries
+        no binding keys, so the split is a no-op: ``input.source`` is the unchanged
+        file map and no binding siblings are added (pre-DSV-5 wire bytes).
 
         ``builder_origin`` (SE-2b) makes the site EDITABLE: when set, it rides
         ``siteConfig.builderOrigin`` and the paw-sites generator (SE-1) injects
@@ -536,7 +602,7 @@ class GeneratorClient:
         capture_api_base: str,
         capture_signed_key: str,
         engine: str,
-        source: dict[str, str] | None,
+        source: dict[str, Any] | None,
         builder_origin: str | None,
         pocket_id: str | None,
         smoke: bool,
@@ -569,7 +635,19 @@ class GeneratorClient:
             "siteConfig": site_config,
         }
         if engine == "svelte":
-            input_json["source"] = source or {}
+            # DSV-5: a DYNAMIC svelte pocket carries its live-data bindings
+            # (objects/sources/actions/auth) as SIBLING keys on the same ``source``
+            # envelope that holds the {path: contents} files. Peel them out: the
+            # file map goes on ``input.source`` (materializeSource writes each key
+            # as a file, so a binding key mixed in would break the build), and the
+            # bindings are spread as FLAT siblings on GenerateInput — the exact
+            # shape DSV-1's parseBindings reads (``input.objects`` / ``input.sources``
+            # / ``input.actions`` / ``input.auth``), NOT nested under ``source``. A
+            # STATIC svelte pocket has no binding keys → ``bindings`` is empty and
+            # ``input.source`` is the unchanged file map (pre-DSV-5 wire bytes).
+            files, bindings = _split_svelte_source(source)
+            input_json["source"] = files
+            input_json.update(bindings)
         else:
             input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)

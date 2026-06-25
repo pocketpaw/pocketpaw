@@ -5,6 +5,16 @@ message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
 
+Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``post_agent_chat``
+threads the authenticated ``workspace_id`` into ``resolve_scope_context`` via
+``expected_workspace_id``, matching the run worker. The HTTP route already
+validates the workspace (the ``current_workspace_id`` dependency rejects an
+empty one with 400); passing it lets the resolver fall back to it when a scope
+doc's ``workspace`` field is empty and reject a scope whose non-empty doc
+workspace disagrees with the caller's (cross-tenant guard). Keeps the
+synchronous request path consistent with the worker that actually attaches the
+run identity.
+
 Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
 run-start. This module is the SINGLE chokepoint that starts a new chat run
 (``create_run`` + executor submit), so the credit gate sits here, right after
@@ -136,8 +146,18 @@ async def post_agent_chat(
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
     try:
+        # Thread the authenticated workspace (fix/worker-trusts-spec-workspace).
+        # The HTTP route already validated it via ``current_workspace_id``; the
+        # resolver uses it the same way the worker does — fall back when the
+        # scope doc's ``workspace`` is empty, reject a scope whose non-empty doc
+        # workspace disagrees with the caller's (cross-tenant guard). Keeps the
+        # synchronous path consistent with the run worker.
         ctx = await resolve_scope_context(
-            scope=scope, scope_id=scope_id, user_id=user_id, agent_id_hint=body.agent_id
+            scope=scope,
+            scope_id=scope_id,
+            user_id=user_id,
+            agent_id_hint=body.agent_id,
+            expected_workspace_id=workspace_id,
         )
         ctx.intent = body.intent
     except InvalidScope:

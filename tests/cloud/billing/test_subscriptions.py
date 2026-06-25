@@ -1,10 +1,14 @@
 # tests/cloud/billing/test_subscriptions.py — proves the BC-7 Subscription-
 # primitive contract end-to-end:
-#   1. ``subscribe(ws, "business")`` opens a Dodo recurring checkout with the
+#   1. ``subscribe(ws, "pro")`` opens a Dodo recurring checkout with the
 #      right product id + {workspace_id, plan_key} metadata, returning the hosted
 #      url (the SDK client mocked).
 #   2. a VERIFIED ``subscription.active`` grants the tier's monthly allotment AND
 #      upgrades ``Workspace.plan`` — entitlements then resolve to that tier.
+# Updated 2026-06-25 (feat/consumer-plan-ladder): rekeyed the tiers exercised here
+#   from {team, business} to the consumer ladder {go, pro}. The product map is now
+#   {go: prod_go_recurring, pro: prod_pro_recurring}; the active/renew/cancel flow
+#   subscribes a workspace to ``pro`` (the business-tier successor).
 #   3. a VERIFIED ``subscription.renewed`` (a NEW event id) grants the allotment
 #      AGAIN, ADDITIVELY — proving ROLLOVER (balance == 2x allotment after
 #      active + renewed).
@@ -50,7 +54,7 @@ from standardwebhooks import Webhook
 # A valid Standard-Webhooks secret: ``whsec_`` + base64 of a 32-byte key.
 SECRET = "whsec_" + base64.b64encode(b"billing-test-secret-key-32bytes!").decode()
 # The plan -> Dodo recurring product mapping the provider/service resolve against.
-PLAN_PRODUCTS = {"team": "prod_team_recurring", "business": "prod_business_recurring"}
+PLAN_PRODUCTS = {"go": "prod_go_recurring", "pro": "prod_pro_recurring"}
 SUB_ID = "sub_dodo_abc123"
 
 
@@ -106,8 +110,8 @@ def _subscription_body(
     *,
     event_type: str,
     workspace_id: str,
-    plan_key: str = "business",
-    product_id: str = "prod_business_recurring",
+    plan_key: str = "pro",
+    product_id: str = "prod_pro_recurring",
     subscription_id: str = SUB_ID,
 ) -> str:
     """A Dodo ``subscription.*`` webhook body (the real envelope shape).
@@ -154,17 +158,17 @@ async def test_subscribe_creates_dodo_subscription_with_product_and_metadata(
     monkeypatch.setattr(dodo_mod, "AsyncDodoPayments", MagicMock(return_value=fake_client))
 
     result = await billing.subscribe(
-        workspace_id=ws, user_id="u1", plan_key="business", provider=_provider()
+        workspace_id=ws, user_id="u1", plan_key="pro", provider=_provider()
     )
     assert result == {"checkout_url": "https://checkout.dodopayments.test/sub/abc123"}
 
     # The Dodo client was called with the business recurring product id and the
     # workspace_id + plan_key on metadata (so the renewal webhook can route back).
     _, kwargs = fake_client.subscriptions.create.call_args
-    assert kwargs["product_id"] == "prod_business_recurring"
+    assert kwargs["product_id"] == "prod_pro_recurring"
     assert kwargs["payment_link"] is True
     assert kwargs["metadata"]["workspace_id"] == ws
-    assert kwargs["metadata"]["plan_key"] == "business"
+    assert kwargs["metadata"]["plan_key"] == "pro"
 
 
 async def test_subscribe_rejects_unknown_plan(mongo_db, patch_plan_products):
@@ -186,9 +190,7 @@ async def test_subscribe_rejects_plan_with_no_product_configured(mongo_db, monke
     from pocketpaw_ee.cloud._core.errors import ValidationError
 
     with pytest.raises(ValidationError) as exc:
-        await billing.subscribe(
-            workspace_id=ws, user_id="u1", plan_key="business", provider=_provider()
-        )
+        await billing.subscribe(workspace_id=ws, user_id="u1", plan_key="pro", provider=_provider())
     assert exc.value.code == "billing.plan_product_unconfigured"
 
 
@@ -200,7 +202,7 @@ async def test_subscribe_rejects_plan_with_no_product_configured(mongo_db, monke
 
 async def test_active_grants_allotment_and_upgrades_plan(mongo_db):
     ws = await _make_workspace(plan="free")
-    allotment = plans.get_plan("business").monthly_credit_allotment
+    allotment = plans.get_plan("pro").monthly_credit_allotment
     assert allotment > 0
 
     assert await credits.balance(ws) == 0
@@ -217,7 +219,7 @@ async def test_active_grants_allotment_and_upgrades_plan(mongo_db):
 
     # Workspace.plan was upgraded to business, so entitlements resolve to business.
     ent = await entitlements.resolve_entitlements(ws)
-    assert ent.plan == "business"
+    assert ent.plan == "pro"
     assert ent.monthly_credit_allotment == allotment
 
     # A Subscription record was written tracking the gateway lifecycle.
@@ -225,7 +227,7 @@ async def test_active_grants_allotment_and_upgrades_plan(mongo_db):
     assert len(subs) == 1
     assert subs[0].gateway == "dodo"
     assert subs[0].gateway_subscription_id == SUB_ID
-    assert subs[0].plan_key == "business"
+    assert subs[0].plan_key == "pro"
     assert subs[0].status == "active"
 
 
@@ -240,9 +242,9 @@ async def test_active_emits_subscription_granted_event(mongo_db, recording_bus):
     assert len(captured) == 1
     data = captured[0].data
     assert data["workspace_id"] == ws
-    assert data["plan_key"] == "business"
+    assert data["plan_key"] == "pro"
     assert data["subscription_id"] == SUB_ID
-    assert data["amount_credits"] == plans.get_plan("business").monthly_credit_allotment
+    assert data["amount_credits"] == plans.get_plan("pro").monthly_credit_allotment
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +256,7 @@ async def test_active_emits_subscription_granted_event(mongo_db, recording_bus):
 
 async def test_renewal_grants_additively_proving_rollover(mongo_db):
     ws = await _make_workspace(plan="free")
-    allotment = plans.get_plan("business").monthly_credit_allotment
+    allotment = plans.get_plan("pro").monthly_credit_allotment
 
     # Month 1 — activation grants once.
     active_body = _subscription_body(event_type="subscription.active", workspace_id=ws)
@@ -286,7 +288,7 @@ async def test_renewal_grants_additively_proving_rollover(mongo_db):
 
 async def test_replay_same_renewal_event_id_is_noop(mongo_db, recording_bus):
     ws = await _make_workspace(plan="free")
-    allotment = plans.get_plan("business").monthly_credit_allotment
+    allotment = plans.get_plan("pro").monthly_credit_allotment
 
     # First activation grants.
     active_body = _subscription_body(event_type="subscription.active", workspace_id=ws)
@@ -330,7 +332,7 @@ async def test_replay_same_renewal_event_id_is_noop(mongo_db, recording_bus):
 
 async def test_cancellation_reverts_plan_without_clawing_back_credits(mongo_db):
     ws = await _make_workspace(plan="free")
-    allotment = plans.get_plan("business").monthly_credit_allotment
+    allotment = plans.get_plan("pro").monthly_credit_allotment
 
     # Activate: plan -> business, allotment granted.
     active_body = _subscription_body(event_type="subscription.active", workspace_id=ws)
@@ -340,7 +342,7 @@ async def test_cancellation_reverts_plan_without_clawing_back_credits(mongo_db):
         provider=_provider(),
     )
     assert await credits.balance(ws) == allotment
-    assert (await entitlements.resolve_entitlements(ws)).plan == "business"
+    assert (await entitlements.resolve_entitlements(ws)).plan == "pro"
 
     # Cancel: plan reverts to free; the granted credits are NOT clawed back.
     cancel_body = _subscription_body(event_type="subscription.cancelled", workspace_id=ws)
@@ -373,7 +375,7 @@ async def test_cancellation_reverts_plan_without_clawing_back_credits(mongo_db):
 
 async def test_provider_parses_subscription_event_fields():
     body = _subscription_body(
-        event_type="subscription.active", workspace_id="ws_parse", plan_key="team"
+        event_type="subscription.active", workspace_id="ws_parse", plan_key="go"
     )
     headers = _sign(body, msg_id="evt_parse_sub_1")
     event = _provider().verify_and_parse_webhook(payload=body.encode(), headers=headers)
@@ -384,7 +386,7 @@ async def test_provider_parses_subscription_event_fields():
     assert event.event_id == "evt_parse_sub_1"
     assert event.type == "subscription.active"
     assert event.workspace_id == "ws_parse"
-    assert event.plan_key == "team"
+    assert event.plan_key == "go"
     assert event.subscription_id == SUB_ID
 
 
@@ -398,14 +400,14 @@ async def test_provider_reverse_maps_product_id_when_plan_key_missing():
             "timestamp": datetime.now(UTC).isoformat(),
             "data": {
                 "subscription_id": SUB_ID,
-                "product_id": "prod_business_recurring",
+                "product_id": "prod_pro_recurring",
                 "metadata": {"workspace_id": "ws_rev"},  # NO plan_key
             },
         }
     )
     headers = _sign(body, msg_id="evt_reverse_1")
     event = _provider().verify_and_parse_webhook(payload=body.encode(), headers=headers)
-    assert event.plan_key == "business"  # recovered from product_id reverse-map
+    assert event.plan_key == "pro"  # recovered from product_id reverse-map
 
 
 # ---------------------------------------------------------------------------
@@ -417,11 +419,11 @@ async def test_provider_reverse_maps_product_id_when_plan_key_missing():
 
 async def test_empty_subscription_id_does_not_corrupt_cross_tenant(mongo_db):
     # Distinct starting plans → distinct workspace slugs (the helper derives the
-    # slug from the plan, and slug is uniquely indexed). Both are below business,
-    # so the active event upgrades each to business.
+    # slug from the plan, and slug is uniquely indexed). Both are below pro,
+    # so the active event upgrades each to pro.
     ws_a = await _make_workspace(plan="free")
-    ws_b = await _make_workspace(plan="team")
-    allotment = plans.get_plan("business").monthly_credit_allotment
+    ws_b = await _make_workspace(plan="go")
+    allotment = plans.get_plan("pro").monthly_credit_allotment
     assert allotment > 0
 
     # Two DIFFERENT workspaces each get a verified active event carrying an EMPTY
@@ -449,8 +451,8 @@ async def test_empty_subscription_id_does_not_corrupt_cross_tenant(mongo_db):
     assert res_b == {"ok": True, "granted": True}
     assert await credits.balance(ws_a) == allotment
     assert await credits.balance(ws_b) == allotment
-    assert (await entitlements.resolve_entitlements(ws_a)).plan == "business"
-    assert (await entitlements.resolve_entitlements(ws_b)).plan == "business"
+    assert (await entitlements.resolve_entitlements(ws_a)).plan == "pro"
+    assert (await entitlements.resolve_entitlements(ws_b)).plan == "pro"
 
     # And NO Subscription audit row was written for either (the upsert is skipped
     # on a falsy id), so there is no cross-tenant overwrite — workspace A's audit

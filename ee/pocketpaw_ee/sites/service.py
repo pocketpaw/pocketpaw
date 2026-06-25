@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-25 (feat/paw-sites-prod-deploy, DEP-3 — graceful generator
+# failure): the publish path shells out to the paw-sites generator + bun, which in
+# a misconfigured deploy (an image missing the toolchain) raised a bare
+# FileNotFoundError / RuntimeError / SmokeGateFailed that escaped publish() as an
+# UNHANDLED 500 (the cloud error handler maps ONLY CloudError). New helper
+# ``_build_or_cloud_error`` wraps EVERY generator.build() call in the publish path
+# (the live build in ``_deploy_site_doc`` and the preview build in ``publish``) and
+# maps those build/install/smoke failures to ``Internal("sites.generator_failed")``
+# (a clean 5xx envelope with a reason), chaining the cause for logs. A CloudError
+# raised inside the build (an injected fake, the existing SmokeGateFailed-driven
+# rollback callers) is re-raised unchanged so its own status/code stand.
+#
 # Updated 2026-06-24 (feat/billing-lifecycle — charge-first hardening, review
 # loose ends A+B):
 #   * (A) ``_publish_pending_site`` now CAPS the serialized deploy-input size
@@ -65,7 +77,7 @@
 # ``SitePublished``. When the site tier has no configured Dodo recurring product
 # (v1 default) the sub init DEGRADES gracefully — the tier is recorded without a
 # live charge, never crashing the publish. The publish ENTITLEMENT gate is the
-# existing ``require_sites_plan`` (the "fabric" plan feature) ``publish`` already
+# existing ``require_sites_plan`` (the "sites" plan feature) ``publish`` already
 # runs FIRST, before any Site insert — a workspace lacking it raises Forbidden and
 # no Site is created. New seam ``_billing_provider`` on ``publish_pocket`` injects
 # a mock subscription provider in tests. A PREVIEW publish skips all of BC-9 (it
@@ -80,6 +92,18 @@
 # (or unset-tier) site resolves to an empty set and stays on the basic create
 # path, unchanged. ``site_plans`` is imported lazily inside ``add_domain``,
 # mirroring ``publish_pocket``.
+# Updated 2026-06-21 (DSV-2b — engine-appropriate objects read for svelte dynamic
+# sites): the data-read resolver ``_dynamic_pocket_objects`` now selects the
+# pocket's CONTENT ENVELOPE by engine before classifying / extracting ``objects``
+# — for ``engine == "svelte"`` it reads the dynamic bindings
+# (``objects``/``sources``/``actions``/``auth``) from the svelte ``source``
+# envelope, for ripple (the default) from ``rippleSpec``, mirroring the
+# ``version_content = (source if engine == "svelte" else ripple_spec)`` switch the
+# publish/promote path already uses. Without this a dynamic SVELTE pocket (whose
+# bindings live on ``source``, not ``rippleSpec``) showed NO tables in the Data
+# tab. ``_is_dynamic`` / ``_dynamic_objects`` are unchanged — they already operate
+# on "a content dict", so passing the engine-selected envelope is all that's
+# needed; ripple dynamic sites keep reading from ``rippleSpec`` (no regress).
 #
 # Updated 2026-06-20 (DS-3 — control-plane read of a dynamic site's D1 data):
 # added the operator data-view reads ``list_site_data_tables`` and
@@ -144,10 +168,10 @@
 # fresh per publish — only the on-disk build dir is reused per pocket.
 #
 # Updated 2026-06-17 (fix/sites-plan-gate-asymmetry): added require_sites_plan()
-# and call it at the top of publish() AND publish_pocket(). Sites is the "fabric"
-# plan feature; the REST router gates it with require_plan_feature("fabric"), but
-# the chat agent created + published sites IN-PROCESS via the sites_manager MCP
-# tools, which bypass the HTTP router. A team-plan workspace could therefore
+# and call it at the top of publish() AND publish_pocket(). Sites is the "sites"
+# plan feature (go+); the REST router gates it with require_plan_feature("sites"),
+# but the chat agent created + published sites IN-PROCESS via the sites_manager MCP
+# tools, which bypass the HTTP router. A free-plan workspace could therefore
 # deploy a live site that GET /sites then 403'd (write path ungated, read path
 # gated). The guard reads the plan from workspace_service.get_workspace_plan
 # against guards.abac.PLAN_FEATURES (same source of truth as the HTTP gate) and
@@ -380,7 +404,14 @@ from typing import Any
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from pocketpaw_ee.cloud._core.errors import Forbidden, NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import (
+    CloudError,
+    Forbidden,
+    Internal,
+    NotFound,
+    ValidationError,
+    with_cause,
+)
 from pocketpaw_ee.cloud.models.site import Site as _SiteDoc
 from pocketpaw_ee.cloud.models.site import SiteDomain as _SiteDomainDoc
 from pocketpaw_ee.sites.domain import HostnameStatus
@@ -408,15 +439,18 @@ _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
 # scope is the pocket it is published from.
 _VERSION_SCOPE_TYPE = "pocket"
 
-# Sites is a plan-gated feature: it unlocks with the "fabric" plan feature
-# (business+). The REST router (sites/router.py) gates every endpoint with
-# require_plan_feature("fabric"), but the chat agent creates + publishes sites
-# IN-PROCESS via the sites_manager MCP tools, which never pass through that HTTP
-# router. Without a service-level gate a team-plan workspace could create and
-# deploy a live site that GET /sites then 403'd — a created-but-invisible
-# resource. require_sites_plan() closes that asymmetry at the service chokepoint
-# so the in-process write paths are gated identically to HTTP.
-_SITES_PLAN_FEATURE = "fabric"
+# Sites is a plan-gated feature: it unlocks with the "sites" plan feature (go+ on
+# the consumer ladder — Paw Go gets a site). NOTE: this used to be the "fabric"
+# flag, but that flag was overloaded (it also gated the enterprise-only Fabric
+# ontology), so Sites + Leads were decoupled onto their own "sites" flag. The REST
+# router (sites/router.py) gates every endpoint with require_plan_feature("sites"),
+# but the chat agent creates + publishes sites IN-PROCESS via the sites_manager MCP
+# tools, which never pass through that HTTP router. Without a service-level gate a
+# free-plan workspace could create and deploy a live site that GET /sites then
+# 403'd — a created-but-invisible resource. require_sites_plan() closes that
+# asymmetry at the service chokepoint so the in-process write paths are gated
+# identically to HTTP.
+_SITES_PLAN_FEATURE = "sites"
 
 # charge-first (review fix A): cap the serialized size of the deploy inputs a
 # PENDING paid site stores on ``Site.pending_deploy_inputs``. A pathological
@@ -430,6 +464,66 @@ _MAX_PENDING_DEPLOY_INPUT_BYTES = 4_000_000
 
 def _default_bundle_reader(project_dir: str) -> bytes:
     return Path(project_dir, _WORKER_BUNDLE_REL).read_bytes()
+
+
+async def _build_or_cloud_error(
+    generator: GeneratorClient, *, map_smoke_gate: bool = True, **build_kwargs: Any
+) -> Any:
+    """Run ``generator.build(...)`` and map any build/install/smoke failure to a
+    ``CloudError`` so a publish never escapes as an UNHANDLED 500 (DEP-3).
+
+    The generator shells out to the paw-sites generator (paw-sites-gen) + bun. In a
+    misconfigured deploy (e.g. an image missing the toolchain — the bug this fix
+    addresses) ``build()`` raises a bare ``FileNotFoundError`` (no such binary on
+    PATH); on a non-zero generator step it raises ``RuntimeError``; a failed install
+    or the workerd SSR fail-gate raises ``SmokeGateFailed`` (a ``RuntimeError``
+    subclass). None of those are ``CloudError`` subclasses, so the cloud error
+    handler (which maps ONLY ``CloudError``) would let them surface as an opaque 500
+    with no machine-readable code. This maps them to ``Internal`` (``CloudError`` →
+    500 with code ``sites.generator_failed``) so the API returns a clean envelope
+    with a reason instead — and chains the cause for log context (the cause is never
+    leaked in the client envelope). ``CloudError`` raised inside the build is
+    re-raised unchanged so its own status/code/message stand.
+
+    ``map_smoke_gate`` (default True) controls whether ``SmokeGateFailed`` is mapped
+    too. The LIVE publish path (``_deploy_site_doc``) maps it — nothing downstream
+    catches it there, so it would escape as a 500. The PREVIEW/edit path passes
+    ``map_smoke_gate=False`` so ``SmokeGateFailed`` propagates RAW: the edit caller
+    (``edit_svelte_component``) catches it to roll the component source back to its
+    prior contents, a contract that must be preserved (mapping it to ``Internal``
+    would silently break that rollback)."""
+    from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+    try:
+        return await generator.build(**build_kwargs)
+    except CloudError:
+        # Already a clean envelope — let it stand (status/code/message preserved).
+        raise
+    except SmokeGateFailed as exc:
+        if not map_smoke_gate:
+            # Preview/edit path: let the caller's rollback-on-SmokeGateFailed run.
+            raise
+        logger.error("sites.publish: generator smoke gate failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.generator_failed",
+                "Site generation failed — the publishing toolchain is unavailable "
+                "or the build did not complete. See server logs for details.",
+            ),
+            exc,
+        ) from exc
+    except (FileNotFoundError, RuntimeError, OSError) as exc:
+        # Missing toolchain / non-zero generator step → a real server-side infra
+        # failure, so a 5xx with a reason (not a 4xx — the request was well-formed).
+        logger.error("sites.publish: generator build failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.generator_failed",
+                "Site generation failed — the publishing toolchain is unavailable "
+                "or the build did not complete. See server logs for details.",
+            ),
+            exc,
+        ) from exc
 
 
 def _preview_id(pocket_id: str) -> str:
@@ -733,13 +827,13 @@ def _to_response(doc: _SiteDoc, pattern: str = "") -> SiteResponse:
 
 async def require_sites_plan(workspace_id: str) -> None:
     """Raise cloud Forbidden('plan.feature_denied') unless the workspace's plan
-    includes the Sites ("fabric") feature.
+    includes the Sites ("sites") feature.
 
     The shared plan gate for the in-process site write paths (publish + the
     create MCP handlers). Reads the plan with the SAME source of truth
     (``workspace_service.get_workspace_plan``) and the SAME feature table
-    (``guards.abac.PLAN_FEATURES``) as the HTTP ``require_plan_feature("fabric")``
-    dependency, so a team-plan caller is denied identically whether it arrives
+    (``guards.abac.PLAN_FEATURES``) as the HTTP ``require_plan_feature("sites")``
+    dependency, so a free-plan caller is denied identically whether it arrives
     over REST or through the chat agent. A missing workspace surfaces as NotFound
     (mirroring the HTTP gate), and the error message names the minimum plan that
     unlocks Sites. Imports are local to keep the sites service importable without
@@ -752,13 +846,15 @@ async def require_sites_plan(workspace_id: str) -> None:
         raise NotFound("workspace", workspace_id)
     if _SITES_PLAN_FEATURE not in PLAN_FEATURES.get(plan, set()):
         # Name the minimum plan that unlocks the feature, like the HTTP gate.
+        # Walks the consumer ladder cheapest-first; ``sites`` lives on go+, so
+        # this resolves to "Go".
         needed = next(
             (
                 p
-                for p in ("team", "business", "enterprise")
+                for p in ("free", "go", "pro", "pro_max", "enterprise")
                 if _SITES_PLAN_FEATURE in PLAN_FEATURES.get(p, set())
             ),
-            "business",
+            "go",
         )
         raise Forbidden(
             "plan.feature_denied",
@@ -827,14 +923,14 @@ async def publish(
     republish can re-apply it. ``None`` (the default) publishes a normal,
     non-editable site (empty ``builder_origin`` on the doc, no bridge).
 
-    Gated on the workspace's plan: Sites is the "fabric" feature, so a team-plan
-    workspace is rejected with Forbidden('plan.feature_denied') here — BEFORE any
-    pocket read, generation, or deploy. Both ``publish_pocket`` (REST + MCP) and
-    direct service callers funnel through ``publish``, so this one gate covers
-    every in-process publish path."""
+    Gated on the workspace's plan: Sites is the "sites" feature (go+), so a
+    free-plan workspace is rejected with Forbidden('plan.feature_denied') here —
+    BEFORE any pocket read, generation, or deploy. Both ``publish_pocket`` (REST +
+    MCP) and direct service callers funnel through ``publish``, so this one gate
+    covers every in-process publish path."""
     # Plan gate FIRST — before any pocket read, name resolution, generation, or
-    # deploy — so a team-plan caller is denied identically to the HTTP router's
-    # require_plan_feature("fabric") gate. Every in-process publish path (REST,
+    # deploy — so a free-plan caller is denied identically to the HTTP router's
+    # require_plan_feature("sites") gate. Every in-process publish path (REST,
     # MCP publish, direct callers) funnels through here.
     await require_sites_plan(workspace_id)
 
@@ -886,7 +982,13 @@ async def publish(
     if preview:
         from pocketpaw_ee.sites import local_server
 
-        build = await generator.build(
+        # DEP-3: map a missing-toolchain / non-zero generator failure to a clean
+        # CloudError so the preview/edit/arm path never 500s opaquely either, BUT
+        # leave SmokeGateFailed RAW (map_smoke_gate=False) so edit_svelte_component's
+        # rollback-on-SmokeGateFailed contract is preserved on this preview path.
+        build = await _build_or_cloud_error(
+            generator,
+            map_smoke_gate=False,
             ripple_spec=ripple_spec,
             theme=theme,
             site_id=site_id,
@@ -1005,7 +1107,13 @@ async def _deploy_site_doc(
     is deployed and no doc is flipped to deployed.
     """
     gen = generator or GeneratorClient()
-    build = await gen.build(
+    # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
+    # build, SSR fail-gate) to a clean CloudError (sites.generator_failed → 5xx)
+    # instead of letting a bare FileNotFoundError / RuntimeError / SmokeGateFailed
+    # escape as an unhandled 500. A misconfigured image (no paw-sites-gen / bun on
+    # PATH) is the bug this guards.
+    build = await _build_or_cloud_error(
+        gen,
         ripple_spec=ripple_spec,
         theme=theme,
         site_id=site_id,
@@ -2323,18 +2431,49 @@ async def audit_pocket(
 _DATA_UNAVAILABLE_LOCAL = "live_on_cloudflare_only"
 
 
+def _dynamic_content_envelope(pocket: dict[str, Any]) -> dict[str, Any]:
+    """The ENGINE-APPROPRIATE content envelope a dynamic site's bindings live on
+    (DSV-2b).
+
+    A dynamic pocket carries its live-data bindings — ``objects`` (the D1 tables),
+    ``sources`` (reads), ``actions`` (writes), optional ``auth`` — as SIBLING KEYS
+    on its content. WHICH content holds them depends on the generation engine, and
+    must match the publish/promote switch (``version_content = source if engine ==
+    "svelte" else ripple_spec``):
+
+      * ``engine == "svelte"`` → the bindings are siblings on the svelte ``source``
+        envelope (the same dict that also carries the ``{path: contents}``
+        hand-written SvelteKit files). This is the CONTRACT the create-svelte brain
+        + the generator must store to: ``objects``/``sources``/``actions``/``auth``
+        sit alongside the file entries on ``source``.
+      * any other engine (``"ripple"``, the default) → the bindings are siblings on
+        ``rippleSpec`` (the ripple-track precedent the create-dynamic-site tool
+        already stamps).
+
+    Returns the selected dict (``{}`` when absent / malformed), so the
+    engine-agnostic ``_is_dynamic`` / ``_dynamic_objects`` helpers can read the
+    bindings off it without caring which engine produced it."""
+    engine = pocket.get("engine") or "ripple"
+    key = "source" if engine == "svelte" else "rippleSpec"
+    content = pocket.get(key)
+    return content if isinstance(content, dict) else {}
+
+
 async def _dynamic_pocket_objects(
     *, workspace_id: str, user_id: str, pocket_id: str
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Read a pocket and return ``(ripple_spec, objects)`` for a DYNAMIC site, or
-    raise (DS-3 shared resolver).
+    """Read a pocket and return ``(content_envelope, objects)`` for a DYNAMIC site,
+    or raise (DS-3 shared resolver; DSV-2b made it engine-aware).
 
     Loads the pocket via the pockets service's PUBLIC ``get`` (wire dict — entity
     isolation; it raises NotFound / Forbidden itself for a missing / access-denied
-    pocket, mapped to 404 / 403). A NON-dynamic pocket (a static landing /
+    pocket, mapped to 404 / 403). The dynamic bindings (``objects`` and friends)
+    are read off the ENGINE-APPROPRIATE content envelope (DSV-2b): a svelte site's
+    bindings live on its ``source`` map, a ripple site's on its ``rippleSpec`` —
+    see ``_dynamic_content_envelope``. A NON-dynamic pocket (a static landing /
     brochure, or a custom pocket with no data bindings) raises
     ValidationError("sites.not_dynamic") → the router maps it to 400: there is no
-    data store to read. The returned ``objects`` are the spec's declared tables
+    data store to read. The returned ``objects`` are the envelope's declared tables
     (the authoritative table set a read may touch). ``workspace_id`` keeps the
     surface tenant-uniform with the other by-pocket reads (the pockets read scopes
     on ``user_id``; the D1 id derivation is workspace-scoped)."""
@@ -2342,13 +2481,13 @@ async def _dynamic_pocket_objects(
 
     pocket = await pockets_service.get(pocket_id, user_id)
     pattern = pocket.get("pattern")
-    ripple_spec = pocket.get("rippleSpec") if isinstance(pocket.get("rippleSpec"), dict) else {}
-    if not _is_dynamic(pattern, ripple_spec):
+    content = _dynamic_content_envelope(pocket)
+    if not _is_dynamic(pattern, content):
         raise ValidationError(
             "sites.not_dynamic",
             "This site is not a dynamic site — it has no live data store to read.",
         )
-    return ripple_spec or {}, _dynamic_objects(ripple_spec)
+    return content, _dynamic_objects(content)
 
 
 def _table_columns(obj: dict[str, Any]) -> list[str]:

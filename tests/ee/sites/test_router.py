@@ -11,11 +11,11 @@
 # configured env fallback) and returns the editable SiteResponse.
 #
 # Auth wiring mirrors tests/cloud/test_ee_fabric_list_endpoints.py: the sites
-# router gates on require_plan_feature("fabric") (router level) +
+# router gates on require_plan_feature("sites") (router level) +
 # require_action_any_workspace("fabric.read"), both of which resolve the caller
 # via current_active_user / current_workspace_id, while the handler body reads
 # ctx.workspace_id from request_context. So the app overrides all three plus
-# require_license, and stubs get_workspace_plan -> "business" so the plan gate
+# require_license, and stubs get_workspace_plan -> "go" so the plan gate
 # passes (fabric is a business+ feature). add_error_handler maps the service's
 # NotFound (cross-tenant) to a 404.
 #
@@ -100,7 +100,7 @@ def _build_app(workspace_id: str, monkeypatch) -> FastAPI:
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.sites.router import router as sites_router
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="business"))
+    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="go"))
 
     fake_user = _FakeUser(workspace_id)
     app = FastAPI()

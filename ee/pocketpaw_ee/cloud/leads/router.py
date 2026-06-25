@@ -87,11 +87,15 @@ async def capture_lead(site_id: str, body: CaptureRequest, request: Request) -> 
     return CaptureResponse(ok=True, lead_id=lead.id)
 
 
+# Leads is a Sites surface, so its plan gate is the "sites" feature (go+) — the
+# same flag the sites router uses, decoupled from the enterprise-only Fabric
+# ontology (2026-06-25 decouple-sites-from-fabric). The RBAC action stays
+# "fabric.read" (an action-role, not a plan feature — unchanged here).
 @router.get(
     "/sites/{site_id}/leads",
     response_model=list[LeadOut],
     dependencies=[
-        Depends(require_plan_feature("fabric")),
+        Depends(require_plan_feature("sites")),
         Depends(require_action_any_workspace("fabric.read")),
     ],
 )
