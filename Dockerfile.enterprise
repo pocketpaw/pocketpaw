@@ -23,7 +23,11 @@
 #         clone+build) and COPY'd to /opt/paw-sites, symlinked at
 #         /usr/local/bin/paw-sites-gen. The generator is pure-Node (stdlib + local
 #         modules), so dist/ + templates/ + package.json is all it needs (no
-#         node_modules); it runs via `node`.
+#         node_modules); it runs via `node`. On the CLONE path its package.json pins
+#         @ripple-ui/svelte = "file:../ripple" (absent in that stage), so the stage
+#         rewrites that one dep to the 0.5.0 tarball the `ripple` stage builds before
+#         `bun install` — the generator never imports ripple (string literals only),
+#         so this just satisfies the installer.
 #       * `@ripple-ui/svelte` tarball — built+packed in a `ripple` stage (vendor
 #         prebuilt .tgz, or clone+build+pack) and COPY'd to
 #         /opt/ripple-ui-svelte-0.5.0.tgz. Baked into
@@ -85,53 +89,12 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex && \
 # build`/`bun pm pack` all use the same bun.
 FROM oven/bun:1.2-debian AS bun
 
-# ---- paw-sites generator stage ----
-# Build (or vendor) the paw-sites generator so /usr/local/bin/paw-sites-gen is on
-# PATH in the runtime image. paw-sites is a SIBLING repo OUTSIDE the build context,
-# so it has a vendor/clone source switch (mirrors the FE's RIPPLE_SOURCE):
-#   vendor (default) — COPY the prebuilt deploy/paw-sites/ tree from the build
-#                      context (produced by scripts/vendor-paw-sites.sh). PUBLIC
-#                      path: no private-repo access needed.
-#   clone            — git clone PAW_SITES_REPO@PAW_SITES_REF and build in-image.
-#                      INTERNAL path (CI / Coolify with repo access).
-# The output at /out is the minimal runtime tree: dist/ (the compiled generator,
-# pure Node stdlib + local modules — NO external runtime deps) + templates/ (read
-# at runtime as a sibling of dist/) + package.json.
-FROM bun AS paw-sites
-ARG PAW_SITES_SOURCE=vendor
-ARG PAW_SITES_REPO=https://github.com/qbtrix/paw-sites.git
-ARG PAW_SITES_REF=main
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-# COPY the build-context dir unconditionally (it always exists — a tracked
-# .gitkeep keeps it present even in Coolify's clone, where the vendored artifacts
-# are gitignored and absent). On vendor it carries the prebuilt tree; on clone it
-# carries only .gitkeep and the branch below rm's + re-clones over it.
-COPY deploy/paw-sites/ /build/paw-sites/
-RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
-      echo "PAW_SITES_SOURCE=clone — building generator from $PAW_SITES_REPO @ $PAW_SITES_REF" && \
-      rm -rf /build/paw-sites && \
-      ( git clone --depth=1 --branch "$PAW_SITES_REF" "$PAW_SITES_REPO" /build/paw-sites \
-        || ( git clone "$PAW_SITES_REPO" /build/paw-sites && cd /build/paw-sites && git checkout "$PAW_SITES_REF" ) ) && \
-      cd /build/paw-sites && bun install --frozen-lockfile && bun run build ; \
-    else \
-      echo "PAW_SITES_SOURCE=vendor — using prebuilt generator from build context" && \
-      test -f /build/paw-sites/dist/cli.js \
-        || ( echo "ERROR: deploy/paw-sites/dist not found. Run scripts/vendor-paw-sites.sh first." && exit 1 ) ; \
-    fi && \
-    mkdir -p /out && \
-    cp -R /build/paw-sites/dist /out/dist && \
-    cp -R /build/paw-sites/templates /out/templates && \
-    cp /build/paw-sites/package.json /out/package.json && \
-    test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
-
 # ---- ripple tarball stage ----
 # Produce the @ripple-ui/svelte npm tarball a generated ripple-track site installs
 # (its dep is rewritten to file:/opt/ripple-ui-svelte-0.5.0.tgz at publish time).
+# Defined BEFORE the paw-sites stage because that stage COPYs --from=ripple (the
+# clone path installs the generator's @ripple-ui/svelte dep from this tarball) — a
+# COPY --from must reference an earlier-defined stage.
 # ripple is also a SIBLING repo outside the context, so the same vendor/clone
 # switch applies:
 #   vendor (default) — COPY the prebuilt deploy/ripple/ripple-ui-svelte-0.5.0.tgz
@@ -171,6 +134,69 @@ RUN if [ "$RIPPLE_SOURCE" = "clone" ]; then \
       cp "/build/ripple-vendor/$RIPPLE_TARBALL" "/out/$RIPPLE_TARBALL" ; \
     fi && \
     test -f "/out/$RIPPLE_TARBALL" || ( echo "ERROR: ripple tarball missing after stage." && exit 1 )
+
+# ---- paw-sites generator stage ----
+# Build (or vendor) the paw-sites generator so /usr/local/bin/paw-sites-gen is on
+# PATH in the runtime image. paw-sites is a SIBLING repo OUTSIDE the build context,
+# so it has a vendor/clone source switch (mirrors the FE's RIPPLE_SOURCE):
+#   vendor (default) — COPY the prebuilt deploy/paw-sites/ tree from the build
+#                      context (produced by scripts/vendor-paw-sites.sh). PUBLIC
+#                      path: no private-repo access needed.
+#   clone            — git clone PAW_SITES_REPO@PAW_SITES_REF and build in-image.
+#                      INTERNAL path (CI / Coolify with repo access).
+# The output at /out is the minimal runtime tree: dist/ (the compiled generator,
+# pure Node stdlib + local modules — NO external runtime deps) + templates/ (read
+# at runtime as a sibling of dist/) + package.json.
+FROM bun AS paw-sites
+ARG PAW_SITES_SOURCE=vendor
+ARG PAW_SITES_REPO=https://github.com/qbtrix/paw-sites.git
+ARG PAW_SITES_REF=main
+# Must match the `ripple` stage's tarball name (the clone path installs the
+# generator's @ripple-ui/svelte dep from it).
+ARG RIPPLE_TARBALL=ripple-ui-svelte-0.5.0.tgz
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# The generator's package.json pins @ripple-ui/svelte = "file:../ripple". On the
+# CLONE path ../ripple does NOT exist in this stage, so `bun install` can't resolve
+# that file: dep and fails. The generator only references @ripple-ui/svelte as
+# STRING LITERALS (an allowlist version const + template text it emits into
+# generated sites) — it has NO real import of it — so `tsc` does not need it
+# resolved; only `bun install` chokes. Fix: install the dep from the real 0.5.0
+# tarball the `ripple` stage already builds. COPY it in (a no-op cost on the vendor
+# path, which never touches it).
+COPY --from=ripple /out/${RIPPLE_TARBALL} /opt/${RIPPLE_TARBALL}
+
+WORKDIR /build
+# COPY the build-context dir unconditionally (it always exists — a tracked
+# .gitkeep keeps it present even in Coolify's clone, where the vendored artifacts
+# are gitignored and absent). On vendor it carries the prebuilt tree; on clone it
+# carries only .gitkeep and the branch below rm's + re-clones over it.
+COPY deploy/paw-sites/ /build/paw-sites/
+RUN if [ "$PAW_SITES_SOURCE" = "clone" ]; then \
+      echo "PAW_SITES_SOURCE=clone — building generator from $PAW_SITES_REPO @ $PAW_SITES_REF" && \
+      rm -rf /build/paw-sites && \
+      ( git clone --depth=1 --branch "$PAW_SITES_REF" "$PAW_SITES_REPO" /build/paw-sites \
+        || ( git clone "$PAW_SITES_REPO" /build/paw-sites && cd /build/paw-sites && git checkout "$PAW_SITES_REF" ) ) && \
+      cd /build/paw-sites && \
+      # Rewrite the unresolvable file:../ripple dep to the bundled 0.5.0 tarball so
+      # `bun install` resolves. Drop --frozen-lockfile (package.json now differs from
+      # the committed lock by exactly this one key). tsc doesn't need ripple, so this
+      # only satisfies the installer.
+      bun -e 'const f="package.json";const p=JSON.parse(require("fs").readFileSync(f));p.dependencies["@ripple-ui/svelte"]="file:/opt/'"$RIPPLE_TARBALL"'";require("fs").writeFileSync(f,JSON.stringify(p,null,2));' && \
+      bun install && bun run build ; \
+    else \
+      echo "PAW_SITES_SOURCE=vendor — using prebuilt generator from build context" && \
+      test -f /build/paw-sites/dist/cli.js \
+        || ( echo "ERROR: deploy/paw-sites/dist not found. Run scripts/vendor-paw-sites.sh first." && exit 1 ) ; \
+    fi && \
+    mkdir -p /out && \
+    cp -R /build/paw-sites/dist /out/dist && \
+    cp -R /build/paw-sites/templates /out/templates && \
+    cp /build/paw-sites/package.json /out/package.json && \
+    test -d /out/templates || ( echo "ERROR: generator templates/ missing — runtime generate would fail." && exit 1 )
 
 # ---- Builder stage ----
 FROM python:3.12-slim AS builder
