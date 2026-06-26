@@ -65,6 +65,14 @@ supplying the ``WorkspaceConnector``-backed ``CloudConnectorStateStore`` as the
 ConnectorRegistry's default durable state store, so cloud connector config
 rehydrates from the tenant DB after a process restart (no /connect needed).
 
+Updated: 2026-06-26 (ART-2) — ``CloudAgentExtension`` gained ``agent_cwd``: a
+per-tenant agent working-directory jail. It delegates to
+``pocketpaw_ee.cloud.agent_jail.resolve_agent_cwd``, which returns a
+per-workspace/session dir (``~/.pocketpaw/workspaces/<ws>/agent/<session>/``) so
+a cloud tenant's file ops never co-mingle in the shared home dir, and FAILS
+CLOSED when a cloud run has no resolvable workspace. OSS / dedicated installs
+return ``None`` and keep ``settings.file_jail_path``.
+
 Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added
 ``CloudFabricMcpProvider`` (entry ``fabric``; server ``pocketpaw_fabric``,
 tools ``fabric_query`` / ``fabric_stats``) and ``CloudInstinctMcpProvider``
@@ -926,8 +934,9 @@ class CloudAgentExtension:
     """`pocketpaw.agent_extensions` — EE additions to the core agent runtime.
 
     Contributes the cloud pocket-specialist function tool to MCP-capable
-    tool-list backends, and cloud workspace/user/session identity to agent
-    subprocess environments.
+    tool-list backends, cloud workspace/user/session identity to agent
+    subprocess environments, and (ART-2) a per-tenant agent working-directory
+    jail so each cloud workspace's file ops stay isolated from every other.
     """
 
     # Backends that receive ``PocketSpecialistTool`` as a native function
@@ -967,6 +976,18 @@ class CloudAgentExtension:
             if value:
                 env[var] = str(value)
         return env
+
+    def agent_cwd(self) -> str | None:
+        """`pocketpaw.agent_extensions` — per-session agent working directory.
+
+        In multi-tenant cloud each workspace gets its own agent cwd
+        (``~/.pocketpaw/workspaces/<ws>/agent/<session>/``) so tenant file ops
+        never co-mingle in the shared home dir; fails CLOSED when a cloud run
+        has no resolvable workspace. Returns ``None`` off-cloud so the core
+        agent keeps using ``settings.file_jail_path`` (ART-2)."""
+        from pocketpaw_ee.cloud.agent_jail import resolve_agent_cwd
+
+        return resolve_agent_cwd()
 
 
 class CloudConnectorStateStoreProvider:

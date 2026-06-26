@@ -1,5 +1,16 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-26 (ART-2) — the agent's working directory is now resolved
+  PER-RUN via ``_resolve_cwd`` instead of being frozen to
+  ``settings.file_jail_path`` at ``__init__``. OSS / dedicated behavior is
+  unchanged (still ``file_jail_path``); when an EE ``pocketpaw.agent_extensions``
+  provider supplies ``agent_cwd`` (the cloud product), the run uses a
+  per-workspace/session jail so a tenant's file ops never co-mingle in the
+  shared home dir. A provider that RAISES (a cloud run with no resolvable
+  workspace) propagates — fail-closed, never a silent fallback to ``~``.
+  ``_build_options`` carries the resolved cwd, so ``run`` and ``prewarm`` warm
+  the same per-session jail (the warm-client cache key already keys on
+  ``session_key``, so a session change rebuilds the subprocess with its own cwd).
 Updated: 2026-06-26 (integration/model-catalog-v2, MCG-11) — the ResultMessage
   token-usage path now runs ``pocketpaw.llm.caching.report_savings`` over the SDK
   usage to surface STRUCTURED prompt-cache telemetry (cache_read_tokens,
@@ -482,6 +493,34 @@ class ClaudeSDKBackend(BaseAgentBackend):
         """Set the working directory for file operations."""
         self._cwd = path
         logger.info(f"📂 Working directory set to: {path}")
+
+    def _resolve_cwd(self) -> Path:
+        """Resolve the agent's working directory for THIS run.
+
+        Defaults to ``settings.file_jail_path`` (the OSS / dedicated behavior,
+        unchanged). When an EE ``pocketpaw.agent_extensions`` provider supplies
+        an ``agent_cwd`` (the cloud product), its result wins — a
+        per-workspace/session jail that keeps each tenant's file operations
+        isolated instead of co-mingling in the shared home dir.
+
+        A provider that RAISES (a multi-tenant cloud run with no resolvable
+        workspace) is propagated, NOT swallowed: that fail-closed is the whole
+        point — we must never silently fall back to ``~`` and let one tenant's
+        files land on another's. Resolved per-run (not cached on the instance)
+        so a single warm backend serving multiple sessions reads each session's
+        own jail; the warm-client cache key already folds in ``session_key``, so
+        a session change rebuilds the subprocess with its correct cwd.
+        """
+        from pocketpaw._registry import providers as _ext_providers
+
+        for ext in _ext_providers("pocketpaw.agent_extensions"):
+            resolver = getattr(ext, "agent_cwd", None)
+            if resolver is None:
+                continue
+            resolved = resolver()  # may raise (fail-closed) — let it propagate
+            if resolved:
+                return Path(resolved)
+        return self.settings.file_jail_path
 
     def _is_dangerous_command(self, command: str) -> str | None:
         """Check if a command matches dangerous patterns.
@@ -1195,6 +1234,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         skills_dir_adopted = False
         plugin_digest = ""
 
+        # Per-run working directory. OSS / dedicated → ``file_jail_path``; cloud
+        # → a per-workspace/session jail (or a fail-closed raise when a cloud run
+        # has no resolvable workspace). Resolved here so BOTH ``run`` and
+        # ``prewarm`` warm the SAME cwd for a session — the warm-client cache key
+        # already keys on ``session_key``, so a session change rebuilds the
+        # subprocess with its own jail.
+        resolved_cwd = self._resolve_cwd()
+
         # Resolve LLM provider early -- needed for routing + env.
         # Use per-backend provider setting (defaults to "anthropic").
         # An API key is REQUIRED for Anthropic provider -- OAuth tokens from
@@ -1443,7 +1490,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "allowed_tools": allowed_tools,
             "setting_sources": [],
             "hooks": hooks,
-            "cwd": str(self._cwd),
+            "cwd": str(resolved_cwd),
             "max_turns": self.settings.claude_sdk_max_turns or None,
         }
 
@@ -1569,7 +1616,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "set" if os.environ.get("ANTHROPIC_API_KEY") else "<unset>",
             list(sdk_env.keys()) if sdk_env else "none",
             _shutil.which("claude") or "<not found>",
-            self._cwd,
+            resolved_cwd,
         )
 
         # Wire in MCP servers (policy-filtered)
