@@ -72,7 +72,7 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     (the propose helper + the executor both lazy-import
     ``pocketpaw.stores.get_instinct_store``)."""
     st = InstinctStore(tmp_path / "instinct_fabric_objects_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
@@ -402,7 +402,7 @@ async def test_production_path_approve_runs_executor_one_terminal(
 
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
     resp = client.post(f"/instinct/actions/{action_id}/approve")
     assert resp.status_code == 200, resp.text
 
@@ -441,7 +441,7 @@ async def test_production_path_reject_router_closes_executor_never_runs(
 
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
     resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "not now"})
     assert resp.status_code == 200, resp.text
 
@@ -480,7 +480,7 @@ async def test_cross_workspace_single_approve_forbidden(store, fabric, journal, 
     action_id = await _propose(store, workspace_id="w-OTHER")
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
 
     resp = client.post(f"/instinct/actions/{action_id}/approve")
     assert resp.status_code == 403, resp.text
@@ -496,7 +496,7 @@ async def test_cross_workspace_single_reject_forbidden(store, fabric, journal, g
     action_id = await _propose(store, workspace_id="w-OTHER")
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
 
     resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "no"})
     assert resp.status_code == 403, resp.text
@@ -510,7 +510,7 @@ async def test_cross_workspace_bulk_approve_forbidden(store, fabric, journal, gr
     action_id = await _propose(store, workspace_id="w-OTHER")
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
 
     resp = client.post("/instinct/actions/bulk-approve", json={"ids": [action_id]})
     assert resp.status_code == 403, resp.text
@@ -525,7 +525,7 @@ async def test_cross_workspace_bulk_reject_forbidden(store, fabric, journal, gra
     action_id = await _propose(store, workspace_id="w-OTHER")
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
 
     resp = client.post("/instinct/actions/bulk-reject", json={"ids": [action_id], "reason": "no"})
     assert resp.status_code == 403, resp.text

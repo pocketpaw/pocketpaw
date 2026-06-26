@@ -55,7 +55,7 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     """Isolated InstinctStore on a tmp file, wired in where the handlers read
     it (``pocketpaw.stores.get_instinct_store``)."""
     st = InstinctStore(tmp_path / "instinct_mcp_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
@@ -300,7 +300,7 @@ async def test_store_error_is_relayed(store, monkeypatch):
         async def pending(self, pocket_id=None, workspace_id=None):
             raise RuntimeError("instinct db is locked")
 
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: _Boom())
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: _Boom())
     with _identity(workspace="w1"):
         res = await instinct_mcp._instinct_pending_handler({})
     assert res.get("is_error") is True

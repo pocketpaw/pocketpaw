@@ -82,7 +82,7 @@ def instinct_store(tmp_path: Path) -> InstinctStore:
 def patch_instinct_store(monkeypatch, instinct_store: InstinctStore):
     """Patch the sweeper's lazy ``ee.api.get_instinct_store`` lookup so
     the test's fixture wins."""
-    monkeypatch.setattr("pocketpaw_ee.api.get_instinct_store", lambda: instinct_store)
+    monkeypatch.setattr("pocketpaw_ee.api.get_instinct_store", lambda *a, **k: instinct_store)
 
 
 async def _seed_pending_action(

@@ -623,7 +623,7 @@ async def test_parked_blob_carries_correlation_id_and_event_id_placeholder(
 
             return _A()
 
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: _StubStore())
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: _StubStore())
 
     pocket = {"_id": "p1", "workspace": "w1", "owner": "u_alice", "name": "Lease 42"}
     await instinct_bridge_module.propose_pocket_write(
@@ -714,7 +714,7 @@ async def test_schema_1_parked_blob_marked_failed_on_post_deploy_approval(
         async def mark_executed(self, action_id: str, reason: str) -> None:  # noqa: ARG002
             pytest.fail("should not have executed a schema-1 blob")
 
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: _StubStore())
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: _StubStore())
 
     # Schema-1 blob — pre-Slice-2 shape, no correlation_id field.
     schema_1_blob = {

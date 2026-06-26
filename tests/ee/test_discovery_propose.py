@@ -150,7 +150,7 @@ def recording_bus():
 @pytest.fixture
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     st = InstinctStore(tmp_path / "instinct_discovery_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 

@@ -34,7 +34,7 @@ def instinct_store(tmp_path, monkeypatch):
     executor (same accessor). Returns the store so a test can read the Action
     back."""
     store = InstinctStore(tmp_path / "rp_instinct.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
     return store
 
 

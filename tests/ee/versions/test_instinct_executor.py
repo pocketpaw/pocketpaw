@@ -73,7 +73,7 @@ async def test_approve_merges_publishes_and_deploys(
     """APPROVE = MERGE: the candidate is promoted to published, the site deploy
     fires, and the Action is marked executed."""
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
 
     deploys: list[dict] = []
 
@@ -117,7 +117,7 @@ async def test_approve_merge_marks_failed_when_deploy_raises(
     """If the deploy raises, the Action is marked FAILED — the version is still
     published (published != live, the BP-2 invariant)."""
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
 
     async def _boom_deploy(**kwargs):
         raise RuntimeError("workerd smoke gate failed")
@@ -147,7 +147,7 @@ async def test_reject_discards_candidate_and_leaves_published(
     """REJECT = DISCARD: the candidate is reverted, the published pointer is
     untouched."""
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
 
     # A live published version, plus a candidate draft.
     live = await versions.write_draft(
@@ -190,7 +190,7 @@ async def test_reject_clears_all_accumulated_drafts(
     so the other accumulated drafts remain → get_draft is non-None → fails.
     """
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
 
     # A live published version.
     live = await versions.write_draft(
