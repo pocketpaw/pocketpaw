@@ -1050,6 +1050,12 @@ the agent surfaces the reason rather than fabricating a link.
 
 **Security:** the path must resolve to inside the caller's own jail
 (`~/.pocketpaw/workspaces/<workspace_id>/...`); `..` traversal, absolute paths
-out, symlinks pointing out, and another tenant's jail are all rejected (reusing
-ART-2's path-segment guard). Size is capped by `POCKETPAW_DELIVER_MAX_MB`
-(default `100`).
+out, symlinks pointing out (including symlinks nested inside a delivered
+directory), and another tenant's jail are all rejected (reusing ART-2's
+path-segment guard). Size is capped by `POCKETPAW_DELIVER_MAX_MB` (default
+`100`). Because the upload relaxes the mime allowlist, a delivered artifact
+whose mime is not in `INLINE_MIMES` (HTML, SVG, JS, …) is served with
+`Content-Disposition: attachment` on the presigned download — it downloads, it
+does not render inline on the storage origin. Inline-safe types (images, pdf,
+plain text) still embed as before. The whole tool is gated on
+`is_multi_tenant_cloud()`.

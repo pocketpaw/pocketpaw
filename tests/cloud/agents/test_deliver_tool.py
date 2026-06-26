@@ -261,3 +261,122 @@ async def test_oversize_rejected(beanie_db, monkeypatch: pytest.MonkeyPatch) -> 
         _detach(tokens)
     assert resp["is_error"] is True
     assert "deliver limit" in resp["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected_mime"),
+    [
+        ("evil.html", "<script>alert(1)</script>", "text/html"),
+        ("evil.svg", "<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>", "image/svg+xml"),
+    ],
+)
+async def test_deliver_renderable_served_as_attachment(
+    beanie_db, monkeypatch: pytest.MonkeyPatch, filename, content, expected_mime
+) -> None:
+    """A delivered HTML/SVG artifact must download (attachment), never render
+    inline on the storage origin. A spy adapter records the Content-Disposition
+    the deliver path forwards to the (S3) presign."""
+    from pocketpaw_ee.agent.mcp_servers.deliver import _deliver_handler
+
+    import pocketpaw.uploads.factory as factory
+
+    recorded: dict[str, str | None] = {}
+    real_build = factory.build_adapter
+
+    class _SpyAdapter:
+        def __init__(self, inner):
+            self._inner = inner
+
+        async def put(self, key, stream, mime):
+            return await self._inner.put(key, stream, mime)
+
+        def open(self, key):
+            return self._inner.open(key)
+
+        async def delete(self, key):
+            return await self._inner.delete(key)
+
+        async def exists(self, key):
+            return await self._inner.exists(key)
+
+        def local_path(self, key):
+            return None
+
+        async def presigned_get(self, key, ttl_seconds, response_content_disposition=None):
+            recorded["disposition"] = response_content_disposition
+            return f"https://signed.example/{key}"
+
+    monkeypatch.setattr(factory, "build_adapter", lambda root: _SpyAdapter(real_build(root)))
+
+    tokens = _bind("wsA", "uA", "sessA")
+    try:
+        (_agent_cwd() / filename).write_text(content)
+        resp = await _deliver_handler({"path": filename})
+    finally:
+        _detach(tokens)
+
+    body = _body(resp)
+    assert body["mime"] == expected_mime
+    assert body["url"].startswith("https://signed.example/")
+    assert recorded["disposition"] is not None
+    assert recorded["disposition"].startswith("attachment;")
+
+
+async def test_symlink_inside_dir_not_archived(beanie_db) -> None:
+    """A symlink INSIDE a delivered directory that points out of the jail is
+    skipped — neither the link entry nor its target's bytes reach the zip."""
+    import io
+    import zipfile
+
+    from pocketpaw_ee.agent.mcp_servers.deliver import _deliver_handler
+    from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+    tokens = _bind("wsA", "uA", "sessA")
+    try:
+        cwd = _agent_cwd()
+        secret = Path.home() / "secret_outside.txt"
+        secret.write_text("TOPSECRET-LEAK")
+        bundle = cwd / "bundle"
+        bundle.mkdir()
+        (bundle / "ok.txt").write_text("safe content")
+        (bundle / "link_to_secret").symlink_to(secret)
+        resp = await _deliver_handler({"path": "bundle"})
+    finally:
+        _detach(tokens)
+
+    body = _body(resp)
+    rec = await MongoFileStore().get_scoped(body["file_id"], workspace="wsA")
+    data = await _read_blob(rec.storage_key)
+    names = set(zipfile.ZipFile(io.BytesIO(data)).namelist())
+    assert "bundle/ok.txt" in names
+    assert "bundle/link_to_secret" not in names
+    assert b"TOPSECRET-LEAK" not in data
+
+
+async def test_deliver_excluded_from_restricted_surfaces() -> None:
+    """The deliver tool id must NOT leak onto restricted surfaces whose profiles
+    carry an explicit MCP allowlist (studio/sites/foresight/belt). Locks the
+    exclusion so a future allowlist edit can't silently expose deliver there."""
+    from pocketpaw_ee.agent.mcp_servers.deliver import DELIVER_ARTIFACT_TOOL_ID
+    from pocketpaw_ee.cloud.surface.surface_registry import _mcp_tool_ids
+
+    ids = _mcp_tool_ids()
+    assert ids.loaded, "surface MCP tool-ids failed to load — test would be vacuous"
+    for allow in (ids.studio_allow, ids.sites_allow, ids.foresight_allow, ids.belt_allow):
+        assert allow is not None
+        assert DELIVER_ARTIFACT_TOOL_ID not in allow
+
+
+async def test_build_deliver_server_gated_on_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    """build_deliver_server is cloud-only — None off multi-tenant cloud, a real
+    server once the cloud DB signal is set."""
+    import pocketpaw_ee.cloud.shared.db as db
+    from pocketpaw_ee.agent.mcp_servers import deliver
+
+    monkeypatch.setattr(db, "_client", None)
+    assert deliver.build_deliver_server() is None
+
+    monkeypatch.setattr(db, "_client", object())  # fake "cloud DB initialized"
+    built = deliver.build_deliver_server()
+    assert built is not None
+    assert built[0] == "pocketpaw_deliver"

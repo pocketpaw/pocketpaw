@@ -134,12 +134,23 @@ class S3StorageAdapter(StorageAdapter):
     def local_path(self, key: str) -> Path | None:
         return None
 
-    async def presigned_get(self, key: str, ttl_seconds: int) -> str | None:
+    async def presigned_get(
+        self,
+        key: str,
+        ttl_seconds: int,
+        response_content_disposition: str | None = None,
+    ) -> str | None:
+        params: dict[str, str] = {"Bucket": self._bucket, "Key": key}
+        # Force the served Content-Disposition (e.g. ``attachment; filename=…``)
+        # so non-inline content delivered to blob storage downloads instead of
+        # rendering on the storage origin. Omitted ⇒ the object's own headers.
+        if response_content_disposition:
+            params["ResponseContentDisposition"] = response_content_disposition
         try:
             return await asyncio.to_thread(
                 self._client.generate_presigned_url,
                 "get_object",
-                Params={"Bucket": self._bucket, "Key": key},
+                Params=params,
                 ExpiresIn=int(ttl_seconds),
             )
         except Exception:
