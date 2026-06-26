@@ -43,6 +43,13 @@ terminal runs the prior worker left unbilled are charged on restart. The
 metering sweep is idempotent (billed flag + ``run:{run_id}`` ledger key), so it
 is safe even when the boot stale-run sweep is disabled — it just bills the
 already-terminal backlog.
+
+Updated: 2026-06-26 (feat/litellm-billing-cutover, WU-F) — the boot sweep also
+runs the per-tenant LiteLLM billing-cutover sweep (``run_cutover_sweep``): a
+no-op in ``off`` mode, a read-only reconciliation compare in ``shadow``, and a
+proxy-spend debit in ``live`` (where ``sweep_unbilled_runs`` self-gates off so
+exactly one meter charges). Idempotent + its own try so a cutover-sweep failure
+can't abort worker startup.
 """
 
 from __future__ import annotations
@@ -130,13 +137,24 @@ async def _startup(ctx: dict[str, Any]) -> None:
     # BC-3 metering: bill any terminal runs the prior worker left unbilled (the
     # boot sweep above just turned this boot's orphans terminal, and earlier
     # finished runs may never have been billed). Own try so a metering failure
-    # can't abort worker startup.
+    # can't abort worker startup. Self-gated OFF in the WU-F ``live`` cutover mode.
     try:
         billed = await sweep_unbilled_runs()
         if billed:
             logger.info("worker boot: billed %d unbilled terminal runs", billed)
     except Exception:
         logger.exception("worker boot: compute-cost metering sweep failed")
+    # WU-F billing cutover: per-tenant LiteLLM spend sweep on boot too (no-op in
+    # ``off``; shadow-compare in ``shadow``; debit proxy spend in ``live``). Own try
+    # so a cutover-sweep failure can't abort worker startup.
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
+
+        summary = await run_cutover_sweep()
+        if summary.get("processed"):
+            logger.info("worker boot: cutover sweep processed %d tenants", summary["processed"])
+    except Exception:
+        logger.exception("worker boot: LiteLLM billing-cutover sweep failed")
 
 
 async def _shutdown(ctx: dict[str, Any]) -> None:

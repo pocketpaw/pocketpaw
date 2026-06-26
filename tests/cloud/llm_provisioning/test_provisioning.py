@@ -220,19 +220,28 @@ async def test_high_water_mark_skips_settled_rows(mongo_db):
     assert doc is not None
     assert doc.last_spend_ingest_ts == "2026-06-26T10:00:00"
 
-    # A re-sweep with the SAME (now-settled) row reads nothing new.
+    # A re-sweep with the SAME (now-settled) row bills NOTHING new. After the WU-F
+    # boundary fix the high-water skip is strict ``<`` (not ``<=``), so a row whose
+    # startTime EQUALS the mark is RE-EXAMINED (rows_read==1) and de-duplicated by
+    # its litellm:{request_id} ledger key — it must not re-bill. (The old ``<=``
+    # skipped it outright, rows_read==0, but that same skip silently DROPPED a
+    # distinct same-second row on a later sweep — the under-bill this fix closes;
+    # see test_high_water_boundary_same_second_rows_both_billed_once.)
+    before_balance = await credits.balance(WS)
     again = await provisioning.ingest_tenant_spend(WS, spend_card=SPEND, admin_client=admin)
-    assert again.rows_read == 0
-    assert again.rows_billed == 0
+    assert again.rows_read == 1  # the boundary row is re-examined...
+    assert again.rows_billed == 0  # ...but never re-billed (deduped on its key)
+    assert await credits.balance(WS) == before_balance  # balance never moved twice
 
-    # A NEWER row gets ingested.
+    # A NEWER row gets ingested (the boundary row is re-examined + deduped, the
+    # newer row bills).
     admin._spend_rows = [
         {"request_id": "req-1", "spend": 0.04, "startTime": "2026-06-26T10:00:00"},
         {"request_id": "req-2", "spend": 0.08, "startTime": "2026-06-26T11:00:00"},
     ]
     newer = await provisioning.ingest_tenant_spend(WS, spend_card=SPEND, admin_client=admin)
-    assert newer.rows_read == 1  # only the new row
-    assert newer.rows_billed == 1
+    assert newer.rows_read == 2  # the boundary row (re-examined) + the new row
+    assert newer.rows_billed == 1  # only the new row produces a debit
     assert newer.credits_debited == 20  # round(0.08 * 250)
     assert await credits.balance(WS) == 1000 - 10 - 20  # 970
 

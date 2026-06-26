@@ -48,6 +48,25 @@
 # exception) which a system-job caller logs + retries, never a bare HTTPException.
 #
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8): new entity.
+# Updated 2026-06-26 (feat/litellm-billing-cutover, WU-F): three changes for the
+# billing cutover from per-run metering (BC-3) to LiteLLM as the single meter,
+# done through a safe shadow-compare phase.
+#   1. ``spend_mode`` / ``reconcile_gap_threshold`` — read the 3-position cutover
+#      switch (POCKETPAW_LITELLM_SPEND_MODE off|shadow|live). The legacy INGEST bool
+#      is honoured ONLY as far as ``shadow`` — ``live`` requires an EXPLICIT mode, so
+#      deploying WU-F never auto-flips an old bool-setter into live billing (a
+#      one-time deprecation notice fires when the legacy bool is seen).
+#      ``spend_ingest_enabled`` is now a back-compat shim over it.
+#   2. ``reconcile_tenant_spend`` — the SHADOW compare. Reads proxy spend + the
+#      BC-3 ``compute_spend`` ledger debits over the same window and records a
+#      reconciliation row (litellm vs bc3 + delta + coverage_gap). It DEBITS
+#      NOTHING and never advances the high-water mark — BC-3 keeps billing during
+#      shadow. The cross-entity ledger read goes through the credits service's
+#      tenant-filtered ``sum_debits_by_cause`` (entity-isolation preserved).
+#   3. ``ingest_tenant_spend`` high-water boundary fix — the same-second skip was
+#      ``<=`` (dropped a distinct boundary row on a later sweep → under-bill); it
+#      is now strict ``<`` with the ``litellm:{request_id}`` ledger dedup as the
+#      exactly-once guard at the boundary. See the inline note at the loop.
 
 from __future__ import annotations
 
@@ -63,16 +82,34 @@ from pocketpaw_ee.cloud.llm_provisioning.domain import (
     ProvisionResult,
     SpendCredits,
     SpendIngestResult,
+    SpendReconciliation,
 )
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
+from pocketpaw_ee.cloud.models.spend_reconciliation import (
+    SpendReconciliation as SpendReconciliationDoc,
+)
 
 logger = logging.getLogger(__name__)
+
+# Once-per-process guard for the legacy-spend-bool deprecation notice (WU-F). The
+# warning is emitted the first time the mode is resolved while the deprecated bool
+# is the only thing set, so an operator is told their old flag now means ``shadow``
+# (NOT ``live``) and that billing requires an explicit POCKETPAW_LITELLM_SPEND_MODE.
+_legacy_bool_warned = False
 
 # Business cause stamped on the ledger movement for proxy-attributed spend. KEPT
 # DISTINCT from BC-3 metering's ``compute_spend`` so a dashboard / audit can tell
 # proxy-gateway spend apart from per-run metered spend (and so the two paths can
 # coexist without their idempotency namespaces colliding).
 _LITELLM_SPEND_CAUSE = "litellm_spend"
+
+# The BC-3 per-run metering cause (``metering.service._COMPUTE_SPEND_CAUSE``). The
+# shadow compare sums the credit ledger's ``compute_spend`` debits to put BC-3 next
+# to LiteLLM. Duplicated as a literal here ON PURPOSE — metering is a SIBLING entity,
+# and importing its private constant would couple two cloud entities at module load
+# (and the import-linter forbids the cross-entity reach). If BC-3's cause string ever
+# changes, this literal + the matching test must change with it.
+_BC3_COMPUTE_SPEND_CAUSE = "compute_spend"
 
 # The key-alias prefix the proxy stamps on a tenant's virtual key, for operator
 # legibility in the proxy admin UI + spend logs.
@@ -129,15 +166,76 @@ def load_spend_credits() -> SpendCredits:
     )
 
 
-def spend_ingest_enabled() -> bool:
-    """Whether the proxy-spend -> credits sweep is enabled for this deployment.
+def warn_legacy_spend_bool_once() -> None:
+    """Emit a ONE-TIME deprecation notice when the legacy spend bool is the only
+    cutover signal set (WU-F money-safety guard).
 
-    Default FALSE — see the DOUBLE-BILL BOUNDARY note in the module header.
-    Provisioning is unaffected by this flag (always on); only ingestion is gated.
+    Fires at most once per process, the first time the mode is resolved while
+    ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` AND the new
+    ``POCKETPAW_LITELLM_SPEND_MODE`` is left at its ``off`` default. Tells the
+    operator the legacy bool now resolves to ``shadow`` (reads + compares, debits
+    NOTHING) and that to actually bill from proxy spend they must EXPLICITLY set
+    ``POCKETPAW_LITELLM_SPEND_MODE=live``. This is why deploying WU-F can never
+    auto-flip an old bool-setter into live billing — the bool can only ever reach
+    the safe shadow mode, loudly, with this notice.
+    """
+    global _legacy_bool_warned
+    if _legacy_bool_warned:
+        return
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    if settings.litellm_spend_mode == "off" and settings.litellm_spend_ingest_enabled:
+        _legacy_bool_warned = True
+        logger.warning(
+            "DEPRECATION (WU-F): POCKETPAW_LITELLM_SPEND_INGEST_ENABLED is set but "
+            "POCKETPAW_LITELLM_SPEND_MODE is unset — the legacy bool now resolves to "
+            "'shadow' (read-only reconciliation, NO debits), NOT live billing. "
+            "LiteLLM will NOT charge and BC-3 per-run metering keeps billing. To make "
+            "LiteLLM the sole meter you must EXPLICITLY set "
+            "POCKETPAW_LITELLM_SPEND_MODE=live."
+        )
+
+
+def spend_mode() -> str:
+    """The LiteLLM billing-cutover mode for this deployment: ``off`` | ``shadow`` |
+    ``live`` (WU-F).
+
+    Delegates to ``Settings.effective_spend_mode()``. The legacy
+    ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED`` bool is honoured ONLY as far as
+    ``shadow`` — it never resolves to ``live`` (that requires an explicit
+    ``POCKETPAW_LITELLM_SPEND_MODE=live``), so merely deploying WU-F can never flip
+    an old bool-setter into live billing. The first resolution that sees the legacy
+    bool emits a one-time deprecation notice. Provisioning is unaffected by the mode
+    (always on); only the spend SWEEP behaviour changes.
+    """
+    warn_legacy_spend_bool_once()
+    from pocketpaw.config import get_settings
+
+    return get_settings().effective_spend_mode()
+
+
+def spend_ingest_enabled() -> bool:
+    """DEPRECATED back-compat shim — whether the spend sweep DEBITS (mode == live).
+
+    Superseded by ``spend_mode()`` (WU-F). Kept so any caller still asking the old
+    yes/no question gets the right answer: only ``live`` mode debits proxy spend.
+    ``shadow`` returns False here (it reads + compares but never debits), matching
+    the original contract that True meant "ingestion debits the ledger".
+    """
+    return spend_mode() == "live"
+
+
+def reconcile_gap_threshold() -> int:
+    """The shadow-compare coverage-gap threshold in credits (WU-F).
+
+    Reads ``POCKETPAW_LITELLM_RECONCILE_GAP_THRESHOLD_CREDITS`` (default 10). A
+    reconciliation row is flagged ``coverage_gap`` when ``abs(delta)`` exceeds this.
+    Clamped to >= 0 so a negative config can't make every window read as a gap.
     """
     from pocketpaw.config import get_settings
 
-    return bool(get_settings().litellm_spend_ingest_enabled)
+    return max(0, int(get_settings().litellm_reconcile_gap_threshold_credits))
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +277,20 @@ async def get_tenant_key(workspace: str) -> str | None:
     _require_workspace(workspace)
     doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
     return doc.litellm_key if doc is not None else None
+
+
+async def list_provisioned_workspaces() -> list[str]:
+    """Every workspace that has a live LiteLLM virtual key.
+
+    The cutover sweep iterates these to run the per-mode spend logic. A SYSTEM-job
+    read across tenants (no per-tenant scope) — but it only returns workspace IDs
+    that have a real key; an unprovisioned workspace has nothing to sweep. Reading
+    ``LiteLLMTenantKey`` stays inside THIS entity (only this module touches that
+    doc), so the cutover sweeper goes through this helper rather than querying the
+    doc itself.
+    """
+    docs = await LiteLLMTenantKey.find(LiteLLMTenantKey.litellm_key != None).to_list()  # noqa: E711
+    return [d.workspace for d in docs if d.litellm_key]
 
 
 async def ensure_tenant_key(
@@ -368,8 +480,17 @@ async def ingest_tenant_spend(
     # Oldest first so the high-water mark advances monotonically.
     for row in sorted(rows, key=lambda r: _row_start_time(r) or ""):
         start_ts = _row_start_time(row)
-        # Skip rows at/older than the high-water mark — already ingested.
-        if high_water is not None and start_ts is not None and start_ts <= high_water:
+        # WU-F boundary fix — skip rows STRICTLY older than the high-water mark
+        # only. The previous ``start_ts <= high_water`` dropped a DISTINCT row that
+        # shared the mark's exact ``startTime`` second when it first appeared on a
+        # LATER sweep (proxy spend rows are not strictly ordered, and second-grained
+        # timestamps collide), silently UNDER-BILLING it. Now a same-second row at
+        # the boundary is RE-EXAMINED and de-duplicated by its own
+        # ``litellm:{request_id}`` ledger key below (the ``is_recorded`` skip + BC-1's
+        # unique index), so an already-ingested boundary row no-ops while a new
+        # boundary row bills exactly once. The mark stays an optimisation that bounds
+        # the read; the per-row request_id is the real exactly-once guard.
+        if high_water is not None and start_ts is not None and start_ts < high_water:
             continue
 
         rows_read += 1
@@ -462,11 +583,182 @@ async def ingest_tenant_spend(
     )
 
 
+# ---------------------------------------------------------------------------
+# Shadow compare — read proxy spend + BC-3 ledger side by side, debit NOTHING.
+# ---------------------------------------------------------------------------
+
+
+def _as_aware(dt: datetime | None) -> datetime | None:
+    """Normalise a datetime to tz-aware UTC (a naive value is assumed UTC), or
+    pass None through. Used so window comparisons never mix naive + aware."""
+    if dt is None:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    """Parse a LiteLLM ``startTime`` ISO string to a datetime, or None.
+
+    Tolerant of the proxy's shapes: a trailing ``Z`` is normalised to ``+00:00``;
+    a naive (no-offset) string parses as naive. Returns None on anything
+    unparseable so a malformed row is excluded from a window rather than crashing
+    the compare.
+    """
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    # LiteLLM /spend/logs ``startTime`` is frequently NAIVE (no offset). The window
+    # bounds the sweep passes are tz-AWARE (UTC), and Python refuses to compare a
+    # naive datetime to an aware one. Normalise a naive timestamp to UTC (the proxy
+    # records UTC) so the window test never crashes on a real proxy row.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _in_window(row_dt: datetime | None, since: datetime | None, until: datetime | None) -> bool:
+    """Half-open window test ``[since, until)`` on a row's parsed timestamp.
+
+    A row with NO parseable timestamp is INCLUDED (we'd rather over-count an
+    undated row into the compare than silently drop spend from the shadow check —
+    the compare is a safety net, so it errs toward surfacing discrepancies). An
+    open bound (``None``) passes that side. ``since`` / ``until`` are normalised to
+    tz-aware UTC alongside the row timestamp so a caller passing naive bounds (or a
+    proxy emitting naive timestamps) can't trip a naive-vs-aware comparison.
+    """
+    if row_dt is None:
+        return True
+    since = _as_aware(since)
+    until = _as_aware(until)
+    row_dt = _as_aware(row_dt)
+    if since is not None and row_dt < since:
+        return False
+    return not (until is not None and row_dt >= until)
+
+
+async def reconcile_tenant_spend(
+    workspace: str,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    spend_card: SpendCredits | None = None,
+    threshold: int | None = None,
+    admin_client: LiteLLMAdminClient | None = None,
+) -> SpendReconciliation:
+    """SHADOW compare for ``workspace`` over ``[since, until)`` — debit NOTHING.
+
+    The safe cutover step. Reads the tenant's LiteLLM proxy spend, converts it to
+    credits via the SAME rate card BC-3 uses, sums the workspace's BC-3
+    ``compute_spend`` ledger debits over the same window, and records the two side
+    by side as a ``SpendReconciliation`` doc (and a structured log line). The
+    ``delta`` (litellm - bc3) and the ``coverage_gap`` verdict (``abs(delta)`` over
+    ``threshold``) tell an operator whether the two meters agree before flipping to
+    ``live``.
+
+    CRITICAL — this performs ZERO debits. It NEVER calls ``credits.service.debit``
+    and NEVER advances the spend high-water mark. BC-3 keeps billing untouched
+    during shadow. The credit ledger is read (via the credits service's own
+    tenant-filtered ``sum_debits_by_cause``) but never written. A workspace with no
+    provisioned key still produces a record (litellm_credits=0) so the operator
+    sees every tenant in the compare, not a silent gap.
+
+    ``since`` / ``until`` bound the window (datetimes; ``until`` exclusive). The
+    LiteLLM rows are filtered on their parsed ``startTime``; the BC-3 debits on
+    ``createdAt`` — the same window on both sides. ``spend_card`` / ``threshold``
+    are injectable for tests; they default to the settings-derived values.
+    """
+    _require_workspace(workspace)
+
+    card = spend_card if spend_card is not None else load_spend_credits()
+    gap_threshold = threshold if threshold is not None else reconcile_gap_threshold()
+
+    # --- LiteLLM side: proxy spend over the window -> credits. ---------------
+    litellm_credits = 0
+    litellm_rows = 0
+    doc = await LiteLLMTenantKey.find_one(LiteLLMTenantKey.workspace == workspace)
+    if doc is not None and doc.litellm_key:
+        client = admin_client if admin_client is not None else LiteLLMAdminClient()
+        rows = await client.spend_logs(api_key=doc.litellm_key)
+        for row in rows:
+            row_dt = _parse_iso(_row_start_time(row))
+            if not _in_window(row_dt, since, until):
+                continue
+            litellm_rows += 1
+            litellm_credits += card.to_credits(_num(row.get("spend")))
+
+    # --- BC-3 side: the metered compute_spend debits over the SAME window. ---
+    # Read through the credits service (entity-isolation: it owns its ledger doc).
+    # This is a READ — no debit, no write.
+    bc3_credits, bc3_entries = await credits_service.sum_debits_by_cause(
+        workspace, _BC3_COMPUTE_SPEND_CAUSE, since=since, until=until
+    )
+
+    delta = litellm_credits - bc3_credits
+    coverage_gap = abs(delta) > gap_threshold
+
+    window_start = since.isoformat() if since is not None else None
+    window_end = until.isoformat() if until is not None else None
+
+    # Persist the reconciliation row (append-only audit — NOT a ledger; recording
+    # one moves no money). One row per tenant per window.
+    record = SpendReconciliationDoc(
+        workspace=workspace,
+        window_start=window_start,
+        window_end=window_end,
+        litellm_credits=litellm_credits,
+        bc3_credits=bc3_credits,
+        delta=delta,
+        coverage_gap=coverage_gap,
+        threshold=gap_threshold,
+        litellm_rows=litellm_rows,
+        bc3_entries=bc3_entries,
+    )
+    await record.insert()
+
+    log = logger.warning if coverage_gap else logger.info
+    log(
+        "llm_provisioning.reconcile_tenant_spend: workspace=%s window=[%s,%s) "
+        "litellm=%d bc3=%d delta=%d coverage_gap=%s (threshold=%d, litellm_rows=%d, "
+        "bc3_entries=%d) — SHADOW, no debit",
+        workspace,
+        window_start,
+        window_end,
+        litellm_credits,
+        bc3_credits,
+        delta,
+        coverage_gap,
+        gap_threshold,
+        litellm_rows,
+        bc3_entries,
+    )
+
+    return SpendReconciliation(
+        workspace_id=workspace,
+        window_start=window_start,
+        window_end=window_end,
+        litellm_credits=litellm_credits,
+        bc3_credits=bc3_credits,
+        delta=delta,
+        coverage_gap=coverage_gap,
+        threshold=gap_threshold,
+        litellm_rows=litellm_rows,
+        bc3_entries=bc3_entries,
+    )
+
+
 __all__ = [
     "ensure_tenant_key",
     "get_tenant_key",
     "ingest_tenant_spend",
+    "list_provisioned_workspaces",
     "load_key_budget",
     "load_spend_credits",
+    "reconcile_gap_threshold",
+    "reconcile_tenant_spend",
     "spend_ingest_enabled",
+    "spend_mode",
+    "warn_legacy_spend_bool_once",
 ]
