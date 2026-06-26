@@ -113,6 +113,34 @@ def test_quota_sums_across_sessions(_jail_root, monkeypatch):
     assert agent_jail.check_workspace_jail_quota("ws1") is not None
 
 
+def test_quota_over_limit_short_circuits(_jail_root, monkeypatch):
+    """The run-start check stops walking once the running sum passes the limit —
+    it does not stat the whole tree (the hot-path guarantee for big node_modules
+    jails). Two session dirs each already exceed the limit on their own, so
+    whichever the DFS reaches first crosses immediately; the other is never
+    scanned."""
+    limit = 1024
+    _make_jail(_jail_root, "ws1", "s1", files={"big1.bin": 4096})
+    _make_jail(_jail_root, "ws1", "s2", files={"big2.bin": 4096})
+
+    real_scandir = os.scandir
+    scanned: list[str] = []
+
+    def counting_scandir(path):
+        scanned.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(agent_jail.os, "scandir", counting_scandir)
+
+    assert agent_jail.workspace_jail_over_quota("ws1", limit) is True
+
+    agent_root = str(_jail_root / "ws1" / "agent")
+    session_scans = [p for p in scanned if p.startswith(agent_root) and p != agent_root]
+    # Exactly ONE session dir was walked before the early-exit fired; the second
+    # (and the rest of the tree) was skipped.
+    assert len(session_scans) == 1, f"expected short-circuit after 1 session dir, scanned {scanned}"
+
+
 # --------------------------------------------------------------------------- #
 # scan_jail_dir
 # --------------------------------------------------------------------------- #
