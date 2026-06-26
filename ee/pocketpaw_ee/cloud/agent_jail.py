@@ -20,20 +20,30 @@ client is set exactly when ``init_cloud_db`` ran (``CloudLifecycleHook`` on
 ``CLOUD_MONGODB_URI``), so it is the authoritative "this process is serving
 tenants" flag without inventing a new one.
 
+When the fail-closed fires (a cloud run that lost its workspace = a
+mis-tenanting signal), a high-severity cloud AuditEvent is emitted via the
+Layer-5 audit service before the raise — exactly the signal that audit exists
+to capture. The emit is best-effort and never blocks the raise.
+
 Scope (ART-2): cwd resolution + fail-closed + the cloud/OSS gate only. Quota,
 TTL garbage-collection and disk-watermark eviction of these dirs are ART-3.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # A jail path segment is a single workspace / session id. Ids are Mongo
 # ObjectId hex in practice; restrict to a safe charset (no path separators)
-# so a malformed or hostile id can never escape its workspace subtree.
-_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+$")
+# so a malformed or hostile id can never escape its workspace subtree. The
+# anchor is ``\Z`` (very end of string), NOT ``$`` — ``$`` also matches just
+# before a trailing newline, so ``"abc\n"`` would slip past a ``$`` guard.
+_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.-]+\Z")
 
 # Group/DM-bridge runs bind a workspace but no session; they share one
 # per-workspace dir under this name (still tenant-isolated, just not
@@ -51,6 +61,42 @@ def _safe_segment(value: str, *, label: str) -> str:
     if value in {".", ".."} or not _SAFE_SEGMENT.match(value):
         raise ValueError(f"unsafe {label} for agent jail path: {value!r}")
     return value
+
+
+def _emit_fail_closed_audit(actor_id: str | None, session_id: str | None) -> None:
+    """Best-effort high-severity audit alert for a fail-closed cloud run.
+
+    A cloud agent run reaching the backend with no resolvable workspace is a
+    mis-tenanting signal — exactly what Layer-5 audit exists to capture. Emit it
+    through the cloud audit service, fire-and-forget on the running loop (the
+    resolver is sync but runs inside the async agent loop). NEVER raises and
+    NEVER blocks the fail-closed raise that follows: a missing alert must not
+    turn a closed door into an open one. No running loop (e.g. a sync unit test)
+    → skip silently; the raise still happens.
+    """
+    try:
+        import asyncio
+
+        from pocketpaw_ee.cloud.audit import service as audit_service
+
+        async def _record() -> None:
+            # ``record`` itself never raises; the workspace is a sentinel
+            # because the whole alert IS "this run had no workspace".
+            await audit_service.record(
+                "__no_workspace__",
+                actor_id or "unknown",
+                "agent.cwd_jail.fail_closed",
+                target_type="agent_run",
+                target_id=session_id,
+                metadata={
+                    "severity": "high",
+                    "reason": "no resolvable workspace_id",
+                },
+            )
+
+        asyncio.get_running_loop().create_task(_record())
+    except Exception:  # noqa: BLE001 — telemetry must never break fail-closed
+        logger.debug("fail-closed audit alert could not be scheduled", exc_info=True)
 
 
 def workspace_jail_root() -> Path:
@@ -81,6 +127,7 @@ def resolve_agent_cwd() -> str | None:
     """
     from pocketpaw_ee.cloud.chat.agent_service import (
         current_session_mongo_id,
+        current_user_id,
         current_workspace_id,
     )
 
@@ -94,6 +141,8 @@ def resolve_agent_cwd() -> str | None:
         from pocketpaw_ee.cloud.shared.db import get_client
 
         if get_client() is not None:
+            # Mis-tenanting signal — alert before failing closed (best-effort).
+            _emit_fail_closed_audit(current_user_id(), current_session_mongo_id())
             raise RuntimeError(
                 "cloud agent run reached the backend with no resolvable "
                 "workspace_id; refusing to fall back to the shared home "
