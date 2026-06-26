@@ -1083,6 +1083,41 @@ async def _handle_interrupted_cleanup(
         logger.debug("interrupted stream write failed", exc_info=True)
 
 
+async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """ART-3 per-workspace agent-jail quota, enforced at RUN-START.
+
+    The agent writes through its native subprocess tools (Write/Bash), so we
+    can't cheaply gate each individual write; instead we measure the workspace's
+    total jail size ONCE here — before spinning up the agent — and reject the run
+    CLEANLY when it's over quota. The rejection is a terminal ``failed`` run with
+    a clear message and an ``error`` stream frame, never an OOM/crash that takes
+    the worker (and every other tenant on the box) down. Returns ``True`` when
+    the run was rejected (the caller returns early), ``False`` to proceed. Off
+    cloud / under quota it is a no-op returning ``False``.
+    """
+    from pocketpaw_ee.cloud import agent_jail
+
+    quota_error = agent_jail.check_workspace_jail_quota(ctx.workspace_id)
+    if not quota_error:
+        return False
+    logger.warning("run %s rejected — agent jail over quota: %s", spec.run_id, quota_error)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": "agent.jail_over_quota", "message": quota_error}
+        )
+    except Exception:
+        logger.debug("over-quota error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=quota_error)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for over-quota run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("over-quota stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -1161,6 +1196,12 @@ async def execute_run(spec: RunSpec) -> None:
     # instead of re-resolving. Never raises — a missing/foreign pocket degrades
     # to the surface base (today's behavior).
     ctx.resolved_profile = await _resolve_entity_profile(ctx)
+
+    # ART-3: reject a run whose workspace agent-jail is over quota BEFORE the
+    # prewarm + mark-running + agent spin-up, so a tenant that filled its scratch
+    # quota fails fast and cleanly instead of crashing the shared box mid-run.
+    if await _reject_if_over_jail_quota(spec, ctx, transport):
+        return
 
     # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
     # subprocess for this session NOW — concurrently with the remaining pre-turn
