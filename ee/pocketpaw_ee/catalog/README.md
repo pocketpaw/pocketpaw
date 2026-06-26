@@ -41,6 +41,21 @@ yet (see the MCG-1 note below).
 | `CATALOG_CACHE_TTL_SECONDS` | `300` | assembled-catalog TTL |
 | `CATALOG_MODELS_DEV_ENABLED` | `true` | toggle models.dev enrichment |
 
+## Known gaps (carried forward)
+
+- **Non-text pricing is unmapped.** The mapper reads only per-token cost
+  (`input_cost_per_token`/`output_cost_per_token`), so image / audio / video
+  models report `pricing=None` even when the proxy knows a per-image or
+  per-second cost. Fails soft (the field is optional). Fix belongs with the
+  multi-modal execution slices (MCG-6/7), which must map the per-unit cost
+  fields into a richer `Pricing` before the picker surfaces non-text prices.
+- **Readiness/status.** `/model/info` exposes no per-model readiness signal, so
+  v1 marks every entry `status="available"`. The `status` field + the
+  catalog⊇routable union are in place for a future readiness probe to flip
+  un-keyed models to `"disabled"`.
+- **`streaming` capability is a heuristic** (assumed for all chat models), not
+  read from `/model/info`.
+
 ## Live deploy — CAPTAIN HANDOFF
 
 This slice ships the **app-side catalog API** and a **reference proxy config**
