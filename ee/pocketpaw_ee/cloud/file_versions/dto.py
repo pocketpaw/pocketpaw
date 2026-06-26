@@ -4,6 +4,9 @@
 #   WriteFile{Request,Response}, UpdateFileContent{Request,Response}, and the
 #   version list/get DTOs. DROPPED the Slice-D editor transport DTOs
 #   (DiffResponse, AiEditRequest, AiEditResponse) — deferred, not ported.
+# Updated: 2026-06-26 (ART-1 quality fix loop, I2) — WriteFileRequest gained an
+#   optional `mime`; when omitted the service guesses from the filename
+#   extension instead of hardcoding application/json.
 """FileVersions DTOs — request/response schemas for the file-version API."""
 
 from __future__ import annotations
@@ -19,6 +22,9 @@ class WriteFileRequest(BaseModel):
     path: str = Field(min_length=1)  # file id or path
     content: str = Field(min_length=0)  # full file content
     filename: str | None = None  # display name (defaults to path if omitted)
+    # Explicit mime. When omitted the service guesses from the filename
+    # extension, defaulting to text/plain for extension-less paths.
+    mime: str | None = None
 
 
 class WriteFileResponse(BaseModel):
