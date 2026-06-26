@@ -1,5 +1,12 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-26 (integration/model-catalog-v2, MCG-11) — the ResultMessage
+  token-usage path now runs ``pocketpaw.llm.caching.report_savings`` over the SDK
+  usage to surface STRUCTURED prompt-cache telemetry (cache_read_tokens,
+  cache_write_tokens, cache_hit_rate, cache_est_tokens_saved) on the
+  ``token_usage`` AgentEvent metadata and log the per-turn margin. This is the
+  measurement hook for the byte-stable cached prefix used by site/pocket-gen;
+  the existing ``cached_input_tokens`` field is unchanged for back-compat.
 Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
   ``connect()`` the warm CLI subprocess for a session BEFORE its first turn so
   the first real ``run`` reuses it instead of paying the ~12s cold connect. To
@@ -2069,6 +2076,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         usage = getattr(event, "usage", None) or {}
                         if isinstance(usage, dict) and (usage or total_cost):
                             _model_name = options_kwargs.get("model", "claude")
+                            # MCG-11 — read prompt-cache effectiveness off the
+                            # SDK usage via the universal helper so the margin
+                            # from the byte-stable cached prefix (site/pocket-gen)
+                            # is MEASURABLE: hit-rate + est. input-token-equivalents
+                            # saved, surfaced to metering alongside the raw counts.
+                            from pocketpaw.llm.caching import report_savings
+
+                            savings = report_savings(usage)
+                            if savings.cache_read_tokens or savings.cache_write_tokens:
+                                logger.info(
+                                    "[claude_sdk] prompt-cache: read=%d write=%d "
+                                    "hit_rate=%.1f%% est_saved=%.0f input-tok-equiv",
+                                    savings.cache_read_tokens,
+                                    savings.cache_write_tokens,
+                                    savings.hit_rate * 100,
+                                    savings.est_tokens_saved,
+                                )
                             yield AgentEvent(
                                 type="token_usage",
                                 content="",
@@ -2077,6 +2101,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
                                     "output_tokens": usage.get("output_tokens", 0),
                                     "cached_input_tokens": usage.get("cache_read_input_tokens", 0)
                                     + usage.get("cache_creation_input_tokens", 0),
+                                    # Structured cache telemetry (MCG-11) — metering
+                                    # can attribute the margin without re-parsing.
+                                    "cache_read_tokens": savings.cache_read_tokens,
+                                    "cache_write_tokens": savings.cache_write_tokens,
+                                    "cache_hit_rate": savings.hit_rate,
+                                    "cache_est_tokens_saved": savings.est_tokens_saved,
                                     "total_cost_usd": total_cost,
                                     "model": _model_name
                                     if isinstance(_model_name, str)

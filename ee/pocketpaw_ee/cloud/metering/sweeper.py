@@ -20,7 +20,21 @@
 # racing it — bills each run once: the second debit collides on the key and is a
 # no-op, and the ``billed`` flag short-circuits the run out of later sweeps.
 #
+# THE BC-3 OFF-SWITCH (WU-F): this sweep is the ONLY place BC-3 actually charges —
+# ``bill_run`` is never called inline in the chat run lifecycle, only from here (the
+# ee/extensions heartbeat + the Tier 2 worker boot). When the billing cutover is in
+# ``live`` mode (POCKETPAW_LITELLM_SPEND_MODE=live) LiteLLM is the sole meter, so
+# this sweep MUST NOT run — otherwise the same usage is billed twice (once by the
+# proxy-spend sweep, once here). ``sweep_unbilled_runs`` therefore checks the mode
+# and no-ops in ``live``. In ``off`` and ``shadow`` it bills as today (shadow is a
+# read-only compare layered ON TOP of unchanged BC-3 billing). Runs that go unbilled
+# while ``live`` is in effect simply stay ``billed=False`` and are billed by LiteLLM
+# instead — they are NOT back-billed by BC-3 if the mode is later turned off, which
+# is the correct behaviour (the proxy already charged them).
+#
 # Created 2026-06-24 (integration/billing-credits, BC-3): new entity.
+# Updated 2026-06-26 (feat/litellm-billing-cutover, WU-F): gated OFF in ``live`` mode
+# — the single-meter guarantee. See "THE BC-3 OFF-SWITCH" above.
 
 from __future__ import annotations
 
@@ -46,6 +60,7 @@ async def sweep_unbilled_runs(
     *,
     batch_limit: int = _SWEEP_BATCH_LIMIT,
     rate_card: RateCard | None = None,
+    mode: str | None = None,
 ) -> int:
     """Bill every unbilled terminal chat run's compute cost, exactly once.
 
@@ -59,7 +74,28 @@ async def sweep_unbilled_runs(
     ``rate_card`` is resolved ONCE for the whole batch (a single settings read)
     and passed into each ``bill_run`` so a 200-run sweep doesn't re-read settings
     200 times. Tests inject a card here to pin the rate.
+
+    WU-F single-meter gate: when the billing-cutover ``mode`` is ``live`` LiteLLM
+    is the sole meter, so this BC-3 sweep MUST NOT charge — it returns 0 WITHOUT
+    touching any wallet or flipping any ``billed`` flag (the off-switch that keeps
+    exactly one meter charging; see the module header). ``off`` and ``shadow`` bill
+    as today. ``mode`` defaults to the resolved deployment mode
+    (``llm_provisioning.service.spend_mode()``, which honours the legacy bool);
+    tests pass it explicitly so they don't depend on ambient settings.
     """
+    if mode is None:
+        # Lazy import — avoids a metering<->llm_provisioning module-load cycle and
+        # mirrors the lazy settings reads elsewhere in the metering entity.
+        from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
+
+        mode = provisioning_service.spend_mode()
+    if mode == "live":
+        logger.debug(
+            "sweep_unbilled_runs: billing mode is 'live' — LiteLLM is the sole "
+            "meter, BC-3 per-run metering is gated OFF (no debit, no flag write)"
+        )
+        return 0
+
     unbilled = (
         await ChatRunDoc.find(
             {"status": {"$in": _TERMINAL_STATES}},

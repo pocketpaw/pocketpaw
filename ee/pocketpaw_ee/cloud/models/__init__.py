@@ -96,6 +96,7 @@ from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
     MeetingProviderCredentials,
@@ -115,6 +116,7 @@ from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
 from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
@@ -231,6 +233,7 @@ __all__ = [
     "Invite",
     "Lead",
     "LeadSource",
+    "LiteLLMTenantKey",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -252,6 +255,7 @@ __all__ = [
     "Site",
     "SiteDomain",
     "SiteRateCounter",
+    "SpendReconciliation",
     "Subscription",
     "WorkspaceSensePreference",
     "Task",
@@ -302,11 +306,17 @@ def get_all_documents():
         # captured via verified ``subscription.*`` webhooks. Only
         # ``ee.cloud.billing.service`` writes this.
         Subscription,
+        # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
+        # ``ee.cloud.llm_provisioning.service`` writes this.
+        LiteLLMTenantKey,
         Invite,
         Group,
         InstinctApproval,
         Message,
         ReadState,
+        # Shadow-compare reconciliation rows (WU-F). One per tenant per window
+        # during shadow mode. Only ``ee.cloud.llm_provisioning.service`` writes it.
+        SpendReconciliation,
         Task,
         TaskAttachment,
         TemporalSweepStateDoc,

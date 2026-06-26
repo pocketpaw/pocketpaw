@@ -27,7 +27,8 @@ Server surfaces (module → server name → tools):
   ``instinct_audit`` (READ-ONLY gate visibility, workspace-scoped; proposing
   goes through ``pocketpaw_external_actions``)
 * ``loom.py`` → ``loom`` (stdio config) → codebase orientation reads
-* ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``video_generate``
+* ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``audio_generate`` /
+  ``audio_transcribe`` / ``video_generate`` (routed through the LiteLLM proxy)
 * ``meetings.py`` → ``pocketpaw_meetings`` → meeting queries
 * ``planner.py`` → ``pocketpaw_planner`` (opt-in) + ``pocketpaw_pocket_planner``
 * ``pockets.py`` → ``pocketpaw_pocket`` → pocket context + widget pinning
