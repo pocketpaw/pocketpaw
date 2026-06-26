@@ -135,6 +135,14 @@
 #        match. ``ensure_type`` / ``ingest_records`` (connectors/fabric_ingest.py)
 #        thread ``workspace_id`` so existing ingestion keeps working and minted
 #        types land in the caller's tenant.
+# Updated: 2026-06-26 (ISO-1 — physical per-workspace isolation) — added
+#   aclose(): a best-effort WAL-checkpoint + state reset the new workspace-keyed
+#   store factory (src/pocketpaw/stores.py) runs when it evicts a per-workspace
+#   FabricStore from its bounded LRU. The store still holds no long-lived
+#   connection; aclose exists only so an idle tenant's write-ahead-log sidecar
+#   gets truncated instead of growing unbounded across 128+ cached tenants. The
+#   W4a in-row workspace_id WHERE-filter is UNCHANGED — physical file isolation
+#   is ADDITIVE defense-in-depth layered on top of it, never a replacement.
 
 
 from __future__ import annotations
@@ -530,6 +538,29 @@ class FabricStore:
     def _conn(self) -> aiosqlite.Connection:
         """Return a new connection context manager. Use with `async with`."""
         return aiosqlite.connect(self._db_path)
+
+    async def aclose(self) -> None:
+        """Release this store's on-disk resources (ISO-1).
+
+        ``FabricStore`` holds NO long-lived connection — every method opens and
+        closes its own ``aiosqlite.connect()`` per call — so there is no socket
+        or cursor to close. What CAN accumulate is a write-ahead-log sidecar
+        (``fabric.db-wal`` / ``-shm``) that grows until a checkpoint folds it
+        back into the main file. Under per-workspace physical isolation the
+        store factory caches up to 128 of these and evicts the least-recently
+        used; ``aclose`` is what the factory runs on eviction so an idle
+        tenant's WAL is truncated rather than left to grow unbounded, and the
+        next ``_ensure_schema`` re-runs cleanly on the cold handle.
+
+        Best-effort and idempotent: a checkpoint failure (DB never created,
+        WAL not in use, file vanished) is swallowed — eviction must never raise.
+        """
+        self._initialized = False
+        try:
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
+            logger.debug("FabricStore.aclose checkpoint skipped", exc_info=True)
 
     # --- Object Types ---
 

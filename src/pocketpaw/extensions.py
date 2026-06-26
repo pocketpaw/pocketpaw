@@ -15,6 +15,12 @@ Updated: 2026-06-12 (connector-store-unification CS-3) — added
 ``ConnectorStateStoreProvider`` (group ``pocketpaw.connector_state_stores``)
 so EE can back the ConnectorRegistry's durable state with the cloud DB
 instead of the file store.
+
+Updated: 2026-06-26 (ISO-1 — workspace-keyed store factory) — activated the
+previously-dormant ``StoreProvider`` seam: ``pocketpaw.stores.get_fabric_store``
+now consults it, and ``get_store`` gained a ``workspace_id`` keyword so a future
+EE provider can return a per-workspace / cloud-backed Fabric store. The EE
+registration is a later task; core only consults the seam here.
 """
 
 from __future__ import annotations
@@ -82,11 +88,24 @@ class AuthProvider(Protocol):
 class StoreProvider(Protocol):
     """Entry-point group: ``pocketpaw.stores``
 
-    Overrides the default singleton store factories (instinct, fabric, …).
-    Core ships local SQLite-backed defaults; EE swaps in cloud-backed ones.
+    Overrides the default store factories (instinct, fabric, …). Core ships
+    local SQLite-backed defaults; EE swaps in cloud-backed ones.
+
+    Activated by ISO-1 (2026-06-26): ``pocketpaw.stores.get_fabric_store``
+    consults this seam before building its own store, so EE can later register a
+    workspace-keyed / cloud-backed Fabric store without core importing EE. The
+    EE registration itself is a LATER task — core merely consults the seam now.
+
+    ``get_store`` takes the logical store *name* (``"fabric"``, ``"instinct"``,
+    …) and the resolved ``workspace_id`` (``None`` for the single-tenant /
+    unscoped path). A provider returns the store it wants core to use, or
+    ``None`` to decline that name (core then builds its local default).
+    Implementations should accept ``workspace_id`` as a keyword so the core
+    factory can pass it; the factory tolerates a legacy no-``workspace_id``
+    signature for back-compat.
     """
 
-    def get_store(self, name: str) -> Any: ...
+    def get_store(self, name: str, *, workspace_id: str | None = None) -> Any: ...
 
 
 @runtime_checkable
