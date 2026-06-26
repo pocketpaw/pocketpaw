@@ -61,6 +61,12 @@ general update() path on purpose (a non-ASK level enables auto-approval of
 agent writes), and emits a WARNING-severity append-only audit event with the
 old→new level. The write goes through this service per the import-linter
 Beanie-writes-only-from-service contract.
+2026-06-26 (feat/litellm-billing-cutover, WU-F): create() now also fires the
+per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
+ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
+swallowed (workspace creation NEVER fails on a provisioning error); the call is
+idempotent, so the billing-cutover sweep and any later workspace touch back-fill
+a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
 """
 
 from __future__ import annotations
@@ -342,6 +348,24 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
         await agents_service.seed_default_agent(str(doc.id), ctx.user_id)
     except Exception as exc:
         logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
+
+    # Provision the per-tenant LiteLLM virtual key (WU-F / MCG-8). BEST-EFFORT and
+    # NON-BLOCKING: if the proxy is unreachable or the mint fails, log + continue —
+    # workspace creation must NEVER fail on a provisioning error. ``ensure_tenant_key``
+    # is idempotent, so the cutover sweep (which iterates provisioned tenants) and a
+    # later workspace touch both back-fill a key that didn't get minted here. Lazy
+    # import keeps the workspace service free of an llm_provisioning dependency at
+    # module load.
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning import service as llm_provisioning_service
+
+        await llm_provisioning_service.ensure_tenant_key(str(doc.id))
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort, never fatal
+        logger.warning(
+            "Failed to provision LiteLLM tenant key for workspace %s (non-fatal): %s",
+            doc.id,
+            exc,
+        )
 
     await emit(
         WorkspaceMemberAdded(

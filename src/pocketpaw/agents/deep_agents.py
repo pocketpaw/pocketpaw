@@ -7,6 +7,21 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 - Pluggable virtual filesystem backends
 
 Requires: pip install deepagents
+
+Updated 2026-06-26 (integration/model-catalog-v2, MCG-11):
+  * The Anthropic prompt-cache patch sources its ``cache_control`` marker from
+    the universal ``pocketpaw.llm.caching._cache_control`` helper (single source
+    of truth for the 5m/1h ephemeral shape) instead of an inline literal.
+  * It now picks the TTL by content: the pocket/site-GENERATOR prefix (detected
+    by the byte-stable ``<pocket-scope>`` sentinel via ``_cache_ttl_for_system``)
+    gets a **1h** window because it recurs across back-to-back briefs; every
+    other long prompt keeps the 5m default. This is where the live site-gen
+    margin actually lands — the specialist runs on this backend by default and
+    its system prompt is a string the patch wraps + marks.
+  * Added prompt-cache TELEMETRY: the stream accumulates per-turn cache token
+    counts (``_accumulate_cache_usage``) and emits a ``token_usage`` AgentEvent
+    (via ``report_savings``) before ``done``, so the margin is measurable on this
+    backend (mirrors the claude_sdk hook).
 """
 
 import logging
@@ -41,6 +56,27 @@ _ANTHROPIC_PATCHED = False
 # prompts the chat agent uses for greetings / one-shot facts. Tuned
 # conservatively — false positives only cost the cache-write overhead.
 _ANTHROPIC_CACHE_MIN_CHARS = 4000
+
+# MCG-11 — byte-stable sentinel that identifies the pocket/site-GENERATOR
+# prefix (``POCKET_SPECIALIST_PROMPT`` and the edit-specialist variants all open
+# with ``_SCOPE_BLOCK``, whose first line is ``<pocket-scope>``). That prefix is
+# huge (~17k tokens) and recurs across BACK-TO-BACK briefs, so it earns the 1h
+# cache window (≥3 reads/hour beats the 5m default and amortises the 2x write).
+# Every OTHER long prompt (chat / home / one-shot) keeps the 5m default — a
+# blanket 1h would 2x the write cost for prompts that never recur within the
+# hour. The gate is a substring test on byte-stable prompt text, so it stays
+# correct regardless of which backend assembled the string.
+_SPECIALIST_PREFIX_SENTINEL = "<pocket-scope>"
+
+
+def _cache_ttl_for_system(text: str) -> str:
+    """Pick the cache TTL for a system prompt by its content.
+
+    Returns ``"1h"`` for the pocket/site-generator prefix (detected by the
+    byte-stable ``<pocket-scope>`` sentinel) — it recurs across briefs so the
+    longer window pays off — and ``"5m"`` for everything else.
+    """
+    return "1h" if _SPECIALIST_PREFIX_SENTINEL in text else "5m"
 
 
 def _patch_openai_message_serializer() -> None:
@@ -257,30 +293,37 @@ def _patch_anthropic_message_serializer() -> None:
 
     original = _ac._format_messages
 
+    # Single source of truth for the ephemeral marker shape (MCG-11) — the
+    # universal caching module owns the 5m/1h ``cache_control`` dict so this
+    # patch and the structured ``build_cacheable`` path can never diverge.
+    from pocketpaw.llm.caching import _cache_control as _cc
+
     def patched(messages):  # type: ignore[no-untyped-def]
         system, formatted = original(messages)
         if isinstance(system, str) and len(system) >= _ANTHROPIC_CACHE_MIN_CHARS:
+            # The pocket/site-generator prefix gets the 1h window (it recurs
+            # across briefs); every other long prompt keeps 5m.
             system = [
                 {
                     "type": "text",
                     "text": system,
-                    "cache_control": {"type": "ephemeral"},
+                    "cache_control": _cc(_cache_ttl_for_system(system)),
                 }
             ]
         elif isinstance(system, list) and system:
             # Already a block list. Tag the last text block whose total
             # text size pushes the system payload over the threshold —
             # short text-only systems and pure-image systems are skipped.
-            total_chars = sum(
-                len(b.get("text", ""))
-                for b in system
-                if isinstance(b, dict) and b.get("type") == "text"
-            )
+            text_blocks = [b for b in system if isinstance(b, dict) and b.get("type") == "text"]
+            total_chars = sum(len(b.get("text", "")) for b in text_blocks)
             already_cached = any(isinstance(b, dict) and b.get("cache_control") for b in system)
             if total_chars >= _ANTHROPIC_CACHE_MIN_CHARS and not already_cached:
+                # TTL keys off the WHOLE system text so the generator prefix is
+                # recognised even when split across blocks.
+                ttl = _cache_ttl_for_system("".join(b.get("text", "") for b in text_blocks))
                 for block in reversed(system):
                     if isinstance(block, dict) and block.get("type") == "text":
-                        block["cache_control"] = {"type": "ephemeral"}
+                        block["cache_control"] = _cc(ttl)
                         break
         return system, formatted
 
@@ -302,6 +345,36 @@ def _unwrap(value: Any) -> Any:
     if hasattr(value, "value"):
         return value.value
     return value
+
+
+def _accumulate_cache_usage(msg_chunk: Any, acc: dict[str, int]) -> None:
+    """Fold a LangChain ``AIMessageChunk``'s cache token counts into ``acc``
+    (MCG-11 telemetry).
+
+    LangChain normalises provider usage onto ``usage_metadata``:
+    ``input_tokens`` is the TOTAL input (cached + uncached) and the cache split
+    lives under ``input_token_details.{cache_read, cache_creation}``. A tool
+    loop yields several AI turns, each with its own ``usage_metadata``, so we
+    SUM across chunks. ``acc`` carries Anthropic-NATIVE keys (read / write /
+    total) so it can be handed straight to ``report_savings`` — which expects
+    ``input_tokens`` to be the UNCACHED remainder, hence we store
+    ``uncached = total - read - write``.
+    """
+    um = getattr(msg_chunk, "usage_metadata", None)
+    if not isinstance(um, dict):
+        return
+    total_input = um.get("input_tokens") or 0
+    details = um.get("input_token_details") or {}
+    read = details.get("cache_read") or 0
+    write = details.get("cache_creation") or 0
+    try:
+        total_input, read, write = int(total_input), int(read), int(write)
+    except (TypeError, ValueError):
+        return
+    uncached = max(0, total_input - read - write)
+    acc["cache_read_input_tokens"] += max(0, read)
+    acc["cache_creation_input_tokens"] += max(0, write)
+    acc["input_tokens"] += uncached
 
 
 def _extract_content_text(content: Any) -> str:
@@ -860,6 +933,17 @@ class DeepAgentsBackend:
             # path emits the final args. Same tool_call_id → emit once.
             announced_tool_ids: set[str] = set()
 
+            # MCG-11 — accumulate prompt-cache token usage across the stream's
+            # AI turns (Anthropic-native keys, so report_savings consumes it
+            # directly). Emitted as a token_usage event before "done" so the
+            # margin from the 1h-cached specialist prefix is MEASURABLE on this
+            # backend (the pocket specialist's default).
+            cache_usage: dict[str, int] = {
+                "input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            }
+
             # Stream using LangGraph's async streaming. Hold the stream in
             # a variable so the ``finally`` block below can call
             # ``aclose()`` on it. LangGraph's astream is backed by
@@ -888,6 +972,9 @@ class DeepAgentsBackend:
                         continue
                     # v2 format: data is (AIMessageChunk, metadata_dict) tuple
                     msg_chunk = data[0] if isinstance(data, tuple | list) else data
+                    # Fold this turn's cache token counts into the accumulator
+                    # (no-op when the chunk carries no usage_metadata).
+                    _accumulate_cache_usage(msg_chunk, cache_usage)
                     text, thinking = _split_content_text_and_thinking(
                         getattr(msg_chunk, "content", "")
                     )
@@ -968,6 +1055,34 @@ class DeepAgentsBackend:
                                     content=tool_content,
                                     metadata={"name": tool_name},
                                 )
+
+            # MCG-11 — emit prompt-cache telemetry before "done" so the margin
+            # from the 1h-cached specialist prefix is observable on this backend
+            # (the pocket specialist's default). Mirrors the claude_sdk hook.
+            if cache_usage["cache_read_input_tokens"] or cache_usage["cache_creation_input_tokens"]:
+                from pocketpaw.llm.caching import report_savings
+
+                savings = report_savings(cache_usage)
+                logger.info(
+                    "[deep_agents] prompt-cache: read=%d write=%d "
+                    "hit_rate=%.1f%% est_saved=%.0f input-tok-equiv",
+                    savings.cache_read_tokens,
+                    savings.cache_write_tokens,
+                    savings.hit_rate * 100,
+                    savings.est_tokens_saved,
+                )
+                yield AgentEvent(
+                    type="token_usage",
+                    content="",
+                    metadata={
+                        "input_tokens": cache_usage["input_tokens"],
+                        "cache_read_tokens": savings.cache_read_tokens,
+                        "cache_write_tokens": savings.cache_write_tokens,
+                        "cache_hit_rate": savings.hit_rate,
+                        "cache_est_tokens_saved": savings.est_tokens_saved,
+                        "backend": "deep_agents",
+                    },
+                )
 
             yield AgentEvent(type="done", content="")
 

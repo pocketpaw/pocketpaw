@@ -557,6 +557,21 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
 
 [[tool.importlinter.contracts]]
+name = "LLM provisioning — Beanie writes only from service.py"
+# MCG-8: the per-tenant LiteLLM virtual-key mapping (LiteLLMTenantKey) is written
+# only by llm_provisioning.service. The domain layer carries framework-free value
+# objects and must never import the Beanie doc (same entity-isolation boundary the
+# credit / foresight entities use).
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.llm_provisioning.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.litellm_key",
+]
+
+[[tool.importlinter.contracts]]
 name = "Foresight — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"

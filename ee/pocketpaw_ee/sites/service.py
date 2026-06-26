@@ -1,6 +1,33 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
+# edit-bridge): ``dev_preview_pocket`` gained an optional ``builder_origin`` and
+# threads it to ``get_manager().ensure_dev_server(builder_origin=...)`` so the
+# dev-server-materialized SOURCE carries SE-1's section anchors + gated edit-bridge
+# (the hover-edit overlay then works against the dev server, not only the static
+# /editable build). The origin is resolved the SAME way ``make_site_editable``
+# resolves it — the passed origin (the router's request ``Origin`` header) when
+# present, else the ``_builder_origin()`` env fallback (PAW_SITES_BUILDER_ORIGIN) —
+# so no new sourcing mechanism is invented. The dev path keeps ``static_build=False``
+# (no prod build); only the generate/scaffold step needs the origin for the gated
+# source injection, and an empty/unset origin still yields a non-bridged source (the
+# generator's gate holds).
+#
+# Updated 2026-06-25 (feat/sites-workers-deploy-mode — workers.dev deploy mode):
+# ``_deploy_site_doc`` now picks one of THREE deploy targets via a new
+# ``_deploy_mode()`` helper reading PAW_CF_DEPLOY_MODE (``local`` | ``workers`` |
+# ``wfp``): ``local`` → ``local_server.deploy_local`` (unchanged), ``workers`` →
+# the NEW ``workers_deploy.deploy_workers`` (deploy a STATIC site as a regular
+# Worker on the free workers.dev tier — a DYNAMIC site raises ``ValidationError``
+# since it needs a per-tenant D1, Phase 2), ``wfp`` → ``cf.put_worker`` (the
+# Workers-for-Platforms path, unchanged). When PAW_CF_DEPLOY_MODE is UNSET the
+# LEGACY selection is preserved exactly (``_local_mode()`` → local, else WfP), and
+# an injected ``_cloudflare`` still forces the WfP branch over an env-requested
+# local mode — so the existing local/CF tests are unaffected. New
+# ``_workers_deploy`` test-injection seam threads ``publish`` → ``_deploy_site_doc``
+# (mirrors ``_local_deploy``/``_cloudflare``). Billing/charge-first logic untouched.
+#
 # Updated 2026-06-25 (feat/paw-sites-prod-deploy, DEP-3 — graceful generator
 # failure): the publish path shells out to the paw-sites generator + bun, which in
 # a misconfigured deploy (an image missing the toolchain) raised a bare
@@ -747,6 +774,38 @@ def _local_mode() -> bool:
     return not os.environ.get("PAW_CF_ACCOUNT_ID")
 
 
+def _deploy_mode() -> str | None:
+    """The EXPLICIT deploy target for a live publish, read from PAW_CF_DEPLOY_MODE
+    (``local`` | ``workers`` | ``wfp``), or ``None`` when unset.
+
+    A 3-way selector layered OVER the existing local/Cloudflare decision without
+    disturbing it:
+      * ``local``   → serve the static site from localhost (local_server.deploy_local).
+      * ``workers`` → deploy as a regular Worker on the free workers.dev tier
+                      (workers_deploy.deploy_workers — STATIC sites only; a dynamic
+                      site raises rather than deploying a broken site).
+      * ``wfp``     → the Workers-for-Platforms dispatch-namespace path
+                      (cloudflare_client.put_worker) — today's Cloudflare default.
+      * UNSET (``None``) → PRESERVE today's behaviour: ``_local_mode()`` selects the
+                      local branch, else the cf/put_worker (wfp) path. So nothing
+                      changes for an environment that does not set the var.
+
+    A value other than the three known modes is treated as UNSET (logged) so a typo
+    degrades to the safe legacy behaviour rather than failing the publish."""
+    import os
+
+    raw = (os.environ.get("PAW_CF_DEPLOY_MODE") or "").strip().lower()
+    if not raw:
+        return None
+    if raw in ("local", "workers", "wfp"):
+        return raw
+    logger.warning(
+        "sites: unknown PAW_CF_DEPLOY_MODE=%r — falling back to legacy local/wfp selection",
+        raw,
+    )
+    return None
+
+
 async def _promote_pocket_draft_to_published(
     *, pocket_id: str, workspace_id: str, author: str | None, content: dict[str, Any]
 ) -> None:
@@ -880,6 +939,7 @@ async def publish(
     _cloudflare: Any | None = None,
     _bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     _local_deploy: Callable[[str, str], str] | None = None,
+    _workers_deploy: Callable[[str, str], Any] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and persist a site. Raises SmokeGateFailed
     (from generator_client) if the workerd smoke render fails — the site is not
@@ -1065,6 +1125,7 @@ async def publish(
         cloudflare=_cloudflare,
         bundle_reader=_bundle_reader,
         local_deploy=_local_deploy,
+        workers_deploy=_workers_deploy,
     )
 
 
@@ -1086,6 +1147,7 @@ async def _deploy_site_doc(
     cloudflare: Any | None = None,
     bundle_reader: Callable[[str], bytes] = _default_bundle_reader,
     local_deploy: Callable[[str, str], str] | None = None,
+    workers_deploy: Callable[[str, str], Any] | None = None,
 ) -> _SiteDoc:
     """Generate, smoke-gate, deploy, and UPSERT the LIVE canonical Site doc.
 
@@ -1093,10 +1155,19 @@ async def _deploy_site_doc(
     (``activate_site``) can run the SAME deferred deploy at payment-confirm time
     using the inputs captured on the pending Site doc. It runs
     ``generator.build`` (with the SSR smoke fail-gate ON — a broken site is
-    rejected before it deploys), deploys via the LOCAL static server or Cloudflare
-    Workers-for-Platforms, and upserts ONE canonical Site doc per (workspace,
-    pocket_id) keyed on the stable ``_id`` (== ``site_id``), flipping
-    ``deployed=True`` + stamping ``deployed_at``.
+    rejected before it deploys), deploys via one of THREE targets, and upserts ONE
+    canonical Site doc per (workspace, pocket_id) keyed on the stable ``_id`` (==
+    ``site_id``), flipping ``deployed=True`` + stamping ``deployed_at``.
+
+    Deploy target (``_deploy_mode()`` reading PAW_CF_DEPLOY_MODE):
+      * ``local``   → the LOCAL static server (``local_server.deploy_local``);
+      * ``workers`` → a regular Worker on the free workers.dev tier
+                      (``workers_deploy.deploy_workers``) — STATIC sites only; a
+                      DYNAMIC site raises ``ValidationError`` (Phase 2 / use WfP);
+      * ``wfp``     → Cloudflare Workers-for-Platforms (``cf.put_worker``).
+    When PAW_CF_DEPLOY_MODE is UNSET the legacy selection stands: ``_local_mode()``
+    → local, else WfP. An injected CF client forces the WfP branch over an
+    env-requested local mode (the existing CF-test contract).
 
     Identity (``site_id`` / ``signed_key`` / ``site_name``) is resolved by the
     caller so the same values flow through a publish and a later activation (the
@@ -1105,6 +1176,10 @@ async def _deploy_site_doc(
     ``pending_deploy_inputs`` (the site is now live, not pending). Raises
     ``SmokeGateFailed`` (from generator_client) if the SSR render fails — nothing
     is deployed and no doc is flipped to deployed.
+
+    ``workers_deploy`` is the test-injection seam for the workers-mode deployer
+    (mirrors ``local_deploy``/``cloudflare``); ``None`` uses the real
+    ``workers_deploy.deploy_workers``.
     """
     gen = generator or GeneratorClient()
     # DEP-3: map a generator/install/smoke failure (missing toolchain, non-zero
@@ -1147,16 +1222,44 @@ async def _deploy_site_doc(
             getattr(_prior, "d1_database_id", "") if _prior is not None else ""
         ) or _derive_d1_database_id(workspace_id, pocket_id)
 
-    # Local mode only when the caller did NOT inject a CF client (tests inject a
-    # fake CF and expect the real branch) AND the environment selects it.
-    use_local = cloudflare is None and _local_mode()
+    # Deploy-mode selection (workers-deploy-mode). PAW_CF_DEPLOY_MODE explicitly
+    # picks one of three targets (local | workers | wfp); when UNSET we preserve the
+    # exact prior behaviour — ``_local_mode()`` → the local branch, else the
+    # cf/put_worker (WfP) path. An injected CF client (tests) still FORCES the real
+    # Cloudflare branch over an env-driven local selection, so the existing CF tests
+    # keep exercising put_worker and the local branch never hijacks them.
+    mode = _deploy_mode()
+    if mode is None:
+        # Legacy selection: local only when no CF client was injected AND the env
+        # selects it; else WfP.
+        use_local = cloudflare is None and _local_mode()
+        mode = "local" if use_local else "wfp"
+    elif mode == "local" and cloudflare is not None:
+        # An injected CF client (a test asserting the real CF branch) wins over an
+        # env that requests local — mirrors the legacy ``cloudflare is None`` guard.
+        mode = "wfp"
+
     url = ""
-    if use_local:
+    if mode == "local":
         from pocketpaw_ee.sites import local_server
 
         deploy = local_deploy or local_server.deploy_local
         url = deploy(site_id, build.project_dir)
-    else:
+    elif mode == "workers":
+        # Free workers.dev tier — STATIC sites only. A dynamic site needs a
+        # per-tenant D1 + Queues (Phase 2 / use WfP), so reject it cleanly rather
+        # than deploying a broken site that can't reach its data.
+        if is_dynamic:
+            raise ValidationError(
+                "sites.workers_dynamic_unsupported",
+                "Dynamic sites aren't supported in workers mode yet (Phase 2) — they "
+                "need a per-tenant D1; publish via Workers-for-Platforms instead.",
+            )
+        from pocketpaw_ee.sites import workers_deploy as workers_deploy_mod
+
+        deploy_w = workers_deploy or workers_deploy_mod.deploy_workers
+        url = await deploy_w(site_id, build.project_dir)
+    else:  # "wfp"
         cf = cloudflare or _cf_client()
         bundle = bundle_reader(build.project_dir)
         # Only a dynamic site passes bindings; a static publish passes None so the
@@ -2335,6 +2438,7 @@ async def dev_preview_pocket(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
+    builder_origin: str | None = None,
 ) -> DevPreviewResponse:
     """Ensure a live Vite dev-server is running for the pocket and return its URL
     (Phase 2 / P2a — the EDITING preview).
@@ -2347,6 +2451,17 @@ async def dev_preview_pocket(
     workerd smoke render is NOT run for the dev server (it is a publish-only gate,
     PERF-4); publish() is unchanged and still does the full prod build + smoke.
 
+    ``builder_origin`` (S1) makes the dev-materialized SOURCE carry SE-1's gated
+    section anchors + postMessage edit-bridge so the hover-edit overlay works against
+    the dev server. It is resolved the SAME way ``make_site_editable`` resolves it —
+    the passed origin (the request ``Origin`` header at the router) when present, else
+    the configured ``PAW_SITES_BUILDER_ORIGIN`` (``_builder_origin()``) — so the dev
+    source is anchored + bridged exactly like the static editable build. It is threaded
+    to the manager → ``_default_materialize`` → ``GeneratorClient.build`` and rides
+    ``siteConfig.builderOrigin``; the generator gates the injection on it, so an
+    empty origin still produces a non-bridged source (the gate holds). The dev path
+    keeps ``static_build=False`` — only the generate/scaffold step needs the origin.
+
     ``user_id`` is threaded through so the manager reads the pocket via the pockets
     service under the caller's scope (it raises NotFound / Forbidden itself, mapped
     by the router to 404 / 403). ``workspace_id`` keeps the surface uniform and
@@ -2354,8 +2469,15 @@ async def dev_preview_pocket(
     """
     from pocketpaw_ee.sites.dev_server import get_manager
 
+    # Mirror make_site_editable's origin resolution: the passed origin (request
+    # Origin header) when present, else the PAW_SITES_BUILDER_ORIGIN env fallback.
+    origin = (builder_origin or "").strip() or _builder_origin()
+
     url = await get_manager().ensure_dev_server(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        builder_origin=origin,
     )
     return DevPreviewResponse(pocket_id=pocket_id, url=url)
 

@@ -44,6 +44,12 @@
 # put_worker and persists that id on the Site doc (reused on re-publish), that a
 # static (landing/None) publish passes NO bindings (single-module path, regress
 # guard), and that publish_pocket threads the pocket's pattern through.
+# Updated 2026-06-25 (feat/sites-workers-deploy-mode): coverage for the 3-way
+# deploy-mode selector — PAW_CF_DEPLOY_MODE=workers routes a STATIC publish to the
+# injected workers deployer (and stamps the returned workers.dev url on the Site);
+# a DYNAMIC site in workers mode raises a clean ValidationError (Phase 2); and with
+# PAW_CF_DEPLOY_MODE UNSET the legacy local/wfp selection is preserved (an injected
+# CF client still wins → put_worker; no env creds + no CF → local deployer).
 from __future__ import annotations
 
 import pytest
@@ -1142,3 +1148,134 @@ async def test_publish_pocket_threads_dynamic_pattern(beanie_test_db):
     assert site.d1_database_id
     d1 = [b for b in (cf.put_bindings[0] or []) if b.get("type") == "d1"]
     assert len(d1) == 1
+
+
+# ── workers deploy mode (PAW_CF_DEPLOY_MODE=workers) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_workers_mode_routes_static_publish_to_workers_deployer(beanie_test_db, monkeypatch):
+    """PAW_CF_DEPLOY_MODE=workers routes a STATIC publish to the injected workers
+    deployer (NOT put_worker, NOT the local server) and stamps the returned
+    workers.dev URL on the Site doc."""
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_workers_deploy(site_id: str, project_dir: str) -> str:
+        calls.append((site_id, project_dir))
+        return f"https://paw-site-{site_id}.acct.workers.dev"
+
+    def cf_boom(*a, **k):  # pragma: no cover - must not run in workers mode
+        raise AssertionError("workers mode must not build a real CF client")
+
+    gen = _FakeGenerator()
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_w1",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="Workers Site",
+        _generator=gen,
+        # No _cloudflare injected → the workers branch owns the deploy.
+        _bundle_reader=lambda d: b"unused-in-workers-mode",
+        _workers_deploy=fake_workers_deploy,
+    )
+
+    assert site.deployed is True
+    assert calls == [(str(site.id), "/tmp/site")]
+    assert site.url == f"https://paw-site-{site.id}.acct.workers.dev"
+    resp = sites_service._to_response(site)
+    assert resp.url == site.url
+
+
+@pytest.mark.asyncio
+async def test_workers_mode_dynamic_site_raises_validation_error(beanie_test_db, monkeypatch):
+    """A DYNAMIC site in workers mode is rejected with a clean ValidationError
+    (Phase 2 needs a per-tenant D1) rather than deploying a broken site. The
+    injected workers deployer must NOT be called."""
+    from pocketpaw_ee.cloud._core.errors import ValidationError
+
+    monkeypatch.setenv("PAW_CF_DEPLOY_MODE", "workers")
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+
+    async def must_not_run(site_id: str, project_dir: str) -> str:  # pragma: no cover
+        raise AssertionError("a dynamic site must not reach the workers deployer")
+
+    gen = _FakeGenerator()
+    with pytest.raises(ValidationError) as exc:
+        await sites_service.publish(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id="pk_w_dyn",
+            ripple_spec={
+                "type": "container",
+                "objects": [{"name": "rows", "fields": {"x": "text"}}],
+                "actions": [{"name": "add", "object": "rows", "op": "insert"}],
+            },
+            theme={},
+            name="Dynamic in Workers",
+            pattern="dynamic",
+            _generator=gen,
+            _bundle_reader=lambda d: b"unused",
+            _workers_deploy=must_not_run,
+        )
+    assert "workers" in str(exc.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_unset_deploy_mode_preserves_legacy_cf_branch(beanie_test_db, monkeypatch):
+    """With PAW_CF_DEPLOY_MODE UNSET, an injected CF client takes the legacy WfP
+    (put_worker) branch — the workers deployer must NOT run."""
+    monkeypatch.delenv("PAW_CF_DEPLOY_MODE", raising=False)
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    cf = _FakeCF()
+
+    async def workers_boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("workers deployer must not run with mode unset + CF injected")
+
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_legacy_cf",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="Legacy CF",
+        _generator=_FakeGenerator(),
+        _cloudflare=cf,
+        _bundle_reader=lambda d: b"export default {}",
+        _workers_deploy=workers_boom,
+    )
+    assert cf.put_calls == [site.script_name]
+    assert site.url == ""  # CF/WfP path leaves url empty in v1
+
+
+@pytest.mark.asyncio
+async def test_unset_deploy_mode_preserves_legacy_local_branch(beanie_test_db, monkeypatch):
+    """With PAW_CF_DEPLOY_MODE UNSET and no CF creds / no CF client, publish() still
+    takes the legacy LOCAL branch — the workers deployer must NOT run."""
+    monkeypatch.delenv("PAW_CF_DEPLOY_MODE", raising=False)
+    monkeypatch.delenv("PAW_CF_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("PAW_SITES_LOCAL", raising=False)
+
+    def fake_local_deploy(site_id: str, project_dir: str) -> str:
+        return f"http://127.0.0.1:9999/{site_id}/"
+
+    async def workers_boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("workers deployer must not run in legacy local mode")
+
+    site = await sites_service.publish(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk_legacy_local",
+        ripple_spec={"type": "container"},
+        theme={},
+        name="Legacy Local",
+        _generator=_FakeGenerator(),
+        _bundle_reader=lambda d: b"unused",
+        _local_deploy=fake_local_deploy,
+        _workers_deploy=workers_boom,
+    )
+    assert site.url == f"http://127.0.0.1:9999/{site.id}/"

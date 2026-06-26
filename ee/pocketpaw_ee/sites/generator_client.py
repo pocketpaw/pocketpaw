@@ -8,6 +8,31 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-26 (fix/sites-build-subprocess-timeout — stop-gap: bound the build
+# subprocesses): all THREE _SubprocessRunner subprocesses (the generator, `bun
+# install`, and the `bun run build` static build) ran a bare ``await
+# proc.communicate()`` with NO timeout. When adapter-cloudflare's workerd prerender
+# wedges (known upstream SvelteKit hang) the `bun run build` step ran forever, so
+# /editable and publish hung unbounded (tens of minutes). The existing
+# ``reap_build_workerd`` only runs AFTER communicate() returns, so it could not
+# rescue a wedged build.
+#   * Each subprocess is now launched with ``start_new_session=True`` (its own
+#     process group) and run through ``_communicate_bounded(proc, timeout_s, label)``,
+#     which ``asyncio.wait_for``-bounds communicate() and, on timeout, SIGKILLs the
+#     whole process GROUP (``_kill_process_group`` → ``os.killpg`` — kills the leaked
+#     workerd CHILD too, not just the bun parent), reaps the parent, and raises the
+#     internal ``_BuildTimeout``.
+#   * Timeout is ``PAW_SITES_BUILD_TIMEOUT_SEC`` (int, default 120s — a legit build is
+#     ~45-60s, a wedged one runs for minutes, so 120s cleanly separates them); read
+#     once per call via ``_build_timeout_sec()`` with an int-parse-or-fallback.
+#   * Each call site converts ``_BuildTimeout`` into its EXISTING failure contract
+#     (callers unchanged): ``install``/``build_static`` return ``(False, "<step> timed
+#     out after Ns ...")`` — the same ``(ok, msg)`` shape the non-zero-exit path
+#     returns, so build() raises SmokeGateFailed and the caller maps it to a CloudError
+#     (FE degrades to view-only); ``generate`` raises ``RuntimeError`` (its existing
+#     raise-on-failure). ``reap_build_workerd`` is kept (success-path + on a build
+#     timeout, as defensive straggler cleanup).
+#
 # Updated 2026-06-21 (DSV-5 — dynamic svelte sites write-side): build() now SPLITS
 # a svelte pocket's ``source`` content envelope before sending it to the generator.
 # A DYNAMIC svelte pocket stores its live-data bindings
@@ -142,17 +167,105 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import shlex
+import signal
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
+
+# Stop-gap timeout that bounds each build subprocess (the generator, `bun install`,
+# and the `bun run build` static build) so a wedged step fails FAST instead of
+# hanging the request unbounded. The static build runs adapter-cloudflare's workerd
+# prerender, which can hang forever on a known upstream SvelteKit bug; without a
+# timeout `/editable` and publish hang for tens of minutes. A legit build is
+# ~45-60s and a wedged one runs for minutes, so the 120s default cleanly separates
+# them. Override with PAW_SITES_BUILD_TIMEOUT_SEC (int seconds). Read once per call
+# via _build_timeout_sec() with an int-parse-or-fallback so a malformed value can
+# never crash the build.
+_DEFAULT_BUILD_TIMEOUT_SEC = 120
+
+
+def _build_timeout_sec() -> int:
+    """Per-subprocess build timeout in seconds (PAW_SITES_BUILD_TIMEOUT_SEC, int,
+    default 120). A malformed/empty value falls back to the default rather than
+    raising — the timeout is a safety net and must never itself break a build."""
+    raw = os.environ.get("PAW_SITES_BUILD_TIMEOUT_SEC")
+    if raw is None:
+        return _DEFAULT_BUILD_TIMEOUT_SEC
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "sites: ignoring non-int PAW_SITES_BUILD_TIMEOUT_SEC=%r, using default %ds",
+            raw,
+            _DEFAULT_BUILD_TIMEOUT_SEC,
+        )
+        return _DEFAULT_BUILD_TIMEOUT_SEC
+
+
+class _BuildTimeout(RuntimeError):
+    """Raised by ``_communicate_bounded`` when a build subprocess exceeds the
+    timeout and is killed. Carries the step ``label`` and the elapsed ``timeout_s``
+    so each call site can convert it into that step's existing failure contract
+    (``install``/``smoke`` → a ``(False, msg)`` tuple; ``generate`` → a
+    ``RuntimeError``). Internal — never surfaces to callers raw."""
+
+    def __init__(self, label: str, timeout_s: int) -> None:
+        self.label = label
+        self.timeout_s = timeout_s
+        super().__init__(f"{label} timed out after {timeout_s}s")
+
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the entire process GROUP of a launched subprocess so leaked workerd
+    CHILDREN die too, not just the parent.
+
+    The build subprocesses are launched with ``start_new_session=True``, so each is
+    its own process-group leader (pgid == pid). ``adapter-cloudflare``'s prerender
+    boots a workerd child that the bun parent never reaps; killing only the parent
+    would leave that child wedged. ``os.killpg(os.getpgid(pid), SIGKILL)`` takes out
+    the whole group. Guards ``ProcessLookupError`` (the proc/group already exited)
+    and ``PermissionError`` (can't signal — nothing we can do) so a best-effort kill
+    never raises into the build path."""
+    pid = proc.pid
+    if pid is None:
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Already dead, or not allowed to signal it — nothing further to do.
+        pass
+
+
+async def _communicate_bounded(
+    proc: asyncio.subprocess.Process, timeout_s: int, label: str
+) -> tuple[bytes, bytes]:
+    """Run ``proc.communicate()`` but bound it by ``timeout_s``. On timeout, kill
+    the proc's whole process group (so leaked workerd children die too), reap the
+    parent, and raise ``_BuildTimeout(label, timeout_s)``.
+
+    Each build subprocess is launched with ``start_new_session=True`` so it leads
+    its own process group; ``_kill_process_group`` SIGKILLs the group. After the
+    kill we ``await proc.wait()`` to REAP the parent (avoid a zombie / a lingering
+    transport) — suppressing any error there since the proc is being torn down
+    anyway. The raised ``_BuildTimeout`` is caught at each call site and converted
+    into that step's existing failure contract."""
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout_s)
+    except TimeoutError as exc:  # asyncio.TimeoutError IS builtin TimeoutError (3.11+)
+        _kill_process_group(proc)
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise _BuildTimeout(label, timeout_s) from exc
+
 
 # Sentinel file (in the per-pocket build dir) recording the install-input
 # fingerprint of the last SUCCESSFUL `bun install`. build() skips install when the
@@ -390,7 +503,10 @@ class _SubprocessRunner:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump(input_json, fh)
             input_path = fh.name
+        timeout_s = _build_timeout_sec()
         try:
+            # start_new_session=True: own process group so a wedged generator (and
+            # any children it leaked) can be killed as a group on timeout.
             proc = await asyncio.create_subprocess_exec(
                 *self._gen_cmd,
                 "build",
@@ -400,8 +516,14 @@ class _SubprocessRunner:
                 out_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await _communicate_bounded(proc, timeout_s, "generator")
+            except _BuildTimeout as exc:
+                # Preserve generate()'s raise-on-failure contract: a timed-out
+                # generator is a failed generate.
+                raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
@@ -418,6 +540,9 @@ class _SubprocessRunner:
         # The deps are already made resolvable by build() (_rewrite_ripple_dep runs
         # before the install decision so the dep-hash reflects the final inputs).
         # This just runs `bun install` on the prepared dir.
+        timeout_s = _build_timeout_sec()
+        # start_new_session=True: own process group so a wedged install is killable
+        # as a group on timeout.
         proc = await asyncio.create_subprocess_exec(
             "bun",
             "install",
@@ -425,8 +550,19 @@ class _SubprocessRunner:
             cwd=project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "bun install")
+        except _BuildTimeout as exc:
+            # Preserve install()'s (ok, msg) contract: a timeout is a build failure,
+            # so build() raises SmokeGateFailed → the publish/editable caller maps it
+            # to a CloudError and the FE degrades to view-only (same as a non-zero exit).
+            return (
+                False,
+                f"bun install timed out after {exc.timeout_s}s — killed the build "
+                "(likely a wedged workerd prerender)",
+            )
         if proc.returncode != 0:
             return False, f"bun install failed (exit {proc.returncode}): {stderr.decode()[-500:]}"
         return True, "ok"
@@ -443,6 +579,11 @@ class _SubprocessRunner:
         #     LIVE publish path). A preview build tolerates a would-fail SSR render
         #     (the live publish still gates + rolls back, so a broken edit can't go
         #     live) but still BUILDS so the served preview is fresh + anchored.
+        timeout_s = _build_timeout_sec()
+        # start_new_session=True: own process group. This is the step that wedges —
+        # adapter-cloudflare's workerd prerender can hang forever (upstream SvelteKit
+        # bug). The group kill on timeout takes out the leaked workerd CHILD too, not
+        # just the bun parent.
         proc = await asyncio.create_subprocess_exec(
             "bun",
             "run",
@@ -450,8 +591,21 @@ class _SubprocessRunner:
             cwd=project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "build")
+        except _BuildTimeout as exc:
+            # A wedged build (typically the hung workerd prerender) is killed as a
+            # group; still run the defensive reap below for any straggler, then return
+            # the same (False, msg) shape a non-zero exit returns so build() treats it
+            # as a normal build failure (→ SmokeGateFailed → CloudError → view-only FE).
+            reap_build_workerd(project_dir)
+            return (
+                False,
+                f"build timed out after {exc.timeout_s}s — killed the build "
+                "(likely a wedged workerd prerender)",
+            )
         # P1a: reap the prerender-spawned workerd after EVERY build (the leak is
         # independent of the gate), scoped to this build's project dir.
         reap_build_workerd(project_dir)
