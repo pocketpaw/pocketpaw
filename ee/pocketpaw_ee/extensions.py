@@ -778,6 +778,34 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudDeliverMcpProvider:
+    """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
+    (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so any cloud chat agent can deliver
+    a file it built — a report, an export, a zipped bundle — to the tenant's
+    blob storage and hand the user a real download URL, without an explicit
+    opt-in. Same regime the sites manager + media + pocket specialist use: the
+    cloud chat agent runs on the claude_agent_sdk backend, which only sees
+    in-process MCP servers, so the deliver path MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.deliver import build_deliver_server
+
+            return build_deliver_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the deliver server is
+            # unavailable, same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.deliver import DELIVER_TOOL_IDS
+
+        return list(DELIVER_TOOL_IDS)
+
+
 class CloudLoomMcpProvider:
     """`pocketpaw.mcp_servers` — the loom codebase-orientation MCP server.
 

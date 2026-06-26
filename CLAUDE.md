@@ -250,6 +250,23 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   the stale-run sweeper, and NEVER evicts a jail whose run is still queued or
   running (resolved via `run_service.find_active_run_scopes`; a retried
   interrupted run re-protects its jail by spawning a fresh queued run).
+- **Artifact delivery + storage boot guard (cloud, ART-4)**: the agent's jail is
+  pure scratch — durability lives in blob storage. The `deliver_artifact`
+  in-process MCP tool (`ee/pocketpaw_ee/agent/mcp_servers/deliver.py`, server
+  `pocketpaw_deliver`) lands a built file (or a zipped directory) from the jail
+  into the tenant's blob storage via `EEUploadService.upload` and returns a real
+  presigned download URL — so the agent shares a working link instead of a
+  container path or a `127.0.0.1` preview server. Path safety is jail-scoped
+  (rejects `..`, absolute paths out, symlinks out, another tenant's jail), and
+  `POCKETPAW_DELIVER_MAX_MB` (default `100`) caps artifact size. Because this
+  only works when uploads go to real object storage, `init_cloud_db` runs
+  `verify_cloud_storage_backend()` (`ee/pocketpaw_ee/cloud/uploads/bootstrap.py`,
+  mirroring the memory guard): in cloud, if `POCKETPAW_UPLOAD_ADAPTER` != `s3` it
+  **WARNs loudly** (a local-disk deploy that would silently no-op delivery is
+  visible in the boot logs), and `POCKETPAW_REQUIRE_S3_IN_CLOUD=1` escalates that
+  to a hard boot failure. The multi-tenant-cloud signal both the jail and this
+  guard read is `is_multi_tenant_cloud()` in `ee/pocketpaw_ee/cloud/shared/db.py`
+  (one name for the `get_client() is not None` check).
 - **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.

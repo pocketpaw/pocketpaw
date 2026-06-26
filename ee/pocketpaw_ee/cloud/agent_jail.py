@@ -15,10 +15,12 @@ silent fallback is the exact co-mingling bug this closes. OFF cloud (OSS /
 dedicated, where the cloud DB was never initialized) it returns ``None`` so the
 core agent keeps using ``settings.file_jail_path`` unchanged.
 
-The multi-tenant-cloud signal is ``get_client() is not None`` — the cloud DB
-client is set exactly when ``init_cloud_db`` ran (``CloudLifecycleHook`` on
+The multi-tenant-cloud signal is ``is_multi_tenant_cloud()`` (ART-4) — the cloud
+DB client is set exactly when ``init_cloud_db`` ran (``CloudLifecycleHook`` on
 ``CLOUD_MONGODB_URI``), so it is the authoritative "this process is serving
-tenants" flag without inventing a new one.
+tenants" flag without inventing a new one. The signal now lives in one place
+(``pocketpaw_ee.cloud.shared.db``) so the jail and the cloud-storage boot guard
+read the same name.
 
 When the fail-closed fires (a cloud run that lost its workspace = a
 mis-tenanting signal), a high-severity cloud AuditEvent is emitted via the
@@ -158,11 +160,12 @@ def resolve_agent_cwd() -> str | None:
         # No tenancy bound. Distinguish a multi-tenant cloud run that lost its
         # workspace (a bug we must NOT paper over by writing into the shared
         # home dir) from an OSS / dedicated run where identity is legitimately
-        # never bound. ``get_client()`` is non-None exactly when
-        # ``init_cloud_db`` ran — the authoritative multi-tenant-cloud signal.
-        from pocketpaw_ee.cloud.shared.db import get_client
+        # never bound. ``is_multi_tenant_cloud()`` is True exactly when
+        # ``init_cloud_db`` ran — the authoritative multi-tenant-cloud signal,
+        # named in one place (ART-4) so the boot guard reads the same check.
+        from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
 
-        if get_client() is not None:
+        if is_multi_tenant_cloud():
             # Mis-tenanting signal — alert before failing closed (best-effort).
             _emit_fail_closed_audit(current_user_id(), current_session_mongo_id())
             raise RuntimeError(
