@@ -1165,6 +1165,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
 
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
+    # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
+    # the user can't reach, so a downloadable result MUST go through
+    # deliver_artifact (which lands it in tenant blob storage and returns a real
+    # download URL) — not a printed container path and not a local preview server.
+    parts.append(_DELIVER_ARTIFACT_RULE)
     # Composio auth/search guidance is injected whenever Composio is
     # enabled. An enabled deployment ALWAYS surfaces at least the
     # discovery meta-tools — ``providers.py`` falls back to them when no
@@ -1296,6 +1301,35 @@ DOES NOT EXIST in this environment:
 - If you genuinely don't have a tool for what the user asked, say so
   plainly. Don't fabricate instructions for a different environment.
 </runtime-identity>"""
+
+
+# Artifact delivery (ART-4). The cloud agent's working directory is a per-tenant
+# jail on the server's filesystem — the user has no shell, no SSH, and cannot
+# reach 127.0.0.1 on the box. So a file the agent "wrote to ./out.pdf" or a
+# "preview running at http://localhost:8000" is invisible to them. The ONLY way
+# to hand the user a downloadable result is deliver_artifact, which uploads the
+# file/dir to the tenant's blob storage and returns a real, short-lived URL.
+_DELIVER_ARTIFACT_RULE = """\
+<artifact-delivery>
+You run in a sandboxed working directory the user cannot see or reach — they
+have no terminal on this machine and cannot open 127.0.0.1 / localhost here.
+
+When you produce something the user should be able to DOWNLOAD (a report, an
+export, a generated document, a built bundle, a zip):
+
+  1. Write it to a file (or a directory) in your working directory.
+  2. Call ``deliver_artifact`` with that path. A single file uploads as-is; a
+     directory is zipped automatically.
+  3. Share the ``url`` it returns — that is the user's real download link.
+
+Do NOT instead:
+  - print the path you wrote to (e.g. "I saved it to ./out.pdf") and stop — that
+    path lives in a container the user can't access;
+  - start a local preview / web server ("run `python -m http.server`", "open
+    http://localhost:8000") — nothing you bind on this box is reachable.
+
+If ``deliver_artifact`` returns an error, relay it; do not invent a link.
+</artifact-delivery>"""
 
 
 # Composio's direct-tools surface caps each toolkit at a fixed limit

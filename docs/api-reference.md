@@ -55,6 +55,10 @@ section: POST /files/write, PUT /files/{id}, and the two version-history
 reads (GET /files/{id}/versions[/{vid}]). The write path archives each
 prior blob as a FileVersionDoc and bumps a per-file content_version counter;
 every read is workspace-scoped.
+Updated: 2026-06-26 (ART-4) — documented the Agent Artifact Delivery
+(deliver_artifact) in-process MCP tool: routes a built file/dir through the
+workspace upload pipeline (file as-is, dir zipped) and returns a presigned
+download URL; jail-scoped path safety; POCKETPAW_DELIVER_MAX_MB cap.
 -->
 
 # Cloud REST API Reference
@@ -1008,3 +1012,44 @@ only versions in the caller's workspace:
 
 Fetch a single archived version with its full content (for revert preview /
 diff). Workspace-scoped — a version id from another workspace returns `404`.
+
+## Agent Artifact Delivery (`deliver_artifact`)
+
+`deliver_artifact` is a cloud-only in-process MCP tool the chat agent calls to
+hand the user a **downloadable** result. The cloud agent works inside a
+per-tenant jail (ART-2) the user can't reach, so a file the agent "wrote to
+`./out.pdf`" — or a preview server it started on `127.0.0.1` — is invisible to
+them. This tool lands the artifact in the tenant's blob storage and returns a
+real, short-lived download URL.
+
+It is registered cloud-gated via the `pocketpaw.mcp_servers` entry point
+(`pocketpaw_deliver` → `mcp__pocketpaw_deliver__deliver_artifact`), ambient on
+the default chat surface (OSS never sees it). Source:
+`ee/pocketpaw_ee/agent/mcp_servers/deliver.py`.
+
+**Input:** `{ "path": "<file or directory inside the agent's workspace>" }`.
+
+**Routing:** a single file is uploaded as-is (mime guessed from the filename); a
+directory is zipped (`application/zip`) and the zip is uploaded. Both go through
+`EEUploadService.upload` — the same workspace-scoped pipeline as `POST /uploads`
+— so a delivered artifact emits `FileReady` (→ KB) and appears in the tenant's
+`GET /files` listing, and the returned URL is the storage adapter's presigned
+download (S3) or the authenticated `/api/v1/uploads/{id}` path (local adapter).
+
+**Result (JSON in the MCP text payload):**
+
+```json
+{ "ok": true, "filename": "report.pdf", "url": "<download URL>",
+  "file_id": "<id>", "size": 12345, "mime": "application/pdf",
+  "expires_in_seconds": 300 }
+```
+
+On failure the tool returns `is_error` with a plain reason (missing identity,
+path escapes the jail, file missing / over the size cap, or the upload failed) —
+the agent surfaces the reason rather than fabricating a link.
+
+**Security:** the path must resolve to inside the caller's own jail
+(`~/.pocketpaw/workspaces/<workspace_id>/...`); `..` traversal, absolute paths
+out, symlinks pointing out, and another tenant's jail are all rejected (reusing
+ART-2's path-segment guard). Size is capped by `POCKETPAW_DELIVER_MAX_MB`
+(default `100`).
