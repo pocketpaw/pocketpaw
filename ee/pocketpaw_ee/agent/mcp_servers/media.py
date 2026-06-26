@@ -83,14 +83,27 @@ MEDIA_TOOL_IDS = (
     VIDEO_GENERATE_TOOL_ID,
 )
 
-# Per-modality default model ids used when the caller passes no ``model``. Image
-# keeps ``settings.image_model`` (resolved at call time) for backward-compat with
-# the studio skill/preamble, which pass only prompt + aspect_ratio. Audio/video
-# defaults are sensible catalog ids the proxy is expected to front; an operator
-# can pick any served model by passing ``model`` explicitly.
+# Per-modality default model ids used when the caller passes no ``model``. THE
+# REAL PATH is the caller passing a catalog model id (the picker / studio skill
+# selects one) — these defaults are only a backward-compat floor for callers
+# that pass nothing, and they only route if the proxy actually serves that id.
+# Image prefers a known-served default and falls back to ``settings.image_model``
+# (resolved at call time); audio/video use proxy-style ids an operator is
+# expected to front. An operator can always pick any served model explicitly.
+_DEFAULT_IMAGE_MODEL = "gpt-image-1"  # an OpenAI-compatible id the proxy serves
 _DEFAULT_AUDIO_TTS_MODEL = "tts-1"
 _DEFAULT_AUDIO_STT_MODEL = "whisper-1"
-_DEFAULT_VIDEO_MODEL = "sora"
+_DEFAULT_VIDEO_MODEL = "sora"  # a proxy-style id; NOT a Replicate owner/name slug
+
+# Map the studio skill's aspect_ratio hint onto an OpenAI-compatible ``size``
+# (the images/generations + videos endpoints take ``size``, not aspect_ratio).
+# An explicit ``size`` arg always wins; this only fills the gap when the caller
+# passed aspect_ratio (the existing bundled-skill contract) and no size.
+_ASPECT_RATIO_TO_SIZE: dict[str, str] = {
+    "1:1": "1024x1024",
+    "16:9": "1792x1024",
+    "9:16": "1024x1792",
+}
 
 # LiteLLM's async video endpoint returns a job; poll its status until terminal,
 # bounded so a stuck job can't hang the chat turn (video can be slow).
@@ -127,6 +140,65 @@ def _str_arg(args: dict, key: str, default: str | None = None) -> str | None:
     if isinstance(val, str) and val.strip():
         return val
     return default
+
+
+def _resolve_size(args: dict) -> str | None:
+    """Resolve an OpenAI-compatible ``size`` from the request args. An explicit
+    ``size`` wins; otherwise the studio skill's ``aspect_ratio`` hint is mapped
+    via _ASPECT_RATIO_TO_SIZE so a user asking 16:9 doesn't silently get the
+    model default. Returns None when neither is usable (model picks its default).
+    """
+    size = _str_arg(args, "size")
+    if size:
+        return size
+    aspect = _str_arg(args, "aspect_ratio")
+    if aspect:
+        return _ASPECT_RATIO_TO_SIZE.get(aspect.strip())
+    return None
+
+
+def _looks_like_replicate_slug(model: str) -> bool:
+    """True when ``model`` looks like a Replicate ``owner/name`` slug rather than
+    a proxy catalog id. Used so the legacy ``settings.video_model`` default
+    (kwaivgi/kling-v2.0) is NOT POSTed to the proxy's /videos endpoint, which
+    won't serve a raw Replicate slug. Heuristic: a single '/' with non-empty
+    halves and no leading provider we recognise as proxy-style. Catalog ids are
+    bare (``sora``) or ``provider/model`` where provider is an LLM provider; a
+    Replicate slug is an account handle. We can't perfectly tell them apart, so
+    we treat ANY ``a/b`` as a slug here — proxy callers that want a namespaced id
+    should pass it explicitly via ``model`` rather than rely on the video_model
+    setting, which exists for the old direct-Replicate path."""
+    return model.count("/") == 1 and all(part.strip() for part in model.split("/"))
+
+
+def _default_image_model() -> str:
+    """The image model to use when the caller passes none. Prefer the known-served
+    default; honour ``settings.image_model`` ONLY if the operator deliberately
+    changed it from its field default (``gemini-2.5-flash-image``, which only
+    routes if the proxy aliases that exact id). Keeps the setting meaningful for
+    an operator who pointed it at a served id, without shipping the unroutable
+    field default as the de-facto proxy default."""
+    from pocketpaw.config import Settings, get_settings
+
+    configured = get_settings().image_model
+    field_default = Settings.model_fields["image_model"].default
+    if configured and configured != field_default:
+        return configured
+    return _DEFAULT_IMAGE_MODEL
+
+
+def _default_video_model() -> str:
+    """The video model to use when the caller passes none. The legacy
+    ``settings.video_model`` default is a Replicate ``owner/name`` slug
+    (kwaivgi/kling-v2.0) that the proxy's /videos endpoint won't serve, so we do
+    NOT forward a slug: prefer a proxy-style default, and use
+    ``settings.video_model`` only when an operator set it to a NON-slug proxy id."""
+    from pocketpaw.config import get_settings
+
+    configured = get_settings().video_model
+    if configured and not _looks_like_replicate_slug(configured):
+        return configured
+    return _DEFAULT_VIDEO_MODEL
 
 
 def _identity() -> tuple[str | None, str | None]:
@@ -407,12 +479,14 @@ async def _proxy_image(
 async def _image_generate_handler(args: dict) -> dict:
     """MCP handler for ``media__image_generate``.
 
-    Routes through the LiteLLM proxy's ``/v1/images/generations`` with the
-    catalog model id from ``args['model']`` (falling back to
-    ``settings.image_model`` when omitted, for backward-compat with the studio
-    skill which passes only prompt + aspect_ratio), saves the PNG under
-    get_config_dir()/generated, then lands it in the STUDIO gallery. Sets
-    ``is_error`` when identity is missing or the proxy call fails.
+    The REAL path is the caller passing a catalog model id in ``args['model']``
+    (the picker / studio skill selects one). Routes through the LiteLLM proxy's
+    ``/v1/images/generations``; ``aspect_ratio`` is mapped to ``size`` (an
+    explicit ``size`` wins) so the bundled skill's aspect hint is honoured rather
+    than silently dropped. Saves the PNG under get_config_dir()/generated, then
+    lands it in the STUDIO gallery. When no model is passed it falls back to a
+    known-served default, then ``settings.image_model``. Sets ``is_error`` when
+    identity is missing or the proxy call fails.
     """
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
@@ -423,14 +497,11 @@ async def _image_generate_handler(args: dict) -> dict:
     prompt = args.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return _error_response("image_generate requires a non-empty `prompt`.")
-    size = _str_arg(args, "size")
+    size = _resolve_size(args)
 
     model = _str_arg(args, "model")
     if not model:
-        # Backward-compat: existing callers (studio skill/preamble) pass no model.
-        from pocketpaw.config import get_settings
-
-        model = get_settings().image_model
+        model = _default_image_model()
 
     image_bytes, err = await _proxy_image(
         model=model, prompt=prompt, size=size, user=workspace_id
@@ -687,13 +758,22 @@ def _extract_video_url(job: dict[str, Any]) -> str | None:
 
 
 async def _proxy_video(
-    *, model: str, prompt: str, seconds: int, size: str | None, user: str
+    *,
+    model: str,
+    prompt: str,
+    seconds: int,
+    size: str | None,
+    aspect_ratio: str | None,
+    user: str,
 ) -> tuple[str | None, str | None]:
     """Generate a video via the proxy's ``/videos`` endpoint.
 
-    POSTs ``{model, prompt, seconds, size?, user}``; the response is an async job
-    (or, for a fast provider, an already-terminal job). If the job is pending it
-    is GET-polled to terminal. Returns the output URL or an error.
+    POSTs ``{model, prompt, seconds, size?, aspect_ratio?, user}``; the response
+    is an async job (or, for a fast provider, an already-terminal job). If the job
+    is pending it is GET-polled to terminal. Both ``size`` and ``aspect_ratio`` are
+    sent when present — different video models accept different shape params and
+    LiteLLM passes through what the model takes / ignores the rest. Returns the
+    output URL or an error.
     """
     base = _proxy_base()
     payload: dict[str, Any] = {
@@ -704,6 +784,8 @@ async def _proxy_video(
     }
     if size:
         payload["size"] = size
+    if aspect_ratio:
+        payload["aspect_ratio"] = aspect_ratio
     try:
         async with _proxy_client(timeout=_VIDEO_POLL_MAX_SECONDS + 30.0) as client:
             resp = await client.post(
@@ -736,12 +818,14 @@ async def _proxy_video(
 async def _video_generate_handler(args: dict) -> dict:
     """MCP handler for ``media__video_generate``.
 
-    Routes through the LiteLLM proxy's ``/videos`` endpoint with the catalog
-    model id from ``args['model']`` (falling back to ``settings.video_model`` then
-    a built-in default, for backward-compat with the studio skill which passes
-    only prompt + duration + aspect_ratio). Lands the resulting output URL in the
-    STUDIO gallery. Sets ``is_error`` when identity is missing or the proxy call
-    fails / does not succeed.
+    The REAL path is the caller passing a catalog model id in ``args['model']``.
+    Routes through the LiteLLM proxy's ``/videos`` endpoint; ``aspect_ratio`` is
+    both mapped to ``size`` and passed through (LiteLLM ignores params a model
+    doesn't take). When no model is passed it defaults to a proxy-style id — it
+    does NOT forward the legacy ``settings.video_model`` Replicate slug, which the
+    proxy won't serve. Lands the resulting output URL in the STUDIO gallery. Sets
+    ``is_error`` when identity is missing or the proxy call fails / does not
+    succeed.
     """
     workspace_id, user_id = _identity()
     if not workspace_id or not user_id:
@@ -753,18 +837,18 @@ async def _video_generate_handler(args: dict) -> dict:
     if not isinstance(prompt, str) or not prompt.strip():
         return _error_response("video_generate requires a non-empty `prompt`.")
     duration = args.get("duration") if isinstance(args.get("duration"), int) else 5
-    size = _str_arg(args, "size")
+    size = _resolve_size(args)
+    aspect_ratio = _str_arg(args, "aspect_ratio")
 
-    model = _str_arg(args, "model")
-    if not model:
-        # Backward-compat: existing callers pass no model. Prefer the legacy
-        # settings.video_model if it looks like a proxy model id, else default.
-        from pocketpaw.config import get_settings
-
-        model = get_settings().video_model or _DEFAULT_VIDEO_MODEL
+    model = _str_arg(args, "model") or _default_video_model()
 
     output_url, err = await _proxy_video(
-        model=model, prompt=prompt, seconds=duration, size=size, user=workspace_id
+        model=model,
+        prompt=prompt,
+        seconds=duration,
+        size=size,
+        aspect_ratio=aspect_ratio,
+        user=workspace_id,
     )
     if err is not None or output_url is None:
         return _error_response(err or "video generation returned no output URL")

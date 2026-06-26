@@ -210,6 +210,114 @@ async def test_image_generate_relays_proxy_error(tmp_path, monkeypatch, proxy_en
     agent_create.assert_not_called()
 
 
+async def test_image_generate_url_return_shape(tmp_path, monkeypatch, proxy_env) -> None:
+    """When the proxy returns a URL instead of b64_json (dall-e-style), the bytes
+    are fetched from the CDN — and the proxy Bearer key must NOT ride the CDN GET
+    (the key is for the proxy, not arbitrary asset hosts)."""
+    monkeypatch.setattr(media, "_GALLERY_STATE", {})
+    cdn_url = "https://cdn.example.test/img/abc.png"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/images/generations":
+            # The generations call carries the Bearer proxy key.
+            assert request.headers.get("authorization") == f"Bearer {_PROXY_KEY}"
+            return httpx.Response(200, json={"data": [{"url": cdn_url}]})
+        if str(request.url) == cdn_url:
+            # The CDN GET must NOT leak the proxy key.
+            assert request.headers.get("authorization") is None
+            return httpx.Response(200, content=b"cdn-png-bytes")
+        return httpx.Response(404)
+
+    _install_transport(monkeypatch, handler)
+    agent_create = AsyncMock(return_value=({"x": 1}, "pkt-url-1", None))
+
+    with (
+        patch.object(media, "_identity", return_value=("ws-1", "u-1")),
+        patch.object(media, "_generated_dir", return_value=tmp_path),
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
+            return_value="sess-1",
+        ),
+        patch("pocketpaw_ee.cloud.pockets.service.agent_create", agent_create),
+        patch.object(media, "_bind_session_and_emit", AsyncMock()),
+    ):
+        result = await media._image_generate_handler({"prompt": "a cat", "model": "dall-e-3"})
+
+    assert result.get("is_error") is not True
+    pngs = list(tmp_path.glob("*.png"))
+    assert len(pngs) == 1
+    assert pngs[0].read_bytes() == b"cdn-png-bytes"
+
+
+async def test_image_generate_aspect_ratio_maps_to_size(tmp_path, monkeypatch, proxy_env) -> None:
+    """The bundled skill passes `aspect_ratio` (not `size`); it must be mapped to
+    an OpenAI-compatible size rather than silently dropped. 16:9 → 1792x1024."""
+    monkeypatch.setattr(media, "_GALLERY_STATE", {})
+    b64 = base64.b64encode(b"png").decode()
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["size"] = json.loads(request.content).get("size")
+        return httpx.Response(200, json={"data": [{"b64_json": b64}]})
+
+    _install_transport(monkeypatch, handler)
+
+    with (
+        patch.object(media, "_identity", return_value=("ws-1", "u-1")),
+        patch.object(media, "_generated_dir", return_value=tmp_path),
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
+            return_value="sess-1",
+        ),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.agent_create",
+            AsyncMock(return_value=({"x": 1}, "p", None)),
+        ),
+        patch.object(media, "_bind_session_and_emit", AsyncMock()),
+    ):
+        result = await media._image_generate_handler(
+            {"prompt": "x", "model": "gpt-image-1", "aspect_ratio": "16:9"}
+        )
+
+    assert result.get("is_error") is not True
+    assert seen["size"] == "1792x1024"
+
+
+async def test_image_generate_explicit_size_wins_over_aspect_ratio(
+    tmp_path, monkeypatch, proxy_env
+) -> None:
+    """When both `size` and `aspect_ratio` are given, the explicit `size` wins."""
+    monkeypatch.setattr(media, "_GALLERY_STATE", {})
+    b64 = base64.b64encode(b"png").decode()
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["size"] = json.loads(request.content).get("size")
+        return httpx.Response(200, json={"data": [{"b64_json": b64}]})
+
+    _install_transport(monkeypatch, handler)
+
+    with (
+        patch.object(media, "_identity", return_value=("ws-1", "u-1")),
+        patch.object(media, "_generated_dir", return_value=tmp_path),
+        patch(
+            "pocketpaw_ee.cloud.chat.agent_service.current_session_mongo_id",
+            return_value="sess-1",
+        ),
+        patch(
+            "pocketpaw_ee.cloud.pockets.service.agent_create",
+            AsyncMock(return_value=({"x": 1}, "p", None)),
+        ),
+        patch.object(media, "_bind_session_and_emit", AsyncMock()),
+    ):
+        result = await media._image_generate_handler(
+            {"prompt": "x", "model": "gpt-image-1", "aspect_ratio": "16:9", "size": "512x512"}
+        )
+
+    assert result.get("is_error") is not True
+    assert seen["size"] == "512x512"
+
+
 # --- audio_generate (TTS) ---
 
 
@@ -315,6 +423,8 @@ async def test_audio_transcribe_routes_to_transcriptions_endpoint(
         raw = request.content
         assert b"whisper-1" in raw
         assert b"fake-audio" in raw
+        # The tenant rides the multipart body via the `user` field.
+        assert b"ws-1" in raw
         return httpx.Response(200, json={"text": "transcribed words"})
 
     captured = _install_transport(monkeypatch, handler)
