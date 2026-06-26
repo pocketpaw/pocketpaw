@@ -10,7 +10,9 @@
 #     `${workspace}:${path}` (two workspaces can share a path); the bare path
 #     stays the client-facing id on FileVersionDoc, the DTOs, and the routes.
 #     write_file revives a soft-deleted tombstone in place instead of a blind
-#     insert (which would raise DuplicateKeyError on the tombstoned unique id).
+#     insert (which would raise DuplicateKeyError on the tombstoned unique id),
+#     and PURGES the dead file's FileVersionDoc rows on revive so the recreated
+#     file starts a fresh history (recreate = a new file at that path).
 #   I1 — a no-op (unchanged-content) update now returns the ACTUAL stored
 #     version, not a phantom +1.
 #   I2 — new files take a real mime (WriteFileRequest.mime, else guessed from
@@ -125,6 +127,10 @@ def _storage_id(workspace_id: str, path: str) -> str:
     neither collides on the unique key nor squats the other's path. The bare
     ``path`` stays the client-facing id everywhere else (FileVersionDoc,
     DTOs, routes); this value is only ever the FileUpload lookup/insert key.
+
+    Invariant: ``workspace_id`` is a colon-free 24-hex Mongo ObjectId, so the
+    first ``':'`` unambiguously splits ws from path — ``(ws, path) -> ws:path``
+    stays injective even when ``path`` itself contains a colon.
     """
     return f"{workspace_id}:{path}"
 
@@ -250,7 +256,13 @@ async def write_file(
     stored = await adapter.put(storage_key, _bytes_iter(content), mime)
 
     if doc is not None:
-        # Revive a soft-deleted tombstone in place — no second unique-key row.
+        # Revive a soft-deleted tombstone in place — a blind insert would
+        # collide on the still-unique stored id. Recreate semantics = a NEW
+        # file at this path = FRESH history, so purge the dead file's archived
+        # versions first (they outlive the FileUpload row — file_versions never
+        # deletes version rows otherwise — and would bleed stale content +
+        # duplicate version_number=1 labels into the revived file).
+        await FileVersionDoc.find({"file_id": path, "workspace_id": workspace_id}).delete()
         doc.deleted_at = None
         doc.filename = body.filename or path
         doc.mime = mime
