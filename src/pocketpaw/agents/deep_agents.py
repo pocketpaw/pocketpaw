@@ -7,6 +7,12 @@ Uses the Deep Agents SDK (pip install deepagents) which provides:
 - Pluggable virtual filesystem backends
 
 Requires: pip install deepagents
+
+Updated 2026-06-26 (integration/model-catalog-v2, MCG-11): the Anthropic
+prompt-cache monkey-patch now sources its ``cache_control`` marker from the
+universal ``pocketpaw.llm.caching._cache_control`` helper (single source of
+truth for the 5m/1h ephemeral shape) instead of an inline literal, so this
+patch and the structured ``build_cacheable`` path can never drift.
 """
 
 import logging
@@ -257,6 +263,11 @@ def _patch_anthropic_message_serializer() -> None:
 
     original = _ac._format_messages
 
+    # Single source of truth for the ephemeral marker shape (MCG-11) — the
+    # universal caching module owns the 5m/1h ``cache_control`` dict so this
+    # patch and the structured ``build_cacheable`` path can never diverge.
+    from pocketpaw.llm.caching import _cache_control as _cc
+
     def patched(messages):  # type: ignore[no-untyped-def]
         system, formatted = original(messages)
         if isinstance(system, str) and len(system) >= _ANTHROPIC_CACHE_MIN_CHARS:
@@ -264,7 +275,7 @@ def _patch_anthropic_message_serializer() -> None:
                 {
                     "type": "text",
                     "text": system,
-                    "cache_control": {"type": "ephemeral"},
+                    "cache_control": _cc("5m"),
                 }
             ]
         elif isinstance(system, list) and system:
@@ -280,7 +291,7 @@ def _patch_anthropic_message_serializer() -> None:
             if total_chars >= _ANTHROPIC_CACHE_MIN_CHARS and not already_cached:
                 for block in reversed(system):
                     if isinstance(block, dict) and block.get("type") == "text":
-                        block["cache_control"] = {"type": "ephemeral"}
+                        block["cache_control"] = _cc("5m")
                         break
         return system, formatted
 

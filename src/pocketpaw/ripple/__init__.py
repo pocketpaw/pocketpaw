@@ -48,6 +48,7 @@ from pocketpaw.ripple._pockets import (
     POCKET_INTERACTION_PROMPT_CLI,
     POCKET_INTERACTION_PROMPT_MCP,
     POCKET_SPECIALIST_PROMPT,
+    build_specialist_cacheable,
     fill_current_pocket,
     get_pocket_prompts,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "POCKET_INTERACTION_PROMPT_MCP",
     "POCKET_SPECIALIST_PROMPT",
     "RIPPLE_DESIGN_RULES",
+    "build_specialist_cacheable",
     "fill_current_pocket",
     "get_pocket_prompts",
 ]
