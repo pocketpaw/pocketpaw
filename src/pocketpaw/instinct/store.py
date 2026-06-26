@@ -1,5 +1,17 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-26 (ISO-4 — audit-lock keyed outside the evictable instance)
+#   — the audit-append lock (``_log_lock``, which serializes the chain
+#   read-head + insert in ``_log``) is no longer a per-instance
+#   ``asyncio.Lock`` set in ``__init__``. It is now a PROPERTY that fetches a
+#   process-global lock keyed by ``db_path`` from ``pocketpaw._store_locks``.
+#   The ISO-2 security review flagged the hole: under the ISO-1/2 bounded-LRU
+#   store factory, a workspace's store can be evicted and rebuilt for the same
+#   file while an append is in flight, so two instances with two per-instance
+#   locks let their appends race and fork the chain. A db_path-keyed lock makes
+#   every instance for the same file share ONE lock; different tenants (files)
+#   still never contend. The two ``async with self._log_lock`` call sites are
+#   unchanged — the property is transparent.
 # Updated: 2026-06-26 (ISO-2 — physical per-workspace isolation) — added
 #   aclose(): a best-effort WAL-checkpoint + state reset the workspace-keyed
 #   store factory (src/pocketpaw/stores.py) runs when it evicts a per-workspace
@@ -384,13 +396,29 @@ class InstinctStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
-        # Serializes the audit-chain read-head + insert in _log (REVIEW-1):
-        # each _log opens its own connection, so without this lock two
-        # concurrent _log calls could both read the same prev_hash before
-        # either inserts, forking the chain and producing false-positive
-        # tamper reports in verify_audit_chain. Per-instance (not module-level)
-        # so separate tenants/stores don't contend.
-        self._log_lock = asyncio.Lock()
+
+    @property
+    def _log_lock(self) -> asyncio.Lock:
+        """The lock serializing this file's audit-chain read-head + insert.
+
+        Held across the prev_hash read + the append in ``_log``: each ``_log``
+        opens its own connection, so without it two concurrent appends could
+        both read the same prev_hash before either inserts, forking the chain
+        and producing false-positive tamper reports in ``verify_audit_chain``.
+
+        ISO-4: the lock is now keyed by ``db_path`` in a PROCESS-GLOBAL registry
+        (``pocketpaw._store_locks``), not stored on this instance. The ISO-2
+        security review flagged that a per-instance lock does NOT cover the
+        bounded-LRU eviction window: when the store factory evicts a workspace's
+        InstinctStore and builds a fresh one for the same file, two instances
+        briefly coexist, and per-instance locks let their appends race and fork
+        that tenant's chain. A db_path-keyed lock makes every instance for the
+        same file share ONE lock, closing that window. Different tenants (files)
+        still get different locks and never contend.
+        """
+        from pocketpaw._store_locks import audit_lock_for
+
+        return audit_lock_for(self._db_path)
 
     async def _ensure_schema(self) -> None:
         if self._initialized:
