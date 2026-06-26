@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
+# edit-bridge): ``dev_preview_pocket`` gained an optional ``builder_origin`` and
+# threads it to ``get_manager().ensure_dev_server(builder_origin=...)`` so the
+# dev-server-materialized SOURCE carries SE-1's section anchors + gated edit-bridge
+# (the hover-edit overlay then works against the dev server, not only the static
+# /editable build). The origin is resolved the SAME way ``make_site_editable``
+# resolves it — the passed origin (the router's request ``Origin`` header) when
+# present, else the ``_builder_origin()`` env fallback (PAW_SITES_BUILDER_ORIGIN) —
+# so no new sourcing mechanism is invented. The dev path keeps ``static_build=False``
+# (no prod build); only the generate/scaffold step needs the origin for the gated
+# source injection, and an empty/unset origin still yields a non-bridged source (the
+# generator's gate holds).
+#
 # Updated 2026-06-25 (feat/sites-workers-deploy-mode — workers.dev deploy mode):
 # ``_deploy_site_doc`` now picks one of THREE deploy targets via a new
 # ``_deploy_mode()`` helper reading PAW_CF_DEPLOY_MODE (``local`` | ``workers`` |
@@ -2425,6 +2438,7 @@ async def dev_preview_pocket(
     workspace_id: str,
     user_id: str,
     pocket_id: str,
+    builder_origin: str | None = None,
 ) -> DevPreviewResponse:
     """Ensure a live Vite dev-server is running for the pocket and return its URL
     (Phase 2 / P2a — the EDITING preview).
@@ -2437,6 +2451,17 @@ async def dev_preview_pocket(
     workerd smoke render is NOT run for the dev server (it is a publish-only gate,
     PERF-4); publish() is unchanged and still does the full prod build + smoke.
 
+    ``builder_origin`` (S1) makes the dev-materialized SOURCE carry SE-1's gated
+    section anchors + postMessage edit-bridge so the hover-edit overlay works against
+    the dev server. It is resolved the SAME way ``make_site_editable`` resolves it —
+    the passed origin (the request ``Origin`` header at the router) when present, else
+    the configured ``PAW_SITES_BUILDER_ORIGIN`` (``_builder_origin()``) — so the dev
+    source is anchored + bridged exactly like the static editable build. It is threaded
+    to the manager → ``_default_materialize`` → ``GeneratorClient.build`` and rides
+    ``siteConfig.builderOrigin``; the generator gates the injection on it, so an
+    empty origin still produces a non-bridged source (the gate holds). The dev path
+    keeps ``static_build=False`` — only the generate/scaffold step needs the origin.
+
     ``user_id`` is threaded through so the manager reads the pocket via the pockets
     service under the caller's scope (it raises NotFound / Forbidden itself, mapped
     by the router to 404 / 403). ``workspace_id`` keeps the surface uniform and
@@ -2444,8 +2469,15 @@ async def dev_preview_pocket(
     """
     from pocketpaw_ee.sites.dev_server import get_manager
 
+    # Mirror make_site_editable's origin resolution: the passed origin (request
+    # Origin header) when present, else the PAW_SITES_BUILDER_ORIGIN env fallback.
+    origin = (builder_origin or "").strip() or _builder_origin()
+
     url = await get_manager().ensure_dev_server(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        builder_origin=origin,
     )
     return DevPreviewResponse(pocket_id=pocket_id, url=url)
 
