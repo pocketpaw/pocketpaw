@@ -230,8 +230,25 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   falling back to `~`. OSS / dedicated installs (no cloud DB initialized) keep
   `settings.file_jail_path` unchanged. Override the jail root with
   `POCKETPAW_WORKSPACE_JAIL_ROOT` (default `~/.pocketpaw/workspaces`) to anchor
-  it on a data volume. Lifecycle (quota / TTL-GC / disk-watermark eviction of
-  these dirs) is ART-3, not yet shipped.
+  it on a data volume.
+- **Agent jail lifecycle (cloud, ART-3)**: bounds the ART-2 scratch jails so
+  disk scales with active concurrency, not user count (the jail is pure scratch;
+  durability lives in blob storage). Three knobs, all read from the environment
+  in `ee/pocketpaw_ee/cloud/agent_jail.py`:
+  `POCKETPAW_AGENT_JAIL_QUOTA_MB` (default `2048`) — per-workspace size cap
+  measured at RUN-START; an over-quota run is rejected cleanly (a terminal
+  `failed` run with an `agent.jail_over_quota` error frame, never an OOM/crash).
+  `0` disables it.
+  `POCKETPAW_AGENT_JAIL_TTL_GRACE_SECONDS` (default `3600`) — idle grace after
+  which a jail with no active run is garbage-collected.
+  `POCKETPAW_AGENT_JAIL_DISK_WATERMARK_PCT` (default `90`) — box disk-usage
+  high-water mark; over it, the GC evicts least-recently-used IDLE jails first
+  until back under. `0` disables watermark eviction.
+  `POCKETPAW_AGENT_JAIL_GC_ENABLED` (default `true`) — escape hatch to disable
+  the GC sweep entirely. The GC (`ee/pocketpaw_ee/cloud/agent_jail_gc.py`,
+  `sweep_agent_jails`) runs on cloud startup and the same 5-minute heartbeat as
+  the stale-run sweeper, and NEVER evicts a jail whose run is still
+  queued/running/resumable (resolved via `run_service.find_active_run_scopes`).
 - **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.

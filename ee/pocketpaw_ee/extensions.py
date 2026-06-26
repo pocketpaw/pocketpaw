@@ -109,6 +109,7 @@ _xproc_consumer_task: asyncio.Task[None] | None = None
 
 
 async def _sweeper_loop() -> None:
+    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -122,6 +123,14 @@ async def _sweeper_loop() -> None:
             raise
         except Exception:
             _run_sweeper_logger.exception("sweep_stale_runs tick failed")
+        # ART-3 jail lifecycle: TTL-GC idle agent jails + LRU-evict under the
+        # disk watermark, so scratch disk scales with active concurrency not user
+        # count. Own try so a jail-GC failure can't suppress the other sweeps (or
+        # vice versa); never evicts a jail backing a queued/running run.
+        try:
+            await sweep_agent_jails()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_agent_jails tick failed")
         # BC-3 metering: bill every newly-terminal run's compute cost on the same
         # heartbeat. Kept in its own try so a metering failure can't suppress the
         # stale-run sweep (or vice versa) on the next tick. Self-gated OFF in the
@@ -154,9 +163,11 @@ async def start_run_sweeper() -> None:
     Boot runs the stale-run sweep (interrupt orphaned runs), the BC-3 compute-cost
     metering sweep (bill any terminal runs left unbilled by the prior process), the
     WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
-    cutover mode), and the charge-first pending-site reconciliation sweep (surface
-    paid sites stuck pending); the 5-minute loop then ticks all four.
+    cutover mode), the charge-first pending-site reconciliation sweep (surface paid
+    sites stuck pending), and the ART-3 agent-jail GC (reclaim scratch left by a
+    prior process's idle runs); the 5-minute loop then ticks all of them.
     """
+    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
     from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
@@ -171,6 +182,8 @@ async def start_run_sweeper() -> None:
         await run_cutover_sweep()
     with suppress(Exception):
         await sweep_pending_sites()
+    with suppress(Exception):
+        await sweep_agent_jails()
     _sweeper_task = asyncio.create_task(_sweeper_loop())
 
 
