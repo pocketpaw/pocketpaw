@@ -371,11 +371,22 @@ def test_fresh_import_has_no_side_effects(tmp_path: Path) -> None:
     touched nothing on disk — the factory must be lazy.
     """
     import importlib.util
+    import sys
 
-    spec = importlib.util.spec_from_file_location("_stores_probe", stores.__file__)
+    name = "_stores_probe"
+    spec = importlib.util.spec_from_file_location(name, stores.__file__)
     assert spec and spec.loader
     probe = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(probe)
+    # Register in sys.modules BEFORE exec: the module defines an @dataclass
+    # (``_StoreKind``), and the dataclasses machinery resolves the owning module
+    # via ``sys.modules[cls.__module__]`` to look up annotations — an unregistered
+    # module makes that lookup return None and raise. Clean it up afterward so the
+    # probe never leaks into other tests.
+    sys.modules[name] = probe
+    try:
+        spec.loader.exec_module(probe)
+    finally:
+        sys.modules.pop(name, None)
 
     probe._DATA_DIR = tmp_path
     # Nothing should exist yet — import alone must not create files/dirs.

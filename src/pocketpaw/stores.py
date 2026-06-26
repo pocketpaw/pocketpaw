@@ -2,8 +2,8 @@
 
 Instinct, Fabric and Paw Print keep their state in SQLite under
 ``~/.pocketpaw/``. These factories return a lazily-created handle so agent
-tools, automations and routers share one instance per process (or, for Fabric,
-one instance per WORKSPACE — see below).
+tools, automations and routers share one instance per process (or, for Fabric
+and Instinct, one instance per WORKSPACE — see below).
 
 ISO-1 (2026-06-26 — physical per-workspace isolation): Fabric is no longer a
 single process-wide singleton on a SHARED ``~/.pocketpaw/fabric.db``. On a
@@ -31,12 +31,21 @@ evicts. When NO workspace resolves:
     ``~/.pocketpaw/fabric.db`` singleton, so a self-hosted install keeps working
     exactly as before.
 
+ISO-2 (2026-06-26 — Instinct isolation) extends the SAME machinery to Instinct:
+``get_instinct_store(*, workspace_id=...)`` returns a per-workspace
+``~/.pocketpaw/workspaces/<id>/instinct.db``. Because each workspace gets its own
+file, its W2b audit hash-chain (genesis→…→head) is INDEPENDENT and
+``verify_audit_chain`` runs PER WORKSPACE — the correct multi-tenant model (a
+tenant's auditor verifies only that tenant's chain, never a global chain mixing
+tenants). The generic ``_StoreKind`` + ``_get_workspace_store`` engine below
+drives both stores; adding a third is a one-liner.
+
 The ``current_workspace`` ContextVar lives HERE in OSS core (``pocketpaw``) on
 purpose: EE imports from OSS, never the reverse. ISO-3 (a later task) wires the
 non-router callers — the agent-tool path, the MCP servers — to SET this
-ContextVar per request/stream so they too land in the right file; THIS task only
-creates and consults it and wires the EE Fabric router (which already resolves
-the workspace) to pass it explicitly.
+ContextVar per request/stream so they too land in the right file; ISO-1/ISO-2
+create and consult it and wire the EE Fabric + Instinct routers (which already
+resolve the workspace) to pass it explicitly.
 
 The factory consults the previously-dormant ``pocketpaw.stores`` entry-point
 seam (``StoreProvider``): if EE (or a third party) registers a provider, it gets
@@ -44,9 +53,8 @@ first refusal on building the store, so a later task can swap in a cloud-backed
 implementation without touching core. An OSS-only install finds no provider and
 uses the local SQLite default.
 
-Instinct and Paw Print are UNCHANGED here — still process-wide singletons on the
-shared file. Per-workspace Instinct isolation is a separate later task (ISO-2);
-the workspace-keyed machinery below is written generically so it can be reused.
+Paw Print is UNCHANGED — still a plain process-wide singleton on the shared file
+(not tenant-isolated yet).
 
 The factories moved here from ``pocketpaw_ee/api.py`` in the OSS-EE split
 (Phase 3); ``pocketpaw_ee.api`` re-exports from this module for the enterprise
@@ -60,7 +68,9 @@ import os
 import re
 from collections import OrderedDict
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pocketpaw._registry import first
 from pocketpaw.fabric.store import FabricStore
@@ -189,90 +199,96 @@ def _safe_workspace_dir(workspace_id: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Instinct / Paw Print — process-wide singletons (UNCHANGED by ISO-1)
+# Generic workspace-keyed store machinery (ISO-1 built it; ISO-2 generalized it)
 # ---------------------------------------------------------------------------
-
-_instinct_store: InstinctStore | None = None
-_paw_print_store: PawPrintStore | None = None
-
-
-def get_instinct_store() -> InstinctStore:
-    """Return the global InstinctStore singleton (``~/.pocketpaw/instinct.db``)."""
-    global _instinct_store
-    if _instinct_store is None:
-        _instinct_store = InstinctStore(_DATA_DIR / "instinct.db")
-    return _instinct_store
+#
+# Both Fabric (ISO-1) and Instinct (ISO-2) need the SAME per-workspace plumbing:
+# resolve workspace -> fail-closed-or-legacy when absent -> per-workspace file
+# under workspaces/<id>/<name>.db -> bounded LRU that aclose()s the evicted
+# handle -> StoreProvider-seam first-refusal. Rather than duplicate that for each
+# store, a ``_StoreKind`` captures the few things that differ (the store class,
+# the file/provider name, the db filename) and one set of generic functions
+# drives every kind. Adding a third workspace-keyed store later is a one-liner.
 
 
-def get_paw_print_store() -> PawPrintStore:
-    """Return the global PawPrintStore singleton (``~/.pocketpaw/paw_print.db``)."""
-    global _paw_print_store
-    if _paw_print_store is None:
-        _paw_print_store = PawPrintStore(_DATA_DIR / "paw_print.db")
-    return _paw_print_store
+@dataclass
+class _StoreKind:
+    """Per-store-type config for the generic workspace-keyed factory.
+
+    ``name`` is BOTH the StoreProvider ``get_store(name=...)`` key and the on-disk
+    db filename stem (``fabric`` -> ``fabric.db``). ``cls`` is the concrete store
+    class the local default constructs. ``legacy`` holds the single-tenant shared
+    singleton; ``cache`` is the bounded per-workspace LRU (workspace_id -> store).
+    """
+
+    name: str
+    cls: type
+    legacy: Any = None  # the lazily-built shared singleton (legacy / OSS path)
+    cache: OrderedDict[str, Any] = field(default_factory=OrderedDict)
+
+    @property
+    def filename(self) -> str:
+        return f"{self.name}.db"
 
 
-# ---------------------------------------------------------------------------
-# Fabric — workspace-keyed physical isolation (ISO-1)
-# ---------------------------------------------------------------------------
-
-# Legacy shared singleton (single-tenant OSS / unscoped, non-required path).
-_fabric_store: FabricStore | None = None
-
-# Per-workspace handle cache: workspace_id -> FabricStore, ordered by recency so
-# we can evict the least-recently-used past the cap. Bounded by
-# _WORKSPACE_STORE_CACHE_CAP; the evicted handle is aclose()d.
-_workspace_fabric_stores: OrderedDict[str, FabricStore] = OrderedDict()
+# The registry of workspace-keyed store kinds. Fabric is wired by ISO-1, Instinct
+# by ISO-2. Paw Print stays a plain shared singleton (not tenant-isolated yet).
+_FABRIC_KIND = _StoreKind(name="fabric", cls=FabricStore)
+_INSTINCT_KIND = _StoreKind(name="instinct", cls=InstinctStore)
+_STORE_KINDS: tuple[_StoreKind, ...] = (_FABRIC_KIND, _INSTINCT_KIND)
 
 
-def _provider_fabric_store(workspace_id: str | None) -> FabricStore | None:
-    """Ask the StoreProvider seam for a Fabric store, if one is registered.
+def _provider_store(kind: _StoreKind, workspace_id: str | None) -> Any | None:
+    """Ask the StoreProvider seam for a store of ``kind``, if one is registered.
 
-    Returns the provider's store, or ``None`` when no provider is installed
-    (the OSS case) or the provider declines (returns ``None`` / lacks Fabric).
-    A provider that raises is isolated: we log and fall back to the local store
+    Returns the provider's store, or ``None`` when no provider is installed (the
+    OSS case) or the provider declines (returns ``None`` / lacks this kind). A
+    provider that raises is isolated: we log and fall back to the local store
     rather than take the factory down — a broken EE plugin must not break core.
+    The returned store must be an instance of ``kind.cls`` or it is ignored.
     """
     provider = first(_STORE_PROVIDER_GROUP)
     if provider is None:
         return None
     try:
-        store = provider.get_store("fabric", workspace_id=workspace_id)
+        store = provider.get_store(kind.name, workspace_id=workspace_id)
     except TypeError:
         # Back-compat for a provider whose get_store predates the workspace_id
         # keyword: call it the old way. (Core ships no such provider; this just
         # keeps the seam tolerant.)
         try:
-            store = provider.get_store("fabric")
+            store = provider.get_store(kind.name)
         except Exception:  # noqa: BLE001
-            logger.warning("StoreProvider.get_store('fabric') failed", exc_info=True)
+            logger.warning("StoreProvider.get_store(%r) failed", kind.name, exc_info=True)
             return None
     except Exception:  # noqa: BLE001 — isolate plugin failures
-        logger.warning("StoreProvider.get_store('fabric', ...) failed", exc_info=True)
+        logger.warning("StoreProvider.get_store(%r, ...) failed", kind.name, exc_info=True)
         return None
-    if store is not None and not isinstance(store, FabricStore):
+    if store is not None and not isinstance(store, kind.cls):
         logger.warning(
-            "StoreProvider returned a %s for 'fabric', expected FabricStore — ignoring",
+            "StoreProvider returned a %s for %r, expected %s — ignoring",
             type(store).__name__,
+            kind.name,
+            kind.cls.__name__,
         )
         return None
     return store
 
 
-def _cache_workspace_store(workspace_id: str, store: FabricStore) -> None:
+def _cache_workspace_store(kind: _StoreKind, workspace_id: str, store: Any) -> None:
     """Insert ``store`` as most-recently-used, evicting + closing LRU past cap."""
-    _workspace_fabric_stores[workspace_id] = store
-    _workspace_fabric_stores.move_to_end(workspace_id)
-    while len(_workspace_fabric_stores) > _WORKSPACE_STORE_CACHE_CAP:
-        _evict_key, evicted = _workspace_fabric_stores.popitem(last=False)
+    kind.cache[workspace_id] = store
+    kind.cache.move_to_end(workspace_id)
+    while len(kind.cache) > _WORKSPACE_STORE_CACHE_CAP:
+        _evict_key, evicted = kind.cache.popitem(last=False)
         _schedule_aclose(evicted)
 
 
-def _schedule_aclose(store: FabricStore) -> None:
+def _schedule_aclose(store: Any) -> None:
     """Best-effort release of an evicted store's on-disk resources.
 
     The evicted store holds no live connection, so the only cleanup is a WAL
-    checkpoint (see ``FabricStore.aclose``). How we run it depends on the caller:
+    checkpoint (see the store's ``aclose``). How we run it depends on the caller:
 
     * A running event loop is present (the common case — eviction fires from an
       async request building another store): fire-and-forget the async
@@ -301,7 +317,7 @@ def _schedule_aclose(store: FabricStore) -> None:
         _sync_checkpoint(store)
 
 
-def _sync_checkpoint(store: FabricStore) -> None:
+def _sync_checkpoint(store: Any) -> None:
     """Synchronously checkpoint a store's WAL via stdlib sqlite3 (no event loop).
 
     Resets the store's ``_initialized`` flag to mirror ``aclose`` so a later
@@ -315,14 +331,69 @@ def _sync_checkpoint(store: FabricStore) -> None:
         with sqlite3.connect(store._db_path) as conn:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
-        logger.debug("evicted FabricStore sync checkpoint skipped", exc_info=True)
+        logger.debug("evicted %s sync checkpoint skipped", type(store).__name__, exc_info=True)
 
 
-async def _safe_aclose(store: FabricStore) -> None:
+async def _safe_aclose(store: Any) -> None:
     try:
         await store.aclose()
     except Exception:  # noqa: BLE001
-        logger.debug("evicted FabricStore aclose failed", exc_info=True)
+        logger.debug("evicted %s aclose failed", type(store).__name__, exc_info=True)
+
+
+def _get_workspace_store(kind: _StoreKind, workspace_id: str | None) -> Any:
+    """Resolve + return the per-workspace (or legacy) store for ``kind``.
+
+    The shared engine behind ``get_fabric_store`` / ``get_instinct_store``.
+    Resolution order: explicit ``workspace_id`` -> ``current_workspace``
+    ContextVar -> ``None``. With a workspace, returns a per-workspace store at
+    ``~/.pocketpaw/workspaces/<id>/<kind>.db`` (dir created), cached in a bounded
+    LRU. Without one: fail-closed (``WorkspaceScopeRequired``) under
+    ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE``, else the legacy shared singleton. A
+    registered ``StoreProvider`` gets first refusal in every branch.
+
+    The path-traversal allowlist (``_safe_workspace_dir``) is applied to EVERY
+    kind, so Instinct inherits the exact ISO-1 guard for free.
+    """
+    resolved = _resolve_workspace_id(workspace_id)
+
+    if resolved is None:
+        if _require_workspace_scope():
+            # Fail-closed: a cloud deployment must carry a workspace. Never fall
+            # back to the shared store — that is the exact cross-tenant leak
+            # physical isolation exists to close.
+            raise WorkspaceScopeRequired(
+                f"A workspace-scoped {kind.name} store is required "
+                f"(${_REQUIRE_WORKSPACE_SCOPE_ENV} is set) but no workspace was "
+                "resolved from the explicit argument or the current_workspace "
+                "context. Refusing to fall back to the shared store."
+            )
+        # Single-tenant OSS path: legacy shared singleton.
+        if kind.legacy is None:
+            provided = _provider_store(kind, None)
+            kind.legacy = provided if provided is not None else kind.cls(_DATA_DIR / kind.filename)
+        return kind.legacy
+
+    # Workspace resolved: per-workspace physically-isolated store.
+    cached = kind.cache.get(resolved)
+    if cached is not None:
+        kind.cache.move_to_end(resolved)  # mark MRU
+        return cached
+
+    provided = _provider_store(kind, resolved)
+    if provided is not None:
+        store = provided
+    else:
+        ws_dir = _safe_workspace_dir(resolved)
+        ws_dir.mkdir(parents=True, exist_ok=True)
+        store = kind.cls(ws_dir / kind.filename)
+    _cache_workspace_store(kind, resolved, store)
+    return store
+
+
+# ---------------------------------------------------------------------------
+# Public factories
+# ---------------------------------------------------------------------------
 
 
 def get_fabric_store(*, workspace_id: str | None = None) -> FabricStore:
@@ -342,56 +413,59 @@ def get_fabric_store(*, workspace_id: str | None = None) -> FabricStore:
     A registered ``StoreProvider`` (entry-point group ``pocketpaw.stores``) gets
     first refusal in every branch, so EE can later supply a cloud-backed store.
     """
-    resolved = _resolve_workspace_id(workspace_id)
+    return _get_workspace_store(_FABRIC_KIND, workspace_id)
 
-    if resolved is None:
-        if _require_workspace_scope():
-            # Fail-closed: a cloud deployment must carry a workspace. Never fall
-            # back to the shared store — that is the exact cross-tenant leak
-            # physical isolation exists to close.
-            raise WorkspaceScopeRequired(
-                "A workspace-scoped Fabric store is required "
-                f"(${_REQUIRE_WORKSPACE_SCOPE_ENV} is set) but no workspace was "
-                "resolved from the explicit argument or the current_workspace "
-                "context. Refusing to fall back to the shared store."
-            )
-        # Single-tenant OSS path: legacy shared singleton.
-        global _fabric_store
-        if _fabric_store is None:
-            provided = _provider_fabric_store(None)
-            _fabric_store = (
-                provided if provided is not None else FabricStore(_DATA_DIR / "fabric.db")
-            )
-        return _fabric_store
 
-    # Workspace resolved: per-workspace physically-isolated store.
-    cached = _workspace_fabric_stores.get(resolved)
-    if cached is not None:
-        _workspace_fabric_stores.move_to_end(resolved)  # mark MRU
-        return cached
+def get_instinct_store(*, workspace_id: str | None = None) -> InstinctStore:
+    """Return the InstinctStore for the resolved workspace (ISO-2).
 
-    provided = _provider_fabric_store(resolved)
-    if provided is not None:
-        store = provided
-    else:
-        ws_dir = _safe_workspace_dir(resolved)
-        ws_dir.mkdir(parents=True, exist_ok=True)
-        store = FabricStore(ws_dir / "fabric.db")
-    _cache_workspace_store(resolved, store)
-    return store
+    Physically isolates Instinct per workspace through the SAME generic factory
+    Fabric uses: explicit ``workspace_id`` arg → ``current_workspace`` ContextVar
+    → ``None``.
+
+    * A resolved workspace returns a per-workspace store at
+      ``~/.pocketpaw/workspaces/<workspace_id>/instinct.db`` — its OWN file, so
+      its W2b audit hash-chain (genesis→…→head) is independent and
+      ``verify_audit_chain`` runs PER WORKSPACE. That is the correct multi-tenant
+      model: a tenant's auditor verifies only that tenant's chain.
+    * No workspace + ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` truthy → raises
+      :class:`WorkspaceScopeRequired` (fail-closed; never a shared read).
+    * No workspace + flag unset → the legacy shared ``~/.pocketpaw/instinct.db``
+      singleton (single-tenant OSS back-compat).
+
+    The W4a in-row ``workspace_id`` read-filter STAYS as a second layer; physical
+    file isolation is additive defense-in-depth. The path-traversal allowlist is
+    inherited from the generic factory.
+    """
+    return _get_workspace_store(_INSTINCT_KIND, workspace_id)
+
+
+# ---------------------------------------------------------------------------
+# Paw Print — plain process-wide singleton (NOT workspace-isolated yet)
+# ---------------------------------------------------------------------------
+
+_paw_print_store: PawPrintStore | None = None
+
+
+def get_paw_print_store() -> PawPrintStore:
+    """Return the global PawPrintStore singleton (``~/.pocketpaw/paw_print.db``)."""
+    global _paw_print_store
+    if _paw_print_store is None:
+        _paw_print_store = PawPrintStore(_DATA_DIR / "paw_print.db")
+    return _paw_print_store
 
 
 def reset_store_caches() -> None:
-    """Drop every cached store handle (legacy singletons + per-workspace LRU).
+    """Drop every cached store handle (legacy singletons + per-workspace LRUs).
 
     For tests that install/remove providers, swap the data dir, or need a clean
     factory between cases. Evicted per-workspace handles are aclose()d
     best-effort so a checkpoint runs and no WAL sidecar is left behind.
     """
-    global _fabric_store, _instinct_store, _paw_print_store
-    _fabric_store = None
-    _instinct_store = None
+    global _paw_print_store
     _paw_print_store = None
-    while _workspace_fabric_stores:
-        _key, store = _workspace_fabric_stores.popitem(last=False)
-        _schedule_aclose(store)
+    for kind in _STORE_KINDS:
+        kind.legacy = None
+        while kind.cache:
+            _key, store = kind.cache.popitem(last=False)
+            _schedule_aclose(store)
