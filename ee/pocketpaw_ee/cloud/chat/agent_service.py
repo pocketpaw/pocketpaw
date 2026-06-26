@@ -168,6 +168,7 @@ from pocketpaw.ripple import (
     get_pocket_prompts,
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
+from pocketpaw.stores import current_workspace as _oss_current_workspace
 from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
 
@@ -216,7 +217,7 @@ def attach_agent_identity(
     user_id: str,
     session_mongo_id: str | None = None,
     pocket_id: str | None = None,
-) -> tuple[Token, Token, Token, Token]:
+) -> tuple[Token, Token, Token, Token, Token]:
     """Bind workspace / user / session / pocket identity for the active
     stream's MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat
     is streaming through — used by ``create_pocket`` to link the active
@@ -232,7 +233,19 @@ def attach_agent_identity(
     that lost the id. Failing loudly at the bind makes any future caller that
     drops tenancy break at the source instead. Every real caller (the SSE chat
     path, the group/DM bridge, the in-process test harnesses) already passes
-    non-empty ids, so this is a guard, not a behavior change for them."""
+    non-empty ids, so this is a guard, not a behavior change for them.
+
+    ISO-3 (workspace store bridge): the same bind also sets the OSS-core
+    ``pocketpaw.stores.current_workspace`` ContextVar, so the NON-router store
+    callers inside an agent run — the agent Fabric tools, the Fabric/Instinct
+    MCP servers, connector ingest — that call ``get_fabric_store()`` /
+    ``get_instinct_store()`` WITHOUT an explicit ``workspace_id`` resolve to THIS
+    stream's workspace and land in its per-workspace file (ISO-1/ISO-2). The
+    EE router path keeps passing ``workspace_id`` explicitly (it has the request
+    scope); this bridges the agent path that doesn't. The OSS token is returned
+    as a FIFTH tuple element — callers treat the tuple opaquely (only
+    ``detach_agent_identity`` unpacks it), so the wider shape is invisible to
+    them. ``detach`` resets it."""
     if not workspace_id or not user_id:
         raise ValueError(
             "attach_agent_identity requires a non-empty workspace_id and user_id "
@@ -243,15 +256,19 @@ def attach_agent_identity(
         _active_user_id.set(user_id),
         _active_session_mongo_id.set(session_mongo_id),
         _active_pocket_id.set(pocket_id),
+        # ISO-3: bridge the EE per-stream workspace onto the OSS store ContextVar.
+        _oss_current_workspace.set(workspace_id),
     )
 
 
-def detach_agent_identity(tokens: tuple[Token, Token, Token, Token]) -> None:
-    ws_token, user_token, session_token, pocket_token = tokens
+def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> None:
+    ws_token, user_token, session_token, pocket_token, oss_ws_token = tokens
     _active_workspace_id.reset(ws_token)
     _active_user_id.reset(user_token)
     _active_session_mongo_id.reset(session_token)
     _active_pocket_id.reset(pocket_token)
+    # ISO-3: clear the OSS store ContextVar bridged in attach_agent_identity.
+    _oss_current_workspace.reset(oss_ws_token)
 
 
 def current_workspace_id() -> str | None:

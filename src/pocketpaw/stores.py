@@ -236,6 +236,7 @@ class _StoreKind:
 _FABRIC_KIND = _StoreKind(name="fabric", cls=FabricStore)
 _INSTINCT_KIND = _StoreKind(name="instinct", cls=InstinctStore)
 _STORE_KINDS: tuple[_StoreKind, ...] = (_FABRIC_KIND, _INSTINCT_KIND)
+_KIND_BY_NAME: dict[str, _StoreKind] = {k.name: k for k in _STORE_KINDS}
 
 
 def _provider_store(kind: _StoreKind, workspace_id: str | None) -> Any | None:
@@ -384,11 +385,45 @@ def _get_workspace_store(kind: _StoreKind, workspace_id: str | None) -> Any:
     if provided is not None:
         store = provided
     else:
-        ws_dir = _safe_workspace_dir(resolved)
-        ws_dir.mkdir(parents=True, exist_ok=True)
-        store = kind.cls(ws_dir / kind.filename)
+        store = _build_local_workspace_store(kind.name, resolved)
     _cache_workspace_store(kind, resolved, store)
     return store
+
+
+def _build_local_workspace_store(name: str, workspace_id: str) -> Any:
+    """Construct the LOCAL per-workspace store for ``name`` at its file path.
+
+    The single authority for "where does workspace ``X``'s ``name`` store live
+    and how is its id validated": resolves the directory via the
+    path-traversal allowlist (``_safe_workspace_dir``), creates it, and
+    constructs the OSS store class on ``<dir>/<name>.db``.
+
+    IMPORTANT: this does NOT consult the StoreProvider seam — it is the local
+    default, and is ALSO what a registered provider should delegate to when it
+    just wants the standard per-workspace file store (see
+    ``build_workspace_store``). Routing a provider back through the seam would
+    recurse. ``name`` must be a known workspace-keyed kind.
+    """
+    kind = _KIND_BY_NAME.get(name)
+    if kind is None:
+        raise ValueError(f"unknown workspace-keyed store kind: {name!r}")
+    ws_dir = _safe_workspace_dir(workspace_id)
+    ws_dir.mkdir(parents=True, exist_ok=True)
+    return kind.cls(ws_dir / kind.filename)
+
+
+def build_workspace_store(name: str, workspace_id: str) -> Any:
+    """Public helper: build the standard per-workspace file store for ``name``.
+
+    The seam an EE ``StoreProvider`` delegates to when it wants the normal
+    per-workspace SQLite file store (Fabric / Instinct at
+    ``~/.pocketpaw/workspaces/<id>/<name>.db``) rather than a bespoke
+    implementation. Keeping the path + the path-traversal allowlist here means
+    the provider can't drift from — or weaken — the OSS guard, and it is
+    recursion-safe (it never re-enters the provider seam). ``workspace_id`` is
+    validated by the same strict allowlist every other store path uses.
+    """
+    return _build_local_workspace_store(name, workspace_id)
 
 
 # ---------------------------------------------------------------------------
