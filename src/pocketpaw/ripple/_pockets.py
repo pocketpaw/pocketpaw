@@ -1,12 +1,14 @@
 # pocketpaw/ripple/_pockets.py — System prompts for the Ripple Pockets surface.
 #
 # Changes: 2026-06-26 (integration/model-catalog-v2, MCG-11) — added
-# `build_specialist_cacheable()`: structures the byte-stable site/pocket-gen
-# system prompt (POCKET_SPECIALIST_PROMPT) into a `cache_control`-marked prefix
-# block ⊕ an unmarked per-brief variable suffix, via the universal
-# `pocketpaw.llm.caching.build_cacheable`. Defaults to a 1h TTL so the
-# generator's shared prefix stays warm across briefs (the Nth site pays ~10% on
-# the prefix → margin on paw-managed keys). No prompt TEXT changed.
+# `build_specialist_cacheable()`: the STRUCTURED-system cache helper that wraps
+# the byte-stable POCKET_SPECIALIST_PROMPT into a `cache_control`-marked prefix
+# block ⊕ an unmarked per-brief variable suffix (1h TTL), via the universal
+# `pocketpaw.llm.caching.build_cacheable`. It is NOT yet on the live run — every
+# shipped backend.run takes a STRING system_prompt, so the live margin is
+# delivered by the `deep_agents` _format_messages patch, which now marks this
+# same prefix at 1h (gated on the `<pocket-scope>` sentinel). This helper is the
+# ready-made path for a future structured/LiteLLM caller. No prompt TEXT changed.
 #
 # Changes: 2026-05-31 (feat/home-agent-source-authoring) — `HOME_POCKET_PROMPT`
 # now (1) carries the `__BACKEND_SUMMARY__` token in its intro (filled via
@@ -2458,11 +2460,25 @@ POCKET_INTERACTION_PROMPT = POCKET_INTERACTION_PROMPT_MCP
 # does. The Nth site then pays ~10% on the (huge) prefix — that is the margin
 # on paw-managed keys.
 #
-# This returns the Anthropic/LiteLLM ``system``-block shape. Backends that take
-# a structured system (LiteLLM/langchain via the deep_agents cache path) consume
-# it directly; the Claude-Agent-SDK backend takes a string system_prompt, so it
-# relies on the deep_agents ``_format_messages`` patch to place the same
-# breakpoint — both paths agree on "stable prefix marked, variable suffix not".
+# Two delivery paths, and what actually runs today:
+#
+#   * The LIVE path (what every shipped backend uses): the assembled prompt is a
+#     STRING — ``runtime._build_system_prompt`` returns ``POCKET_SPECIALIST_PROMPT``
+#     (the stable prefix) with the variable hints concatenated AFTER it, and
+#     passes it as ``system_prompt=`` to ``backend.run``. The cache marker is
+#     placed by the ``deep_agents._format_messages`` patch, which wraps the whole
+#     string in one ``cache_control`` block. That patch now picks a **1h** TTL for
+#     this prefix (it carries the ``<pocket-scope>`` sentinel — see
+#     ``deep_agents._cache_ttl_for_system``); other prompts stay at 5m. So the
+#     live margin is real and runs at 1h.
+#
+#   * The STRUCTURED path (this helper): ``build_specialist_cacheable`` returns the
+#     Anthropic/LiteLLM ``system``-BLOCK shape — stable prefix as a marked block,
+#     variable suffix as a separate unmarked block — at 1h by default. No shipped
+#     backend.run takes a structured ``system`` today (they take a string), so this
+#     is the ready-made helper for a future LiteLLM/structured-system caller; it is
+#     NOT yet on the live specialist path. Both paths now agree at 1h, and on
+#     "stable prefix marked, variable suffix not".
 # ---------------------------------------------------------------------------
 
 
@@ -2472,7 +2488,8 @@ def build_specialist_cacheable(
     base_prompt: str = POCKET_SPECIALIST_PROMPT,
     ttl: str = "1h",
 ):
-    """Structure a site/pocket-gen system prompt as a CACHEABLE block list.
+    """Structure a site/pocket-gen system prompt as a CACHEABLE block list
+    (the STRUCTURED-system path — see the module comment above).
 
     ``base_prompt`` (default the byte-stable ``POCKET_SPECIALIST_PROMPT``) is
     the cached prefix and carries the ``cache_control`` marker; ``variable_suffix``
@@ -2482,11 +2499,17 @@ def build_specialist_cacheable(
 
     ``ttl`` defaults to ``"1h"`` — the generator reuses this exact prefix across
     back-to-back briefs, so the 2x write cost amortises fast and the 1h window
-    keeps the prefix warm between sites.
+    keeps the prefix warm between sites. This matches the TTL the live string
+    path now uses for the same prefix (``deep_agents._cache_ttl_for_system``).
 
     Returns the LiteLLM/Anthropic ``system``-parameter block list (see
     ``pocketpaw.llm.caching.build_cacheable``). Byte-stable: the prefix block is
     identical for the same ``base_prompt`` no matter what ``variable_suffix`` is.
+
+    NOTE: no shipped ``backend.run`` accepts a structured ``system`` today (they
+    take a string), so this helper is the ready-made path for a future
+    LiteLLM/structured-system caller — it is NOT yet wired into the live
+    specialist run. The live margin comes from the ``deep_agents`` cache patch.
     """
     from pocketpaw.llm.caching import build_cacheable
 
