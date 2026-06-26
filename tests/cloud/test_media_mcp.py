@@ -23,6 +23,11 @@
 # All tests mock the per-stream ContextVar identity (``_identity``) and the
 # session-bind/SSE side effects (``_bind_session_and_emit``) so they run without
 # a live SSE chat stream.
+#
+# 2026-06-26 (MCG-8): added coverage for ``_resolve_auth_key`` — media now Bearers
+# the workspace's provisioned per-tenant LiteLLM virtual key (resolved best-effort
+# via llm_provisioning.get_tenant_key), falling back to the deployment master key
+# when none is provisioned or the lookup fails.
 
 from __future__ import annotations
 
@@ -599,3 +604,51 @@ def test_gallery_spec_uses_only_existing_widget_types() -> None:
     # The grid holds one tile per media item.
     grid = next(n for n in root["children"] if n["type"] == "grid")
     assert len(grid["children"]) == 3
+
+
+# --- MCG-8: per-tenant LiteLLM virtual-key resolution on proxy calls ---
+
+
+async def test_resolve_auth_key_prefers_provisioned_tenant_key(monkeypatch, proxy_env) -> None:
+    """When the workspace has a provisioned virtual key, media Bearers THAT key
+    (so the proxy enforces the tenant budget + attributes spend), not the master
+    key. ``get_tenant_key`` is patched to stand in for the provisioning lookup so
+    this test needs no Mongo."""
+    with patch(
+        "pocketpaw_ee.cloud.llm_provisioning.service.get_tenant_key",
+        new=AsyncMock(return_value="sk-tenant-w1"),
+    ):
+        key = await media._resolve_auth_key("ws-1")
+    assert key == "sk-tenant-w1"  # the tenant key, NOT _PROXY_KEY (the master key)
+
+
+async def test_resolve_auth_key_falls_back_to_master_when_unprovisioned(
+    monkeypatch, proxy_env
+) -> None:
+    """No provisioned key -> fall back to the deployment master key (pre-MCG-8
+    behaviour), so media keeps working before provisioning has run."""
+    with patch(
+        "pocketpaw_ee.cloud.llm_provisioning.service.get_tenant_key",
+        new=AsyncMock(return_value=None),
+    ):
+        key = await media._resolve_auth_key("ws-1")
+    assert key == _PROXY_KEY  # the master key from proxy_env
+
+
+async def test_resolve_auth_key_falls_back_to_master_on_lookup_error(
+    monkeypatch, proxy_env
+) -> None:
+    """A failing tenant-key lookup must NEVER break media — it falls back to the
+    master key rather than raising."""
+    with patch(
+        "pocketpaw_ee.cloud.llm_provisioning.service.get_tenant_key",
+        new=AsyncMock(side_effect=RuntimeError("db down")),
+    ):
+        key = await media._resolve_auth_key("ws-1")
+    assert key == _PROXY_KEY
+
+
+async def test_resolve_auth_key_no_workspace_uses_master(monkeypatch, proxy_env) -> None:
+    """No workspace id (e.g. identity missing) -> the master key, no lookup."""
+    key = await media._resolve_auth_key(None)
+    assert key == _PROXY_KEY

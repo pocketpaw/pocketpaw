@@ -99,6 +99,12 @@
 # (``new_balance == before + amount``) that is wrong under concurrency — a racing
 # grant could suppress a genuine emit or fire a spurious one. The created-flag is
 # the authoritative replay signal; callers gate the emit on it.
+# Changed 2026-06-26 (MCG-8): added ``is_recorded`` — a read-only check for whether
+# a ``(workspace, idempotency_key)`` movement already exists. MCG-8's LiteLLM
+# spend-log sweep ingests already-deduplicated external rows; it uses this to
+# report an accurate newly-billed count and skip a redundant insert-then-rollback
+# on the duplicate path. It does NOT weaken the exactly-once guard (grant/debit
+# stay idempotent via the unique index); it only saves the wasted round-trip.
 
 from __future__ import annotations
 
@@ -384,6 +390,30 @@ async def check_balance(workspace: str) -> None:
         raise InsufficientCredits(1, max(bal, 0))
 
 
+async def is_recorded(workspace: str, idempotency_key: str) -> bool:
+    """Whether a movement with this ``(workspace, idempotency_key)`` already exists.
+
+    A read-only pre-check for callers that ingest external, already-deduplicated
+    events (e.g. MCG-8's LiteLLM spend-log sweep) and want to know whether a given
+    source row was ALREADY recorded — so they can report an accurate
+    "newly billed" count and skip a redundant insert-then-rollback on the
+    duplicate path. This does NOT replace the exactly-once guard: ``grant`` /
+    ``debit`` remain idempotent via the unique index regardless, so a race between
+    this read and the write still resolves correctly (the write no-ops). It only
+    saves the wasted round-trip and lets the caller's bookkeeping stay honest.
+    Tenant-filtered (Rule 7).
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+    if not idempotency_key:
+        return False
+    existing = await CreditLedgerEntry.find_one(
+        CreditLedgerEntry.workspace == workspace,
+        CreditLedgerEntry.idempotency_key == idempotency_key,
+    )
+    return existing is not None
+
+
 async def history(
     workspace: str,
     *,
@@ -587,5 +617,6 @@ __all__ = [
     "debit",
     "grant",
     "history",
+    "is_recorded",
     "reconcile",
 ]

@@ -23,6 +23,14 @@
 # via the OpenAI `user` field (the proxy keys per-end-customer spend off it) so
 # the existing proxy spend log attributes cost to the workspace; we do not block
 # on metering — the proxy already logs it.
+# 2026-06-26 (MCG-8): each proxy call now Bearers the workspace's PROVISIONED
+# per-tenant LiteLLM virtual key (resolved best-effort via
+# ee.cloud.llm_provisioning.service.get_tenant_key) instead of the deployment
+# master key, so the proxy enforces the tenant's budget + rate caps and attributes
+# spend to the tenant key. Falls back to the master key when a workspace has no
+# key yet (provisioning hasn't run) or the lookup fails — media never breaks on
+# key resolution, and the `user=workspace_id` tag still attributes spend either
+# way. See ``_resolve_auth_key``.
 #
 # What this file does: clones the sites.py / sites_create.py shape — a single
 # ``create_sdk_mcp_server`` with an SDK import-guard, ``SERVER_NAME`` /
@@ -229,18 +237,48 @@ def _proxy_base() -> str:
 
 
 def _proxy_key() -> str | None:
-    """The LiteLLM proxy admin/virtual key (or None), from catalog config."""
+    """The LiteLLM proxy admin/MASTER key (or None), from catalog config. The
+    fallback Bearer when a workspace has no provisioned per-tenant virtual key."""
     from pocketpaw_ee.catalog import config
 
     return config.litellm_proxy_api_key()
 
 
-def _proxy_headers(*, json_content: bool = True) -> dict[str, str]:
+async def _resolve_auth_key(workspace_id: str | None) -> str | None:
+    """Resolve the Bearer key for a tenant's media proxy call (MCG-8).
+
+    Prefer the workspace's PROVISIONED LiteLLM virtual key (so the proxy enforces
+    the tenant's budget + attributes spend to the key, not just the ``user`` tag);
+    fall back to the deployment master key when the workspace has no key yet (or
+    the lookup fails). Best-effort + non-fatal: media must keep working on the
+    master key when provisioning hasn't run — the ``user=workspace_id`` tag still
+    attributes spend in the proxy log either way. Importing the provisioning
+    service lazily keeps the agent MCP import graph free of Beanie at module load.
+    """
+    if workspace_id:
+        try:
+            from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
+
+            tenant_key = await provisioning.get_tenant_key(workspace_id)
+            if tenant_key:
+                return tenant_key
+        except Exception:  # noqa: BLE001 — never let key resolution break a generation
+            logger.debug(
+                "media: tenant key lookup failed for workspace=%s; using master key",
+                workspace_id,
+                exc_info=True,
+            )
+    return _proxy_key()
+
+
+def _proxy_headers(*, json_content: bool = True, auth_key: str | None = None) -> dict[str, str]:
     """Bearer the proxy key (when set) the same way the catalog client does.
+    ``auth_key`` is the per-tenant virtual key resolved by ``_resolve_auth_key``;
+    when None we fall back to the deployment master key (the pre-MCG-8 behaviour).
     ``json_content`` adds the JSON content-type for the OpenAI-compatible JSON
     endpoints; multipart uploads (STT) let httpx set the boundary itself."""
     headers: dict[str, str] = {}
-    key = _proxy_key()
+    key = auth_key if auth_key is not None else _proxy_key()
     if key:
         headers["Authorization"] = f"Bearer {key}"
     if json_content:
@@ -429,7 +467,7 @@ async def _land_in_gallery(
 
 
 async def _proxy_image(
-    *, model: str, prompt: str, size: str | None, user: str
+    *, model: str, prompt: str, size: str | None, user: str, auth_key: str | None = None
 ) -> tuple[bytes | None, str | None]:
     """Generate an image via the proxy's OpenAI-compatible image endpoint.
 
@@ -454,7 +492,7 @@ async def _proxy_image(
         async with _proxy_client() as client:
             resp = await client.post(
                 f"{base}/v1/images/generations",
-                headers=_proxy_headers(),
+                headers=_proxy_headers(auth_key=auth_key),
                 json=payload,
             )
             resp.raise_for_status()
@@ -503,8 +541,9 @@ async def _image_generate_handler(args: dict) -> dict:
     if not model:
         model = _default_image_model()
 
+    auth_key = await _resolve_auth_key(workspace_id)
     image_bytes, err = await _proxy_image(
-        model=model, prompt=prompt, size=size, user=workspace_id
+        model=model, prompt=prompt, size=size, user=workspace_id, auth_key=auth_key
     )
     if err is not None or image_bytes is None:
         return _error_response(err or "image generation returned no data")
@@ -543,7 +582,13 @@ async def _image_generate_handler(args: dict) -> dict:
 
 
 async def _proxy_audio_speech(
-    *, model: str, text: str, voice: str, response_format: str, user: str
+    *,
+    model: str,
+    text: str,
+    voice: str,
+    response_format: str,
+    user: str,
+    auth_key: str | None = None,
 ) -> tuple[bytes | None, str | None]:
     """Synthesize speech via the proxy's OpenAI-compatible speech endpoint.
 
@@ -563,7 +608,7 @@ async def _proxy_audio_speech(
         async with _proxy_client() as client:
             resp = await client.post(
                 f"{base}/v1/audio/speech",
-                headers=_proxy_headers(),
+                headers=_proxy_headers(auth_key=auth_key),
                 json=payload,
             )
             resp.raise_for_status()
@@ -596,12 +641,14 @@ async def _audio_generate_handler(args: dict) -> dict:
     response_format = _str_arg(args, "response_format", "mp3")
     model = _str_arg(args, "model", _DEFAULT_AUDIO_TTS_MODEL)
 
+    auth_key = await _resolve_auth_key(workspace_id)
     audio_bytes, err = await _proxy_audio_speech(
         model=model,
         text=text,
         voice=voice,
         response_format=response_format,
         user=workspace_id,
+        auth_key=auth_key,
     )
     if err is not None or audio_bytes is None:
         return _error_response(err or "audio synthesis returned no data")
@@ -640,7 +687,7 @@ async def _audio_generate_handler(args: dict) -> dict:
 
 
 async def _proxy_audio_transcription(
-    *, model: str, audio_path: Path, user: str
+    *, model: str, audio_path: Path, user: str, auth_key: str | None = None
 ) -> tuple[str | None, str | None]:
     """Transcribe an audio file via the proxy's OpenAI-compatible transcription
     endpoint.
@@ -659,7 +706,7 @@ async def _proxy_audio_transcription(
         async with _proxy_client() as client:
             resp = await client.post(
                 f"{base}/v1/audio/transcriptions",
-                headers=_proxy_headers(json_content=False),
+                headers=_proxy_headers(json_content=False, auth_key=auth_key),
                 files={"file": (audio_path.name, data)},
                 data={"model": model, "user": user},
             )
@@ -700,8 +747,9 @@ async def _audio_transcribe_handler(args: dict) -> dict:
 
     model = _str_arg(args, "model", _DEFAULT_AUDIO_STT_MODEL)
 
+    auth_key = await _resolve_auth_key(workspace_id)
     text, err = await _proxy_audio_transcription(
-        model=model, audio_path=audio_path, user=workspace_id
+        model=model, audio_path=audio_path, user=workspace_id, auth_key=auth_key
     )
     if err is not None or text is None:
         return _error_response(err or "transcription returned no text")
@@ -715,7 +763,7 @@ async def _audio_transcribe_handler(args: dict) -> dict:
 
 
 async def _poll_proxy_video(
-    client: httpx.AsyncClient, base: str, job_id: str
+    client: httpx.AsyncClient, base: str, job_id: str, *, auth_key: str | None = None
 ) -> dict[str, Any]:
     """Poll ``GET {proxy}/videos/{job_id}`` until the job reaches a terminal
     status (``completed`` / ``succeeded`` / ``failed`` / ``cancelled``), bounded
@@ -724,7 +772,9 @@ async def _poll_proxy_video(
     waited = 0.0
     job: dict[str, Any] = {}
     while waited < _VIDEO_POLL_MAX_SECONDS:
-        resp = await client.get(f"{base}/videos/{job_id}", headers=_proxy_headers())
+        resp = await client.get(
+            f"{base}/videos/{job_id}", headers=_proxy_headers(auth_key=auth_key)
+        )
         resp.raise_for_status()
         job = resp.json()
         status = (job.get("status") or "").lower()
@@ -765,6 +815,7 @@ async def _proxy_video(
     size: str | None,
     aspect_ratio: str | None,
     user: str,
+    auth_key: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Generate a video via the proxy's ``/videos`` endpoint.
 
@@ -790,7 +841,7 @@ async def _proxy_video(
         async with _proxy_client(timeout=_VIDEO_POLL_MAX_SECONDS + 30.0) as client:
             resp = await client.post(
                 f"{base}/videos",
-                headers=_proxy_headers(),
+                headers=_proxy_headers(auth_key=auth_key),
                 json=payload,
             )
             resp.raise_for_status()
@@ -799,7 +850,7 @@ async def _proxy_video(
             terminal = {"completed", "succeeded", "failed", "cancelled", "canceled", "error"}
             job_id = job.get("id")
             if status not in terminal and job_id:
-                job = await _poll_proxy_video(client, base, str(job_id))
+                job = await _poll_proxy_video(client, base, str(job_id), auth_key=auth_key)
             status = (job.get("status") or "").lower()
             if status not in ("completed", "succeeded"):
                 detail = job.get("error") or status or "unknown status"
@@ -842,6 +893,7 @@ async def _video_generate_handler(args: dict) -> dict:
 
     model = _str_arg(args, "model") or _default_video_model()
 
+    auth_key = await _resolve_auth_key(workspace_id)
     output_url, err = await _proxy_video(
         model=model,
         prompt=prompt,
@@ -849,6 +901,7 @@ async def _video_generate_handler(args: dict) -> dict:
         size=size,
         aspect_ratio=aspect_ratio,
         user=workspace_id,
+        auth_key=auth_key,
     )
     if err is not None or output_url is None:
         return _error_response(err or "video generation returned no output URL")

@@ -1516,6 +1516,56 @@ class Settings(BaseSettings):
             "POCKETPAW_BILLING_ENFORCED."
         ),
     )
+
+    # Per-tenant LiteLLM virtual-key provisioning (MCG-8). The cloud mints a
+    # budgeted, rate-limited virtual key per workspace on the LiteLLM proxy so the
+    # proxy enforces a spend ceiling + rate caps per tenant and attributes spend
+    # to the workspace. These knobs are the key's provisioning defaults — NOT
+    # secrets; the proxy master key stays in POCKETPAW_LITELLM_API_KEY.
+    tenant_max_budget_usd: float = Field(
+        default=0.0,
+        description=(
+            "USD budget ceiling minted onto each tenant's LiteLLM virtual key, "
+            "enforced by the proxy over POCKETPAW_TENANT_BUDGET_DURATION. 0 == no "
+            "budget cap (the proxy applies no ceiling). Set via "
+            "POCKETPAW_TENANT_MAX_BUDGET_USD."
+        ),
+    )
+    tenant_budget_duration: str = Field(
+        default="30d",
+        description=(
+            "Reset window for a tenant key's budget — a LiteLLM duration string "
+            "(e.g. '30d', '1mo'). Empty == the budget never resets. Set via "
+            "POCKETPAW_TENANT_BUDGET_DURATION."
+        ),
+    )
+    tenant_rpm_limit: int = Field(
+        default=0,
+        description=(
+            "Requests-per-minute cap minted onto each tenant's LiteLLM virtual key. "
+            "0 == no RPM cap. Set via POCKETPAW_TENANT_RPM_LIMIT."
+        ),
+    )
+    tenant_tpm_limit: int = Field(
+        default=0,
+        description=(
+            "Tokens-per-minute cap minted onto each tenant's LiteLLM virtual key. "
+            "0 == no TPM cap. Set via POCKETPAW_TENANT_TPM_LIMIT."
+        ),
+    )
+    litellm_spend_ingest_enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether the LiteLLM proxy-spend -> credits sweep (MCG-8) runs. Default "
+            "FALSE: the proxy's /spend/logs includes the text chat runs BC-3 "
+            "metering already bills per ChatRunDoc, so enabling this alongside "
+            "per-run metering would double-bill text chat. It is the future "
+            "single-source-of-truth path (bill all compute from proxy spend, retire "
+            "per-run metering) — flip it (with row-level dedup against BC-3) as a "
+            "deliberate migration. Provisioning the per-tenant key is unaffected by "
+            "this flag. Set via POCKETPAW_LITELLM_SPEND_INGEST."
+        ),
+    )
     site_pending_alert_hours: float = Field(
         default=24.0,
         description=(

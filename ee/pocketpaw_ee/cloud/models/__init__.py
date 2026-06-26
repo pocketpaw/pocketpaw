@@ -96,6 +96,7 @@ from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
     MeetingProviderCredentials,
@@ -231,6 +232,7 @@ __all__ = [
     "Invite",
     "Lead",
     "LeadSource",
+    "LiteLLMTenantKey",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -302,6 +304,9 @@ def get_all_documents():
         # captured via verified ``subscription.*`` webhooks. Only
         # ``ee.cloud.billing.service`` writes this.
         Subscription,
+        # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
+        # ``ee.cloud.llm_provisioning.service`` writes this.
+        LiteLLMTenantKey,
         Invite,
         Group,
         InstinctApproval,
