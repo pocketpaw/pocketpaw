@@ -5,7 +5,8 @@
 # Updated: 2026-06-26 (ART-1 quality fix loop) — added the LOGIC tests for the
 #   defects the unique-index-blind mongomock harness hid:
 #   C1 cross-tenant — two workspaces share a path -> distinct stored rows, no
-#      error, isolated content; same-workspace soft-delete then recreate works.
+#      error, isolated content; soft-delete then recreate revives with a FRESH
+#      history (the dead file's version rows are purged on revive).
 #   I1 — a no-op update returns the stored version (no phantom +1 / phantom 409).
 #   I2 — new-file mime comes from the filename / explicit mime, not hardcoded.
 #   I3 — a blob-read failure aborts and archives nothing (history preserved).
@@ -164,27 +165,41 @@ async def test_cross_tenant_same_path_no_collision(mongo_db, fake_storage):
 
 
 @pytest.mark.asyncio
-async def test_soft_delete_then_recreate_same_path(mongo_db, fake_storage):
-    """C1 — recreating a soft-deleted path succeeds (tombstone revived in place,
-    not a second unique-key row that would 500 on real Mongo)."""
+async def test_soft_delete_then_recreate_purges_history(mongo_db, fake_storage):
+    """C1 follow-up — soft-delete then recreate is a NEW file at that path with
+    FRESH history: the revive succeeds AND purges the dead file's version rows
+    so they don't bleed stale content / duplicate version_number=1 labels."""
     ctx = _ctx("w1")
     stored_id = service._storage_id("w1", "report")
 
-    await service.write_file(ctx, WriteFileRequest(path="report", content="first"))
+    # Build a 2-version history on the original file.
+    await service.write_file(ctx, WriteFileRequest(path="report", content="v1"))
+    await service.update_file_content(ctx, "report", UpdateFileContentRequest(content="v2"))
+    await service.update_file_content(ctx, "report", UpdateFileContentRequest(content="v3"))
+    versions = await service.list_versions(ctx, "report")
+    assert [v.version_number for v in versions] == [1, 2]
 
     # Simulate the uploads soft-delete (file_versions has no delete of its own).
     doc = await FileUpload.find_one({"file_id": stored_id, "workspace": "w1"})
     doc.deleted_at = datetime.now(UTC)
     await doc.save()
 
-    # Recreate the same path — must succeed.
-    res = await service.write_file(ctx, WriteFileRequest(path="report", content="second"))
+    # Recreate the same path — succeeds, and starts a CLEAN history.
+    res = await service.write_file(ctx, WriteFileRequest(path="report", content="fresh"))
     assert res.version == 1
+    assert await service.list_versions(ctx, "report") == []  # stale v1/v2 purged
 
-    # Exactly ONE row for the stored id (revived), and it's live again.
+    # Exactly ONE live row for the stored id (revived in place).
     rows = await FileUpload.find({"file_id": stored_id, "workspace": "w1"}).to_list()
     assert len(rows) == 1
     assert rows[0].deleted_at is None
+
+    # The next edit archives a clean version_number=1 (no duplicate label,
+    # no stale content) — proving the purge worked.
+    await service.update_file_content(ctx, "report", UpdateFileContentRequest(content="fresh2"))
+    versions2 = await service.list_versions(ctx, "report")
+    assert [v.version_number for v in versions2] == [1]
+    assert (await service.get_version(ctx, "report", versions2[0].id)).content == "fresh"
 
 
 @pytest.mark.asyncio
