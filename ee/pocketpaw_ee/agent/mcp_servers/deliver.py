@@ -25,7 +25,13 @@
 # (``workspace_jail_root()/<workspace_id>/...``). ``..``, absolute paths, and
 # symlinks pointing out are all rejected (resolve() then check it's under the
 # workspace root), reusing ART-2's path-segment guard so the agent can never
-# deliver ``/etc/passwd`` or another tenant's jail.
+# deliver ``/etc/passwd`` or another tenant's jail. Because the upload relaxes
+# the mime allowlist, a delivered non-inline type (HTML/SVG/JS) is served as a
+# DOWNLOAD, not inline — EEUploadService.presigned_get forces
+# ``Content-Disposition: attachment`` for anything outside INLINE_MIMES, so a
+# delivered .html can't render active content on the storage origin. The whole
+# server is gated on is_multi_tenant_cloud() (cloud-only, like the ART-4 boot
+# guard and ART-2 jail).
 """Agent-side MCP surface for delivering a built artifact to tenant blob storage.
 
 Tool registered:
@@ -222,14 +228,21 @@ def _zip_dir_to_tempfile(src: Path) -> Path:
     os.close(fd)
     tmp_path = Path(tmp_name)
     parent = src.parent  # arcnames become ``<dirname>/...``
-    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for root, dirs, files in os.walk(src, followlinks=False):
-            dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
-            for name in files:
-                fp = os.path.join(root, name)
-                if os.path.islink(fp):
-                    continue
-                zf.write(fp, arcname=os.path.relpath(fp, parent))
+    # The mkstemp file exists NOW, and the caller only binds it for cleanup
+    # AFTER this returns — so a failure mid-walk (a vanished file, a perms
+    # error, disk-full) would leak it. Clean it up here on any failure.
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(src, followlinks=False):
+                dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d))]
+                for name in files:
+                    fp = os.path.join(root, name)
+                    if os.path.islink(fp):
+                        continue
+                    zf.write(fp, arcname=os.path.relpath(fp, parent))
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return tmp_path
 
 
@@ -365,12 +378,26 @@ async def _deliver_handler(args: dict) -> dict:
 
 def build_deliver_server() -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server for artifact delivery, or ``None`` if
-    the Claude Agent SDK isn't installed.
+    delivery isn't available (not multi-tenant cloud, or the SDK is missing).
 
     Matches the shape returned by ``build_sites_manager_server`` /
     ``build_pocket_context_server`` (``(name, server)`` or ``None``) so the
     backend's MCP registration loop in ``claude_sdk.py`` treats it identically.
+
+    Cloud-only gate: deliver lands artifacts in tenant blob storage and resolves
+    paths against the per-tenant jail, both of which only exist in multi-tenant
+    cloud. Gating on ``is_multi_tenant_cloud()`` makes the cloud-only intent
+    explicit — the same signal the ART-4 boot guard and the ART-2 jail read —
+    rather than relying solely on the tool's fail-closed-without-identity guard.
+    The per-run MCP build (``claude_sdk._get_mcp_servers``) happens after the
+    cloud DB is initialized, so this never hides the tool from a real cloud run.
     """
+    from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
+
+    if not is_multi_tenant_cloud():
+        logger.debug("not multi-tenant cloud; pocketpaw_deliver MCP disabled")
+        return None
+
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
     except ImportError:
