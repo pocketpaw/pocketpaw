@@ -745,7 +745,8 @@ async def trigger_shift(workspace_id: str, user_id: str, mandate_id: str) -> dic
         source="belt:mandate-foreman",
         reason="shift plan proposed by the mandate foreman — requires human approval",
     )
-    store = get_instinct_store()
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     try:
         action = await store.propose(
             pocket_id=workspace_id,
@@ -1032,7 +1033,8 @@ async def prepare_plan_resolution(
             f"shift {body.shift_no} is {shift.state!r} — only an in_gate shift can be resolved",
         )
 
-    store = get_instinct_store()
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.get_action(shift.plan_action_id)
     params = dict(getattr(action, "parameters", None) or {}) if action else {}
     blob = params.get(BELT_PLAN_PARAM_KEY)
@@ -1149,7 +1151,9 @@ async def shift_wire(workspace_id: str, shift_id: str) -> dict[str, Any]:
         from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
         try:
-            action = await get_instinct_store().get_action(doc.plan_action_id)
+            # ISO: HTTP path (no ContextVar) — scope to the caller's workspace.
+            _store = get_instinct_store(workspace_id=workspace_id or None)
+            action = await _store.get_action(doc.plan_action_id)
             blob = (getattr(action, "parameters", None) or {}).get(BELT_PLAN_PARAM_KEY)
             if isinstance(blob, dict):
                 task_count = len((blob.get("plan") or {}).get("tasks") or [])
@@ -1202,7 +1206,8 @@ async def get_pawprints(workspace_id: str, user_id: str, mandate_id: str) -> dic
     from pocketpaw.stores import get_instinct_store
     from pocketpaw_ee.cloud.mandates.executor import BELT_PLAN_PARAM_KEY
 
-    store = get_instinct_store()
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     prints: list[dict[str, Any]] = []
 
     def _item(shift: Any, kind: str, summary: str, refs: list[str], ts: Any) -> dict[str, Any]:

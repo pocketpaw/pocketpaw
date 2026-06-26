@@ -109,6 +109,20 @@ _DEFAULT_BILLING_COUNTRY = "US"
 _PLACEHOLDER_EMAIL = "billing@pocketpaw.local"
 
 
+def _customer_param(email: str | None) -> dict[str, str]:
+    """Build Dodo's ``CustomerRequest`` (new-customer variant).
+
+    Dodo's ``customer`` is an untagged enum: ``{customer_id}`` (attach existing) OR
+    ``{email, name}`` (new customer). Sending ``{email}`` alone fails the server-side
+    variant match with a 422 (``did not match any variant of untagged enum
+    CustomerRequest``) — a NAME is required too. Derive a display name from the email
+    local-part when the caller has none; Dodo collects the real details on the hosted
+    page either way.
+    """
+    e = email or _PLACEHOLDER_EMAIL
+    return {"email": e, "name": e.split("@", 1)[0] or "Customer"}
+
+
 class DodoProvider:
     """Dodo Payments gateway adapter. Implements ``IPaymentsProvider``."""
 
@@ -213,7 +227,7 @@ class DodoProvider:
         client = self._client()
         response = await client.payments.create(
             billing={"country": _DEFAULT_BILLING_COUNTRY},
-            customer={"email": customer_email or _PLACEHOLDER_EMAIL},
+            customer=_customer_param(customer_email),
             product_cart=[
                 {
                     "product_id": self._credit_product_id,
@@ -272,7 +286,7 @@ class DodoProvider:
         client = self._client()
         response = await client.subscriptions.create(
             billing={"country": _DEFAULT_BILLING_COUNTRY},
-            customer={"email": customer_email or _PLACEHOLDER_EMAIL},
+            customer=_customer_param(customer_email),
             product_id=product_id,
             quantity=1,
             payment_link=True,

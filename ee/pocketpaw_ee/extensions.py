@@ -75,6 +75,17 @@ only MCP servers do — so without these the cloud chat agent had no path to the
 Fabric ontology or Instinct gate visibility. Both are READ-ONLY and
 workspace-scoped via the chat ContextVars. Gated proposing stays on
 ``pocketpaw_external_actions``. Ambient (not opt-in).
+
+Updated: 2026-06-26 (ISO-3 — workspace store bridge) — added ``CloudStoreProvider``
+(``pocketpaw.stores`` entry-point) so the dormant ``StoreProvider`` seam ISO-1 lit
+up is now live under EE. It returns the standard per-workspace SQLite file store
+(Fabric / Instinct at ``~/.pocketpaw/workspaces/<id>/<name>.db``) by delegating to
+the OSS helper ``pocketpaw.stores.build_workspace_store`` — so the path + the
+path-traversal allowlist stay authoritative in OSS and the provider can never drift
+from or weaken them. It returns ``None`` for the legacy (no-workspace) path, leaving
+the OSS factory's shared singleton in place. This activates the entry-point end to
+end and gives EE the single hook to later swap in a cloud-backed store without
+touching core.
 """
 
 from __future__ import annotations
@@ -1028,3 +1039,36 @@ class CloudComposioMcpProvider:
         # ``mcp__composio`` is the server-level allowlist entry — it
         # permits every tool the in-process ``composio`` server exposes.
         return ["mcp__composio"]
+
+
+class CloudStoreProvider:
+    """``pocketpaw.stores`` — the workspace-keyed store provider (ISO-3).
+
+    Activates the ``StoreProvider`` seam ISO-1 added but left dormant. The OSS
+    factory consults this provider FIRST when building a workspace-keyed store;
+    we return the standard per-workspace SQLite file store (Fabric / Instinct
+    under ``~/.pocketpaw/workspaces/<id>/<name>.db``) by delegating to the OSS
+    helper ``build_workspace_store``, so:
+
+    * the file path AND the strict path-traversal allowlist stay defined ONCE,
+      in OSS core — a provider can't drift from or weaken the guard; and
+    * delegation is recursion-safe (``build_workspace_store`` never re-enters
+      the provider seam).
+
+    We return ``None`` for the legacy / no-workspace path (``workspace_id`` is
+    ``None``) so the OSS factory keeps using its shared single-tenant singleton
+    there — the cloud always carries a workspace, so on cloud this provider only
+    ever serves the per-workspace branch. This is the one hook a future task
+    swaps to back stores with a cloud DB or a per-tenant server, without
+    touching core.
+    """
+
+    def get_store(self, name: str, *, workspace_id: str | None = None) -> Any:
+        if workspace_id is None:
+            # No workspace → let the OSS factory use its legacy shared singleton
+            # (or fail closed under POCKETPAW_REQUIRE_WORKSPACE_SCOPE, which the
+            # factory enforces before it ever consults a provider).
+            return None
+        from pocketpaw.stores import build_workspace_store
+
+        return build_workspace_store(name, workspace_id)

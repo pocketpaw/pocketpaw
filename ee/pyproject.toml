@@ -177,6 +177,11 @@ cloud = "pocketpaw_ee.extensions:CloudEmbeddingProvider"
 [project.entry-points."pocketpaw.memory_backends"]
 mongodb = "pocketpaw_ee.extensions:MongoMemoryBackendProvider"
 
+# ISO-3: the workspace-keyed store provider. Activates the StoreProvider seam
+# ISO-1 added; returns the per-workspace file store via the OSS helper.
+[project.entry-points."pocketpaw.stores"]
+cloud = "pocketpaw_ee.extensions:CloudStoreProvider"
+
 [project.entry-points."pocketpaw.capabilities"]
 cloud = "pocketpaw_ee.extensions:CloudCapabilityProvider"
 

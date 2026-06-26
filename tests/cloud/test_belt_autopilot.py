@@ -102,8 +102,8 @@ def graph(tmp_path: Path) -> DecisionGraph:
 @pytest.fixture
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     st = InstinctStore(tmp_path / "instinct_autopilot.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: st)
     return st
 
 

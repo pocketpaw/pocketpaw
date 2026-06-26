@@ -148,7 +148,7 @@ async def test_sites_pipeline_regression_gate(beanie_test_db, tmp_path, monkeypa
     from pocketpaw.instinct.store import InstinctStore
 
     store = InstinctStore(tmp_path / "gate_instinct.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
 
     from pocketpaw_ee.versions import service as versions
 

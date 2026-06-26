@@ -43,7 +43,7 @@ def store(tmp_path: Path) -> InstinctStore:
 def _patch_store(monkeypatch, store: InstinctStore):
     from unittest.mock import AsyncMock
 
-    monkeypatch.setattr(mc_service, "get_instinct_store", lambda: store)
+    monkeypatch.setattr(mc_service, "get_instinct_store", lambda *a, **k: store)
     # Façade composes Tasks alongside Nudges; stub the Tasks read so the
     # Instinct-only project-filter tests don't need a Beanie test DB.
     monkeypatch.setattr(

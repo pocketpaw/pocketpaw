@@ -243,7 +243,7 @@ async def test_propose_emits_policy_evaluated_and_persists_event_id(
     onto the parked blob's ``parked_policy_event_id`` field so the
     eventual ``human.corrected`` can chain its ``causation_id`` back."""
     corr = uuid4()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: router_store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: router_store)
 
     park_blob = {
         "action": "mark_renewed",
@@ -294,7 +294,7 @@ async def test_propose_without_correlation_id_skips_policy_emit(
     parks without minting one) skips the policy.evaluated emit — the
     Slice 4 abandon sweeper will eventually close the chain. The
     propose call still succeeds."""
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: router_store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: router_store)
 
     park_blob = {
         "action": "mark_renewed",
@@ -613,7 +613,7 @@ async def test_full_chain_causation_wires_policy_to_human(
     propose-side emits this test cares about."""
     user = _FakeUser("user-A", "ws-A")
     client = _make_client(router_store, user, monkeypatch)
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: router_store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: router_store)
 
     async def _noop_execute(_action):
         return None
@@ -803,7 +803,7 @@ async def test_full_chain_via_graph_with_real_proposed_event(
 
     user = _FakeUser("user-A", "ws-A")
     client = _make_client(router_store, user, monkeypatch)
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: router_store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: router_store)
 
     def _fake_getaddrinfo(host, *_args, **_kwargs):
         return [(2, 1, 6, "", ("8.8.8.8", 0))]

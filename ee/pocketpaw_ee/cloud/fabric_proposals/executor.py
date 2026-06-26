@@ -373,12 +373,12 @@ async def execute_approved_fabric_objects(
     """
     from pocketpaw.stores import get_fabric_store, get_instinct_store
 
-    store = get_instinct_store()
     params = getattr(action, "parameters", None) or {}
     blob = params.get(FABRIC_OBJECTS_PARAM_KEY)
     if not isinstance(blob, dict):
         # Not a fabric-objects Action at all — no chain was opened for it, so
-        # there is nothing to close. Return without a terminal emit.
+        # there is nothing to close. We can't resolve the store's workspace
+        # without the blob either, so bail before opening one.
         logger.warning("approved action %s carries no _fabric_objects blob", action.id)
         return
 
@@ -388,6 +388,10 @@ async def execute_approved_fabric_objects(
     correlation_id = _coerce_uuid(blob.get("correlation_id"))
     workspace_id = str(blob.get("workspace_id") or "")
     requested_by = str(blob.get("requested_by") or "")
+    # ISO: HTTP approve path (no ``current_workspace`` ContextVar) — scope the
+    # store to the blob's workspace BEFORE ``_fail`` (which calls mark_failed)
+    # so every terminal lands in the tenant's file, not the shared ledger.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     approver = str(getattr(action, "approved_by", "") or "") or requested_by or "system"
     causation = _coerce_uuid(human_event_id)
 
@@ -461,7 +465,9 @@ async def execute_approved_fabric_objects(
     try:
         from pocketpaw.connectors.fabric_ingest import ingest_records
 
-        fabric = get_fabric_store()
+        # ISO: scope the fabric store to the blob's workspace (guaranteed
+        # non-empty by the tenancy guard above) — no ContextVar on this path.
+        fabric = get_fabric_store(workspace_id=workspace_id or None)
         batches = _build_ingest_batches(object_types, objects)
 
         total_created = 0

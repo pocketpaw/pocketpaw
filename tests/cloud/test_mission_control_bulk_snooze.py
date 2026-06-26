@@ -42,7 +42,7 @@ def store(tmp_path: Path) -> InstinctStore:
 
 @pytest.fixture(autouse=True)
 def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
-    monkeypatch.setattr(mc_service, "get_instinct_store", lambda: store)
+    monkeypatch.setattr(mc_service, "get_instinct_store", lambda *a, **k: store)
     monkeypatch.setattr(
         mc_service.pockets_service,
         "list_pockets",

@@ -11,6 +11,12 @@
 #   stays gated on require_plan_feature("fabric"), which is now ENTERPRISE-ONLY
 #   (Sites/Leads were decoupled onto the "sites" flag). The fixture therefore
 #   patches get_workspace_plan to "enterprise" so the ontology gate passes.
+# Updated: 2026-06-26 (ISO-1 — physical per-workspace isolation) — the router
+#   dropped its module-level _DB_PATH and now routes through
+#   pocketpaw.stores.get_fabric_store(workspace_id=...). The client fixture
+#   therefore isolates by patching stores._DATA_DIR to tmp_path and resetting the
+#   factory caches (so the router's store lands in tmp_path/workspaces/ws-test/
+#   fabric.db) instead of patching the removed _DB_PATH.
 
 from __future__ import annotations
 
@@ -56,10 +62,17 @@ def client(tmp_path: Path, monkeypatch) -> TestClient:
         ENTERPRISE-only feature in PLAN_FEATURES after Sites/Leads were
         decoupled onto the 'sites' flag).
     """
-    # Point the module-level store at the tmp db. The router always calls
-    # _store() lazily so setattr is enough.
-    test_db = tmp_path / "fabric-test.db"
-    monkeypatch.setattr(fabric_router_module, "_DB_PATH", test_db)
+    # ISO-1: the router no longer holds a module-level _DB_PATH — it routes
+    # through pocketpaw.stores.get_fabric_store(workspace_id=...), which builds a
+    # per-workspace file under <_DATA_DIR>/workspaces/<id>/fabric.db. Point the
+    # factory's data dir at tmp and reset its caches so this client's store lands
+    # in tmp_path/workspaces/ws-test/fabric.db, fully isolated from ~/.pocketpaw
+    # and from any handle a prior test cached. Imported locally so the import
+    # sorter can't drop it as "unused" (it's only referenced in this fixture).
+    import pocketpaw.stores as stores
+
+    monkeypatch.setattr(stores, "_DATA_DIR", tmp_path)
+    stores.reset_store_caches()
 
     import pocketpaw_ee.cloud.workspace.service as ws_svc
 

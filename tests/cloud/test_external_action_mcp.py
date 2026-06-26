@@ -52,7 +52,7 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     """Isolated InstinctStore on a tmp file, wired in everywhere the propose
     helper reads it (``pocketpaw.stores.get_instinct_store``)."""
     st = InstinctStore(tmp_path / "instinct_ea_mcp_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 

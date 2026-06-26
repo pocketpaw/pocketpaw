@@ -122,7 +122,7 @@ def _patch_store_and_pockets(monkeypatch, store: InstinctStore):
       forcing every façade test to initialize Beanie. Tests that
       exercise the Tasks branch override this with their own patch.
     """
-    monkeypatch.setattr(mc_service, "get_instinct_store", lambda: store)
+    monkeypatch.setattr(mc_service, "get_instinct_store", lambda *a, **k: store)
     monkeypatch.setattr(
         mc_service.pockets_service,
         "list_pockets",
@@ -427,7 +427,7 @@ class TestBulkApproveExecutesWrites:
             _get_creds,
         )
         monkeypatch.setattr("pocketpaw_ee.cloud.pockets.action_executor.run_action", run_action)
-        monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+        monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
 
     @pytest.mark.asyncio
     async def test_bulk_approve_executes_each_parked_write_and_reaches_executed(

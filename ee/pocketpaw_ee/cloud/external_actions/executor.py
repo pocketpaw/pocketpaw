@@ -316,12 +316,12 @@ async def execute_approved_external_action(
     """
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
     params = getattr(action, "parameters", None) or {}
     blob = params.get(EXTERNAL_ACTION_PARAM_KEY)
     if not isinstance(blob, dict):
         # Not an external-action Action at all — no chain was opened for it, so
-        # there is nothing to close. Return without a terminal emit.
+        # there is nothing to close. We can't resolve the store's workspace
+        # either (the blob carries it), so bail before opening one.
         logger.warning("approved action %s carries no _external_action blob", action.id)
         return
 
@@ -330,6 +330,10 @@ async def execute_approved_external_action(
     # (the Slice 4 abandon-sweeper closes any chain left open).
     correlation_id = _coerce_uuid(blob.get("correlation_id"))
     workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: HTTP approve path (no ``current_workspace`` ContextVar) — scope the
+    # store to the blob's workspace so the terminal audit row + chain-close land
+    # in the tenant's file, not the shared ledger (and don't raise under the flag).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     requested_by = str(blob.get("requested_by") or "")
     approver = str(getattr(action, "approved_by", "") or "") or requested_by or "system"
     causation = _coerce_uuid(human_event_id)
