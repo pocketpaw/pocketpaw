@@ -49,6 +49,12 @@ instead of firing an HTTP write, and the new
 GET /workspaces/{ws}/jobs/{job_id} status poll. Jobs run on the shared ARQ
 worker under the synthetic `system:workspace_job` identity and merge their
 results back into the pocket's `state` over the live update bridge.
+
+Updated: 2026-06-26 (ART-1) — documented the Files — Versioned Writes
+section: POST /files/write, PUT /files/{id}, and the two version-history
+reads (GET /files/{id}/versions[/{vid}]). The write path archives each
+prior blob as a FileVersionDoc and bumps a per-file content_version counter;
+every read is workspace-scoped.
 -->
 
 # Cloud REST API Reference
@@ -938,3 +944,67 @@ Response `200`:
 conversion, a pricing-rules engine, and disputes / clawback. This endpoint
 returns a raw sum of declared values — the queryable figure those layers
 will build on later (see `outcome-spec.md`).
+
+## Files — Versioned Writes
+
+The `file_versions` entity layers a versioned write path over the uploads
+storage adapter. A file's live (current) content lives in the
+StorageAdapter; each edit archives the prior blob as a `FileVersionDoc` row
+and bumps a per-file `content_version` counter on the `FileUpload` record.
+All four routes share the `/files` prefix with the listing router (`GET
+/files`, `/files/tree`, `/files/browse`) without collision, require a valid
+license, and are workspace-scoped — every read is filtered to the caller's
+workspace.
+
+### `POST /files/write`
+
+Create a file, or overwrite an existing one in place (versioned). Used for
+first-save and programmatic writes.
+
+Request body:
+
+```json
+{ "path": "<file id or path>", "content": "<full content>", "filename": "<optional display name>" }
+```
+
+Response `201`:
+
+```json
+{ "fileId": "<id>", "version": 1, "sizeBytes": 42 }
+```
+
+When a file already exists for `path`, the content is updated through the
+PUT path instead and `version` reflects the bumped counter.
+
+### `PUT /files/{file_id}`
+
+Replace a text file's content inline with optimistic concurrency. Body:
+
+```json
+{ "content": "<new text>", "expectedVersion": 3 }
+```
+
+`expectedVersion` (or the `If-Match: <version>` header, which takes
+precedence) guards against lost updates. Response `200`:
+
+```json
+{ "fileId": "<id>", "newVersion": 4, "sizeBytes": 57, "contentHash": "<sha256>" }
+```
+
+Returns `404` if the file is missing, `409` on a version conflict, and
+`422` if the file's mime type is not editable inline.
+
+### `GET /files/{file_id}/versions`
+
+List archived versions for a file (oldest first, content omitted). Returns
+only versions in the caller's workspace:
+
+```json
+[ { "id": "<oid>", "fileId": "<id>", "versionNumber": 2, "sizeBytes": 42,
+    "editorKind": "human", "editorId": "<user id>", "createdAt": "<iso>" } ]
+```
+
+### `GET /files/{file_id}/versions/{version_id}`
+
+Fetch a single archived version with its full content (for revert preview /
+diff). Workspace-scoped — a version id from another workspace returns `404`.

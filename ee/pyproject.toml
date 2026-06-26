@@ -385,6 +385,17 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
 
 [[tool.importlinter.contracts]]
+name = "FileVersions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.file_versions.router",
+    "pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw_ee.cloud.file_versions.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
+
+[[tool.importlinter.contracts]]
 name = "FabricIngest — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
