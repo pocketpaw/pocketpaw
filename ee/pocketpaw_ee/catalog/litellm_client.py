@@ -135,7 +135,9 @@ def map_model_info_row(row: dict[str, Any]) -> ModelCatalogEntry | None:
     usable ``model_name`` (the canonical id). Pure + side-effect free so it is
     unit-testable in isolation."""
     model_name = (row.get("model_name") or "").strip()
-    if not model_name:
+    # Skip LiteLLM's "*" catch-all passthrough — a routing wildcard, not a real,
+    # selectable model.
+    if not model_name or model_name == "*":
         return None
     info: dict[str, Any] = row.get("model_info") or {}
     params: dict[str, Any] = row.get("litellm_params") or {}
@@ -248,6 +250,8 @@ class LiteLLMClient:
             logger.warning("LiteLLM /v1/models unavailable; catalog from /model/info only")
             served_ids = []
         for mid in served_ids:
+            if mid == "*":
+                continue  # routing wildcard, not a real model
             if mid not in entries:
                 # Served but undescribed — list it as a minimal available entry so
                 # the routable set is never narrower than the catalog.

@@ -11,8 +11,8 @@
 #
 # Catalog wiring on the app side (set in the enterprise env, see
 # .env.enterprise.example):
-#   LITELLM_PROXY_URL=http://<proxy-host>:4000
-#   LITELLM_PROXY_API_KEY=<the master_key below, or a virtual key>
+#   POCKETPAW_LITELLM_API_BASE=http://<proxy-host>:4000
+#   POCKETPAW_LITELLM_API_KEY=<the master_key below, or a virtual key>
 #
 # Created 2026-06-26 (feat/mcg-1-catalog-api, MCG-1): reference proxy config.
 
@@ -46,7 +46,7 @@ litellm_settings:
 
 general_settings:
   # The proxy admin key. The catalog sends this (or a virtual key minted from it)
-  # as LITELLM_PROXY_API_KEY. Reads from the proxy host's env — never inline.
+  # as POCKETPAW_LITELLM_API_KEY. Reads from the proxy host's env — never inline.
   master_key: os.environ/LITELLM_MASTER_KEY
   # Postgres backs the proxy's virtual-key / spend tables. Placeholder DSN —
   # point at the deploy's Postgres.

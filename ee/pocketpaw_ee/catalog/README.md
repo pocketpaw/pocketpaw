@@ -36,8 +36,8 @@ yet (see the MCG-1 note below).
 
 | Var | Default | Meaning |
 | --- | --- | --- |
-| `LITELLM_PROXY_URL` | `http://localhost:4000` | proxy base URL |
-| `LITELLM_PROXY_API_KEY` | _(unset)_ | proxy admin/virtual key (Bearer) |
+| `POCKETPAW_LITELLM_API_BASE` | `http://localhost:4000` | proxy base URL |
+| `POCKETPAW_LITELLM_API_KEY` | _(unset)_ | proxy admin/virtual key (Bearer) |
 | `CATALOG_CACHE_TTL_SECONDS` | `300` | assembled-catalog TTL |
 | `CATALOG_MODELS_DEV_ENABLED` | `true` | toggle models.dev enrichment |
 
@@ -61,7 +61,7 @@ yet (see the MCG-1 note below).
 This slice ships the **app-side catalog API** and a **reference proxy config**
 (`litellm.config.example.yaml`). Standing up the live LiteLLM proxy — wiring it
 into the Coolify deploy, supplying real provider keys + Postgres/Redis, and
-pointing `LITELLM_PROXY_URL` / `LITELLM_PROXY_API_KEY` at it — is a **captain
+pointing `POCKETPAW_LITELLM_API_BASE` / `POCKETPAW_LITELLM_API_KEY` at it — is a **captain
 handoff**; the controller has the box and the credentials. Until the live proxy
 is reachable, the catalog endpoints return `502` (source of truth unreachable),
 which is the intended behavior, not a bug.

@@ -4,8 +4,10 @@
 # following the same env-helper pattern as the Recall provider client
 # (ee/pocketpaw_ee/cloud/meetings/providers/recall/client.py).
 #
-#   LITELLM_PROXY_URL      — proxy base URL. Default http://localhost:4000.
-#   LITELLM_PROXY_API_KEY  — proxy admin/virtual key (optional). When set it is
+#   POCKETPAW_LITELLM_API_BASE — proxy base URL. Default http://localhost:4000.
+#                            (Same env var as the pocketpaw Settings field
+#                            litellm_api_base, so one value configures both.)
+#   POCKETPAW_LITELLM_API_KEY  — proxy admin/virtual key (optional). When set it is
 #                            sent as a Bearer token on every proxy call so a
 #                            key-protected proxy authorizes the catalog reads.
 #   CATALOG_CACHE_TTL_SECONDS  — assembled-catalog in-process TTL. Default 300.
@@ -31,7 +33,7 @@ def litellm_proxy_url() -> str:
     ``/`` without producing a double slash. Falls back to ``http://localhost:4000``
     (a local proxy) when the env var is unset or blank.
     """
-    raw = os.environ.get("LITELLM_PROXY_URL", "").strip() or DEFAULT_PROXY_URL
+    raw = os.environ.get("POCKETPAW_LITELLM_API_BASE", "").strip() or DEFAULT_PROXY_URL
     return raw.rstrip("/")
 
 
@@ -41,7 +43,7 @@ def litellm_proxy_api_key() -> str | None:
     Optional: a proxy with no key requirement (e.g. a local dev proxy) needs no
     value. When present it becomes the Bearer token on every proxy request.
     """
-    key = os.environ.get("LITELLM_PROXY_API_KEY", "").strip()
+    key = os.environ.get("POCKETPAW_LITELLM_API_KEY", "").strip()
     return key or None
 
 
