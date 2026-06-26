@@ -9,8 +9,10 @@ Changes:
     ledger, ZERO debits) that records a reconciliation row; 'live' makes LiteLLM
     the sole meter (proxy-spend sweep debits + BC-3 sweep gated off). The legacy
     bool is kept for back-compat and resolved by ``effective_spend_mode()`` — an
-    existing ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` maps to 'live' only
-    while the new mode is left at 'off'.
+    existing ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` maps to 'shadow' (NOT
+    'live') while the new mode is left at 'off', so deploying WU-F can never
+    auto-flip an old bool-setter into live billing; 'live' requires an explicit
+    POCKETPAW_LITELLM_SPEND_MODE=live.
   - 2026-06-26: Added the L2 cross-backend harness-failover settings (MCG-10) —
     ``backend_failover_enabled`` (default False; kill-switch — when False the
     new ``AgentRouter.run_with_failover`` behaves exactly like ``run`` and no
@@ -1608,13 +1610,15 @@ class Settings(BaseSettings):
         description=(
             "DEPRECATED back-compat flag for the MCG-8 spend sweep — superseded by "
             "POCKETPAW_LITELLM_SPEND_MODE (WU-F). Left in place so an existing "
-            "deployment that set POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true keeps "
-            "billing from proxy spend: when the new mode is left at its 'off' default "
-            "and this bool is True, ``effective_spend_mode()`` resolves to 'live' "
-            "(the old bool meant 'ingest + single meter'). Prefer setting "
-            "POCKETPAW_LITELLM_SPEND_MODE explicitly; this flag is ignored once the "
-            "mode is set to any non-'off' value. Set via "
-            "POCKETPAW_LITELLM_SPEND_INGEST_ENABLED."
+            "deployment that set POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true is not "
+            "silently flipped into live billing by deploying WU-F: when the new mode "
+            "is left at its 'off' default and this bool is True, "
+            "``effective_spend_mode()`` resolves to 'shadow' (read-only "
+            "reconciliation, ZERO debits) — NOT 'live'. Making LiteLLM the sole meter "
+            "requires an EXPLICIT POCKETPAW_LITELLM_SPEND_MODE=live (a money-meter "
+            "flip must be a conscious operator choice). A one-time deprecation notice "
+            "is logged when this bool is seen. The flag is ignored once the mode is "
+            "set to any non-'off' value. Set via POCKETPAW_LITELLM_SPEND_INGEST_ENABLED."
         ),
     )
     litellm_spend_mode: Literal["off", "shadow", "live"] = Field(
@@ -1954,19 +1958,30 @@ class Settings(BaseSettings):
         """Resolve the LiteLLM billing-cutover mode, honouring the legacy bool.
 
         WU-F replaced the ``litellm_spend_ingest_enabled`` bool with the
-        three-position ``litellm_spend_mode`` switch. To keep an existing
-        deployment that set ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` billing
-        from proxy spend, the bool is treated as a 'live'-intent fallback: when the
-        new mode is still at its 'off' default AND the old bool is True, the
-        effective mode is 'live' (the bool meant "ingest proxy spend as the
-        single meter"). Once the mode is set to ANY non-'off' value it wins
-        outright and the bool is ignored — so an explicit 'shadow' is never
-        silently upgraded to 'live' by a stale bool.
+        three-position ``litellm_spend_mode`` switch. Resolution, in order:
+
+          1. An EXPLICIT ``POCKETPAW_LITELLM_SPEND_MODE`` (any non-'off' value)
+             wins outright — ``shadow`` and ``live`` are taken as set.
+          2. Mode unset / 'off' + the legacy bool True → ``shadow`` (NOT ``live``).
+          3. Mode unset / 'off' + the legacy bool False/unset → ``off``.
+
+        WHY the legacy bool maps to ``shadow`` and NEVER ``live`` (money safety):
+        WU-F adds the FIRST periodic ingestion caller (the cutover sweep on the
+        heartbeat + worker boot). Under WU-C the bool toggled an ingestion path
+        that had NO periodic caller, so a deployment could carry
+        ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` harmlessly. If WU-F resolved
+        that bool to ``live``, merely DEPLOYING WU-F would start LiteLLM debiting AND
+        gate BC-3 off — a billing-meter flip with no operator decision. So ``live``
+        requires an EXPLICIT ``POCKETPAW_LITELLM_SPEND_MODE=live`` and is never
+        inferred. The legacy bool resolves to ``shadow`` — it reads + compares but
+        debits nothing — so an old deployment gets the (safe) reconciliation signal
+        and the operator must consciously set the mode to ``live`` to bill. See
+        ``warn_legacy_spend_bool_once`` for the one-time startup notice.
         """
         if self.litellm_spend_mode != "off":
             return self.litellm_spend_mode
         if self.litellm_spend_ingest_enabled:
-            return "live"
+            return "shadow"
         return "off"
 
     def save(self) -> None:

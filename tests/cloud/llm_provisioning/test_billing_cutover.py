@@ -422,20 +422,88 @@ def test_mode_default_is_off(monkeypatch):
     assert _mode_for(monkeypatch, mode_env=None, ingest_env=None) == "off"
 
 
-def test_legacy_ingest_bool_maps_to_live(monkeypatch):
-    # Old deployments set only POCKETPAW_LITELLM_SPEND_INGEST=true.
-    assert _mode_for(monkeypatch, mode_env=None, ingest_env="true") == "live"
+def test_legacy_ingest_bool_maps_to_shadow_not_live(monkeypatch):
+    # MONEY SAFETY: an old deployment that set only the legacy bool must resolve to
+    # 'shadow' (read-only compare, ZERO debits) — NEVER 'live'. Deploying WU-F (which
+    # adds the first periodic ingestion caller) must not auto-start LiteLLM billing.
+    assert _mode_for(monkeypatch, mode_env=None, ingest_env="true") == "shadow"
+
+
+def test_live_is_never_inferred_from_legacy_bool(monkeypatch):
+    # 'live' requires an EXPLICIT POCKETPAW_LITELLM_SPEND_MODE=live. The legacy bool
+    # alone can only ever reach 'shadow' — there is no value of the bool that yields
+    # 'live'. This is the core anti-silent-flip guarantee.
+    assert _mode_for(monkeypatch, mode_env=None, ingest_env="true") == "shadow"
+    assert _mode_for(monkeypatch, mode_env="off", ingest_env="true") == "shadow"
+    # The ONLY path to live is the explicit mode.
+    assert _mode_for(monkeypatch, mode_env="live", ingest_env=None) == "live"
 
 
 def test_explicit_shadow_overrides_legacy_bool(monkeypatch):
-    # A new explicit 'shadow' is NOT silently upgraded to 'live' by a stale bool.
+    # A new explicit 'shadow' is taken as-is alongside a stale bool.
     assert _mode_for(monkeypatch, mode_env="shadow", ingest_env="true") == "shadow"
+
+
+def test_explicit_live_overrides_legacy_bool(monkeypatch):
+    # An explicit 'live' wins (the operator consciously chose to bill), bool or not.
+    assert _mode_for(monkeypatch, mode_env="live", ingest_env="true") == "live"
 
 
 def test_explicit_modes_resolve(monkeypatch):
     assert _mode_for(monkeypatch, mode_env="off", ingest_env=None) == "off"
     assert _mode_for(monkeypatch, mode_env="shadow", ingest_env=None) == "shadow"
     assert _mode_for(monkeypatch, mode_env="live", ingest_env=None) == "live"
+
+
+def test_legacy_bool_emits_one_time_deprecation_warning(monkeypatch, caplog):
+    # When the legacy bool is the only signal, the first mode resolution logs a
+    # one-time deprecation notice telling the operator it now means 'shadow' and
+    # that billing needs an explicit mode. Fires at most once per process.
+    import logging
+
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    from pocketpaw.config import get_settings
+
+    monkeypatch.setattr(svc, "_legacy_bool_warned", False)  # reset the once-guard
+    monkeypatch.delenv("POCKETPAW_LITELLM_SPEND_MODE", raising=False)
+    monkeypatch.setenv("POCKETPAW_LITELLM_SPEND_INGEST_ENABLED", "true")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        with caplog.at_level(logging.WARNING, logger=svc.logger.name):
+            assert svc.spend_mode() == "shadow"
+            # Resolve again — the warning must NOT fire a second time.
+            assert svc.spend_mode() == "shadow"
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    dep = [r for r in caplog.records if "DEPRECATION (WU-F)" in r.getMessage()]
+    assert len(dep) == 1, "the deprecation notice must fire exactly once"
+    msg = dep[0].getMessage()
+    assert "'shadow'" in msg
+    assert "POCKETPAW_LITELLM_SPEND_MODE=live" in msg
+
+
+def test_no_warning_when_mode_explicit(monkeypatch, caplog):
+    # With an explicit mode set, the legacy-bool notice never fires (the operator
+    # already made a conscious choice).
+    import logging
+
+    import pocketpaw_ee.cloud.llm_provisioning.service as svc
+
+    from pocketpaw.config import get_settings
+
+    monkeypatch.setattr(svc, "_legacy_bool_warned", False)
+    monkeypatch.setenv("POCKETPAW_LITELLM_SPEND_MODE", "live")
+    monkeypatch.setenv("POCKETPAW_LITELLM_SPEND_INGEST_ENABLED", "true")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        with caplog.at_level(logging.WARNING, logger=svc.logger.name):
+            assert svc.spend_mode() == "live"
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    assert not [r for r in caplog.records if "DEPRECATION (WU-F)" in r.getMessage()]
 
 
 def test_spend_ingest_enabled_shim_true_only_in_live(monkeypatch):

@@ -52,8 +52,11 @@
 # billing cutover from per-run metering (BC-3) to LiteLLM as the single meter,
 # done through a safe shadow-compare phase.
 #   1. ``spend_mode`` / ``reconcile_gap_threshold`` — read the 3-position cutover
-#      switch (POCKETPAW_LITELLM_SPEND_MODE off|shadow|live, honouring the legacy
-#      INGEST bool). ``spend_ingest_enabled`` is now a back-compat shim over it.
+#      switch (POCKETPAW_LITELLM_SPEND_MODE off|shadow|live). The legacy INGEST bool
+#      is honoured ONLY as far as ``shadow`` — ``live`` requires an EXPLICIT mode, so
+#      deploying WU-F never auto-flips an old bool-setter into live billing (a
+#      one-time deprecation notice fires when the legacy bool is seen).
+#      ``spend_ingest_enabled`` is now a back-compat shim over it.
 #   2. ``reconcile_tenant_spend`` — the SHADOW compare. Reads proxy spend + the
 #      BC-3 ``compute_spend`` ledger debits over the same window and records a
 #      reconciliation row (litellm vs bc3 + delta + coverage_gap). It DEBITS
@@ -87,6 +90,12 @@ from pocketpaw_ee.cloud.models.spend_reconciliation import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Once-per-process guard for the legacy-spend-bool deprecation notice (WU-F). The
+# warning is emitted the first time the mode is resolved while the deprecated bool
+# is the only thing set, so an operator is told their old flag now means ``shadow``
+# (NOT ``live``) and that billing requires an explicit POCKETPAW_LITELLM_SPEND_MODE.
+_legacy_bool_warned = False
 
 # Business cause stamped on the ledger movement for proxy-attributed spend. KEPT
 # DISTINCT from BC-3 metering's ``compute_spend`` so a dashboard / audit can tell
@@ -157,15 +166,50 @@ def load_spend_credits() -> SpendCredits:
     )
 
 
+def warn_legacy_spend_bool_once() -> None:
+    """Emit a ONE-TIME deprecation notice when the legacy spend bool is the only
+    cutover signal set (WU-F money-safety guard).
+
+    Fires at most once per process, the first time the mode is resolved while
+    ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` AND the new
+    ``POCKETPAW_LITELLM_SPEND_MODE`` is left at its ``off`` default. Tells the
+    operator the legacy bool now resolves to ``shadow`` (reads + compares, debits
+    NOTHING) and that to actually bill from proxy spend they must EXPLICITLY set
+    ``POCKETPAW_LITELLM_SPEND_MODE=live``. This is why deploying WU-F can never
+    auto-flip an old bool-setter into live billing — the bool can only ever reach
+    the safe shadow mode, loudly, with this notice.
+    """
+    global _legacy_bool_warned
+    if _legacy_bool_warned:
+        return
+    from pocketpaw.config import get_settings
+
+    settings = get_settings()
+    if settings.litellm_spend_mode == "off" and settings.litellm_spend_ingest_enabled:
+        _legacy_bool_warned = True
+        logger.warning(
+            "DEPRECATION (WU-F): POCKETPAW_LITELLM_SPEND_INGEST_ENABLED is set but "
+            "POCKETPAW_LITELLM_SPEND_MODE is unset — the legacy bool now resolves to "
+            "'shadow' (read-only reconciliation, NO debits), NOT live billing. "
+            "LiteLLM will NOT charge and BC-3 per-run metering keeps billing. To make "
+            "LiteLLM the sole meter you must EXPLICITLY set "
+            "POCKETPAW_LITELLM_SPEND_MODE=live."
+        )
+
+
 def spend_mode() -> str:
     """The LiteLLM billing-cutover mode for this deployment: ``off`` | ``shadow`` |
     ``live`` (WU-F).
 
-    Delegates to ``Settings.effective_spend_mode()`` so the legacy
-    ``POCKETPAW_LITELLM_SPEND_INGEST`` bool is honoured (an existing True maps to
-    ``live`` while the new mode is left at its ``off`` default). Provisioning is
-    unaffected by the mode (always on); only the spend SWEEP behaviour changes.
+    Delegates to ``Settings.effective_spend_mode()``. The legacy
+    ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED`` bool is honoured ONLY as far as
+    ``shadow`` — it never resolves to ``live`` (that requires an explicit
+    ``POCKETPAW_LITELLM_SPEND_MODE=live``), so merely deploying WU-F can never flip
+    an old bool-setter into live billing. The first resolution that sees the legacy
+    bool emits a one-time deprecation notice. Provisioning is unaffected by the mode
+    (always on); only the spend SWEEP behaviour changes.
     """
+    warn_legacy_spend_bool_once()
     from pocketpaw.config import get_settings
 
     return get_settings().effective_spend_mode()
@@ -716,4 +760,5 @@ __all__ = [
     "reconcile_tenant_spend",
     "spend_ingest_enabled",
     "spend_mode",
+    "warn_legacy_spend_bool_once",
 ]
