@@ -754,9 +754,7 @@ async def _audio_transcribe_handler(args: dict) -> dict:
     if err is not None or text is None:
         return _error_response(err or "transcription returned no text")
 
-    return _success_response(
-        {"ok": True, "kind": "transcription", "model": model, "text": text}
-    )
+    return _success_response({"ok": True, "kind": "transcription", "model": model, "text": text})
 
 
 # ── Video (POST {proxy}/videos) ──────────────────────────────────────────────

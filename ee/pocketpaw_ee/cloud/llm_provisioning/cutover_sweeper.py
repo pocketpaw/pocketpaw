@@ -131,9 +131,7 @@ async def run_cutover_sweep(*, mode: str | None = None) -> dict[str, int]:
     # An unrecognised mode (mis-set env) — log loud and do nothing rather than
     # guess. ``effective_spend_mode`` only ever returns off|shadow|live, so this is
     # defensive against a hand-rolled caller passing a bad value.
-    logger.warning(
-        "run_cutover_sweep: unrecognised billing mode %r — sweeping nothing", resolved
-    )
+    logger.warning("run_cutover_sweep: unrecognised billing mode %r — sweeping nothing", resolved)
     return summary
 
 
