@@ -1,6 +1,19 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-26: Added the L2 cross-backend harness-failover settings (MCG-10) —
+    ``backend_failover_enabled`` (default False; kill-switch — when False the
+    new ``AgentRouter.run_with_failover`` behaves exactly like ``run`` and no
+    harness switch ever happens) and ``backend_failover_chain`` (default
+    ["claude_agent_sdk", "codex_cli", "opencode"]; the ordered list of agent
+    HARNESSES to try when the whole primary lane is down — distinct from L1's
+    LiteLLM model/account failover, which cannot escape a provider-wide
+    outage). Only a lane-level failure (overload/unavailable/auth that
+    persists after the backend's own retries) before any token is streamed
+    triggers a switch; each harness is tried at most once. Env:
+    POCKETPAW_BACKEND_FAILOVER_ENABLED / POCKETPAW_BACKEND_FAILOVER_CHAIN
+    (JSON list). The EE cloud run path wiring is a follow-up — this ships the
+    mechanism + the OSS hook only.
   - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
     POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
     tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
@@ -247,6 +260,33 @@ class Settings(BaseSettings):
     fallback_backends: list[str] = Field(
         default_factory=list,
         description=("Ordered list of fallback backends to try if the primary backend fails"),
+    )
+
+    # L2 cross-backend harness failover (MCG-10) — distinct from the generic
+    # ``fallback_backends`` above. This is the harness-level escape hatch for a
+    # provider-wide outage: when the whole Claude Code lane is down (an
+    # Anthropic-wide overload that Claude Code's own ``--fallback-model`` cannot
+    # escape, because that stays in Anthropic's capacity pool), switch to a
+    # DIFFERENT backend harness. Only fires on a lane-level failure (overload /
+    # unavailable / auth that survives the backend's own retries) AND only if
+    # nothing was streamed to the user yet (a half-streamed turn can't be
+    # replayed). Off by default so behavior is unchanged unless opted in.
+    backend_failover_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable L2 cross-backend (harness) failover. When True, "
+            "AgentRouter.run_with_failover switches to the next harness in "
+            "backend_failover_chain if the primary lane is down before any "
+            "token is streamed. Off by default."
+        ),
+    )
+    backend_failover_chain: list[str] = Field(
+        default_factory=lambda: ["claude_agent_sdk", "codex_cli", "opencode"],
+        description=(
+            "Ordered list of agent HARNESSES to try on a lane-level failure "
+            "(Claude Code -> Codex -> opencode). Each harness is tried at most "
+            "once; the chain is consulted only when backend_failover_enabled."
+        ),
     )
 
     # Claude Agent SDK Settings
