@@ -607,7 +607,16 @@ def _assert_belt_plan_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — an absent/empty workspace claim is a HARD 403, never a
+    # pass-through (matches _assert_artifact_change_workspace). Now that the
+    # executors resolve the store from the blob's workspace_id, an empty claim
+    # would otherwise approve-then-misfile onto the shared ledger / raise.
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This shift plan has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This shift plan belongs to a different workspace",
@@ -673,7 +682,14 @@ def _assert_code_change_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This code change has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This code change belongs to a different workspace",
@@ -695,7 +711,14 @@ def _assert_external_action_workspace(action: Any, current_workspace: str) -> No
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This external action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This external action belongs to a different workspace",
@@ -737,7 +760,14 @@ def _assert_fabric_objects_workspace(action: Any, current_workspace: str) -> Non
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This fabric-objects write has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This fabric-objects write belongs to a different workspace",
@@ -780,7 +810,14 @@ def _assert_pocket_create_workspace(action: Any, current_workspace: str) -> None
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This pocket create has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This pocket create belongs to a different workspace",
@@ -810,7 +847,14 @@ def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This action's pocket write has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This action's pocket write belongs to a different workspace",

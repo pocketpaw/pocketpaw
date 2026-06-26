@@ -2833,7 +2833,10 @@ async def request_publish_pocket(
         "proposed_event_id": None,
     }
 
-    store = get_instinct_store()
+    # ISO: scope the store to the caller's workspace (this can run on an HTTP
+    # path with no ``current_workspace`` ContextVar) so the publish proposal
+    # lands in the tenant's file.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
         title="Publish site changes",

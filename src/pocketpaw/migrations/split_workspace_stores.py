@@ -455,8 +455,6 @@ async def _migrate_instinct(
             ws = _effective_ws(row, system_workspace)
             by_ws_audit.setdefault(ws, []).append(row)
 
-        import json as _json
-
         for ws_id, ws_audit_rows in by_ws_audit.items():
             store = build_workspace_store("instinct", ws_id)
             await store._ensure_schema()
@@ -487,8 +485,6 @@ async def _migrate_instinct(
 
                 count = 0
                 for row in new_rows:
-                    import json
-
                     context_raw = row["context"]
                     try:
                         context_obj = json.loads(context_raw) if context_raw else {}
@@ -522,7 +518,7 @@ async def _migrate_instinct(
                         new_prev_hash = None
                         new_entry_hash = None
 
-                    context_json = _json.dumps(context_obj) if not context_raw else context_raw
+                    context_json = json.dumps(context_obj) if not context_raw else context_raw
 
                     await dest.execute(
                         "INSERT OR IGNORE INTO instinct_audit"

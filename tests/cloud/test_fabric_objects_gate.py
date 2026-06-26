@@ -70,18 +70,38 @@ from pocketpaw.instinct.store import InstinctStore  # noqa: E402
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     """Isolated InstinctStore on a tmp file, wired everywhere the gate reads it
     (the propose helper + the executor both lazy-import
-    ``pocketpaw.stores.get_instinct_store``)."""
+    ``pocketpaw.stores.get_instinct_store``).
+
+    SINGLE-store, accept-and-ignore ``workspace_id`` (fix/cloud-iso-executor-scope):
+    these gate tests — especially the cross-workspace 403 cases — drive ONE
+    physical store and rely on the IN-ROW ``workspace_id`` filter for tenancy
+    (a "w1" propose and a "w-OTHER" propose must coexist in the same file so the
+    router's cross-workspace assertion is what forbids the approve). The factory
+    therefore returns the one store regardless of workspace; it only has to
+    TOLERATE the explicit ``workspace_id`` the propose/executor now thread
+    through. The executor's per-file isolation is proven separately in
+    tests/cloud/test_executor_workspace_iso.py and test_belt_gate.py."""
     st = InstinctStore(tmp_path / "instinct_fabric_objects_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
+    monkeypatch.setattr(
+        "pocketpaw.stores.get_instinct_store",
+        lambda *a, workspace_id=None, **k: st,
+    )
     return st
 
 
 @pytest.fixture
 def fabric(tmp_path: Path, monkeypatch) -> FabricStore:
     """Isolated FabricStore on a tmp file, wired into ``get_fabric_store`` so the
-    executor writes real (but isolated) typed objects + links."""
+    executor writes real (but isolated) typed objects + links.
+
+    Single-store, accept-and-ignore ``workspace_id`` — the old ``lambda: fs``
+    TypeError'd once the executor threaded the blob's workspace into the fabric
+    factory (fix/cloud-iso-executor-scope); the in-row filter handles tenancy."""
     fs = FabricStore(tmp_path / "fabric_objects_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_fabric_store", lambda: fs)
+    monkeypatch.setattr(
+        "pocketpaw.stores.get_fabric_store",
+        lambda *a, workspace_id=None, **k: fs,
+    )
     return fs
 
 

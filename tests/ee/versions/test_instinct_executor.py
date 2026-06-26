@@ -2,6 +2,13 @@
 # Created: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — behaviour
 # coverage for the artifact-change merge/discard EXECUTOR against real
 # ArtifactVersion rows (beanie), with the Instinct store + site deploy mocked.
+# Updated: 2026-06-26 (fix/cloud-iso-executor-scope) — the store factory mock
+# is now WORKSPACE-KEYED. The old `lambda *a, **k: store` swallowed
+# ``workspace_id`` so the executor's BARE (pre-fix, unscoped) call and the
+# router's scoped call both returned the SAME store — hiding the per-workspace
+# isolation bug (C1). `_install_workspace_store` returns the seeded store ONLY
+# when asked for WS, and a DISTINCT empty store otherwise, so an unscoped
+# executor call lands on the wrong store and the terminal assertions fail.
 #
 # What this pins (the BP-3 done-when behaviour):
 #   * execute_approved_change MERGES: the candidate draft (to_version_id) is
@@ -42,6 +49,25 @@ class _FakeStore:
         self.failed[action_id] = error
 
 
+def _install_workspace_store(monkeypatch, store: _FakeStore, ws: str = WS) -> dict[str, _FakeStore]:
+    """Patch ``get_instinct_store`` with a WORKSPACE-KEYED factory.
+
+    The factory returns ``store`` ONLY when called with ``workspace_id == ws``;
+    any other (or missing) workspace gets a fresh, empty ``_FakeStore``. This is
+    the anti-over-mock: a BARE ``get_instinct_store()`` (no workspace) can no
+    longer reach the seeded store, so the executor MUST resolve the blob's
+    workspace and pass it — proving the isolation fix rather than masking it.
+    Returns the registry so a test can assert which workspaces were opened."""
+    registry: dict[str, _FakeStore] = {ws: store}
+
+    def _factory(*_a: Any, workspace_id: str | None = None, **_k: Any) -> _FakeStore:
+        key = str(workspace_id or "")
+        return registry.setdefault(key, store if key == ws else _FakeStore())
+
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", _factory)
+    return registry
+
+
 def _action(to_version_id: str) -> SimpleNamespace:
     """A minimal Action stand-in carrying an ``_artifact_change`` blob.
 
@@ -73,7 +99,7 @@ async def test_approve_merges_publishes_and_deploys(
     """APPROVE = MERGE: the candidate is promoted to published, the site deploy
     fires, and the Action is marked executed."""
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    _install_workspace_store(monkeypatch, store)
 
     deploys: list[dict] = []
 
@@ -117,7 +143,7 @@ async def test_approve_merge_marks_failed_when_deploy_raises(
     """If the deploy raises, the Action is marked FAILED — the version is still
     published (published != live, the BP-2 invariant)."""
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    _install_workspace_store(monkeypatch, store)
 
     async def _boom_deploy(**kwargs):
         raise RuntimeError("workerd smoke gate failed")
@@ -147,7 +173,7 @@ async def test_reject_discards_candidate_and_leaves_published(
     """REJECT = DISCARD: the candidate is reverted, the published pointer is
     untouched."""
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    _install_workspace_store(monkeypatch, store)
 
     # A live published version, plus a candidate draft.
     live = await versions.write_draft(
@@ -190,7 +216,7 @@ async def test_reject_clears_all_accumulated_drafts(
     so the other accumulated drafts remain → get_draft is non-None → fails.
     """
     store = _FakeStore()
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
+    _install_workspace_store(monkeypatch, store)
 
     # A live published version.
     live = await versions.write_draft(

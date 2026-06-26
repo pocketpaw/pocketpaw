@@ -169,6 +169,15 @@ async def test_subscribe_creates_dodo_subscription_with_product_and_metadata(
     assert kwargs["payment_link"] is True
     assert kwargs["metadata"]["workspace_id"] == ws
     assert kwargs["metadata"]["plan_key"] == "pro"
+    # H1 — the new-customer object MUST carry a non-empty ``name`` alongside
+    # ``email``. Dodo's CustomerRequest rejects ``{email}`` alone (NewCustomer
+    # requires a name); reverting _customer_param to ``{email}`` must fail here.
+    customer = kwargs["customer"]
+    assert customer.get("email"), customer
+    assert customer.get("name"), (
+        "Dodo new-customer object is missing a non-empty 'name' — "
+        f"{customer!r} would be rejected server-side"
+    )
 
 
 async def test_subscribe_rejects_unknown_plan(mongo_db, patch_plan_products):

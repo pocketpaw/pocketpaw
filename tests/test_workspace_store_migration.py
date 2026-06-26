@@ -205,7 +205,7 @@ async def test_migration_preserves_shared_files_as_migrated(tmp_path: Path) -> N
 
 @pytest.mark.asyncio
 async def test_fabric_null_rows_land_in_system_workspace(tmp_path: Path) -> None:
-    """NULL-workspace fabric objects must end up in the __system__ workspace."""
+    """NULL-workspace fabric objects must end up in the system0 workspace."""
     await _seed_shared_fabric(tmp_path)
     await migrate_shared_stores_to_workspaces(data_dir=tmp_path, system_workspace=WS_SYS)
 
@@ -213,10 +213,10 @@ async def test_fabric_null_rows_land_in_system_workspace(tmp_path: Path) -> None
 
     from pocketpaw.fabric.models import FabricQuery
 
-    # Unscoped query in the __system__ file — should contain the null-workspace object
+    # Unscoped query in the system0 file — should contain the null-workspace object
     result = await sys_store.query(FabricQuery(type_name="TestWidget"))
     names = {obj.properties.get("name") for obj in result.objects}
-    assert "null1" in names, f"null-workspace object 'null1' not found in __system__; got {names}"
+    assert "null1" in names, f"null-workspace object 'null1' not found in system0; got {names}"
 
 
 @pytest.mark.asyncio
@@ -322,7 +322,7 @@ async def test_instinct_actions_isolated_per_workspace_after_migration(
 
 @pytest.mark.asyncio
 async def test_instinct_null_actions_land_in_system_workspace(tmp_path: Path) -> None:
-    """NULL-workspace instinct actions must end up in __system__."""
+    """NULL-workspace instinct actions must end up in system0."""
     await _seed_shared_instinct(tmp_path)
     await migrate_shared_stores_to_workspaces(data_dir=tmp_path)
 
@@ -330,9 +330,7 @@ async def test_instinct_null_actions_land_in_system_workspace(tmp_path: Path) ->
     actions = await sys_store.list_actions()
     titles = {a.title for a in actions}
 
-    assert "Sys-action" in titles, (
-        f"null-ws action 'Sys-action' not found in __system__; got {titles}"
-    )
+    assert "Sys-action" in titles, f"null-ws action 'Sys-action' not found in system0; got {titles}"
 
 
 # ---------------------------------------------------------------------------
