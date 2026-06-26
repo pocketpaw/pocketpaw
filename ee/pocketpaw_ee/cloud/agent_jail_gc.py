@@ -16,13 +16,15 @@ in order:
      least-recently-used IDLE jails first until back under the mark.
 
 The one invariant that makes this safe: a jail backing a still-active run is
-NEVER evicted. "Active" = a non-terminal (``queued`` / ``running`` / resumable)
-``ChatRunDoc`` whose scope names that jail dir — resolved once per pass via
-``run_service.find_active_run_scopes`` and matched against each dir's
-``(workspace, session_segment)``. Idleness is read from the jail's newest mtime
-(``agent_jail.scan_jail_dir``), which the DB active-set check backstops: even a
-freshly-created queued run whose dir hasn't been written yet (old mtime, empty
-dir) is protected, because its scope is in the active set.
+NEVER evicted. "Active" = a non-terminal ``ChatRunDoc`` (status ``queued`` or
+``running`` — the only non-terminal states) whose scope names that jail dir —
+resolved once per pass via ``run_service.find_active_run_scopes`` and matched
+against each dir's ``(workspace, session_segment)``. An ``interrupted`` run that
+the user retries re-protects its jail by spawning a fresh ``queued`` run, so
+evicting an idle jail between runs never races a resume. Idleness is read from
+the jail's newest mtime (``agent_jail.scan_jail_dir``), which the DB active-set
+check backstops: even a freshly-created queued run whose dir hasn't been written
+yet (old mtime, empty dir) is protected, because its scope is in the active set.
 
 Registered on cloud startup and the 5-minute heartbeat in
 ``extensions._sweeper_loop`` / ``start_run_sweeper``, in its own try, exactly
@@ -85,7 +87,7 @@ async def sweep_agent_jails() -> int:
     for row in rows:
         workspace_id, segment, path, _size, last_activity = row
         if _is_active(workspace_id, segment):
-            continue  # never evict a jail with a queued/running/resumable run
+            continue  # never evict a jail whose run is still queued or running
         idle_for = now - last_activity
         if idle_for > grace:
             if agent_jail.evict_jail_dir(path):

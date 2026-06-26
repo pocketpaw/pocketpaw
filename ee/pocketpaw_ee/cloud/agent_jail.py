@@ -45,7 +45,8 @@ all cloud-only:
     startup and the 5-minute heartbeat exactly like the stale-run sweeper. This
     module owns the filesystem primitives the sweep composes (scan, enumerate,
     evict, disk probe); the sweep owns the run-state coordination (it never
-    evicts a jail whose run is still queued/running/resumable).
+    evicts a jail while its run is still queued or running — and a retried
+    interrupted run re-protects the jail by spawning a fresh queued run).
 """
 
 from __future__ import annotations
@@ -280,18 +281,40 @@ def scan_jail_dir(path: Path) -> tuple[int, float]:
     return (size, latest)
 
 
-def workspace_jail_used_bytes(workspace_id: str) -> int:
-    """Total bytes used across every session jail of one workspace."""
-    agent_root = workspace_jail_root() / workspace_id / "agent"
-    try:
-        entries = list(os.scandir(agent_root))
-    except OSError:
-        return 0
+def workspace_jail_over_quota(workspace_id: str, limit_bytes: int) -> bool:
+    """``True`` as soon as a workspace's total jail size crosses ``limit_bytes``.
+
+    Short-circuits the moment the running sum passes the limit — it does NOT
+    finish the walk or compute the exact total. The run-start quota gate only
+    needs the boolean, and it runs on EVERY run's critical path: a workspace
+    whose jail holds a ``node_modules`` (tens of thousands of files) would
+    otherwise pay a full ``O(files)`` stat-walk before every run — exactly our
+    file-creating use case. With the early-exit the walk is bounded by roughly
+    ``limit_bytes`` worth of file entries even when a runaway jail is many times
+    over quota. (The off-critical-path GC sweep keeps the full ``scan_jail_dir``
+    walk; it needs the exact size + last-activity and runs on a 5-minute cadence.)
+    """
+    # Iterative DFS over the whole ``<root>/<ws>/agent`` subtree (all session
+    # dirs at once), summing file sizes and bailing the instant we cross.
     total = 0
-    for entry in entries:
-        if entry.is_dir(follow_symlinks=False):
-            total += scan_jail_dir(Path(entry.path))[0]
-    return total
+    stack = [workspace_jail_root() / workspace_id / "agent"]
+    while stack:
+        try:
+            entries = list(os.scandir(stack.pop()))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(Path(entry.path))
+            else:
+                total += st.st_size
+                if total > limit_bytes:
+                    return True
+    return False
 
 
 def check_workspace_jail_quota(workspace_id: str | None) -> str | None:
@@ -299,7 +322,8 @@ def check_workspace_jail_quota(workspace_id: str | None) -> str | None:
     quota, else ``None``.
 
     Called at RUN-START by ``run_core`` to reject a run before it spins up the
-    agent. A ``None`` / empty workspace (no jail) and a disabled quota
+    agent, so it leans on ``workspace_jail_over_quota``'s early-exit rather than
+    a full size walk. A ``None`` / empty workspace (no jail) and a disabled quota
     (``<= 0``) are always allowed.
     """
     if not workspace_id:
@@ -307,13 +331,12 @@ def check_workspace_jail_quota(workspace_id: str | None) -> str | None:
     quota = jail_quota_bytes()
     if quota <= 0:
         return None
-    used = workspace_jail_used_bytes(workspace_id)
-    if used <= quota:
+    if not workspace_jail_over_quota(workspace_id, quota):
         return None
     return (
-        f"agent workspace storage is full: {used / 1024 / 1024:.0f} MB used "
-        f"exceeds the {quota / 1024 / 1024:.0f} MB per-workspace limit. Deliver "
-        f"or remove build artifacts to free space, then retry."
+        f"agent workspace storage is full: the jail exceeds its "
+        f"{quota / 1024 / 1024:.0f} MB per-workspace limit. Deliver or remove "
+        f"build artifacts to free space, then retry."
     )
 
 
