@@ -9,8 +9,12 @@ Updated: 2026-06-26 (ART-2) — the agent's working directory is now resolved
   shared home dir. A provider that RAISES (a cloud run with no resolvable
   workspace) propagates — fail-closed, never a silent fallback to ``~``.
   ``_build_options`` carries the resolved cwd, so ``run`` and ``prewarm`` warm
-  the same per-session jail (the warm-client cache key already keys on
-  ``session_key``, so a session change rebuilds the subprocess with its own cwd).
+  the same per-session jail. ART-2 hardening: the resolved cwd is folded into
+  ``_client_cache_key`` so warm-client tenant isolation is STRUCTURAL (a changed
+  cwd forces a fresh subprocess), not merely an implicit session_key<->cwd
+  coupling; the now-inert ``set_working_directory`` setter was removed
+  (``_build_options`` no longer reads ``self._cwd``); and ``get_status`` reports
+  ``base_cwd`` (the OSS/default base) instead of a misleading ``cwd``.
 Updated: 2026-06-26 (integration/model-catalog-v2, MCG-11) — the ResultMessage
   token-usage path now runs ``pocketpaw.llm.caching.report_savings`` over the SDK
   usage to surface STRUCTURED prompt-cache telemetry (cache_read_tokens,
@@ -489,13 +493,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
             logger.error(f"❌ Failed to initialize Claude Agent SDK: {e}")
             self._sdk_available = False
 
-    def set_working_directory(self, path: Path) -> None:
-        """Set the working directory for file operations."""
-        self._cwd = path
-        logger.info(f"📂 Working directory set to: {path}")
-
     def _resolve_cwd(self) -> Path:
         """Resolve the agent's working directory for THIS run.
+
+        NOTE: the per-tenant cwd jail + fail-closed live ONLY in this backend.
+        Other backends (codex_cli, deep_agents, …) receive workspace tenancy via
+        ``subprocess_env`` but NOT the cwd jail — a non-``claude_agent_sdk`` cloud
+        agent would run in ``file_jail_path``. Cloud chat defaults to this
+        backend; see ART-2's report for the residual non-claude gap.
 
         Defaults to ``settings.file_jail_path`` (the OSS / dedicated behavior,
         unchanged). When an EE ``pocketpaw.agent_extensions`` provider supplies
@@ -508,8 +513,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         point — we must never silently fall back to ``~`` and let one tenant's
         files land on another's. Resolved per-run (not cached on the instance)
         so a single warm backend serving multiple sessions reads each session's
-        own jail; the warm-client cache key already folds in ``session_key``, so
-        a session change rebuilds the subprocess with its correct cwd.
+        own jail; the warm-client cache key folds in the resolved cwd (ART-2), so
+        a changed cwd rebuilds the subprocess with its correct working directory.
         """
         from pocketpaw._registry import providers as _ext_providers
 
@@ -1022,8 +1027,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
     def _client_cache_key(
         cls, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
     ) -> str:
-        """Persistent-client cache key: session + model + tools + a digest of
-        the system prompt's stable behavioral prefix + the plugin-identity
+        """Persistent-client cache key: session + cwd + model + tools + a digest
+        of the system prompt's stable behavioral prefix + the plugin-identity
         digest.
 
         The prefix digest is what makes a mid-session backend config change
@@ -1036,11 +1041,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
         re-spawning every turn. Empty ``plugin_digest`` (the default) leaves the
         key byte-for-byte identical to the pre-fix behavior for non-skill
         callers. Hashing keeps the key bounded regardless of prompt length.
+
+        ``cwd`` (ART-2) is folded in so warm-client tenant isolation is
+        STRUCTURAL, not an implicit consequence of the session_key<->cwd
+        coupling: if cwd derivation ever changes to depend on something not in
+        session_key, a stale warm subprocess can never be reused across two
+        different working directories (i.e. two tenants). The SDK fixes cwd at
+        connect() time, so a changed cwd MUST force a fresh subprocess.
         """
         prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
         prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
         return (
             f"{session_key or ''}:"
+            f"{getattr(options, 'cwd', '')}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
             f"{prefix_digest}:"
@@ -2355,7 +2368,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "sdk_installed": self._sdk_available,
             "cli_installed": self._cli_available,
             "running": not self._stop_flag,
-            "cwd": str(self._cwd),
+            # Base (OSS/default) working dir only. The ACTUAL per-run cwd is
+            # resolved each turn by ``_resolve_cwd`` — in cloud it's a per-tenant
+            # jail, not this base — so labelling it ``base_cwd`` keeps status
+            # honest (and avoids resolving here, which would fail closed off-run).
+            "base_cwd": str(self._cwd),
             "features": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
             if ready
             else [],

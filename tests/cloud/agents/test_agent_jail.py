@@ -7,11 +7,14 @@
 #   * cloud active + no workspace -> RAISES (fail-closed)
 #   * cloud NOT active + no workspace -> None (OSS / dedicated unchanged)
 #   * hostile / traversal ids are rejected before they touch the filesystem
+#   * a trailing-newline id is rejected (the \Z-vs-$ anchor hardening)
+#   * the fail-closed emits a high-severity cloud AuditEvent before it raises
 #   * CloudAgentExtension.agent_cwd delegates to the resolver
 """Per-tenant agent working-directory jail (ART-2)."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -156,6 +159,17 @@ def test_hostile_session_id_rejected(_jail_root):
         detach_agent_identity(tok)
 
 
+def test_trailing_newline_id_rejected(_jail_root):
+    # ``$`` matches just before a trailing newline; the ``\Z`` anchor must
+    # reject ``"ws1\n"`` so a newline can't slip past the traversal guard.
+    tok = _bind("ws1\n", session_mongo_id="sess1")
+    try:
+        with pytest.raises(ValueError, match="unsafe workspace_id"):
+            agent_jail.resolve_agent_cwd()
+    finally:
+        detach_agent_identity(tok)
+
+
 def test_extension_delegates(_jail_root):
     from pocketpaw_ee.extensions import CloudAgentExtension
 
@@ -165,3 +179,40 @@ def test_extension_delegates(_jail_root):
     finally:
         detach_agent_identity(tok)
     assert Path(cwd) == _jail_root / "ws1" / "agent" / "sessX"
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_emits_high_severity_audit(cloud_active, monkeypatch):
+    """The fail-closed (a cloud run that lost its workspace) emits a
+    high-severity cloud AuditEvent before it raises — best-effort, fire-and-
+    forget on the running loop."""
+    import pocketpaw_ee.cloud.audit.service as audit_service
+
+    calls: list[tuple] = []
+
+    async def fake_record(workspace_id, actor_id, action, **kwargs):
+        calls.append((workspace_id, actor_id, action, kwargs))
+
+    monkeypatch.setattr(audit_service, "record", fake_record)
+
+    from pocketpaw_ee.cloud.chat import agent_service as svc
+
+    # Bind a user + session but NO workspace (the mis-tenanting condition).
+    utok = svc._active_user_id.set("user-1")
+    stok = svc._active_session_mongo_id.set("sess-9")
+    try:
+        with pytest.raises(RuntimeError, match="no resolvable workspace"):
+            agent_jail.resolve_agent_cwd()
+        # The emit is scheduled on the loop; give it turns to run.
+        for _ in range(3):
+            await asyncio.sleep(0)
+    finally:
+        svc._active_user_id.reset(utok)
+        svc._active_session_mongo_id.reset(stok)
+
+    assert calls, "expected a fail-closed audit alert to be recorded"
+    workspace_id, actor_id, action, kwargs = calls[0]
+    assert action == "agent.cwd_jail.fail_closed"
+    assert actor_id == "user-1"
+    assert kwargs["target_id"] == "sess-9"
+    assert kwargs["metadata"]["severity"] == "high"
