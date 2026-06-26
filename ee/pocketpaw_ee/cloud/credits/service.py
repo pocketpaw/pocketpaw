@@ -105,6 +105,13 @@
 # report an accurate newly-billed count and skip a redundant insert-then-rollback
 # on the duplicate path. It does NOT weaken the exactly-once guard (grant/debit
 # stay idempotent via the unique index); it only saves the wasted round-trip.
+# Changed 2026-06-26 (WU-F billing cutover): added ``sum_debits_by_cause`` — a
+# read-only, tenant-filtered sum of credits debited under one ``cause`` over a
+# ``createdAt`` window (only ``applied`` entries counted). The shadow-compare phase
+# of the LiteLLM cutover uses it to total the BC-3 ``compute_spend`` debits for a
+# tenant's window so the llm_provisioning entity never reads the credit ledger doc
+# directly (the credits service owns reads of its own ``CreditLedgerEntry``). It
+# performs NO writes — shadow mode debits nothing.
 
 from __future__ import annotations
 
@@ -414,6 +421,56 @@ async def is_recorded(workspace: str, idempotency_key: str) -> bool:
     return existing is not None
 
 
+async def sum_debits_by_cause(
+    workspace: str,
+    cause: str,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> tuple[int, int]:
+    """Sum the credits debited under ``cause`` for ``workspace`` over a window.
+
+    Returns ``(credits, entry_count)`` where ``credits`` is the POSITIVE total
+    debited (the absolute value of the summed negative ``amount_delta`` over the
+    matching APPLIED entries) and ``entry_count`` is how many entries fed it.
+
+    The window is on ``createdAt``: ``since`` is inclusive (``>=``), ``until`` is
+    EXCLUSIVE (``<``) so adjacent windows never double-count a boundary entry; a
+    ``None`` bound is open on that side. Only ``applied is True`` entries are
+    counted — a committed-but-unapplied phantom never moved the wallet, so it must
+    not inflate the sum (the same rule ``reconcile`` enforces).
+
+    WU-F's shadow compare uses this to total the BC-3 ``compute_spend`` debits over
+    a tenant's window WITHOUT the llm_provisioning entity reaching into the credit
+    ledger doc directly — the credits service owns the read of its own
+    ``CreditLedgerEntry`` (EE entity-isolation), so the cross-entity compare goes
+    through this tenant-filtered helper. It performs NO writes.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+
+    query: dict[str, Any] = {
+        "workspace": workspace,
+        "cause": cause,
+        "applied": True,
+    }
+    created_filter: dict[str, Any] = {}
+    if since is not None:
+        created_filter["$gte"] = since
+    if until is not None:
+        created_filter["$lt"] = until
+    if created_filter:
+        query["createdAt"] = created_filter
+
+    entries = await CreditLedgerEntry.find(query).to_list()
+    # A debit's ``amount_delta`` is negative; sum and flip the sign to a positive
+    # "credits debited" figure. A stray positive delta under this cause (there
+    # should be none — compute_spend is debit-only) is clamped out so a bad row
+    # can't make the spend total read as a refund.
+    total = sum(-int(e.amount_delta) for e in entries if int(e.amount_delta) < 0)
+    return total, len(entries)
+
+
 async def history(
     workspace: str,
     *,
@@ -619,4 +676,5 @@ __all__ = [
     "history",
     "is_recorded",
     "reconcile",
+    "sum_debits_by_cause",
 ]

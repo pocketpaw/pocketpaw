@@ -1,6 +1,16 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
+    (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
+    three-position billing-cutover switch that supersedes the
+    ``litellm_spend_ingest_enabled`` bool. 'off' keeps BC-3 per-run metering as
+    today; 'shadow' runs a read-only per-tenant compare (litellm spend vs BC-3
+    ledger, ZERO debits) that records a reconciliation row; 'live' makes LiteLLM
+    the sole meter (proxy-spend sweep debits + BC-3 sweep gated off). The legacy
+    bool is kept for back-compat and resolved by ``effective_spend_mode()`` — an
+    existing ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` maps to 'live' only
+    while the new mode is left at 'off'.
   - 2026-06-26: Added the L2 cross-backend harness-failover settings (MCG-10) —
     ``backend_failover_enabled`` (default False; kill-switch — when False the
     new ``AgentRouter.run_with_failover`` behaves exactly like ``run`` and no
@@ -1596,14 +1606,49 @@ class Settings(BaseSettings):
     litellm_spend_ingest_enabled: bool = Field(
         default=False,
         description=(
-            "Whether the LiteLLM proxy-spend -> credits sweep (MCG-8) runs. Default "
-            "FALSE: the proxy's /spend/logs includes the text chat runs BC-3 "
-            "metering already bills per ChatRunDoc, so enabling this alongside "
-            "per-run metering would double-bill text chat. It is the future "
-            "single-source-of-truth path (bill all compute from proxy spend, retire "
-            "per-run metering) — flip it (with row-level dedup against BC-3) as a "
-            "deliberate migration. Provisioning the per-tenant key is unaffected by "
-            "this flag. Set via POCKETPAW_LITELLM_SPEND_INGEST."
+            "DEPRECATED back-compat flag for the MCG-8 spend sweep — superseded by "
+            "POCKETPAW_LITELLM_SPEND_MODE (WU-F). Left in place so an existing "
+            "deployment that set POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true keeps "
+            "billing from proxy spend: when the new mode is left at its 'off' default "
+            "and this bool is True, ``effective_spend_mode()`` resolves to 'live' "
+            "(the old bool meant 'ingest + single meter'). Prefer setting "
+            "POCKETPAW_LITELLM_SPEND_MODE explicitly; this flag is ignored once the "
+            "mode is set to any non-'off' value. Set via "
+            "POCKETPAW_LITELLM_SPEND_INGEST_ENABLED."
+        ),
+    )
+    litellm_spend_mode: Literal["off", "shadow", "live"] = Field(
+        default="off",
+        description=(
+            "The billing-cutover mode for LiteLLM proxy spend (WU-F). Replaces the "
+            "POCKETPAW_LITELLM_SPEND_INGEST bool with a three-position switch so the "
+            "cutover to LiteLLM as the single meter happens through a SAFE "
+            "shadow-compare phase:\n"
+            "  * 'off'    (default) — nothing changes; BC-3 per-run metering bills "
+            "as today, no proxy-spend sweep runs.\n"
+            "  * 'shadow' — the safe compare. A per-tenant sweep reads /spend/logs, "
+            "converts cost->credits, sums the BC-3 compute_spend ledger debits over "
+            "the same window, and records a reconciliation row (litellm vs bc3 + "
+            "delta + coverage_gap). It performs ZERO debits — BC-3 keeps billing — "
+            "so an operator can confirm the two meters agree BEFORE cutting over.\n"
+            "  * 'live'   — LiteLLM is the sole meter: the proxy-spend sweep debits "
+            "litellm_spend AND BC-3's per-run metering sweep is gated OFF, so "
+            "exactly one meter charges each unit of usage (no double-bill window).\n"
+            "Provisioning the per-tenant key is unaffected by this mode (always on). "
+            "Set via POCKETPAW_LITELLM_SPEND_MODE."
+        ),
+    )
+    litellm_reconcile_gap_threshold_credits: int = Field(
+        default=10,
+        description=(
+            "Shadow-compare coverage-gap threshold in CREDITS (WU-F). During "
+            "POCKETPAW_LITELLM_SPEND_MODE=shadow, a reconciliation row is flagged "
+            "``coverage_gap=true`` when |litellm_credits - bc3_credits| exceeds this "
+            "many credits — a discrepancy big enough to mean traffic is bypassing "
+            "the proxy OR the USD->credits conversion disagrees, which must be "
+            "resolved before flipping to 'live'. 1 credit == $0.01, so the default "
+            "10 ≈ $0.10 of tolerated per-tenant-per-window drift (rounding noise). "
+            "Set via POCKETPAW_LITELLM_RECONCILE_GAP_THRESHOLD_CREDITS."
         ),
     )
     site_pending_alert_hours: float = Field(
@@ -1904,6 +1949,25 @@ class Settings(BaseSettings):
             )
             self.kb_scopes = [self.kb_scope]
         return self
+
+    def effective_spend_mode(self) -> Literal["off", "shadow", "live"]:
+        """Resolve the LiteLLM billing-cutover mode, honouring the legacy bool.
+
+        WU-F replaced the ``litellm_spend_ingest_enabled`` bool with the
+        three-position ``litellm_spend_mode`` switch. To keep an existing
+        deployment that set ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` billing
+        from proxy spend, the bool is treated as a 'live'-intent fallback: when the
+        new mode is still at its 'off' default AND the old bool is True, the
+        effective mode is 'live' (the bool meant "ingest proxy spend as the
+        single meter"). Once the mode is set to ANY non-'off' value it wins
+        outright and the bool is ignored — so an explicit 'shadow' is never
+        silently upgraded to 'live' by a stale bool.
+        """
+        if self.litellm_spend_mode != "off":
+            return self.litellm_spend_mode
+        if self.litellm_spend_ingest_enabled:
+            return "live"
+        return "off"
 
     def save(self) -> None:
         """Save settings to config file.

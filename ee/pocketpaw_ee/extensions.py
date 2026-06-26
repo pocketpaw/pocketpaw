@@ -91,6 +91,7 @@ _xproc_consumer_task: asyncio.Task[None] | None = None
 
 async def _sweeper_loop() -> None:
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
@@ -104,11 +105,20 @@ async def _sweeper_loop() -> None:
             _run_sweeper_logger.exception("sweep_stale_runs tick failed")
         # BC-3 metering: bill every newly-terminal run's compute cost on the same
         # heartbeat. Kept in its own try so a metering failure can't suppress the
-        # stale-run sweep (or vice versa) on the next tick.
+        # stale-run sweep (or vice versa) on the next tick. Self-gated OFF in the
+        # WU-F ``live`` cutover mode (LiteLLM is then the sole meter).
         try:
             await sweep_unbilled_runs()
         except Exception:
             _run_sweeper_logger.exception("sweep_unbilled_runs tick failed")
+        # WU-F billing cutover: per-tenant LiteLLM spend sweep. No-op in ``off``;
+        # a read-only reconciliation compare in ``shadow``; debits proxy spend in
+        # ``live``. Own try so a cutover-sweep failure can't suppress the other
+        # sweeps (or vice versa) on the next tick.
+        try:
+            await run_cutover_sweep()
+        except Exception:
+            _run_sweeper_logger.exception("run_cutover_sweep tick failed")
         # Charge-first (review fix C): surface PAID sites stuck pending past the
         # threshold (a lost/delayed subscription.active webhook). VISIBILITY ONLY —
         # logs at WARNING, never auto-deploys or auto-cancels. Its own try so a
@@ -123,11 +133,13 @@ async def start_run_sweeper() -> None:
     """Sweep once on boot, then tick every 5 minutes until shutdown.
 
     Boot runs the stale-run sweep (interrupt orphaned runs), the BC-3 compute-cost
-    metering sweep (bill any terminal runs left unbilled by the prior process), and
-    the charge-first pending-site reconciliation sweep (surface paid sites stuck
-    pending); the 5-minute loop then ticks all three.
+    metering sweep (bill any terminal runs left unbilled by the prior process), the
+    WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
+    cutover mode), and the charge-first pending-site reconciliation sweep (surface
+    paid sites stuck pending); the 5-minute loop then ticks all four.
     """
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
     from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
     from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
@@ -136,6 +148,8 @@ async def start_run_sweeper() -> None:
         await sweep_stale_runs()
     with suppress(Exception):
         await sweep_unbilled_runs()
+    with suppress(Exception):
+        await run_cutover_sweep()
     with suppress(Exception):
         await sweep_pending_sites()
     _sweeper_task = asyncio.create_task(_sweeper_loop())

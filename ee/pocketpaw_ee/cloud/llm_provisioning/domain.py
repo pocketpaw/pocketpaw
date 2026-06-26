@@ -15,12 +15,21 @@
 #                           proxy spend rows were read, how many credits were
 #                           debited, the USD total + cached-token savings, and the
 #                           resulting wallet balance.
+#   * ``SpendReconciliation`` — the outcome of one SHADOW compare for a tenant (WU-F):
+#                           the litellm-vs-BC-3 credits over a window, their delta,
+#                           and the coverage-gap verdict. Carries NO debit — shadow
+#                           only reads + compares. The Beanie persistence twin is
+#                           ``models.spend_reconciliation.SpendReconciliation``.
 #   * ``SpendCredits``    — the per-tenant spend rate card: USD-cost markup + the
 #                           per-credit USD denomination. Mirrors metering's
 #                           ``RateCard`` shape deliberately so proxy-spend and
 #                           per-run metering convert USD->credits identically.
 #
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8): new entity.
+# Updated 2026-06-26 (feat/litellm-billing-cutover, WU-F): added
+# ``SpendReconciliation`` — the value object returned by the shadow-mode compare
+# (``service.reconcile_tenant_spend``). Distinct from the Beanie doc of the same
+# concept; this is the framework-free shape the sweep logs + the doc is built from.
 
 from __future__ import annotations
 
@@ -105,3 +114,35 @@ class SpendIngestResult:
     cost_usd: float
     cached_tokens: int
     balance_after: int
+
+
+@dataclass(frozen=True)
+class SpendReconciliation:
+    """The outcome of one SHADOW compare for a tenant (WU-F billing cutover).
+
+    Shadow mode reads the tenant's LiteLLM proxy spend over a window, converts it
+    to credits (the SAME rate card BC-3 uses), sums the workspace's BC-3
+    ``compute_spend`` ledger debits over that window, and records the two side by
+    side. This object is the framework-free result; it carries NO debit — the whole
+    point of shadow is to compare WITHOUT touching the wallet.
+
+    ``litellm_credits`` is the proxy spend in credits; ``bc3_credits`` is the summed
+    BC-3 metered debits in credits. ``delta = litellm_credits - bc3_credits``
+    (positive ⇒ the proxy saw MORE than BC-3 billed — traffic likely bypassing
+    per-run metering, or a conversion mismatch; negative ⇒ BC-3 billed more than the
+    proxy attributed). ``coverage_gap`` is True when ``abs(delta) > threshold`` — a
+    discrepancy big enough to resolve BEFORE flipping to live. ``window_start`` /
+    ``window_end`` bound the compare (ISO ``startTime`` strings, half-open).
+    ``litellm_rows`` / ``bc3_entries`` are the input counts (provenance).
+    """
+
+    workspace_id: str
+    window_start: str | None
+    window_end: str | None
+    litellm_credits: int
+    bc3_credits: int
+    delta: int
+    coverage_gap: bool
+    threshold: int
+    litellm_rows: int
+    bc3_entries: int
