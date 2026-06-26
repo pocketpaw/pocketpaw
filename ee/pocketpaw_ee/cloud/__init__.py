@@ -365,6 +365,16 @@ def mount_cloud(app: FastAPI) -> None:
     # (Cloudflare for SaaS) the Domains panel drives.
     app.include_router(sites_router, prefix="/api/v1")
 
+    # Model Catalog — MCG-1. License-gated, tenant-independent reads of the
+    # models a self-hosted LiteLLM proxy serves: GET /catalog/models (filtered by
+    # modality/provider/q/capability) and GET /catalog/models/{id}. The proxy is
+    # the source of truth (read via /v1/models + /model/info, mapped to
+    # ModelCatalogEntry, TTL-cached in-process); models.dev enriches logo/desc
+    # best-effort. Thin adapter over ee.catalog.service.
+    from pocketpaw_ee.catalog.router import router as catalog_router
+
+    app.include_router(catalog_router, prefix="/api/v1")
+
     # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
     # for the persisted (trigger, row) state matrix; the actual sweep
     # is driven by the in-process scheduler at
