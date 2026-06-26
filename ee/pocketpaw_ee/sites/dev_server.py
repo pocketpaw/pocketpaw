@@ -3,6 +3,24 @@
 #
 # Created: 2026-06-18 (feat/sites-devserver, Phase 2 / P2a).
 #
+# Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
+# edit-bridge): ``ensure_dev_server`` (method + module convenience) and
+# ``_default_materialize`` gained an optional ``builder_origin`` that is threaded
+# into ``GeneratorClient.build(builder_origin=..., static_build=False)``. The
+# generator (paw-sites SE-1) gates the section anchors + postMessage edit-bridge on
+# ``siteConfig.builderOrigin``, so passing the origin makes the dev-server-
+# materialized SOURCE carry the bridge — the hover-edit overlay then works against
+# the dev server, not only the static ``/editable`` build. Before this the dev path
+# called ``build()`` with NO ``builder_origin``, so the dev source had no anchors /
+# no bridge and flipping ``BRIDGE_IN_DEV`` regressed the overlay (the 2026-06-19
+# back-out). The origin is sourced upstream the SAME way ``/editable`` sources it
+# (router request ``Origin`` → service ``PAW_SITES_BUILDER_ORIGIN`` fallback); a
+# None/empty origin still materializes a NON-bridged source (the generator's gate
+# holds). ``static_build`` stays ``False`` — the bridge is in the SOURCE the scaffold
+# step injects, not in the (skipped) prod static output, so the dev path's speed win
+# is untouched. This supersedes the EDIT-BRIDGE NOTE below: the active generator now
+# carries the SE-1/SE-2b injection; this change just threads the origin to it.
+#
 # Updated 2026-06-19 (fix/sites-preview-fresh-build, P0a): the P0a fix makes
 # generator.build()'s ``bun run build`` static-output step ALWAYS run by default
 # (so the served preview/publish is fresh + anchored — the #1 bug). The dev server
@@ -154,14 +172,24 @@ def _default_free_port() -> int:
         s.close()
 
 
-async def _default_materialize(*, workspace_id: str, user_id: str, pocket_id: str) -> str:
+async def _default_materialize(
+    *, workspace_id: str, user_id: str, pocket_id: str, builder_origin: str | None = None
+) -> str:
     """Default source-materialize: run the generator into the PERSISTENT per-pocket
     dir (PERF-3 — node_modules already cached there) and return the SvelteKit
     project dir `vite dev` runs in. We reuse the same build path the preview/edit
     flow uses with ``smoke=False`` (the workerd render is a publish-only gate,
     PERF-4) — generate + cached install is all the dev server needs before it can
     serve + HMR. Reads the pocket's draft content via the sites service the same way
-    a preview build does. Replaced in tests by an injected fake."""
+    a preview build does. Replaced in tests by an injected fake.
+
+    ``builder_origin`` (S1) is threaded into the GENERATE step so the materialized
+    SOURCE carries SE-1's gated section anchors + postMessage edit-bridge — the same
+    injection the static ``/editable`` build gets. It rides
+    ``siteConfig.builderOrigin`` and the generator gates the injection on it, so when
+    it is None/empty the dev source is materialized WITHOUT the bridge (the gate
+    holds, matching the publish path's non-editable behaviour). Only the
+    generate/scaffold step needs it — ``static_build`` stays ``False``."""
     from pocketpaw_ee.cloud.pockets import service as pockets_service
     from pocketpaw_ee.sites.generator_client import GeneratorClient
 
@@ -183,6 +211,12 @@ async def _default_materialize(*, workspace_id: str, user_id: str, pocket_id: st
         capture_signed_key="dev-preview",
         engine=engine,
         source=source,
+        # S1: the EDITABLE builder origin. Threaded into the generate/scaffold step so
+        # the dev-served SOURCE carries the gated edit-bridge (mirrors the /editable
+        # build). Gated by the generator: None/empty → no bridge injected, so the dev
+        # source stays non-editable when no origin is supplied. Sourced upstream the
+        # same way /editable sources it (request Origin → PAW_SITES_BUILDER_ORIGIN).
+        builder_origin=builder_origin,
         # PERF-3: build into the stable per-pocket working dir (cached node_modules).
         pocket_id=f"dev-{pocket_id}",
         # PERF-4: the dev server never needs the workerd smoke render.
@@ -193,6 +227,8 @@ async def _default_materialize(*, workspace_id: str, user_id: str, pocket_id: st
         # dev`). Forcing the static build here would add a wasted full prod build
         # before every dev-server start. (The static build is REQUIRED only on the
         # served preview/publish path — that is where the #1 stale-build bug lived.)
+        # S1: ONLY the generate step needs builder_origin for the source injection —
+        # static_build stays False (the bridge is in the SOURCE, not the prod output).
         static_build=False,
     )
     return build.project_dir
@@ -234,10 +270,23 @@ class DevServerManager:
 
     # --- public API --------------------------------------------------------
 
-    async def ensure_dev_server(self, *, workspace_id: str, user_id: str, pocket_id: str) -> str:
+    async def ensure_dev_server(
+        self,
+        *,
+        workspace_id: str,
+        user_id: str,
+        pocket_id: str,
+        builder_origin: str | None = None,
+    ) -> str:
         """Return the dev URL for the pocket's live `vite dev` server, starting it
         if needed. A second call for a running pocket touches it (LRU bump) and
-        returns the same URL without respawning."""
+        returns the same URL without respawning.
+
+        ``builder_origin`` (S1) is forwarded to ``_materialize`` so the dev-served
+        SOURCE carries SE-1's gated edit-bridge — the hover-edit overlay then works
+        against the dev server. It only matters on the spawn path (a reused running
+        server already materialized its source); a None/empty origin materializes a
+        non-bridged source (the generator's gate holds)."""
         lock = self._lock_for(pocket_id)
         async with lock:
             existing = self._servers.get(pocket_id)
@@ -254,7 +303,10 @@ class DevServerManager:
             await self._enforce_cap()
 
             project_dir = await self._materialize(
-                workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+                workspace_id=workspace_id,
+                user_id=user_id,
+                pocket_id=pocket_id,
+                builder_origin=builder_origin,
             )
             port = self._free_port()
             cmd = _dev_cmd_argv(port, self.host)
@@ -415,10 +467,18 @@ def get_manager() -> DevServerManager:
     return _MANAGER
 
 
-async def ensure_dev_server(*, workspace_id: str, user_id: str, pocket_id: str) -> str:
-    """Module-level convenience over the singleton — the endpoint calls this."""
+async def ensure_dev_server(
+    *, workspace_id: str, user_id: str, pocket_id: str, builder_origin: str | None = None
+) -> str:
+    """Module-level convenience over the singleton — the endpoint calls this.
+
+    ``builder_origin`` (S1) is forwarded so the dev-served source carries the gated
+    edit-bridge (see ``DevServerManager.ensure_dev_server``)."""
     return await get_manager().ensure_dev_server(
-        workspace_id=workspace_id, user_id=user_id, pocket_id=pocket_id
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        builder_origin=builder_origin,
     )
 
 
