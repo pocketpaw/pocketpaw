@@ -339,3 +339,75 @@ class TestClaudeSDKCliAuth:
 
         assert len(resolved_providers) > 0
         assert resolved_providers[0] == "anthropic"
+
+
+# =============================================================================
+# ART-2: per-run cwd resolution + fail-closed (agent_extensions seam)
+# =============================================================================
+
+
+class TestResolveCwd:
+    """``ClaudeSDKBackend._resolve_cwd`` — the OSS/cloud cwd gate.
+
+    OSS (no ``agent_extensions`` provider) must stay on ``file_jail_path``; an
+    EE provider's ``agent_cwd`` wins; a provider that RAISES (a cloud run with
+    no resolvable workspace) propagates — fail-closed, never a silent fallback.
+    """
+
+    def test_oss_defaults_to_file_jail_path(self, monkeypatch):
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: ())
+        settings = Settings()
+        backend = ClaudeSDKBackend(settings)
+        assert backend._resolve_cwd() == settings.file_jail_path
+
+    def test_extension_cwd_wins(self, monkeypatch, tmp_path):
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        jail = tmp_path / "jail" / "wsX"
+
+        class FakeExt:
+            def agent_cwd(self):
+                return str(jail)
+
+        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (FakeExt(),))
+        backend = ClaudeSDKBackend(Settings())
+        assert backend._resolve_cwd() == jail
+
+    def test_extension_raise_propagates_fail_closed(self, monkeypatch):
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        class FailClosedExt:
+            def agent_cwd(self):
+                raise RuntimeError("no resolvable workspace_id")
+
+        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (FailClosedExt(),))
+        backend = ClaudeSDKBackend(Settings())
+        with pytest.raises(RuntimeError, match="no resolvable workspace_id"):
+            backend._resolve_cwd()
+
+    def test_extension_returning_none_falls_back(self, monkeypatch):
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        class NoneExt:
+            def agent_cwd(self):
+                return None
+
+        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (NoneExt(),))
+        settings = Settings()
+        backend = ClaudeSDKBackend(settings)
+        assert backend._resolve_cwd() == settings.file_jail_path
+
+    def test_provider_without_agent_cwd_ignored(self, monkeypatch):
+        # A provider predating agent_cwd must not break resolution.
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        class OldExt:
+            def subprocess_env(self):
+                return {}
+
+        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (OldExt(),))
+        settings = Settings()
+        backend = ClaudeSDKBackend(settings)
+        assert backend._resolve_cwd() == settings.file_jail_path

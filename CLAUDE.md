@@ -221,6 +221,17 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Per-tenant agent cwd jail (cloud, ART-2)**: In multi-tenant cloud each
+  workspace's chat agent runs with `cwd = ~/.pocketpaw/workspaces/<workspace_id>/agent/<session_id>/`
+  (resolved per-run from the `attach_agent_identity` ContextVars in
+  `ee/pocketpaw_ee/cloud/agent_jail.py`) so one tenant's file ops never
+  co-mingle in the shared home dir. It **fails closed**: a cloud run that
+  reaches the backend with no resolvable `workspace_id` RAISES rather than
+  falling back to `~`. OSS / dedicated installs (no cloud DB initialized) keep
+  `settings.file_jail_path` unchanged. Override the jail root with
+  `POCKETPAW_WORKSPACE_JAIL_ROOT` (default `~/.pocketpaw/workspaces`) to anchor
+  it on a data volume. Lifecycle (quota / TTL-GC / disk-watermark eviction of
+  these dirs) is ART-3, not yet shipped.
 - **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.
