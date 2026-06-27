@@ -101,6 +101,44 @@ def _redis_settings() -> RedisSettings:
     return RedisSettings.from_dsn(url)
 
 
+# arq's DEFAULT job_timeout is 300s (5 min), which CANCELS a long agent run
+# mid-generation: a big coding task in /chat halts after ~5 min with only the
+# partial that already streamed persisted (run_core catches the CancelledError and
+# emits a cancelled stream_end). Lift the cap to a generous default and make it
+# env-tunable; the 10-minute stale-run sweeper remains the backstop against a
+# genuinely runaway run holding a worker slot.
+_DEFAULT_RUN_JOB_TIMEOUT_SECONDS = 1800  # 30 minutes
+
+
+def _job_timeout_seconds() -> int:
+    """Resolve the per-run arq job_timeout from ``POCKETPAW_CLOUD_RUN_JOB_TIMEOUT``.
+
+    Defaults to 30 minutes. An unparseable or non-positive value falls back to the
+    default (rather than 0 / negative, which would disable or break the cap), so a
+    typo can't silently let runs run forever or crash the worker.
+    """
+    raw = os.environ.get("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", "").strip()
+    if not raw:
+        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%r is not an int; using default %ds",
+            raw,
+            _DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+    if val <= 0:
+        logger.warning(
+            "POCKETPAW_CLOUD_RUN_JOB_TIMEOUT=%d is not positive; using default %ds",
+            val,
+            _DEFAULT_RUN_JOB_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+    return val
+
+
 class WorkerSettings:
     """arq worker configuration. Loaded by ``arq <dotted-path>``."""
 
@@ -111,5 +149,9 @@ class WorkerSettings:
     # so the user can decide whether to resend — re-running could double-bill or
     # surface a partial duplicate.
     max_tries = 1
+    # Per-run timeout. arq's default (300s) cancels long agent runs mid-stream; lift
+    # it and make it env-tunable (POCKETPAW_CLOUD_RUN_JOB_TIMEOUT, default 30 min).
+    # Plain int in __dict__ for the same arq-reads-__dict__ reason as redis_settings.
+    job_timeout = _job_timeout_seconds()
     # Eager: arq reads __dict__, which bypasses descriptors. See `_redis_settings`.
     redis_settings = _redis_settings()
