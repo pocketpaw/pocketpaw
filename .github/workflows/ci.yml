@@ -16,6 +16,10 @@
 # image-build time). Lives in this workflow (not workflow_run) because the
 # repo's default branch is main — workflow_run triggers only fire from the
 # default branch's file, and main lags dev.
+# Updated: 2026-06-27 — CI speed: the `test` job now runs the full 3.11/3.12/
+# 3.13 matrix only on push to dev/main; PRs test 3.12 alone (the prod version,
+# per the Dockerfile), so version-specific breaks are still caught at the merge
+# gate. The duplicate full-suite run in tests.yaml was removed in the same pass.
 name: CI
 
 on:
@@ -159,7 +163,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # PRs test only the prod version (3.12, per the Dockerfile) for speed;
+        # the full 3.11/3.12/3.13 matrix runs on push to dev/main so version-
+        # specific breaks are still caught at the merge gate.
+        python-version: ${{ (github.event_name == 'push') && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.12"]') }}
     steps:
       - uses: actions/checkout@v4
 
