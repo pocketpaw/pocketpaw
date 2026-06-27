@@ -1,5 +1,15 @@
 """MongoDB connection and Beanie ODM initialization.
 
+2026-06-26 (ART-4): added ``is_multi_tenant_cloud()`` — the single, named home
+for the established "this process is serving tenants" signal
+(``get_client() is not None``, set exactly when ``init_cloud_db`` ran). The
+agent cwd jail (ART-2) and the new cloud-storage boot guard both read it instead
+of re-spelling the ``get_client()`` truthiness check inline. ``init_cloud_db``
+also now calls ``verify_cloud_storage_backend()`` right after the memory guard so
+a cloud deploy missing the S3 upload adapter is loud (warn, or a hard boot
+failure under ``POCKETPAW_REQUIRE_S3_IN_CLOUD``) instead of silently writing
+"blob" artifacts to local disk.
+
 2026-06-07: added ``_drop_legacy_invite_token_index`` and called it after
 ``init_beanie``. The invite-token hashing rollout dropped ``unique=True``
 from ``Invite.token`` (uniqueness moved to ``token_hash``), but Beanie only
@@ -109,6 +119,16 @@ async def init_cloud_db(mongo_uri: str = "mongodb://localhost:27017/paw-enterpri
     # chat history to disk; the cloud must keep everything in Mongo.
     verify_cloud_memory_backend()
 
+    # Loud guard on the upload/blob backend (ART-4). A cloud deploy that left
+    # POCKETPAW_UPLOAD_ADAPTER on its local default would write delivered agent
+    # artifacts to the box's disk instead of tenant blob storage — the whole
+    # deliver_artifact feature silently no-ops to local disk. WARN by default;
+    # POCKETPAW_REQUIRE_S3_IN_CLOUD escalates it to a hard boot failure. Runs
+    # AFTER _client is set so the is_multi_tenant_cloud() signal it reads is True.
+    from pocketpaw_ee.cloud.uploads.bootstrap import verify_cloud_storage_backend
+
+    verify_cloud_storage_backend()
+
 
 async def close_cloud_db() -> None:
     """Close the client."""
@@ -121,3 +141,20 @@ async def close_cloud_db() -> None:
 def get_client() -> AsyncMongoClient | None:
     """Return the current MongoDB client, or None if not initialized."""
     return _client
+
+
+def is_multi_tenant_cloud() -> bool:
+    """``True`` when this process is serving tenants (multi-tenant cloud mode).
+
+    The cloud DB client is set exactly when ``init_cloud_db`` ran
+    (``CloudLifecycleHook`` on ``CLOUD_MONGODB_URI``), so ``get_client() is not
+    None`` is the authoritative "this process is serving tenants" flag — there is
+    no separate cloud-mode env var to invent. OFF cloud (OSS / a process that
+    never initialized the cloud DB) it is ``False``.
+
+    Single home for the signal so callers (the ART-2 agent cwd jail, the ART-4
+    cloud-storage boot guard) read one name instead of re-spelling the
+    ``get_client()`` truthiness check — one place to change if the signal ever
+    moves.
+    """
+    return _client is not None
