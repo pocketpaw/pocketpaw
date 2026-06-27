@@ -1,6 +1,15 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-26 (ART-2) — ``_prewarm_session`` now binds the run's identity
+  (``attach_agent_identity`` with the same ``session_mongo_id`` / ``pocket_id``
+  the stream path uses) around its ``pool.prewarm`` call, then detaches in a
+  ``finally``. The per-tenant cwd jail resolves the agent's working directory
+  from those ContextVars; since prewarm is fired in its own ``create_task``
+  context BEFORE the stream binds identity, without this the cloud cwd resolver
+  would fail closed during warm-up (swallowed) and every cloud session would
+  lose the turn-1 warm. Binding here makes prewarm warm the SAME per-session
+  jail turn 1 will use.
 - 2026-06-25 (fix/worker-trusts-spec-workspace) — ``execute_run`` now threads
   the authenticated ``spec.workspace_id`` into ``resolve_scope_context`` via the
   new ``expected_workspace_id`` kwarg, then raises a clean
@@ -739,16 +748,35 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         surface_skills = surface_skills | _agent_skill_set(instance)
 
-        await pool.prewarm(
-            ctx.target_agent_id,
-            session_key_for(ctx),
-            instructions=behavior_instructions,
-            deny_mcp_tool_ids=surface_deny,
-            allow_sdk_tools=surface_allow,
-            allow_mcp_tool_ids=surface_allow_mcp,
-            system_message_override=surface_sys_override,
-            skill_names=surface_skills,
+        # Bind this run's tenancy for the warm-up so the prewarmed subprocess
+        # connects with the SAME per-tenant cwd jail the first turn will resolve
+        # (ART-2). _prewarm_session runs in its own create_task context, fired
+        # BEFORE the stream binds identity at the _drive_agent_loop seam, so
+        # without this the cloud cwd resolver would fail closed here (swallowed)
+        # and every cloud session would lose the turn-1 warm. Mirrors the
+        # run-path binding exactly (same session_mongo_id / pocket_id) so prewarm
+        # and turn 1 resolve one cwd; detached in finally so it can't leak into
+        # this task's later work.
+        session_mongo_id = ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
+        identity_tokens = attach_agent_identity(
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
+            session_mongo_id=session_mongo_id,
+            pocket_id=ctx.pocket_id,
         )
+        try:
+            await pool.prewarm(
+                ctx.target_agent_id,
+                session_key_for(ctx),
+                instructions=behavior_instructions,
+                deny_mcp_tool_ids=surface_deny,
+                allow_sdk_tools=surface_allow,
+                allow_mcp_tool_ids=surface_allow_mcp,
+                system_message_override=surface_sys_override,
+                skill_names=surface_skills,
+            )
+        finally:
+            detach_agent_identity(identity_tokens)
     except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
 
@@ -1055,6 +1083,41 @@ async def _handle_interrupted_cleanup(
         logger.debug("interrupted stream write failed", exc_info=True)
 
 
+async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """ART-3 per-workspace agent-jail quota, enforced at RUN-START.
+
+    The agent writes through its native subprocess tools (Write/Bash), so we
+    can't cheaply gate each individual write; instead we measure the workspace's
+    total jail size ONCE here — before spinning up the agent — and reject the run
+    CLEANLY when it's over quota. The rejection is a terminal ``failed`` run with
+    a clear message and an ``error`` stream frame, never an OOM/crash that takes
+    the worker (and every other tenant on the box) down. Returns ``True`` when
+    the run was rejected (the caller returns early), ``False`` to proceed. Off
+    cloud / under quota it is a no-op returning ``False``.
+    """
+    from pocketpaw_ee.cloud import agent_jail
+
+    quota_error = agent_jail.check_workspace_jail_quota(ctx.workspace_id)
+    if not quota_error:
+        return False
+    logger.warning("run %s rejected — agent jail over quota: %s", spec.run_id, quota_error)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": "agent.jail_over_quota", "message": quota_error}
+        )
+    except Exception:
+        logger.debug("over-quota error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=quota_error)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for over-quota run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("over-quota stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -1133,6 +1196,12 @@ async def execute_run(spec: RunSpec) -> None:
     # instead of re-resolving. Never raises — a missing/foreign pocket degrades
     # to the surface base (today's behavior).
     ctx.resolved_profile = await _resolve_entity_profile(ctx)
+
+    # ART-3: reject a run whose workspace agent-jail is over quota BEFORE the
+    # prewarm + mark-running + agent spin-up, so a tenant that filled its scratch
+    # quota fails fast and cleanly instead of crashing the shared box mid-run.
+    if await _reject_if_over_jail_quota(spec, ctx, transport):
+        return
 
     # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
     # subprocess for this session NOW — concurrently with the remaining pre-turn

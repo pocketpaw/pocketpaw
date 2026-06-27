@@ -17,6 +17,8 @@ Server surfaces (module → server name → tools):
 * ``belt.py`` → ``pocketpaw_belt`` → ``belt_propose_change`` (gated code change)
 * ``connectors.py`` → ``pocketpaw_connectors`` → connector listing + execution
 * ``decisions.py`` → ``pocketpaw_decisions`` → Decision-Graph queries
+* ``deliver.py`` → ``pocketpaw_deliver`` → ``deliver_artifact`` (land a built
+  file/dir in tenant blob storage, return a download URL)
 * ``external_actions.py`` → ``pocketpaw_external_actions`` →
   ``propose_external_action`` (gated connector call — the propose path for
   this backend)

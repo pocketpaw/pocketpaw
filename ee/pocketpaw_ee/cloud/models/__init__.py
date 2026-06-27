@@ -78,6 +78,7 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestState,
 )
 from pocketpaw_ee.cloud.models.file import FileObj
+from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
     ForesightPredictionRecord,
@@ -221,6 +222,7 @@ __all__ = [
     "FileFolder",
     "FileObj",
     "FileUpload",
+    "FileVersionDoc",
     "ForesightBacktest",
     "ForesightPredictionRecord",
     "ForesightProjectedDecision",
@@ -292,6 +294,9 @@ def get_all_documents():
         FileObj,
         FileUpload,
         FileFolder,
+        # file_versions edit history (ART-1). Only ``file_versions.service``
+        # imports this class (import-linter "FileVersions" contract).
+        FileVersionDoc,
         Workspace,
         WorkspaceConnector,
         ComposioConnection,
