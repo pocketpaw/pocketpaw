@@ -18,6 +18,14 @@
 # M2b.1 ``_park`` field on ``pocketpaw.instinct.models.Action`` is
 # scoped to the RFC 03 v2 template flow only — the M2b.1 binding-level
 # park remains for backward compatibility.
+#
+# Updated: 2026-06-18 (feat/instinct-gate-foundation, T3) — added the
+# additive ``"auto_approved"`` status value to ``ApprovalStatusT``. The
+# layered/learning gate's AUTO lane writes a row already-decided with this
+# status (via ``instinct_approvals.service.auto_approve``,
+# ``decided_by="system:triager"``) in a single write. The human queue UI
+# filters on ``status="pending"``, so an auto-approved row never appears in
+# the human tray. No migration: the literal is additive only.
 
 """Beanie document for the Instinct approval queue (RFC 03 v2)."""
 
@@ -31,7 +39,7 @@ from pydantic import Field
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
-ApprovalStatusT = Literal["pending", "approved", "rejected", "expired"]
+ApprovalStatusT = Literal["pending", "approved", "rejected", "expired", "auto_approved"]
 
 
 class InstinctApproval(TimestampedDocument):

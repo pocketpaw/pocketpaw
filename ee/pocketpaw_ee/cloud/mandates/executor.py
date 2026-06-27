@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/cloud/mandates/executor.py
 # Created: 2026-06-11 (feat/belt-mandates, slice 4 — plan gate + executor).
 #
+# Updated: 2026-06-13 (feat/belt-headless-exec) — ``resolve_dispatcher`` now
+#   honours ``POCKETPAW_MANDATE_DISPATCHER=headless``: the ``HeadlessTaskDispatcher``
+#   (``cloud/belt/headless.py``) files the SAME queued ``code_change`` run as the
+#   station dispatcher, then PRODUCES the diff programmatically via the headless
+#   develop runner and attaches it, so the run becomes a real PENDING change
+#   awaiting the per-diff Instinct gate — no human in the diff-producing loop
+#   (the approval gate is preserved). It degrades to the plain ``station``
+#   dispatcher when no production develop loop is wired, so the older HONESTY
+#   note below still describes the DEFAULT (``station``) path; ``headless`` is the
+#   additive autonomous path. The ``station`` and ``bus`` dispatchers are
+#   untouched.
+#
 # Updated: 2026-06-11 (feat/belt-autopilot — REAL task dispatcher) — added the
 #   ``StationTaskDispatcher`` and ``resolve_dispatcher()`` so an approved plan
 #   task starts a REAL Belt station run instead of a bus-only echo. The
@@ -180,7 +192,10 @@ class StationTaskDispatcher:
         from pocketpaw.stores import get_instinct_store
         from pocketpaw_ee.cloud.belt import service as belt_service
 
-        store = get_instinct_store()
+        # ISO: background/dispatch path (no ``current_workspace`` ContextVar) —
+        # scope the store to the caller's workspace so the queued run lands in
+        # the tenant's file.
+        store = get_instinct_store(workspace_id=workspace_id or None)
 
         title = str(task.get("title") or "Belt station task")
         why = str(task.get("why") or "")
@@ -272,8 +287,16 @@ def resolve_dispatcher() -> TaskDispatcher:
 
     * ``station`` (default) — the REAL ``StationTaskDispatcher``: each approved
       task becomes a queued belt station run (a real ``code_change`` Instinct
-      Action) that shows in the console Runs tab. Falls back to ``bus`` if the
-      belt plumbing can't be imported (an OSS-only / partial install).
+      Action) that shows in the console Runs tab. A HUMAN then drives the
+      interactive ``/belt`` station to a diff. Falls back to ``bus`` if the belt
+      plumbing can't be imported (an OSS-only / partial install).
+    * ``headless`` — the ``HeadlessTaskDispatcher`` (feat/belt-headless-exec):
+      files the SAME queued run, then PRODUCES the diff programmatically via the
+      headless develop runner and attaches it, so the run becomes a real PENDING
+      ``code_change`` awaiting the per-diff Instinct gate — NO human in the
+      diff-producing loop (the approval gate is still preserved). Degrades to the
+      plain ``station`` dispatcher when no production develop loop is wired (so a
+      deploy without the LLM runner files queued runs a human can still drive).
     * ``bus`` — the announce-only ``BusTaskDispatcher`` (the prior default).
 
     An unrecognized value falls back to the station default.
@@ -283,8 +306,8 @@ def resolve_dispatcher() -> TaskDispatcher:
     choice = (os.environ.get("POCKETPAW_MANDATE_DISPATCHER") or "station").strip().lower()
     if choice == "bus":
         return BusTaskDispatcher()
-    # Default / "station": prefer the real station dispatcher, but degrade to the
-    # bus dispatcher cleanly if the belt service can't be imported.
+    # "station" / "headless" / default: both need the belt plumbing — degrade to
+    # the bus dispatcher cleanly if it can't be imported (a partial install).
     try:
         import pocketpaw_ee.cloud.belt.service  # noqa: F401
         from pocketpaw.stores import get_instinct_store  # noqa: F401
@@ -294,6 +317,20 @@ def resolve_dispatcher() -> TaskDispatcher:
             exc_info=True,
         )
         return BusTaskDispatcher()
+    if choice == "headless":
+        # The headless dispatcher needs a wired develop loop. ``resolve_headless_
+        # dispatcher`` returns it when one is available, else ``None`` so we fall
+        # through to the queued-run station dispatcher (a human-drivable run is
+        # never lost just because the LLM loop isn't wired in this deploy).
+        from pocketpaw_ee.cloud.belt.headless import resolve_headless_dispatcher
+
+        headless = resolve_headless_dispatcher()
+        if headless is not None:
+            return headless
+        logger.warning(
+            "mandate: headless dispatcher requested but no develop loop is wired — "
+            "falling back to the queued-run station dispatcher",
+        )
     return StationTaskDispatcher()
 
 
@@ -409,18 +446,23 @@ async def execute_approved_plan(
     chokepoint (emit + return), success via the single close at the end."""
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
     dispatch: TaskDispatcher = dispatcher or resolve_dispatcher()
 
     params = getattr(action, "parameters", None) or {}
     blob = params.get(BELT_PLAN_PARAM_KEY)
     if not isinstance(blob, dict):
-        # Not a belt_plan Action — no chain was opened for it here.
+        # Not a belt_plan Action — no chain was opened for it here. We can't
+        # resolve the store's workspace without the blob either, so bail before
+        # opening one.
         logger.warning("approved action %s carries no _belt_plan blob", action.id)
         return
 
     correlation_id = _coerce_uuid(blob.get("correlation_id"))
     workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: HTTP approve path (no ``current_workspace`` ContextVar) — scope the
+    # store to the blob's workspace BEFORE ``_fail`` (which calls mark_failed)
+    # so every terminal lands in the tenant's file, not the shared ledger.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     requested_by = str(blob.get("requested_by") or "")
     mandate_id = str(blob.get("mandate_id") or "")
     shift_id = str(blob.get("shift_id") or "")

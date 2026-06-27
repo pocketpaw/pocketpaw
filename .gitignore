@@ -78,3 +78,16 @@ private.key
 *.bak
 
 output.txt
+
+# Vendored Paw Sites publish toolchain (DEP-1/DEP-2) — build artifacts staged into
+# the build context by scripts/vendor-paw-sites.sh + scripts/vendor-ripple-tarball.sh
+# for a PAW_SITES_SOURCE=vendor / RIPPLE_SOURCE=vendor Dockerfile.enterprise build.
+# The artifacts themselves are never committed (mirrors paw-enterprise's
+# /deploy/ripple/): internal CI / Coolify builds with the `clone` source instead.
+# But the DIRS must exist in EVERY checkout (incl. Coolify's clone) — the Dockerfile
+# COPYs them unconditionally before the vendor/clone branch — so a tracked .gitkeep
+# keeps each dir present while its contents stay ignored.
+/deploy/paw-sites/*
+!/deploy/paw-sites/.gitkeep
+/deploy/ripple/*
+!/deploy/ripple/.gitkeep

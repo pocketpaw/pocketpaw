@@ -172,7 +172,9 @@ async def ingest_collection(
             "errors": [f"no mapping for collection {source_id!r}"],
         }
 
-    store = store or _default_store()
+    # ISO: thread the caller's workspace so the default store is tenant-scoped
+    # (an injected test store is used as-is).
+    store = store or _default_store(workspace_id)
     state = await _load_or_create_state(workspace_id, source_id)
     mode = "backfill" if not state.backfill_done else "incremental"
     state.status = "running"
@@ -508,12 +510,16 @@ async def _apply_link_rules(
 # --------------------------------------------------------------------------
 
 
-def _default_store() -> StoreLike:
-    """The process-wide OSS FabricStore singleton. Imported lazily so a unit
-    test passing a fake store never pulls the OSS store stack."""
+def _default_store(workspace_id: str | None = None) -> StoreLike:
+    """The OSS FabricStore for ``workspace_id``. Imported lazily so a unit test
+    passing a fake store never pulls the OSS store stack.
+
+    ISO: ingest runs on a background/HTTP path with no ``current_workspace``
+    ContextVar, so the caller threads its workspace in. Under
+    ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` a missing one fail-closes."""
     from pocketpaw.stores import get_fabric_store
 
-    return get_fabric_store()
+    return get_fabric_store(workspace_id=workspace_id or None)
 
 
 def _default_reader() -> FirestoreReader:

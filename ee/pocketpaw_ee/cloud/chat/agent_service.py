@@ -94,13 +94,74 @@ ABSENT (and the digest never even pulled) in every shared / multi-member
 room. Graceful: an empty digest (no connected accounts) or a digest that
 raises → ``""``, so unconnected and non-solo sessions are byte-identical to
 before.
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context) — ``ScopeContext``
+carries an optional ``pocket_summary``: the anchored pocket's orientation
+data ({name, description, type, template_slug, pattern, ripple}) where
+``ripple`` is ``spec_ops.summarize_ripple_spec`` over the pocket's
+rippleSpec (top-level ui node count/types, capped state keys, source
+summaries, action keys, legacy widgets count). Populated by
+``_pocket_summary_data`` in ``_resolve_pocket`` AND ``_resolve_session``
+(when the session is pocket-anchored) for ALL pocket types, from the
+Pocket doc those resolvers already fetched — zero extra DB reads.
+``build_behavior_instructions`` renders it as a ``<pocket-summary>``
+block (description clamped, whole block hard-capped — the about-member
+precedent) appended after the per-scope pocket prompts and gated off for
+``intent="pocket_create"`` (mirrors the ``<current-pocket>`` tag gate).
+Fixes the context-starvation bug where a chat anchored to a fully
+composed template pocket had NO pocket content in its prompt, so the
+agent read the empty legacy ``widgets[]`` via get_pocket and answered
+"an empty shell". HOME pockets keep HOME_POCKET_PROMPT + backend_summary
+byte-identical — the new block is purely additive.
+Changes: 2026-06-12 (fix/pocket-anchored-chat-context, review pass) —
+``<pocket-summary>`` hardening. EVERY field the renderer interpolates —
+not just name/description — now passes through
+``_sanitize_pocket_summary_field`` (whitespace collapse, angle brackets
+swapped for lookalikes, per-item clamp), killing the prompt-injection
+where a member-authored state key / node type / template slug containing
+``"</pocket-summary>\\nIGNORE PREVIOUS INSTRUCTIONS"`` forged the block's
+closing tag and escaped into instruction space. Numeric counts are
+type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
+now sanitizes at the source (the get_pocket ``_summary`` path) — it never
+trusts a hand-built dict. Capped lists render honest "+N more" markers
+from the summarizer's new ``*_omitted`` counters.
+Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
+and the three resolvers gained ``expected_workspace_id``: the authenticated,
+route-validated workspace the run worker threads from ``spec.workspace_id``.
+The new ``_reconcile_workspace_id`` helper makes it tenant-safe: a NON-EMPTY
+doc ``workspace`` stays authoritative AND a disagreeing ``expected_workspace_id``
+raises ``Forbidden`` (the cross-tenant guard — the ``_get_pocket`` / ``_get_session``
+finders look up by ``_id`` alone, not tenant-scoped, so a spec for workspace B
+can load workspace A's doc); an EMPTY/missing doc workspace FALLS BACK to the
+trusted ``expected_workspace_id``. This fixes the worker throwing away the
+authenticated ``spec.workspace_id`` and re-deriving tenancy from a doc that can
+be empty — which blanked the identity contextvar and made the sites-create MCP
+tool raise "requires workspace and user context (call from a cloud chat
+session)". ``expected_workspace_id is None`` (legacy / non-worker callers)
+preserves today's doc-only behavior. Defense-in-depth: ``attach_agent_identity``
+now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
+instead of binding ``""``, so any future caller that loses tenancy fails loudly
+at the seam, not deep inside an MCP tool.
+
+Changes: 2026-06-27 (fix/cloud-artifacts-reland) — added the per-run
+``_active_cloud_chat_run`` marker ContextVar (+ ``current_cloud_chat_run`` and
+the ``mark_cloud_chat_run`` context manager) beside the identity ContextVars.
+It distinguishes an actual cloud CHAT dispatch (the path that MUST bind
+workspace identity) from any other workspace-less run in a cloud-connected
+process. The agent cwd jail's fail-closed (``agent_jail.resolve_agent_cwd``) was
+gated on ``is_multi_tenant_cloud()`` alone — a PROCESS-GLOBAL, true whenever the
+cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
+(direct backend tests, CLI, background jobs), not just a mis-tenanted chat run.
+``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
+and the jail fails closed only when this marker is set; otherwise it falls back
+to ``settings.file_jail_path`` (pre-ART-2 behavior).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -121,7 +182,8 @@ from pocketpaw.ripple import (
     get_pocket_prompts,
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
-from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw.stores import current_workspace as _oss_current_workspace
+from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
 
 logger = logging.getLogger(__name__)
@@ -162,6 +224,22 @@ _active_session_mongo_id: ContextVar[str | None] = ContextVar(
 # chat isn't bound to a pocket (a plain DM / group thread).
 _active_pocket_id: ContextVar[str | None] = ContextVar("agent_pocket_id", default=None)
 
+# Marks the active async context as a live cloud CHAT run — the dispatch path
+# that is REQUIRED to bind workspace identity (``run_core.execute_run`` sets it
+# around the run lifecycle, BEFORE the prewarm ``create_task`` + the two
+# ``attach_agent_identity`` binds). The per-tenant cwd jail
+# (``agent_jail.resolve_agent_cwd``) fails CLOSED on a workspace-less run ONLY
+# when this marker is set: a workspace-less run in a cloud-connected process
+# that is NOT a chat dispatch (a direct backend test, the CLI, a background job)
+# is legitimately un-tenanted and must fall back to the shared file jail, not
+# hard-fail. ``is_multi_tenant_cloud()`` alone can't tell the two apart — it is a
+# PROCESS-GLOBAL, true whenever the cloud Mongo client is connected — so this
+# per-run marker carries the distinction. Default False; the context manager
+# resets it in a finally so it never leaks past one run. ``asyncio.create_task``
+# copies the context, so a marker set before the prewarm ``create_task``
+# propagates into the prewarm task too.
+_active_cloud_chat_run: ContextVar[bool] = ContextVar("agent_cloud_chat_run", default=False)
+
 
 def attach_agent_identity(
     *,
@@ -169,27 +247,58 @@ def attach_agent_identity(
     user_id: str,
     session_mongo_id: str | None = None,
     pocket_id: str | None = None,
-) -> tuple[Token, Token, Token, Token]:
+) -> tuple[Token, Token, Token, Token, Token]:
     """Bind workspace / user / session / pocket identity for the active
     stream's MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat
     is streaming through — used by ``create_pocket`` to link the active
     session to the freshly-created pocket. ``pocket_id`` is the room the chat
     is anchored to (when any) — read by the connector-execution MCP server to
-    scope ``list_connector_actions`` / ``connector_execute`` to this pocket."""
+    scope ``list_connector_actions`` / ``connector_execute`` to this pocket.
+
+    Defense-in-depth (fix/worker-trusts-spec-workspace): REJECT an empty
+    ``workspace_id`` / ``user_id`` instead of binding ``""`` to the contextvar.
+    A blank tenancy here silently propagated to every in-process MCP tool —
+    the sites-create tool surfaced it as "requires workspace and user context
+    (call from a cloud chat session)" deep inside the tool, far from the seam
+    that lost the id. Failing loudly at the bind makes any future caller that
+    drops tenancy break at the source instead. Every real caller (the SSE chat
+    path, the group/DM bridge, the in-process test harnesses) already passes
+    non-empty ids, so this is a guard, not a behavior change for them.
+
+    ISO-3 (workspace store bridge): the same bind also sets the OSS-core
+    ``pocketpaw.stores.current_workspace`` ContextVar, so the NON-router store
+    callers inside an agent run — the agent Fabric tools, the Fabric/Instinct
+    MCP servers, connector ingest — that call ``get_fabric_store()`` /
+    ``get_instinct_store()`` WITHOUT an explicit ``workspace_id`` resolve to THIS
+    stream's workspace and land in its per-workspace file (ISO-1/ISO-2). The
+    EE router path keeps passing ``workspace_id`` explicitly (it has the request
+    scope); this bridges the agent path that doesn't. The OSS token is returned
+    as a FIFTH tuple element — callers treat the tuple opaquely (only
+    ``detach_agent_identity`` unpacks it), so the wider shape is invisible to
+    them. ``detach`` resets it."""
+    if not workspace_id or not user_id:
+        raise ValueError(
+            "attach_agent_identity requires a non-empty workspace_id and user_id "
+            f"(got workspace_id={workspace_id!r}, user_id={user_id!r})"
+        )
     return (
         _active_workspace_id.set(workspace_id),
         _active_user_id.set(user_id),
         _active_session_mongo_id.set(session_mongo_id),
         _active_pocket_id.set(pocket_id),
+        # ISO-3: bridge the EE per-stream workspace onto the OSS store ContextVar.
+        _oss_current_workspace.set(workspace_id),
     )
 
 
-def detach_agent_identity(tokens: tuple[Token, Token, Token, Token]) -> None:
-    ws_token, user_token, session_token, pocket_token = tokens
+def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> None:
+    ws_token, user_token, session_token, pocket_token, oss_ws_token = tokens
     _active_workspace_id.reset(ws_token)
     _active_user_id.reset(user_token)
     _active_session_mongo_id.reset(session_token)
     _active_pocket_id.reset(pocket_token)
+    # ISO-3: clear the OSS store ContextVar bridged in attach_agent_identity.
+    _oss_current_workspace.reset(oss_ws_token)
 
 
 def current_workspace_id() -> str | None:
@@ -206,6 +315,36 @@ def current_session_mongo_id() -> str | None:
 
 def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
+
+
+def current_cloud_chat_run() -> bool:
+    """True when the active context is a live cloud CHAT run dispatch.
+
+    Read by ``agent_jail.resolve_agent_cwd`` to decide whether a workspace-less
+    run in a cloud-connected process is a mis-tenanting bug (fail closed) or a
+    legitimately un-tenanted run that should fall back to the file jail.
+    """
+    return _active_cloud_chat_run.get()
+
+
+@contextmanager
+def mark_cloud_chat_run() -> Iterator[None]:
+    """Mark the active context as a live cloud CHAT run for the per-tenant cwd
+    jail's fail-closed (see ``_active_cloud_chat_run``).
+
+    Sets the marker True on enter and resets it to the prior value in a finally
+    so it never leaks past the run. ``run_core.execute_run`` wraps the run
+    lifecycle with this — set BEFORE the prewarm ``create_task`` (which copies
+    the context, carrying the marker into the prewarm task) and BEFORE
+    ``attach_agent_identity``, so a run that reaches the backend WITHOUT binding
+    identity (the real mis-tenanting bug) still trips the jail's fail-closed
+    instead of silently co-mingling tenant files in the shared home directory.
+    """
+    token = _active_cloud_chat_run.set(True)
+    try:
+        yield
+    finally:
+        _active_cloud_chat_run.reset(token)
 
 
 def push_sse_event(name: str, data: dict[str, Any]) -> None:
@@ -331,6 +470,19 @@ class ScopeContext:
     # agent then behaves exactly as before, no block. Stays a pre-rendered
     # string so the sync ``build_behavior_instructions`` never has to await.
     about_member_block: str | None = None
+    # The anchored pocket's orientation data: {name, description, type,
+    # template_slug, pattern, ripple} where ``ripple`` is
+    # ``spec_ops.summarize_ripple_spec`` over the pocket's rippleSpec
+    # (top-level ui node count/types, capped state keys, source summaries,
+    # action keys, legacy widgets count). Populated for ALL pocket-anchored
+    # scopes by ``_pocket_summary_data`` — built from the Pocket doc the
+    # resolvers already fetched, so it costs no extra DB read.
+    # ``build_behavior_instructions`` renders it as the ``<pocket-summary>``
+    # block so the agent knows what the pocket contains WITHOUT having to
+    # call get_pocket (and without misreading the empty legacy ``widgets[]``
+    # array as "this pocket is an empty shell"). ``None`` when the chat
+    # isn't anchored to a pocket — no block, behavior unchanged.
+    pocket_summary: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +545,40 @@ async def _home_backend_summary(
         logger.debug("home backend summary fetch failed for pocket %s", pocket_id, exc_info=True)
         return None
     return summary
+
+
+def _pocket_summary_data(pocket: Any) -> dict[str, Any] | None:
+    """Build the ``ScopeContext.pocket_summary`` dict from an already-fetched
+    Pocket doc, or ``None``.
+
+    Pure read over the in-hand document — NO DB round-trip. Runs for ALL
+    pocket types (home included; there the summary is additive next to the
+    existing backend_summary flow). A malformed doc degrades to ``None`` so
+    a summary failure can never block scope resolution — the agent then
+    simply behaves as before the block existed.
+    """
+    if pocket is None:
+        return None
+    try:
+        # Lazy import, mirroring ``_home_backend_summary`` — chat paths that
+        # never anchor to a pocket shouldn't pull the pockets package in.
+        from pocketpaw_ee.cloud.pockets.spec_ops import summarize_ripple_spec
+
+        ripple = summarize_ripple_spec(
+            getattr(pocket, "rippleSpec", None),
+            widgets_count=len(getattr(pocket, "widgets", None) or []),
+        )
+        return {
+            "name": str(getattr(pocket, "name", "") or ""),
+            "description": str(getattr(pocket, "description", "") or ""),
+            "type": getattr(pocket, "type", None),
+            "template_slug": getattr(pocket, "template_slug", None),
+            "pattern": getattr(pocket, "pattern", None),
+            "ripple": ripple,
+        }
+    except Exception:  # noqa: BLE001 — a summary failure must not block resolution
+        logger.debug("pocket summary build failed", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +681,140 @@ async def _resolve_about_member(workspace_id: str, user_id: str) -> str | None:
     return block or None
 
 
+# ---------------------------------------------------------------------------
+# "<pocket-summary>" block (agent orientation, fix/pocket-anchored-chat-context)
+# ---------------------------------------------------------------------------
+
+# Same prompt-bloat discipline as the about-member block: the description
+# gets a generous per-field clamp, every other interpolated field gets the
+# tighter item clamp, and the whole rendered block gets a hard backstop cap.
+# ~4 chars/token ⇒ 2000 chars ≈ ~500 tokens for a fully composed pocket —
+# cheap orientation that saves the get_pocket round-trip (and the
+# "widgets: 0 ⇒ empty shell" misread).
+_POCKET_SUMMARY_DESC_CHAR_CAP = 280
+_POCKET_SUMMARY_ITEM_CHAR_CAP = 120
+_POCKET_SUMMARY_CHAR_CAP = 2000
+
+
+def _sanitize_pocket_summary_field(value: Any, *, cap: int = _POCKET_SUMMARY_ITEM_CHAR_CAP) -> str:
+    """Sanitize ONE member-authored field for embedding in the
+    ``<pocket-summary>`` block.
+
+    Collapses ALL whitespace (a crafted name / state key / node type must
+    never smuggle a newline into the system prompt), swaps angle brackets
+    for lookalikes (so a forged ``</pocket-summary>`` — or ANY tag — can't
+    close the block and escape into instruction space), and clamps the
+    length. Twin of ``spec_ops._summary_item``; duplicated here so the
+    renderer never trusts its input even when handed a dict that didn't
+    come from the summarizer.
+    """
+    text = " ".join(str(value or "").split())
+    text = text.replace("<", "‹").replace(">", "›")
+    if len(text) > cap:
+        text = text[:cap].rstrip() + "…"
+    return text
+
+
+def _render_pocket_summary_block(summary: dict[str, Any]) -> str:
+    """Render ``ScopeContext.pocket_summary`` as the ``<pocket-summary>``
+    system-prompt block.
+
+    Sync and pure — the data was resolved (and the ripple summary computed)
+    in the scope resolvers, mirroring the about-member flow. Only lines with
+    content are emitted. Ends with the one-line get_pocket hint so the agent
+    knows where the full spec lives.
+
+    SECURITY: every interpolated field is workspace-member-authored (pocket
+    names, descriptions, state keys, node types, source paths…) and lands in
+    every co-member's system prompt, so EACH ONE — not just name/description
+    — passes through ``_sanitize_pocket_summary_field`` before assembly. The
+    summarizer sanitizes its own output too; this renderer re-sanitizes
+    because its input dict may be hand-built. Numeric counts are type-gated
+    so a junk dict can't interpolate a string where an int belongs.
+    """
+    clean = _sanitize_pocket_summary_field
+
+    def _count(value: Any) -> int:
+        return value if isinstance(value, int) else 0
+
+    name = clean(summary.get("name"))
+    desc = clean(summary.get("description"), cap=_POCKET_SUMMARY_DESC_CHAR_CAP)
+    ripple = summary.get("ripple") or {}
+
+    lines = [
+        "<pocket-summary>",
+        "This chat is anchored to the pocket below. Orient from this summary",
+        "when asked what the pocket is or contains.",
+        f"  name: {name or '(unnamed)'}",
+    ]
+    if desc:
+        lines.append(f"  description: {desc}")
+    meta_bits = []
+    if summary.get("type"):
+        lines.append(f"  type: {clean(summary['type'])}")
+    if summary.get("template_slug"):
+        meta_bits.append(f"template: {clean(summary['template_slug'])}")
+    if summary.get("pattern"):
+        meta_bits.append(f"pattern: {clean(summary['pattern'])}")
+    if meta_bits:
+        lines.append("  " + " · ".join(meta_bits))
+
+    if ripple.get("has_ripple_spec"):
+        types = ", ".join(clean(t) for t in ripple.get("ui_node_types") or []) or "(untyped)"
+        types_omitted = _count(ripple.get("ui_node_types_omitted"))
+        types_suffix = f" (+{types_omitted} more)" if types_omitted else ""
+        lines.append(
+            f"  layout: rippleSpec.ui — {_count(ripple.get('ui_node_count'))} "
+            f"top-level node(s): {types}{types_suffix}"
+        )
+        state_keys = [clean(k) for k in ripple.get("state_keys") or []]
+        if state_keys:
+            omitted = _count(ripple.get("state_keys_omitted"))
+            suffix = f" (+{omitted} more)" if omitted else ""
+            lines.append(
+                f"  state keys ({len(state_keys) + omitted}): {', '.join(state_keys)}{suffix}"
+            )
+        sources = [s for s in ripple.get("sources") or [] if isinstance(s, dict)]
+        if sources:
+            rendered = "; ".join(
+                f"{clean(s.get('key'))} — {clean(s.get('method')) or '?'} "
+                f"{clean(s.get('path')) or '?'} → {clean(s.get('bind')) or '?'}"
+                for s in sources
+            )
+            sources_omitted = _count(ripple.get("sources_omitted"))
+            sources_suffix = f" (+{sources_omitted} more)" if sources_omitted else ""
+            lines.append(
+                f"  sources ({len(sources) + sources_omitted}): {rendered}{sources_suffix}"
+            )
+        action_keys = [clean(k) for k in ripple.get("action_keys") or []]
+        if action_keys:
+            actions_omitted = _count(ripple.get("action_keys_omitted"))
+            actions_suffix = f" (+{actions_omitted} more)" if actions_omitted else ""
+            lines.append(
+                f"  actions ({len(action_keys) + actions_omitted}): "
+                f"{', '.join(action_keys)}{actions_suffix}"
+            )
+        # The misread this block exists to kill: an empty top-level widgets[]
+        # does NOT mean the pocket is empty — the real layout is the spec.
+        lines.append(
+            f"  widgets[]: {_count(ripple.get('widgets_count'))} entries — this is a "
+            "legacy array; the real layout lives in rippleSpec.ui above"
+        )
+    else:
+        lines.append(
+            f"  layout: no rippleSpec — {_count(ripple.get('widgets_count'))} "
+            "legacy widgets[] entries"
+        )
+    lines.append("Call get_pocket for the full rippleSpec, state, and sources.")
+    lines.append("</pocket-summary>")
+    block = "\n".join(lines)
+
+    if len(block) > _POCKET_SUMMARY_CHAR_CAP:
+        # Backstop hard cap — keep the block well-formed by re-closing it.
+        block = block[:_POCKET_SUMMARY_CHAR_CAP].rstrip() + "…\n</pocket-summary>"
+    return block
+
+
 async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
     """Resolve the workspace's default ``pocketpaw`` agent id, or ``None``.
 
@@ -519,16 +839,69 @@ async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _reconcile_workspace_id(doc_workspace_id: str, expected_workspace_id: str | None) -> str:
+    """Resolve the AUTHORITATIVE workspace for a scope, given the workspace the
+    scope DOC carries and the ``expected_workspace_id`` the authenticated caller
+    asserts (the worker threads ``spec.workspace_id`` here — fix/worker-trusts-
+    spec-workspace).
+
+    Rules (tenant-safe by construction):
+
+    * Doc workspace NON-EMPTY:
+        - it stays AUTHORITATIVE, AND
+        - if ``expected_workspace_id`` is also non-empty and DISAGREES, raise a
+          ``Forbidden`` — never silently trust a mismatched caller assertion.
+          The scope finders look the doc up by ``_id`` alone (not tenant-scoped),
+          so a spec for workspace B CAN load workspace A's doc; this mismatch
+          check is the actual cross-tenant guard, not just belt-and-suspenders.
+    * Doc workspace EMPTY/missing (a legacy / partially-stamped doc):
+        - FALL BACK to the trusted ``expected_workspace_id`` when present. This
+          is the fix: the worker stops blanking tenancy when the doc's workspace
+          field is empty, and uses the authenticated id the HTTP route already
+          validated (the ``current_workspace_id`` dependency rejects an empty
+          workspace with 400 before the spec is ever built).
+        - ``""`` when neither is usable — the caller (``execute_run``) then
+          raises a clean error rather than attaching an empty identity.
+
+    ``expected_workspace_id is None`` (legacy / non-worker callers that don't
+    thread it) preserves today's behavior exactly: the doc workspace passes
+    through untouched.
+    """
+    doc_ws = (doc_workspace_id or "").strip()
+    expected = (expected_workspace_id or "").strip()
+    if doc_ws:
+        if expected and expected != doc_ws:
+            raise Forbidden(
+                "scope.workspace_mismatch",
+                "Scope belongs to a different workspace than the authenticated request",
+            )
+        return doc_ws
+    return expected
+
+
 async def resolve_scope_context(
-    *, scope: str, scope_id: str, user_id: str, agent_id_hint: str | None
+    *,
+    scope: str,
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
 ) -> ScopeContext:
     """Resolve a ``ScopeContext`` for a cloud agent chat request.
+
+    ``expected_workspace_id`` is the authoritative, authenticated workspace the
+    caller asserts (the run worker threads ``spec.workspace_id`` here). It is
+    used to (a) FALL BACK to trusted tenancy when the scope doc's ``workspace``
+    field is empty/missing and (b) REJECT a caller whose workspace DISAGREES
+    with a non-empty doc workspace (cross-tenant guard). Defaults to ``None`` —
+    legacy / non-worker callers keep today's doc-only behavior.
 
     Raises:
         InvalidScope: ``scope`` is not one of dm/group/pocket/session.
         NotFound: the group, pocket, or session doesn't exist.
-        CloudError: caller is not a member, no agent is in scope, or the
-            caller must disambiguate ``agent_id`` for a multi-agent group.
+        CloudError: caller is not a member, no agent is in scope, the caller
+            must disambiguate ``agent_id`` for a multi-agent group, or the
+            asserted workspace disagrees with the scope's (``Forbidden``).
     """
     try:
         kind = ScopeKind(scope)
@@ -536,19 +909,33 @@ async def resolve_scope_context(
         raise InvalidScope(scope) from e
 
     if kind is ScopeKind.POCKET:
-        return await _resolve_pocket(scope_id, user_id, agent_id_hint)
+        return await _resolve_pocket(scope_id, user_id, agent_id_hint, expected_workspace_id)
     if kind is ScopeKind.SESSION:
-        return await _resolve_session(scope_id, user_id, agent_id_hint)
-    return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint)
+        return await _resolve_session(scope_id, user_id, agent_id_hint, expected_workspace_id)
+    return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint, expected_workspace_id)
 
 
-async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | None) -> ScopeContext:
+async def _resolve_session(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
     session = await _get_session(scope_id)
     if session is None or getattr(session, "deleted_at", None) is not None:
         raise NotFound("session", scope_id)
 
     if getattr(session, "owner", None) != user_id:
         raise CloudError(403, "session.forbidden", "Caller does not own this session")
+
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace). Reconciled FIRST so the home-summary lookup and the
+    # returned ctx both use the authoritative id, and a cross-tenant mismatch
+    # raises before any further reads.
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(session, "workspace", "")), expected_workspace_id
+    )
 
     # When the session lives inside a pocket, hydrate the pocket's tool specs
     # so a chat routed through ``session`` scope still gets the pocket-scoped
@@ -559,6 +946,7 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
     pocket_tool_specs: list[dict[str, Any]] = []
     pocket_type: str | None = None
     backend_summary: dict[str, Any] | None = None
+    pocket_summary: dict[str, Any] | None = None
     pocket_id = getattr(session, "pocket", None)
     if pocket_id:
         pocket = await _get_pocket(str(pocket_id))
@@ -569,11 +957,13 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
             # active session id is honored). Surface the home pocket's
             # backend summary here too so the home agent inlines it whether
             # the chat routed through pocket or session scope.
-            backend_summary = await _home_backend_summary(
-                pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
-            )
+            backend_summary = await _home_backend_summary(pocket_type, workspace_id, str(pocket_id))
+            # Pocket orientation for ALL pocket types — built from the doc
+            # we already fetched, no extra read. Mirrors the pocket-scope
+            # path so the agent sees the same <pocket-summary> block
+            # whichever scope the frontend routed the chat through.
+            pocket_summary = _pocket_summary_data(pocket)
 
-    workspace_id = str(getattr(session, "workspace", ""))
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
         # Sessions created via ``createPocketSession`` don't yet pin an agent
@@ -603,11 +993,16 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
         pocket_type=pocket_type,
         backend_summary=backend_summary,
         about_member_block=about_member_block,
+        pocket_summary=pocket_summary,
     )
 
 
 async def _resolve_group_like(
-    kind: ScopeKind, scope_id: str, user_id: str, agent_id_hint: str | None
+    kind: ScopeKind,
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
 ) -> ScopeContext:
     group = await _get_group(scope_id)
     if group is None:
@@ -633,7 +1028,12 @@ async def _resolve_group_like(
 
     target = _pick_target_agent(agent_ids, agent_id_hint)
 
-    workspace_id = str(getattr(group, "workspace", ""))
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace).
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(group, "workspace", "")), expected_workspace_id
+    )
     # Orient the agent to the calling member (pp#1367) — pre-rendered capped
     # block, ``None`` when the member has no Person.
     about_member_block = await _resolve_about_member(workspace_id, user_id)
@@ -650,7 +1050,12 @@ async def _resolve_group_like(
     )
 
 
-async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None) -> ScopeContext:
+async def _resolve_pocket(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
     pocket = await _get_pocket(scope_id)
     if pocket is None:
         raise NotFound("pocket", scope_id)
@@ -665,7 +1070,12 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
     # For workspace/public we still require the caller be a workspace member;
     # the route-level dependency ``current_workspace_id`` already enforced that.
 
-    workspace_id = str(getattr(pocket, "workspace", ""))
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace).
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(pocket, "workspace", "")), expected_workspace_id
+    )
 
     agents = list(getattr(pocket, "agents", []) or [])
     agent_ids = [a if isinstance(a, str) else getattr(a, "id", None) for a in agents]
@@ -703,6 +1113,9 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
 
     pocket_type = getattr(pocket, "type", None)
     backend_summary = await _home_backend_summary(pocket_type, workspace_id, scope_id)
+    # Pocket orientation for ALL pocket types (fix/pocket-anchored-chat-
+    # context) — built from the doc we already fetched, no extra read.
+    pocket_summary = _pocket_summary_data(pocket)
     # Orient the agent to the calling member (pp#1367) — pre-rendered capped
     # block, ``None`` when the member has no Person.
     about_member_block = await _resolve_about_member(workspace_id, user_id)
@@ -720,6 +1133,7 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
         pocket_type=pocket_type,
         backend_summary=backend_summary,
         about_member_block=about_member_block,
+        pocket_summary=pocket_summary,
     )
 
 
@@ -828,6 +1242,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
 
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
+    # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
+    # the user can't reach, so a downloadable result MUST go through
+    # deliver_artifact (which lands it in tenant blob storage and returns a real
+    # download URL) — not a printed container path and not a local preview server.
+    parts.append(_DELIVER_ARTIFACT_RULE)
     # Composio auth/search guidance is injected whenever Composio is
     # enabled. An enabled deployment ALWAYS surfaces at least the
     # discovery meta-tools — ``providers.py`` falls back to them when no
@@ -894,6 +1313,18 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
         parts.append(
             fill_current_pocket(HOME_POCKET_PROMPT, ctx.pocket_id or "", ctx.backend_summary)
         )
+    # ADDITIVE pocket orientation (fix/pocket-anchored-chat-context): every
+    # pocket-anchored scope — home included — gets a <pocket-summary> block
+    # (name, description, template/pattern, ui node types, state keys,
+    # sources, legacy widgets count) so the agent can answer "what's this
+    # pocket about?" without misreading the empty legacy widgets[] array as
+    # "an empty shell". Resolved on the ScopeContext from the already-fetched
+    # Pocket doc; rendered sync here (the about-member pattern). Gated off
+    # for intent="pocket_create" — that flow is about a NEW pocket, so the
+    # anchor's summary would mislead (mirrors the <current-pocket> tag gate
+    # in build_dynamic_context). ``None`` ⇒ no block, byte-identical prompt.
+    if ctx.pocket_summary and ctx.intent != "pocket_create":
+        parts.append(_render_pocket_summary_block(ctx.pocket_summary))
     # ADDITIVE member orientation (pp#1367): append the pre-rendered, capped
     # "about this member" block LAST so the agent greets the caller by name and
     # tailors to their role/focus from turn one. It is pre-resolved on the
@@ -947,6 +1378,35 @@ DOES NOT EXIST in this environment:
 - If you genuinely don't have a tool for what the user asked, say so
   plainly. Don't fabricate instructions for a different environment.
 </runtime-identity>"""
+
+
+# Artifact delivery (ART-4). The cloud agent's working directory is a per-tenant
+# jail on the server's filesystem — the user has no shell, no SSH, and cannot
+# reach 127.0.0.1 on the box. So a file the agent "wrote to ./out.pdf" or a
+# "preview running at http://localhost:8000" is invisible to them. The ONLY way
+# to hand the user a downloadable result is deliver_artifact, which uploads the
+# file/dir to the tenant's blob storage and returns a real, short-lived URL.
+_DELIVER_ARTIFACT_RULE = """\
+<artifact-delivery>
+You run in a sandboxed working directory the user cannot see or reach — they
+have no terminal on this machine and cannot open 127.0.0.1 / localhost here.
+
+When you produce something the user should be able to DOWNLOAD (a report, an
+export, a generated document, a built bundle, a zip):
+
+  1. Write it to a file (or a directory) in your working directory.
+  2. Call ``deliver_artifact`` with that path. A single file uploads as-is; a
+     directory is zipped automatically.
+  3. Share the ``url`` it returns — that is the user's real download link.
+
+Do NOT instead:
+  - print the path you wrote to (e.g. "I saved it to ./out.pdf") and stop — that
+    path lives in a container the user can't access;
+  - start a local preview / web server ("run `python -m http.server`", "open
+    http://localhost:8000") — nothing you bind on this box is reachable.
+
+If ``deliver_artifact`` returns an error, relay it; do not invent a link.
+</artifact-delivery>"""
 
 
 # Composio's direct-tools surface caps each toolkit at a fixed limit

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -230,6 +232,44 @@ class TestMeetingNotesAgent:
 
         mock_finalize.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_stop_does_not_block_on_slow_transcribe_task(self):
+        """Regression test: stop() must NOT await a cancelled transcribe task.
+
+        The old code awaited the cancelled transcribe task, which blocked on
+        cleanup of AudioStream/Deepgram pipes for long meetings. The fix
+        cancels the task without awaiting it, letting asyncio.run() clean up.
+        """
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="test123",
+            room_name="group-call-test123",
+            bot_token="test-token",
+        )
+
+        # Set up a transcribe task that simulates a long-running cleanup
+        # after cancellation (e.g. draining audio streams).
+        agent._running = True
+        agent._transcribe_task = asyncio.create_task(self._never_ending())
+
+        # This must complete quickly (~0s, not ~10s+).
+        with patch.object(agent, "_finalize_notes", new_callable=AsyncMock) as mock_finalize:
+            await asyncio.wait_for(agent.stop(), timeout=2)
+
+        mock_finalize.assert_called_once()
+
+    @staticmethod
+    async def _never_ending() -> None:
+        """A task that never finishes cleanly after cancellation."""
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # Simulate slow cleanup (old code would await this)
+            await asyncio.sleep(30)
+            raise
+
     def test_add_transcript_segment(self):
         from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
 
@@ -305,6 +345,41 @@ class TestMeetingNotesAgent:
 
         assert "Line 1" in summary
         assert items == []
+
+    @pytest.mark.asyncio
+    async def test_finalize_notes_truncates_long_transcript_for_llm(self):
+        """Long transcripts should be truncated before the LLM call.
+
+        The full transcript is still saved in the payload, but the LLM
+        should only receive ~5000 chars so the API call completes within
+        the process-grace-period window.
+        """
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="test123",
+            room_name="group-call-test123",
+            bot_token="test-token",
+        )
+        agent._call_start_time = time.time()
+
+        # Add transcript segments totalling well over 5000 chars
+        long_text = "Hello world. " * 1000  # ~14K chars
+        agent.add_transcript_segment("Alice", long_text)
+        agent.add_transcript_segment("Bob", "Short reply.")
+
+        with patch.object(agent, "_generate_summary", AsyncMock()) as mock_gen:
+            mock_gen.return_value = ("summary", ["action"])
+            await agent._finalize_notes()
+
+        # Verify the LLM got a truncated version (head + tail + ellipsis
+        # is ~5048 chars with the speaker prefix; assert it's well under
+        # the original ~14K length and contains the truncation marker).
+        called_with = mock_gen.call_args[0][0]
+        assert len(called_with) < 14000, (
+            f"LLM got full {len(called_with)}-char transcript, expected truncation"
+        )
+        assert "[... transcript truncated at 5000 chars ...]" in called_with
 
 
 class TestMeetingNotesPosting:

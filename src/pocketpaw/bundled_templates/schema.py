@@ -25,6 +25,19 @@
 # path-required-for-http and sense_id+action-required-for-sense, and validates
 # sense_id via senses.validate_sense_id. The resolved Sense value binds into
 # state like any HTTP source, so Ripple needs no changes.
+# Modified: 2026-06-19 (feat/typed-ripplespec-phase1) — added the RFC-03-v2
+# RUNTIME layer-split models ``TemplateLayer``, ``InstanceLayer`` and
+# ``RippleSpec`` (distinct from the design-time ``PocketTemplate`` above).
+# ``RippleSpec`` is a TYPE boundary over the flat rippleSpec dict MongoDB
+# already stores — ``to_flat_dict`` is BSON-byte-equivalent (no migration).
+# The split lets the cloud ``service.update`` + ``reconcile`` paths overwrite
+# template-owned regions (ui/actions/sources/shape) WITHOUT clobbering the
+# instance-owned regions (state/selections), the 2026-06-13 production bug.
+# Phase 1 wires these models INTERNALLY in service.update + reconcile only;
+# Beanie ``Pocket.rippleSpec`` and ``domain.Pocket.ripple_spec`` stay ``dict``
+# and every reader still receives a flat dict (executor dual-path readers are
+# deferred to a #1472-gated Phase 2). All compile_template passthrough keys are
+# explicit typed fields so no ``.get("agents")`` reader silently breaks.
 """Pydantic v2 model for the RFC 03 v2 Pocket Template Schema.
 
 This module is the **schema chokepoint** — every bundled template, every
@@ -54,6 +67,7 @@ Out of scope (separate PRs):
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from pydantic import (
@@ -65,6 +79,8 @@ from pydantic import (
 )
 
 from pocketpaw.bundled_templates.expressions import CelExpression
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Enumerations (kept as Literal aliases so Pydantic generates clean
@@ -534,18 +550,203 @@ class PocketTemplate(BaseModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# RFC 03 v2 RUNTIME layer split — TemplateLayer / InstanceLayer / RippleSpec
+# ---------------------------------------------------------------------------
+#
+# These are the RUNTIME models (distinct from the design-time ``PocketTemplate``
+# above). ``compile_template`` turns a ``PocketTemplate`` into a flat rippleSpec
+# dict; ``RippleSpec`` is the typed view OVER that flat dict. The split is a
+# TYPE boundary, not a storage boundary: ``to_flat_dict`` produces the exact
+# flat dict MongoDB already stores, so there is NO migration and revert is a
+# one-line change at every call site.
+#
+# Ownership partition (the load-bearing contract — see reconcile.py):
+#   * TEMPLATE-OWNED (reconcile overwrites from the source template):
+#       ui, actions, sources, shape  → ``TemplateLayer``
+#   * INSTANCE-OWNED (reconcile NEVER touches; agents read/write via state_ops):
+#       state, selections            → ``InstanceLayer``
+#   * Everything else (agents, triggers, kb_scope, schema_version, …) is a
+#     compile_template PASSTHROUGH field — explicit on ``RippleSpec`` so a
+#     ``.get("agents")`` reader never silently breaks (adversarial must-fix #2).
+
+
+class TemplateLayer(BaseModel):
+    """Template-owned rippleSpec regions.
+
+    Reconcile owns these — it overwrites them from the freshly-loaded source
+    template. Instance edits to these regions survive only until the user runs
+    reconcile. NEVER write instance/runtime data into this layer.
+
+    ``actions`` is typed ``dict | list`` because ``compile_template`` emits a
+    list from ``PocketTemplate.actions`` while the runtime ``rippleSpec.actions``
+    block (post-normalizer write-binding lift) is a dict; both shapes are valid
+    on a stored doc.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ui: dict[str, Any] | None = None
+    actions: dict[str, Any] | list[Any] | None = None
+    sources: dict[str, Any] | None = None
+    shape: str | None = None
+
+
+class InstanceLayer(BaseModel):
+    """Instance-owned rippleSpec regions.
+
+    Reconcile NEVER touches these. Agents read/write ``state`` via state_ops.
+    The clobber-fix preserves this layer when a partial ``update`` omits it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: dict[str, Any] = Field(default_factory=dict)
+    selections: dict[str, Any] = Field(default_factory=dict)
+
+
+class RippleSpec(BaseModel):
+    """Typed, layer-split rippleSpec — the RFC-03-v2 runtime model.
+
+    The layer split is a TYPE boundary, not a storage boundary. ``to_flat_dict``
+    is byte-equivalent to the flat dict MongoDB already stores, so no document
+    migration is required and any phase is independently revertable.
+
+    Design notes embedded in the contract:
+
+    * **Every ``compile_template`` passthrough key is an explicit field**
+      (adversarial must-fix #2). No key silently disappears into
+      ``__pydantic_extra__`` where a ``.get("agents")`` reader would miss it.
+      Truly-unknown future keys still land in ``__pydantic_extra__`` (extra is
+      allowed) and survive a round-trip — additive-safe.
+    * **``to_flat_dict`` uses ``exclude_unset=True``** (must-fix #1) so a key
+      absent from the original dict is never re-emitted as a null, while a key
+      explicitly set to ``None`` (a deliberate clear) is preserved.
+    * **``from_flat_dict`` is the sole promotion entry point** and NEVER raises
+      — a corrupted spec must not break pocket load (returns ``None``).
+    * **``with_template_layer`` / ``with_instance_layer`` return NEW objects.**
+      No mutation — the ownership boundary is explicit at the call site.
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    # Template layer (explicit — IDE autocomplete + grep + reconcile derives
+    # _TEMPLATE_OWNED_REGIONS from TemplateLayer.model_fields, not from here).
+    ui: dict[str, Any] | None = None
+    actions: dict[str, Any] | list[Any] | None = None
+    sources: dict[str, Any] | None = None
+    shape: str | None = None
+
+    # Instance layer.
+    state: dict[str, Any] = Field(default_factory=dict)
+    selections: dict[str, Any] = Field(default_factory=dict)
+
+    # compile_template passthrough fields (explicit to prevent .get() breakage).
+    schema_version: str | None = None
+    name: str | None = None
+    version: str | None = None
+    agents: list[Any] | None = None
+    triggers: list[Any] | None = None
+    outcomes: list[str] | None = None
+    kb_scope: str | None = None
+    skill_refs: list[str] | None = None
+    permissions: dict[str, Any] | None = None
+    instinct_rules: dict[str, Any] | None = None
+
+    # Any remaining keys land in __pydantic_extra__ — additive safe.
+
+    @property
+    def template_layer(self) -> TemplateLayer:
+        """The template-owned regions as a typed ``TemplateLayer``.
+
+        Only fields the spec actually SET are carried onto the layer, so a
+        downstream ``model_dump(exclude_unset=True)`` does not resurrect a key
+        the spec omitted (keeps the layer-merge faithful to the partial input).
+        """
+        return TemplateLayer.model_validate(
+            {k: getattr(self, k) for k in TemplateLayer.model_fields if k in self.model_fields_set}
+        )
+
+    @property
+    def instance_layer(self) -> InstanceLayer:
+        """The instance-owned regions as a typed ``InstanceLayer``.
+
+        Mirrors :attr:`template_layer`: only fields the spec SET are carried,
+        so an absent ``selections`` is not re-introduced as ``{}`` on merge.
+        """
+        return InstanceLayer.model_validate(
+            {k: getattr(self, k) for k in InstanceLayer.model_fields if k in self.model_fields_set}
+        )
+
+    @classmethod
+    def from_flat_dict(cls, d: dict[str, Any] | None) -> RippleSpec | None:
+        """Promote a legacy flat dict to ``RippleSpec``.
+
+        Returns ``None`` on ``None``/non-dict input or any validation failure —
+        NEVER raises, because a corrupted stored spec must not break pocket
+        load. An already-constructed ``RippleSpec`` is returned unchanged
+        (idempotent promotion).
+        """
+        if d is None:
+            return None
+        if isinstance(d, RippleSpec):
+            return d
+        if not isinstance(d, dict):
+            return None
+        try:
+            return cls.model_validate(d)
+        except Exception:  # noqa: BLE001 — promotion must never break load.
+            logger.warning("RippleSpec.from_flat_dict: validation failed, returning None")
+            return None
+
+    def to_flat_dict(self) -> dict[str, Any]:
+        """Serialize to a BSON-compatible flat dict.
+
+        Byte-equivalent to the current MongoDB documents — no migration needed.
+        ``exclude_unset=True`` avoids injecting null keys absent from the
+        original document while preserving keys explicitly set to ``None``
+        (tracked via ``model_fields_set``). See adversarial must-fix #1.
+        """
+        return self.model_dump(exclude_unset=True, mode="python")
+
+    def with_template_layer(self, layer: TemplateLayer) -> RippleSpec:
+        """Return a NEW ``RippleSpec`` with template-owned fields from ``layer``.
+
+        Instance-owned fields (state, selections) and passthrough/extra keys
+        are preserved verbatim. Only the fields ``layer`` actually SET are
+        overlaid, so an empty ``TemplateLayer()`` is a no-op on the template
+        regions (it never clears an existing ui).
+        """
+        flat = self.to_flat_dict()
+        flat.update(layer.model_dump(exclude_unset=True))
+        return RippleSpec.model_validate(flat)
+
+    def with_instance_layer(self, layer: InstanceLayer) -> RippleSpec:
+        """Return a NEW ``RippleSpec`` with instance-owned fields from ``layer``.
+
+        Template-owned fields and passthrough/extra keys are preserved verbatim.
+        Only the fields ``layer`` actually SET are overlaid.
+        """
+        flat = self.to_flat_dict()
+        flat.update(layer.model_dump(exclude_unset=True))
+        return RippleSpec.model_validate(flat)
+
+
 __all__ = [
     "ActionDef",
     "AgentDef",
     "ColumnDef",
     "ConfirmDef",
     "DataSourceDef",
+    "InstanceLayer",
     "InstinctRule",
     "InstinctRulesDef",
     "JoinedEntity",
     "PermissionsDef",
     "PocketTemplate",
+    "RippleSpec",
     "SavedView",
     "StateBinding",
+    "TemplateLayer",
     "TriggerDef",
 ]

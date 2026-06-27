@@ -199,6 +199,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# The dormant, fail-safe triager level. When a caller threads no
+# `approval_level` into `run_action`, gate 1.5 passes this string and
+# `gate_action._coerce_approval_level` maps it onto ApprovalLevel.ASK — the
+# triager stays dormant and every escalate goes to a human (zero behavior
+# change). Kept as a bare string so this module does not import the
+# `instinct_triage` enum at module load (instinct_triage imports
+# `CompensateSpec` from HERE, so a top-level back-import would risk a cycle).
+_DEFAULT_APPROVAL_LEVEL = "ASK"
+
 # --- limits / policy --------------------------------------------------------
 _PER_ACTION_TIMEOUT_S = 10.0
 # Write budget per (pocket, user) per window. Separate from the read
@@ -210,6 +219,40 @@ _ACTION_RATE_LIMIT_WINDOW_S = 60.0
 # Per-(pocket, user) write timestamps. SEPARATE dict from
 # source_executor._run_log so reads and writes never share a budget.
 _action_log: dict[tuple[str, str], list[float]] = {}
+
+# --- optimistic compensation registry (layered/learning gate, T10) ----------
+# The OPTIMISTIC lane fires a reversible write BEFORE a human reviews it, on
+# the bet that it can be undone. The registry holds the inverse-write handle
+# until the client rolls it back OR the TTL hard-expires it (firing an ALERT
+# audit). A single process-wide instance keyed by config TTL; consulted only
+# by the same process that minted the handle (in-memory is correct for the
+# foundation — see instinct_compensation_registry).
+_optimistic_registry: Any = None
+
+
+def get_optimistic_registry():
+    """Return the process-wide ``OptimisticCompensationRegistry`` (lazy).
+
+    Lazily constructed so importing this module never reads config at import
+    time and so a test can swap the instance. The TTL comes from
+    ``instinct_optimistic_ttl_seconds`` (default 300s, hard-expiry, no
+    heartbeat — design Q2).
+    """
+    global _optimistic_registry
+    if _optimistic_registry is None:
+        from pocketpaw.config import get_settings
+        from pocketpaw_ee.cloud.pockets.instinct_compensation_registry import (
+            OptimisticCompensationRegistry,
+        )
+
+        ttl = 300
+        try:
+            ttl = int(get_settings().instinct_optimistic_ttl_seconds)
+        except Exception:  # noqa: BLE001 — fall back to the documented default
+            logger.warning("could not read instinct_optimistic_ttl_seconds; using 300s")
+        _optimistic_registry = OptimisticCompensationRegistry(ttl_seconds=ttl)
+    return _optimistic_registry
+
 
 # Guards the check-and-record on ``_action_log``. The read-filter-write is a
 # TOCTOU race under ``asyncio.gather``; the lock makes it atomic — the same
@@ -671,6 +714,10 @@ async def run_action(
     workspace_context: dict[str, Any] | None = None,
     row_id: str = "",
     correlation_id: UUID | None = None,
+    optimistic_execute: bool = False,
+    dry_run: bool = False,
+    approval_level: Any = None,
+    dry_run_mode: bool = False,
 ) -> dict:
     """Run ONE pocket write action against its configured backend.
 
@@ -697,6 +744,24 @@ async def run_action(
     Action's schema-2 ``_pocket_write`` blob). On the parked path the
     minted / supplied id rides on the ``_park`` dict so the bridge can
     stash it on the Instinct Action.
+
+    ``dry_run`` and ``optimistic_execute`` (the layered/learning gate
+    integration, T7) are NEW dedicated flags — neither reuses
+    ``from_instinct``:
+
+    * ``dry_run=True`` — a GOVERNANCE REHEARSAL. The executor runs every
+      security gate (2-6) as VALIDATION, then intercepts at gate 7 and
+      returns the ``instinct_dry_run`` sentinel carrying the resolved write
+      under ``_park`` — server-side only, NO HTTP call, NO approval row. An
+      off-policy write (allowlist miss, bad base-url) is still REJECTED by
+      the gates that run first; the dry-run intercept never runs for it
+      (the safety-critical ordering, T-30).
+    * ``optimistic_execute=True`` — a TRUSTED, REVERSIBLE write the triager
+      cleared for OPTIMISTIC execution. It sets ``optimistic_gate_cleared``
+      so gate 7's deny-by-default park does NOT fire; the write executes
+      NOW. ``from_instinct`` stays ``False`` (MF-4 — no semantic lie: this
+      is not a post-human-approval re-entry). The caller registers a bounded
+      compensation handle so the optimistic bet is time-limited.
 
     The result shape on a fired success::
 
@@ -812,6 +877,10 @@ async def run_action(
             "outcome_value": binding.outcome_value,
             "outcome_unit": binding.outcome_unit,
         }
+        # The binding's declared inverse rides on `park` so the triage
+        # router (classify_lane) can read reversibility for the lane decision.
+        if binding.compensate is not None:
+            park["compensate"] = binding.compensate.model_dump()
         gate = await instinct_dispatch.gate_action(
             workspace_id=workspace_id,
             user_id=user_id,
@@ -822,6 +891,15 @@ async def run_action(
             workspace_context=workspace_context,
             row_id=row_id,
             park=park,
+            # Layered/learning gate (T6). When the caller passes no
+            # `approval_level` (every legacy caller), `gate_action`'s own
+            # default ApprovalLevel.ASK applies — the triager stays dormant
+            # and every escalate becomes a human-pending row (zero behavior
+            # change). The router passes the workspace's level to activate it.
+            approval_level=approval_level
+            if approval_level is not None
+            else _DEFAULT_APPROVAL_LEVEL,
+            dry_run_mode=dry_run_mode,
         )
         if gate.next_step == "blocked":
             _audit_action_run(
@@ -859,15 +937,38 @@ async def run_action(
                 "on_success": [],
                 "on_error": [],
             }
-        # gate.next_step == "proceed" — fall through into the existing
-        # gate stack. Notify rules are dropped on the floor here; Wave
-        # 3c wires the side-effect dispatcher.
-        #
-        # W2a — the template gate EXPLICITLY adjudicated this write and said
-        # proceed. Mark it so gate 7's deny-by-default park does not double-
-        # gate it (see the `template_gate_cleared` definition above and the
-        # gate-7 condition below).
-        template_gate_cleared = True
+        if gate.next_step == "dry_run":
+            # The triager routed this escalate to the DRY_RUN lane. Set the
+            # local dry-run flag so gate 7a returns the `instinct_dry_run`
+            # sentinel AFTER the security gates validate the write. No
+            # approval row was persisted (the gate's DRY_RUN branch persists
+            # nothing). template_gate_cleared so gate 7's park does not also
+            # fire.
+            dry_run = True
+            template_gate_cleared = True
+        elif gate.next_step == "auto_approved":
+            # AUTO lane — the gate already wrote a DECIDED (auto_approved)
+            # approval row; the write now FIRES. template_gate_cleared
+            # suppresses gate 7's deny-by-default park so the HTTP call runs.
+            template_gate_cleared = True
+        elif gate.next_step == "optimistic_proceed":
+            # OPTIMISTIC lane — the gate wrote a decided row; the write fires
+            # NOW and registers a bounded compensation handle (gate 8 success
+            # path). `optimistic_execute` clears gate 7's park and triggers
+            # the handle registration.
+            optimistic_execute = True
+            template_gate_cleared = True
+        else:
+            # gate.next_step == "proceed" — EXECUTE / NOTIFY_AND_EXECUTE.
+            # Fall through into the existing gate stack. Notify rules are
+            # dropped on the floor here; Wave 3c wires the side-effect
+            # dispatcher.
+            #
+            # W2a — the template gate EXPLICITLY adjudicated this write and
+            # said proceed. Mark it so gate 7's deny-by-default park does not
+            # double-gate it (see the `template_gate_cleared` definition above
+            # and the gate-7 condition below).
+            template_gate_cleared = True
 
     # ── 2. write rate limit ─────────────────────────────────────────────
     if await _action_rate_limited(pocket_id, user_id):
@@ -1009,9 +1110,58 @@ async def run_action(
         )
         return _error(action, exc.message, exc.code, on_error)
 
+    # The resolved-write blob — built once so the dry-run sentinel and the
+    # gate-7 park return BYTE-IDENTICAL `_park` dicts. The router strips
+    # `_park` from both sentinels the same way (it must never reach the
+    # wire), so the two shapes must match exactly (T-31).
+    park_blob = {
+        "action": action,
+        "method": method,
+        "path": path,
+        "params": params,
+        "idempotency_key": idempotency_key,
+        "outcome": binding.outcome,
+        # gap-3 — billable value/unit ride on _park so the bridge stashes
+        # them on the persisted parked-write blob and the post-approval
+        # emit threads them to the ledger row.
+        "outcome_value": binding.outcome_value,
+        "outcome_unit": binding.outcome_unit,
+        # RFC 09 Slice 2 — correlation_id rides on _park so the bridge can
+        # stash it on the parked Action's schema-2 _pocket_write blob.
+        "correlation_id": str(correlation_id),
+    }
+
+    # ── 7a. DRY-RUN intercept (layered/learning gate, T7) ───────────────
+    # Placed AFTER the security gates (2-6) so they run as VALIDATION first:
+    # an off-policy write (allowlist miss, SSRF, bad base-url) was ALREADY
+    # rejected above and never reaches this point (T-30). A dry-run is a
+    # governance REHEARSAL — the write is resolved + auditable but NEVER
+    # sent to the backend and NEVER persisted as an approval row. The
+    # `instinct_dry_run` sentinel stays server-side: the router strips
+    # `_park` exactly as it does for `instinct_pending`, so the resolved
+    # write never reaches the client wire (T-31). dry_run never overrides a
+    # BLOCK — a BLOCK short-circuited at gate 1.5 before reaching here.
+    if dry_run:
+        _audit_action_run(
+            actor=user_id,
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            action=action,
+            status="instinct-dry-run",
+            base_url=base_url,
+        )
+        return {
+            "ok": True,
+            "code": "instinct_dry_run",
+            "action": action,
+            "_park": park_blob,
+            "on_success": [],
+            "on_error": [],
+        }
+
     # ── 7. instinct park ────────────────────────────────────────────────
     # W2a — DENY-BY-DEFAULT. `binding.requires_instinct` now defaults True
-    # (see ActionBinding), so EVERY write parks here unless one of THREE
+    # (see ActionBinding), so EVERY write parks here unless one of FOUR
     # explicit, auditable conditions holds:
     #   * `binding.instinct_exempt` — the author declared (in the persisted
     #     spec) that this binding is deliberately allowed to fire without
@@ -1029,21 +1179,32 @@ async def run_action(
     #     writes the template already cleared. The template gate is the
     #     governance for template-bound pockets; the binding-level gate is
     #     the deny-by-default backstop for everything else.
+    #   * `optimistic_execute` — the layered/learning gate (T7) cleared this
+    #     write for OPTIMISTIC execution: trusted + reversible, the triager
+    #     bet the write can be undone if wrong. It fires NOW instead of
+    #     parking, and the caller registers a bounded compensation handle so
+    #     the bet is time-limited. A DEDICATED flag, not `from_instinct`
+    #     (MF-4): this is NOT a post-human-approval re-entry, so reusing
+    #     `from_instinct` would be a semantic lie that also wrongly
+    #     suppresses the direct-path chain close. The optimistic write OWNS
+    #     its chain close like any other direct fire.
     #
     # A binding that requires instinct, on a direct (not post-approval, not
-    # exempt, not template-cleared) run, is PARKED — not fired. Gates 2-6
-    # already ran as VALIDATION, so a write the allowlist would reject was
-    # rejected above, NOT parked: an off-policy write must never reach the
-    # approval surface looking legitimate. The executor stays pure — it just
-    # returns the resolved write under `_park` and signals
-    # `instinct_pending`. The router hands `_park` to
+    # exempt, not template-cleared, not optimistic) run, is PARKED — not
+    # fired. Gates 2-6 already ran as VALIDATION, so a write the allowlist
+    # would reject was rejected above, NOT parked: an off-policy write must
+    # never reach the approval surface looking legitimate. The executor
+    # stays pure — it just returns the resolved write under `_park` and
+    # signals `instinct_pending`. The router hands `_park` to
     # `instinct_bridge.propose_pocket_write`, which builds the Instinct
     # Action. NO HTTP call is made here.
+    optimistic_gate_cleared = optimistic_execute
     if (
         binding.requires_instinct
         and not binding.instinct_exempt
         and not from_instinct
         and not template_gate_cleared
+        and not optimistic_gate_cleared
     ):
         _audit_action_run(
             actor=user_id,
@@ -1057,26 +1218,7 @@ async def run_action(
             "ok": True,
             "code": "instinct_pending",
             "action": action,
-            "_park": {
-                "action": action,
-                "method": method,
-                "path": path,
-                "params": params,
-                "idempotency_key": idempotency_key,
-                "outcome": binding.outcome,
-                # gap-3 — billable value/unit ride on _park so the bridge
-                # stashes them on the persisted parked-write blob and the
-                # post-approval emit threads them to the ledger row.
-                "outcome_value": binding.outcome_value,
-                "outcome_unit": binding.outcome_unit,
-                # RFC 09 Slice 2 — correlation_id rides on _park so the
-                # bridge can stash it on the parked Action's schema-2
-                # _pocket_write blob. The Instinct router reads it back
-                # at approve/reject time to chain policy.evaluated +
-                # human.corrected + decision.completed under the same
-                # correlation as the agent.proposed we already emitted.
-                "correlation_id": str(correlation_id),
-            },
+            "_park": park_blob,
             "on_success": [],
             "on_error": [],
         }
@@ -1267,7 +1409,7 @@ async def run_action(
             causation_id=policy_event_id,
         )
 
-    return {
+    success = {
         "ok": True,
         "action": action,
         "status": result["status"],
@@ -1284,6 +1426,34 @@ async def run_action(
         "on_success": binding.on_success,
         "on_error": on_error,
     }
+
+    # ── OPTIMISTIC compensation registration (layered/learning gate, T10) ─
+    # An OPTIMISTIC write fired BEFORE a human reviewed it, on the bet it's
+    # reversible. If the binding declares a `compensate` inverse, register a
+    # bounded handle so (a) the client can roll it back via the optimistic
+    # rollback endpoint and (b) the TTL sweeper hard-expires the bet with an
+    # ALERT if it's never rolled back. No `compensate` → no handle (nothing
+    # to undo). Best-effort: a registry hiccup must never break the write
+    # that already succeeded. The id rides back on `_optimistic_compensation_id`
+    # which the router passes to the client and strips from the wire model.
+    if optimistic_execute and binding.compensate is not None:
+        try:
+            cid = get_optimistic_registry().register(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                action=action,
+                compensate=binding.compensate,
+            )
+            success["_optimistic_compensation_id"] = cid
+        except Exception:  # noqa: BLE001 — registration must never break the write
+            logger.warning(
+                "optimistic compensation registration failed for action=%s pocket=%s",
+                action,
+                pocket_id,
+                exc_info=True,
+            )
+
+    return success
 
 
 def _emit_direct_path_failure(
@@ -1395,4 +1565,9 @@ async def _do_request(
     return {"status": resp.status_code, "response": response}
 
 
-__all__ = ["ActionBinding", "CompensateSpec", "run_action"]
+__all__ = [
+    "ActionBinding",
+    "CompensateSpec",
+    "get_optimistic_registry",
+    "run_action",
+]

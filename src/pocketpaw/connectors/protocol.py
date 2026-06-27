@@ -9,6 +9,10 @@
 #   methods on ConnectorProtocol. See ee/cloud/connectors/CHARTER.md
 #   §4 + §6.2 for the rationale (CLI connectors can't multi-tenant in
 #   cloud, so the runtime needs to know where each action runs).
+# Updated: 2026-06-12 (connector-store-unification CS-2) — Added
+#   ConnectorStatus.DEFINITION_MISSING for orphaned state rows: config is
+#   persisted in the state store but the connector's YAML definition is
+#   gone (deleted, or the deploy dropped it). Surfaced, never crashed on.
 
 from __future__ import annotations
 
@@ -18,12 +22,19 @@ from typing import Any, Literal, Protocol
 
 
 class ConnectorStatus(StrEnum):
-    """Connection status."""
+    """Connection status.
+
+    ``DEFINITION_MISSING`` marks an orphaned state row: config persisted in
+    the connector state store, but the YAML definition no longer resolves
+    (file deleted, or a deploy dropped it). The row stays visible so the
+    operator can fix or remove it instead of the registry silently hiding it.
+    """
 
     DISCONNECTED = "disconnected"
     CONNECTED = "connected"
     SYNCING = "syncing"
     ERROR = "error"
+    DEFINITION_MISSING = "definition_missing"
 
 
 class TrustLevel(StrEnum):

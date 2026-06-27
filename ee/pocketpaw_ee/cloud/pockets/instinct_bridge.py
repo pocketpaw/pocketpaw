@@ -222,7 +222,12 @@ async def propose_pocket_write(
 
     approver = _resolve_approver(pocket, backend_config)
 
-    store = get_instinct_store()
+    # ISO: this propose path is reached from BOTH the agent stream (ContextVar
+    # set) AND the REST run_action endpoint (FastAPI Depends, no ContextVar) —
+    # so scope the store to the pocket's workspace explicitly. When the
+    # ContextVar IS set it equals this id (harmless); on the REST path it's the
+    # only correct source.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
         title=title or action_name or "Pocket write",
@@ -428,12 +433,20 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
     from pocketpaw_ee.cloud.pockets import action_executor
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    store = get_instinct_store()
     params = getattr(action, "parameters", None) or {}
     blob = params.get("_pocket_write")
     if not isinstance(blob, dict):
+        # Can't resolve the store's workspace without the blob either, so bail
+        # before opening one.
         logger.warning("approved action %s carries no _pocket_write blob", action.id)
         return
+
+    pocket_id = str(action.pocket_id or "")
+    workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: this runs on the HTTP approve path (no ``current_workspace``
+    # ContextVar) — scope the store to the blob's workspace so the
+    # executed/failed mark lands in the tenant's file, not the shared ledger.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     if blob.get("schema") != _POCKET_WRITE_SCHEMA:
         await store.mark_failed(
             action.id,
@@ -441,9 +454,6 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
             "incompatible build and cannot be executed",
         )
         return
-
-    pocket_id = str(action.pocket_id or "")
-    workspace_id = str(blob.get("workspace_id") or "")
     action_name = str(blob.get("action") or "")
     requested_by = str(blob.get("requested_by") or "")
     approver = str(getattr(action, "approved_by", "") or "") or "system"
@@ -600,6 +610,32 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
         action.id,
         f"write '{action_name}' executed — HTTP {result.get('status')}",
     )
+
+    # T8 (layered/learning gate) — the SINGLE trust-feedback write site.
+    # After a gated write actually LANDS, append one trust-ledger row for
+    # the (workspace, pocket, action) pair. ``was_auto_approved`` is True
+    # when the system triager decided the write (``approver ==
+    # "system:triager"`` — the AUTO/OPTIMISTIC lanes' decider) and False
+    # when a human approved it. This is the ONLY place trust is recorded
+    # (MF-3): ``outcomes/service.py`` must NOT call it, so the trust loop
+    # can never self-poison by double-counting one executed write. Best-
+    # effort: a sidecar write failure degrades trust accuracy but must
+    # never fail the approve response (the write already succeeded).
+    try:
+        from pocketpaw_ee.cloud.pockets import trust_ledger
+
+        await trust_ledger.record_correction(
+            workspace_id,
+            pocket_id,
+            action_name,
+            was_auto_approved=(approver == "system:triager"),
+        )
+    except Exception:  # noqa: BLE001 — trust feedback is best-effort
+        logger.warning(
+            "approved action %s: trust feedback write failed (write succeeded)",
+            action.id,
+            exc_info=True,
+        )
 
     # RFC 09 Slice 2 — chain close on the bridge-side success path
     # (audit Producer 4 site (b)). Emit BEFORE ``emit_pocket_outcome``

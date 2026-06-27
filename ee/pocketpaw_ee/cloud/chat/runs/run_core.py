@@ -1,6 +1,50 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
+  lifecycle (the prewarm ``create_task`` + the main agent loop) in
+  ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
+  (``agent_jail.resolve_agent_cwd``) fires ONLY for an actual cloud chat
+  dispatch — not for any workspace-less run in a cloud-connected process. The
+  marker is set BEFORE the prewarm ``create_task`` (``asyncio.create_task``
+  copies the context, carrying it into the prewarm task) and BEFORE the two
+  ``attach_agent_identity`` binds, so a run that reaches the backend WITHOUT
+  binding identity still trips the guard. Fixes the dev-CI regression where the
+  jail hard-failed direct claude_sdk backend tests + a broad ee set once a cloud
+  test left ``is_multi_tenant_cloud()`` True in the process.
+- 2026-06-26 (ART-2) — ``_prewarm_session`` now binds the run's identity
+  (``attach_agent_identity`` with the same ``session_mongo_id`` / ``pocket_id``
+  the stream path uses) around its ``pool.prewarm`` call, then detaches in a
+  ``finally``. The per-tenant cwd jail resolves the agent's working directory
+  from those ContextVars; since prewarm is fired in its own ``create_task``
+  context BEFORE the stream binds identity, without this the cloud cwd resolver
+  would fail closed during warm-up (swallowed) and every cloud session would
+  lose the turn-1 warm. Binding here makes prewarm warm the SAME per-session
+  jail turn 1 will use.
+- 2026-06-25 (fix/worker-trusts-spec-workspace) — ``execute_run`` now threads
+  the authenticated ``spec.workspace_id`` into ``resolve_scope_context`` via the
+  new ``expected_workspace_id`` kwarg, then raises a clean
+  ``CloudError("scope.no_workspace")`` if the resolved ``ctx.workspace_id`` is
+  STILL empty — instead of letting ``_drive_agent_loop`` attach an empty
+  identity. The worker used to re-derive tenancy from the scope doc alone and
+  discard the trusted, route-validated spec workspace; when the doc's
+  ``workspace`` field was empty the identity contextvar became ``""`` and the
+  sites-create MCP tool raised "requires workspace and user context (call from a
+  cloud chat session)". The resolver now falls back to the trusted spec
+  workspace (and rejects a spec that disagrees with a non-empty doc workspace —
+  the cross-tenant guard); this seam adds the loud, scope-specific failure.
+- 2026-06-13 (feat/claude-sdk-prewarm) — ``execute_run`` now fires
+  ``_prewarm_session(ctx)`` as a fire-and-forget ``asyncio.create_task`` right
+  after the entity-aware profile is resolved, so the agent's Claude CLI
+  subprocess warms CONCURRENTLY with the remaining pre-turn work (knowledge
+  context, soul recall, SSE setup, prompt assembly) and turn 1 reuses it instead
+  of paying the ~12s cold ``connect()``. ``_prewarm_session`` resolves the SAME
+  inputs ``_drive_agent_loop`` will (instructions, the entity-aware
+  deny/allow/skills/override, session_key) and calls ``AgentPool.prewarm`` so the
+  prewarmed client's cache key matches the first turn's. It is gated to
+  smart-routing-OFF (the model is message-derived when routing is on, so a
+  message-less prewarm could warm the wrong tier and churn) and swallows every
+  error. Skill sessions on smart-routing-ON deployments keep today's cold turn-1.
 - 2026-06-10 (sov/w3a-igw — per-run token metering) — real token usage is now
   threaded through the run instead of being dropped. Every backend emits a
   ``token_usage`` ``AgentEvent`` (input / output / cached token counts +
@@ -99,6 +143,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     build_knowledge_context,
     detach_agent_identity,
     detach_sse_event_sink,
+    mark_cloud_chat_run,
     push_sse_event,
     session_key_for,
 )
@@ -108,6 +153,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
+from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -652,6 +698,101 @@ def _agent_skill_set(instance: Any) -> frozenset[str]:
     return direct | plugin_skills
 
 
+async def _prewarm_session(ctx: ScopeContext) -> None:
+    """Eagerly warm the agent's CLI subprocess for this run's session BEFORE the
+    first model turn (feat/claude-sdk-prewarm).
+
+    The warm-client fix (#1456) made skill-bearing turns REUSE the warm CLI
+    subprocess across turns, but the FIRST send of every new session still paid a
+    cold ~12s ``connect()`` because the warm client was created lazily inside the
+    first ``run``. This fires concurrently with the remaining pre-turn work
+    (knowledge-context build, soul recall, SSE setup, prompt assembly) so the
+    subprocess is already live by the time ``pool.run`` calls
+    ``_get_or_create_client`` — turn 1 then reuses it.
+
+    It resolves the SAME inputs ``_drive_agent_loop`` will (instructions, the
+    entity-aware deny/allow/skills/override, session_key) so the prewarmed
+    client's cache key MATCHES the first turn's — a mismatch would make turn 1
+    EVICT the prewarmed client (a net loss).
+
+    FIRE-AND-FORGET, never-break-a-turn: meant to be wrapped in
+    ``asyncio.create_task``. Every failure path is swallowed (this guard +
+    ``AgentPool.prewarm`` + the backend's ``prewarm``), so a failed prewarm just
+    leaves turn 1 to pay the cold connect it would have paid anyway.
+
+    LIMITATION: skipped when smart routing is ON, because the model is then
+    classified from the message (which we don't have yet) — prewarming a guessed
+    tier could warm the wrong subprocess and cause evict-churn. Those deployments
+    keep today's cold turn-1.
+    """
+    try:
+        from pocketpaw.config import Settings
+
+        # Smart routing makes the model message-dependent → can't match the
+        # turn-1 cache key from a message-less prewarm. Skip to avoid churn.
+        if Settings.load().smart_routing_enabled:
+            return
+
+        pool = get_agent_pool()
+        instance = await pool.get(ctx.target_agent_id)
+
+        backend_name = (
+            instance.config.get("backend", "claude_agent_sdk")
+            if hasattr(instance, "config")
+            else None
+        )
+        # Only the Claude SDK backend has a warm subprocess to prewarm.
+        if backend_name is not None and "claude" not in backend_name:
+            return
+
+        # Mirror _drive_agent_loop's resolution EXACTLY so the cache key matches.
+        behavior_instructions = build_behavior_instructions(ctx, backend_name=backend_name)
+        surface_deny: frozenset[str] = frozenset()
+        surface_allow: frozenset[str] = frozenset()
+        surface_allow_mcp: frozenset[str] | None = None
+        surface_sys_override: str | None = None
+        surface_skills: frozenset[str] = frozenset()
+        if ctx.resolved_profile is not None:
+            surface_deny = ctx.resolved_profile.deny_mcp_tool_ids
+            surface_allow = ctx.resolved_profile.allowed_sdk_tools or frozenset()
+            surface_allow_mcp = ctx.resolved_profile.allow_mcp_tool_ids
+            surface_sys_override = ctx.resolved_profile.system_message_override
+            surface_skills = ctx.resolved_profile.skill_names or frozenset()
+        surface_skills = surface_skills | _agent_skill_set(instance)
+
+        # Bind this run's tenancy for the warm-up so the prewarmed subprocess
+        # connects with the SAME per-tenant cwd jail the first turn will resolve
+        # (ART-2). _prewarm_session runs in its own create_task context, fired
+        # BEFORE the stream binds identity at the _drive_agent_loop seam, so
+        # without this the cloud cwd resolver would fail closed here (swallowed)
+        # and every cloud session would lose the turn-1 warm. Mirrors the
+        # run-path binding exactly (same session_mongo_id / pocket_id) so prewarm
+        # and turn 1 resolve one cwd; detached in finally so it can't leak into
+        # this task's later work.
+        session_mongo_id = ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
+        identity_tokens = attach_agent_identity(
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
+            session_mongo_id=session_mongo_id,
+            pocket_id=ctx.pocket_id,
+        )
+        try:
+            await pool.prewarm(
+                ctx.target_agent_id,
+                session_key_for(ctx),
+                instructions=behavior_instructions,
+                deny_mcp_tool_ids=surface_deny,
+                allow_sdk_tools=surface_allow,
+                allow_mcp_tool_ids=surface_allow_mcp,
+                system_message_override=surface_sys_override,
+                skill_names=surface_skills,
+            )
+        finally:
+            detach_agent_identity(identity_tokens)
+    except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
+        logger.debug("prewarm_session skipped (swallowed): %s", exc)
+
+
 async def _drive_agent_loop(
     ctx: ScopeContext,
     *,
@@ -954,6 +1095,41 @@ async def _handle_interrupted_cleanup(
         logger.debug("interrupted stream write failed", exc_info=True)
 
 
+async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """ART-3 per-workspace agent-jail quota, enforced at RUN-START.
+
+    The agent writes through its native subprocess tools (Write/Bash), so we
+    can't cheaply gate each individual write; instead we measure the workspace's
+    total jail size ONCE here — before spinning up the agent — and reject the run
+    CLEANLY when it's over quota. The rejection is a terminal ``failed`` run with
+    a clear message and an ``error`` stream frame, never an OOM/crash that takes
+    the worker (and every other tenant on the box) down. Returns ``True`` when
+    the run was rejected (the caller returns early), ``False`` to proceed. Off
+    cloud / under quota it is a no-op returning ``False``.
+    """
+    from pocketpaw_ee.cloud import agent_jail
+
+    quota_error = agent_jail.check_workspace_jail_quota(ctx.workspace_id)
+    if not quota_error:
+        return False
+    logger.warning("run %s rejected — agent jail over quota: %s", spec.run_id, quota_error)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": "agent.jail_over_quota", "message": quota_error}
+        )
+    except Exception:
+        logger.debug("over-quota error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=quota_error)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for over-quota run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("over-quota stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -961,12 +1137,33 @@ async def execute_run(spec: RunSpec) -> None:
     persistence purposes (no assistant message created).
     """
     transport = get_stream_transport()
+    # Thread the authenticated, route-validated workspace from the spec into
+    # scope resolution (fix/worker-trusts-spec-workspace). The HTTP route stamps
+    # ``spec.workspace_id`` from the ``current_workspace_id`` dependency (which
+    # rejects an empty workspace with 400), so it is the trusted tenancy. The
+    # resolver uses it to FALL BACK when the scope doc's ``workspace`` field is
+    # empty/missing and to REJECT a spec whose workspace disagrees with a
+    # non-empty doc workspace. Before this, the worker re-derived tenancy from
+    # the doc alone and a blank doc workspace blanked the whole identity — the
+    # sites-create MCP tool then raised "requires workspace and user context".
     ctx = await resolve_scope_context(
         scope=spec.context_type,
         scope_id=spec.scope_id,
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
+        expected_workspace_id=spec.workspace_id,
     )
+    # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
+    # must fail cleanly here — never attach an empty identity downstream (the
+    # contextvar-reading MCP tools would surface a confusing error deep inside
+    # the tool instead of at this seam). ``attach_agent_identity`` also rejects
+    # empties as defense-in-depth; this gives a scope-specific code first.
+    if not ctx.workspace_id:
+        raise CloudError(
+            400,
+            "scope.no_workspace",
+            "Could not resolve a workspace for this run's scope",
+        )
     ctx.intent = spec.intent
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
@@ -1012,68 +1209,98 @@ async def execute_run(spec: RunSpec) -> None:
     # to the surface base (today's behavior).
     ctx.resolved_profile = await _resolve_entity_profile(ctx)
 
-    await _mark_running(spec.run_id)
-    await _broadcast_agent_typing(ctx, active=True)
+    # ART-3: reject a run whose workspace agent-jail is over quota BEFORE the
+    # prewarm + mark-running + agent spin-up, so a tenant that filled its scratch
+    # quota fails fast and cleanly instead of crashing the shared box mid-run.
+    if await _reject_if_over_jail_quota(spec, ctx, transport):
+        return
 
-    full_text = ""
-    cancelled = False
-    error: Exception | None = None
-    backend_error_message: str | None = None
-    # Per-run token metering (W3a). The backend yields a ``token_usage`` event
-    # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
-    # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
-    # multi-turn agent loop can report usage more than once) so the final
-    # ``stream_end`` frame and the persisted run doc carry actual counts instead
-    # of the old hardcoded ``{}``.
-    usage: dict[str, Any] = {}
-    try:
-        async for event_name, event_data in _iter_agent_events(spec, ctx):
-            if await transport.is_cancelled(spec.run_id):
-                cancelled = True
-                break
-            if event_name == "chunk":
-                content = event_data.get("content", "")
-                if isinstance(content, str):
-                    full_text += content
-            elif event_name == "token_usage":
-                if isinstance(event_data, dict) and event_data:
-                    usage = event_data
-            await transport.append_event(spec.run_id, event_name, event_data)
-            if event_name == "error":
-                # ``_drive_agent_loop`` already broke out after yielding this.
-                # The frame is terminal for the client (TERMINAL_EVENTS); stop
-                # writing and route to the failed-mark path below so the doc
-                # doesn't get flipped to ``completed`` by the empty-text branch.
-                backend_error_message = str(event_data.get("message") or "")
-                break
-    except asyncio.CancelledError:
-        # The task itself was cancelled (worker shutdown, host signal). Run
-        # the interrupted-cleanup INSIDE the except clause so the bare
-        # ``raise`` below re-raises the original CancelledError instance —
-        # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
-        # and the original traceback. The cleanup is shielded so a second
-        # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
-        # and strand the doc in ``running`` with no terminal stream frame.
-        logger.info("execute_run %s cancelled by host", spec.run_id)
+    # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
+    # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``
+    # refuses to fall back to the shared home dir on a workspace-less run ONLY
+    # when this marker is set — so a workspace-less run in a cloud-connected
+    # process that ISN'T a chat dispatch (a direct backend test, the CLI, a
+    # background job) cleanly falls back instead of hard-failing. Set HERE, at
+    # the common dispatch ancestor and BEFORE the prewarm ``create_task`` and
+    # the two ``attach_agent_identity`` binds, so (a) the prewarm task inherits
+    # it (``asyncio.create_task`` copies the context) and (b) a run that reaches
+    # the backend WITHOUT binding identity — the real mis-tenanting bug — still
+    # trips the guard. Reset in the context manager's finally so it never leaks
+    # past this run. The post-loop persist below resolves no cwd, so it sits
+    # outside the marked region.
+    with mark_cloud_chat_run():
+        # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
+        # subprocess for this session NOW — concurrently with the remaining pre-turn
+        # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
+        # knowledge-context build, soul recall, SSE setup, prompt assembly). By the
+        # time pool.run reaches the first connect(), the subprocess is already live
+        # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
+        # forget: _prewarm_session swallows every error, so it can never delay or
+        # break this run; the task is intentionally not awaited.
+        asyncio.create_task(_prewarm_session(ctx))
+
+        await _mark_running(spec.run_id)
+        await _broadcast_agent_typing(ctx, active=True)
+
+        full_text = ""
+        cancelled = False
+        error: Exception | None = None
+        backend_error_message: str | None = None
+        # Per-run token metering (W3a). The backend yields a ``token_usage`` event
+        # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
+        # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
+        # multi-turn agent loop can report usage more than once) so the final
+        # ``stream_end`` frame and the persisted run doc carry actual counts instead
+        # of the old hardcoded ``{}``.
+        usage: dict[str, Any] = {}
         try:
-            await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+            async for event_name, event_data in _iter_agent_events(spec, ctx):
+                if await transport.is_cancelled(spec.run_id):
+                    cancelled = True
+                    break
+                if event_name == "chunk":
+                    content = event_data.get("content", "")
+                    if isinstance(content, str):
+                        full_text += content
+                elif event_name == "token_usage":
+                    if isinstance(event_data, dict) and event_data:
+                        usage = event_data
+                await transport.append_event(spec.run_id, event_name, event_data)
+                if event_name == "error":
+                    # ``_drive_agent_loop`` already broke out after yielding this.
+                    # The frame is terminal for the client (TERMINAL_EVENTS); stop
+                    # writing and route to the failed-mark path below so the doc
+                    # doesn't get flipped to ``completed`` by the empty-text branch.
+                    backend_error_message = str(event_data.get("message") or "")
+                    break
         except asyncio.CancelledError:
-            # The outer await is cancelled but the shielded inner task
-            # continues running to completion in the background. That's
-            # exactly what we want; just don't re-raise from this layer —
-            # let the original cancel propagate after the except clause.
-            pass
-        except Exception:
-            logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
-        raise
-    except Exception as exc:
-        error = exc
-        logger.exception("execute_run %s crashed", spec.run_id)
-        await transport.append_event(
-            spec.run_id,
-            "error",
-            {"code": "agent.run_failed", "message": str(exc)},
-        )
+            # The task itself was cancelled (worker shutdown, host signal). Run
+            # the interrupted-cleanup INSIDE the except clause so the bare
+            # ``raise`` below re-raises the original CancelledError instance —
+            # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
+            # and the original traceback. The cleanup is shielded so a second
+            # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
+            # and strand the doc in ``running`` with no terminal stream frame.
+            logger.info("execute_run %s cancelled by host", spec.run_id)
+            try:
+                await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+            except asyncio.CancelledError:
+                # The outer await is cancelled but the shielded inner task
+                # continues running to completion in the background. That's
+                # exactly what we want; just don't re-raise from this layer —
+                # let the original cancel propagate after the except clause.
+                pass
+            except Exception:
+                logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
+            raise
+        except Exception as exc:
+            error = exc
+            logger.exception("execute_run %s crashed", spec.run_id)
+            await transport.append_event(
+                spec.run_id,
+                "error",
+                {"code": "agent.run_failed", "message": str(exc)},
+            )
 
     # Drop the typing indicator before persist so a slow Mongo write
     # doesn't leave it stuck on. Only reached on non-cancelled paths;

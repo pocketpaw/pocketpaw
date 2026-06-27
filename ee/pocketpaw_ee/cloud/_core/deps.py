@@ -153,7 +153,9 @@ async def require_membership(
 # Plan-tier feature gate
 # ---------------------------------------------------------------------------
 
-_PLAN_ORDER = ("team", "business", "enterprise")
+# Cheapest-first ladder used ONLY to name the minimum tier in a denial message
+# (the actual gate is the PLAN_FEATURES set check below). Consumer ladder keys.
+_PLAN_ORDER = ("free", "go", "pro", "pro_max", "enterprise")
 
 
 def require_plan_feature(feature: str) -> Callable[..., Coroutine[Any, Any, None]]:

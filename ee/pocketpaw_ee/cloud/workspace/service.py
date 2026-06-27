@@ -17,8 +17,14 @@ Public API:
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
 - ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
-  the plan-feature gate dependency; returns "team" on any failure so the
-  dep fails open on plan rather than crashing with a 500.
+  the plan-feature gate dependency; returns None when the workspace is
+  missing/soft-deleted/malformed (the gate maps that to a 404) and
+  re-raises DB errors rather than silently downgrading a paying customer.
+- ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
+  tier (BC-7). The billing subscription webhook is the only caller: a
+  verified ``subscription.active`` upgrades to the subscribed tier and a
+  ``subscription.cancelled`` reverts to ``free``. Returns True on a write,
+  False when the workspace is missing/soft-deleted.
 
 Changes: added get_workspace_plan helper for plan-feature gate dep; added
 slug_reason() (format + reserved + uniqueness) backing the live
@@ -39,6 +45,28 @@ locking the invitee out of every workspace read. Both already_accepted
 raise-sites now route through _heal_or_conflict: a rightful invitee missing
 the membership gets it added (idempotent) instead of a 409; a genuine
 duplicate (already a member) still raises invite.already_accepted.
+2026-06-14 (WB-1): update() now accepts an optional branding patch. A
+BrandingPatch merges onto the workspace's existing Branding (partial patches
+don't wipe set fields). logo_asset / favicon_asset are ownership-checked
+against the workspace via _assert_asset_owned (mirrors the uploads
+workspace-scoped lookup) — a cross-workspace or unknown asset ref raises
+Forbidden (workspace.branding_asset_not_owned). accent_color format is
+validated upstream by BrandingPatch (422). _workspace_to_domain now carries
+branding through to the domain object so it serializes onto WorkspaceOut.
+2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
+set_instinct_approval_level() — the dedicated, OWNER-gated writer for a
+workspace's layered-Instinct-gate triager level. Validates against the
+ApprovalLevel enum (422 on a bad value, nothing written), kept off the
+general update() path on purpose (a non-ASK level enables auto-approval of
+agent writes), and emits a WARNING-severity append-only audit event with the
+old→new level. The write goes through this service per the import-linter
+Beanie-writes-only-from-service contract.
+2026-06-26 (feat/litellm-billing-cutover, WU-F): create() now also fires the
+per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
+ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
+swallowed (workspace creation NEVER fails on a provisioning error); the call is
+idempotent, so the billing-cutover sweep and any later workspace touch back-fill
+a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
 """
 
 from __future__ import annotations
@@ -57,6 +85,7 @@ from pocketpaw_ee.cloud._core.errors import (
     Forbidden,
     NotFound,
     SeatLimitError,
+    ValidationError,
 )
 from pocketpaw_ee.cloud._core.realtime.bus import get_resolver
 from pocketpaw_ee.cloud._core.realtime.emit import emit
@@ -81,6 +110,7 @@ from pocketpaw_ee.cloud.models.invite import hash_token
 from pocketpaw_ee.cloud.models.notification import NotificationSource
 from pocketpaw_ee.cloud.models.user import User as _UserDoc
 from pocketpaw_ee.cloud.models.user import WorkspaceMembership as _Membership
+from pocketpaw_ee.cloud.models.workspace import Branding as _BrandingDoc
 from pocketpaw_ee.cloud.models.workspace import Workspace as _WorkspaceDoc
 from pocketpaw_ee.cloud.models.workspace import WorkspaceSettings
 from pocketpaw_ee.cloud.notifications import service as notifications_service
@@ -88,12 +118,14 @@ from pocketpaw_ee.cloud.people import service as people_service
 from pocketpaw_ee.cloud.shared.events import event_bus
 from pocketpaw_ee.cloud.uploads.models import FileUpload as _FileUploadDoc
 from pocketpaw_ee.cloud.workspace.domain import (
+    Branding,
     Invite,
     InviteContext,
     Workspace,
     WorkspaceMember,
 )
 from pocketpaw_ee.cloud.workspace.dto import (
+    BrandingPatch,
     BulkInviteRequest,
     CreateInviteRequest,
     CreateWorkspaceRequest,
@@ -114,6 +146,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _branding_doc_to_domain(b: _BrandingDoc | None) -> Branding | None:
+    """Map the embedded persistence ``Branding`` to the domain value object.
+
+    ``None`` (no custom branding) passes straight through — the frontend
+    renders the Paw defaults."""
+    if b is None:
+        return None
+    return Branding(
+        logo_asset=b.logo_asset,
+        favicon_asset=b.favicon_asset,
+        display_name=b.display_name,
+        tab_title=b.tab_title,
+        accent_color=b.accent_color,
+        show_paw_mark=b.show_paw_mark,
+    )
+
+
 def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Workspace:
     return Workspace(
         id=str(doc.id),
@@ -125,6 +174,7 @@ def _workspace_to_domain(doc: _WorkspaceDoc, *, member_count: int = 0) -> Worksp
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         member_count=member_count,
         deleted_at=doc.deleted_at,
+        branding=_branding_doc_to_domain(getattr(doc, "branding", None)),
     )
 
 
@@ -299,6 +349,24 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
     except Exception as exc:
         logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
 
+    # Provision the per-tenant LiteLLM virtual key (WU-F / MCG-8). BEST-EFFORT and
+    # NON-BLOCKING: if the proxy is unreachable or the mint fails, log + continue —
+    # workspace creation must NEVER fail on a provisioning error. ``ensure_tenant_key``
+    # is idempotent, so the cutover sweep (which iterates provisioned tenants) and a
+    # later workspace touch both back-fill a key that didn't get minted here. Lazy
+    # import keeps the workspace service free of an llm_provisioning dependency at
+    # module load.
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning import service as llm_provisioning_service
+
+        await llm_provisioning_service.ensure_tenant_key(str(doc.id))
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort, never fatal
+        logger.warning(
+            "Failed to provision LiteLLM tenant key for workspace %s (non-fatal): %s",
+            doc.id,
+            exc,
+        )
+
     await emit(
         WorkspaceMemberAdded(
             data={"workspace_id": str(doc.id), "user_id": ctx.user_id, "role": "owner"}
@@ -331,6 +399,47 @@ async def get(ctx: RequestContext, workspace_id: str) -> Workspace:
     return _workspace_to_domain(doc, member_count=count)
 
 
+async def _assert_asset_owned(workspace_id: str, file_id: str) -> None:
+    """Reject a branding asset ref that doesn't belong to this workspace.
+
+    Mirrors the chat-attachment ownership check (uploads' workspace-scoped
+    lookup): the asset must exist as a non-deleted ``FileUpload`` whose
+    ``workspace`` matches. A cross-workspace ref OR a non-existent id both
+    fail the same way — neither is owned by this workspace. Raises ``Forbidden``
+    so the route returns a 403, consistent with the rest of the workspace
+    authorization surface.
+    """
+    owned = await _FileUploadDoc.find_one(
+        {"file_id": file_id, "workspace": workspace_id, "deleted_at": None}
+    )
+    if owned is None:
+        raise Forbidden(
+            "workspace.branding_asset_not_owned",
+            f"Asset '{file_id}' does not belong to this workspace",
+        )
+
+
+async def _apply_branding_patch(
+    doc: _WorkspaceDoc, workspace_id: str, patch: BrandingPatch
+) -> None:
+    """Validate + merge a branding patch onto the workspace doc.
+
+    Asset refs (``logo_asset`` / ``favicon_asset``) are ownership-checked
+    against this workspace before anything is written. The patch MERGES onto
+    any existing branding so a partial patch (e.g. only ``display_name``)
+    doesn't wipe previously set fields. ``accent_color`` format was already
+    validated by ``BrandingPatch`` at the route boundary (422).
+    """
+    if patch.logo_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.logo_asset)
+    if patch.favicon_asset is not None:
+        await _assert_asset_owned(workspace_id, patch.favicon_asset)
+
+    current = doc.branding or _BrandingDoc()
+    merged = current.model_copy(update=patch.model_dump(exclude_unset=True))
+    doc.branding = merged
+
+
 async def update(
     ctx: RequestContext,
     workspace_id: str,
@@ -343,6 +452,8 @@ async def update(
         doc.name = body.name
     if body.settings is not None:
         doc.settings = WorkspaceSettings(**body.settings)
+    if body.branding is not None:
+        await _apply_branding_patch(doc, workspace_id, body.branding)
     await doc.save()
 
     patched = body.model_dump(exclude_unset=True)
@@ -355,6 +466,98 @@ async def update(
         target_type="workspace",
         target_id=workspace_id,
         metadata={"patched": patched},
+    )
+
+    count = await _count_members(workspace_id)
+    return _workspace_to_domain(doc, member_count=count)
+
+
+def _audit_approval_level_change(
+    *, actor: str, workspace_id: str, old_level: str, new_level: str
+) -> None:
+    """Append-only audit of the layered-gate activation switch (security FIX 1).
+
+    Setting a non-ASK ``instinct_approval_level`` turns ON auto-approval of
+    agent WRITE actions for the workspace — the single most security-sensitive
+    governance switch in the gate. Emitted at WARNING severity (a
+    state-changing, potentially-dangerous op, mirroring ``action_executor.
+    _audit_action_run``) carrying actor + workspace_id + old→new level so the
+    flip is loud and attributable. Audit failure must never break the write, so
+    the whole call is wrapped.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor=actor,
+                action="instinct.approval_level.set",
+                target=workspace_id,
+                status="changed" if old_level != new_level else "unchanged",
+                category="instinct_activation",
+                workspace_id=workspace_id,
+                old_level=old_level,
+                new_level=new_level,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the activation write
+        logger.warning("instinct approval-level audit-log write failed", exc_info=True)
+
+
+async def set_instinct_approval_level(
+    ctx: RequestContext,
+    workspace_id: str,
+    level: str,
+) -> Workspace:
+    """Set a workspace's layered-Instinct-gate triager activation level.
+
+    The DEDICATED writer for the activation switch (security-review FIX 1).
+    Kept off the general ``UpdateWorkspaceRequest``/PATCH path on purpose: a
+    non-ASK level enables AUTO-APPROVAL of agent WRITE actions workspace-wide,
+    so it gets its own OWNER-only route (``instinct.activate``) and its own
+    loud WARNING audit trail, never folded into the routine workspace patch.
+
+    ``level`` is validated against the canonical ``ApprovalLevel`` enum here
+    (defense in depth — the DTO already constrains it at the route boundary).
+    An out-of-enum value raises ``ValidationError`` (422) and NOTHING is
+    written: the level must fail loudly, never be coerced to a fallback that
+    silently parks a typo on the document (the gate would then read it and
+    route ASK, masking the misconfiguration). The write goes through this
+    service per the import-linter contract (Beanie writes only from
+    ``service.py``). Emits a WARNING audit event carrying old→new level.
+    """
+    from pocketpaw_ee.cloud.pockets.instinct_triage import ApprovalLevel
+
+    valid = {lvl.value for lvl in ApprovalLevel}
+    if level not in valid:
+        raise ValidationError(
+            "workspace.invalid_approval_level",
+            f"approval level {level!r} must be one of {sorted(valid)}",
+        )
+
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace", workspace_id)
+
+    old_level = doc.instinct_approval_level or "ASK"
+    doc.instinct_approval_level = level
+    await doc.save()
+
+    _audit_approval_level_change(
+        actor=ctx.user_id,
+        workspace_id=workspace_id,
+        old_level=old_level,
+        new_level=level,
+    )
+
+    await audit_service.record(
+        workspace_id,
+        ctx.user_id,
+        "workspace.instinct_approval_level_set",
+        target_type="workspace",
+        target_id=workspace_id,
+        metadata={"old_level": old_level, "new_level": level},
     )
 
     count = await _count_members(workspace_id)
@@ -1456,15 +1659,193 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     return doc.plan
 
 
+async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
+    """Set a workspace's plan tier (BC-7 subscription lifecycle).
+
+    The ONLY caller is the billing subscription webhook: a verified
+    ``subscription.active`` upgrades the workspace to the subscribed tier, and a
+    ``subscription.cancelled`` reverts it to ``free``. Idempotent — writing the
+    same plan the workspace already holds is a harmless no-op write.
+
+    Returns True when the plan was written, False when the workspace is missing /
+    soft-deleted / has a malformed id (so the webhook can log-and-ack rather than
+    500 on an unroutable event). Does NOT touch credits — the per-renewal grant is
+    BC-1's job, keyed on the webhook event id; this only moves the entitlement.
+    """
+    if not plan:
+        raise ValidationError("workspace.invalid_plan", "plan is required")
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return False
+    doc.plan = plan
+    await doc.save()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Route Permissions
+# ---------------------------------------------------------------------------
+
+
+async def get_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Return the full route-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed route keys. An empty list
+    or missing entry means full access (no restrictions).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+    return dict(doc.route_permissions or {})
+
+
+async def set_member_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+    routes: list[str],
+) -> None:
+    """Set route permissions for a single member.
+
+    An empty ``routes`` list clears restrictions (full access).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.route_permissions or {})
+    if routes:
+        perms[user_id] = routes
+    else:
+        # Empty list = full access; remove the entry entirely
+        perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"route_permissions": perms}},
+    )
+
+    logger.info(
+        "route_permissions.set",
+        extra={"workspace_id": workspace_id, "user_id": user_id, "routes": routes},
+    )
+
+
+async def clear_member_route_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+) -> None:
+    """Remove all route restrictions for a member (grants full access)."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.route_permissions or {})
+    perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"route_permissions": perms}},
+    )
+
+    logger.info(
+        "route_permissions.clear",
+        extra={"workspace_id": workspace_id, "user_id": user_id},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Connector Permissions
+# ---------------------------------------------------------------------------
+
+
+async def get_connector_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+) -> dict[str, list[str]]:
+    """Return the full connector-permissions map for the workspace.
+
+    Returns a dict of user_id → list of allowed connector names. An empty
+    list or missing entry means full access (no restrictions).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+    return dict(doc.connector_permissions or {})
+
+
+async def set_member_connector_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+    connectors: list[str],
+) -> None:
+    """Set connector permissions for a single member.
+
+    An empty ``connectors`` list clears restrictions (full access).
+    """
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.connector_permissions or {})
+    if connectors:
+        perms[user_id] = connectors
+    else:
+        perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"connector_permissions": perms}},
+    )
+
+    logger.info(
+        "connector_permissions.set",
+        extra={"workspace_id": workspace_id, "user_id": user_id, "connectors": connectors},
+    )
+
+
+async def clear_member_connector_permissions(
+    ctx: RequestContext,
+    workspace_id: str,
+    user_id: str,
+) -> None:
+    """Remove all connector restrictions for a member (grants full access)."""
+    doc = await _fetch_workspace(workspace_id)
+    if doc is None:
+        raise NotFound("workspace.not_found")
+
+    perms = dict(doc.connector_permissions or {})
+    perms.pop(user_id, None)
+
+    await _WorkspaceDoc.find_one({"_id": doc.id}).update(
+        {"$set": {"connector_permissions": perms}},
+    )
+
+    logger.info(
+        "connector_permissions.clear",
+        extra={"workspace_id": workspace_id, "user_id": user_id},
+    )
+
+
 __all__ = [
     "accept_invite",
     "bulk_create_invites",
+    "clear_member_connector_permissions",
+    "clear_member_route_permissions",
     "create",
     "create_invite",
     "decline_invite",
     "delete",
     "get",
+    "get_connector_permissions",
     "get_delete_preview",
+    "get_route_permissions",
     "get_workspace_plan",
     "legacy_ctx",
     "list_admin_ids",
@@ -1478,6 +1859,9 @@ __all__ = [
     "resend_invite",
     "revoke_invite",
     "seed_default_workspace",
+    "set_member_connector_permissions",
+    "set_member_route_permissions",
+    "set_instinct_approval_level",
     "update",
     "update_member_role",
     "validate_invite",

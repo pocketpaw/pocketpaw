@@ -54,6 +54,13 @@ on the view under ``_source_merge``) as ``authored_sources`` /
 ``skipped_sources`` so the agent can't report a source that was silently
 dropped. No honesty keys appear when no ``sources`` were supplied — the
 legacy result shape is unchanged.
+Changes: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER.
+``_validate_ripple_spec`` and ``_resolved_view_for_frontend`` now coerce a
+typed ``RippleSpec`` to its BSON-equivalent flat dict at entry (via
+``to_flat_dict``) before the existing dict-tree walks / resolver run. The
+agent callers still pass the raw wire dict, so this is a no-op for them — the
+guard covers a promoted spec reaching these helpers under the Phase-2
+promote-on-read boundary. No wire / behavior change.
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pocketpaw.bundled_templates.schema import RippleSpec
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 
 logger = logging.getLogger(__name__)
@@ -107,7 +115,9 @@ async def fetch_pocket_for_agent(pocket_id: str) -> dict[str, Any]:
     return {"ok": True, "pocket": view}
 
 
-async def _validate_ripple_spec(ripple_spec: dict[str, Any] | None) -> list[dict[str, Any]]:
+async def _validate_ripple_spec(
+    ripple_spec: RippleSpec | dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     """Pre-persist guard against agent prop-name drift.
 
     Fetches the same manifest the ``get_widget_spec`` MCP tool uses,
@@ -118,7 +128,13 @@ async def _validate_ripple_spec(ripple_spec: dict[str, Any] | None) -> list[dict
     Returns the issues list so callers can surface them to the agent.
     Best-effort — if the manifest is unavailable, returns ``[]``. Mutates
     ``ripple_spec`` in place when aliases apply.
+
+    Phase-2 dual-path: a typed ``RippleSpec`` is flattened to its
+    BSON-equivalent dict at entry (the in-place alias walk then operates on
+    that flat dict); the agent callers pass the raw wire dict, unchanged.
     """
+    if isinstance(ripple_spec, RippleSpec):
+        ripple_spec = ripple_spec.to_flat_dict()
     if not isinstance(ripple_spec, dict):
         return []
     try:
@@ -201,6 +217,12 @@ async def _resolved_view_for_frontend(pocket_view: dict[str, Any]) -> dict[str, 
     spec = pocket_view.get("rippleSpec")
     if not spec:
         return pocket_view
+    # Phase-2 dual-path: a promoted ``RippleSpec`` is flattened back to its
+    # BSON-equivalent dict before resolution, so the ``$source``-marker tree
+    # walk (and the resolved wire payload) stay flat dicts. Agent callers pass
+    # the wire dict, so this is a no-op for them.
+    if isinstance(spec, RippleSpec):
+        spec = spec.to_flat_dict()
     try:
         from pocketpaw_ee.cloud.chat.agent_service import current_user_id, current_workspace_id
 

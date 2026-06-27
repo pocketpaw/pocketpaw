@@ -34,8 +34,9 @@
 #     workspace (fix/fabric-stats-workspace-scope: the original instance-wide
 #     stats leaked another tenant's experimental type names into chat on a
 #     shared box). Counts mirror fabric_query's visibility exactly; the type
-#     list holds only types with object rows visible to the workspace (type
-#     DEFINITIONS are global in the schema — see FabricStore.list_types).
+#     list holds only the caller workspace's own types (SZD-2: the
+#     fabric_object_types table now carries a workspace_id; a NULL workspace_id
+#     is a legacy/global type visible to all — see FabricStore.list_types).
 #
 # Read-only: neither tool writes anything. FabricCreateTool is deliberately
 # NOT wrapped — ontology writes from the SDK backend should arrive as gated

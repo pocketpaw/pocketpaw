@@ -226,12 +226,13 @@ async def test_stats_does_not_leak_other_tenant_type_names(store):
     """The live leak, pinned at the MCP boundary.
 
     w2 alone models "Lease" / "Lease2"; w1 models "Customer". A w1-scoped
-    fabric_stats must NOT name w2's experimental types — even though the type
-    DEFINITIONS are global in the schema.
+    fabric_stats must NOT name w2's experimental types. SZD-2 — type isolation
+    is by who DEFINED the type (its own workspace_id), so w2's experimental
+    types are stamped with workspace="w2".
     """
     await _seed_customers(store)  # Customer rows in w1 (+ one in w2)
-    lease = await store.define_type(name="Lease", properties=[])
-    lease2 = await store.define_type(name="Lease2", properties=[])
+    lease = await store.define_type(name="Lease", properties=[], workspace_id="w2")
+    lease2 = await store.define_type(name="Lease2", properties=[], workspace_id="w2")
     await store.create_object(lease.id, {"tenant": "X"}, workspace_id="w2")
     await store.create_object(lease2.id, {"tenant": "Y"}, workspace_id="w2")
 

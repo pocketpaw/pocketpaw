@@ -12,6 +12,15 @@
 #   existing ObjectType by id (the EE Firestore→Fabric worker's per-workspace
 #   mapping) ride this same canonical upsert loop instead of hand-rolling a
 #   parallel one. Additive; name-based callers are unchanged.
+# Updated: 2026-06-19 (SZD-2 — workspace-scope object TYPES) — ensure_type() now
+#   threads ``workspace_id`` into both the get_type_by_name() resolve and the
+#   define_type() create, so the type catalog stays per-tenant: a connector
+#   ingesting into workspace A resolves/defines its ObjectType inside A, and the
+#   same logical type name in workspace B resolves to B's own type (or is
+#   defined fresh for B) rather than silently reusing A's. ``ingest_records``
+#   already carried ``workspace_id`` for the object writes; it now forwards it to
+#   ensure_type so the TYPE mint is scoped too. ``None`` (OSS / single-tenant
+#   callers) keeps the prior unscoped behavior.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -117,22 +126,30 @@ class IngestResult:
         return self.created + self.updated
 
 
-async def ensure_type(store: FabricStore, mapping: FabricMapping) -> str:
+async def ensure_type(
+    store: FabricStore, mapping: FabricMapping, workspace_id: str | None = None
+) -> str:
     """Ensure the mapping's ObjectType exists; return its ``type_id``.
 
     When the mapping carries an explicit ``type_id`` (the caller's config
     references an existing type by id), return it directly — no name lookup,
     no implicit define.
 
-    Otherwise, define-once-by-name: if a type with this name already exists (a
-    prior sync, a manually-defined ontology type, the EE fabric registry),
-    reuse it rather than creating a second type that would split the same
-    logical objects across two ``type_id``s. Name match is case-insensitive
-    (see get_type_by_name).
+    Otherwise, define-once-by-name: if a type with this name already exists in
+    the caller's workspace (a prior sync, a manually-defined ontology type, the
+    EE fabric registry), reuse it rather than creating a second type that would
+    split the same logical objects across two ``type_id``s. Name match is
+    case-insensitive (see get_type_by_name).
+
+    SZD-2: ``workspace_id`` scopes both the resolve and the define so the type
+    catalog is per-tenant — workspace A's "CalendarEvent" type is neither found
+    nor reused when ingesting into workspace B, and a fresh define for B is
+    stamped with B's workspace. ``None`` keeps the unscoped behavior for OSS /
+    single-tenant callers.
     """
     if mapping.type_id:
         return mapping.type_id
-    existing = await store.get_type_by_name(mapping.type_name)
+    existing = await store.get_type_by_name(mapping.type_name, workspace_id=workspace_id)
     if existing is not None:
         return existing.id
     created = await store.define_type(
@@ -141,6 +158,7 @@ async def ensure_type(store: FabricStore, mapping: FabricMapping) -> str:
         description=mapping.type_description,
         icon=mapping.type_icon,
         color=mapping.type_color,
+        workspace_id=workspace_id,
     )
     return created.id
 
@@ -172,7 +190,7 @@ async def ingest_records(
     lacking a usable source_id are skipped (counted) — without a stable key they
     cannot be deduplicated and would silently duplicate on every sync.
     """
-    type_id = await ensure_type(store, mapping)
+    type_id = await ensure_type(store, mapping, workspace_id=workspace_id)
     result = IngestResult(type_name=mapping.type_name)
 
     for record in records:

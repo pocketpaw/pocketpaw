@@ -198,9 +198,21 @@ class SagaResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# Result codes that mean a forward step did NOT commit a backend write even
+# though it returned ``ok:True``. Both are "the write was governed away":
+#   * ``instinct_pending`` — parked for human approval (it never fired).
+#   * ``instinct_dry_run`` — a governance rehearsal (resolved + audited but
+#     deliberately not sent to the backend; T10).
+# A step that returns either is a sequence non-commit: the steps BEFORE it
+# are committed and must roll back, exactly like an ``ok:false`` failure.
+_NON_COMMIT_CODES = frozenset({"instinct_pending", "instinct_dry_run"})
+
+
 def _is_parked(result: dict[str, Any]) -> bool:
-    """A forward step that routed to Instinct instead of firing."""
-    return result.get("code") == "instinct_pending"
+    """A forward step that routed to Instinct (parked OR dry-run) instead of
+    firing. Either way no backend write committed, so the sequence cannot
+    advance past it and the prior committed steps must roll back."""
+    return result.get("code") in _NON_COMMIT_CODES
 
 
 def _compensation_idempotency_key(step_key: str | None) -> str | None:

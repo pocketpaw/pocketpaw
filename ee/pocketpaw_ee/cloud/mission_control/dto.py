@@ -133,6 +133,17 @@ class BulkSnoozeRequest(BaseModel):
     until_iso: str = Field(description="ISO-8601 timestamp to snooze until")
 
 
+class BulkRevertRequest(BaseModel):
+    """Body for ``POST /mission-control/items/bulk-revert``.
+
+    Reverts N Tasks from a terminal status (done, reverted, failed) back
+    to ``in_progress`` via ``tasks.service.agent_update_task``. Ids that
+    aren't Tasks come back in ``skipped``.
+    """
+
+    ids: list[str] = Field(min_length=1)
+
+
 class OutcomesQueryRequest(BaseModel):
     """Query filters for ``GET /mission-control/outcomes``."""
 
@@ -195,6 +206,23 @@ class AttachCycleItemsResponse(BaseModel):
     """
 
     attached: list[str]
+    skipped: list[str] = Field(default_factory=list)
+    cycle_id: str
+
+
+DetachCycleItemsRequest = AttachCycleItemsRequest
+
+
+class DetachCycleItemsResponse(BaseModel):
+    """Result of a bulk-detach call.
+
+    Same partial-success posture as ``AttachCycleItemsResponse``.
+    ``detached`` lists ids that were successfully removed from the
+    sprint; ``skipped`` lists ids the caller couldn't see or that
+    weren't in this sprint.
+    """
+
+    detached: list[str]
     skipped: list[str] = Field(default_factory=list)
     cycle_id: str
 
@@ -408,10 +436,15 @@ class AnalyticsResponse(BaseModel):
 __all__ = [
     "ActivityEventResponse",
     "AnalyticsResponse",
+    "AttachCycleItemsRequest",
+    "AttachCycleItemsResponse",
     "BulkActionRequest",
     "BulkReassignRequest",
+    "BulkRevertRequest",
     "BulkSnoozeRequest",
     "CreateCycleRequest",
+    "DetachCycleItemsRequest",
+    "DetachCycleItemsResponse",
     "ListActivityRequest",
     "ListPlanSessionsRequest",
     "ListWorkItemsRequest",

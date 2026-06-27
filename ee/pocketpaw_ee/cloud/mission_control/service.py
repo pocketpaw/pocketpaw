@@ -74,6 +74,18 @@
 # shared ``ee.instinct.chain_emitters`` module instead of reaching into the
 # Instinct router's private internals. Behavior is identical (same helpers,
 # same call order) — the façade no longer couples to the router.
+# Updated: 2026-06-12 (fix/tray-workspace-scoped-nudges) — workspace-scoped
+# nudges now reach The Tray. External-action proposals stamp
+# ``Action.pocket_id = workspace_id`` (they aren't pocket-bound — see
+# ``external_actions/propose.py``), but ``agent_list_work_items`` dropped any
+# action whose ``pocket_id`` wasn't a visible POCKET id, so every gated
+# external action sat pending without ever surfacing in the feed. The
+# per-action filter now also admits ``a.pocket_id == workspace_id`` (the
+# caller's own workspace only — the W4c store-level scope still keeps other
+# tenants' rows out in SQL), the instinct block runs even when the workspace
+# has zero visible pockets, and a workspace-scoped item projects with
+# pocket_name "Workspace" instead of leaking the raw workspace hex id.
+# Pocket-bound nudges keep the exact same visibility filter as before.
 """Mission Control façade service.
 
 Every function is module-level ``async def`` per ee/cloud rule #5. The
@@ -95,7 +107,10 @@ Tenancy:
          is visible to the caller's workspace. ``pockets_service.list_pockets``
          enforces this as the chokepoint. This stays as a second filter
          (owner / shared_with / visibility within the tenant), layered on
-         top of the store scope, not in place of it.
+         top of the store scope, not in place of it. Workspace-scoped
+         nudges (``pocket_id == workspace_id``, e.g. external-action
+         proposals) bypass only this pocket layer — the store scope in
+         (1) is still what isolates them per tenant.
 
 No Beanie writes here — the façade is read-only against Instinct + the
 activity buffer. Bulk-approve / bulk-reject delegate to
@@ -139,8 +154,10 @@ from pocketpaw_ee.cloud.mission_control.dto import (
     AttachCycleItemsResponse,
     BulkActionRequest,
     BulkReassignRequest,
+    BulkRevertRequest,
     BulkSnoozeRequest,
     CreateCycleRequest,
+    DetachCycleItemsResponse,
     ListActivityRequest,
     ListPlanSessionsRequest,
     ListWorkItemsRequest,
@@ -385,40 +402,52 @@ async def agent_list_work_items(
 
     items: list[WorkItem] = []
 
-    # --- Instinct Nudges (pocket-scoped) -----------------------------------
-    # Nudges always live inside a pocket, so an empty visible set means
-    # there are no Nudges to show. Tasks below have their own workspace-
-    # level tenancy and are NOT gated by pocket visibility.
-    if visible:
-        store = get_instinct_store()
-        # W4c — scope the instinct reads to the caller's workspace (plus legacy
-        # NULL rows) at the store/SQL layer so a tenant never reads another
-        # tenant's Nudges off the shared DB. The pocket-visibility filter below
-        # is a second, intra-tenant layer (owner / shared_with / visibility).
-        pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
-        resolved = await store.list_actions(
-            pocket_id=body.pocket, limit=200, workspace_id=workspace_id
-        )
+    # --- Instinct Nudges (pocket- or workspace-scoped) ----------------------
+    # Most Nudges live inside a pocket and only surface when that pocket is
+    # visible. External-action proposals are the exception: they stamp
+    # ``pocket_id = workspace_id`` (see ``external_actions/propose.py``), so
+    # they're admitted by workspace identity instead — which also means the
+    # block must run even when the workspace has zero visible pockets. Tasks
+    # below have their own workspace-level tenancy and are NOT gated by
+    # pocket visibility.
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope the store
+    # file to the caller's workspace (the W4c in-row filter below is additive).
+    store = get_instinct_store(workspace_id=workspace_id or None)
+    # W4c — scope the instinct reads to the caller's workspace (plus legacy
+    # NULL rows) at the store/SQL layer so a tenant never reads another
+    # tenant's Nudges off the shared DB. The pocket-visibility filter below
+    # is a second, intra-tenant layer (owner / shared_with / visibility);
+    # the store scope is also what keeps OTHER tenants' workspace-scoped
+    # nudges out — ``a.pocket_id == workspace_id`` below can only ever match
+    # the caller's own rows.
+    pending = await store.pending(pocket_id=body.pocket, workspace_id=workspace_id)
+    resolved = await store.list_actions(pocket_id=body.pocket, limit=200, workspace_id=workspace_id)
 
-        actions: list[Action] = []
-        seen: set[str] = set()
-        for a in (*pending, *resolved):
-            if a.id in seen:
-                continue
-            if a.pocket_id not in visible:
-                continue
-            if body.agent and a.trigger.source != body.agent:
-                continue
-            seen.add(a.id)
-            actions.append(a)
-        items.extend(
-            _action_to_work_item(
-                a,
-                workspace_id,
-                pocket_name=name_map.get(a.pocket_id, a.pocket_id or ""),
-            )
-            for a in actions
+    actions: list[Action] = []
+    seen: set[str] = set()
+    for a in (*pending, *resolved):
+        if a.id in seen:
+            continue
+        if a.pocket_id not in visible and a.pocket_id != workspace_id:
+            continue
+        if body.agent and a.trigger.source != body.agent:
+            continue
+        seen.add(a.id)
+        actions.append(a)
+    items.extend(
+        _action_to_work_item(
+            a,
+            workspace_id,
+            # A workspace-scoped nudge has no pocket — show "Workspace"
+            # rather than leaking the raw workspace hex id as a name.
+            pocket_name=(
+                "Workspace"
+                if a.pocket_id == workspace_id
+                else name_map.get(a.pocket_id, a.pocket_id or "")
+            ),
         )
+        for a in actions
+    )
 
     # --- Tasks (workspace-scoped) ------------------------------------------
     # Lazy import keeps the façade installable on forks that haven't
@@ -565,7 +594,7 @@ async def agent_bulk_approve(
     from uuid import uuid4
 
     body = BulkActionRequest.model_validate(body)
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
 
     bulk_id = uuid4().hex
     approved: list[dict] = []
@@ -611,7 +640,8 @@ async def agent_bulk_approve(
     # Handle nudges via Instinct store
     if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
-        store = get_instinct_store()
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
         eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
@@ -637,13 +667,18 @@ async def agent_bulk_approve(
 async def agent_bulk_reject(
     ctx: RequestContext, body: BulkActionRequest | dict[str, Any]
 ) -> dict[str, Any]:
-    """Reject N pending Nudges in one call. ``reason`` is required.
+    """Reject N pending items in one call. ``reason`` is required.
 
-    Same tenancy semantics as ``agent_bulk_approve``. The reason text is
-    surfaced on every Action's ``rejected_reason`` AND on every audit
-    row's ``context.reason`` so the soul-bridge correction pipeline can
-    learn from bulk rejects the same way it learns from single-item
-    rejects.
+    Handles both Tasks (``task:`` prefix) and Instinct Nudges (bare or
+    ``nudge:`` prefix) — mirrors the same split that ``agent_bulk_approve``
+    performs. Tasks are blocked with the given reason so they surface in
+    the operator's Snags section; Nudges flow through the Instinct store's
+    native reject path.
+
+    The reason text is surfaced on every Action's ``rejected_reason`` AND
+    on every audit row's ``context.reason`` so the soul-bridge correction
+    pipeline can learn from bulk rejects the same way it learns from
+    single-item rejects.
     """
     body = BulkActionRequest.model_validate(body)
     if not body.reason:
@@ -651,18 +686,65 @@ async def agent_bulk_reject(
             "mission_control.reason_required",
             "bulk-reject requires a reason — pass a non-empty string in ``reason``.",
         )
-    _require_workspace(ctx)
-    visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
-    eligible, blocked = await _split_ids_by_tenancy(store, list(body.ids), visible)
-    rejected, missing, bulk_id = await store.bulk_reject(
-        eligible, reason=body.reason, rejector=ctx.user_id
-    )
-    # no-event: per-item approve/reject inside the loop already emits the events
+    workspace_id = _require_workspace(ctx)
+
+    from uuid import uuid4
+
+    bulk_id = uuid4().hex
+    rejected: list[dict] = []
+    missing: list[str] = []
+
+    # Split IDs by prefix — same pattern as agent_bulk_approve
+    task_ids: list[str] = []
+    nudge_store_ids: list[str] = []
+    nudge_id_map: dict[str, str] = {}
+    for raw_id in body.ids:
+        if raw_id.startswith("task:"):
+            task_ids.append(raw_id)
+            continue
+        bare = raw_id[len("nudge:") :] if raw_id.startswith("nudge:") else raw_id
+        nudge_store_ids.append(bare)
+        nudge_id_map[bare] = raw_id
+
+    # Handle tasks: block each one so it surfaces in Snags
+    if task_ids:
+        from pocketpaw_ee.cloud.tasks import service as tasks_service
+        from pocketpaw_ee.cloud.tasks.dto import BlockTaskRequest
+
+        for raw_id in task_ids:
+            task_id = _classify_task_id(raw_id)
+            if task_id is None:
+                missing.append(raw_id)
+                continue
+            try:
+                result = await tasks_service.agent_block_task(
+                    ctx,
+                    task_id,
+                    BlockTaskRequest(reason=body.reason),
+                )
+                rejected.append(result.model_dump(mode="json"))
+            except Exception as e:
+                logger.info("bulk_reject: task %s failed: %s", raw_id, e)
+                missing.append(raw_id)
+
+    # Handle nudges via Instinct store
+    if nudge_store_ids:
+        visible = await _visible_pocket_ids(ctx)
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
+        eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
+        nudge_rejected, nudge_missing, _ = await store.bulk_reject(
+            eligible, reason=body.reason, rejector=ctx.user_id
+        )
+        rejected.extend(a.model_dump(mode="json") for a in nudge_rejected)
+        missing.extend(nudge_id_map.get(mid, mid) for mid in nudge_missing)
+        missing.extend(nudge_id_map.get(bid, bid) for bid in blocked)
+
+    # no-event: per-item block/reject inside the loops already emit events
     return {
         "bulk_id": bulk_id,
-        "rejected": [a.model_dump(mode="json") for a in rejected],
-        "missing": [*missing, *blocked],
+        "rejected": rejected,
+        "missing": missing,
     }
 
 
@@ -708,7 +790,8 @@ async def agent_outcomes_summary(
     body = OutcomesQueryRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
+    # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     cutoff = datetime.now() - _window_to_delta(body.window)
 
     # Pull a generous slice and filter in Python. ``list_actions`` does
@@ -911,6 +994,49 @@ async def agent_bulk_snooze(
             skipped.append(raw_id)
 
     # no-event: per-item agent_update_task already emits TaskUpdated per row
+    return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
+
+
+async def agent_bulk_revert(
+    ctx: RequestContext, body: BulkRevertRequest | dict[str, Any]
+) -> dict[str, Any]:
+    """Revert N Tasks from a terminal status back to in_progress.
+
+    Fans out per-id to ``tasks.service.agent_revert_task`` to flip the
+    task status from ``done``, ``reverted``, or ``failed`` back to
+    ``in_progress``. Ids that aren't Tasks land in ``skipped``.
+
+    This differs from ``agent_bulk_reject`` (which rejects pending
+    Nudges) — revert acts on *already-finished* work to un-mark it
+    as complete so the operator can resume work.
+    """
+    body = BulkRevertRequest.model_validate(body)
+    _require_workspace(ctx)
+
+    from uuid import uuid4
+
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    bulk_id = uuid4().hex
+    affected: list[str] = []
+    skipped: list[str] = []
+
+    for raw_id in body.ids:
+        task_id = _classify_task_id(raw_id)
+        if task_id is None:
+            skipped.append(raw_id)
+            continue
+        try:
+            await tasks_service.agent_revert_task(ctx, task_id)
+            affected.append(raw_id)
+        except Exception:
+            logger.info(
+                "mission_control.bulk_revert: skipped id %s",
+                raw_id,
+                exc_info=True,
+            )
+            skipped.append(raw_id)
+
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
@@ -1177,6 +1303,56 @@ async def agent_attach_cycle_items(
     )
 
 
+async def agent_detach_cycle_items(
+    ctx: RequestContext,
+    cycle_id: str,
+    body: AttachCycleItemsRequest,
+) -> DetachCycleItemsResponse:
+    """Detach a batch of work items from a sprint.
+
+    Validates the sprint exists in the caller's workspace, then for each
+    item id calls ``tasks.service.agent_set_task_cycle`` with ``None``
+    to clear the cycle pointer. Items the caller can't see are reported
+    back as ``skipped`` rather than failing the whole batch.
+    """
+
+    body = AttachCycleItemsRequest.model_validate(body)
+    workspace_id = _require_workspace(ctx)
+
+    from pocketpaw_ee.cloud.cycles import service as cycles_service
+    from pocketpaw_ee.cloud.tasks import service as tasks_service
+
+    # Tenancy check on the cycle itself
+    await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+
+    detached: list[str] = []
+    skipped: list[str] = []
+    for task_id in body.item_ids:
+        try:
+            raw_id = task_id.removeprefix("task:")
+            await tasks_service.agent_set_task_cycle(ctx, raw_id, None)
+            detached.append(task_id)
+        except Exception:
+            skipped.append(task_id)
+
+    # Refresh counters on the cycle so scope/started/completed update
+    tasks = await cycles_service._tasks_for_cycle(ctx, cycle_id)
+    if tasks is not None:
+        scope, started, completed = cycles_service._counters_from_tasks(tasks)
+        doc = await cycles_service._fetch_in_workspace(workspace_id, cycle_id)
+        if (doc.scope, doc.started, doc.completed) != (scope, started, completed):
+            doc.scope = scope
+            doc.started = started
+            doc.completed = completed
+            await doc.save()
+
+    return DetachCycleItemsResponse(
+        detached=detached,
+        skipped=skipped,
+        cycle_id=cycle_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Analytics
 # ---------------------------------------------------------------------------
@@ -1286,6 +1462,7 @@ __all__ = [
     "agent_bulk_approve",
     "agent_bulk_reassign",
     "agent_bulk_reject",
+    "agent_bulk_revert",
     "agent_bulk_snooze",
     "agent_create_cycle",
     "agent_list_activity",

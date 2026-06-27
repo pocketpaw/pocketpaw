@@ -3,6 +3,15 @@
 # Updated: 2026-06-10 (W0d) — Added test_fabric_query_forwards_filters: the
 #   FabricQueryTool must forward its `filters` arg into FabricQuery so chat-driven
 #   property filters ("rent > X") narrow results instead of returning all objects.
+# Updated: 2026-06-13 (feat/fabric-multihop) — Added test_fabric_query_forwards_path
+#   and test_fabric_query_rejects_bad_hop: the FabricQueryTool must forward its
+#   new `path` arg into FabricQuery.path so an LLM can issue the 2-hop ontology
+#   join (open Deals -> Customer -> Competitor) as ONE tool call, and must turn a
+#   malformed hop into a readable error string rather than raising.
+# Updated: 2026-06-13 (review fixes #1465) — Added
+#   test_fabric_query_too_deep_path_returns_clean_error: a path deeper than
+#   MAX_HOPS is rejected at FabricQuery construction and surfaces through the
+#   tool as a clean error string (no store call, no raised exception).
 
 from __future__ import annotations
 
@@ -181,6 +190,90 @@ class TestFabricTools:
         assert "Found 1" in result
         assert "Globex" in result
         assert "Acme" not in result
+
+    @pytest.mark.asyncio
+    async def test_fabric_query_forwards_path(self, tmp_path):
+        # feat/fabric-multihop: the agent tool must forward `path` into
+        # FabricQuery.path so an LLM issues the 2-hop join as ONE call. Real
+        # store so the whole tool -> FabricQuery -> store.query path runs.
+        from pocketpaw.fabric.store import FabricStore
+        from pocketpaw.tools.builtin.fabric_tools import FabricQueryTool
+
+        store = FabricStore(tmp_path / "fabric.db")
+        deal_t = await store.define_type(name="Deal", properties=[])
+        cust_t = await store.define_type(name="Customer", properties=[])
+        comp_t = await store.define_type(name="Competitor", properties=[])
+        acme = await store.create_object(cust_t.id, {"name": "Acme"})
+        rival = await store.create_object(comp_t.id, {"name": "Rival Inc"})
+        open_deal = await store.create_object(deal_t.id, {"name": "Acme deal", "stage": "open"})
+        won_deal = await store.create_object(deal_t.id, {"name": "Won deal", "stage": "won"})
+        await store.link(open_deal.id, acme.id, "deal_for")
+        await store.link(won_deal.id, acme.id, "deal_for")
+        await store.link(acme.id, rival.id, "competes_with")
+
+        tool = FabricQueryTool()
+        with patch("pocketpaw.tools.builtin.fabric_tools._get_fabric_store", return_value=store):
+            # From the Competitor, walk back to the OPEN Deals via the Customer.
+            result = await tool.execute(
+                linked_to=rival.id,
+                path=[
+                    {"link_type": "competes_with", "object_type": "Customer", "direction": "in"},
+                    {
+                        "link_type": "deal_for",
+                        "object_type": "Deal",
+                        "direction": "in",
+                        "filters": {"stage": "open"},
+                    },
+                ],
+            )
+
+        assert "Found 1" in result
+        assert "Acme deal" in result
+        assert "Won deal" not in result
+
+    @pytest.mark.asyncio
+    async def test_fabric_query_rejects_bad_hop(self):
+        # A malformed hop (unknown direction) must surface a readable error, not
+        # raise — the LLM can read it and retry. No store call should happen.
+        from pocketpaw.tools.builtin.fabric_tools import FabricQueryTool
+
+        mock_store = MagicMock()
+        mock_store.query = AsyncMock()
+
+        tool = FabricQueryTool()
+        with patch(
+            "pocketpaw.tools.builtin.fabric_tools._get_fabric_store", return_value=mock_store
+        ):
+            result = await tool.execute(
+                linked_to="obj-x",
+                path=[{"link_type": "deal_for", "direction": "sideways"}],
+            )
+
+        assert "Invalid path hop at index 0" in result
+        mock_store.query.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fabric_query_too_deep_path_returns_clean_error(self):
+        # review fixes #1465: a path deeper than MAX_HOPS is rejected when the
+        # FabricQuery is built (inside the tool's try), so it surfaces as a clean
+        # "Error querying Fabric" string rather than raising out of the tool.
+        from pocketpaw.fabric.models import MAX_HOPS
+        from pocketpaw.tools.builtin.fabric_tools import FabricQueryTool
+
+        mock_store = MagicMock()
+        mock_store.query = AsyncMock()
+
+        tool = FabricQueryTool()
+        with patch(
+            "pocketpaw.tools.builtin.fabric_tools._get_fabric_store", return_value=mock_store
+        ):
+            result = await tool.execute(
+                linked_to="obj-x",
+                path=[{"link_type": "rel"} for _ in range(MAX_HOPS + 1)],
+            )
+
+        assert "Error querying Fabric" in result
+        mock_store.query.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fabric_create_object(self):
