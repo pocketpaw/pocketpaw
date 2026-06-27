@@ -1,6 +1,17 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
+  lifecycle (the prewarm ``create_task`` + the main agent loop) in
+  ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
+  (``agent_jail.resolve_agent_cwd``) fires ONLY for an actual cloud chat
+  dispatch — not for any workspace-less run in a cloud-connected process. The
+  marker is set BEFORE the prewarm ``create_task`` (``asyncio.create_task``
+  copies the context, carrying it into the prewarm task) and BEFORE the two
+  ``attach_agent_identity`` binds, so a run that reaches the backend WITHOUT
+  binding identity still trips the guard. Fixes the dev-CI regression where the
+  jail hard-failed direct claude_sdk backend tests + a broad ee set once a cloud
+  test left ``is_multi_tenant_cloud()`` True in the process.
 - 2026-06-26 (ART-2) — ``_prewarm_session`` now binds the run's identity
   (``attach_agent_identity`` with the same ``session_mongo_id`` / ``pocket_id``
   the stream path uses) around its ``pool.prewarm`` call, then detaches in a
@@ -132,6 +143,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     build_knowledge_context,
     detach_agent_identity,
     detach_sse_event_sink,
+    mark_cloud_chat_run,
     push_sse_event,
     session_key_for,
 )
@@ -1203,78 +1215,92 @@ async def execute_run(spec: RunSpec) -> None:
     if await _reject_if_over_jail_quota(spec, ctx, transport):
         return
 
-    # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
-    # subprocess for this session NOW — concurrently with the remaining pre-turn
-    # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
-    # knowledge-context build, soul recall, SSE setup, prompt assembly). By the
-    # time pool.run reaches the first connect(), the subprocess is already live
-    # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
-    # forget: _prewarm_session swallows every error, so it can never delay or
-    # break this run; the task is intentionally not awaited.
-    asyncio.create_task(_prewarm_session(ctx))
+    # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
+    # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``
+    # refuses to fall back to the shared home dir on a workspace-less run ONLY
+    # when this marker is set — so a workspace-less run in a cloud-connected
+    # process that ISN'T a chat dispatch (a direct backend test, the CLI, a
+    # background job) cleanly falls back instead of hard-failing. Set HERE, at
+    # the common dispatch ancestor and BEFORE the prewarm ``create_task`` and
+    # the two ``attach_agent_identity`` binds, so (a) the prewarm task inherits
+    # it (``asyncio.create_task`` copies the context) and (b) a run that reaches
+    # the backend WITHOUT binding identity — the real mis-tenanting bug — still
+    # trips the guard. Reset in the context manager's finally so it never leaks
+    # past this run. The post-loop persist below resolves no cwd, so it sits
+    # outside the marked region.
+    with mark_cloud_chat_run():
+        # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
+        # subprocess for this session NOW — concurrently with the remaining pre-turn
+        # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
+        # knowledge-context build, soul recall, SSE setup, prompt assembly). By the
+        # time pool.run reaches the first connect(), the subprocess is already live
+        # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
+        # forget: _prewarm_session swallows every error, so it can never delay or
+        # break this run; the task is intentionally not awaited.
+        asyncio.create_task(_prewarm_session(ctx))
 
-    await _mark_running(spec.run_id)
-    await _broadcast_agent_typing(ctx, active=True)
+        await _mark_running(spec.run_id)
+        await _broadcast_agent_typing(ctx, active=True)
 
-    full_text = ""
-    cancelled = False
-    error: Exception | None = None
-    backend_error_message: str | None = None
-    # Per-run token metering (W3a). The backend yields a ``token_usage`` event
-    # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
-    # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
-    # multi-turn agent loop can report usage more than once) so the final
-    # ``stream_end`` frame and the persisted run doc carry actual counts instead
-    # of the old hardcoded ``{}``.
-    usage: dict[str, Any] = {}
-    try:
-        async for event_name, event_data in _iter_agent_events(spec, ctx):
-            if await transport.is_cancelled(spec.run_id):
-                cancelled = True
-                break
-            if event_name == "chunk":
-                content = event_data.get("content", "")
-                if isinstance(content, str):
-                    full_text += content
-            elif event_name == "token_usage":
-                if isinstance(event_data, dict) and event_data:
-                    usage = event_data
-            await transport.append_event(spec.run_id, event_name, event_data)
-            if event_name == "error":
-                # ``_drive_agent_loop`` already broke out after yielding this.
-                # The frame is terminal for the client (TERMINAL_EVENTS); stop
-                # writing and route to the failed-mark path below so the doc
-                # doesn't get flipped to ``completed`` by the empty-text branch.
-                backend_error_message = str(event_data.get("message") or "")
-                break
-    except asyncio.CancelledError:
-        # The task itself was cancelled (worker shutdown, host signal). Run
-        # the interrupted-cleanup INSIDE the except clause so the bare
-        # ``raise`` below re-raises the original CancelledError instance —
-        # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
-        # and the original traceback. The cleanup is shielded so a second
-        # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
-        # and strand the doc in ``running`` with no terminal stream frame.
-        logger.info("execute_run %s cancelled by host", spec.run_id)
+        full_text = ""
+        cancelled = False
+        error: Exception | None = None
+        backend_error_message: str | None = None
+        # Per-run token metering (W3a). The backend yields a ``token_usage`` event
+        # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
+        # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
+        # multi-turn agent loop can report usage more than once) so the final
+        # ``stream_end`` frame and the persisted run doc carry actual counts instead
+        # of the old hardcoded ``{}``.
+        usage: dict[str, Any] = {}
         try:
-            await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+            async for event_name, event_data in _iter_agent_events(spec, ctx):
+                if await transport.is_cancelled(spec.run_id):
+                    cancelled = True
+                    break
+                if event_name == "chunk":
+                    content = event_data.get("content", "")
+                    if isinstance(content, str):
+                        full_text += content
+                elif event_name == "token_usage":
+                    if isinstance(event_data, dict) and event_data:
+                        usage = event_data
+                await transport.append_event(spec.run_id, event_name, event_data)
+                if event_name == "error":
+                    # ``_drive_agent_loop`` already broke out after yielding this.
+                    # The frame is terminal for the client (TERMINAL_EVENTS); stop
+                    # writing and route to the failed-mark path below so the doc
+                    # doesn't get flipped to ``completed`` by the empty-text branch.
+                    backend_error_message = str(event_data.get("message") or "")
+                    break
         except asyncio.CancelledError:
-            # The outer await is cancelled but the shielded inner task
-            # continues running to completion in the background. That's
-            # exactly what we want; just don't re-raise from this layer —
-            # let the original cancel propagate after the except clause.
-            pass
-        except Exception:
-            logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
-        raise
-    except Exception as exc:
-        error = exc
-        logger.exception("execute_run %s crashed", spec.run_id)
-        await transport.append_event(
-            spec.run_id,
-            "error",
-            {"code": "agent.run_failed", "message": str(exc)},
-        )
+            # The task itself was cancelled (worker shutdown, host signal). Run
+            # the interrupted-cleanup INSIDE the except clause so the bare
+            # ``raise`` below re-raises the original CancelledError instance —
+            # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
+            # and the original traceback. The cleanup is shielded so a second
+            # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
+            # and strand the doc in ``running`` with no terminal stream frame.
+            logger.info("execute_run %s cancelled by host", spec.run_id)
+            try:
+                await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+            except asyncio.CancelledError:
+                # The outer await is cancelled but the shielded inner task
+                # continues running to completion in the background. That's
+                # exactly what we want; just don't re-raise from this layer —
+                # let the original cancel propagate after the except clause.
+                pass
+            except Exception:
+                logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
+            raise
+        except Exception as exc:
+            error = exc
+            logger.exception("execute_run %s crashed", spec.run_id)
+            await transport.append_event(
+                spec.run_id,
+                "error",
+                {"code": "agent.run_failed", "message": str(exc)},
+            )
 
     # Drop the typing indicator before persist so a slow Mongo write
     # doesn't leave it stuck on. Only reached on non-cancelled paths;

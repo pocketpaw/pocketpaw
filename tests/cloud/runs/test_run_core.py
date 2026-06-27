@@ -86,6 +86,54 @@ async def test_execute_run_writes_chunks_then_stream_end(monkeypatch):
     assert events[-1].data["cancelled"] is False
 
 
+async def test_execute_run_marks_cloud_chat_run_for_jail_fail_closed(monkeypatch):
+    """execute_run wraps the run lifecycle in ``mark_cloud_chat_run`` so the
+    per-tenant cwd jail's fail-closed (``agent_jail.resolve_agent_cwd``) can fire
+    for a real chat dispatch. Locks the wrap itself: the marker must be set
+    DURING the main agent loop AND inherited by the prewarm task
+    (``asyncio.create_task`` copies the context), and reset after the run so it
+    never leaks. Without this, the wrap could be silently removed and every other
+    test would still pass (they set the marker by hand)."""
+    from pocketpaw_ee.cloud.chat import agent_service as svc
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    transport = RedisStreamTransport(redis)
+
+    seen: dict[str, bool] = {}
+
+    async def capturing_events(spec, ctx):
+        seen["loop"] = svc.current_cloud_chat_run()
+        yield ("chunk", {"content": "hi", "type": "text"})
+
+    async def capturing_prewarm(ctx):
+        # Fired via asyncio.create_task INSIDE the marked region — the copied
+        # context must carry the marker into this task.
+        seen["prewarm"] = svc.current_cloud_chat_run()
+
+    monkeypatch.setattr(run_core, "_iter_agent_events", capturing_events)
+    monkeypatch.setattr(run_core, "_prewarm_session", capturing_prewarm)
+    monkeypatch.setattr(run_core, "get_stream_transport", lambda: transport)
+    monkeypatch.setattr(run_core, "_mark_running", _noop)
+    monkeypatch.setattr(run_core, "_persist_and_complete", _persist_stub)
+    monkeypatch.setattr(run_core, "_broadcast_agent_typing", _noop)
+    monkeypatch.setattr(run_core, "resolve_scope_context", fake_resolve_scope_context)
+
+    # Outside any run the marker is its default (False).
+    assert svc.current_cloud_chat_run() is False
+
+    await run_core.execute_run(_spec())
+    # The prewarm task is fire-and-forget; give it turns to run if it hasn't.
+    for _ in range(5):
+        if "prewarm" in seen:
+            break
+        await asyncio.sleep(0)
+
+    assert seen.get("loop") is True, "marker must be set during the main agent loop"
+    assert seen.get("prewarm") is True, "prewarm task must inherit the marker via create_task"
+    # And it must NOT leak past the run.
+    assert svc.current_cloud_chat_run() is False
+
+
 async def test_execute_run_cancelled_does_not_persist(monkeypatch):
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     transport = RedisStreamTransport(redis)
