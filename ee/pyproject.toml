@@ -216,6 +216,7 @@ composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
+deliver = "pocketpaw_ee.extensions:CloudDeliverMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
@@ -383,6 +384,17 @@ source_modules = [
     "pocketpaw_ee.cloud.notifications.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+
+[[tool.importlinter.contracts]]
+name = "FileVersions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.file_versions.router",
+    "pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw_ee.cloud.file_versions.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
 
 [[tool.importlinter.contracts]]
 name = "FabricIngest — Beanie writes only from service.py"
