@@ -117,3 +117,44 @@ async def test_close_pool_swallows_aclose_failure(monkeypatch, caplog):
         await arq_executor.close_pool()  # must not raise
 
     assert arq_executor._pool is None  # ref cleared even on failure
+
+
+# --- run job_timeout: arq's 300s default cancelled long agent runs ----------
+
+
+async def test_worker_settings_job_timeout_is_generous():
+    """REGRESSION: WorkerSettings set no ``job_timeout``, so arq applied its 300s
+    default — which CANCELS a long agent run mid-generation. A big coding task in
+    /chat would halt after ~5 minutes with only the already-streamed partial
+    persisted (run_core catches the CancelledError and emits a cancelled frame).
+    arq reads ``__dict__`` directly, so the cap must live there as a plain int
+    well above 300s.
+    """
+    raw = worker_mod.WorkerSettings.__dict__.get("job_timeout")
+    assert isinstance(raw, int), (
+        f"WorkerSettings.job_timeout in __dict__ is {type(raw).__name__}, expected int"
+    )
+    assert raw >= 1800, (
+        f"job_timeout {raw}s is not generous enough — arq's 300s default cancels "
+        "long agent runs mid-stream."
+    )
+
+
+async def test_job_timeout_helper_default(monkeypatch):
+    monkeypatch.delenv("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", raising=False)
+    assert worker_mod._job_timeout_seconds() == worker_mod._DEFAULT_RUN_JOB_TIMEOUT_SECONDS
+
+
+async def test_job_timeout_helper_env_override(monkeypatch):
+    monkeypatch.setenv("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", "3600")
+    assert worker_mod._job_timeout_seconds() == 3600
+
+
+async def test_job_timeout_helper_invalid_or_nonpositive_falls_back(monkeypatch):
+    """A typo / non-positive value falls back to the default rather than silently
+    disabling or breaking the cap."""
+    for bad in ("not-a-number", "-5", "0", ""):
+        monkeypatch.setenv("POCKETPAW_CLOUD_RUN_JOB_TIMEOUT", bad)
+        assert worker_mod._job_timeout_seconds() == worker_mod._DEFAULT_RUN_JOB_TIMEOUT_SECONDS, (
+            f"{bad!r} should fall back to the default"
+        )
