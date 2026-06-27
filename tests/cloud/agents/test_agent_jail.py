@@ -4,12 +4,18 @@
 #   * workspace + session -> <root>/<ws>/agent/<session>/
 #   * workspace, no session -> <root>/<ws>/agent/_shared/ (group/DM bridge)
 #   * same identity reuses one dir across turns
-#   * cloud active + no workspace -> RAISES (fail-closed)
+#   * cloud active + cloud-chat-run marker + no workspace -> RAISES (fail-closed)
+#   * cloud active + NO marker + no workspace -> None (non-chat run falls back)
 #   * cloud NOT active + no workspace -> None (OSS / dedicated unchanged)
 #   * hostile / traversal ids are rejected before they touch the filesystem
 #   * a trailing-newline id is rejected (the \Z-vs-$ anchor hardening)
 #   * the fail-closed emits a high-severity cloud AuditEvent before it raises
 #   * CloudAgentExtension.agent_cwd delegates to the resolver
+# Updated 2026-06-27 (fix/cloud-artifacts-reland) — the fail-closed is now gated
+# on the per-run mark_cloud_chat_run() marker, not is_multi_tenant_cloud() alone
+# (a process-global). The fail-closed tests set the marker so a real cloud CHAT
+# run still raises; a new test locks the no-marker -> None fallback (a non-chat
+# run merely sharing a cloud-connected process must NOT hard-fail).
 """Per-tenant agent working-directory jail (ART-2)."""
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from pocketpaw_ee.cloud import agent_jail
 from pocketpaw_ee.cloud.chat.agent_service import (
     attach_agent_identity,
     detach_agent_identity,
+    mark_cloud_chat_run,
 )
 
 
@@ -131,9 +138,21 @@ def test_same_identity_reuses_dir(_jail_root):
 
 
 def test_fail_closed_when_cloud_active_and_no_workspace(cloud_active):
-    # No identity bound (contextvar default None) + cloud mode active.
-    with pytest.raises(RuntimeError, match="no resolvable workspace"):
+    # Cloud mode active + a live cloud CHAT run (marker set) + no identity bound
+    # (contextvar default None) → the mis-tenanting fail-closed fires. The marker
+    # is REQUIRED: without it the resolver falls back (see the next test), so a
+    # real chat run that lost its workspace must set it to keep the protection.
+    with pytest.raises(RuntimeError, match="no resolvable workspace"), mark_cloud_chat_run():
         agent_jail.resolve_agent_cwd()
+
+
+def test_returns_none_when_cloud_active_but_not_chat_run(cloud_active):
+    # Cloud mode active + no workspace BUT no cloud-chat-run marker — a direct
+    # backend test / CLI / background job merely sharing a cloud-connected
+    # process. The resolver MUST fall back to None, not hard-fail
+    # (fix/cloud-artifacts-reland): is_multi_tenant_cloud() is a process-global,
+    # so the fail-closed is gated on the per-run marker, which is absent here.
+    assert agent_jail.resolve_agent_cwd() is None
 
 
 def test_returns_none_when_not_cloud(cloud_inactive):
@@ -197,11 +216,12 @@ async def test_fail_closed_emits_high_severity_audit(cloud_active, monkeypatch):
 
     from pocketpaw_ee.cloud.chat import agent_service as svc
 
-    # Bind a user + session but NO workspace (the mis-tenanting condition).
+    # Bind a user + session but NO workspace (the mis-tenanting condition),
+    # under a live cloud CHAT run (marker set) so the fail-closed actually fires.
     utok = svc._active_user_id.set("user-1")
     stok = svc._active_session_mongo_id.set("sess-9")
     try:
-        with pytest.raises(RuntimeError, match="no resolvable workspace"):
+        with pytest.raises(RuntimeError, match="no resolvable workspace"), mark_cloud_chat_run():
             agent_jail.resolve_agent_cwd()
         # The emit is scheduled on the loop; give it turns to run.
         for _ in range(3):

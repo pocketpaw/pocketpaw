@@ -9,11 +9,16 @@ every tenant's agent shares ``~`` and writes land on top of each other.
 ``resolve_agent_cwd()`` reads the run's identity from the
 ``attach_agent_identity`` ContextVars (``current_workspace_id`` /
 ``current_session_mongo_id``) and returns a per-workspace, per-session jail dir.
-It FAILS CLOSED: a run that reaches the backend in multi-tenant cloud mode with
-no resolvable workspace RAISES rather than silently falling back to ``~`` — that
-silent fallback is the exact co-mingling bug this closes. OFF cloud (OSS /
-dedicated, where the cloud DB was never initialized) it returns ``None`` so the
-core agent keeps using ``settings.file_jail_path`` unchanged.
+It FAILS CLOSED, but ONLY for a cloud CHAT run: a run that reaches the backend on
+the cloud chat dispatch path (marked by ``current_cloud_chat_run()`` — set by
+``run_core.execute_run`` around the run lifecycle) with no resolvable workspace
+RAISES rather than silently falling back to ``~`` — that silent fallback is the
+exact co-mingling bug this closes. Every OTHER workspace-less run returns
+``None`` so the core agent keeps using ``settings.file_jail_path`` unchanged: an
+OSS / dedicated run (the cloud DB was never initialized), AND a non-chat run (the
+CLI, a background job, a direct backend test) that merely shares a
+cloud-connected process. ``is_multi_tenant_cloud()`` alone is a process-global,
+so without the per-run marker the gate would wrongly hard-fail all of those.
 
 The multi-tenant-cloud signal is ``is_multi_tenant_cloud()`` (ART-4) — the cloud
 DB client is set exactly when ``init_cloud_db`` ran (``CloudLifecycleHook`` on
@@ -49,6 +54,17 @@ all cloud-only:
     evict, disk probe); the sweep owns the run-state coordination (it never
     evicts a jail while its run is still queued or running — and a retried
     interrupted run re-protects the jail by spawning a fresh queued run).
+
+Changes: 2026-06-27 (fix/cloud-artifacts-reland) — ``resolve_agent_cwd``'s
+fail-closed is now ALSO gated on the per-run ``current_cloud_chat_run()`` marker,
+not ``is_multi_tenant_cloud()`` alone. The latter is a PROCESS-GLOBAL (True
+whenever the cloud Mongo client is connected), so the original gate hard-failed
+EVERY workspace-less run in a cloud-connected process — direct claude_sdk backend
+tests, the CLI, background jobs — and would have hard-failed legitimate
+non-tenant agent runs in a real cloud process. The marker (set by
+``run_core.execute_run`` around the run lifecycle) fires the fail-closed only for
+an actual cloud chat dispatch; otherwise the resolver returns ``None`` and the
+core falls back to ``settings.file_jail_path``.
 """
 
 from __future__ import annotations
@@ -150,6 +166,7 @@ def resolve_agent_cwd() -> str | None:
         fail-closed guard against tenant file co-mingling.
     """
     from pocketpaw_ee.cloud.chat.agent_service import (
+        current_cloud_chat_run,
         current_session_mongo_id,
         current_user_id,
         current_workspace_id,
@@ -157,15 +174,24 @@ def resolve_agent_cwd() -> str | None:
 
     workspace_id = current_workspace_id()
     if not workspace_id:
-        # No tenancy bound. Distinguish a multi-tenant cloud run that lost its
-        # workspace (a bug we must NOT paper over by writing into the shared
-        # home dir) from an OSS / dedicated run where identity is legitimately
-        # never bound. ``is_multi_tenant_cloud()`` is True exactly when
-        # ``init_cloud_db`` ran — the authoritative multi-tenant-cloud signal,
-        # named in one place (ART-4) so the boot guard reads the same check.
+        # No tenancy bound. Distinguish a multi-tenant cloud CHAT run that lost
+        # its workspace (a bug we must NOT paper over by writing into the shared
+        # home dir) from every OTHER workspace-less run: an OSS / dedicated run
+        # where identity is legitimately never bound, OR a non-chat run (the CLI,
+        # a background job, a direct backend test) that merely shares a
+        # cloud-connected process. ``is_multi_tenant_cloud()`` is a PROCESS-GLOBAL
+        # — True whenever ``init_cloud_db`` ran (the cloud Mongo client is set, so
+        # the box is serving tenants) — so it CANNOT tell a real chat dispatch
+        # from any other run in the same process. The per-run
+        # ``current_cloud_chat_run()`` marker (set by ``run_core.execute_run``
+        # around the run lifecycle, BEFORE identity is bound) carries that
+        # distinction. Fail closed ONLY for a cloud CHAT run; otherwise return
+        # ``None`` so the core falls back to ``settings.file_jail_path`` — the
+        # pre-ART-2 behavior — instead of hard-failing a legitimately un-tenanted
+        # run.
         from pocketpaw_ee.cloud.shared.db import is_multi_tenant_cloud
 
-        if is_multi_tenant_cloud():
+        if is_multi_tenant_cloud() and current_cloud_chat_run():
             # Mis-tenanting signal — alert before failing closed (best-effort).
             _emit_fail_closed_audit(current_user_id(), current_session_mongo_id())
             raise RuntimeError(
