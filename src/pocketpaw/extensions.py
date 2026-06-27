@@ -202,17 +202,6 @@ class AgentExtension(Protocol):
         context is active (the common OSS / out-of-stream case)."""
         ...
 
-    def agent_cwd(self) -> str | None:
-        """Per-run working directory for the agent, or ``None`` to use
-        ``settings.file_jail_path``. The cloud product returns a
-        per-workspace/session jail so a tenant's file operations never
-        co-mingle in the shared home dir, and RAISES when a cloud run has
-        no resolvable workspace (fail-closed — never silently land in
-        ``~``). An OSS install registers no provider, so the core keeps
-        its ``file_jail_path`` default. Optional: a provider predating
-        this method simply isn't consulted (the core uses ``getattr``)."""
-        ...
-
 
 @runtime_checkable
 class PocketWriter(Protocol):
