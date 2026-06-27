@@ -1,4 +1,13 @@
-"""Tests for the ``pocketpaw serve`` API-only server."""
+"""Tests for the ``pocketpaw serve`` API-only server.
+
+Updated: 2026-06-27 (test hermeticity for pytest-xdist) — test_sessions_endpoint
+now satisfies the EE ``require_license`` dependency in-process via a per-test
+``app.dependency_overrides`` no-op (mirroring tests/cloud/conftest.py). In an
+isolated process no ``POCKETPAW_LICENSE_KEY`` is set, so the EE sessions router's
+license gate returned 403; the full serial suite only passed because an earlier
+test had cached a license. The override is a no-op when ee.cloud is absent, so
+the 200 (core router) / 401 (EE auth) assertion is unchanged.
+"""
 
 import socket
 from unittest.mock import MagicMock, patch
@@ -54,12 +63,34 @@ class TestAPIAppStructure:
         resp = client.get("/api/v1/backends")
         assert resp.status_code == 200
 
-    def test_sessions_endpoint(self, _mock, client):
-        resp = client.get("/api/v1/sessions")
+    def test_sessions_endpoint(self, _mock, api_app, client):
         # When ee.cloud is installed, the enterprise sessions router takes
-        # precedence and requires JWT auth (401).  The core sessions router
-        # returns 200 when ee is absent.
-        assert resp.status_code in (200, 401)
+        # precedence and gates on a license (403 with no key) then JWT auth
+        # (401).  Satisfy the license dependency in-process so the route
+        # reaches its auth check; without this the test depends on an earlier
+        # test having cached a license (non-hermetic under pytest-xdist).
+        try:
+            from pocketpaw_ee.cloud.license import require_license
+
+            async def _license_ok():
+                return None
+
+            api_app.dependency_overrides[require_license] = _license_ok
+        except ImportError:
+            # ee.cloud absent — core sessions router returns 200, no gate.
+            pass
+
+        try:
+            resp = client.get("/api/v1/sessions")
+            # ee present + licensed → 401 (JWT required); ee absent → 200.
+            assert resp.status_code in (200, 401)
+        finally:
+            try:
+                from pocketpaw_ee.cloud.license import require_license
+
+                api_app.dependency_overrides.pop(require_license, None)
+            except ImportError:
+                pass
 
     def test_skills_endpoint(self, _mock, client):
         resp = client.get("/api/v1/skills")
