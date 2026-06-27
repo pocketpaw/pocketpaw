@@ -48,23 +48,11 @@ class StorageAdapter(Protocol):
         ``None`` — the caller should fall back to streaming via ``open``.
         """
 
-    async def presigned_get(
-        self,
-        key: str,
-        ttl_seconds: int,
-        response_content_disposition: str | None = None,
-    ) -> str | None:
+    async def presigned_get(self, key: str, ttl_seconds: int) -> str | None:
         """Return a time-limited public URL for reading ``key``.
 
         Adapters that natively support presigning (S3, GCS) return an
         absolute URL the browser can fetch without an Authorization header.
         Adapters that don't (local disk) return ``None``; the caller should
         fall back to its own signing scheme.
-
-        ``response_content_disposition`` (when set) is forwarded so the served
-        response carries that ``Content-Disposition`` — callers pass
-        ``attachment; filename="…"`` to force a download for content that must
-        not render inline on the storage origin (e.g. delivered HTML/SVG). The
-        local adapter ignores it (it never presigns); ``None`` preserves the
-        adapter/object default disposition.
         """

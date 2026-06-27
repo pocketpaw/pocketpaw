@@ -81,13 +81,7 @@ class LocalStorageAdapter(StorageAdapter):
             return None
         return target if target.exists() else None
 
-    async def presigned_get(
-        self,
-        key: str,
-        ttl_seconds: int,
-        response_content_disposition: str | None = None,
-    ) -> str | None:
+    async def presigned_get(self, key: str, ttl_seconds: int) -> str | None:
         # Local disk can't mint a public URL. Callers fall back to the
-        # HMAC-signed ``/uploads/{id}?t=...`` proxy, which sets its own
-        # Content-Disposition — so the disposition hint is unused here.
+        # HMAC-signed ``/uploads/{id}?t=...`` proxy.
         return None

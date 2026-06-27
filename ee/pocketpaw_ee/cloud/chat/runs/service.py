@@ -167,22 +167,3 @@ async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:
         {"status": {"$in": ["queued", "running"]}},
         ChatRunDoc.createdAt < older_than,
     ).to_list()
-
-
-async def find_active_run_scopes() -> set[tuple[str, str, str]]:
-    """Every ``(workspace, context_type, scope_id)`` with a non-terminal
-    (``queued`` / ``running``) run.
-
-    The active-jail guard for the ART-3 jail GC: a per-session agent jail dir is
-    named after its run's scope (``session`` runs → ``<scope_id>``; ``dm`` /
-    ``group`` / ``pocket`` runs share the workspace ``_shared`` dir), so a jail
-    whose scope is in this set is in use and must never be evicted. Uses the
-    same ``active = queued | running`` definition as ``find_active_run_for_scope``
-    — an ``interrupted`` run that the user retries spawns a NEW queued/running
-    run for the same scope, which re-protects the jail, so a retry can't race a
-    GC pass into deleting a jail it's about to reuse.
-    """
-    docs = await ChatRunDoc.find(
-        {"status": {"$in": ["queued", "running"]}},
-    ).to_list()
-    return {(d.workspace, d.context_type, d.scope_id) for d in docs}

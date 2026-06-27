@@ -7,6 +7,8 @@ Updated for multi-SDK architecture:
 - Removed: ExecutorProtocol, OrchestratorProtocol, pocketpaw_native, open_interpreter
 """
 
+from pathlib import Path
+
 import pytest
 
 from pocketpaw.config import Settings
@@ -152,6 +154,14 @@ class TestClaudeAgentSDK:
         assert sdk._stop_flag is False
         await sdk.stop()
         assert sdk._stop_flag is True
+
+    def test_sdk_set_working_directory(self):
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        sdk = ClaudeSDKBackend(Settings())
+        new_path = Path("/tmp")
+        sdk.set_working_directory(new_path)
+        assert sdk._cwd == new_path
 
     @pytest.mark.asyncio
     async def test_sdk_run_without_sdk_installed(self):
@@ -329,140 +339,3 @@ class TestClaudeSDKCliAuth:
 
         assert len(resolved_providers) > 0
         assert resolved_providers[0] == "anthropic"
-
-
-# =============================================================================
-# ART-2: per-run cwd resolution + fail-closed (agent_extensions seam)
-# =============================================================================
-
-
-class TestResolveCwd:
-    """``ClaudeSDKBackend._resolve_cwd`` — the OSS/cloud cwd gate.
-
-    OSS (no ``agent_extensions`` provider) must stay on ``file_jail_path``; an
-    EE provider's ``agent_cwd`` wins; a provider that RAISES (a cloud run with
-    no resolvable workspace) propagates — fail-closed, never a silent fallback.
-    """
-
-    def test_oss_defaults_to_file_jail_path(self, monkeypatch):
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: ())
-        settings = Settings()
-        backend = ClaudeSDKBackend(settings)
-        assert backend._resolve_cwd() == settings.file_jail_path
-
-    def test_extension_cwd_wins(self, monkeypatch, tmp_path):
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        jail = tmp_path / "jail" / "wsX"
-
-        class FakeExt:
-            def agent_cwd(self):
-                return str(jail)
-
-        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (FakeExt(),))
-        backend = ClaudeSDKBackend(Settings())
-        assert backend._resolve_cwd() == jail
-
-    def test_extension_raise_propagates_fail_closed(self, monkeypatch):
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        class FailClosedExt:
-            def agent_cwd(self):
-                raise RuntimeError("no resolvable workspace_id")
-
-        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (FailClosedExt(),))
-        backend = ClaudeSDKBackend(Settings())
-        with pytest.raises(RuntimeError, match="no resolvable workspace_id"):
-            backend._resolve_cwd()
-
-    def test_extension_returning_none_falls_back(self, monkeypatch):
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        class NoneExt:
-            def agent_cwd(self):
-                return None
-
-        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (NoneExt(),))
-        settings = Settings()
-        backend = ClaudeSDKBackend(settings)
-        assert backend._resolve_cwd() == settings.file_jail_path
-
-    def test_provider_without_agent_cwd_ignored(self, monkeypatch):
-        # A provider predating agent_cwd must not break resolution.
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        class OldExt:
-            def subprocess_env(self):
-                return {}
-
-        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (OldExt(),))
-        settings = Settings()
-        backend = ClaudeSDKBackend(settings)
-        assert backend._resolve_cwd() == settings.file_jail_path
-
-
-class TestCwdJailHardening:
-    """ART-2 hardening: run()-level fail-closed lock + cwd in the cache key."""
-
-    @pytest.mark.asyncio
-    async def test_run_fails_closed_no_home_fallback(self, monkeypatch):
-        """A cloud run whose cwd resolver RAISES must surface an error event and
-        NEVER execute the agent with a file_jail_path / home fallback cwd.
-
-        Locks the fail-closed at the run() seam, not just the _resolve_cwd unit:
-        guards against a future edit adding a generic cwd fallback in run()'s
-        except handler (the known cloud-fail-closed-slips-past-green-OSS-CI
-        pattern). Asserts the CLOUD branch — the resolver raises.
-        """
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        settings = Settings()
-        backend = ClaudeSDKBackend(settings)
-        backend._sdk_available = True
-        backend._cli_available = True
-
-        class FailClosedExt:
-            def agent_cwd(self):
-                raise RuntimeError("no resolvable workspace_id")
-
-        monkeypatch.setattr("pocketpaw._registry.providers", lambda group: (FailClosedExt(),))
-
-        # Capture the cwd of every SDK-options construction — the only gateway
-        # to actually launching the agent. On the fail-closed path the resolver
-        # raises first, so options are never built at all.
-        built_cwds: list[str | None] = []
-
-        def spy_options(**kwargs):
-            built_cwds.append(kwargs.get("cwd"))
-            raise RuntimeError("options must not be built on the fail-closed path")
-
-        backend._ClaudeAgentOptions = spy_options
-
-        events = [e async for e in backend.run("hi", session_key="s1")]
-
-        # (1) the run surfaces an error event
-        assert any(e.type == "error" for e in events)
-        # (2) the agent NEVER executed with a home / file_jail_path fallback cwd
-        assert str(settings.file_jail_path) not in built_cwds
-        # in fact nothing was built — the raise precedes options construction
-        assert built_cwds == []
-
-    def test_cache_key_includes_cwd(self):
-        """Two different resolved cwds → different cache keys (no warm-client
-        reuse across tenants); identical inputs → identical key (reuse kept)."""
-        from types import SimpleNamespace
-
-        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-
-        def opts(cwd):
-            return SimpleNamespace(
-                cwd=cwd, model="claude-x", allowed_tools=["Read"], system_prompt="p"
-            )
-
-        key_a = ClaudeSDKBackend._client_cache_key(opts("/jail/wsA/agent/s1"), session_key="s1")
-        key_b = ClaudeSDKBackend._client_cache_key(opts("/jail/wsB/agent/s1"), session_key="s1")
-        key_a2 = ClaudeSDKBackend._client_cache_key(opts("/jail/wsA/agent/s1"), session_key="s1")
-        assert key_a != key_b
-        assert key_a == key_a2

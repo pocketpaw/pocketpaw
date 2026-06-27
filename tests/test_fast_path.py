@@ -287,7 +287,6 @@ async def test_persistent_client_reuse():
     options1 = MagicMock()
     options1.model = "claude-sonnet-4-5-20250929"
     options1.allowed_tools = ["Bash", "Read"]
-    options1.cwd = "/jail/ws"  # cwd is part of the cache key (ART-2)
 
     # First call — creates client
     client1 = await sdk._get_or_create_client(options1)
@@ -298,7 +297,6 @@ async def test_persistent_client_reuse():
     options2 = MagicMock()
     options2.model = "claude-sonnet-4-5-20250929"
     options2.allowed_tools = ["Bash", "Read"]
-    options2.cwd = "/jail/ws"  # same cwd → same key → warm reuse
 
     client2 = await sdk._get_or_create_client(options2)
     assert len(clients_created) == 1  # No new client created
@@ -335,37 +333,6 @@ async def test_persistent_client_reconnects_on_model_change():
     assert len(clients_created) == 2
     assert client2 is not client1
     assert client1.disconnected  # Old client was disconnected
-
-
-async def test_persistent_client_reconnects_on_cwd_change():
-    """Same session + model + tools but a DIFFERENT cwd (another tenant's jail)
-    must create a fresh client, never reuse the warm one (ART-2). Locks warm-
-    client tenant isolation as structural, not implicit in session_key."""
-    sdk = _make_sdk()
-
-    clients_created = []
-
-    def _client_factory(**kwargs):
-        c = _FakeSDKClient()
-        clients_created.append(c)
-        return c
-
-    sdk._ClaudeSDKClient = _client_factory
-
-    options1 = MagicMock()
-    options1.model = "claude-sonnet-4-5-20250929"
-    options1.allowed_tools = ["Bash"]
-    options1.cwd = "/jail/wsA/agent/s1"
-    client1 = await sdk._get_or_create_client(options1, session_key="s1")
-    assert len(clients_created) == 1
-
-    options2 = MagicMock()
-    options2.model = "claude-sonnet-4-5-20250929"
-    options2.allowed_tools = ["Bash"]
-    options2.cwd = "/jail/wsB/agent/s1"  # different tenant, same session_key
-    client2 = await sdk._get_or_create_client(options2, session_key="s1")
-    assert len(clients_created) == 2
-    assert client2 is not client1
 
 
 async def test_persistent_client_falls_back_to_query():
