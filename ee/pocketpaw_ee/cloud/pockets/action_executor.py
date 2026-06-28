@@ -1,4 +1,20 @@
 # action_executor.py — Server-side executor for pocket WRITE actions.
+# Updated: 2026-06-28 (AW-6 — read_only action marker) — `ActionBinding` gains
+#   a `read_only: bool = False` field that marks a genuinely SAFE, read-only
+#   action as gate-exempt BY DEFINITION. The `method` Literal is widened to
+#   accept GET / HEAD so a true read can be declared on this surface. A new
+#   `_read_only_is_safe` model_validator (mirrors `_exempt_is_consistent`)
+#   guards the widening BOTH ways so the write-only contract is preserved: a
+#   GET/HEAD binding WITHOUT `read_only=True` is still rejected (a bare read
+#   verb on the action surface stays a misconfiguration); and `read_only=True`
+#   is rejected on any mutating method (POST/PUT/PATCH/DELETE) or alongside an
+#   `instinct_policy` — a write can never be mislabeled safe. Gate 7 suppresses
+#   the Instinct park when `binding.read_only` is True, via its OWN path (NOT
+#   reusing `instinct_exempt`) so the audit trace stays truthful: a read
+#   proceeds ungated because there is nothing to govern, not because an author
+#   opted a write out. This is the marker AW-7 needs to flip the template
+#   default to deny without gating legitimate reads. No template-level gate or
+#   default is changed here.
 # Updated: 2026-06-11 (gap-housekeeping) — the
 #   `_outcome_value_pairs_with_unit` model_validator now also rejects a
 #   NEGATIVE `outcome_value`. The aggregation sums value by unit into a
@@ -370,7 +386,12 @@ class ActionBinding(BaseModel):
     model_config = {"extra": "ignore"}
 
     kind: Literal["write_binding"] = "write_binding"
-    method: Literal["POST", "PUT", "PATCH", "DELETE"]
+    # AW-6: GET / HEAD are accepted here ONLY so a genuinely read-only action
+    # can be declared on the write surface and marked `read_only=True` (the
+    # safe-by-definition exemption below). A mutating verb stays the common
+    # case; `_read_only_is_safe` rejects `read_only=True` on any mutating
+    # method, so the read-only flag can never label a write as safe.
+    method: Literal["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"]
     path: str
     params: dict = Field(default_factory=dict)
     confirm: bool = False
@@ -401,6 +422,14 @@ class ActionBinding(BaseModel):
     # W2a: explicit, auditable exemption. A binding the author deliberately
     # allows to fire WITHOUT the gate sets this True in the persisted spec.
     instinct_exempt: bool = False
+    # AW-6: SAFE-BY-DEFINITION read marker. A `read_only=True` binding is a
+    # genuine read (GET / HEAD, no `instinct_policy`) that proceeds UNGATED —
+    # not because the author opted a write out (`instinct_exempt`), but because
+    # there is nothing to govern. It rides its OWN gate-7 suppression path so
+    # the audit trace stays truthful (a read, not an exempted write).
+    # `_read_only_is_safe` rejects the flag on any mutating method or alongside
+    # an `instinct_policy`, so it can never silently un-gate a real write.
+    read_only: bool = False
     # --- Saga Compensate (RFC 05) ---------------------------------------
     # The inverse write that undoes this action on a mid-sequence rollback.
     # Declaration-only here; ``saga.py`` reads + fires it. ``None`` means
@@ -439,6 +468,52 @@ class ActionBinding(BaseModel):
             raise ValueError(
                 "instinct_exempt is true but instinct_policy is set — an "
                 "exempt binding has no gate for a policy to apply to"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _read_only_is_safe(self) -> ActionBinding:
+        """AW-6 — a non-write verb is ONLY admissible as a declared read.
+
+        This surface is write-first by contract: ``method`` historically was
+        a write-verb Literal so a compromised client could never coax a read
+        through the action executor (reads belong to ``source_executor``). AW-6
+        widens the Literal to admit ``GET`` / ``HEAD`` for ONE purpose: a
+        genuinely safe, read-only action that proceeds ungated. So the
+        non-write verbs are gated behind the ``read_only`` flag, both ways:
+
+        * A ``GET`` / ``HEAD`` binding WITHOUT ``read_only=True`` is rejected —
+          preserving the original write-only invariant (a bare read verb on
+          the action surface is still a misconfiguration / probe).
+        * A ``read_only=True`` binding on a mutating verb
+          (``POST`` / ``PUT`` / ``PATCH`` / ``DELETE``) is rejected — labelling
+          a write "safe" would un-gate a real state change.
+        * A ``read_only=True`` binding carrying an ``instinct_policy`` is
+          rejected — "proceeds ungated" and "gate this way" contradict.
+
+        Caught at parse time so neither the gate-7 suppression nor the
+        executor ever has to second-guess a mislabeled binding.
+        """
+        # A non-write verb is only legal when explicitly declared read_only.
+        if self.method in ("GET", "HEAD") and not self.read_only:
+            raise ValueError(
+                f"method is {self.method} but read_only is not set — a "
+                "non-write verb is only admissible on the action surface as an "
+                "explicit read_only action; writes use POST/PUT/PATCH/DELETE"
+            )
+        if not self.read_only:
+            return self
+        if self.method not in ("GET", "HEAD"):
+            raise ValueError(
+                f"read_only is true but method is {self.method} — a mutating "
+                "method (POST/PUT/PATCH/DELETE) must not be labeled read_only; "
+                "read_only is only valid for GET/HEAD"
+            )
+        if self.instinct_policy is not None:
+            raise ValueError(
+                "read_only is true but instinct_policy is set — a read_only "
+                "action proceeds ungated, so a gate policy has nothing to "
+                "apply to"
             )
         return self
 
@@ -1198,10 +1273,17 @@ async def run_action(
     # signals `instinct_pending`. The router hands `_park` to
     # `instinct_bridge.propose_pocket_write`, which builds the Instinct
     # Action. NO HTTP call is made here.
+    #   * `binding.read_only` (AW-6) — a genuine read (GET / HEAD, no policy;
+    #     enforced by `_read_only_is_safe`) is SAFE BY DEFINITION and proceeds
+    #     ungated. It rides its OWN suppression here rather than reusing
+    #     `instinct_exempt`, so the audit trace stays truthful: this is a read,
+    #     not an author-exempted write. This is what lets a later task (AW-7)
+    #     flip the template default to deny without gating legitimate reads.
     optimistic_gate_cleared = optimistic_execute
     if (
         binding.requires_instinct
         and not binding.instinct_exempt
+        and not binding.read_only
         and not from_instinct
         and not template_gate_cleared
         and not optimistic_gate_cleared
