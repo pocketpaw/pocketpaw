@@ -72,8 +72,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ._audit import record_tool_call
 import httpx
+
+from ._audit import record_tool_call
 
 logger = logging.getLogger(__name__)
 
