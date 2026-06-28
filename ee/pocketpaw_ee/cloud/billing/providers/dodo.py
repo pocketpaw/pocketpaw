@@ -348,9 +348,7 @@ class DodoProvider:
                 "billing.no_checkout_url",
                 "Dodo did not return a checkout session url for the subscription.",
             )
-        return SubscriptionCheckout(
-            checkout_url=str(checkout_url), subscription_id=str(session_id)
-        )
+        return SubscriptionCheckout(checkout_url=str(checkout_url), subscription_id=str(session_id))
 
     async def cancel_subscription(self, subscription_id: str) -> None:
         if not subscription_id:
