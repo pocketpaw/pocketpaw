@@ -1,6 +1,18 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
+    ``instinct_template_default_deny`` (default False, env
+    POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
+    TEMPLATE-level deny-by-default. When a template is BOUND to a pocket but
+    declares NO rule matching a MUTATING action, the template gate previously
+    returned EXECUTE (proceed). With this flag ON, that no-rule-match case
+    parks the write for human approval (PENDING_APPROVAL) instead; READS
+    (read_only / GET / HEAD actions) still proceed ungated. OFF by default so
+    day-one behavior is unchanged. A per-workspace override field
+    (``instinct_template_default_deny`` on the workspace document; null = use
+    this global default) is resolved exactly like
+    ``instinct_approval_level``.
   - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
     (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
     three-position billing-cutover switch that supersedes the
@@ -1476,6 +1488,30 @@ class Settings(BaseSettings):
             "hard expiry. On expiry the registry fires an ALERT audit event and "
             "persists the expired handle (no heartbeat extension). Set via "
             "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
+        ),
+    )
+    # AW-7 — TEMPLATE-level deny-by-default. Binding-level deny-by-default
+    # (``ActionBinding.requires_instinct`` defaults True) is already live; this
+    # closes the remaining hole: a template BOUND to a pocket that declares NO
+    # rule matching a MUTATING action used to fall through to the template
+    # gate's EXECUTE default and fire. When this flag is ON the no-rule-match
+    # case parks the write for a human (PENDING_APPROVAL) instead. READS
+    # (read_only / GET / HEAD actions) still proceed ungated — a read has
+    # nothing to govern. DORMANT by default (False): shipping it changes zero
+    # behavior. A per-workspace override field of the same name on the
+    # workspace document (null = use this global default) is resolved exactly
+    # like ``instinct_approval_level`` via
+    # ``resolve_workspace_template_default_deny``.
+    instinct_template_default_deny: bool = Field(
+        default=False,
+        description=(
+            "When true, a template BOUND to a pocket that declares no rule "
+            "matching a MUTATING action (POST/PUT/PATCH/DELETE and not "
+            "read_only) parks the write for human approval instead of firing "
+            "(template-level deny-by-default). Reads (read_only / GET / HEAD) "
+            "still proceed ungated. Off by default (zero behavior change). "
+            "Per-workspace overrides live on the workspace document. Set via "
+            "POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY."
         ),
     )
 

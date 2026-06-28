@@ -75,7 +75,9 @@ A write binding lives inside `rippleSpec.actions` on the pocket. The minimum sha
 |-------|---------|
 | `method` | One of `POST` / `PUT` / `PATCH` / `DELETE`. Validated server-side; the client cannot override. |
 | `path` | Resolved path appended to the backend `base_url`. `:placeholder` segments are filled at call time. |
-| `requires_instinct` | When `true`, runs validation gates but parks the write for human approval via the Instinct surface. |
+| `requires_instinct` | Defaults to **`true`** (deny-by-default): runs validation gates but parks the write for human approval via the Instinct surface. Set `false` only with `instinct_exempt: true` to fire ungated. |
+| `instinct_exempt` | When `true` (paired with `requires_instinct: false`), the explicit, auditable opt-out of the gate. Rejected by the model validator alongside an `instinct_policy`. |
+| `read_only` | When `true`, marks a genuinely safe read (`GET` / `HEAD`) that proceeds ungated. Rejected on any mutating method or alongside an `instinct_policy`. See [Deny-by-default](#deny-by-default). |
 | `instinct_policy` | Optional reference to a named Instinct policy. Rejected by the model validator if set without `requires_instinct`. |
 | `outcome` | Optional outcome name emitted on success. Feeds RFC 07's DecisionProjection. |
 | `compensate` | Optional inverse-write spec (`{method, path, params, outcome?}`) — the action that undoes this one if a later step in a write sequence fails. Fired by the Saga runtime on rollback; ignored on a single `run_action` call. See [Saga Compensation](#saga-compensation-multi-step-rollback). |
@@ -97,6 +99,28 @@ Three things decide whether a write fires inline or routes to a human:
 3. **The Instinct policy** (optional) — when `instinct_policy` is set on the binding, the Instinct service can compose policy rules on top (allow-list of approvers, expiry, batch approval, etc.).
 
 The executor's contribution is the **fail-closed default**: a binding with `requires_instinct: true` and a misconfigured approval route still parks the write; it never silently falls through to direct execution.
+
+### Deny-by-default
+
+Governance is **deny-by-default at two layers**, so an agent-authored write is gated unless something explicitly clears it.
+
+**Binding layer.** `requires_instinct` defaults to **`true`**. A write binding routes through the Instinct approval gate unless it is explicitly exempted (`instinct_exempt: true`, paired with `requires_instinct: false`) or the call is an already-gated re-entry. An agent that authors a binding and never sets the field still gets a gated write — the moat claim ("every agent action routes through an audited approval gate") holds at author time.
+
+A genuinely safe **read** can be declared on the action surface with `read_only: true` (a `GET` / `HEAD` binding). A `read_only` action proceeds **ungated** — not because an author opted a write out, but because there is nothing to govern. A model validator rejects `read_only: true` on any mutating method or alongside an `instinct_policy`, so the marker can never relabel a write as safe.
+
+**Template layer (`instinct_template_default_deny`).** When a **template is bound** to a pocket and governs an action, the template's Instinct rules adjudicate the write. The remaining hole: a bound template that declares **no rule matching** an action used to fall through to the template gate's default `EXECUTE` and fire. The `instinct_template_default_deny` flag closes it.
+
+When the flag is **on**, a bound template with no matching rule for a **mutating** action (`POST` / `PUT` / `PATCH` / `DELETE` and not `read_only`) **parks the write for approval** (`instinct_pending`) instead of executing. **Reads** (`read_only` / `GET` / `HEAD`) always proceed ungated — the flip never gates a legitimate read. The scope is tight: only the *no-rule-match* default is flipped. A rule that matched and returned `EXECUTE`, a `notify_only` author floor, and a `BLOCK` rule are explicit policy decisions and are never overridden.
+
+The flag is **off by default** (`POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY`), so shipping it changes zero behavior. It is a **per-workspace opt-in**: the `instinct_template_default_deny` field on the workspace document overrides the global config default, exactly like `instinct_approval_level`. An unset workspace field falls back to the global default, and any read failure degrades safe to `false` — a DB hiccup can never silently start parking a tenant's writes.
+
+| Resolution order | Effect |
+|------------------|--------|
+| Workspace document field `instinct_template_default_deny` (when a non-null bool) | The per-workspace opt-in wins. |
+| Global config `instinct_template_default_deny` (`POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY`, default `false`) | Applies to workspaces that have not set their own field. |
+| Read failure / malformed id | Degrades safe to `false`. |
+
+> **Known nuance.** A `read_only` `GET` that skips the park still flows through the write-allowlist and the gate-8 write executor (the action surface, not `source_executor`). Routing `read_only` reads to `source_executor` is a deeper refactor and out of scope for the template default-deny flip; what the flag guarantees is only that it does **not** gate a read.
 
 ## Outcome Emission
 

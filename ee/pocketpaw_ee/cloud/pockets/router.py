@@ -1,5 +1,14 @@
 """Pockets domain — FastAPI router.
 
+Updated: 2026-06-28 (AW-7 — template gate deny-on-no-match) — ``run_pocket_action``
+resolves the workspace's TEMPLATE-level deny-by-default
+(``resolve_workspace_template_default_deny`` → per-workspace field → global
+config default → False) WHEN a template governs the action, and threads it into
+``run_action`` as ``template_default_deny``. When ON and the bound template
+declares no rule matching a MUTATING action, the executor's gate parks the write
+for a human instead of firing; reads stay ungated. Resolved only when a template
+governs the action (same condition as ``approval_level``), so a non-template
+write is byte-identical to before. OFF by default.
 Updated: 2026-06-20 (feat/workspace-jobs, pp#1459) — ``run_pocket_action`` now
 branches on ``raw_action["kind"] == "job"`` BEFORE the path-resolution +
 ``action_executor.run_action`` HTTP-write path. A job action enqueues a named
@@ -1241,11 +1250,19 @@ async def run_pocket_action(
     # never runs), so a non-template write is byte-identical to before.
     approval_level = "ASK"
     dry_run_mode = False
+    # AW-7 — TEMPLATE-level deny-on-no-match. Resolved alongside approval_level,
+    # under the same "only when a template governs this action" guard: a
+    # non-template write never runs the template gate, so its behavior is
+    # unchanged. Per-workspace field → global config default → False.
+    template_default_deny = False
     if template is not None:
         approval_level = await pockets_service.resolve_workspace_approval_level(workspace_id)
         from pocketpaw.config import get_settings
 
         dry_run_mode = bool(get_settings().instinct_dry_run_mode)
+        template_default_deny = await pockets_service.resolve_workspace_template_default_deny(
+            workspace_id
+        )
 
     # no-event: the write result is response-body delivery, not persisted.
     result = await action_executor.run_action(
@@ -1265,6 +1282,7 @@ async def run_pocket_action(
         template=template,
         approval_level=approval_level,
         dry_run_mode=dry_run_mode,
+        template_default_deny=template_default_deny,
     )
 
     # W2a — a template-level CEL rule BLOCKED this write (gate 1.5). It

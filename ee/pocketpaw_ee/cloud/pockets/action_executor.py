@@ -1,4 +1,16 @@
 # action_executor.py — Server-side executor for pocket WRITE actions.
+# Updated: 2026-06-28 (AW-7 — template gate deny-on-no-match) — `run_action`
+#   takes a new `template_default_deny: bool = False` and threads it into the
+#   gate-1.5 `gate_action` call ALONGSIDE an `is_mutating` flag the executor
+#   computes from the parsed binding (`method ∈ POST/PUT/PATCH/DELETE AND not
+#   read_only`). When the flag is ON and a bound template declares no rule
+#   matching a MUTATING action, the gate parks the write for a human instead of
+#   proceeding — finishing deny-by-default at the template layer. READS
+#   (read_only marker from AW-6, or GET/HEAD) are NOT mutating, so the flip
+#   never gates a legitimate read. AW-6 nuance carried forward: a read_only GET
+#   that skips the park still flows through the write-allowlist + gate-8
+#   executor; routing read_only to source_executor is a deeper refactor left
+#   out of scope here. Flag OFF (default) → byte-identical to the prior gate.
 # Updated: 2026-06-28 (AW-6 — read_only action marker) — `ActionBinding` gains
 #   a `read_only: bool = False` field that marks a genuinely SAFE, read-only
 #   action as gate-exempt BY DEFINITION. The `method` Literal is widened to
@@ -793,6 +805,7 @@ async def run_action(
     dry_run: bool = False,
     approval_level: Any = None,
     dry_run_mode: bool = False,
+    template_default_deny: bool = False,
 ) -> dict:
     """Run ONE pocket write action against its configured backend.
 
@@ -975,6 +988,23 @@ async def run_action(
             if approval_level is not None
             else _DEFAULT_APPROVAL_LEVEL,
             dry_run_mode=dry_run_mode,
+            # AW-7 — TEMPLATE-level deny-on-no-match. When the workspace/global
+            # flag is ON and this binding is a MUTATING write that the bound
+            # template declares no matching rule for, the gate parks it for a
+            # human instead of proceeding. `is_mutating` is computed from the
+            # parsed binding HERE (the executor owns the binding) so the gate
+            # never re-parses: a read_only marker (AW-6) or a GET/HEAD verb is
+            # NOT mutating and always proceeds ungated — the template flip never
+            # gates a legitimate read. NOTE (AW-6 nuance): a read_only GET that
+            # skips the park still flows through the write-allowlist + gate-8
+            # executor; routing read_only to source_executor is a deeper
+            # refactor left out of scope — what matters here is only that the
+            # default-deny flip does not gate it.
+            template_default_deny=template_default_deny,
+            is_mutating=(
+                binding.method in ("POST", "PUT", "PATCH", "DELETE")
+                and not binding.read_only
+            ),
         )
         if gate.next_step == "blocked":
             _audit_action_run(
