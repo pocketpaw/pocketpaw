@@ -18,6 +18,21 @@
 #   lazily-built httpx.AsyncClient per adapter instance (connection pooling +
 #   cookie jar) instead of opening a fresh client per call; disconnect() closes
 #   it. Existing auth methods, timeouts, and error mapping are unchanged.
+# Updated: 2026-06-28 (AW-1 connector egress guard) — execute() now routes its
+#   outbound HTTP through the SSRF egress guard when the
+#   POCKETPAW_CONNECTOR_EGRESS_GUARD flag is on. Before each request it calls
+#   ``assert_egress_allowed(url, {host})`` (https-only, no userinfo/fragment,
+#   host must equal the connector's declared base-URL host, DNS pre-resolve +
+#   internal-range reject) and dials the result through a per-request
+#   pinned-IP client (``PinnedTransport``, ``follow_redirects=False``) so the
+#   connection cannot be re-resolved to an internal address between check and
+#   connect (DNS-rebind TOCTOU). A rejection returns a clean ActionResult error.
+#   The flag defaults OFF (safe rollout) — with it off the pooled client path is
+#   byte-for-byte unchanged. The guard primitive lives in the OSS module
+#   ``security.url_validators`` (the OSS->EE import boundary forbids importing
+#   the EE ``_http_guard``); the EE guard re-exports it to stay canonical. For
+#   this task the allow-list is the single declared base-URL host —
+#   multi-host/auth-host support is a later task.
 
 from __future__ import annotations
 
@@ -159,6 +174,48 @@ class DirectRESTAdapter:
 
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
+
+    @staticmethod
+    def _egress_guard_enabled() -> bool:
+        """True when POCKETPAW_CONNECTOR_EGRESS_GUARD is set (settings flag)."""
+        try:
+            from pocketpaw.config import get_settings
+
+            return bool(get_settings().connector_egress_guard)
+        except Exception:  # noqa: BLE001 — never let a config-load issue break execute()
+            return False
+
+    async def _egress_client(self, url: str) -> Any:
+        """Validate ``url`` against the egress policy and return a pinned client.
+
+        Closes the connector SSRF bypass (AW-1): enforces https-only, no
+        userinfo/fragment, the host must equal the connector's own declared
+        base-URL host (the allow-list for this task is that single host), DNS
+        pre-resolve + internal-range reject, then dials the vetted/pinned IP via
+        a per-request ``PinnedTransport`` client with redirects disabled — so
+        the connection cannot be re-resolved to an internal address between the
+        check and the connect (DNS-rebind TOCTOU). The caller MUST close the
+        returned client (it is per-request, not the pooled adapter client).
+
+        Raises ``EgressError`` (a ``ValueError``) when the URL is disallowed.
+        """
+        import httpx
+
+        from pocketpaw.security.url_validators import (
+            PinnedTransport,
+            assert_egress_allowed,
+        )
+
+        host = httpx.URL(url).host
+        # For this task the allow-list is exactly the connector's declared
+        # base-URL host. Multi-host / auth-host allow-lists are a later task.
+        target = await assert_egress_allowed(url, {host})
+        transport = PinnedTransport(target.pinned_ip)
+        return httpx.AsyncClient(
+            timeout=30.0,
+            follow_redirects=False,
+            transport=transport,
+        )
 
     @property
     def name(self) -> str:
@@ -304,16 +361,31 @@ class DirectRESTAdapter:
                 else:
                     body_data[key] = val
 
+        # AW-1 egress guard: when enabled, validate + pin the target and use a
+        # per-request client; when off, reuse the pooled adapter client exactly
+        # as before. ``guarded_client`` is closed in the finally block.
+        guarded = self._egress_guard_enabled()
+        guarded_client = None
+
         try:
             import httpx
+
+            from pocketpaw.security.url_validators import EgressError
 
             # Detect form-encoded APIs (Stripe, etc.) from URL or content_type hint
             content_type = act_def.get("content_type", "")
             use_form = content_type == "form" or "stripe.com" in url
 
-            # Reuse the per-adapter client: pooled connections + persistent
-            # cookie jar across calls. Closed in disconnect().
-            client = await self._get_client()
+            if guarded:
+                try:
+                    guarded_client = await self._egress_client(url)
+                except EgressError as e:
+                    return ActionResult(success=False, error=f"Blocked by egress guard: {e}")
+                client = guarded_client
+            else:
+                # Reuse the per-adapter client: pooled connections + persistent
+                # cookie jar across calls. Closed in disconnect().
+                client = await self._get_client()
             if method == "GET":
                 resp = await client.get(url, params=query_params, headers=headers)
             elif method == "POST":
@@ -373,6 +445,11 @@ class DirectRESTAdapter:
             return ActionResult(success=False, error=f"Request failed: {e}")
         except Exception as e:
             return ActionResult(success=False, error=str(e))
+        finally:
+            # The guarded client is per-request (pinned to this call's IP), so
+            # close it here. The pooled adapter client is left open for reuse.
+            if guarded_client is not None:
+                await guarded_client.aclose()
 
     def _build_auth_headers(self) -> dict[str, str]:
         """Build auth headers from stored credentials based on auth method."""

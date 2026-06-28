@@ -5,6 +5,14 @@
 #   (`action_executor.py`) import for outbound-HTTP safety. Pure extraction —
 #   no behavior change from the alpha; the read-executor regression tests are
 #   the proof gate.
+# Updated: 2026-06-28 (AW-1 connector egress guard) — re-exports the OSS-side
+#   egress primitive so this module stays the ONE canonical guard entry point
+#   even though the reusable code now lives in OSS ``security.url_validators``
+#   (the OSS connector engine needs it and core may not import this EE module —
+#   the import boundary runs one way). ``assert_egress_allowed`` /
+#   ``PinnedTransport`` / ``EgressTarget`` / ``EgressError`` are surfaced here
+#   verbatim from that module; no behavior change for the existing executors,
+#   which keep importing ``_assert_host_external`` / ``_resolve_url`` as before.
 #
 # SSRF BOUNDARY. Every defense from the locked RFC 04 security review lives
 # here: strict path-traversal rejection, absolute-URL rejection, same-host
@@ -26,7 +34,13 @@ import urllib.parse
 
 import httpx
 
-from pocketpaw.security.url_validators import host_is_internal
+from pocketpaw.security.url_validators import (
+    EgressError,
+    EgressTarget,
+    PinnedTransport,
+    assert_egress_allowed,
+    host_is_internal,
+)
 
 # --- limits / policy --------------------------------------------------------
 _MAX_RESPONSE_BYTES = 524_288  # 512 KB (D11)
@@ -131,4 +145,10 @@ __all__ = [
     "_auth_headers",
     "_resolve_url",
     "_strip_query",
+    # AW-1 egress primitive — re-exported from OSS so this stays the canonical
+    # guard entry point (the OSS connector engine imports the originals).
+    "EgressError",
+    "EgressTarget",
+    "PinnedTransport",
+    "assert_egress_allowed",
 ]
