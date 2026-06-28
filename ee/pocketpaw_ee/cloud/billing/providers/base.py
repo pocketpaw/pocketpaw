@@ -95,14 +95,25 @@ class IPaymentsProvider(ABC):
         workspace_id: str,
         customer_email: str | None,
         metadata: dict,
+        return_url: str | None = None,
+        cancel_url: str | None = None,
     ) -> SubscriptionCheckout:
-        """Create a RECURRING subscription and return its hosted checkout.
+        """Create a RECURRING subscription checkout and return its hosted url.
 
         ``product_id`` is the gateway's recurring-product id for the tier
         (resolved by the service from config). The provider attaches ``metadata``
         — which MUST carry ``workspace_id`` AND ``plan_key`` so the renewal
         webhook can route the grant back to the right wallet at the right tier —
-        and returns the hosted ``checkout_url`` plus the gateway ``subscription_id``.
+        and returns the hosted ``checkout_url`` plus a gateway reference in
+        ``SubscriptionCheckout.subscription_id``.
+
+        ``return_url`` / ``cancel_url`` are where the buyer is sent back AFTER pay
+        / cancel — without them the buyer is stranded on the gateway. They are
+        OPTIONAL: a flow with no return base (e.g. server-side publish) passes
+        neither, and the provider omits them. When the gateway models the checkout
+        as a SESSION (the subscription is created at payment, not at create time),
+        ``SubscriptionCheckout.subscription_id`` carries the SESSION id; the real
+        gateway subscription id then arrives on the subscription.active webhook.
         """
         raise NotImplementedError
 

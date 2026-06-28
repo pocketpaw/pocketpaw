@@ -27,6 +27,11 @@
 #   subscription metadata's ``site_id`` (stamped at per-site subscribe time); a
 #   workspace-plan sub carries no ``site_id`` (""), so the webhook routes it to the
 #   workspace path. Defaults "" so a BC-7 workspace-plan delivery is unchanged.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): documented that
+#   ``SubscriptionCheckout.subscription_id`` now carries the Dodo CHECKOUT SESSION
+#   id (the subscription is created at payment, not at checkout-create), with the
+#   real gateway subscription id arriving on the subscription.active webhook. Field
+#   shape is unchanged (no breaking change to the consumers / sites flow).
 
 from __future__ import annotations
 
@@ -72,9 +77,16 @@ class SubscriptionCheckout:
     """A created RECURRING-subscription hosted checkout, normalized across gateways.
 
     ``checkout_url`` is the hosted page the buyer is redirected to to confirm the
-    subscription. ``subscription_id`` is the gateway's own id for the created
-    subscription (Dodo's ``subscription_id``), kept so a later cancel / change can
-    address it and so the renewal webhook can be reconciled against it.
+    subscription. ``subscription_id`` is a gateway reference for the created
+    checkout kept for reconciliation / a later cancel or change.
+
+    NOTE (fix/billing-checkout-sessions): Dodo now opens a CHECKOUT SESSION, where
+    the subscription is created at PAYMENT time, not at checkout-create time — so
+    this field carries the SESSION id (``cks_…``) the create call returns, not the
+    final ``sub_…``. The authoritative gateway subscription id arrives later on the
+    verified ``subscription.active`` webhook body (``data.subscription_id``), which
+    is what the credit grant + the Subscription audit row key on; the session id
+    stamped here at checkout time is a pre-payment placeholder for that slot.
     """
 
     checkout_url: str

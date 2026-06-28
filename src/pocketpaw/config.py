@@ -1,6 +1,12 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
+    (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
+    Dodo subscription checkout session returns the buyer to after pay / cancel when
+    the /billing/subscribe request carries no Origin (or usable Referer) header.
+    Return urls become ``{base}/settings/billing?checkout=success|cancel``; empty
+    default omits the redirect when no origin is available.
   - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
     (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
     three-position billing-cutover switch that supersedes the
@@ -1540,6 +1546,19 @@ class Settings(BaseSettings):
             "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
             '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
             "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
+    dodo_checkout_return_base: str = Field(
+        default="",
+        description=(
+            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
+            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header. The return "
+            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
+            "Default empty: when both this and the request Origin are absent the "
+            "redirect is omitted (the checkout still works, the buyer just isn't "
+            "auto-returned)."
         ),
     )
 
