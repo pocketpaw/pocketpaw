@@ -14,6 +14,22 @@
 # ``spec.actions[name]``. A corrupt spec yields the same ``action_not_found``
 # soft failure. Promote-on-read; no document migration.
 #
+# Updated: 2026-06-28 (AW-7 follow-up — security) — CLOSE THE TEMPORAL
+# DENY-BY-DEFAULT HOLE. AW-7 added the per-workspace
+# ``instinct_template_default_deny`` flag: when ON, a template-bound pocket
+# with NO matching rule for a MUTATING action PARKS it instead of firing. The
+# router path threads it, but this temporal-sweep path did NOT — so a
+# scheduled mutating action with no matching rule fired ungated even with the
+# flag ON, bypassing deny-by-default. ``_dispatch_one_edge`` now mirrors the
+# router (router.py ~L1257-1285): it resolves the flag via
+# ``pockets_service.resolve_workspace_template_default_deny(workspace_id)``,
+# computes ``is_mutating`` from the edge's action binding exactly as
+# ``action_executor`` does (method in {POST,PUT,PATCH,DELETE} and not
+# ``read_only``), and threads BOTH into the direct ``gate_action`` call AND
+# ``template_default_deny`` into the ``run_action`` re-gate (so the
+# double-gate the executor performs also honors deny-by-default). Flag OFF
+# (the default) keeps the temporal path byte-for-byte unchanged.
+#
 # Wave 3d scope (locked by the architect brief):
 #
 #   1. Load the prior sweep state via ``temporal_sweeps.service.load_last_seen``.
@@ -99,6 +115,45 @@ def _has_temporal_trigger(template: PocketTemplate) -> bool:
     return any(t.type == "temporal" for t in template.triggers)
 
 
+async def _resolve_is_mutating(workspace_id: str, pocket_id: str, action_name: str) -> bool:
+    """Compute ``is_mutating`` for the temporal-sweep gate, from the binding.
+
+    AW-7 follow-up (security): the direct ``gate_action`` call in
+    ``_dispatch_one_edge`` needs ``is_mutating`` so the template default-deny
+    flip parks a mutating write but never gates a read. We compute it the SAME
+    way ``action_executor`` does — ``method in {POST,PUT,PATCH,DELETE} and not
+    read_only`` — by reading the pocket's ``rippleSpec.actions[action_name]``
+    binding (the same source the executor parses).
+
+    Conservative on failure: a missing / corrupt / unreadable binding returns
+    ``True`` (treat as mutating). With the flag ON that parks the action for a
+    human rather than firing it ungated — fail CLOSED, never silently EXECUTE.
+    The action is fetched here ONLY to read the verb; the executor re-fetches
+    and re-parses the full binding when it actually runs the write.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        ripple_spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
+        spec = RippleSpec.from_flat_dict(ripple_spec)
+        actions = spec.actions if spec is not None and isinstance(spec.actions, dict) else None
+        raw_action = actions.get(action_name) if isinstance(actions, dict) else None
+        if not isinstance(raw_action, dict):
+            return True
+        method = str(raw_action.get("method") or "POST").upper()
+        read_only = bool(raw_action.get("read_only", False))
+        return method in ("POST", "PUT", "PATCH", "DELETE") and not read_only
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable binding is mutating
+        logger.warning(
+            "temporal sweep: pocket=%s could not resolve is_mutating for action=%s — "
+            "treating as mutating (fail closed)",
+            pocket_id,
+            action_name,
+            exc_info=True,
+        )
+        return True
+
+
 async def _dispatch_one_edge(
     *,
     edge: TemporalRisingEdge,
@@ -161,6 +216,30 @@ async def _dispatch_one_edge(
     actor = "system:temporal-sweeper"
     row_context = dict(edge.row)
 
+    # AW-7 follow-up (security) — resolve the workspace's TEMPLATE-level
+    # deny-by-default flag and the binding's mutating-ness BEFORE the gate, then
+    # thread both in. This mirrors the router path (router.py ~L1257-1285). When
+    # the flag is OFF (the default) ``template_default_deny`` is False and the
+    # gate behaves byte-for-byte as before — ``is_mutating`` is then irrelevant
+    # (the escalation condition is gated on the flag). The flag and the binding
+    # are resolved with their own try/except inside the helpers so a read
+    # failure can never raise into this loop.
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    try:
+        template_default_deny = await pockets_service.resolve_workspace_template_default_deny(
+            workspace_id
+        )
+    except Exception:  # noqa: BLE001 — a flag read failure falls back to OFF (dormant)
+        logger.warning(
+            "temporal sweep: pocket=%s could not resolve template_default_deny — "
+            "treating as OFF",
+            pocket_id,
+            exc_info=True,
+        )
+        template_default_deny = False
+    is_mutating = await _resolve_is_mutating(workspace_id, pocket_id, action_name)
+
     try:
         gate = await instinct_dispatch.gate_action(
             workspace_id=workspace_id,
@@ -170,6 +249,13 @@ async def _dispatch_one_edge(
             action_name=action_name,
             row_context=row_context,
             row_id=edge.row_id,
+            # AW-7 follow-up (security) — close the temporal deny-by-default
+            # hole. With the flag ON and a MUTATING action the bound template
+            # declares no matching rule for, the gate parks for a human
+            # (``pending_approval`` → counted under ``escalated`` below)
+            # instead of proceeding.
+            template_default_deny=template_default_deny,
+            is_mutating=is_mutating,
         )
     except Exception:  # noqa: BLE001 — gate raising into the loop is a bug; isolate
         logger.warning(
@@ -221,6 +307,13 @@ async def _dispatch_one_edge(
             action_name=action_name,
             row_context=row_context,
             row_id=edge.row_id,
+            # AW-7 follow-up (security) — thread the flag into the executor's
+            # re-gate too. The executor re-runs ``gate_action`` (so Wave 3c
+            # outcome emission fires) and computes ``is_mutating`` itself from
+            # the parsed binding; passing the flag makes that second gate honor
+            # deny-by-default as well. Without it the double-gate the review
+            # flagged would re-EXECUTE the very write the first gate parked.
+            template_default_deny=template_default_deny,
         )
     except Exception:  # noqa: BLE001 — executor raising into the loop is a bug; isolate
         logger.warning(
@@ -259,6 +352,7 @@ async def _invoke_executor(
     action_name: str,
     row_context: dict[str, Any],
     row_id: str,
+    template_default_deny: bool = False,
 ) -> dict:
     """Call ``action_executor.run_action`` for one rising-edge row.
 
@@ -337,6 +431,11 @@ async def _invoke_executor(
         template=template,
         row_context=row_context,
         row_id=row_id,
+        # AW-7 follow-up (security) — the executor's internal re-gate must also
+        # see the flag, or the double-gate re-EXECUTEs a write the first gate
+        # parked. The executor computes ``is_mutating`` itself from the parsed
+        # binding. Default False keeps the OFF path unchanged.
+        template_default_deny=template_default_deny,
     )
 
 
