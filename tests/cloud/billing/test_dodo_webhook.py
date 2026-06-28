@@ -277,6 +277,15 @@ async def test_create_topup_returns_checkout_url(mongo_db, monkeypatch):
     assert kwargs["metadata"]["workspace_id"] == WS
     assert kwargs["product_cart"][0]["product_id"] == PRODUCT_ID
     assert kwargs["product_cart"][0]["amount"] == 1000
+    # H1 — the one-time payment's new-customer object MUST carry a non-empty
+    # ``name`` alongside ``email`` (Dodo rejects ``{email}`` alone). Reverting
+    # _customer_param to ``{email}`` must fail this assertion.
+    customer = kwargs["customer"]
+    assert customer.get("email"), customer
+    assert customer.get("name"), (
+        "Dodo new-customer object is missing a non-empty 'name' — "
+        f"{customer!r} would be rejected server-side"
+    )
 
 
 async def test_create_topup_rejects_non_positive_amount(mongo_db):

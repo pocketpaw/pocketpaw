@@ -28,6 +28,9 @@
 #     for an arbitrary credit amount is therefore modeled as a pay-what-you-want
 #     line on a configured credits product (``dodo_credit_product_id``), with the
 #     amount carried on the cart item.
+#   * The ``billing`` country defaults to ``US`` but is configurable via
+#     ``dodo_billing_country`` (POCKETPAW_DODO_BILLING_COUNTRY) — set ``IN`` with
+#     INR products to surface UPI; the buyer can still change it on the hosted page.
 #   * The hosted url comes back as ``response.payment_link`` (only populated when
 #     ``payment_link=True``); ``response.payment_id`` is the gateway ref.
 #   * The webhook body is ``{business_id, data: Payment, timestamp, type}``; the
@@ -109,6 +112,20 @@ _DEFAULT_BILLING_COUNTRY = "US"
 _PLACEHOLDER_EMAIL = "billing@pocketpaw.local"
 
 
+def _customer_param(email: str | None) -> dict[str, str]:
+    """Build Dodo's ``CustomerRequest`` (new-customer variant).
+
+    Dodo's ``customer`` is an untagged enum: ``{customer_id}`` (attach existing) OR
+    ``{email, name}`` (new customer). Sending ``{email}`` alone fails the server-side
+    variant match with a 422 (``did not match any variant of untagged enum
+    CustomerRequest``) — a NAME is required too. Derive a display name from the email
+    local-part when the caller has none; Dodo collects the real details on the hosted
+    page either way.
+    """
+    e = email or _PLACEHOLDER_EMAIL
+    return {"email": e, "name": e.split("@", 1)[0] or "Customer"}
+
+
 class DodoProvider:
     """Dodo Payments gateway adapter. Implements ``IPaymentsProvider``."""
 
@@ -120,6 +137,7 @@ class DodoProvider:
         webhook_secret: str | None,
         credit_product_id: str | None,
         plan_products: dict[str, str] | None = None,
+        billing_country: str = _DEFAULT_BILLING_COUNTRY,
     ) -> None:
         # Stored, not validated here — a deployment may construct the provider
         # with billing disabled. Each call validates the inputs IT needs, so a
@@ -133,6 +151,9 @@ class DodoProvider:
         # delivery's metadata lacks plan_key; the forward direction (picking a
         # product for a tier) is the service's job, passed in to create_subscription.
         self._plan_products = dict(plan_products or {})
+        # ISO-3166 alpha-2 country prefilled on the hosted checkout's billing
+        # address — drives which payment methods Dodo surfaces (e.g. IN -> UPI).
+        self._billing_country = billing_country or _DEFAULT_BILLING_COUNTRY
 
     @classmethod
     def from_settings(cls, settings: Any) -> DodoProvider:
@@ -144,6 +165,7 @@ class DodoProvider:
             webhook_secret=getattr(settings, "dodo_webhook_secret", None),
             credit_product_id=getattr(settings, "dodo_credit_product_id", None),
             plan_products=plan_products if isinstance(plan_products, dict) else None,
+            billing_country=getattr(settings, "dodo_billing_country", _DEFAULT_BILLING_COUNTRY),
         )
 
     def _plan_key_for_product(self, product_id: str) -> str:
@@ -212,8 +234,8 @@ class DodoProvider:
 
         client = self._client()
         response = await client.payments.create(
-            billing={"country": _DEFAULT_BILLING_COUNTRY},
-            customer={"email": customer_email or _PLACEHOLDER_EMAIL},
+            billing={"country": self._billing_country},
+            customer=_customer_param(customer_email),
             product_cart=[
                 {
                     "product_id": self._credit_product_id,
@@ -271,8 +293,8 @@ class DodoProvider:
         # returns a HOSTED checkout url on ``response.payment_link``.
         client = self._client()
         response = await client.subscriptions.create(
-            billing={"country": _DEFAULT_BILLING_COUNTRY},
-            customer={"email": customer_email or _PLACEHOLDER_EMAIL},
+            billing={"country": self._billing_country},
+            customer=_customer_param(customer_email),
             product_id=product_id,
             quantity=1,
             payment_link=True,

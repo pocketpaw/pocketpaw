@@ -1,5 +1,27 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-26 (ART-2) — the agent's working directory is now resolved
+  PER-RUN via ``_resolve_cwd`` instead of being frozen to
+  ``settings.file_jail_path`` at ``__init__``. OSS / dedicated behavior is
+  unchanged (still ``file_jail_path``); when an EE ``pocketpaw.agent_extensions``
+  provider supplies ``agent_cwd`` (the cloud product), the run uses a
+  per-workspace/session jail so a tenant's file ops never co-mingle in the
+  shared home dir. A provider that RAISES (a cloud run with no resolvable
+  workspace) propagates — fail-closed, never a silent fallback to ``~``.
+  ``_build_options`` carries the resolved cwd, so ``run`` and ``prewarm`` warm
+  the same per-session jail. ART-2 hardening: the resolved cwd is folded into
+  ``_client_cache_key`` so warm-client tenant isolation is STRUCTURAL (a changed
+  cwd forces a fresh subprocess), not merely an implicit session_key<->cwd
+  coupling; the now-inert ``set_working_directory`` setter was removed
+  (``_build_options`` no longer reads ``self._cwd``); and ``get_status`` reports
+  ``base_cwd`` (the OSS/default base) instead of a misleading ``cwd``.
+Updated: 2026-06-26 (integration/model-catalog-v2, MCG-11) — the ResultMessage
+  token-usage path now runs ``pocketpaw.llm.caching.report_savings`` over the SDK
+  usage to surface STRUCTURED prompt-cache telemetry (cache_read_tokens,
+  cache_write_tokens, cache_hit_rate, cache_est_tokens_saved) on the
+  ``token_usage`` AgentEvent metadata and log the per-turn margin. This is the
+  measurement hook for the byte-stable cached prefix used by site/pocket-gen;
+  the existing ``cached_input_tokens`` field is unchanged for back-compat.
 Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``: eagerly
   ``connect()`` the warm CLI subprocess for a session BEFORE its first turn so
   the first real ``run`` reuses it instead of paying the ~12s cold connect. To
@@ -471,10 +493,39 @@ class ClaudeSDKBackend(BaseAgentBackend):
             logger.error(f"❌ Failed to initialize Claude Agent SDK: {e}")
             self._sdk_available = False
 
-    def set_working_directory(self, path: Path) -> None:
-        """Set the working directory for file operations."""
-        self._cwd = path
-        logger.info(f"📂 Working directory set to: {path}")
+    def _resolve_cwd(self) -> Path:
+        """Resolve the agent's working directory for THIS run.
+
+        NOTE: the per-tenant cwd jail + fail-closed live ONLY in this backend.
+        Other backends (codex_cli, deep_agents, …) receive workspace tenancy via
+        ``subprocess_env`` but NOT the cwd jail — a non-``claude_agent_sdk`` cloud
+        agent would run in ``file_jail_path``. Cloud chat defaults to this
+        backend; see ART-2's report for the residual non-claude gap.
+
+        Defaults to ``settings.file_jail_path`` (the OSS / dedicated behavior,
+        unchanged). When an EE ``pocketpaw.agent_extensions`` provider supplies
+        an ``agent_cwd`` (the cloud product), its result wins — a
+        per-workspace/session jail that keeps each tenant's file operations
+        isolated instead of co-mingling in the shared home dir.
+
+        A provider that RAISES (a multi-tenant cloud run with no resolvable
+        workspace) is propagated, NOT swallowed: that fail-closed is the whole
+        point — we must never silently fall back to ``~`` and let one tenant's
+        files land on another's. Resolved per-run (not cached on the instance)
+        so a single warm backend serving multiple sessions reads each session's
+        own jail; the warm-client cache key folds in the resolved cwd (ART-2), so
+        a changed cwd rebuilds the subprocess with its correct working directory.
+        """
+        from pocketpaw._registry import providers as _ext_providers
+
+        for ext in _ext_providers("pocketpaw.agent_extensions"):
+            resolver = getattr(ext, "agent_cwd", None)
+            if resolver is None:
+                continue
+            resolved = resolver()  # may raise (fail-closed) — let it propagate
+            if resolved:
+                return Path(resolved)
+        return self.settings.file_jail_path
 
     def _is_dangerous_command(self, command: str) -> str | None:
         """Check if a command matches dangerous patterns.
@@ -976,8 +1027,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
     def _client_cache_key(
         cls, options: Any, *, session_key: str | None = None, plugin_digest: str = ""
     ) -> str:
-        """Persistent-client cache key: session + model + tools + a digest of
-        the system prompt's stable behavioral prefix + the plugin-identity
+        """Persistent-client cache key: session + cwd + model + tools + a digest
+        of the system prompt's stable behavioral prefix + the plugin-identity
         digest.
 
         The prefix digest is what makes a mid-session backend config change
@@ -990,11 +1041,19 @@ class ClaudeSDKBackend(BaseAgentBackend):
         re-spawning every turn. Empty ``plugin_digest`` (the default) leaves the
         key byte-for-byte identical to the pre-fix behavior for non-skill
         callers. Hashing keeps the key bounded regardless of prompt length.
+
+        ``cwd`` (ART-2) is folded in so warm-client tenant isolation is
+        STRUCTURAL, not an implicit consequence of the session_key<->cwd
+        coupling: if cwd derivation ever changes to depend on something not in
+        session_key, a stale warm subprocess can never be reused across two
+        different working directories (i.e. two tenants). The SDK fixes cwd at
+        connect() time, so a changed cwd MUST force a fresh subprocess.
         """
         prefix = cls._behavior_prefix(getattr(options, "system_prompt", None))
         prefix_digest = hashlib.sha256(prefix.encode("utf-8", "replace")).hexdigest()[:16]
         return (
             f"{session_key or ''}:"
+            f"{getattr(options, 'cwd', '')}:"
             f"{getattr(options, 'model', '')}:"
             f"{sorted(getattr(options, 'allowed_tools', []) or [])}:"
             f"{prefix_digest}:"
@@ -1187,6 +1246,14 @@ class ClaudeSDKBackend(BaseAgentBackend):
         run_skills_root: Path | None = None
         skills_dir_adopted = False
         plugin_digest = ""
+
+        # Per-run working directory. OSS / dedicated → ``file_jail_path``; cloud
+        # → a per-workspace/session jail (or a fail-closed raise when a cloud run
+        # has no resolvable workspace). Resolved here so BOTH ``run`` and
+        # ``prewarm`` warm the SAME cwd for a session — the warm-client cache key
+        # already keys on ``session_key``, so a session change rebuilds the
+        # subprocess with its own jail.
+        resolved_cwd = self._resolve_cwd()
 
         # Resolve LLM provider early -- needed for routing + env.
         # Use per-backend provider setting (defaults to "anthropic").
@@ -1436,7 +1503,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "allowed_tools": allowed_tools,
             "setting_sources": [],
             "hooks": hooks,
-            "cwd": str(self._cwd),
+            "cwd": str(resolved_cwd),
             "max_turns": self.settings.claude_sdk_max_turns or None,
         }
 
@@ -1562,7 +1629,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "set" if os.environ.get("ANTHROPIC_API_KEY") else "<unset>",
             list(sdk_env.keys()) if sdk_env else "none",
             _shutil.which("claude") or "<not found>",
-            self._cwd,
+            resolved_cwd,
         )
 
         # Wire in MCP servers (policy-filtered)
@@ -2069,6 +2136,23 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         usage = getattr(event, "usage", None) or {}
                         if isinstance(usage, dict) and (usage or total_cost):
                             _model_name = options_kwargs.get("model", "claude")
+                            # MCG-11 — read prompt-cache effectiveness off the
+                            # SDK usage via the universal helper so the margin
+                            # from the byte-stable cached prefix (site/pocket-gen)
+                            # is MEASURABLE: hit-rate + est. input-token-equivalents
+                            # saved, surfaced to metering alongside the raw counts.
+                            from pocketpaw.llm.caching import report_savings
+
+                            savings = report_savings(usage)
+                            if savings.cache_read_tokens or savings.cache_write_tokens:
+                                logger.info(
+                                    "[claude_sdk] prompt-cache: read=%d write=%d "
+                                    "hit_rate=%.1f%% est_saved=%.0f input-tok-equiv",
+                                    savings.cache_read_tokens,
+                                    savings.cache_write_tokens,
+                                    savings.hit_rate * 100,
+                                    savings.est_tokens_saved,
+                                )
                             yield AgentEvent(
                                 type="token_usage",
                                 content="",
@@ -2077,6 +2161,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
                                     "output_tokens": usage.get("output_tokens", 0),
                                     "cached_input_tokens": usage.get("cache_read_input_tokens", 0)
                                     + usage.get("cache_creation_input_tokens", 0),
+                                    # Structured cache telemetry (MCG-11) — metering
+                                    # can attribute the margin without re-parsing.
+                                    "cache_read_tokens": savings.cache_read_tokens,
+                                    "cache_write_tokens": savings.cache_write_tokens,
+                                    "cache_hit_rate": savings.hit_rate,
+                                    "cache_est_tokens_saved": savings.est_tokens_saved,
                                     "total_cost_usd": total_cost,
                                     "model": _model_name
                                     if isinstance(_model_name, str)
@@ -2278,7 +2368,11 @@ class ClaudeSDKBackend(BaseAgentBackend):
             "sdk_installed": self._sdk_available,
             "cli_installed": self._cli_available,
             "running": not self._stop_flag,
-            "cwd": str(self._cwd),
+            # Base (OSS/default) working dir only. The ACTUAL per-run cwd is
+            # resolved each turn by ``_resolve_cwd`` — in cloud it's a per-tenant
+            # jail, not this base — so labelling it ``base_cwd`` keeps status
+            # honest (and avoids resolving here, which would fail closed off-run).
+            "base_cwd": str(self._cwd),
             "features": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch"]
             if ready
             else [],

@@ -480,14 +480,14 @@ async def execute_approved_change(
     """
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
     opener: PrOpener = pr_opener or GhCliPrOpener()
 
     params = getattr(action, "parameters", None) or {}
     blob = params.get(_CODE_CHANGE_PARAM_KEY)
     if not isinstance(blob, dict):
         # Not a Belt code-change Action at all — no chain was ever opened for
-        # it, so there is nothing to close. Return without a terminal emit.
+        # it, so there is nothing to close. We can't resolve the store's
+        # workspace either (the blob carries it), so bail before opening one.
         logger.warning("approved action %s carries no _code_change blob", action.id)
         return
 
@@ -497,6 +497,10 @@ async def execute_approved_change(
     # no-ops (the Slice 4 abandon-sweeper closes any chain left open).
     correlation_id = _blob_correlation_id(blob)
     workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: this runs on the HTTP approve path (no ``current_workspace``
+    # ContextVar), so the store MUST be scoped to the blob's workspace or it
+    # split-brains onto the shared file (flag unset) / raises (flag set).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     requested_by = str(blob.get("requested_by") or "")
     causation = _coerce_uuid(human_event_id)
 

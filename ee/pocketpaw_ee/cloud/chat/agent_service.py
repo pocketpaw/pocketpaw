@@ -141,13 +141,27 @@ preserves today's doc-only behavior. Defense-in-depth: ``attach_agent_identity``
 now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
 instead of binding ``""``, so any future caller that loses tenancy fails loudly
 at the seam, not deep inside an MCP tool.
+
+Changes: 2026-06-27 (fix/cloud-artifacts-reland) — added the per-run
+``_active_cloud_chat_run`` marker ContextVar (+ ``current_cloud_chat_run`` and
+the ``mark_cloud_chat_run`` context manager) beside the identity ContextVars.
+It distinguishes an actual cloud CHAT dispatch (the path that MUST bind
+workspace identity) from any other workspace-less run in a cloud-connected
+process. The agent cwd jail's fail-closed (``agent_jail.resolve_agent_cwd``) was
+gated on ``is_multi_tenant_cloud()`` alone — a PROCESS-GLOBAL, true whenever the
+cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
+(direct backend tests, CLI, background jobs), not just a mis-tenanted chat run.
+``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
+and the jail fails closed only when this marker is set; otherwise it falls back
+to ``settings.file_jail_path`` (pre-ART-2 behavior).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -168,6 +182,7 @@ from pocketpaw.ripple import (
     get_pocket_prompts,
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
+from pocketpaw.stores import current_workspace as _oss_current_workspace
 from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
 
@@ -209,6 +224,22 @@ _active_session_mongo_id: ContextVar[str | None] = ContextVar(
 # chat isn't bound to a pocket (a plain DM / group thread).
 _active_pocket_id: ContextVar[str | None] = ContextVar("agent_pocket_id", default=None)
 
+# Marks the active async context as a live cloud CHAT run — the dispatch path
+# that is REQUIRED to bind workspace identity (``run_core.execute_run`` sets it
+# around the run lifecycle, BEFORE the prewarm ``create_task`` + the two
+# ``attach_agent_identity`` binds). The per-tenant cwd jail
+# (``agent_jail.resolve_agent_cwd``) fails CLOSED on a workspace-less run ONLY
+# when this marker is set: a workspace-less run in a cloud-connected process
+# that is NOT a chat dispatch (a direct backend test, the CLI, a background job)
+# is legitimately un-tenanted and must fall back to the shared file jail, not
+# hard-fail. ``is_multi_tenant_cloud()`` alone can't tell the two apart — it is a
+# PROCESS-GLOBAL, true whenever the cloud Mongo client is connected — so this
+# per-run marker carries the distinction. Default False; the context manager
+# resets it in a finally so it never leaks past one run. ``asyncio.create_task``
+# copies the context, so a marker set before the prewarm ``create_task``
+# propagates into the prewarm task too.
+_active_cloud_chat_run: ContextVar[bool] = ContextVar("agent_cloud_chat_run", default=False)
+
 
 def attach_agent_identity(
     *,
@@ -216,7 +247,7 @@ def attach_agent_identity(
     user_id: str,
     session_mongo_id: str | None = None,
     pocket_id: str | None = None,
-) -> tuple[Token, Token, Token, Token]:
+) -> tuple[Token, Token, Token, Token, Token]:
     """Bind workspace / user / session / pocket identity for the active
     stream's MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat
     is streaming through — used by ``create_pocket`` to link the active
@@ -232,7 +263,19 @@ def attach_agent_identity(
     that lost the id. Failing loudly at the bind makes any future caller that
     drops tenancy break at the source instead. Every real caller (the SSE chat
     path, the group/DM bridge, the in-process test harnesses) already passes
-    non-empty ids, so this is a guard, not a behavior change for them."""
+    non-empty ids, so this is a guard, not a behavior change for them.
+
+    ISO-3 (workspace store bridge): the same bind also sets the OSS-core
+    ``pocketpaw.stores.current_workspace`` ContextVar, so the NON-router store
+    callers inside an agent run — the agent Fabric tools, the Fabric/Instinct
+    MCP servers, connector ingest — that call ``get_fabric_store()`` /
+    ``get_instinct_store()`` WITHOUT an explicit ``workspace_id`` resolve to THIS
+    stream's workspace and land in its per-workspace file (ISO-1/ISO-2). The
+    EE router path keeps passing ``workspace_id`` explicitly (it has the request
+    scope); this bridges the agent path that doesn't. The OSS token is returned
+    as a FIFTH tuple element — callers treat the tuple opaquely (only
+    ``detach_agent_identity`` unpacks it), so the wider shape is invisible to
+    them. ``detach`` resets it."""
     if not workspace_id or not user_id:
         raise ValueError(
             "attach_agent_identity requires a non-empty workspace_id and user_id "
@@ -243,15 +286,19 @@ def attach_agent_identity(
         _active_user_id.set(user_id),
         _active_session_mongo_id.set(session_mongo_id),
         _active_pocket_id.set(pocket_id),
+        # ISO-3: bridge the EE per-stream workspace onto the OSS store ContextVar.
+        _oss_current_workspace.set(workspace_id),
     )
 
 
-def detach_agent_identity(tokens: tuple[Token, Token, Token, Token]) -> None:
-    ws_token, user_token, session_token, pocket_token = tokens
+def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> None:
+    ws_token, user_token, session_token, pocket_token, oss_ws_token = tokens
     _active_workspace_id.reset(ws_token)
     _active_user_id.reset(user_token)
     _active_session_mongo_id.reset(session_token)
     _active_pocket_id.reset(pocket_token)
+    # ISO-3: clear the OSS store ContextVar bridged in attach_agent_identity.
+    _oss_current_workspace.reset(oss_ws_token)
 
 
 def current_workspace_id() -> str | None:
@@ -268,6 +315,36 @@ def current_session_mongo_id() -> str | None:
 
 def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
+
+
+def current_cloud_chat_run() -> bool:
+    """True when the active context is a live cloud CHAT run dispatch.
+
+    Read by ``agent_jail.resolve_agent_cwd`` to decide whether a workspace-less
+    run in a cloud-connected process is a mis-tenanting bug (fail closed) or a
+    legitimately un-tenanted run that should fall back to the file jail.
+    """
+    return _active_cloud_chat_run.get()
+
+
+@contextmanager
+def mark_cloud_chat_run() -> Iterator[None]:
+    """Mark the active context as a live cloud CHAT run for the per-tenant cwd
+    jail's fail-closed (see ``_active_cloud_chat_run``).
+
+    Sets the marker True on enter and resets it to the prior value in a finally
+    so it never leaks past the run. ``run_core.execute_run`` wraps the run
+    lifecycle with this — set BEFORE the prewarm ``create_task`` (which copies
+    the context, carrying the marker into the prewarm task) and BEFORE
+    ``attach_agent_identity``, so a run that reaches the backend WITHOUT binding
+    identity (the real mis-tenanting bug) still trips the jail's fail-closed
+    instead of silently co-mingling tenant files in the shared home directory.
+    """
+    token = _active_cloud_chat_run.set(True)
+    try:
+        yield
+    finally:
+        _active_cloud_chat_run.reset(token)
 
 
 def push_sse_event(name: str, data: dict[str, Any]) -> None:
@@ -1165,6 +1242,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
 
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
+    # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
+    # the user can't reach, so a downloadable result MUST go through
+    # deliver_artifact (which lands it in tenant blob storage and returns a real
+    # download URL) — not a printed container path and not a local preview server.
+    parts.append(_DELIVER_ARTIFACT_RULE)
     # Composio auth/search guidance is injected whenever Composio is
     # enabled. An enabled deployment ALWAYS surfaces at least the
     # discovery meta-tools — ``providers.py`` falls back to them when no
@@ -1296,6 +1378,35 @@ DOES NOT EXIST in this environment:
 - If you genuinely don't have a tool for what the user asked, say so
   plainly. Don't fabricate instructions for a different environment.
 </runtime-identity>"""
+
+
+# Artifact delivery (ART-4). The cloud agent's working directory is a per-tenant
+# jail on the server's filesystem — the user has no shell, no SSH, and cannot
+# reach 127.0.0.1 on the box. So a file the agent "wrote to ./out.pdf" or a
+# "preview running at http://localhost:8000" is invisible to them. The ONLY way
+# to hand the user a downloadable result is deliver_artifact, which uploads the
+# file/dir to the tenant's blob storage and returns a real, short-lived URL.
+_DELIVER_ARTIFACT_RULE = """\
+<artifact-delivery>
+You run in a sandboxed working directory the user cannot see or reach — they
+have no terminal on this machine and cannot open 127.0.0.1 / localhost here.
+
+When you produce something the user should be able to DOWNLOAD (a report, an
+export, a generated document, a built bundle, a zip):
+
+  1. Write it to a file (or a directory) in your working directory.
+  2. Call ``deliver_artifact`` with that path. A single file uploads as-is; a
+     directory is zipped automatically.
+  3. Share the ``url`` it returns — that is the user's real download link.
+
+Do NOT instead:
+  - print the path you wrote to (e.g. "I saved it to ./out.pdf") and stop — that
+    path lives in a container the user can't access;
+  - start a local preview / web server ("run `python -m http.server`", "open
+    http://localhost:8000") — nothing you bind on this box is reachable.
+
+If ``deliver_artifact`` returns an error, relay it; do not invent a link.
+</artifact-delivery>"""
 
 
 # Composio's direct-tools surface caps each toolkit at a fixed limit

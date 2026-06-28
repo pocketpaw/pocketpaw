@@ -177,6 +177,11 @@ cloud = "pocketpaw_ee.extensions:CloudEmbeddingProvider"
 [project.entry-points."pocketpaw.memory_backends"]
 mongodb = "pocketpaw_ee.extensions:MongoMemoryBackendProvider"
 
+# ISO-3: the workspace-keyed store provider. Activates the StoreProvider seam
+# ISO-1 added; returns the per-workspace file store via the OSS helper.
+[project.entry-points."pocketpaw.stores"]
+cloud = "pocketpaw_ee.extensions:CloudStoreProvider"
+
 [project.entry-points."pocketpaw.capabilities"]
 cloud = "pocketpaw_ee.extensions:CloudCapabilityProvider"
 
@@ -211,6 +216,7 @@ composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
+deliver = "pocketpaw_ee.extensions:CloudDeliverMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
@@ -378,6 +384,17 @@ source_modules = [
     "pocketpaw_ee.cloud.notifications.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
+
+[[tool.importlinter.contracts]]
+name = "FileVersions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.file_versions.router",
+    "pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw_ee.cloud.file_versions.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
 
 [[tool.importlinter.contracts]]
 name = "FabricIngest — Beanie writes only from service.py"
@@ -550,6 +567,21 @@ source_modules = [
     "pocketpaw_ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "LLM provisioning — Beanie writes only from service.py"
+# MCG-8: the per-tenant LiteLLM virtual-key mapping (LiteLLMTenantKey) is written
+# only by llm_provisioning.service. The domain layer carries framework-free value
+# objects and must never import the Beanie doc (same entity-isolation boundary the
+# credit / foresight entities use).
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.llm_provisioning.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.litellm_key",
+]
 
 [[tool.importlinter.contracts]]
 name = "Foresight — Beanie writes only from service.py"

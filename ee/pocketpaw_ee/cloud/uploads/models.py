@@ -1,5 +1,10 @@
 """EE FileUpload document — Mongo metadata for blobs stored via StorageAdapter.
 
+2026-06-26 — ART-1. Added ``content_version`` (default 0) so the
+``file_versions`` service can run optimistic-concurrency edits and archive
+each prior blob as a ``FileVersionDoc``. Legacy rows read as 0; ``write_file``
+stamps new rows at 1. Beanie field-add is backward compatible (no migration).
+
 2026-05-03 — Stage 3.E "Files as Knowledge". Added ``pocket_id`` so the
 unified Files panel and the FileReady listener can route a single upload
 into a pocket-scoped KB instead of the workspace pool. ``None`` is the
@@ -43,6 +48,10 @@ class FileUpload(TimestampedDocument):
     # Storage layout is unchanged — partitioning is metadata-only.
     pocket_id: str | None = None
     deleted_at: datetime | None = None
+    # Optimistic-concurrency counter for the file_versions edit pipeline
+    # (ART-1). Each successful inline edit bumps this and archives the prior
+    # blob as a ``FileVersionDoc``. 0 on legacy rows; ``write_file`` stamps 1.
+    content_version: int = 0
 
     class Settings:
         name = "file_uploads"

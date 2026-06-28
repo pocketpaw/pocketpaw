@@ -114,16 +114,22 @@ class HeadlessDevelopRunner:
 
     develop_fn: DevelopFn
 
-    async def run(self, action_id: str) -> str:
+    async def run(self, action_id: str, *, workspace_id: str | None = None) -> str:
         """Produce a diff for a queued ``code_change`` action and attach it.
 
         Returns the action id (a run reference) in every case — success or
         handled failure. Never raises: a develop-loop crash or an empty diff
         leaves the run queued and records ``headless_error`` on the blob so a
-        human can still drive the station or the dispatcher can retry."""
+        human can still drive the station or the dispatcher can retry.
+
+        ``workspace_id`` scopes the store: this runs on a background dispatch
+        path (no ``current_workspace`` ContextVar), so the caller threads the
+        tenant in. Under ``POCKETPAW_REQUIRE_WORKSPACE_SCOPE`` a missing one
+        fail-closes — the blob (which also carries it) can't be read until the
+        store is open, so the explicit arg is the only safe source here."""
         from pocketpaw.stores import get_instinct_store
 
-        store = get_instinct_store()
+        store = get_instinct_store(workspace_id=workspace_id or None)
         action = await store.get_action(action_id)
         if action is None:
             logger.warning("headless: action %s not found — nothing to develop", action_id)
@@ -395,8 +401,9 @@ class HeadlessTaskDispatcher:
         )
         # 2. Produce the diff headlessly and attach it (the run becomes a real
         #    pending diff). Never raises — a miss leaves the queued run for a
-        #    human to drive.
-        await self.runner.run(run_ref)
+        #    human to drive. Thread the workspace so the runner's store is scoped
+        #    to the tenant (no ContextVar on this background path — ISO).
+        await self.runner.run(run_ref, workspace_id=workspace_id)
         return run_ref
 
 

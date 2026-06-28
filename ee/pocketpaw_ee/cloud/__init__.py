@@ -299,6 +299,7 @@ def mount_cloud(app: FastAPI) -> None:
             exc_info=True,
         )
 
+    from pocketpaw_ee.cloud.file_versions.router import router as file_versions_router
     from pocketpaw_ee.cloud.files.router import router as files_router
     from pocketpaw_ee.cloud.kb.knowledge_router import router as knowledge_router
 
@@ -335,6 +336,11 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(notifications_router, prefix="/api/v1")
     app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
+    # file_versions (ART-1) — versioned file-write storage spine. Shares the
+    # /files prefix with files_router (GET /files, /tree, /browse) but only
+    # adds POST /files/write, PUT /files/{id}, GET /files/{id}/versions[/{vid}]
+    # — no method+path collisions with the existing listing routes.
+    app.include_router(file_versions_router, prefix="/api/v1")
     app.include_router(mission_control_router, prefix="/api/v1")
     app.include_router(livekit_router, prefix="/api/v1")
     # Pocket outcomes — GET /api/v1/outcomes count surface (RFC 05 M2b.2).
@@ -364,6 +370,16 @@ def mount_cloud(app: FastAPI) -> None:
     # smoke-gate + WfP deploy), GET /sites, and the custom-domain pair
     # (Cloudflare for SaaS) the Domains panel drives.
     app.include_router(sites_router, prefix="/api/v1")
+
+    # Model Catalog — MCG-1. License-gated, tenant-independent reads of the
+    # models a self-hosted LiteLLM proxy serves: GET /catalog/models (filtered by
+    # modality/provider/q/capability) and GET /catalog/models/{id}. The proxy is
+    # the source of truth (read via /v1/models + /model/info, mapped to
+    # ModelCatalogEntry, TTL-cached in-process); models.dev enriches logo/desc
+    # best-effort. Thin adapter over ee.catalog.service.
+    from pocketpaw_ee.catalog.router import router as catalog_router
+
+    app.include_router(catalog_router, prefix="/api/v1")
 
     # Temporal sweeps — RFC 03 v2 Wave 3d. Read-only inspect endpoint
     # for the persisted (trigger, row) state matrix; the actual sweep

@@ -98,15 +98,20 @@ async def execute_approved_change(action: Any, *, human_event_id: Any | None = N
     """
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
     blob = artifact_change_blob(action)
     if blob is None:
-        # Defensive — the router only calls this when the blob is present.
+        # Defensive — the router only calls this when the blob is present. We
+        # can't resolve the store's workspace without the blob either, so bail
+        # before opening one.
         return
 
     scope_type = str(blob.get("scope_type") or "")
     scope_id = str(blob.get("scope_id") or "")
     workspace_id = str(blob.get("workspace") or blob.get("workspace_id") or "")
+    # ISO: HTTP approve path (no ``current_workspace`` ContextVar) — scope the
+    # store to the blob's workspace so the merge's executed/failed mark lands in
+    # the tenant's file, not the shared ledger (and doesn't raise under the flag).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     to_version_id = str(blob.get("to_version_id") or "")
     author = blob.get("user_id")
 

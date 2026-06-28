@@ -2,6 +2,13 @@
 # Created: 2026-06-18 (feat/sites-devserver, Phase 2 / P2a) — unit tests for the
 # live Vite dev-server preview manager (ee/pocketpaw_ee/sites/dev_server.py).
 #
+# Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
+# edit-bridge): the fake ``_materialize`` seams now accept the new ``builder_origin``
+# kwarg ``ensure_dev_server`` threads through, and ``test_ensure_threads_builder_
+# origin_to_materialize`` pins that the origin reaches the materialize seam (the
+# manager-level half of the dev-path threading — the source-level proof that the
+# materialized files carry the bridge lives in test_dev_bridge_source.py).
+#
 # The manager spawns a long-lived `vite dev` per pocket so edits hot-reload in ~ms
 # instead of rebuilding the whole site per edit. These tests exercise the FULL
 # lifecycle WITHOUT a real vite/bun: the spawner, the free-port allocator, and the
@@ -54,11 +61,15 @@ def _make_manager(
     def _free_port() -> int:
         return next(probe["ports"])
 
-    async def _materialize(*, workspace_id: str, user_id: str, pocket_id: str) -> str:
+    async def _materialize(
+        *, workspace_id: str, user_id: str, pocket_id: str, builder_origin: str | None = None
+    ) -> str:
         # The real seam runs GeneratorClient.build(preview) and returns the
-        # persistent per-pocket project dir; the fake just records the call and
-        # returns a deterministic path so the spawn cwd is observable.
+        # persistent per-pocket project dir; the fake just records the call (incl.
+        # the S1 builder_origin) and returns a deterministic path so the spawn cwd
+        # is observable.
         probe["materialized"].append(pocket_id)
+        probe.setdefault("builder_origins", []).append(builder_origin)
         return f"/tmp/site-builds/{pocket_id}"
 
     async def _spawn(cmd: list[str], cwd: str, port: int) -> _FakeProc:
@@ -93,6 +104,37 @@ async def test_ensure_starts_once_and_reuses_on_second_call():
     # Exactly ONE spawn + ONE materialize across both calls.
     assert len(probe["spawned"]) == 1
     assert probe["materialized"] == ["pk1"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_threads_builder_origin_to_materialize():
+    """S1: ensure_dev_server forwards ``builder_origin`` to the materialize seam, so
+    the dev-server-materialized SOURCE can carry SE-1's gated edit-bridge. Before S1
+    the dev path materialized with no origin, so the dev source had no anchors / no
+    bridge (flipping BRIDGE_IN_DEV regressed the overlay)."""
+    mgr, probe = _make_manager()
+
+    await mgr.ensure_dev_server(
+        workspace_id="ws1",
+        user_id="u1",
+        pocket_id="pk1",
+        builder_origin="https://app.paw.example",
+    )
+
+    # The origin reached materialize verbatim (it then rides build()'s builder_origin).
+    assert probe["builder_origins"] == ["https://app.paw.example"]
+
+
+@pytest.mark.asyncio
+async def test_ensure_without_builder_origin_passes_none():
+    """The gate still holds: with no ``builder_origin``, materialize is called with
+    None, so the generator injects no bridge and the dev source stays non-editable
+    (matches the publish path's non-editable behaviour)."""
+    mgr, probe = _make_manager()
+
+    await mgr.ensure_dev_server(workspace_id="ws1", user_id="u1", pocket_id="pk1")
+
+    assert probe["builder_origins"] == [None]
 
 
 @pytest.mark.asyncio
@@ -181,7 +223,9 @@ async def test_concurrent_ensure_spawns_only_once():
     def _free_port() -> int:
         return next(probe["ports"])
 
-    async def _materialize(*, workspace_id: str, user_id: str, pocket_id: str) -> str:
+    async def _materialize(
+        *, workspace_id: str, user_id: str, pocket_id: str, builder_origin: str | None = None
+    ) -> str:
         await asyncio.sleep(0.02)  # force interleave
         return f"/tmp/site-builds/{pocket_id}"
 

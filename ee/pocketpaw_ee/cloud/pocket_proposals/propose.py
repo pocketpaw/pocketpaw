@@ -327,7 +327,9 @@ async def propose_pocket(
         reason="proposed starter Pocket requires approval",
     )
 
-    store = get_instinct_store()
+    # ISO: scope the store to the caller's workspace (validated non-empty above)
+    # — this propose path has no ``current_workspace`` ContextVar set.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action_obj = await store.propose(
         # ``pocket_id`` carries the workspace for Pocket-create proposals — they
         # aren't bound to an EXISTING pocket the way Mission Control items are

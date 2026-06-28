@@ -720,7 +720,9 @@ async def list_runs(workspace_id: str) -> dict[str, Any]:
     """
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
+    # ISO: HTTP console path (no ``current_workspace`` ContextVar) — scope the
+    # store to the caller's workspace so the listing reads the tenant's file.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     actions = await store.list_actions(pocket_id=workspace_id, limit=200)
     runs: list[dict[str, Any]] = []
     for action in actions:
@@ -742,7 +744,10 @@ async def get_run(workspace_id: str, action_id: str) -> dict[str, Any]:
     """
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
+    # ISO: HTTP console path (no ``current_workspace`` ContextVar) — scope the
+    # store to the caller's workspace so a foreign action is never read from the
+    # shared file (the blob-workspace 404 below stays as belt-and-braces).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.get_action(action_id)
     blob = _code_change_blob(action) if action is not None else None
     if action is None or blob is None:

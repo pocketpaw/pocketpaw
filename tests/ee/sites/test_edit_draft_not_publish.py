@@ -99,7 +99,7 @@ def instinct_store(tmp_path, monkeypatch):
     """A throwaway InstinctStore wired into the accessor the sites service reads so
     request_publish_pocket() can actually create the review Action."""
     store = InstinctStore(tmp_path / "edit_draft_instinct.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: store)
     return store
 
 

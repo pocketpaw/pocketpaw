@@ -1,5 +1,31 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-26 (ISO-4 — audit-lock keyed outside the evictable instance)
+#   — the audit-append lock (``_log_lock``, which serializes the chain
+#   read-head + insert in ``_log``) is no longer a per-instance
+#   ``asyncio.Lock`` set in ``__init__``. It is now a PROPERTY that fetches a
+#   process-global lock keyed by ``db_path`` from ``pocketpaw._store_locks``.
+#   The ISO-2 security review flagged the hole: under the ISO-1/2 bounded-LRU
+#   store factory, a workspace's store can be evicted and rebuilt for the same
+#   file while an append is in flight, so two instances with two per-instance
+#   locks let their appends race and fork the chain. A db_path-keyed lock makes
+#   every instance for the same file share ONE lock; different tenants (files)
+#   still never contend. The two ``async with self._log_lock`` call sites are
+#   unchanged — the property is transparent.
+# Updated: 2026-06-26 (ISO-2 — physical per-workspace isolation) — added
+#   aclose(): a best-effort WAL-checkpoint + state reset the workspace-keyed
+#   store factory (src/pocketpaw/stores.py) runs when it evicts a per-workspace
+#   InstinctStore from its bounded LRU. The store still holds no long-lived
+#   connection; aclose exists only so an idle tenant's write-ahead-log sidecar
+#   gets truncated instead of growing across 128+ cached tenants. ISO-2 gives
+#   each workspace its OWN instinct.db (~/.pocketpaw/workspaces/<id>/instinct.db),
+#   so the W2b audit hash-chain below is now PER-FILE: each tenant's chain has its
+#   own genesis→…→head and ``verify_audit_chain`` runs PER WORKSPACE (a tenant's
+#   auditor verifies only that tenant's chain — the correct multi-tenant model).
+#   The W4a in-row ``workspace_id`` read-filter is UNCHANGED — physical file
+#   isolation is ADDITIVE defense-in-depth layered on top of it. The store class
+#   itself is workspace-agnostic; isolation is entirely in which file the factory
+#   hands it.
 # Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — ADDITIVE
 #   generic scope on the actions table. ``instinct_actions`` now carries a
 #   nullable ``scope_type`` column (additive ALTER, mirrors the assignee /
@@ -102,6 +128,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -121,6 +148,8 @@ from pocketpaw.instinct.models import (
     OutcomeVerdict,
 )
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_outcome(outcome: str | OutcomeVerdict | None) -> str | None:
@@ -367,13 +396,29 @@ class InstinctStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
-        # Serializes the audit-chain read-head + insert in _log (REVIEW-1):
-        # each _log opens its own connection, so without this lock two
-        # concurrent _log calls could both read the same prev_hash before
-        # either inserts, forking the chain and producing false-positive
-        # tamper reports in verify_audit_chain. Per-instance (not module-level)
-        # so separate tenants/stores don't contend.
-        self._log_lock = asyncio.Lock()
+
+    @property
+    def _log_lock(self) -> asyncio.Lock:
+        """The lock serializing this file's audit-chain read-head + insert.
+
+        Held across the prev_hash read + the append in ``_log``: each ``_log``
+        opens its own connection, so without it two concurrent appends could
+        both read the same prev_hash before either inserts, forking the chain
+        and producing false-positive tamper reports in ``verify_audit_chain``.
+
+        ISO-4: the lock is now keyed by ``db_path`` in a PROCESS-GLOBAL registry
+        (``pocketpaw._store_locks``), not stored on this instance. The ISO-2
+        security review flagged that a per-instance lock does NOT cover the
+        bounded-LRU eviction window: when the store factory evicts a workspace's
+        InstinctStore and builds a fresh one for the same file, two instances
+        briefly coexist, and per-instance locks let their appends race and fork
+        that tenant's chain. A db_path-keyed lock makes every instance for the
+        same file share ONE lock, closing that window. Different tenants (files)
+        still get different locks and never contend.
+        """
+        from pocketpaw._store_locks import audit_lock_for
+
+        return audit_lock_for(self._db_path)
 
     async def _ensure_schema(self) -> None:
         if self._initialized:
@@ -427,6 +472,29 @@ class InstinctStore:
     def _conn(self) -> aiosqlite.Connection:
         """Return a new connection context manager."""
         return aiosqlite.connect(self._db_path)
+
+    async def aclose(self) -> None:
+        """Release this store's on-disk resources (ISO-2).
+
+        Like ``FabricStore``, ``InstinctStore`` holds NO long-lived connection —
+        every method opens and closes its own ``aiosqlite.connect()`` per call —
+        so there is no socket or cursor to close. What CAN accumulate is a
+        write-ahead-log sidecar (``instinct.db-wal`` / ``-shm``). Under
+        per-workspace physical isolation (ISO-2) the store factory caches up to
+        128 per-workspace handles and evicts the least-recently-used; ``aclose``
+        is what the factory runs on eviction so an idle tenant's WAL is truncated
+        rather than left to grow, and the next ``_ensure_schema`` re-runs cleanly
+        on the cold handle.
+
+        Best-effort and idempotent: a checkpoint failure (DB never created, WAL
+        not in use, file vanished) is swallowed — eviction must never raise.
+        """
+        self._initialized = False
+        try:
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
+            logger.debug("InstinctStore.aclose checkpoint skipped", exc_info=True)
 
     # --- Actions ---
 
@@ -1144,14 +1212,22 @@ class InstinctStore:
     async def verify_audit_chain(self) -> dict[str, Any]:
         """Walk the audit hash chain and report whether it is intact.
 
-        The chain is GLOBAL (each row's ``prev_hash`` links to the previous
-        *hashed* row across the whole ledger, not within a pocket), so
+        The chain spans the WHOLE FILE (each row's ``prev_hash`` links to the
+        previous *hashed* row in this ledger, not within a pocket), so
         verification always runs over the entire table in insertion order
         (``rowid``). It recomputes each row's ``entry_hash`` from the row's
         canonical content + the recomputed running ``prev_hash`` and compares
         against the stored value. The first row that fails to match is the
         break point — any insertion, edit, or deletion of a hashed row shifts
         or invalidates every subsequent link.
+
+        ISO-2: under per-workspace physical isolation each workspace has its OWN
+        ``instinct.db``, so "the whole ledger" here is exactly ONE tenant's
+        ledger — the chain is per-workspace, with its own genesis→…→head, and
+        this verifies that tenant's chain independently. (On a single-tenant OSS
+        install, or the legacy shared file, it verifies the one shared chain, as
+        before. The method is workspace-agnostic — isolation is entirely in which
+        file the factory opened.)
 
         Legacy boundary: rows written before W2b have a NULL ``entry_hash``.
         They are counted as ``legacy_unhashed`` and skipped — the chain is
