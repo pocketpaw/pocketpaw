@@ -216,7 +216,11 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   `POCKETPAW_CLOUD_STREAM_TRANSPORT` (`redis` default — adapter selector for
   future non-Redis backends like NATS JetStream);
   `POCKETPAW_CLOUD_RUN_STREAM_TTL` (default `3600`, the Redis Stream retention
-  after a run terminates). See `docs/plans/2026-05-22-resumable-chat-runs-design.md`.
+  after a run terminates);
+  `POCKETPAW_CLOUD_RUN_JOB_TIMEOUT` (default `1800` = 30 min, the arq per-run
+  job timeout — arq's own default is 300s, which cancels a long agent run
+  mid-generation, so a big coding task halts after ~5 min; lift it for long
+  runs, the 10-minute stale-run sweeper is the backstop). See `docs/plans/2026-05-22-resumable-chat-runs-design.md`.
   A background sweeper runs on cloud startup and every 5 minutes (hardcoded, not
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance

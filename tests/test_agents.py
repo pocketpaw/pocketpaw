@@ -415,6 +415,14 @@ class TestCwdJailHardening:
         guards against a future edit adding a generic cwd fallback in run()'s
         except handler (the known cloud-fail-closed-slips-past-green-OSS-CI
         pattern). Asserts the CLOUD branch — the resolver raises.
+
+        The OSS run() seam knows ONLY that the extension's ``agent_cwd`` raised;
+        it does not see the EE marker. In production (fix/cloud-artifacts-reland)
+        the EE resolver raises exactly when a cloud CHAT run — the
+        ``mark_cloud_chat_run`` dispatch — loses its workspace; the marker-gated
+        side of that contract is covered in tests/cloud/agents/test_agent_jail.py.
+        This mock stands in for that fail-closed without coupling the OSS test to
+        EE internals.
         """
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
 
@@ -424,6 +432,8 @@ class TestCwdJailHardening:
         backend._cli_available = True
 
         class FailClosedExt:
+            # Stands in for the EE resolver fail-closing on a marker-set cloud
+            # CHAT run that lost its workspace (the real mis-tenanting signal).
             def agent_cwd(self):
                 raise RuntimeError("no resolvable workspace_id")
 

@@ -753,7 +753,14 @@ class TestFullAccessApiLimiterExemption:
         from pocketpaw.dashboard_auth import _auth_dispatch
         from pocketpaw.security.rate_limiter import RateLimiter
 
-        fresh = RateLimiter(rate=10.0, capacity=30)
+        # rate=0: a no-refill bucket. The cap (capacity 30) is what this test
+        # guards — an unauthenticated flood must still get a 429. With the real
+        # rate=10/s refill, a loaded CI runner spent enough time per await that
+        # the bucket refilled mid-flood and never fully drained, so the 429
+        # never fired → intermittent false green (the recurring CI flake). Zero
+        # refill makes "40 requests > capacity 30 → 429" deterministic without
+        # weakening what the test guards.
+        fresh = RateLimiter(rate=0.0, capacity=30)
         saw_429 = False
         with (
             patch("pocketpaw.dashboard_auth.api_limiter", fresh),

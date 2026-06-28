@@ -1501,6 +1501,16 @@ class Settings(BaseSettings):
             "POCKETPAW_DODO_ENVIRONMENT."
         ),
     )
+    dodo_billing_country: str = Field(
+        default="US",
+        description=(
+            "Default ISO-3166 alpha-2 country prefilled on the Dodo hosted "
+            "checkout's billing address. Drives which payment methods Dodo "
+            "surfaces — e.g. 'IN' (with INR products) is required for UPI to "
+            "appear; 'US' shows cards. The buyer can still change it on the "
+            "hosted page. Set via POCKETPAW_DODO_BILLING_COUNTRY."
+        ),
+    )
     dodo_webhook_secret: str | None = Field(
         default=None,
         description=(
