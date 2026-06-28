@@ -24,10 +24,15 @@
 #   catalog (each tier -> annual price + the Cloudflare features it resells). Like
 #   /billing/plans it is tenant-independent (no workspace scoping); the frontend
 #   (BC-11) reads it to render the publish tier picker.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): POST /billing/subscribe now
+#   reads the buyer's Origin (fallback Referer) header via ``_request_origin`` and
+#   threads it to ``billing_service.subscribe(origin=...)`` so the Dodo checkout
+#   session returns the buyer to the app's billing page after pay / cancel (the
+#   prior payment-link checkout had nowhere to send them).
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import service as billing_service
@@ -94,9 +99,31 @@ async def create_topup(
     return CreateTopupResponse(checkout_url=result["checkout_url"])
 
 
+def _request_origin(request: Request) -> str:
+    """The buyer's app origin, for building the post-checkout return_url.
+
+    Prefer the ``Origin`` header (sent by the browser on the fetch); fall back to
+    deriving ``scheme://host`` from ``Referer`` when Origin is absent (some
+    same-origin navigations omit Origin). Empty string when neither is usable —
+    the service then falls back to the ``dodo_checkout_return_base`` config.
+    """
+    origin = (request.headers.get("origin") or "").strip()
+    if origin:
+        return origin
+    referer = (request.headers.get("referer") or "").strip()
+    if referer:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(referer)
+        if parts.scheme and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    return ""
+
+
 @router.post("/subscribe", response_model=CreateSubscriptionResponse)
 async def create_subscription(
     body: CreateSubscriptionRequest,
+    request: Request,
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> CreateSubscriptionResponse:
@@ -106,10 +133,15 @@ async def create_subscription(
     upgraded and credits are NOT granted here — both land when Dodo posts a
     verified ``subscription.active`` to the public webhook; each renewal then
     grants the tier's monthly allotment additively (unused credits roll over).
+
+    The buyer's ``Origin`` (fallback ``Referer``) header is threaded into the
+    checkout's return_url / cancel_url so Dodo returns them to the app's billing
+    page after pay / cancel — without it the buyer is stranded on the gateway.
     """
     result = await billing_service.subscribe(
         workspace_id=workspace_id,
         user_id=user_id,
         plan_key=body.plan_key,
+        origin=_request_origin(request),
     )
     return CreateSubscriptionResponse(checkout_url=result["checkout_url"])

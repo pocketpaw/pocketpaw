@@ -34,6 +34,12 @@
 #   the unique (gateway, "") Subscription index. The fix SKIPS the audit upsert on
 #   a falsy subscription_id, so the second workspace never overwrites the first's
 #   row; the grant + plan change still apply for both.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): added the checkout-sessions
+#   bug-fix tests — create_subscription must open a Dodo CHECKOUT SESSION with a
+#   non-empty return_url + cancel_url + a product_cart line + customer (so the buyer
+#   is returned to the app after paying), omit return_url when no base is available,
+#   and the service must thread an ``origin`` into the return_url. Rewired the
+#   existing criterion-1 mock from subscriptions.create to checkout_sessions.create.
 
 from __future__ import annotations
 
@@ -145,13 +151,15 @@ async def test_subscribe_creates_dodo_subscription_with_product_and_metadata(
 ):
     ws = await _make_workspace(plan="free")
 
-    # Mock the async DodoPayments client so no network call happens.
-    fake_response = MagicMock()
-    fake_response.payment_link = "https://checkout.dodopayments.test/sub/abc123"
-    fake_response.subscription_id = SUB_ID
+    # Mock the async DodoPayments client so no network call happens. The
+    # subscription checkout now goes through the CHECKOUT SESSIONS API (the fix),
+    # whose response carries ``session_id`` + ``checkout_url``.
+    fake_session = MagicMock()
+    fake_session.checkout_url = "https://checkout.dodopayments.test/sub/abc123"
+    fake_session.session_id = SESSION_ID
 
     fake_client = MagicMock()
-    fake_client.subscriptions.create = AsyncMock(return_value=fake_response)
+    fake_client.checkout_sessions.create = AsyncMock(return_value=fake_session)
 
     import pocketpaw_ee.cloud.billing.providers.dodo as dodo_mod
 
@@ -162,11 +170,11 @@ async def test_subscribe_creates_dodo_subscription_with_product_and_metadata(
     )
     assert result == {"checkout_url": "https://checkout.dodopayments.test/sub/abc123"}
 
-    # The Dodo client was called with the business recurring product id and the
-    # workspace_id + plan_key on metadata (so the renewal webhook can route back).
-    _, kwargs = fake_client.subscriptions.create.call_args
-    assert kwargs["product_id"] == "prod_pro_recurring"
-    assert kwargs["payment_link"] is True
+    # The Dodo client was called via checkout_sessions.create with the business
+    # recurring product as a product_cart line and the workspace_id + plan_key on
+    # metadata (so the renewal webhook can route the grant back).
+    _, kwargs = fake_client.checkout_sessions.create.call_args
+    assert kwargs["product_cart"] == [{"product_id": "prod_pro_recurring", "quantity": 1}]
     assert kwargs["metadata"]["workspace_id"] == ws
     assert kwargs["metadata"]["plan_key"] == "pro"
     # H1 — the new-customer object MUST carry a non-empty ``name`` alongside
@@ -178,6 +186,134 @@ async def test_subscribe_creates_dodo_subscription_with_product_and_metadata(
         "Dodo new-customer object is missing a non-empty 'name' — "
         f"{customer!r} would be rejected server-side"
     )
+
+
+# ---------------------------------------------------------------------------
+# Checkout-sessions bug fix (fix/billing-checkout-sessions) — after paying on
+# Dodo the buyer must be returned to the app. The OLD path called
+# ``subscriptions.create(payment_link=True)`` which accepts NO return_url, so the
+# buyer was stranded. The fix moves to the Checkout Sessions API
+# (``checkout_sessions.create``) which DOES carry return_url + cancel_url.
+#
+# These tests assert the provider now calls ``checkout_sessions.create`` (NOT
+# ``subscriptions.create``) with a non-empty ``return_url``, the recurring
+# product as a ``product_cart`` line ([{product_id, quantity:1}]), and a
+# ``customer`` object — and that the SESSION url + session_id come back on the
+# normalized ``SubscriptionCheckout``.
+# ---------------------------------------------------------------------------
+
+SESSION_ID = "cks_dodo_session_xyz789"
+SESSION_CHECKOUT_URL = "https://checkout.dodopayments.com/session/cks_dodo_session_xyz789"
+
+
+def _fake_session_client(monkeypatch) -> MagicMock:
+    """Patch ``AsyncDodoPayments`` with a client whose ``checkout_sessions.create``
+    returns a ``CheckoutSessionResponse``-shaped object (session_id + checkout_url).
+
+    ``subscriptions.create`` is ALSO stubbed and asserted NOT-called, so a
+    regression back to the stranded ``subscriptions.create(payment_link=True)``
+    path fails loudly here.
+    """
+    fake_session = MagicMock()
+    fake_session.session_id = SESSION_ID
+    fake_session.checkout_url = SESSION_CHECKOUT_URL
+
+    fake_client = MagicMock()
+    fake_client.checkout_sessions.create = AsyncMock(return_value=fake_session)
+    fake_client.subscriptions.create = AsyncMock(
+        side_effect=AssertionError("must use checkout_sessions.create, not subscriptions.create")
+    )
+
+    import pocketpaw_ee.cloud.billing.providers.dodo as dodo_mod
+
+    monkeypatch.setattr(dodo_mod, "AsyncDodoPayments", MagicMock(return_value=fake_client))
+    return fake_client
+
+
+async def test_create_subscription_uses_checkout_session_with_return_url(monkeypatch):
+    """The provider opens a CHECKOUT SESSION carrying return_url + cancel_url + a
+    product_cart line + customer — so the buyer is returned to the app after pay."""
+    fake_client = _fake_session_client(monkeypatch)
+
+    checkout = await _provider().create_subscription(
+        plan_key="pro",
+        product_id="prod_pro_recurring",
+        workspace_id="ws_checkout",
+        customer_email="buyer@example.com",
+        metadata={"workspace_id": "ws_checkout", "plan_key": "pro"},
+        return_url="https://app.pocketpaw.test/settings/billing?checkout=success",
+        cancel_url="https://app.pocketpaw.test/settings/billing?checkout=cancel",
+    )
+
+    # The Checkout Sessions API was used (NOT subscriptions.create).
+    fake_client.checkout_sessions.create.assert_awaited_once()
+    fake_client.subscriptions.create.assert_not_called()
+
+    _, kwargs = fake_client.checkout_sessions.create.call_args
+    # return_url is the whole point of the fix — it MUST be present and non-empty.
+    assert kwargs.get("return_url"), f"return_url missing/empty: {kwargs!r}"
+    assert kwargs["return_url"].startswith("https://app.pocketpaw.test/settings/billing")
+    assert kwargs.get("cancel_url"), f"cancel_url missing/empty: {kwargs!r}"
+    # The recurring product rides as a product_cart line (a session creates the
+    # subscription at payment when the product is recurring).
+    assert kwargs["product_cart"] == [{"product_id": "prod_pro_recurring", "quantity": 1}]
+    # Customer object carries email + a derived name (Dodo's NewCustomer needs both).
+    customer = kwargs["customer"]
+    assert customer.get("email") == "buyer@example.com"
+    assert customer.get("name"), customer
+    # workspace_id + plan_key still ride on metadata for the renewal webhook.
+    assert kwargs["metadata"]["workspace_id"] == "ws_checkout"
+    assert kwargs["metadata"]["plan_key"] == "pro"
+
+    # The normalized result carries the SESSION url + the session_id (repurposed
+    # onto SubscriptionCheckout.subscription_id — the real subscription_id arrives
+    # later on the subscription.active webhook body, not from this create call).
+    assert checkout.checkout_url == SESSION_CHECKOUT_URL
+    assert checkout.subscription_id == SESSION_ID
+
+
+async def test_create_subscription_omits_return_url_when_not_provided(monkeypatch):
+    """When no return base is available the call OMITS return_url (rather than
+    sending an empty string) — the sites publish path passes no origin."""
+    fake_client = _fake_session_client(monkeypatch)
+
+    await _provider().create_subscription(
+        plan_key="pro",
+        product_id="prod_pro_recurring",
+        workspace_id="ws_no_origin",
+        customer_email=None,
+        metadata={"workspace_id": "ws_no_origin", "plan_key": "pro"},
+        # no return_url / cancel_url
+    )
+
+    _, kwargs = fake_client.checkout_sessions.create.call_args
+    assert "return_url" not in kwargs
+    assert "cancel_url" not in kwargs
+    # Still a valid session create with the cart + customer.
+    assert kwargs["product_cart"] == [{"product_id": "prod_pro_recurring", "quantity": 1}]
+
+
+async def test_subscribe_threads_origin_into_return_url(mongo_db, monkeypatch, patch_plan_products):
+    """End-to-end at the service layer: an ``origin`` passed to ``subscribe`` is
+    woven into return_url/cancel_url on the checkout session (the route reads it
+    from the buyer's Origin header)."""
+    ws = await _make_workspace(plan="free")
+    fake_client = _fake_session_client(monkeypatch)
+
+    result = await billing.subscribe(
+        workspace_id=ws,
+        user_id="u1",
+        plan_key="pro",
+        origin="https://app.acme.com",
+        provider=_provider(),
+    )
+    # The /subscribe contract is preserved — the SESSION url is returned as
+    # checkout_url (the frontend reads checkout_url).
+    assert result == {"checkout_url": SESSION_CHECKOUT_URL}
+
+    _, kwargs = fake_client.checkout_sessions.create.call_args
+    assert kwargs["return_url"] == "https://app.acme.com/settings/billing?checkout=success"
+    assert kwargs["cancel_url"] == "https://app.acme.com/settings/billing?checkout=cancel"
 
 
 async def test_subscribe_rejects_unknown_plan(mongo_db, patch_plan_products):
