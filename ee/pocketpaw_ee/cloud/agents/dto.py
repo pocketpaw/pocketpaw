@@ -4,6 +4,9 @@ Replaces ``ee/cloud/agents/schemas.py``. The wire shape uses some
 unusual keys preserved from legacy: ``uname`` (the slug), ``createdOn``
 and ``lastUpdatedOn`` (with mixedCase). The mappers preserve these
 exactly.
+
+Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — ``agent_to_dict`` now
+emits ``disabled`` so callers can see whether an agent has been soft-disabled.
 """
 
 from __future__ import annotations
@@ -140,6 +143,7 @@ def agent_to_dict(agent: Agent) -> dict[str, Any]:
         "visibility": agent.visibility,
         "config": _config_to_dict(agent.config),
         "owner": agent.owner,
+        "disabled": agent.disabled,
         "createdOn": iso_utc(agent.created_at),
         "lastUpdatedOn": iso_utc(agent.updated_at),
     }

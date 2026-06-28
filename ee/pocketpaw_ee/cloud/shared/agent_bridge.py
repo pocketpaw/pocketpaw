@@ -25,6 +25,11 @@ in-process MCP tools that resolve scope from ContextVars (fabric, instinct,
 decisions, connectors) work on the group/DM bridge path. The SSE chat path
 already did this in ``run_core``; the bridge path skipped it, so every
 scoped tool returned "requires workspace context".
+
+Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): ``_run_agent_response``
+catches ``AgentDisabled`` from ``pool.get`` explicitly and SKIPS the agent
+(returns None, no error to the channel) — a soft-disabled agent simply stops
+responding in groups/DMs until re-enabled.
 """
 
 from __future__ import annotations
@@ -412,6 +417,7 @@ async def _run_agent_response(
     ``meta``). They're formatted into ``user_message`` before ``pool.run`` so
     the agent sees filename/mime/size the same way it does on the DM path.
     """
+    from pocketpaw.agents.errors import AgentDisabled
     from pocketpaw.agents.pool import get_agent_pool
     from pocketpaw_ee.cloud.chat import message_service
     from pocketpaw_ee.cloud.chat.agent_service import (
@@ -431,6 +437,12 @@ async def _run_agent_response(
 
     try:
         instance = await pool.get(agent_id)
+    except AgentDisabled:
+        # Soft-disabled / revoked (AW-4): SKIP this agent in the group/DM
+        # dispatch — no error to the channel, no 500. A disabled agent simply
+        # does not respond until re-enabled.
+        logger.info("Skipping disabled agent %s in group %s", agent_id, group_id)
+        return None
     except Exception:
         logger.error("Failed to get agent instance %s", agent_id, exc_info=True)
         return None

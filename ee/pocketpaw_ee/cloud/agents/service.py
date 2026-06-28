@@ -12,6 +12,10 @@ Public API:
 - ``list_agents(workspace_id, query=None)``
 - ``update(ctx, agent_id, body)``
 - ``delete(ctx, agent_id)``
+- ``disable(ctx, agent_id)`` / ``enable(ctx, agent_id)`` — soft-disable / revoke
+  everywhere (AW-4): flips the doc's ``disabled`` flag, invalidates the run
+  pool's cached instance immediately, and emits ``AgentDisabled`` /
+  ``AgentEnabled``.
 - ``get_scopes(agent_id)``
 - ``set_scopes(agent_id, scopes)``
 - ``discover(ctx, workspace_id, body)``
@@ -33,6 +37,8 @@ from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import (
     AgentCreated,
     AgentDeleted,
+    AgentDisabled,
+    AgentEnabled,
     AgentScopeUpdated,
     AgentUpdated,
 )
@@ -106,6 +112,7 @@ def _to_domain(doc: _AgentDoc) -> Agent:
         config=_config_to_domain(doc.config),
         created_at=getattr(doc, "createdAt", None),  # type: ignore[arg-type]
         updated_at=getattr(doc, "updatedAt", None),  # type: ignore[arg-type]
+        disabled=getattr(doc, "disabled", False),
     )
 
 
@@ -347,6 +354,59 @@ async def delete(ctx: RequestContext, agent_id: str) -> None:
             }
         )
     )
+
+
+async def _set_disabled(ctx: RequestContext, agent_id: str, disabled: bool) -> Agent:
+    """Flip the agent's soft-disable flag (AW-4) and revoke everywhere.
+
+    Owner-check mirrors ``delete()`` exactly. ``doc.save()`` bumps ``updatedAt``,
+    which the run pool's staleness check would eventually notice — but we do NOT
+    rely on that alone: we ALSO invalidate the pool's cached instance
+    immediately so a disabled agent is revoked the instant the flag flips, with
+    no stale-instance window. Emits ``AgentDisabled`` / ``AgentEnabled`` mirroring
+    ``AgentDeleted``'s payload shape.
+    """
+    try:
+        doc = await _AgentDoc.get(PydanticObjectId(agent_id))
+    except Exception:
+        doc = None
+    if doc is None:
+        raise NotFound("agent", agent_id)
+    if doc.owner != ctx.user_id:
+        raise Forbidden("agent.not_owner", "Only the agent owner can disable it")
+
+    doc.disabled = disabled
+    await doc.save()  # bumps updatedAt
+
+    # MUST-FIX: explicit immediate cache invalidation. The pool's staleness
+    # check is a fallback, not the primary revoke mechanism — drop the cached
+    # instance now so the very next get() rebuilds (and, while disabled, raises
+    # AgentDisabled). Lazy import keeps the EE service off a module-level
+    # dependency on the OSS pool singleton.
+    from pocketpaw.agents.pool import get_agent_pool
+
+    await get_agent_pool().invalidate(agent_id)
+
+    event_cls = AgentDisabled if disabled else AgentEnabled
+    await emit(
+        event_cls(
+            data={
+                "agent_id": agent_id,
+                "workspace_id": doc.workspace,
+            }
+        )
+    )
+    return _to_domain(doc)
+
+
+async def disable(ctx: RequestContext, agent_id: str) -> Agent:
+    """Soft-disable an agent — revoke it everywhere at once (AW-4)."""
+    return await _set_disabled(ctx, agent_id, True)
+
+
+async def enable(ctx: RequestContext, agent_id: str) -> Agent:
+    """Re-enable a soft-disabled agent (AW-4)."""
+    return await _set_disabled(ctx, agent_id, False)
 
 
 async def get_scopes(agent_id: str) -> list[str]:

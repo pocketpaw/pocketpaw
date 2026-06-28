@@ -1,6 +1,11 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-28 (feat/aiam-agent-revoke, AW-4) — ``_drive_agent_loop`` catches
+  ``AgentDisabled`` from ``pool.get`` explicitly and yields a clean
+  ``agent.unavailable`` error instead of letting it fall through to the generic
+  ``agent.load_failed`` 500-style path. A soft-disabled agent surfaces a tidy
+  "currently unavailable" message to the chat client.
 - 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
   lifecycle (the prewarm ``create_task`` + the main agent loop) in
   ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
@@ -130,6 +135,7 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
+from pocketpaw.agents.errors import AgentDisabled  # type: ignore[import-untyped]
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
@@ -807,6 +813,19 @@ async def _drive_agent_loop(
     pool = get_agent_pool()
     try:
         instance = await pool.get(ctx.target_agent_id)
+    except AgentDisabled:
+        # Soft-disabled / revoked (AW-4): surface a CLEAN "agent unavailable"
+        # error to the chat client instead of an unhandled 500. The agent is
+        # not resolvable until an admin re-enables it.
+        logger.info("Agent %s is disabled; refusing run", ctx.target_agent_id)
+        yield (
+            "error",
+            {
+                "code": "agent.unavailable",
+                "message": "This agent is currently unavailable.",
+            },
+        )
+        return
     except Exception as e:
         logger.exception("Failed to load agent instance %s", ctx.target_agent_id)
         yield ("error", {"code": "agent.load_failed", "message": str(e)})
