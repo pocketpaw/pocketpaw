@@ -17,8 +17,14 @@ Public API:
   ``list_peer_ids(user_id)`` — used as function refs by the realtime
   audience resolver
 - ``get_workspace_plan(workspace_id)`` — lightweight plan-tier lookup for
-  the plan-feature gate dependency; returns "team" on any failure so the
-  dep fails open on plan rather than crashing with a 500.
+  the plan-feature gate dependency; returns None when the workspace is
+  missing/soft-deleted/malformed (the gate maps that to a 404) and
+  re-raises DB errors rather than silently downgrading a paying customer.
+- ``set_workspace_plan(workspace_id, plan)`` — set the workspace's plan
+  tier (BC-7). The billing subscription webhook is the only caller: a
+  verified ``subscription.active`` upgrades to the subscribed tier and a
+  ``subscription.cancelled`` reverts to ``free``. Returns True on a write,
+  False when the workspace is missing/soft-deleted.
 
 Changes: added get_workspace_plan helper for plan-feature gate dep; added
 slug_reason() (format + reserved + uniqueness) backing the live
@@ -55,6 +61,12 @@ general update() path on purpose (a non-ASK level enables auto-approval of
 agent writes), and emits a WARNING-severity append-only audit event with the
 old→new level. The write goes through this service per the import-linter
 Beanie-writes-only-from-service contract.
+2026-06-26 (feat/litellm-billing-cutover, WU-F): create() now also fires the
+per-tenant LiteLLM key provisioning trigger — a BEST-EFFORT, NON-BLOCKING
+ensure_tenant_key(workspace) call. A proxy outage / mint failure is logged and
+swallowed (workspace creation NEVER fails on a provisioning error); the call is
+idempotent, so the billing-cutover sweep and any later workspace touch back-fill
+a key that didn't mint here. Mirrors the best-effort seed_default_agent step.
 """
 
 from __future__ import annotations
@@ -336,6 +348,24 @@ async def create(ctx: RequestContext, body: CreateWorkspaceRequest) -> Workspace
         await agents_service.seed_default_agent(str(doc.id), ctx.user_id)
     except Exception as exc:
         logger.warning("Failed to seed default agent for workspace %s (non-fatal): %s", doc.id, exc)
+
+    # Provision the per-tenant LiteLLM virtual key (WU-F / MCG-8). BEST-EFFORT and
+    # NON-BLOCKING: if the proxy is unreachable or the mint fails, log + continue —
+    # workspace creation must NEVER fail on a provisioning error. ``ensure_tenant_key``
+    # is idempotent, so the cutover sweep (which iterates provisioned tenants) and a
+    # later workspace touch both back-fill a key that didn't get minted here. Lazy
+    # import keeps the workspace service free of an llm_provisioning dependency at
+    # module load.
+    try:
+        from pocketpaw_ee.cloud.llm_provisioning import service as llm_provisioning_service
+
+        await llm_provisioning_service.ensure_tenant_key(str(doc.id))
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort, never fatal
+        logger.warning(
+            "Failed to provision LiteLLM tenant key for workspace %s (non-fatal): %s",
+            doc.id,
+            exc,
+        )
 
     await emit(
         WorkspaceMemberAdded(
@@ -1627,6 +1657,33 @@ async def get_workspace_plan(workspace_id: str) -> str | None:
     if doc is None or doc.deleted_at is not None:
         return None
     return doc.plan
+
+
+async def set_workspace_plan(workspace_id: str, plan: str) -> bool:
+    """Set a workspace's plan tier (BC-7 subscription lifecycle).
+
+    The ONLY caller is the billing subscription webhook: a verified
+    ``subscription.active`` upgrades the workspace to the subscribed tier, and a
+    ``subscription.cancelled`` reverts it to ``free``. Idempotent — writing the
+    same plan the workspace already holds is a harmless no-op write.
+
+    Returns True when the plan was written, False when the workspace is missing /
+    soft-deleted / has a malformed id (so the webhook can log-and-ack rather than
+    500 on an unroutable event). Does NOT touch credits — the per-renewal grant is
+    BC-1's job, keyed on the webhook event id; this only moves the entitlement.
+    """
+    if not plan:
+        raise ValidationError("workspace.invalid_plan", "plan is required")
+    try:
+        oid = PydanticObjectId(workspace_id)
+    except Exception:
+        return False
+    doc = await _WorkspaceDoc.get(oid)
+    if doc is None or doc.deleted_at is not None:
+        return False
+    doc.plan = plan
+    await doc.save()
+    return True
 
 
 # ---------------------------------------------------------------------------

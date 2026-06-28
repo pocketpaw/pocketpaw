@@ -121,7 +121,7 @@ def settings_allowlist(roots: Path, monkeypatch) -> Path:
 @pytest.fixture
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     st = InstinctStore(tmp_path / "instinct_console.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
@@ -720,7 +720,7 @@ async def test_executor_emits_landed_and_persists_pr_result(
     monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
 
     st = InstinctStore(tmp_path / "exec.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
 
     action = await _propose_run(
         st,
@@ -784,7 +784,7 @@ async def test_executor_local_only_emits_landed_without_pr_url(
     monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
 
     st = InstinctStore(tmp_path / "exec_local.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
 
     action = await _propose_run(
         st,
@@ -856,7 +856,7 @@ async def test_executor_emits_failed_on_apply_conflict(monkeypatch, recording_bu
     monkeypatch.setattr("pocketpaw.config.get_settings", lambda: _S())
 
     st = InstinctStore(tmp_path / "exec_fail.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
 
     action = await _propose_run(
         st,

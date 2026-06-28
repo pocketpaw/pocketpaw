@@ -314,7 +314,10 @@ async def propose_external_action(
         reason=f"external action '{action}' on connector '{connector_name}' requires approval",
     )
 
-    store = get_instinct_store()
+    # ISO: scope the store to the caller's workspace (validated non-empty above)
+    # so the proposal lands in the tenant's file — this propose path has no
+    # ``current_workspace`` ContextVar set.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action_obj = await store.propose(
         # ``pocket_id`` carries the workspace for external actions — they aren't
         # bound to a pocket the way Mission Control items are (mirrors belt.py).

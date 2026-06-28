@@ -34,6 +34,19 @@
 # supplied (a static site), it keeps the prior single-module upload byte-for-byte,
 # so the static path never regresses. The fail-closed + in-memory-token handling
 # is identical on both paths.
+# Updated 2026-06-24 (BC-10 — resell Cloudflare features by site-plan tier):
+# ``create_custom_hostname`` gained an optional ``features`` param (the
+# ``cloudflare_features`` set from the site's plan tier — e.g. ``{"waf",
+# "edge_cache", ...}``). When features are present, the custom-hostname request
+# carries the corresponding premium SSL/settings fields via ``_ssl_for_features``
+# (a pure feature-set → CF ``ssl`` payload map) plus a ``custom_metadata`` block
+# recording the resold feature set, so a HIGHER tier provisions paid security
+# (WAF / strict TLS / edge cache) at hostname-create time. When ``features`` is
+# None/empty (the BASE tier), the request is the prior basic
+# ``{"method": "http", "type": "dv"}`` ssl payload byte-for-byte, so a basic-tier
+# site never regresses. The mapping is intentionally MINIMAL + documented (a real
+# CF account tunes the exact toggles); the contract is "feature set in → those
+# CF fields out", asserted with a mocked transport.
 
 from __future__ import annotations
 
@@ -55,6 +68,51 @@ _MAIN_MODULE = "index.mjs"
 # date the generator bakes into the (otherwise-ignored-on-direct-API-upload)
 # wrangler.toml so the runtime semantics are identical to a wrangler deploy.
 _COMPATIBILITY_DATE = "2024-09-23"
+
+# BC-10: the basic (no-feature) custom-hostname SSL payload — the prior default,
+# kept byte-for-byte so a base-tier site never regresses.
+_BASIC_SSL: dict = {"method": "http", "type": "dv"}
+
+# BC-10: map a single resold feature → the custom-hostname ``ssl.settings`` fields
+# it provisions. A site's plan tier resolves to a SET of feature keys (from
+# ``billing.site_plans``); the union of these per-feature fragments becomes the
+# ``ssl.settings`` block on the create request. Intentionally MINIMAL — a real CF
+# account tunes the exact toggles; the contract is the feature → field mapping,
+# not the specific security values. Features not in this map (e.g. analytics,
+# custom_domain) provision NO ssl.settings field — they're recorded on
+# ``custom_metadata`` so the tier is still visible on the hostname.
+_FEATURE_SSL_SETTINGS: dict[str, dict] = {
+    # WAF / managed security: opt the hostname into strict TLS so the resold
+    # WAF rules sit behind a hardened handshake.
+    "waf": {"min_tls_version": "1.2", "tls_1_3": "on"},
+    # Edge cache controls: enable HTTP/2 + early-hints-friendly negotiation on
+    # the resold edge-cache tier.
+    "edge_cache": {"http2": "on"},
+}
+
+
+def _ssl_for_features(features: set[str] | None) -> dict:
+    """Build the custom-hostname ``ssl`` payload for a tier's resold features.
+
+    No features (base tier) → the prior basic ``{"method": "http", "type": "dv"}``
+    payload, unchanged. With features, the basic payload gains an ``ssl.settings``
+    block that is the UNION of every known feature's fragment (``_FEATURE_SSL_SETTINGS``)
+    plus a ``custom_metadata`` recording the full resold feature set (sorted, so the
+    wire payload is deterministic). A feature with no ssl fragment still lands on
+    ``custom_metadata`` — the tier is visible even when it provisions no toggle.
+    """
+    if not features:
+        return dict(_BASIC_SSL)
+    settings: dict = {}
+    for feat in features:
+        settings.update(_FEATURE_SSL_SETTINGS.get(feat, {}))
+    ssl: dict = dict(_BASIC_SSL)
+    if settings:
+        ssl["settings"] = settings
+    # Record the resold feature set on the hostname so the tier is auditable on
+    # the CF side (sorted → deterministic wire payload).
+    ssl["custom_metadata"] = {"resold_features": ",".join(sorted(features))}
+    return ssl
 
 
 def _map_status(cf_status: str, ssl_status: str) -> HostnameStatus:
@@ -155,12 +213,24 @@ class CloudflareClient:
         self._unwrap(resp)
         return True
 
-    async def create_custom_hostname(self, hostname: str) -> CustomHostname:
+    async def create_custom_hostname(
+        self, hostname: str, *, features: set[str] | None = None
+    ) -> CustomHostname:
+        """Register a Cloudflare-for-SaaS custom hostname, return its single CNAME.
+
+        ``features`` (BC-10) is the site plan tier's ``cloudflare_features`` set.
+        When present, the create request carries the premium ``ssl`` payload built
+        by ``_ssl_for_features`` (strict-TLS / HTTP-2 toggles for WAF / edge-cache
+        + a ``custom_metadata`` recording the resold set), so a HIGHER-tier site
+        provisions paid security at hostname-create time. When None/empty (the BASE
+        tier), the request is the prior basic DV ``ssl`` payload, unchanged — a
+        base-tier site never regresses.
+        """
         url = f"{_CF_API}/zones/{self._zone_id}/custom_hostnames"
         async with self._client() as client:
             resp = await client.post(
                 url,
-                json={"hostname": hostname, "ssl": {"method": "http", "type": "dv"}},
+                json={"hostname": hostname, "ssl": _ssl_for_features(features)},
             )
         result = self._unwrap(resp)
         return CustomHostname(

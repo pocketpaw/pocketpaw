@@ -439,7 +439,9 @@ async def agent_list_work_items(
     # block must run even when the workspace has zero visible pockets. Tasks
     # below have their own workspace-level tenancy and are NOT gated by
     # pocket visibility.
-    store = get_instinct_store()
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope the store
+    # file to the caller's workspace (the W4c in-row filter below is additive).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     # W4c — scope the instinct reads to the caller's workspace (plus legacy
     # NULL rows) at the store/SQL layer so a tenant never reads another
     # tenant's Nudges off the shared DB. The pocket-visibility filter below
@@ -621,7 +623,7 @@ async def agent_bulk_approve(
     from uuid import uuid4
 
     body = BulkActionRequest.model_validate(body)
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
 
     bulk_id = uuid4().hex
     approved: list[dict] = []
@@ -667,7 +669,8 @@ async def agent_bulk_approve(
     # Handle nudges via Instinct store
     if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
-        store = get_instinct_store()
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
         eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
@@ -724,7 +727,7 @@ async def agent_bulk_reject(
             "mission_control.reason_required",
             "bulk-reject requires a reason — pass a non-empty string in ``reason``.",
         )
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
 
     from uuid import uuid4
 
@@ -768,7 +771,8 @@ async def agent_bulk_reject(
     # Handle nudges via Instinct store
     if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
-        store = get_instinct_store()
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
         eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
         nudge_rejected, nudge_missing, _ = await store.bulk_reject(
             eligible, reason=body.reason, rejector=ctx.user_id
@@ -834,7 +838,8 @@ async def agent_outcomes_summary(
     body = OutcomesQueryRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
+    # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     cutoff = datetime.now() - _window_to_delta(body.window)
 
     # Pull a generous slice and filter in Python. ``list_actions`` does

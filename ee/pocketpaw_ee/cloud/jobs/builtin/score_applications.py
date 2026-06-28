@@ -28,6 +28,17 @@
 #     `params["rows"]` behavior so current tests/specs still work.
 # The WORKER now owns the `<action>_status` flag (Bug B fix), so this built-in
 # no longer returns any status key — only `scored_rows` + the scored count.
+#
+# Updated: 2026-06-22 (feat/jobs-worker-register-and-connector-read) — added a
+# CONNECTOR source mode: when `params` carries `connector` (and `action`), the
+# job reads its batch from the workspace's BOUND connector via
+# `jobs.service.execute_connector_action` (the jobs entity owns the connectors
+# call — the built-in never imports the connectors service directly) and scores
+# those records. Source PRECEDENCE is connector > source_collection > rows; the
+# Mongo `source_collection` and inline `rows` fallbacks are PRESERVED. The same
+# idempotent dedup (skip ids already in the pocket's `scored_rows`), the same
+# real heuristic + band, and the same PII allowlist (id/name/score/band/stage)
+# apply to all three source modes — only WHERE the batch comes from differs.
 
 """Built-in `score_applications` job: real data-backed scoring + PII allowlist."""
 
@@ -193,9 +204,30 @@ class ScoreApplicationsJob:
         self, *, workspace_id: str, pocket_id: str, job_id: str, params: dict
     ) -> dict:
         batch_size = max(0, int(params.get("batch_size", 20)))
+        connector = params.get("connector")
+        connector_action = params.get("action")
         source_collection = params.get("source_collection")
 
-        if isinstance(source_collection, str) and source_collection.strip():
+        # Source PRECEDENCE: connector > source_collection > inline rows. A
+        # `connector` (with its `action`) reads the batch from the workspace's
+        # bound connector; otherwise a `source_collection` reads from Mongo;
+        # otherwise the inline `params["rows"]` fallback keeps current
+        # specs/tests working.
+        if (
+            isinstance(connector, str)
+            and connector.strip()
+            and isinstance(connector_action, str)
+            and connector_action.strip()
+        ):
+            scored_rows = await self._run_connector_backed(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                connector=connector,
+                connector_action=connector_action,
+                connector_params=params.get("connector_params"),
+                batch_size=batch_size,
+            )
+        elif isinstance(source_collection, str) and source_collection.strip():
             scored_rows = await self._run_source_backed(
                 workspace_id=workspace_id,
                 pocket_id=pocket_id,
@@ -214,6 +246,96 @@ class ScoreApplicationsJob:
             }
         }
 
+    async def _existing_scored_rows(
+        self, *, workspace_id: str, pocket_id: str
+    ) -> list[dict[str, Any]]:
+        """The pocket's CURRENT ``scored_rows`` — the dedup + accumulation base.
+
+        Shared by every data-backed source mode (connector + collection) so the
+        idempotent batch advancement is identical regardless of where the batch
+        comes from.
+        """
+        spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
+        state = spec.get("state") if isinstance(spec, dict) else None
+        existing_rows = state.get("scored_rows") if isinstance(state, dict) else None
+        return list(existing_rows) if isinstance(existing_rows, list) else []
+
+    def _score_next_batch(
+        self,
+        *,
+        existing_rows: list[dict[str, Any]],
+        page: list[Any],
+        batch_size: int,
+    ) -> list[dict[str, Any]]:
+        """Score the next NEW batch from ``page`` and return the ACCUMULATED rows.
+
+        Idempotent: records whose id is already in ``existing_rows`` are skipped,
+        so re-running advances to the next batch instead of re-scoring the same
+        records. Records with no resolvable id are skipped (can't dedup). The new
+        batch is capped at ``batch_size``; the result is ``existing_rows`` plus
+        the newly-scored ones (PII-projected by :func:`_score_row`).
+        """
+        seen_ids = _already_scored_ids(existing_rows)
+        if batch_size == 0:
+            return existing_rows
+
+        new_scored: list[dict[str, Any]] = []
+        for record in page:
+            if not isinstance(record, dict):
+                continue
+            rid = _record_id(record)
+            if rid is None or rid in seen_ids:
+                continue
+            new_scored.append(_score_row(record))
+            seen_ids.add(rid)
+            if len(new_scored) >= batch_size:
+                break
+
+        return existing_rows + new_scored
+
+    async def _run_connector_backed(
+        self,
+        *,
+        workspace_id: str,
+        pocket_id: str,
+        connector: str,
+        connector_action: str,
+        connector_params: Any,
+        batch_size: int,
+    ) -> list[dict[str, Any]]:
+        """Read a batch from a BOUND connector, score the next NEW records, and
+        return the ACCUMULATED rows (existing scored + newly scored).
+
+        The connector read goes through ``jobs.service.execute_connector_action``
+        (the jobs entity owns the connectors call); on a connector failure that
+        helper raises ``CloudError`` which propagates to the worker's failure
+        path. Same idempotent dedup as the Mongo path: records already scored on
+        the pocket are skipped. The connector's data payload may be a list of
+        records (the common shape) or a single record dict (normalized to a
+        one-element list).
+        """
+        existing_rows = await self._existing_scored_rows(
+            workspace_id=workspace_id, pocket_id=pocket_id
+        )
+        if batch_size == 0:
+            return existing_rows
+
+        params = connector_params if isinstance(connector_params, dict) else {}
+        data = await jobs_service.execute_connector_action(
+            workspace_id, connector, connector_action, params
+        )
+        # Normalize the connector data payload to a list of records: a
+        # list-shaped action returns the records directly; a scalar one returns a
+        # single dict we wrap. Anything else reads as "no records".
+        if isinstance(data, list):
+            page: list[Any] = data
+        elif isinstance(data, dict):
+            page = [data]
+        else:
+            page = []
+
+        return self._score_next_batch(existing_rows=existing_rows, page=page, batch_size=batch_size)
+
     async def _run_source_backed(
         self,
         *,
@@ -229,13 +351,9 @@ class ScoreApplicationsJob:
         ``scored_rows`` are skipped, so re-running advances to the next batch
         instead of re-scoring the same records.
         """
-        # Current scored rows on the pocket — the dedup + accumulation base.
-        spec = await pockets_service.get_pocket_ripple_spec(workspace_id, pocket_id)
-        state = spec.get("state") if isinstance(spec, dict) else None
-        existing_rows = state.get("scored_rows") if isinstance(state, dict) else None
-        existing_rows = list(existing_rows) if isinstance(existing_rows, list) else []
-        seen_ids = _already_scored_ids(existing_rows)
-
+        existing_rows = await self._existing_scored_rows(
+            workspace_id=workspace_id, pocket_id=pocket_id
+        )
         if batch_size == 0:
             return existing_rows
 
@@ -244,21 +362,7 @@ class ScoreApplicationsJob:
         # then filtered to NEW records and capped at `batch_size`.
         page = await jobs_service.read_source_records(source_collection, limit=300)
 
-        new_scored: list[dict[str, Any]] = []
-        for record in page:
-            if not isinstance(record, dict):
-                continue
-            rid = _record_id(record)
-            # Skip records with no resolvable id (can't dedup) and ones already
-            # scored.
-            if rid is None or rid in seen_ids:
-                continue
-            new_scored.append(_score_row(record))
-            seen_ids.add(rid)
-            if len(new_scored) >= batch_size:
-                break
-
-        return existing_rows + new_scored
+        return self._score_next_batch(existing_rows=existing_rows, page=page, batch_size=batch_size)
 
 
 __all__ = ["ScoreApplicationsJob", "project_row"]

@@ -65,6 +65,14 @@ supplying the ``WorkspaceConnector``-backed ``CloudConnectorStateStore`` as the
 ConnectorRegistry's default durable state store, so cloud connector config
 rehydrates from the tenant DB after a process restart (no /connect needed).
 
+Updated: 2026-06-26 (ART-2) — ``CloudAgentExtension`` gained ``agent_cwd``: a
+per-tenant agent working-directory jail. It delegates to
+``pocketpaw_ee.cloud.agent_jail.resolve_agent_cwd``, which returns a
+per-workspace/session dir (``~/.pocketpaw/workspaces/<ws>/agent/<session>/``) so
+a cloud tenant's file ops never co-mingle in the shared home dir, and FAILS
+CLOSED when a cloud run has no resolvable workspace. OSS / dedicated installs
+return ``None`` and keep ``settings.file_jail_path``.
+
 Updated: 2026-06-11 (feat/fabric-instinct-mcp-providers) — added
 ``CloudFabricMcpProvider`` (entry ``fabric``; server ``pocketpaw_fabric``,
 tools ``fabric_query`` / ``fabric_stats``) and ``CloudInstinctMcpProvider``
@@ -75,6 +83,17 @@ only MCP servers do — so without these the cloud chat agent had no path to the
 Fabric ontology or Instinct gate visibility. Both are READ-ONLY and
 workspace-scoped via the chat ContextVars. Gated proposing stays on
 ``pocketpaw_external_actions``. Ambient (not opt-in).
+
+Updated: 2026-06-26 (ISO-3 — workspace store bridge) — added ``CloudStoreProvider``
+(``pocketpaw.stores`` entry-point) so the dormant ``StoreProvider`` seam ISO-1 lit
+up is now live under EE. It returns the standard per-workspace SQLite file store
+(Fabric / Instinct at ``~/.pocketpaw/workspaces/<id>/<name>.db``) by delegating to
+the OSS helper ``pocketpaw.stores.build_workspace_store`` — so the path + the
+path-traversal allowlist stay authoritative in OSS and the provider can never drift
+from or weaken them. It returns ``None`` for the legacy (no-workspace) path, leaving
+the OSS factory's shared singleton in place. This activates the entry-point end to
+end and gives EE the single hook to later swap in a cloud-backed store without
+touching core.
 """
 
 from __future__ import annotations
@@ -90,7 +109,11 @@ _xproc_consumer_task: asyncio.Task[None] | None = None
 
 
 async def _sweeper_loop() -> None:
+    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
+    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
+    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
     while True:
         try:
@@ -100,15 +123,67 @@ async def _sweeper_loop() -> None:
             raise
         except Exception:
             _run_sweeper_logger.exception("sweep_stale_runs tick failed")
+        # ART-3 jail lifecycle: TTL-GC idle agent jails + LRU-evict under the
+        # disk watermark, so scratch disk scales with active concurrency not user
+        # count. Own try so a jail-GC failure can't suppress the other sweeps (or
+        # vice versa); never evicts a jail backing a queued/running run.
+        try:
+            await sweep_agent_jails()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_agent_jails tick failed")
+        # BC-3 metering: bill every newly-terminal run's compute cost on the same
+        # heartbeat. Kept in its own try so a metering failure can't suppress the
+        # stale-run sweep (or vice versa) on the next tick. Self-gated OFF in the
+        # WU-F ``live`` cutover mode (LiteLLM is then the sole meter).
+        try:
+            await sweep_unbilled_runs()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_unbilled_runs tick failed")
+        # WU-F billing cutover: per-tenant LiteLLM spend sweep. No-op in ``off``;
+        # a read-only reconciliation compare in ``shadow``; debits proxy spend in
+        # ``live``. Own try so a cutover-sweep failure can't suppress the other
+        # sweeps (or vice versa) on the next tick.
+        try:
+            await run_cutover_sweep()
+        except Exception:
+            _run_sweeper_logger.exception("run_cutover_sweep tick failed")
+        # Charge-first (review fix C): surface PAID sites stuck pending past the
+        # threshold (a lost/delayed subscription.active webhook). VISIBILITY ONLY —
+        # logs at WARNING, never auto-deploys or auto-cancels. Its own try so a
+        # failure here can't suppress the other sweeps (or vice versa).
+        try:
+            await sweep_pending_sites()
+        except Exception:
+            _run_sweeper_logger.exception("sweep_pending_sites tick failed")
 
 
 async def start_run_sweeper() -> None:
-    """Sweep once on boot, then tick every 5 minutes until shutdown."""
+    """Sweep once on boot, then tick every 5 minutes until shutdown.
+
+    Boot runs the stale-run sweep (interrupt orphaned runs), the BC-3 compute-cost
+    metering sweep (bill any terminal runs left unbilled by the prior process), the
+    WU-F LiteLLM billing-cutover sweep (no-op / shadow-compare / live-ingest per the
+    cutover mode), the charge-first pending-site reconciliation sweep (surface paid
+    sites stuck pending), and the ART-3 agent-jail GC (reclaim scratch left by a
+    prior process's idle runs); the 5-minute loop then ticks all of them.
+    """
+    from pocketpaw_ee.cloud.agent_jail_gc import sweep_agent_jails
     from pocketpaw_ee.cloud.chat.runs.sweeper import sweep_stale_runs
+    from pocketpaw_ee.cloud.llm_provisioning.cutover_sweeper import run_cutover_sweep
+    from pocketpaw_ee.cloud.metering.sweeper import sweep_unbilled_runs
+    from pocketpaw_ee.sites.pending_sweeper import sweep_pending_sites
 
     global _sweeper_task
     with suppress(Exception):
         await sweep_stale_runs()
+    with suppress(Exception):
+        await sweep_unbilled_runs()
+    with suppress(Exception):
+        await run_cutover_sweep()
+    with suppress(Exception):
+        await sweep_pending_sites()
+    with suppress(Exception):
+        await sweep_agent_jails()
     _sweeper_task = asyncio.create_task(_sweeper_loop())
 
 
@@ -703,6 +778,34 @@ class CloudMediaMcpProvider:
         return list(MEDIA_TOOL_IDS)
 
 
+class CloudDeliverMcpProvider:
+    """`pocketpaw.mcp_servers` — the artifact-delivery in-process server
+    (``pocketpaw_deliver``). Hosts ``deliver_artifact`` only (ART-4).
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so any cloud chat agent can deliver
+    a file it built — a report, an export, a zipped bundle — to the tenant's
+    blob storage and hand the user a real download URL, without an explicit
+    opt-in. Same regime the sites manager + media + pocket specialist use: the
+    cloud chat agent runs on the claude_agent_sdk backend, which only sees
+    in-process MCP servers, so the deliver path MUST be surfaced here.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.deliver import build_deliver_server
+
+            return build_deliver_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the deliver server is
+            # unavailable, same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.deliver import DELIVER_TOOL_IDS
+
+        return list(DELIVER_TOOL_IDS)
+
+
 class CloudLoomMcpProvider:
     """`pocketpaw.mcp_servers` — the loom codebase-orientation MCP server.
 
@@ -872,8 +975,9 @@ class CloudAgentExtension:
     """`pocketpaw.agent_extensions` — EE additions to the core agent runtime.
 
     Contributes the cloud pocket-specialist function tool to MCP-capable
-    tool-list backends, and cloud workspace/user/session identity to agent
-    subprocess environments.
+    tool-list backends, cloud workspace/user/session identity to agent
+    subprocess environments, and (ART-2) a per-tenant agent working-directory
+    jail so each cloud workspace's file ops stay isolated from every other.
     """
 
     # Backends that receive ``PocketSpecialistTool`` as a native function
@@ -913,6 +1017,18 @@ class CloudAgentExtension:
             if value:
                 env[var] = str(value)
         return env
+
+    def agent_cwd(self) -> str | None:
+        """`pocketpaw.agent_extensions` — per-session agent working directory.
+
+        In multi-tenant cloud each workspace gets its own agent cwd
+        (``~/.pocketpaw/workspaces/<ws>/agent/<session>/``) so tenant file ops
+        never co-mingle in the shared home dir; fails CLOSED when a cloud run
+        has no resolvable workspace. Returns ``None`` off-cloud so the core
+        agent keeps using ``settings.file_jail_path`` (ART-2)."""
+        from pocketpaw_ee.cloud.agent_jail import resolve_agent_cwd
+
+        return resolve_agent_cwd()
 
 
 class CloudConnectorStateStoreProvider:
@@ -985,3 +1101,36 @@ class CloudComposioMcpProvider:
         # ``mcp__composio`` is the server-level allowlist entry — it
         # permits every tool the in-process ``composio`` server exposes.
         return ["mcp__composio"]
+
+
+class CloudStoreProvider:
+    """``pocketpaw.stores`` — the workspace-keyed store provider (ISO-3).
+
+    Activates the ``StoreProvider`` seam ISO-1 added but left dormant. The OSS
+    factory consults this provider FIRST when building a workspace-keyed store;
+    we return the standard per-workspace SQLite file store (Fabric / Instinct
+    under ``~/.pocketpaw/workspaces/<id>/<name>.db``) by delegating to the OSS
+    helper ``build_workspace_store``, so:
+
+    * the file path AND the strict path-traversal allowlist stay defined ONCE,
+      in OSS core — a provider can't drift from or weaken the guard; and
+    * delegation is recursion-safe (``build_workspace_store`` never re-enters
+      the provider seam).
+
+    We return ``None`` for the legacy / no-workspace path (``workspace_id`` is
+    ``None``) so the OSS factory keeps using its shared single-tenant singleton
+    there — the cloud always carries a workspace, so on cloud this provider only
+    ever serves the per-workspace branch. This is the one hook a future task
+    swaps to back stores with a cloud DB or a per-tenant server, without
+    touching core.
+    """
+
+    def get_store(self, name: str, *, workspace_id: str | None = None) -> Any:
+        if workspace_id is None:
+            # No workspace → let the OSS factory use its legacy shared singleton
+            # (or fail closed under POCKETPAW_REQUIRE_WORKSPACE_SCOPE, which the
+            # factory enforces before it ever consults a provider).
+            return None
+        from pocketpaw.stores import build_workspace_store
+
+        return build_workspace_store(name, workspace_id)

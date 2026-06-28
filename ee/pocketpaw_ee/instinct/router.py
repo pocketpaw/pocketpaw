@@ -1,5 +1,20 @@
 # ee/instinct/router.py — FastAPI router for the Instinct decision pipeline API.
 # Created: 2026-03-28 — Propose, approve/reject, list pending, query audit.
+# Updated: 2026-06-26 (ISO-2 — physical per-workspace isolation) — the store is
+#   no longer one shared ``~/.pocketpaw/instinct.db``. ``_store`` now takes the
+#   caller's ``workspace_id`` and routes through
+#   ``pocketpaw.stores.get_instinct_store(workspace_id=...)``, so every action +
+#   audit read/write hits that tenant's OWN
+#   ``~/.pocketpaw/workspaces/<id>/instinct.db`` — and therefore that tenant's
+#   own audit hash-chain. The audit ``verify`` and ``corrections`` endpoints,
+#   which previously took no workspace, now resolve ``current_workspace_id`` so
+#   ``verify_audit_chain`` checks the CALLER'S per-tenant chain (not a global
+#   chain spanning tenants — the correct multi-tenant model). The internal
+#   helpers ``_forward_to_soul`` and ``_fetch_current_fabric`` take
+#   ``workspace_id`` from their endpoint callers (the latter also threads it into
+#   the per-workspace Fabric store so it doesn't fail closed on a cloud path).
+#   The per-endpoint W4a ``workspace_id`` filter args are UNCHANGED — physical
+#   file isolation is additive defense-in-depth on top of the in-row filter.
 # Updated: 2026-06-19 (SZD-5b — _pocket_create proposal type) — added a gated
 #   starter-Pocket-create proposal kind (TENANCY GATE). ``_pocket_create_blob`` +
 #   ``_assert_pocket_create_workspace`` are the peers of the existing blob
@@ -52,6 +67,29 @@
 #   of BP-3 also added an additive ``scope_type`` to ``ProposeRequest`` /
 #   ``propose_action`` so an Action can be scoped to a generic artifact.
 #   TODO(BP-4): revert/discard semantics deepen in the executor + a history view.
+# Updated: 2026-06-16 (feat/instinct-smart-triage) — ``propose_action`` now runs
+#   a smart-approval auto-triage hook (``_run_auto_triage``) synchronously after
+#   ``store.propose`` succeeds and BEFORE the response returns. The hook calls
+#   the cheap-model classifier in ``ee.instinct.auto_triage``; on an APPROVE
+#   verdict it auto-approves the Action via ``store.auto_approve`` (writing the
+#   hash-chained ``action_auto_approved`` ledger row with the triager's verdict +
+#   reasoning, ``actor="system:triager"``) and emits the same Decision-Graph
+#   chain events a human approval emits, then returns the auto-approved Action so
+#   the human is not notified. Otherwise the original proposal is returned
+#   unchanged and the route falls through to the existing human path
+#   byte-for-byte. The feature is OFF BY DEFAULT: the approval level defaults to
+#   ``ASK`` (triager not invoked) until a workspace opts in to TRIAGE / TRUSTED.
+#   The hook is fail-safe (any triager error / low confidence → ESCALATE; v1 has
+#   no auto-reject, so a bad action is escalated, never silently killed) and
+#   best-effort — a wiring failure can never break the propose response, and an
+#   audit-ledger failure (``AuditChainError``) is logged LOUD at ERROR and leaves
+#   the proposal PENDING. The classifier reuses the mandate-foreman
+#   ``ClaudeCliLlm`` shell-out pattern (``claude -p --output-format json``) —
+#   agent mode has NO ANTHROPIC_API_KEY, so ``AsyncAnthropic`` is deliberately
+#   NOT used. KNOWN LIMITATION (v1): the ``rule_flagged`` safety signal is read
+#   from a caller-supplied ``Action.parameters._triage`` hint (an internal-caller
+#   trust input), not re-resolved from the pocket's standing rules here — see the
+#   ``_run_auto_triage`` docstring for the rationale + the v2 TODO.
 # Updated: 2026-06-11 (feat/external-action-proposal) — added the THIRD gated
 #   proposal kind: a gated external-action connector call. ``_external_action_blob``
 #   + ``_assert_external_action_workspace`` are the peers of the ``_code_change``
@@ -277,6 +315,7 @@ from pocketpaw.instinct.models import (
     ActionTrigger,
     AuditEntry,
 )
+from pocketpaw.instinct.store import AuditChainError
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
 from pocketpaw_ee.cloud._core.deps import (
     current_user,
@@ -301,6 +340,139 @@ from pocketpaw_ee.instinct.chain_emitters import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_auto_triage(action: Any, workspace_id: str) -> Any:
+    """Smart-approval auto-triage hook (feat/instinct-smart-triage).
+
+    Sits between ``store.propose`` succeeding and the propose response. Runs the
+    cheap-model triager over the freshly proposed Action; on an APPROVE verdict
+    the Action is auto-approved AND audited (``store.auto_approve`` →
+    ``action_auto_approved`` ledger row), and the auto-approved Action is
+    returned so the route skips the human-notification path. On ESCALATE / DENY
+    (the common, safe case) the ORIGINAL Action is returned unchanged so the
+    route falls through to today's human path byte-for-byte.
+
+    SAFETY:
+      * ``ASK`` level → the triager is never invoked; today's behaviour exactly.
+        ASK is the DEFAULT (off-by-default per the PRD): with no workspace /
+        pocket / env opt-in ``resolve_approval_level`` returns ASK, so this hook
+        returns the original proposal untouched until a workspace turns it on.
+      * A ``_triage`` hint carrying ``rule_flagged=true`` (a template
+        ESCALATE_APPROVAL / BLOCK match) is NEVER auto-approved.
+      * Any triager failure fails SAFE to ESCALATE (handled inside the module).
+      * The whole hook is wrapped best-effort: a triager wiring failure must
+        NEVER break the propose response — it falls back to the human path with
+        the original Action.
+
+    The hint object the caller may attach under ``Action.parameters._triage``:
+      ``{"rule_flagged": bool, "instinct_rules": [...], "approval_level":
+      "ASK"|"TRIAGE"|"TRUSTED" (per-pocket override), "reasoning_trace": {...},
+      "fabric_snapshots": [...]}``. All optional.
+
+    KNOWN LIMITATION (v1) — the ``rule_flagged`` safety signal is HINT-DEPENDENT:
+    it is read from the caller-supplied ``_triage`` hint, not resolved here from
+    the pocket's standing rules. The generic ``propose_action`` endpoint receives
+    a free-form Action (title / description / recommendation / parameters) and
+    does NOT carry the template ``action_name`` + per-row ``row_context`` that
+    ``bundled_templates.resolve_instinct`` needs, so the router cannot cheaply
+    re-derive the verdict at this seam. The correct owner of the flag is the
+    PROPOSING path that already holds the template + verdict (e.g.
+    ``ee.cloud.pockets.instinct_dispatch.gate_action``), which should stamp
+    ``rule_flagged`` (and the matched ``instinct_rules``) onto the hint. This is
+    sound as long as that path is the only one that turns the level above ASK —
+    and ASK-by-default means an un-stamped proposal is never auto-approved
+    anyway. The hint is therefore a trust input from an INTERNAL caller, not from
+    the wire.
+    TODO(instinct-triage v2): resolve ``rule_flagged`` + ``instinct_rules``
+    directly from the store via ``action.pocket_id`` (load the pocket's template,
+    map the Action back to its template ``action_name`` + ``row_context``, call
+    ``resolve_instinct``) so the gate no longer trusts the caller. Tracked as the
+    follow-up to this slice.
+    """
+    try:
+        from pocketpaw_ee.instinct.auto_triage import (
+            TriageContext,
+            maybe_auto_approve,
+            resolve_approval_level,
+        )
+
+        params = getattr(action, "parameters", None)
+        params = params if isinstance(params, dict) else {}
+        hint = params.get("_triage")
+        hint = hint if isinstance(hint, dict) else {}
+
+        level = resolve_approval_level(pocket_level=hint.get("approval_level"))
+
+        # Resolve the parked-operation blob (one of the gated kinds), if any —
+        # it gives the triager the concrete method/path/params to judge and the
+        # Decision-Graph correlation id to close the chain on auto-approve.
+        parked_blob = (
+            _pocket_write_blob(action)
+            or _code_change_blob(action)
+            or _external_action_blob(action)
+            or {}
+        )
+
+        # The reasoning trace + fabric snapshots were attached at propose time
+        # and persisted into the audit row; surface what the caller passed on
+        # the params hint so the triager sees the same decision inputs.
+        reasoning_trace = hint.get("reasoning_trace")
+        fabric_snapshots = hint.get("fabric_snapshots")
+
+        context = TriageContext(
+            workspace_id=str(workspace_id or ""),
+            pocket_id=str(getattr(action, "pocket_id", "") or ""),
+            action_id=str(getattr(action, "id", "") or ""),
+            title=str(getattr(action, "title", "") or ""),
+            description=str(getattr(action, "description", "") or ""),
+            recommendation=str(getattr(action, "recommendation", "") or ""),
+            rule_flagged=bool(hint.get("rule_flagged", False)),
+            parked_blob=parked_blob if isinstance(parked_blob, dict) else {},
+            reasoning_trace=reasoning_trace if isinstance(reasoning_trace, dict) else {},
+            fabric_snapshots=fabric_snapshots if isinstance(fabric_snapshots, list) else [],
+            instinct_rules=(
+                hint.get("instinct_rules") if isinstance(hint.get("instinct_rules"), list) else []
+            ),
+        )
+
+        outcome = await maybe_auto_approve(
+            store=_store(workspace_id),
+            action=action,
+            context=context,
+            level=level,
+        )
+        if outcome.auto_approved:
+            logger.info(
+                "instinct auto-triage AUTO-APPROVED action=%s (workspace=%s, level=%s)",
+                context.action_id,
+                workspace_id,
+                level.value,
+            )
+        return outcome.action
+    except AuditChainError:
+        # The tamper-evident ledger append failed (``maybe_auto_approve`` already
+        # catches this in the common path, but a chain failure in a chain-emit
+        # import or a future store seam could still surface here). This is a
+        # ledger-integrity event, NOT a routine triager wiring failure — log
+        # LOUD at ERROR with a distinct message. Still fail-safe: return the
+        # original PENDING proposal so the human reviews it.
+        logger.error(
+            "instinct auto-triage hit an audit-ledger failure for action=%s — "
+            "ledger-integrity event (distinct from an LLM failure); leaving the "
+            "proposal PENDING for the human",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
+    except Exception:  # noqa: BLE001 — the hook must NEVER break propose
+        logger.warning(
+            "instinct auto-triage hook failed for action=%s — falling back to "
+            "the human path with the original proposal",
+            getattr(action, "id", "?"),
+            exc_info=True,
+        )
+        return action
 
 
 def _code_change_blob(action: Any) -> dict[str, Any] | None:
@@ -435,7 +607,16 @@ def _assert_belt_plan_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — an absent/empty workspace claim is a HARD 403, never a
+    # pass-through (matches _assert_artifact_change_workspace). Now that the
+    # executors resolve the store from the blob's workspace_id, an empty claim
+    # would otherwise approve-then-misfile onto the shared ledger / raise.
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This shift plan has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This shift plan belongs to a different workspace",
@@ -501,7 +682,14 @@ def _assert_code_change_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This code change has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This code change belongs to a different workspace",
@@ -523,7 +711,14 @@ def _assert_external_action_workspace(action: Any, current_workspace: str) -> No
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This external action has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This external action belongs to a different workspace",
@@ -565,7 +760,14 @@ def _assert_fabric_objects_workspace(action: Any, current_workspace: str) -> Non
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This fabric-objects write has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This fabric-objects write belongs to a different workspace",
@@ -608,7 +810,14 @@ def _assert_pocket_create_workspace(action: Any, current_workspace: str) -> None
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This pocket create has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This pocket create belongs to a different workspace",
@@ -638,7 +847,14 @@ def _assert_pocket_write_workspace(action: Any, current_workspace: str) -> None:
     if blob is None:
         return
     blob_workspace = str(blob.get("workspace_id") or "")
-    if blob_workspace and blob_workspace != current_workspace:
+    # LOW-1 — empty workspace claim fails closed (the executor resolves its
+    # store from this field; an empty one would misfile onto the shared ledger).
+    if not blob_workspace:
+        raise Forbidden(
+            "instinct.missing_workspace_in_blob",
+            "This action's pocket write has no workspace claim — cannot verify tenancy",
+        )
+    if blob_workspace != current_workspace:
         raise Forbidden(
             "instinct.cross_workspace_approval",
             "This action's pocket write belongs to a different workspace",
@@ -651,10 +867,20 @@ router = APIRouter(
 )
 
 
-def _store():
-    from pocketpaw_ee.api import get_instinct_store
+def _store(workspace_id: str):
+    """Return the InstinctStore for ``workspace_id`` (ISO-2 — physical isolation).
 
-    return get_instinct_store()
+    Routes through the workspace-keyed factory so every Instinct action +
+    audit-ledger read/write in this router hits the caller's OWN
+    ``~/.pocketpaw/workspaces/<id>/instinct.db`` file — and therefore that
+    tenant's own audit hash-chain. ``workspace_id`` is the caller's active
+    workspace, already resolved by ``current_workspace_id`` on each endpoint. The
+    W4a in-row ``workspace_id`` read-filter the endpoints already pass STAYS — the
+    physical file split is additive defense-in-depth on top of it.
+    """
+    from pocketpaw.stores import get_instinct_store
+
+    return get_instinct_store(workspace_id=workspace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -814,8 +1040,20 @@ async def propose_action(
     caller's active workspace so the cross-tenant decision leak is closed at
     the write side: later list/pending/audit reads scoped to a tenant only
     surface that tenant's actions.
+
+    Smart-approval auto-triage (feat/instinct-smart-triage) — after the
+    proposal is created, a cheap-model classifier runs synchronously (the
+    ``_run_auto_triage`` hook). On an APPROVE verdict the Action is
+    auto-approved AND written to the hash-chained audit ledger
+    (``action_auto_approved``, ``actor="system:triager"``), and the
+    auto-approved Action is returned (the human is not notified). On
+    ESCALATE / DENY — and at the ``ASK`` approval level, where the triager is
+    never invoked — the original proposal is returned unchanged and the route
+    behaves exactly as before. The hook is fail-safe and best-effort: any
+    triager failure escalates to the human, and a wiring failure can never
+    break this propose response.
     """
-    return await _store().propose(
+    action = await _store(workspace_id).propose(
         pocket_id=req.pocket_id,
         title=req.title,
         description=req.description,
@@ -829,6 +1067,7 @@ async def propose_action(
         workspace_id=workspace_id,
         scope_type=req.scope_type,
     )
+    return await _run_auto_triage(action, workspace_id)
 
 
 @router.get(
@@ -854,7 +1093,9 @@ async def pending_actions(
     W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
     rows) so The Tray for tenant A never surfaces tenant B's pending decisions.
     """
-    return await _store().pending(pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id)
+    return await _store(workspace_id).pending(
+        pocket_id=pocket_id, assignee=assignee, workspace_id=workspace_id
+    )
 
 
 @router.get(
@@ -875,7 +1116,7 @@ async def list_actions(
     W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
     rows) so a tenant can't enumerate another tenant's actions.
     """
-    store = _store()
+    store = _store(workspace_id)
     status_enum = ActionStatus(status) if status else None
     actions = await store.list_actions(
         pocket_id=pocket_id,
@@ -923,7 +1164,7 @@ async def bulk_approve_actions(
       * SHOULD-FIX 1 — the audit actor is the authenticated user id, not
         the free-text ``req.approver`` field.
     """
-    store = _store()
+    store = _store(workspace_id)
     approver_id = str(user.id)
 
     # BLOCKER 1 — verify tenancy on every requested action up front. A
@@ -1210,7 +1451,7 @@ async def bulk_reject_actions(
     item would hide a cross-tenant rejection-escalation attempt
     (mirror of bulk-approve's BLOCKER 1 behaviour).
     """
-    store = _store()
+    store = _store(workspace_id)
     rejector_id = str(user.id)
 
     # Touch-time security fix — verify tenancy on every requested
@@ -1448,7 +1689,7 @@ async def approve_action(
       * SHOULD-FIX 1 — the audit actor + outcome actor are the
         authenticated user id, never the free-text ``req.approver``.
     """
-    store = _store()
+    store = _store(workspace_id)
     before = await store.get_action(action_id)
     if not before:
         raise HTTPException(404, "Action not found")
@@ -1503,7 +1744,7 @@ async def approve_action(
             )
             await store.record_correction(correction)
             await _persist_edits(store, after, edited_fields)
-            await _forward_to_soul(correction, after)
+            await _forward_to_soul(correction, after, workspace_id)
 
     approved = await store.approve(action_id, approver=approver_id)
     if not approved:
@@ -1793,8 +2034,12 @@ async def approve_action(
     return ApproveResponse(action=approved, correction=correction)
 
 
-async def _forward_to_soul(correction: Correction, action: Action) -> None:
-    """Hand off to the soul bridge — always best-effort, never breaks approval."""
+async def _forward_to_soul(correction: Correction, action: Action, workspace_id: str) -> None:
+    """Hand off to the soul bridge — always best-effort, never breaks approval.
+
+    ISO-2: takes the caller's ``workspace_id`` so the bridge's InstinctStore is
+    the tenant's own per-workspace file, not the shared one.
+    """
     try:
         from pocketpaw.instinct.correction_soul_bridge import CorrectionSoulBridge
         from pocketpaw.soul import get_soul_manager
@@ -1802,7 +2047,7 @@ async def _forward_to_soul(correction: Correction, action: Action) -> None:
         manager = get_soul_manager()
         if manager is None:
             return
-        bridge = CorrectionSoulBridge(soul_manager=manager, store=_store())
+        bridge = CorrectionSoulBridge(soul_manager=manager, store=_store(workspace_id))
         await bridge.record(correction, action)
     except Exception:
         logger.exception("Correction soul-bridge failed (non-fatal)")
@@ -1842,7 +2087,7 @@ async def reject_action(
          scope. The bridge is NOT invoked on reject so the router owns
          the chain close.
     """
-    store = _store()
+    store = _store(workspace_id)
     before = await store.get_action(action_id)
     if not before:
         raise HTTPException(404, "Action not found")
@@ -2162,9 +2407,14 @@ async def list_corrections(
     pocket_id: str | None = Query(None, description="Filter by pocket ID"),
     action_id: str | None = Query(None, description="Filter by action ID"),
     limit: int = Query(100, ge=1, le=500),
+    workspace_id: str = Depends(current_workspace_id),
 ):
-    """List corrections captured when humans edited proposed actions."""
-    store = _store()
+    """List corrections captured when humans edited proposed actions.
+
+    ISO-2: corrections live in the tenant's own ``instinct.db``, so resolving the
+    store by ``workspace_id`` keeps one tenant's corrections out of another's.
+    """
+    store = _store(workspace_id)
     if action_id:
         corrections = await store.get_corrections_for_action(action_id)
     elif pocket_id:
@@ -2218,7 +2468,7 @@ async def query_audit(
     """
     response.headers["Deprecation"] = "true"
     response.headers["Link"] = '</api/v1/runtime/audit>; rel="successor-version"'
-    entries = await _store().query_audit(
+    entries = await _store(workspace_id).query_audit(
         pocket_id=pocket_id,
         category=category,
         event=event,
@@ -2288,7 +2538,7 @@ async def export_audit(
     the ledger verified at export time. Call ``GET /instinct/audit/verify`` for
     the full break-point detail.
     """
-    store = _store()
+    store = _store(workspace_id)
     data = await store.export_audit(pocket_id=pocket_id, workspace_id=workspace_id)
     verdict = await store.verify_audit_chain()
     return Response(
@@ -2306,21 +2556,27 @@ async def export_audit(
     response_model=AuditVerifyResponse,
     dependencies=[Depends(require_action_any_workspace("instinct.audit"))],
 )
-async def verify_audit_chain():
+async def verify_audit_chain(workspace_id: str = Depends(current_workspace_id)):
     """Verify the tamper-evident audit hash chain end to end.
 
-    Walks the entire ``instinct_audit`` ledger in insertion order, recomputes
-    each row's hash from its canonical content + the running previous hash, and
-    reports whether the chain is intact. Any insertion, edit, or deletion of a
-    hashed row surfaces as ``intact=false`` with ``broken_at`` pointing at the
-    first failing row — proof an auditor or insurer can run themselves.
+    Walks this workspace's ``instinct_audit`` ledger in insertion order,
+    recomputes each row's hash from its canonical content + the running previous
+    hash, and reports whether the chain is intact. Any insertion, edit, or
+    deletion of a hashed row surfaces as ``intact=false`` with ``broken_at``
+    pointing at the first failing row — proof an auditor or insurer can run
+    themselves.
 
-    The chain is global (not pocket-scoped), so this endpoint takes no filter:
-    integrity is a property of the whole ledger. Pre-W2b rows without a hash
-    are counted under ``legacy_unhashed`` and are not enforced — see the store
-    docstring for the genesis/legacy boundary.
+    ISO-2: the chain is now PER WORKSPACE. Each tenant has its own
+    ``instinct.db`` with its own genesis→…→head chain, so this endpoint verifies
+    the CALLER'S chain (resolved via ``current_workspace_id``), not a global
+    chain mixing tenants. That is the correct multi-tenant model — a tenant's
+    auditor verifies only that tenant's ledger, and one tenant's tampering can
+    never flip another tenant's verdict. The chain spans the whole (per-tenant)
+    file rather than a single pocket, so there is no pocket filter. Pre-W2b rows
+    without a hash are counted under ``legacy_unhashed`` and are not enforced —
+    see the store docstring for the genesis/legacy boundary.
     """
-    verdict = await _store().verify_audit_chain()
+    verdict = await _store(workspace_id).verify_audit_chain()
     return AuditVerifyResponse(**verdict)
 
 
@@ -2351,7 +2607,7 @@ async def get_audit_entry(
     the prior path paged the most-recent rows and matched in Python, 404-ing on
     valid ids past that window for a tenant with a large ledger.
     """
-    store = _store()
+    store = _store(workspace_id)
     entry = await store.get_audit_entry(audit_id, workspace_id=workspace_id)
     if entry is None:
         raise HTTPException(404, "Audit entry not found")
@@ -2364,7 +2620,7 @@ async def get_audit_entry(
     current: list[dict[str, Any]] = []
     if trace is not None:
         snapshots = await store.get_snapshots_for_audit(audit_id)
-        current = await _fetch_current_fabric(trace.fabric_queries)
+        current = await _fetch_current_fabric(trace.fabric_queries, workspace_id)
 
     return HydratedAuditEntry(
         entry=entry,
@@ -2385,21 +2641,27 @@ def _decode_trace(entry: AuditEntry) -> ReasoningTrace | None:
         return None
 
 
-async def _fetch_current_fabric(object_ids: list[str]) -> list[dict[str, Any]]:
-    """Look up live Fabric objects by ID, tolerating a missing ee module."""
+async def _fetch_current_fabric(object_ids: list[str], workspace_id: str) -> list[dict[str, Any]]:
+    """Look up live Fabric objects by ID, tolerating a missing ee module.
+
+    ISO-2: takes the caller's ``workspace_id`` so the Fabric store is the
+    tenant's own per-workspace file (ISO-1). Passing it is also REQUIRED on a
+    cloud path — an unscoped Fabric-store fetch there now fails closed — and it
+    keeps the W4a in-row filter on ``get_object``.
+    """
     if not object_ids:
         return []
     try:
-        from pocketpaw_ee.api import get_fabric_store
+        from pocketpaw.stores import get_fabric_store
 
-        fabric = get_fabric_store()
+        fabric = get_fabric_store(workspace_id=workspace_id)
     except ImportError:
         return []
 
     results: list[dict[str, Any]] = []
     for oid in object_ids:
         try:
-            obj = await fabric.get_object(oid)
+            obj = await fabric.get_object(oid, workspace_id=workspace_id)
         except Exception:
             obj = None
         if obj is None:

@@ -138,3 +138,108 @@ async def test_worker_settings_exposes_execute_run_job():
     assert worker.WorkerSettings.max_tries == 1
     assert worker.WorkerSettings.on_startup is worker._startup
     assert worker.WorkerSettings.on_shutdown is worker._shutdown
+
+
+async def test_startup_registers_builtin_jobs(mongo_db, monkeypatch):  # noqa: ARG001
+    """PRODUCTION FIX — the worker boots in its OWN process, so the registry
+    ``mount_cloud`` populates for the web process is empty here. ``_startup``
+    must call ``register_builtins()`` or ``execute_workspace_job`` →
+    ``resolve_job(name)`` raises ``UnknownJobError`` for EVERY job in a real
+    deploy. Clear the registry, run ``_startup``, and assert the built-ins are
+    registered.
+    """
+    from pocketpaw_ee.cloud.jobs.registry import (
+        UnknownJobError,
+        get_job_registry,
+        resolve_job,
+    )
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    # Sweep off — we are only exercising the registration step on boot.
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    # Start from an empty registry so the assertion can ONLY pass if `_startup`
+    # registered the built-ins itself (not because the web mount happened to run
+    # earlier in the test session). Restore afterwards so the module-level dict
+    # doesn't leak state to sibling tests.
+    registry = get_job_registry()
+    saved = dict(registry)
+    registry.clear()
+    try:
+        # Pre-condition: with an empty registry the resolve raises.
+        with pytest.raises(UnknownJobError):
+            resolve_job("score_applications")
+
+        await worker._startup({})
+
+        # Post-condition: the built-in is now resolvable.
+        assert "score_applications" in registry
+        job = resolve_job("score_applications")
+        assert job.name == "score_applications"
+    finally:
+        registry.clear()
+        registry.update(saved)
+
+
+async def test_startup_registers_entrypoint_custom_jobs(mongo_db, monkeypatch):  # noqa: ARG001
+    """``_startup`` must also call ``load_entrypoint_jobs()`` so the worker
+    process (separate from the web ``mount_cloud``) registers WORKSPACE-CUSTOM
+    jobs declared under the ``pocketpaw.jobs`` entry-point group. Without it a
+    custom job dispatched by the web app resolves there but raises
+    ``UnknownJobError`` in the worker that actually runs it. We don't install a
+    real package — we monkeypatch the ``entry_points`` symbol the loader calls.
+    """
+    from pocketpaw_ee.cloud.jobs import plugins as jobs_plugins
+    from pocketpaw_ee.cloud.jobs.registry import (
+        UnknownJobError,
+        get_job_registry,
+        resolve_job,
+    )
+
+    async def _noop_db(_uri):
+        return None
+
+    def _noop_realtime():
+        return None
+
+    monkeypatch.setattr(worker, "init_cloud_db", _noop_db)
+    monkeypatch.setattr(worker, "init_realtime", _noop_realtime)
+    monkeypatch.delenv(worker._BOOT_SWEEP_ENV, raising=False)
+
+    class _StubCustomJob:
+        name = "custom_from_entrypoint"
+
+        async def __call__(self, *, workspace_id, pocket_id, job_id, params):
+            return {"state": {"ran": self.name}}
+
+    class _FakeEP:
+        name = "tenant_jobs"
+
+        def load(self):
+            return lambda: _StubCustomJob()
+
+    def _fake_entry_points(*, group):
+        return [_FakeEP()] if group == jobs_plugins.JOBS_ENTRYPOINT_GROUP else []
+
+    monkeypatch.setattr(jobs_plugins, "entry_points", _fake_entry_points)
+
+    registry = get_job_registry()
+    saved = dict(registry)
+    registry.clear()
+    try:
+        with pytest.raises(UnknownJobError):
+            resolve_job("custom_from_entrypoint")
+
+        await worker._startup({})
+
+        assert resolve_job("custom_from_entrypoint").name == "custom_from_entrypoint"
+    finally:
+        registry.clear()
+        registry.update(saved)

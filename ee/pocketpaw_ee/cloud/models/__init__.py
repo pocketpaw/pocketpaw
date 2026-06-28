@@ -48,6 +48,15 @@ lives in the ``pocketpaw_ee.versions`` package (its own entity), so it is
 imported lazily here — the same out-of-models discipline the belt/mandates docs
 use — to keep ``cloud.models`` from hard-importing the versions package. Only
 ``pocketpaw_ee.versions.service`` imports the doc class directly.
+Updated: 2026-06-24 (integration/billing-credits, BC-2) — added ``Payment``
+(the top-up payment record captured via a verified Dodo webhook) to the imports,
+``__all__``, and ``get_all_documents()`` so the ``billing_payments`` collection
+is wired into ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
+Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription``
+(the recurring plan subscription record captured via a verified Dodo
+``subscription.active`` webhook) to the imports, ``__all__``, and
+``get_all_documents()`` so the ``billing_subscriptions`` collection is wired into
+``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
 """
 
 from __future__ import annotations
@@ -62,6 +71,7 @@ from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
 from pocketpaw_ee.cloud.models.comment import Comment, CommentAuthor, CommentTarget
 from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
+from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
 from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
@@ -69,6 +79,7 @@ from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestState,
 )
 from pocketpaw_ee.cloud.models.file import FileObj
+from pocketpaw_ee.cloud.models.file_version import FileVersionDoc
 from pocketpaw_ee.cloud.models.foresight_backtest import ForesightBacktest
 from pocketpaw_ee.cloud.models.foresight_prediction_record import (
     ForesightPredictionRecord,
@@ -87,6 +98,7 @@ from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
+from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
 from pocketpaw_ee.cloud.models.meeting import (
     Meeting,
     MeetingProviderCredentials,
@@ -96,6 +108,7 @@ from pocketpaw_ee.cloud.models.meeting import (
 from pocketpaw_ee.cloud.models.member_ingest_state import MemberIngestState
 from pocketpaw_ee.cloud.models.message import Attachment, Mention, Message, Reaction
 from pocketpaw_ee.cloud.models.notification import Notification, NotificationSource
+from pocketpaw_ee.cloud.models.payment import Payment
 from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
@@ -106,6 +119,8 @@ from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
+from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
+from pocketpaw_ee.cloud.models.subscription import Subscription
 from pocketpaw_ee.cloud.models.task import Task, TaskAssignee, TaskSource
 from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
 from pocketpaw_ee.cloud.models.task_event import TaskEvent
@@ -200,6 +215,8 @@ __all__ = [
     "CommentAuthor",
     "CommentTarget",
     "ComposioConnection",
+    "CreditBalance",
+    "CreditLedgerEntry",
     "Cycle",
     "CycleDailyPoint",
     "FabricIngestConfig",
@@ -207,6 +224,7 @@ __all__ = [
     "FileFolder",
     "FileObj",
     "FileUpload",
+    "FileVersionDoc",
     "ForesightBacktest",
     "ForesightPredictionRecord",
     "ForesightProjectedDecision",
@@ -219,6 +237,7 @@ __all__ = [
     "Invite",
     "Lead",
     "LeadSource",
+    "LiteLLMTenantKey",
     "Meeting",
     "MeetingProviderCredentials",
     "MeetingsSettings",
@@ -229,6 +248,7 @@ __all__ = [
     "Notification",
     "NotificationSource",
     "OAuthAccount",
+    "Payment",
     "PlanSession",
     "PlanSessionAgentGap",
     "Pocket",
@@ -241,6 +261,8 @@ __all__ = [
     "Site",
     "SiteDomain",
     "SiteRateCounter",
+    "SpendReconciliation",
+    "Subscription",
     "WorkspaceSensePreference",
     "Task",
     "TaskAssignee",
@@ -276,9 +298,26 @@ def get_all_documents():
         FileObj,
         FileUpload,
         FileFolder,
+        # file_versions edit history (ART-1). Only ``file_versions.service``
+        # imports this class (import-linter "FileVersions" contract).
+        FileVersionDoc,
         Workspace,
         WorkspaceConnector,
         ComposioConnection,
+        # Credit ledger (BC-1) — workspace-scoped wallet + append-only audit.
+        # Only ``ee.cloud.credits.service`` writes these.
+        CreditBalance,
+        CreditLedgerEntry,
+        # Billing payments (BC-2) — top-up payment records captured via a
+        # gateway webhook. Only ``ee.cloud.billing.service`` writes this.
+        Payment,
+        # Billing subscriptions (BC-7) — recurring plan subscription records
+        # captured via verified ``subscription.*`` webhooks. Only
+        # ``ee.cloud.billing.service`` writes this.
+        Subscription,
+        # LiteLLM per-tenant virtual-key mapping (MCG-8). Only
+        # ``ee.cloud.llm_provisioning.service`` writes this.
+        LiteLLMTenantKey,
         Invite,
         Group,
         InstinctApproval,
@@ -286,6 +325,9 @@ def get_all_documents():
         ReadState,
         RequestLog,
         DeepWorkLog,
+        # Shadow-compare reconciliation rows (WU-F). One per tenant per window
+        # during shadow mode. Only ``ee.cloud.llm_provisioning.service`` writes it.
+        SpendReconciliation,
         Task,
         TaskAttachment,
         TemporalSweepStateDoc,

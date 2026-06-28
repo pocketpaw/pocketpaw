@@ -120,6 +120,17 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Payments gateway (BC-2 — the Gateway primitive) ---
+    # Dodo is the only gateway for v1, behind the IPaymentsProvider abstraction
+    # in ee/pocketpaw_ee/cloud/billing/providers/ so Razorpay can drop in later.
+    # PINNED to 1.105.0: the supply-chain rule on this machine enforces a 7-day
+    # minimum release age. The newest dodopayments (1.105.1) was published
+    # 2026-06-18 (<7 days ago) so it is BLOCKED; 1.105.0 (released 2026-06-16)
+    # is the latest version that satisfies the age guard. The ``[webhooks]``
+    # extra pulls ``standardwebhooks<2,>=1.0.1`` (stable since 2024) — the
+    # Standard Webhooks HMAC-SHA256 verifier the inbound webhook route uses to
+    # prove a payload came from Dodo before any credits are granted.
+    "dodopayments[webhooks]==1.105.0",
 ]
 
 [project.optional-dependencies]
@@ -166,6 +177,11 @@ cloud = "pocketpaw_ee.extensions:CloudEmbeddingProvider"
 [project.entry-points."pocketpaw.memory_backends"]
 mongodb = "pocketpaw_ee.extensions:MongoMemoryBackendProvider"
 
+# ISO-3: the workspace-keyed store provider. Activates the StoreProvider seam
+# ISO-1 added; returns the per-workspace file store via the OSS helper.
+[project.entry-points."pocketpaw.stores"]
+cloud = "pocketpaw_ee.extensions:CloudStoreProvider"
+
 [project.entry-points."pocketpaw.capabilities"]
 cloud = "pocketpaw_ee.extensions:CloudCapabilityProvider"
 
@@ -200,6 +216,7 @@ composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
+deliver = "pocketpaw_ee.extensions:CloudDeliverMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
@@ -369,6 +386,17 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
 
 [[tool.importlinter.contracts]]
+name = "FileVersions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.file_versions.router",
+    "pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw_ee.cloud.file_versions.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
+
+[[tool.importlinter.contracts]]
 name = "FabricIngest — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
@@ -385,12 +413,14 @@ type = "forbidden"
 allow_indirect_imports = "true"
 source_modules = [
     # Only ``jobs.service`` owns the WorkspaceJobDoc Beanie write. The router,
-    # dto, domain, registry, the ARQ worker entrypoint, and the built-in jobs
-    # all go through the service — none may import the Beanie doc directly.
+    # dto, domain, registry, the entry-point plugin loader, the ARQ worker
+    # entrypoint, and the built-in jobs all go through the service — none may
+    # import the Beanie doc directly.
     "pocketpaw_ee.cloud.jobs.router",
     "pocketpaw_ee.cloud.jobs.dto",
     "pocketpaw_ee.cloud.jobs.domain",
     "pocketpaw_ee.cloud.jobs.registry",
+    "pocketpaw_ee.cloud.jobs.plugins",
     "pocketpaw_ee.cloud.jobs.worker",
     "pocketpaw_ee.cloud.jobs.builtin.score_applications",
 ]
@@ -537,6 +567,21 @@ source_modules = [
     "pocketpaw_ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "LLM provisioning — Beanie writes only from service.py"
+# MCG-8: the per-tenant LiteLLM virtual-key mapping (LiteLLMTenantKey) is written
+# only by llm_provisioning.service. The domain layer carries framework-free value
+# objects and must never import the Beanie doc (same entity-isolation boundary the
+# credit / foresight entities use).
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.llm_provisioning.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.litellm_key",
+]
 
 [[tool.importlinter.contracts]]
 name = "Foresight — Beanie writes only from service.py"

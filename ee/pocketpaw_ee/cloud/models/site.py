@@ -55,6 +55,36 @@
 # stored value on every re-publish so the binding target (and the data behind it)
 # is stable across deploys. "" for static sites (no D1 binding). Defaults "", so
 # pre-DS-2 rows and every static publish read empty — no migration.
+#
+# Updated 2026-06-24 (integration/billing-credits, BC-9 — per-site annual plan):
+# added the per-site billing fields a published site carries on its OWN recurring
+# annual plan (the Webflow model — each site has its own tier, not just the
+# workspace plan). ``plan_tier`` is the site-plan catalog key (basic | pro |
+# business — ``site_plans.SITE_PLAN_CATALOG``), ``subscription_id`` the Dodo
+# subscription this site's annual sub maps to, ``annual_renewal_date`` the next
+# renewal stamp the webhook updates, and ``subscription_status`` the lifecycle
+# (none | active | cancelled). ``service.publish_pocket`` stamps ``plan_tier`` +
+# ``subscription_id`` at publish; the per-site ``subscription.*`` webhook (routed
+# by a ``site_id`` on its metadata) advances ``subscription_status`` /
+# ``annual_renewal_date``. All default to backward-compatible values (None /
+# "none") so every pre-BC-9 row and every workspace-plan-only site reads as having
+# no per-site sub — no migration.
+#
+# Updated 2026-06-24 (feat/charge-first-sites — charge-first per-site publishing):
+# a PAID-tier site is now created as PENDING and NOT deployed live until the
+# ``subscription.active`` webhook confirms payment. Two additions support that:
+#   * ``pending_deploy_inputs`` — the deploy inputs (rippleSpec / theme / engine /
+#     svelte source / pattern / builder_origin / name) captured at publish time so
+#     the webhook-time ``activate_site`` can run the deferred deploy WITHOUT
+#     re-reading the pocket (the webhook only carries workspace_id + site_id, and
+#     the pocket's draft may have moved on by activation time). Set ONLY for a
+#     pending paid publish; "" / empty for a free/live publish, and cleared once
+#     the site is activated. Default empty dict so every pre-charge-first row reads
+#     as having no pending deploy.
+#   * ``_checkout_url`` — a TRANSIENT pydantic PrivateAttr (NOT persisted to Mongo)
+#     the publish path stashes the Dodo checkout link on so the router can surface
+#     it on ``SiteResponse.checkout_url`` for a paid publish. None for a free
+#     publish. Private so it never round-trips through the DB.
 
 from __future__ import annotations
 
@@ -62,7 +92,7 @@ from datetime import datetime
 from typing import Any
 
 from beanie import Indexed
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from pocketpaw_ee.cloud.models.base import TimestampedDocument
 
@@ -99,6 +129,30 @@ class Site(TimestampedDocument):
     # Stable across re-publishes (publish reuses the stored value) so the D1
     # binding target — and the data behind it — never moves under a live site.
     d1_database_id: str = ""
+    # BC-9: per-site annual plan (the Webflow model — each published site has its
+    # OWN recurring annual plan on a tier, distinct from the workspace plan).
+    # ``plan_tier`` is the site-plan catalog key (basic | pro | business — see
+    # ``billing.site_plans``); None until a publish stamps one. ``subscription_id``
+    # is the Dodo subscription id for this site's annual sub (None when Dodo is
+    # unconfigured — the tier is recorded without a live charge in v1).
+    # ``annual_renewal_date`` is the next renewal stamp the per-site webhook
+    # updates; ``subscription_status`` tracks the lifecycle (none | active |
+    # cancelled). Defaults keep pre-BC-9 / workspace-plan-only sites at "no sub".
+    plan_tier: str | None = None
+    subscription_id: str | None = None
+    annual_renewal_date: datetime | None = None
+    subscription_status: str = "none"
+    # charge-first: the deploy inputs captured at publish time for a PENDING paid
+    # site, so the ``subscription.active`` webhook can run the deferred deploy
+    # without re-reading the pocket (the webhook carries only workspace_id +
+    # site_id, and the pocket's draft may have advanced by activation time). Keys:
+    # ripple_spec, theme, engine, source, pattern, builder_origin, name. Empty for
+    # a free/live publish; cleared once the site is activated.
+    pending_deploy_inputs: dict[str, Any] = Field(default_factory=dict)
+    # charge-first: TRANSIENT (NOT persisted) Dodo checkout link for a paid
+    # publish. The publish path stashes it here so the router can surface it on
+    # ``SiteResponse.checkout_url``; a PrivateAttr so it never serializes to Mongo.
+    _checkout_url: str | None = PrivateAttr(default=None)
     # PERF-2: a non-destructive tombstone for duplicate Site docs the pre-PERF-1
     # per-publish ObjectId minting left behind. The dedupe migration keeps ONE
     # canonical doc per (workspace, pocket_id) active and sets this True on the

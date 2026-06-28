@@ -1,0 +1,3 @@
+# Keep this dir present in every checkout so Dockerfile.enterprise can COPY it
+# even on the clone source path (Coolify). The vendored ripple tarball lives here
+# but is gitignored — see scripts/vendor-ripple-tarball.sh + .gitignore.

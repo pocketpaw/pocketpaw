@@ -1,21 +1,27 @@
 # tests/ee/sites/test_plan_gate.py
 # Created: 2026-06-17 (fix/sites-plan-gate-asymmetry) — reproduce-first coverage
-# for the Sites plan-gate asymmetry bug. Sites is a fabric-gated feature: the REST
-# router gates every endpoint with require_plan_feature("fabric"), but the chat
+# for the Sites plan-gate asymmetry bug. Sites is a plan-gated feature: the REST
+# router gates every endpoint with require_plan_feature("sites"), but the chat
 # agent creates + publishes sites IN-PROCESS (the sites_manager MCP tools call the
 # create handlers + publish_pocket directly), bypassing the HTTP router. Net bug:
-# on a `team`-plan workspace the agent happily created and deployed a live site,
+# on a denied-plan workspace the agent happily created and deployed a live site,
 # but GET /sites 403'd — a created-but-invisible resource (write path ungated,
 # read path gated). This suite asserts the in-process write paths are now gated at
 # the SERVICE chokepoint, identically to HTTP:
 #   1. publish_pocket() / publish() raise Forbidden("plan.feature_denied") on a
-#      team plan, and succeed on business/enterprise.
+#      free plan, and succeed on go/pro/pro_max/enterprise.
 #   2. The create MCP handlers (landing / svelte) surface the same
-#      plan.feature_denied as an MCP error on a team plan, and create on business.
+#      plan.feature_denied as an MCP error on a free plan, and create on go.
 # (origin/dev ships the landing + svelte create tools; the dynamic create tool is
 # not yet on dev, so it is out of scope for this PR.)
 # The plan is controlled by patching workspace_service.get_workspace_plan (same
 # technique as tests/cloud/test_plan_feature_gate.py) so no plan-seeding is needed.
+# Updated 2026-06-25 (feat/consumer-plan-ladder): rekeyed to the consumer ladder.
+# Updated 2026-06-25 (decouple-sites-from-fabric): Sites now gates on the dedicated
+#   "sites" flag (go+), NOT the overloaded "fabric" flag. The consumer ladder gives
+#   Paw Go a site, so the gated/ungated split is {free DENIED, go ALLOWED} — go is
+#   now allowed (previously denied under the fabric coupling). The Fabric ONTOLOGY
+#   stays on "fabric" (enterprise-only) and is covered by its own suite.
 
 from __future__ import annotations
 
@@ -28,7 +34,7 @@ pytest.importorskip("pocketpaw_ee")
 
 
 # A minimal landing copy object — enough for assemble_landing_spec on the
-# business-plan success path. The team-plan path is rejected before assembly.
+# pro-plan success path. The go-plan path is rejected before assembly.
 def _landing_content() -> dict:
     return {
         "brand": "Acme",
@@ -93,8 +99,8 @@ def recording_bus():
 
 class TestPublishPlanGate:
     @pytest.mark.asyncio
-    async def test_publish_pocket_on_team_plan_is_forbidden(self) -> None:
-        """The shared publish path must reject a team-plan workspace with
+    async def test_publish_pocket_on_free_plan_is_forbidden(self) -> None:
+        """The shared publish path must reject a free-plan workspace with
         plan.feature_denied, BEFORE reading the pocket or invoking the generator
         (so this proves the gate, not an incidental missing-pocket error)."""
         from bson import ObjectId
@@ -104,7 +110,7 @@ class TestPublishPlanGate:
         workspace_id = str(ObjectId())
         user_id = str(ObjectId())
 
-        with _patch_plan("team"):
+        with _patch_plan("free"):
             with pytest.raises(Forbidden) as ei:
                 await sites_service.publish_pocket(
                     workspace_id=workspace_id,
@@ -115,14 +121,14 @@ class TestPublishPlanGate:
         assert ei.value.status_code == 403
 
     @pytest.mark.asyncio
-    async def test_publish_on_team_plan_is_forbidden(self) -> None:
+    async def test_publish_on_free_plan_is_forbidden(self) -> None:
         """publish() (the inner funnel the REST endpoint also reaches) is gated
         too, so a direct service caller can't slip past the publish_pocket guard."""
         from bson import ObjectId
         from pocketpaw_ee.cloud._core.errors import Forbidden
         from pocketpaw_ee.sites import service as sites_service
 
-        with _patch_plan("team"):
+        with _patch_plan("free"):
             with pytest.raises(Forbidden) as ei:
                 await sites_service.publish(
                     workspace_id=str(ObjectId()),
@@ -134,10 +140,10 @@ class TestPublishPlanGate:
         assert ei.value.code == "plan.feature_denied"
 
     @pytest.mark.asyncio
-    async def test_publish_pocket_on_business_plan_passes_the_gate(
+    async def test_publish_pocket_on_go_plan_passes_the_gate(
         self, beanie_test_db, recording_bus
     ) -> None:
-        """A business-plan workspace passes the gate and publishes. The generator
+        """A go-plan workspace passes the gate and publishes. The generator
         + Cloudflare client are faked so this runs without Bun/workerd/CF; the
         assertion is that the gate did NOT fire (the publish proceeds and persists
         a Site), not the deploy mechanics."""
@@ -174,7 +180,7 @@ class TestPublishPlanGate:
             async def put_worker(self, **_kwargs):  # noqa: ANN003
                 return None
 
-        with _patch_plan("business"):
+        with _patch_plan("go"):
             doc = await sites_service.publish_pocket(
                 workspace_id=workspace_id,
                 user_id=user_id,
@@ -207,7 +213,7 @@ def _svelte_source() -> dict:
 
 class TestCreateHandlersPlanGate:
     @pytest.mark.asyncio
-    async def test_create_landing_site_on_team_plan_is_error(self, recording_bus) -> None:
+    async def test_create_landing_site_on_free_plan_is_error(self, recording_bus) -> None:
         # recording_bus is installed so that, on the BUGGY (pre-fix) code, the
         # handler proceeds past the absent gate and into agent_create instead of
         # raising "EventBus not initialized" — making the failure a clean
@@ -215,28 +221,28 @@ class TestCreateHandlersPlanGate:
         # the guard fires before agent_create, so the bus is never reached.
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
-        workspace_id, user_id = "ws_team", "u_1"
+        workspace_id, user_id = "ws_free", "u_1"
         pw, pu = _patch_identity(workspace_id, user_id)
-        with _patch_plan("team"), pw, pu:
+        with _patch_plan("free"), pw, pu:
             out = await mcp._create_landing_site_handler({"content": _landing_content()})
         assert out.get("is_error") is True
         assert "plan.feature_denied" in out["content"][0]["text"]
 
     @pytest.mark.asyncio
-    async def test_create_svelte_site_on_team_plan_is_error(self, recording_bus) -> None:
+    async def test_create_svelte_site_on_free_plan_is_error(self, recording_bus) -> None:
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
 
-        pw, pu = _patch_identity("ws_team", "u_1")
-        with _patch_plan("team"), pw, pu:
+        pw, pu = _patch_identity("ws_free", "u_1")
+        with _patch_plan("free"), pw, pu:
             out = await mcp._create_svelte_site_handler({"source": _svelte_source()})
         assert out.get("is_error") is True
         assert "plan.feature_denied" in out["content"][0]["text"]
 
     @pytest.mark.asyncio
-    async def test_create_landing_site_on_business_plan_creates(
+    async def test_create_landing_site_on_go_plan_creates(
         self, beanie_test_db, recording_bus
     ) -> None:
-        """Business plan passes the gate and the landing site is created (ground
+        """Go plan passes the gate and the landing site is created (ground
         truth: a pocket lands and the handler returns ok)."""
         from bson import ObjectId
         from pocketpaw_ee.agent.mcp_servers import sites_create as mcp
@@ -245,7 +251,7 @@ class TestCreateHandlersPlanGate:
         workspace_id = str(ObjectId())
         user_id = str(ObjectId())
         pw, pu = _patch_identity(workspace_id, user_id)
-        with _patch_plan("business"), pw, pu:
+        with _patch_plan("go"), pw, pu:
             out = await mcp._create_landing_site_handler(
                 {"content": _landing_content(), "name": "Acme"}
             )

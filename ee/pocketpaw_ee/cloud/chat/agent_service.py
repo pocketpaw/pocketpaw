@@ -124,13 +124,44 @@ type-gated. The renderer re-sanitizes even though ``summarize_ripple_spec``
 now sanitizes at the source (the get_pocket ``_summary`` path) — it never
 trusts a hand-built dict. Capped lists render honest "+N more" markers
 from the summarizer's new ``*_omitted`` counters.
+Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``resolve_scope_context``
+and the three resolvers gained ``expected_workspace_id``: the authenticated,
+route-validated workspace the run worker threads from ``spec.workspace_id``.
+The new ``_reconcile_workspace_id`` helper makes it tenant-safe: a NON-EMPTY
+doc ``workspace`` stays authoritative AND a disagreeing ``expected_workspace_id``
+raises ``Forbidden`` (the cross-tenant guard — the ``_get_pocket`` / ``_get_session``
+finders look up by ``_id`` alone, not tenant-scoped, so a spec for workspace B
+can load workspace A's doc); an EMPTY/missing doc workspace FALLS BACK to the
+trusted ``expected_workspace_id``. This fixes the worker throwing away the
+authenticated ``spec.workspace_id`` and re-deriving tenancy from a doc that can
+be empty — which blanked the identity contextvar and made the sites-create MCP
+tool raise "requires workspace and user context (call from a cloud chat
+session)". ``expected_workspace_id is None`` (legacy / non-worker callers)
+preserves today's doc-only behavior. Defense-in-depth: ``attach_agent_identity``
+now REJECTS an empty ``workspace_id`` / ``user_id`` (raises ``ValueError``)
+instead of binding ``""``, so any future caller that loses tenancy fails loudly
+at the seam, not deep inside an MCP tool.
+
+Changes: 2026-06-27 (fix/cloud-artifacts-reland) — added the per-run
+``_active_cloud_chat_run`` marker ContextVar (+ ``current_cloud_chat_run`` and
+the ``mark_cloud_chat_run`` context manager) beside the identity ContextVars.
+It distinguishes an actual cloud CHAT dispatch (the path that MUST bind
+workspace identity) from any other workspace-less run in a cloud-connected
+process. The agent cwd jail's fail-closed (``agent_jail.resolve_agent_cwd``) was
+gated on ``is_multi_tenant_cloud()`` alone — a PROCESS-GLOBAL, true whenever the
+cloud Mongo client is connected — so it hard-failed EVERY workspace-less run
+(direct backend tests, CLI, background jobs), not just a mis-tenanted chat run.
+``run_core.execute_run`` now wraps the run lifecycle in ``mark_cloud_chat_run``
+and the jail fails closed only when this marker is set; otherwise it falls back
+to ``settings.file_jail_path`` (pre-ART-2 behavior).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -151,7 +182,8 @@ from pocketpaw.ripple import (
     get_pocket_prompts,
 )
 from pocketpaw.ripple._pockets import _MCP_POCKET_BACKENDS
-from pocketpaw_ee.cloud.shared.errors import CloudError, NotFound
+from pocketpaw.stores import current_workspace as _oss_current_workspace
+from pocketpaw_ee.cloud.shared.errors import CloudError, Forbidden, NotFound
 from pocketpaw_ee.cloud.surface import SurfaceContext, SurfaceProfile
 
 logger = logging.getLogger(__name__)
@@ -192,6 +224,22 @@ _active_session_mongo_id: ContextVar[str | None] = ContextVar(
 # chat isn't bound to a pocket (a plain DM / group thread).
 _active_pocket_id: ContextVar[str | None] = ContextVar("agent_pocket_id", default=None)
 
+# Marks the active async context as a live cloud CHAT run — the dispatch path
+# that is REQUIRED to bind workspace identity (``run_core.execute_run`` sets it
+# around the run lifecycle, BEFORE the prewarm ``create_task`` + the two
+# ``attach_agent_identity`` binds). The per-tenant cwd jail
+# (``agent_jail.resolve_agent_cwd``) fails CLOSED on a workspace-less run ONLY
+# when this marker is set: a workspace-less run in a cloud-connected process
+# that is NOT a chat dispatch (a direct backend test, the CLI, a background job)
+# is legitimately un-tenanted and must fall back to the shared file jail, not
+# hard-fail. ``is_multi_tenant_cloud()`` alone can't tell the two apart — it is a
+# PROCESS-GLOBAL, true whenever the cloud Mongo client is connected — so this
+# per-run marker carries the distinction. Default False; the context manager
+# resets it in a finally so it never leaks past one run. ``asyncio.create_task``
+# copies the context, so a marker set before the prewarm ``create_task``
+# propagates into the prewarm task too.
+_active_cloud_chat_run: ContextVar[bool] = ContextVar("agent_cloud_chat_run", default=False)
+
 
 def attach_agent_identity(
     *,
@@ -199,27 +247,58 @@ def attach_agent_identity(
     user_id: str,
     session_mongo_id: str | None = None,
     pocket_id: str | None = None,
-) -> tuple[Token, Token, Token, Token]:
+) -> tuple[Token, Token, Token, Token, Token]:
     """Bind workspace / user / session / pocket identity for the active
     stream's MCP tools. ``session_mongo_id`` is the ``Session._id`` the chat
     is streaming through — used by ``create_pocket`` to link the active
     session to the freshly-created pocket. ``pocket_id`` is the room the chat
     is anchored to (when any) — read by the connector-execution MCP server to
-    scope ``list_connector_actions`` / ``connector_execute`` to this pocket."""
+    scope ``list_connector_actions`` / ``connector_execute`` to this pocket.
+
+    Defense-in-depth (fix/worker-trusts-spec-workspace): REJECT an empty
+    ``workspace_id`` / ``user_id`` instead of binding ``""`` to the contextvar.
+    A blank tenancy here silently propagated to every in-process MCP tool —
+    the sites-create tool surfaced it as "requires workspace and user context
+    (call from a cloud chat session)" deep inside the tool, far from the seam
+    that lost the id. Failing loudly at the bind makes any future caller that
+    drops tenancy break at the source instead. Every real caller (the SSE chat
+    path, the group/DM bridge, the in-process test harnesses) already passes
+    non-empty ids, so this is a guard, not a behavior change for them.
+
+    ISO-3 (workspace store bridge): the same bind also sets the OSS-core
+    ``pocketpaw.stores.current_workspace`` ContextVar, so the NON-router store
+    callers inside an agent run — the agent Fabric tools, the Fabric/Instinct
+    MCP servers, connector ingest — that call ``get_fabric_store()`` /
+    ``get_instinct_store()`` WITHOUT an explicit ``workspace_id`` resolve to THIS
+    stream's workspace and land in its per-workspace file (ISO-1/ISO-2). The
+    EE router path keeps passing ``workspace_id`` explicitly (it has the request
+    scope); this bridges the agent path that doesn't. The OSS token is returned
+    as a FIFTH tuple element — callers treat the tuple opaquely (only
+    ``detach_agent_identity`` unpacks it), so the wider shape is invisible to
+    them. ``detach`` resets it."""
+    if not workspace_id or not user_id:
+        raise ValueError(
+            "attach_agent_identity requires a non-empty workspace_id and user_id "
+            f"(got workspace_id={workspace_id!r}, user_id={user_id!r})"
+        )
     return (
         _active_workspace_id.set(workspace_id),
         _active_user_id.set(user_id),
         _active_session_mongo_id.set(session_mongo_id),
         _active_pocket_id.set(pocket_id),
+        # ISO-3: bridge the EE per-stream workspace onto the OSS store ContextVar.
+        _oss_current_workspace.set(workspace_id),
     )
 
 
-def detach_agent_identity(tokens: tuple[Token, Token, Token, Token]) -> None:
-    ws_token, user_token, session_token, pocket_token = tokens
+def detach_agent_identity(tokens: tuple[Token, Token, Token, Token, Token]) -> None:
+    ws_token, user_token, session_token, pocket_token, oss_ws_token = tokens
     _active_workspace_id.reset(ws_token)
     _active_user_id.reset(user_token)
     _active_session_mongo_id.reset(session_token)
     _active_pocket_id.reset(pocket_token)
+    # ISO-3: clear the OSS store ContextVar bridged in attach_agent_identity.
+    _oss_current_workspace.reset(oss_ws_token)
 
 
 def current_workspace_id() -> str | None:
@@ -236,6 +315,36 @@ def current_session_mongo_id() -> str | None:
 
 def current_pocket_id() -> str | None:
     return _active_pocket_id.get()
+
+
+def current_cloud_chat_run() -> bool:
+    """True when the active context is a live cloud CHAT run dispatch.
+
+    Read by ``agent_jail.resolve_agent_cwd`` to decide whether a workspace-less
+    run in a cloud-connected process is a mis-tenanting bug (fail closed) or a
+    legitimately un-tenanted run that should fall back to the file jail.
+    """
+    return _active_cloud_chat_run.get()
+
+
+@contextmanager
+def mark_cloud_chat_run() -> Iterator[None]:
+    """Mark the active context as a live cloud CHAT run for the per-tenant cwd
+    jail's fail-closed (see ``_active_cloud_chat_run``).
+
+    Sets the marker True on enter and resets it to the prior value in a finally
+    so it never leaks past the run. ``run_core.execute_run`` wraps the run
+    lifecycle with this — set BEFORE the prewarm ``create_task`` (which copies
+    the context, carrying the marker into the prewarm task) and BEFORE
+    ``attach_agent_identity``, so a run that reaches the backend WITHOUT binding
+    identity (the real mis-tenanting bug) still trips the jail's fail-closed
+    instead of silently co-mingling tenant files in the shared home directory.
+    """
+    token = _active_cloud_chat_run.set(True)
+    try:
+        yield
+    finally:
+        _active_cloud_chat_run.reset(token)
 
 
 def push_sse_event(name: str, data: dict[str, Any]) -> None:
@@ -730,16 +839,69 @@ async def _get_default_workspace_agent_id(workspace_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _reconcile_workspace_id(doc_workspace_id: str, expected_workspace_id: str | None) -> str:
+    """Resolve the AUTHORITATIVE workspace for a scope, given the workspace the
+    scope DOC carries and the ``expected_workspace_id`` the authenticated caller
+    asserts (the worker threads ``spec.workspace_id`` here — fix/worker-trusts-
+    spec-workspace).
+
+    Rules (tenant-safe by construction):
+
+    * Doc workspace NON-EMPTY:
+        - it stays AUTHORITATIVE, AND
+        - if ``expected_workspace_id`` is also non-empty and DISAGREES, raise a
+          ``Forbidden`` — never silently trust a mismatched caller assertion.
+          The scope finders look the doc up by ``_id`` alone (not tenant-scoped),
+          so a spec for workspace B CAN load workspace A's doc; this mismatch
+          check is the actual cross-tenant guard, not just belt-and-suspenders.
+    * Doc workspace EMPTY/missing (a legacy / partially-stamped doc):
+        - FALL BACK to the trusted ``expected_workspace_id`` when present. This
+          is the fix: the worker stops blanking tenancy when the doc's workspace
+          field is empty, and uses the authenticated id the HTTP route already
+          validated (the ``current_workspace_id`` dependency rejects an empty
+          workspace with 400 before the spec is ever built).
+        - ``""`` when neither is usable — the caller (``execute_run``) then
+          raises a clean error rather than attaching an empty identity.
+
+    ``expected_workspace_id is None`` (legacy / non-worker callers that don't
+    thread it) preserves today's behavior exactly: the doc workspace passes
+    through untouched.
+    """
+    doc_ws = (doc_workspace_id or "").strip()
+    expected = (expected_workspace_id or "").strip()
+    if doc_ws:
+        if expected and expected != doc_ws:
+            raise Forbidden(
+                "scope.workspace_mismatch",
+                "Scope belongs to a different workspace than the authenticated request",
+            )
+        return doc_ws
+    return expected
+
+
 async def resolve_scope_context(
-    *, scope: str, scope_id: str, user_id: str, agent_id_hint: str | None
+    *,
+    scope: str,
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
 ) -> ScopeContext:
     """Resolve a ``ScopeContext`` for a cloud agent chat request.
+
+    ``expected_workspace_id`` is the authoritative, authenticated workspace the
+    caller asserts (the run worker threads ``spec.workspace_id`` here). It is
+    used to (a) FALL BACK to trusted tenancy when the scope doc's ``workspace``
+    field is empty/missing and (b) REJECT a caller whose workspace DISAGREES
+    with a non-empty doc workspace (cross-tenant guard). Defaults to ``None`` —
+    legacy / non-worker callers keep today's doc-only behavior.
 
     Raises:
         InvalidScope: ``scope`` is not one of dm/group/pocket/session.
         NotFound: the group, pocket, or session doesn't exist.
-        CloudError: caller is not a member, no agent is in scope, or the
-            caller must disambiguate ``agent_id`` for a multi-agent group.
+        CloudError: caller is not a member, no agent is in scope, the caller
+            must disambiguate ``agent_id`` for a multi-agent group, or the
+            asserted workspace disagrees with the scope's (``Forbidden``).
     """
     try:
         kind = ScopeKind(scope)
@@ -747,19 +909,33 @@ async def resolve_scope_context(
         raise InvalidScope(scope) from e
 
     if kind is ScopeKind.POCKET:
-        return await _resolve_pocket(scope_id, user_id, agent_id_hint)
+        return await _resolve_pocket(scope_id, user_id, agent_id_hint, expected_workspace_id)
     if kind is ScopeKind.SESSION:
-        return await _resolve_session(scope_id, user_id, agent_id_hint)
-    return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint)
+        return await _resolve_session(scope_id, user_id, agent_id_hint, expected_workspace_id)
+    return await _resolve_group_like(kind, scope_id, user_id, agent_id_hint, expected_workspace_id)
 
 
-async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | None) -> ScopeContext:
+async def _resolve_session(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
     session = await _get_session(scope_id)
     if session is None or getattr(session, "deleted_at", None) is not None:
         raise NotFound("session", scope_id)
 
     if getattr(session, "owner", None) != user_id:
         raise CloudError(403, "session.forbidden", "Caller does not own this session")
+
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace). Reconciled FIRST so the home-summary lookup and the
+    # returned ctx both use the authoritative id, and a cross-tenant mismatch
+    # raises before any further reads.
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(session, "workspace", "")), expected_workspace_id
+    )
 
     # When the session lives inside a pocket, hydrate the pocket's tool specs
     # so a chat routed through ``session`` scope still gets the pocket-scoped
@@ -781,16 +957,13 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
             # active session id is honored). Surface the home pocket's
             # backend summary here too so the home agent inlines it whether
             # the chat routed through pocket or session scope.
-            backend_summary = await _home_backend_summary(
-                pocket_type, str(getattr(session, "workspace", "")), str(pocket_id)
-            )
+            backend_summary = await _home_backend_summary(pocket_type, workspace_id, str(pocket_id))
             # Pocket orientation for ALL pocket types — built from the doc
             # we already fetched, no extra read. Mirrors the pocket-scope
             # path so the agent sees the same <pocket-summary> block
             # whichever scope the frontend routed the chat through.
             pocket_summary = _pocket_summary_data(pocket)
 
-    workspace_id = str(getattr(session, "workspace", ""))
     target = agent_id_hint or getattr(session, "agent", None)
     if not target:
         # Sessions created via ``createPocketSession`` don't yet pin an agent
@@ -825,7 +998,11 @@ async def _resolve_session(scope_id: str, user_id: str, agent_id_hint: str | Non
 
 
 async def _resolve_group_like(
-    kind: ScopeKind, scope_id: str, user_id: str, agent_id_hint: str | None
+    kind: ScopeKind,
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
 ) -> ScopeContext:
     group = await _get_group(scope_id)
     if group is None:
@@ -851,7 +1028,12 @@ async def _resolve_group_like(
 
     target = _pick_target_agent(agent_ids, agent_id_hint)
 
-    workspace_id = str(getattr(group, "workspace", ""))
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace).
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(group, "workspace", "")), expected_workspace_id
+    )
     # Orient the agent to the calling member (pp#1367) — pre-rendered capped
     # block, ``None`` when the member has no Person.
     about_member_block = await _resolve_about_member(workspace_id, user_id)
@@ -868,7 +1050,12 @@ async def _resolve_group_like(
     )
 
 
-async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None) -> ScopeContext:
+async def _resolve_pocket(
+    scope_id: str,
+    user_id: str,
+    agent_id_hint: str | None,
+    expected_workspace_id: str | None = None,
+) -> ScopeContext:
     pocket = await _get_pocket(scope_id)
     if pocket is None:
         raise NotFound("pocket", scope_id)
@@ -883,7 +1070,12 @@ async def _resolve_pocket(scope_id: str, user_id: str, agent_id_hint: str | None
     # For workspace/public we still require the caller be a workspace member;
     # the route-level dependency ``current_workspace_id`` already enforced that.
 
-    workspace_id = str(getattr(pocket, "workspace", ""))
+    # Trust the authenticated spec workspace when the doc's is empty; reject a
+    # spec that disagrees with a non-empty doc workspace (fix/worker-trusts-
+    # spec-workspace).
+    workspace_id = _reconcile_workspace_id(
+        str(getattr(pocket, "workspace", "")), expected_workspace_id
+    )
 
     agents = list(getattr(pocket, "agents", []) or [])
     agent_ids = [a if isinstance(a, str) else getattr(a, "id", None) for a in agents]
@@ -1050,6 +1242,11 @@ def build_behavior_instructions(ctx: ScopeContext, *, backend_name: str | None =
 
     parts: list[str] = []
     parts.append(_RUNTIME_IDENTITY_RULE)
+    # Artifact-delivery rule (ART-4): the agent builds files in a per-tenant jail
+    # the user can't reach, so a downloadable result MUST go through
+    # deliver_artifact (which lands it in tenant blob storage and returns a real
+    # download URL) — not a printed container path and not a local preview server.
+    parts.append(_DELIVER_ARTIFACT_RULE)
     # Composio auth/search guidance is injected whenever Composio is
     # enabled. An enabled deployment ALWAYS surfaces at least the
     # discovery meta-tools — ``providers.py`` falls back to them when no
@@ -1181,6 +1378,35 @@ DOES NOT EXIST in this environment:
 - If you genuinely don't have a tool for what the user asked, say so
   plainly. Don't fabricate instructions for a different environment.
 </runtime-identity>"""
+
+
+# Artifact delivery (ART-4). The cloud agent's working directory is a per-tenant
+# jail on the server's filesystem — the user has no shell, no SSH, and cannot
+# reach 127.0.0.1 on the box. So a file the agent "wrote to ./out.pdf" or a
+# "preview running at http://localhost:8000" is invisible to them. The ONLY way
+# to hand the user a downloadable result is deliver_artifact, which uploads the
+# file/dir to the tenant's blob storage and returns a real, short-lived URL.
+_DELIVER_ARTIFACT_RULE = """\
+<artifact-delivery>
+You run in a sandboxed working directory the user cannot see or reach — they
+have no terminal on this machine and cannot open 127.0.0.1 / localhost here.
+
+When you produce something the user should be able to DOWNLOAD (a report, an
+export, a generated document, a built bundle, a zip):
+
+  1. Write it to a file (or a directory) in your working directory.
+  2. Call ``deliver_artifact`` with that path. A single file uploads as-is; a
+     directory is zipped automatically.
+  3. Share the ``url`` it returns — that is the user's real download link.
+
+Do NOT instead:
+  - print the path you wrote to (e.g. "I saved it to ./out.pdf") and stop — that
+    path lives in a container the user can't access;
+  - start a local preview / web server ("run `python -m http.server`", "open
+    http://localhost:8000") — nothing you bind on this box is reachable.
+
+If ``deliver_artifact`` returns an error, relay it; do not invent a link.
+</artifact-delivery>"""
 
 
 # Composio's direct-tools surface caps each toolkit at a fixed limit

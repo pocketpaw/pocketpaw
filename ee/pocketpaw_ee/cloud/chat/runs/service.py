@@ -10,6 +10,12 @@ Changes:
   token-usage dict it assembles from the backend's ``token_usage`` event, so
   each finished run carries its real prompt / completion / cached token counts.
   ``None`` leaves the stored usage untouched (legacy callers / no-usage runs).
+- 2026-06-24 (B3 review fix — metering boundary) — added ``mark_billed(run_id)``.
+  The metering service (BC-3) previously wrote ``run_doc.billed=True`` +
+  ``run_doc.save()`` directly, a FOREIGN write across the chat.runs entity
+  boundary (EE Rule 2 — only this module touches ``ChatRunDoc``). ``bill_run`` now
+  calls ``mark_billed`` instead. Reading ``run_doc.usage`` in metering stays fine;
+  only the WRITE moves here, the owner of the document.
 """
 
 from __future__ import annotations
@@ -119,6 +125,16 @@ async def mark_terminal(
     await doc.save()
 
 
+async def mark_billed(run_id: str) -> None:
+    """Flag a run as billed (BC-3). The owner of ``ChatRunDoc`` makes this write
+    so the metering service never writes a foreign entity's document (EE Rule 2).
+    Idempotent — re-flagging an already-billed run is harmless; the ledger key is
+    the real double-debit guard, this flag just keeps the sweeper bounded."""
+    doc = await get_run(run_id)
+    doc.billed = True
+    await doc.save()
+
+
 async def find_active_run_for_scope(
     *,
     workspace_id: str,
@@ -151,3 +167,22 @@ async def find_stale_running(older_than: datetime) -> list[ChatRunDoc]:
         {"status": {"$in": ["queued", "running"]}},
         ChatRunDoc.createdAt < older_than,
     ).to_list()
+
+
+async def find_active_run_scopes() -> set[tuple[str, str, str]]:
+    """Every ``(workspace, context_type, scope_id)`` with a non-terminal
+    (``queued`` / ``running``) run.
+
+    The active-jail guard for the ART-3 jail GC: a per-session agent jail dir is
+    named after its run's scope (``session`` runs → ``<scope_id>``; ``dm`` /
+    ``group`` / ``pocket`` runs share the workspace ``_shared`` dir), so a jail
+    whose scope is in this set is in use and must never be evicted. Uses the
+    same ``active = queued | running`` definition as ``find_active_run_for_scope``
+    — an ``interrupted`` run that the user retries spawns a NEW queued/running
+    run for the same scope, which re-protects the jail, so a retry can't race a
+    GC pass into deleting a jail it's about to reuse.
+    """
+    docs = await ChatRunDoc.find(
+        {"status": {"$in": ["queued", "running"]}},
+    ).to_list()
+    return {(d.workspace, d.context_type, d.scope_id) for d in docs}

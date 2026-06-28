@@ -1266,3 +1266,247 @@ async def test_score_applications_missing_source_collection_returns_empty(
     rows = result["state"]["scored_rows"]
     # Existing batch preserved; nothing new added.
     assert [r["id"] for r in rows] == ["app-1"]
+
+
+# ---------------------------------------------------------------------------
+# CHANGE 2 (this PR) — score_applications CONNECTOR source mode. When `params`
+# carries `connector` + `action`, the job reads its batch from the workspace's
+# BOUND connector via `jobs.service.execute_connector_action` (which calls
+# `connectors_service.execute`) and scores those records — same idempotent
+# dedup, same heuristic + band, same PII allowlist as the Mongo path. Source
+# precedence is connector > source_collection > rows. The connector call is
+# mocked by monkeypatching `connectors_service.execute` to return sample
+# records, so nothing real is dispatched.
+# ---------------------------------------------------------------------------
+
+
+def _connector_response(records: Any) -> Any:
+    """Build a real ``ExecuteActionResponse`` (success) carrying ``records`` as
+    the data payload — the shape ``execute_connector_action`` unwraps."""
+    from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse
+
+    return ExecuteActionResponse(success=True, data=records, execution_mode="cloud")
+
+
+def _patch_connector_execute(monkeypatch: pytest.MonkeyPatch, records: Any):
+    """Monkeypatch ``connectors_service.execute`` to return ``records`` and
+    capture the call args. ``execute_connector_action`` lazy-imports the
+    connectors service inside the function, so patching the real module object
+    is what the lazy import resolves to.
+
+    Returns the ``captured`` dict so a test can assert the call ran under the
+    workspace job identity with ``pocket_id=None``.
+    """
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_execute(workspace_id, name, body, *, user_id=None):  # type: ignore[no-untyped-def]
+        captured["workspace_id"] = workspace_id
+        captured["name"] = name
+        captured["body"] = body
+        captured["user_id"] = user_id
+        return _connector_response(records)
+
+    monkeypatch.setattr(connectors_service, "execute", _fake_execute)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_score_applications_connector_backed_scores_records(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A connector-backed run scores the records the mocked
+    ``connectors_service.execute`` returns, and the connector call runs under
+    the workspace job identity with workspace-scope credentials
+    (``pocket_id=None``)."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    captured = _patch_connector_execute(
+        monkeypatch,
+        [
+            {
+                "id": "lead-1",
+                "name": "Jordan Strong",
+                "email": "jordan@acme.com",
+                "message": "x" * 150,
+                "referral": "linkedin.com/in/jordan",
+            },
+            {"id": "lead-2", "name": "Sam Sparse"},
+            {"id": "lead-3", "name": "Casey Throwaway", "email": "casey@mailinator.com"},
+        ],
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-conn-1",
+        params={"connector": "snctm-api", "action": "list_leads", "batch_size": 20},
+    )
+
+    rows = result["state"]["scored_rows"]
+    assert {r["id"] for r in rows} == {"lead-1", "lead-2", "lead-3"}
+    assert result["state"]["score_applications_scored_count"] == 3
+    by_id = {r["id"]: r for r in rows}
+    assert by_id["lead-1"]["band"] == "Strong"
+    assert by_id["lead-3"]["score"] < by_id["lead-1"]["score"]
+    assert all(r["stage"] == "scored" for r in rows)
+    # No status key from the built-in (the worker owns it).
+    assert "score_applications_status" not in result["state"]
+
+    # The connector call ran under the synthetic job identity with
+    # workspace-scope creds (no pocket binding, no params-borne tokens).
+    assert captured["name"] == "snctm-api"
+    assert captured["user_id"] == WORKSPACE_JOB_IDENTITY
+    assert captured["body"].action == "list_leads"
+    assert captured["body"].pocket_id is None
+
+
+@pytest.mark.asyncio
+async def test_score_applications_connector_backed_is_idempotent(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running a connector-backed job SKIPS records already in the pocket's
+    ``scored_rows`` and pulls the next ``batch_size``, accumulating onto the
+    existing rows (idempotent batch advancement)."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    _patch_connector_execute(
+        monkeypatch,
+        [
+            {"id": "lead-1", "name": "One", "email": "one@acme.com"},
+            {"id": "lead-2", "name": "Two", "email": "two@acme.com"},
+            {"id": "lead-3", "name": "Three", "email": "three@acme.com"},
+        ],
+    )
+    # lead-1 is already scored on the pocket.
+    pocket_id = await _seed_pocket_with_scored_rows(
+        workspace=WS,
+        scored_rows=[
+            {"id": "lead-1", "name": "One", "score": 40, "band": "Moderate", "stage": "scored"}
+        ],
+    )
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-conn-2",
+        params={"connector": "snctm-api", "action": "list_leads", "batch_size": 1},
+    )
+
+    rows = result["state"]["scored_rows"]
+    ids = [r["id"] for r in rows]
+    assert ids[0] == "lead-1"
+    assert len(rows) == 2  # one already-scored + exactly one NEW (batch_size=1)
+    new_id = ids[1]
+    assert new_id in ("lead-2", "lead-3")
+    assert new_id != "lead-1"
+    # The preserved row keeps its original score (not re-scored).
+    assert rows[0]["score"] == 40
+    assert result["state"]["score_applications_scored_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_score_applications_connector_backed_strips_pii(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The broadcast rows from a connector-backed run carry ONLY the allowlist —
+    no email / phone / raw connector field reaches ``state``."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    _patch_connector_execute(
+        monkeypatch,
+        [
+            {
+                "id": "lead-1",
+                "name": "Jordan",
+                "email": "jordan@acme.com",
+                "phone": "+1-555-0100",
+                "ssn": "000-00-0000",
+                "message": "Hello there, here is my note.",
+            }
+        ],
+    )
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-conn-3",
+        params={"connector": "snctm-api", "action": "list_leads", "batch_size": 20},
+    )
+
+    rows = result["state"]["scored_rows"]
+    assert rows
+    row = rows[0]
+    assert "email" not in row
+    assert "phone" not in row
+    assert "ssn" not in row
+    assert "message" not in row
+    assert set(row.keys()) <= {"id", "name", "score", "band", "stage"}
+
+
+@pytest.mark.asyncio
+async def test_score_applications_connector_precedence_over_collection(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Source precedence: when BOTH `connector` and `source_collection` are set,
+    the connector wins — the Mongo collection is never read."""
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    _patch_connector_execute(monkeypatch, [{"id": "from-connector", "name": "Via Connector"}])
+    # Seed a Mongo collection with a DIFFERENT id; if precedence were wrong the
+    # collection's record would show up in the scored rows.
+    await _seed_source(mongo_db, "applications", [{"id": "from-collection", "name": "Via Mongo"}])
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    result = await job(
+        workspace_id=WS,
+        pocket_id=pocket_id,
+        job_id="j-conn-4",
+        params={
+            "connector": "snctm-api",
+            "action": "list_leads",
+            "source_collection": "applications",
+            "batch_size": 20,
+        },
+    )
+
+    ids = {r["id"] for r in result["state"]["scored_rows"]}
+    assert ids == {"from-connector"}
+    assert "from-collection" not in ids
+
+
+@pytest.mark.asyncio
+async def test_score_applications_connector_error_propagates(
+    mongo_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-success connector response raises ``CloudError(job.connector_error)``
+    out of the job, so the worker's failure path marks the job failed + un-hangs
+    the button. (The built-in does not swallow connector failures the way the
+    best-effort Mongo read degrades to 'no records'.)"""
+    from pocketpaw_ee.cloud._core.errors import CloudError
+    from pocketpaw_ee.cloud.connectors import service as connectors_service
+    from pocketpaw_ee.cloud.connectors.dto import ExecuteActionResponse
+    from pocketpaw_ee.cloud.jobs.builtin.score_applications import ScoreApplicationsJob
+
+    async def _failing_execute(workspace_id, name, body, *, user_id=None):  # type: ignore[no-untyped-def]
+        return ExecuteActionResponse(success=False, data=None, error="upstream 500")
+
+    monkeypatch.setattr(connectors_service, "execute", _failing_execute)
+    pocket_id = await _seed_pocket_with_scored_rows(workspace=WS, scored_rows=[])
+
+    job = ScoreApplicationsJob()
+    with pytest.raises(CloudError) as exc:
+        await job(
+            workspace_id=WS,
+            pocket_id=pocket_id,
+            job_id="j-conn-5",
+            params={"connector": "snctm-api", "action": "list_leads", "batch_size": 20},
+        )
+    assert exc.value.code == "job.connector_error"

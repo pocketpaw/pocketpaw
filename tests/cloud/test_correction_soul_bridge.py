@@ -272,7 +272,7 @@ class TestInstinctCorrectionsTool:
         empty_store = InstinctStore(tmp_path / "empty.db")
         monkeypatch.setattr(
             "pocketpaw.tools.builtin.instinct_corrections._get_instinct_store",
-            lambda: empty_store,
+            lambda *a, **k: empty_store,
         )
 
         tool = InstinctCorrectionsTool()
@@ -297,7 +297,7 @@ class TestInstinctCorrectionsTool:
         )
         monkeypatch.setattr(
             "pocketpaw.tools.builtin.instinct_corrections._get_instinct_store",
-            lambda: store,
+            lambda *a, **k: store,
         )
 
         tool = InstinctCorrectionsTool()
@@ -316,7 +316,7 @@ class TestInstinctCorrectionsTool:
 
         monkeypatch.setattr(
             "pocketpaw.tools.builtin.instinct_corrections._get_instinct_store",
-            lambda: None,
+            lambda *a, **k: None,
         )
 
         tool = InstinctCorrectionsTool()

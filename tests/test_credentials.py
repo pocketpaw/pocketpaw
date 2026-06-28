@@ -3,6 +3,8 @@
 # Created: 2026-02-06
 # Tests: CredentialStore, config save/load separation, plaintext migration,
 #         file permissions, and log secret scrubbing.
+# Updated 2026-06-24: expected SECRET_FIELDS now includes the Dodo billing
+#         secrets (dodo_payments_api_key, dodo_webhook_secret).
 
 import json
 import logging
@@ -540,6 +542,8 @@ class TestSecretFieldsList:
             "litellm_api_key",
             "claude_code_oauth_token",
             "status_api_key",
+            "dodo_payments_api_key",
+            "dodo_webhook_secret",
         }
         assert SECRET_FIELDS == expected
 

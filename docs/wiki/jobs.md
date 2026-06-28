@@ -3,8 +3,8 @@
 > The workspace jobs primitive runs named, parameterized, server-side async work for a pocket — durably, in the ARQ worker, under a synthetic workspace identity rather than the triggering user's session. A job is dispatched by a `kind:"job"` action on a pocket, runs to completion even after the user's socket closes, and writes its result back into the pocket's rippleSpec `state` so any open canvas updates live. It exists to give pockets a "do this in the background and tell me when it's done" capability without granting an unbounded agent loop.
 
 **Categories:** background work, async execution, ARQ, multi-tenancy, realtime
-**Concepts:** pocket job, job registry, JobCallable, WorkspaceJobDoc, kind="job" action, writeback, system:workspace_job identity, xproc bridge, state-only result, PII allowlist
-**Version:** 1
+**Concepts:** pocket job, job registry, JobCallable, WorkspaceJobDoc, kind="job" action, writeback, system:workspace_job identity, xproc bridge, state-only result, PII allowlist, custom jobs, entry-point registration
+**Version:** 2
 
 ---
 
@@ -33,7 +33,7 @@ Durability comes from **ARQ**: a job runs in the same worker process as resumabl
 
 ### Registry (`jobs/registry.py`)
 
-A module-level dict of `name → JobCallable`, following the `OptimisticCompensationRegistry` shape. `JobCallable` is a Protocol with a `name` attribute and `async __call__(*, workspace_id, pocket_id, job_id, params) -> dict`. Built-ins register at mount time via `register_builtins()`, after `init_realtime()`.
+A module-level dict of `name → JobCallable`, following the `OptimisticCompensationRegistry` shape. `JobCallable` is a Protocol with a `name` attribute and `async __call__(*, workspace_id, pocket_id, job_id, params) -> dict`. Built-ins register at mount time via `register_builtins()`, after `init_realtime()`; workspace-custom jobs register right after that via `load_entrypoint_jobs()` (`jobs/plugins.py`) — see **Custom jobs (entry-point registration)** below.
 
 ### Status doc (`models/workspace_job.py`)
 
@@ -46,6 +46,36 @@ On success the worker calls `merge_spec(workspace_id, user_id="system:workspace_
 ### Status poll
 
 `GET /api/v1/workspaces/{ws}/jobs/{job_id}` returns `{job_id, status, timestamps, error}` (the result is already in `state`). Any workspace member may read; the service re-fetches by id and re-checks `workspace_id`, returning 404 on a cross-tenant mismatch.
+
+## Custom jobs (entry-point registration)
+
+Built-in jobs ship inside `pocketpaw_ee`. A **workspace/deploy** ships its own jobs without editing this repo by publishing a small Python package that declares an entry-point in the `pocketpaw.jobs` group — the same SAFE discovery mechanism the OSS core uses for its optional providers (`pocketpaw._registry`). There is **no runtime import of user-supplied code**: discovery reads installed-package metadata only, and `load_entrypoint_jobs()` runs once at process startup right after `register_builtins()` in BOTH the web app (`mount_cloud`) and the ARQ worker (`_startup`), so a custom job resolves identically on either side of the dispatch boundary.
+
+This repo ships **no** `pocketpaw.jobs` entry-point of its own (like the OSS core, it owns the group but registers nothing into it).
+
+### The contract
+
+A `pocketpaw.jobs` entry-point must resolve to a **zero-arg factory** that returns either a single `JobCallable` or an iterable of them. Each resolved object must satisfy the `JobCallable` protocol — a `name: str` attribute plus an `async def __call__(self, *, workspace_id, pocket_id, job_id, params) -> dict`. A provider that fails to load, whose factory raises, or that resolves to a non-`JobCallable` is **skipped with a logged warning** and never blocks startup or other valid providers.
+
+A custom-job package author writes:
+
+```toml
+# pyproject.toml of the custom-job package
+[project.entry-points."pocketpaw.jobs"]
+my_jobs = "my_pkg:make_jobs"
+```
+
+```python
+# my_pkg/__init__.py
+def make_jobs():
+    return [MyDailyDigestJob()]   # one JobCallable, or a list of them
+```
+
+Once that package is installed in the web + worker environments, the job's `name` is registered on boot and can be dispatched via a `kind:"job"` action (`{"kind":"job","job":"my_daily_digest", ...}`).
+
+### Same security contract applies
+
+A custom job runs under the same boundary as a built-in: writeback is **state-only** (`validate_job_result` rejects `ui`/`actions`/`sources`/`shape`), params are **credential-scrubbed** before the job sees them (`validate_job_params`), it runs under the `system:workspace_job` identity, and connector calls use the workspace's stored creds — never params-supplied tokens. **PII projection is the job author's responsibility**: because a result becomes broadcast `state`, a custom job must project rows through its own allowlist exactly as `score_applications` does (drop `email`/`phone` etc. before returning).
 
 ## Security properties
 
@@ -63,6 +93,7 @@ On success the worker calls `merge_spec(workspace_id, user_id="system:workspace_
 |--------|------|
 | `jobs/domain.py` | Pure constants/value types (identity, queue, timeout, failed-state writeback). |
 | `jobs/registry.py` | The named registry + `validate_job_params` / `validate_job_result`. |
+| `jobs/plugins.py` | Discovers + registers workspace-custom jobs from `pocketpaw.jobs` entry-points (`load_entrypoint_jobs`). |
 | `jobs/service.py` | The only writer of `WorkspaceJobDoc`: dispatch + lifecycle + audit. |
 | `jobs/worker.py` | The ARQ `execute_workspace_job` entrypoint (run → validate → writeback). |
 | `jobs/router.py` | The status-poll route. |

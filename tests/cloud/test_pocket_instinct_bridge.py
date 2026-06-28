@@ -37,7 +37,7 @@ def store(tmp_path, monkeypatch):
     temp-backed store and never touch ``~/.pocketpaw/instinct.db``.
     """
     st = InstinctStore(tmp_path / "instinct_bridge_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 

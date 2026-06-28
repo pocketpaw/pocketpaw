@@ -114,7 +114,7 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     (the propose helper + the executor both lazy-import
     ``pocketpaw.stores.get_instinct_store``)."""
     st = InstinctStore(tmp_path / "instinct_external_action_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
@@ -449,7 +449,7 @@ async def test_production_path_approve_runs_executor_one_terminal(
     # executor). The router's _store indirection points at our tmp store.
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
     resp = client.post(f"/instinct/actions/{action_id}/approve")
     assert resp.status_code == 200, resp.text
 
@@ -497,7 +497,7 @@ async def test_production_path_reject_router_closes_executor_never_called(
 
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
     resp = client.post(f"/instinct/actions/{action_id}/reject", json={"reason": "not now"})
     assert resp.status_code == 200, resp.text
 
@@ -539,7 +539,7 @@ async def test_router_cross_workspace_approval_forbidden(store, journal, graph, 
     # Caller is in w1 but the action belongs to w-OTHER.
     user = _FakeUser("u1", "w1")
     client = _make_client(user, monkeypatch)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: store)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: store)
     resp = client.post(f"/instinct/actions/{action_id}/approve")
     assert resp.status_code == 403, resp.text
     # Nothing fired.

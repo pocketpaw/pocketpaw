@@ -2106,7 +2106,10 @@ async def _fan_to_instinct_proposal(
     )
     dedupe_key = proposal.parameters.get("_foresight", {}).get("dedupe_key", "")
 
-    store = get_instinct_store()
+    # ISO: the foresight engine runs inline inside the HTTP run handler (no
+    # ``current_workspace`` ContextVar) — scope the store file to the run's
+    # tenant (the W4c in-row filter below is additive).
+    store = get_instinct_store(workspace_id=domain_pd.workspace_id or None)
     # W4c — scope the dedupe read to the run's tenant so the idempotence check
     # only sees this workspace's rows (plus legacy NULL) on the shared store.
     existing = await _existing_dedupe_keys(
@@ -2251,7 +2254,9 @@ async def list_instinct_proposals_for_run(
     # at module top would touch the disk on every cloud module load.
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
+    # ISO: HTTP path (no ContextVar) — scope the store to the caller (the W4c
+    # in-row filter below is additive).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     pocket_id = _foresight_pocket_id(run_id)
     # Pull a generous slice (Instinct's max page size is 500) and
     # filter to the rows our own provenance stamped, in case a future
