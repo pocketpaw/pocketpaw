@@ -10,6 +10,11 @@
 #     dependency as DELETE (symmetric tenant-scope protection — asymmetric
 #     protection = no protection).
 #   * the wire dict (agent_to_dict) surfaces the ``disabled`` flag.
+#
+# Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-5) — roster surfacing:
+#   * list_agents() keeps a disabled agent IN the list (no hard filter) and the
+#     wire dict carries disabled=True, so the client can grey/inactive the row
+#     instead of the agent just silently vanishing.
 
 from __future__ import annotations
 
@@ -187,3 +192,29 @@ async def test_agent_to_dict_surfaces_disabled(recording_bus) -> None:
 
     disabled = await agents_service.disable(_ctx(), agent.id)
     assert agent_to_dict(disabled)["disabled"] is True
+
+
+# --- roster surfacing (AW-5) ----------------------------------------------
+
+
+async def test_list_agents_includes_disabled_with_flag(recording_bus) -> None:
+    """A disabled agent must STAY in list_agents() — surfaced with
+    ``disabled=True`` so the client can render it greyed/inactive, not hard
+    filtered out (owners need to see and re-enable it)."""
+    live = await agents_service.create(_ctx(), "w1", _create_body(slug="live", name="Live"))
+    dead = await agents_service.create(_ctx(), "w1", _create_body(slug="dead", name="Dead"))
+    await agents_service.disable(_ctx(), dead.id)
+
+    listed = await agents_service.list_agents("w1")
+    by_id = {a.id: a for a in listed}
+
+    # Both agents present — the disabled one is NOT filtered out.
+    assert live.id in by_id
+    assert dead.id in by_id
+    assert by_id[live.id].disabled is False
+    assert by_id[dead.id].disabled is True
+
+    # And the wire dicts the router returns carry the same flag.
+    wire = {d["_id"]: d for d in (agent_to_dict(a) for a in listed)}
+    assert wire[live.id]["disabled"] is False
+    assert wire[dead.id]["disabled"] is True
