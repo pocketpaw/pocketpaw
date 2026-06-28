@@ -23,6 +23,16 @@
 #   boundary forbids importing ``pocketpaw_ee`` from core). When
 #   ``POCKETPAW_ALLOW_INTERNAL_URLS`` is set (dev escape) internal resolved
 #   IPs are permitted so localhost connectors keep working in development.
+# Updated: 2026-06-28 (AW-2 cookie-jar fix) — ``PinnedTransport`` now RESTORES
+#   the request's original (hostname) URL after the inner transport returns.
+#   ``httpx.AsyncClient`` runs ``cookies.extract_cookies(response)`` AFTER the
+#   transport, keyed on ``response.request.url.host`` — the same request object
+#   the transport mutated in place. Leaving it pointed at the pinned IP stored
+#   every Set-Cookie against the IP, so the cookie jar never replayed on the
+#   next call (whose pre-transport URL is the hostname) — breaking
+#   session/cookie-auth under the guard. Restoring the hostname keeps cookie
+#   attribution on the real host. The connection still went to the pinned IP;
+#   only the post-hoc bookkeeping URL is reset.
 
 from __future__ import annotations
 
@@ -340,18 +350,32 @@ def _build_pinned_transport_cls() -> type:
 
         async def handle_async_request(self, request: Any) -> Any:
             # httpx fixes the Host header at request-build time from the
-            # original URL host, so capture it before rewriting the URL.
-            original_host = request.url.host
+            # original URL host, so capture the original URL before rewriting.
+            original_url = request.url
+            original_host = original_url.host
             # Repoint the connect target at the pinned IP (httpx brackets an
             # IPv6 literal automatically). The Host header is left unchanged.
-            request.url = request.url.copy_with(host=self._pinned_ip)
+            request.url = original_url.copy_with(host=self._pinned_ip)
             request.headers["Host"] = original_host
             # TLS handshake + cert validation use sni_hostname (read by
             # httpcore), so the cert is verified against the real hostname,
             # not the pinned IP.
             request.extensions = dict(request.extensions or {})
             request.extensions["sni_hostname"] = original_host
-            return await self._inner.handle_async_request(request)
+            try:
+                return await self._inner.handle_async_request(request)
+            finally:
+                # Restore the original (hostname) URL on the request object.
+                # ``AsyncClient`` runs ``cookies.extract_cookies(response)``
+                # AFTER the transport, keyed on ``response.request.url.host`` —
+                # which is THIS request object, mutated in place. If we leave it
+                # pointed at the pinned IP, every Set-Cookie is stored against
+                # the IP, so the cookie jar never replays on the next call (the
+                # next request's pre-transport URL is the hostname). Restoring
+                # the hostname here keeps cookie attribution on the real host,
+                # so session/cookie-auth survives the pin. The bytes already
+                # went to the pinned IP — this only fixes post-hoc bookkeeping.
+                request.url = original_url
 
         async def aclose(self) -> None:
             await self._inner.aclose()

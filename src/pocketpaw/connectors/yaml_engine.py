@@ -21,18 +21,42 @@
 # Updated: 2026-06-28 (AW-1 connector egress guard) — execute() now routes its
 #   outbound HTTP through the SSRF egress guard when the
 #   POCKETPAW_CONNECTOR_EGRESS_GUARD flag is on. Before each request it calls
-#   ``assert_egress_allowed(url, {host})`` (https-only, no userinfo/fragment,
-#   host must equal the connector's declared base-URL host, DNS pre-resolve +
-#   internal-range reject) and dials the result through a per-request
-#   pinned-IP client (``PinnedTransport``, ``follow_redirects=False``) so the
-#   connection cannot be re-resolved to an internal address between check and
-#   connect (DNS-rebind TOCTOU). A rejection returns a clean ActionResult error.
-#   The flag defaults OFF (safe rollout) — with it off the pooled client path is
-#   byte-for-byte unchanged. The guard primitive lives in the OSS module
+#   ``assert_egress_allowed(url, allowed_hosts)`` (https-only, no
+#   userinfo/fragment, host must be on the allow-list, DNS pre-resolve +
+#   internal-range reject) and dials the result through a pinned-IP client
+#   (``PinnedTransport``, ``follow_redirects=False``) so the connection cannot
+#   be re-resolved to an internal address between check and connect (DNS-rebind
+#   TOCTOU). A rejection returns a clean ActionResult error. The flag defaults
+#   OFF (safe rollout) — with it off the pooled client path is byte-for-byte
+#   unchanged. The guard primitive lives in the OSS module
 #   ``security.url_validators`` (the OSS->EE import boundary forbids importing
-#   the EE ``_http_guard``); the EE guard re-exports it to stay canonical. For
-#   this task the allow-list is the single declared base-URL host —
-#   multi-host/auth-host support is a later task.
+#   the EE ``_http_guard``); the EE guard re-exports it to stay canonical.
+# Updated: 2026-06-28 (AW-2 multi-host allow-list + concern fixes) —
+#   * ConnectorDef grows ``allowed_hosts: list[str]`` parsed from a top-level
+#     ``allowed_hosts:`` YAML key (explicit operator additions).
+#   * The effective per-call allow-list is now built from THREE sources, not
+#     just the request host: every action's declared base-URL host (resolved
+#     through the SAME ``{template}`` substitution execute() applies, so
+#     ``{FRESHDESK_DOMAIN}.freshdesk.com`` and ``{CONFLUENCE_BASE_URL}`` resolve
+#     to the real runtime host), the auth-endpoint host (``auth.auth_url`` /
+#     ``auth.token_url`` — some connectors authenticate on a different host),
+#     and the explicit ``allowed_hosts``. Hosts are normalized (lowercase,
+#     IPv6 brackets stripped). The RESOLVED request host is checked against this
+#     set — never a template string — so a templated/dynamic base URL is vetted
+#     by its real host at call time. IP-literal and IPv6 base URLs flow through
+#     unchanged (urlsplit handles the brackets; the resolved-IP internal check
+#     still applies).
+#   * Concern fix 1 (fail-CLOSED on config error): ``_egress_guard_enabled``
+#     no longer swallows a settings-load error into "guard off". A settings
+#     failure now logs at error level and FAILS CLOSED (returns True → the
+#     guard runs) so a malformed settings load cannot silently re-open the
+#     SSRF bypass. The dev escape ``POCKETPAW_ALLOW_INTERNAL_URLS`` still lets
+#     localhost connectors through when the guard runs.
+#   * Concern fix 2 (preserve the cookie jar): pinned clients are now CACHED
+#     per resolved host (``_pinned_clients``) instead of built fresh per
+#     request, so the persistent cookie jar survives across calls — session /
+#     cookie-auth connectors keep working under the guard. The cache is closed
+#     alongside the pooled client in disconnect().
 
 from __future__ import annotations
 
@@ -91,6 +115,12 @@ class ConnectorDef:
     # Sense tier — the provider-agnostic capabilities this connector fills
     # (e.g. ["paw.email.v1"]). Empty when the YAML has no ``senses:`` key.
     senses: list[str] = field(default_factory=list)
+    # AW-2 — explicit egress allow-list additions from a top-level
+    # ``allowed_hosts:`` YAML key. These are ADDED on top of the auto-seeded
+    # hosts (declared base-URL host + auth-endpoint host); they never narrow
+    # the list. Empty when the YAML has no ``allowed_hosts:`` key. The effective
+    # per-call allow-list is computed in DirectRESTAdapter._effective_allowed_hosts.
+    allowed_hosts: list[str] = field(default_factory=list)
 
 
 def _parse_surface_profile(raw: Any) -> ConnectorSurfaceProfile | None:
@@ -135,6 +165,16 @@ def parse_connector_yaml(path: Path) -> ConnectorDef:
                 f"connector {name!r} declares invalid sense {sense_id!r}: {e}"
             ) from e
 
+    # AW-2 — explicit egress allow-list additions. Tolerate a missing key (the
+    # common case) and a non-list value (ignored) so connectors without the key
+    # parse byte-identically. Each entry is coerced to a stripped string.
+    raw_allowed = raw.get("allowed_hosts", [])
+    allowed_hosts = (
+        [str(h).strip() for h in raw_allowed if str(h).strip()]
+        if isinstance(raw_allowed, list)
+        else []
+    )
+
     return ConnectorDef(
         name=name,
         display_name=raw.get("display_name", raw.get("name", path.stem)),
@@ -145,6 +185,7 @@ def parse_connector_yaml(path: Path) -> ConnectorDef:
         sync=raw.get("sync", {}),
         surface_profile=_parse_surface_profile(raw.get("surface_profile")),
         senses=senses,
+        allowed_hosts=allowed_hosts,
     )
 
 
@@ -166,6 +207,17 @@ class DirectRESTAdapter:
         # in the client's cookie jar for the next request. ``Any`` avoids a
         # module-level httpx import (it stays inside execute()/_get_client).
         self._client: Any | None = None
+        # AW-2 concern fix 2 — per-resolved-host pinned clients. Building a
+        # fresh PinnedTransport client per request (AW-1) dropped the cookie
+        # jar, breaking session/cookie-auth connectors under the guard. Caching
+        # one pinned client per resolved host preserves that host's cookie jar
+        # across calls while keeping the IP pin (and DNS-rebind safety) intact.
+        # Closed alongside ``_client`` in disconnect().
+        self._pinned_clients: dict[str, Any] = {}
+        # AW-2 — per-workspace egress allow-list additions, populated by
+        # connect() from the config blob (WorkspaceConnector.allowed_hosts).
+        # Layered on top of the YAML-declared hosts in _effective_allowed_hosts.
+        self._ws_allowed_hosts: list[str] = []
 
     async def _get_client(self) -> Any:
         """Return the per-adapter httpx.AsyncClient, building it on first use."""
@@ -177,25 +229,135 @@ class DirectRESTAdapter:
 
     @staticmethod
     def _egress_guard_enabled() -> bool:
-        """True when POCKETPAW_CONNECTOR_EGRESS_GUARD is set (settings flag)."""
+        """Whether to route this request through the SSRF egress guard.
+
+        Returns the ``connector_egress_guard`` settings flag (default False).
+
+        AW-2 concern fix 1 — FAIL CLOSED, not open. AW-1 swallowed any
+        ``get_settings()`` error into ``False`` (guard off), so a malformed
+        settings load would silently re-open the SSRF bypass the guard exists to
+        close. Here a settings-load failure is logged at error level and FAILS
+        CLOSED (returns True → the guard runs). The cost of a false-closed is a
+        blocked connector call with a clear error; the cost of a false-open is a
+        silent SSRF hole, so closed is the safe default. The dev escape
+        ``POCKETPAW_ALLOW_INTERNAL_URLS`` still lets localhost through when the
+        guard runs, so local development is not broken by failing closed.
+        """
         try:
             from pocketpaw.config import get_settings
 
             return bool(get_settings().connector_egress_guard)
-        except Exception:  # noqa: BLE001 — never let a config-load issue break execute()
-            return False
+        except Exception:  # noqa: BLE001 — a config-load failure must not silently disable the guard
+            import logging
+
+            logging.getLogger(__name__).error(
+                "connector egress guard: settings load failed; FAILING CLOSED "
+                "(routing through the guard) so the SSRF bypass cannot silently re-open",
+                exc_info=True,
+            )
+            return True
+
+    def _substitute_host_template(self, value: str) -> str:
+        """Apply the SAME ``{placeholder}`` substitution execute() applies to a
+        declared URL, so a templated base URL resolves to its real runtime host.
+
+        Mirrors execute()'s loop: a ``{placeholder}`` is filled from a stored
+        credential first, then nothing else (params are per-call and not known
+        when seeding the static allow-list — the request host itself covers the
+        param-templated case at check time). An unresolved placeholder is left
+        as-is; its host is dropped by the caller (it can't be a real hostname).
+        """
+        import re
+
+        out = value
+        for placeholder in re.findall(r"\{(\w+)\}", out):
+            if placeholder in self._credentials:
+                out = out.replace(f"{{{placeholder}}}", self._credentials[placeholder])
+        return out
+
+    def _effective_allowed_hosts(self) -> set[str]:
+        """Build the connector's effective egress allow-list (AW-2).
+
+        Auto-seeded from THREE sources, normalized (lowercase, IPv6 brackets
+        stripped), with empty/unresolved entries dropped:
+
+        1. Every action's declared base-URL host, taken AFTER the same
+           ``{template}`` credential substitution execute() performs — so a
+           templated host (``{FRESHDESK_DOMAIN}.freshdesk.com``,
+           ``{CONFLUENCE_BASE_URL}``) contributes its real runtime host, never a
+           template string. The ``BASE_URL`` credential's host (the
+           build-from-base path) is included too.
+        2. The auth-endpoint host — ``auth.auth_url`` / ``auth.token_url`` — for
+           connectors that authenticate on a different host than the API.
+        3. Explicit operator additions — from ``allowed_hosts:`` in the YAML
+           (all workspaces) and the per-workspace ``WorkspaceConnector``
+           ``allowed_hosts`` (captured by connect()). These never narrow.
+
+        Used to check the RESOLVED request host at call time; a host outside
+        this set is rejected by ``assert_egress_allowed``.
+        """
+        from urllib.parse import urlsplit
+
+        def _host_of(url: str) -> str | None:
+            url = self._substitute_host_template(url).strip()
+            if not url or "{" in url:  # unresolved template — not a real host
+                return None
+            # A bare ``host/path`` (no scheme) lands the host in ``.path``;
+            # prepend a scheme so urlsplit populates ``.hostname``.
+            parts = urlsplit(url if "://" in url else f"https://{url}")
+            host = parts.hostname
+            return host.lower().strip("[]") if host else None
+
+        hosts: set[str] = set()
+
+        # 1. Declared action base-URL hosts + the BASE_URL credential host.
+        for act in self._def.actions:
+            url = act.get("url", "")
+            if url:
+                h = _host_of(str(url))
+                if h:
+                    hosts.add(h)
+        base_cred = self._credentials.get("BASE_URL", "")
+        if base_cred:
+            h = _host_of(base_cred)
+            if h:
+                hosts.add(h)
+
+        # 2. Auth-endpoint host (auth host may differ from the API host).
+        auth = self._def.auth or {}
+        for key in ("auth_url", "token_url", "authorization_url", "token_endpoint"):
+            endpoint = auth.get(key)
+            if endpoint:
+                h = _host_of(str(endpoint))
+                if h:
+                    hosts.add(h)
+
+        # 3. Explicit operator additions — from the connector YAML
+        # (``allowed_hosts:``) and from the per-workspace WorkspaceConnector row
+        # (folded into config by the cloud layer, captured in connect()).
+        for h_raw in (*self._def.allowed_hosts, *self._ws_allowed_hosts):
+            h = _host_of(str(h_raw))
+            if h:
+                hosts.add(h)
+
+        return hosts
 
     async def _egress_client(self, url: str) -> Any:
         """Validate ``url`` against the egress policy and return a pinned client.
 
-        Closes the connector SSRF bypass (AW-1): enforces https-only, no
-        userinfo/fragment, the host must equal the connector's own declared
-        base-URL host (the allow-list for this task is that single host), DNS
-        pre-resolve + internal-range reject, then dials the vetted/pinned IP via
-        a per-request ``PinnedTransport`` client with redirects disabled — so
-        the connection cannot be re-resolved to an internal address between the
-        check and the connect (DNS-rebind TOCTOU). The caller MUST close the
-        returned client (it is per-request, not the pooled adapter client).
+        Closes the connector SSRF bypass (AW-1) and adds the multi-host
+        allow-list (AW-2): enforces https-only, no userinfo/fragment, the
+        RESOLVED request host must be on the connector's effective allow-list
+        (declared base-URL host(s) + auth-endpoint host + explicit
+        ``allowed_hosts``), DNS pre-resolve + internal-range reject, then dials
+        the vetted/pinned IP via a ``PinnedTransport`` client with redirects
+        disabled — so the connection cannot be re-resolved to an internal
+        address between the check and the connect (DNS-rebind TOCTOU).
+
+        The pinned client is CACHED per resolved host (AW-2 concern fix 2) so
+        the cookie jar survives across calls — session/cookie-auth connectors
+        keep working under the guard. The cache is closed in disconnect(); the
+        caller MUST NOT close the returned client.
 
         Raises ``EgressError`` (a ``ValueError``) when the URL is disallowed.
         """
@@ -206,16 +368,33 @@ class DirectRESTAdapter:
             assert_egress_allowed,
         )
 
-        host = httpx.URL(url).host
-        # For this task the allow-list is exactly the connector's declared
-        # base-URL host. Multi-host / auth-host allow-lists are a later task.
-        target = await assert_egress_allowed(url, {host})
+        # Check the RESOLVED request host against the connector's effective
+        # allow-list. ``url`` already had its {templates} substituted by
+        # execute(), so this is a concrete host, never a template string.
+        allowed = self._effective_allowed_hosts()
+        target = await assert_egress_allowed(url, allowed)
+
+        # Cache one pinned client per resolved host so the cookie jar persists
+        # across calls (concern fix 2). Key on the host so the cookie jar is
+        # reused even if DNS later returns a different IP. ``assert_egress_allowed``
+        # above STILL re-resolves and re-checks the host on every call, so the
+        # security boundary (host on the allow-list + currently resolving to a
+        # non-internal IP) holds per request even though the cached transport
+        # keeps dialing the first call's pinned IP. That stale-pin is an
+        # availability edge (a host migrating IPs mid-session), not a security
+        # one — and re-pinning per call would discard the cookie jar, the exact
+        # regression this cache fixes. Rebuild only if the cached client closed.
+        cached = self._pinned_clients.get(target.host)
+        if cached is not None and not cached.is_closed:
+            return cached
         transport = PinnedTransport(target.pinned_ip)
-        return httpx.AsyncClient(
+        client = httpx.AsyncClient(
             timeout=30.0,
             follow_redirects=False,
             transport=transport,
         )
+        self._pinned_clients[target.host] = client
+        return client
 
     @property
     def name(self) -> str:
@@ -240,6 +419,18 @@ class DirectRESTAdapter:
                     message=f"Missing required credential: {key}",
                 )
 
+        # AW-2 — per-workspace egress allow-list additions. The cloud layer
+        # folds WorkspaceConnector.allowed_hosts into the config blob under
+        # ``allowed_hosts``; capture it so _effective_allowed_hosts() can layer
+        # these operator additions on top of the YAML-declared hosts. Tolerate a
+        # non-list value (ignored) so a malformed config can't break connect().
+        ws_allowed = config.get("allowed_hosts", [])
+        self._ws_allowed_hosts = (
+            [str(h).strip() for h in ws_allowed if str(h).strip()]
+            if isinstance(ws_allowed, list)
+            else []
+        )
+
         self._connected = True
         tables = []
         if self._def.sync.get("table"):
@@ -260,6 +451,12 @@ class DirectRESTAdapter:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        # AW-2 — close every cached pinned client (one per resolved host) and
+        # drop their cookie jars too. They live across calls now, so disconnect
+        # is the single place they are torn down.
+        for client in self._pinned_clients.values():
+            await client.aclose()
+        self._pinned_clients.clear()
         return True
 
     async def actions(self) -> list[ActionSchema]:
@@ -361,11 +558,13 @@ class DirectRESTAdapter:
                 else:
                     body_data[key] = val
 
-        # AW-1 egress guard: when enabled, validate + pin the target and use a
-        # per-request client; when off, reuse the pooled adapter client exactly
-        # as before. ``guarded_client`` is closed in the finally block.
+        # AW-1/AW-2 egress guard: when enabled, validate the resolved request
+        # host against the connector's effective allow-list, pin the vetted IP,
+        # and use a per-resolved-host CACHED client (so the cookie jar persists
+        # across calls); when off, reuse the pooled adapter client exactly as
+        # before. The guarded client is cached on the adapter and closed in
+        # disconnect() — NOT per request — so it is not torn down here.
         guarded = self._egress_guard_enabled()
-        guarded_client = None
 
         try:
             import httpx
@@ -378,10 +577,9 @@ class DirectRESTAdapter:
 
             if guarded:
                 try:
-                    guarded_client = await self._egress_client(url)
+                    client = await self._egress_client(url)
                 except EgressError as e:
                     return ActionResult(success=False, error=f"Blocked by egress guard: {e}")
-                client = guarded_client
             else:
                 # Reuse the per-adapter client: pooled connections + persistent
                 # cookie jar across calls. Closed in disconnect().
@@ -445,11 +643,6 @@ class DirectRESTAdapter:
             return ActionResult(success=False, error=f"Request failed: {e}")
         except Exception as e:
             return ActionResult(success=False, error=str(e))
-        finally:
-            # The guarded client is per-request (pinned to this call's IP), so
-            # close it here. The pooled adapter client is left open for reuse.
-            if guarded_client is not None:
-                await guarded_client.aclose()
 
     def _build_auth_headers(self) -> dict[str, str]:
         """Build auth headers from stored credentials based on auth method."""

@@ -15,6 +15,21 @@
 #       the POCKETPAW_CONNECTOR_EGRESS_GUARD flag.
 # DNS is mocked throughout (no network); ``POCKETPAW_ALLOW_INTERNAL_URLS`` is
 # pinned per-test so the dev escape never leaks across cases.
+# Updated: 2026-06-28 (AW-2 multi-host allow-list + concern fixes) — added
+#   ``TestEffectiveAllowList`` and ``TestConnectorMultiHost`` proving:
+#     * a two-host connector (auth host on auth.auth_url ≠ the API host) calls
+#       BOTH hosts successfully under the guard — both are auto-seeded;
+#     * a templated base URL ({FOO}.api.example.com) resolves at call time and
+#       is checked by its RESOLVED host (not the template string);
+#     * a request to a host outside the connector's declared topology is
+#       blocked with a clean "egress guard" error even though it resolves to a
+#       public IP (the allow-list is now meaningful, not tautological);
+#     * a cookie/session-auth connector keeps its cookie jar across two calls
+#       under the guard (the pinned client is cached per host, concern fix 2);
+#     * ``_egress_guard_enabled`` FAILS CLOSED (returns True) on a settings-load
+#       error instead of silently disabling the guard (concern fix 1);
+#     * explicit ``allowed_hosts:`` (YAML) and per-workspace allowed_hosts (via
+#       connect() config) are layered on top of the auto-seeded hosts.
 
 from __future__ import annotations
 
@@ -253,3 +268,348 @@ class TestConnectorEgressSmoke:
         result = await adapter.execute("fetch", {"path": "orders"})
         assert result.success is True, result.error
         assert result.data == {"pooled": True}
+
+
+# ---------------------------------------------------------------------------
+# AW-2 — multi-host allow-list, edge cases, and the two AW-1 concern fixes.
+# ---------------------------------------------------------------------------
+
+
+def _force_guard(monkeypatch, enabled: bool) -> None:
+    """Force the egress-guard flag without a full ``Settings.load()``.
+
+    Same rationale as ``TestConnectorEgressSmoke._force_guard`` — patching the
+    classmethod keeps these tests about guard behavior, not the settings loader
+    (the workspace ``.env`` legitimately points URL fields at localhost).
+    """
+    from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
+
+    monkeypatch.setattr(DirectRESTAdapter, "_egress_guard_enabled", staticmethod(lambda: enabled))
+
+
+class TestEffectiveAllowList:
+    """Unit-test the allow-list builder: auto-seed from declared base-URL host
+    + auth-endpoint host + explicit additions, with template resolution."""
+
+    def _adapter(self, **kw):
+        from pocketpaw.connectors.yaml_engine import ConnectorDef, DirectRESTAdapter
+
+        cdef = ConnectorDef(name="demo", display_name="Demo", **kw)
+        return DirectRESTAdapter(cdef)
+
+    def test_seeds_from_declared_action_hosts(self):
+        adapter = self._adapter(
+            actions=[
+                {"name": "a", "url": "https://api.example.com/v1/x"},
+                {"name": "b", "url": "https://api.example.com/v1/y"},
+            ]
+        )
+        assert adapter._effective_allowed_hosts() == {"api.example.com"}
+
+    def test_seeds_auth_endpoint_host_distinct_from_api(self):
+        # Two-host connector: API on api.example.com, auth on auth.example.com.
+        adapter = self._adapter(
+            auth={"method": "bearer", "auth_url": "https://auth.example.com/oauth/token"},
+            actions=[{"name": "a", "url": "https://api.example.com/v1/x"}],
+        )
+        assert adapter._effective_allowed_hosts() == {"api.example.com", "auth.example.com"}
+
+    def test_resolves_templated_host_from_credentials(self):
+        # A templated base URL resolves through the SAME substitution execute()
+        # applies — the allow-list carries the REAL host, not "{FOO}...".
+        adapter = self._adapter(
+            actions=[{"name": "a", "url": "https://{REGION}.freshdesk.com/api/v2/tickets"}]
+        )
+        adapter._credentials = {"REGION": "acme"}
+        assert adapter._effective_allowed_hosts() == {"acme.freshdesk.com"}
+
+    def test_unresolved_template_is_dropped_not_allowlisted(self):
+        # No credential to fill {REGION} → the template host is dropped, never
+        # added as a literal "{region}.freshdesk.com".
+        adapter = self._adapter(actions=[{"name": "a", "url": "https://{REGION}.freshdesk.com/x"}])
+        assert adapter._effective_allowed_hosts() == set()
+
+    def test_base_url_credential_host_is_seeded(self):
+        # The build-from-BASE_URL path host is allow-listed too.
+        adapter = self._adapter(actions=[{"name": "a"}])
+        adapter._credentials = {"BASE_URL": "https://gitlab.example.com"}
+        assert adapter._effective_allowed_hosts() == {"gitlab.example.com"}
+
+    def test_explicit_yaml_allowed_hosts_layered_on_top(self):
+        adapter = self._adapter(
+            actions=[{"name": "a", "url": "https://api.example.com/x"}],
+            allowed_hosts=["cdn.example.com", "Mirror.Example.COM"],
+        )
+        assert adapter._effective_allowed_hosts() == {
+            "api.example.com",
+            "cdn.example.com",
+            "mirror.example.com",  # normalized lowercase
+        }
+
+    def test_workspace_allowed_hosts_from_connect_config(self):
+        adapter = self._adapter(actions=[{"name": "a", "url": "https://api.example.com/x"}])
+        # Simulate what connect() captures from the WorkspaceConnector config.
+        adapter._ws_allowed_hosts = ["extra.example.com"]
+        assert adapter._effective_allowed_hosts() == {"api.example.com", "extra.example.com"}
+
+    def test_ipv6_literal_base_url_host_normalized(self):
+        # An IPv6-literal base URL keeps its host (brackets stripped) so a
+        # request to that literal is allow-listed; the resolved-IP internal
+        # check still applies at request time.
+        adapter = self._adapter(actions=[{"name": "a", "url": "https://[2606:2800:220:1::1]/x"}])
+        assert adapter._effective_allowed_hosts() == {"2606:2800:220:1::1"}
+
+
+class TestConnectorMultiHost:
+    """End-to-end-ish connector.execute() with the guard on and DNS mocked."""
+
+    def _adapter(self, monkeypatch, *, base_url="", actions=None, auth=None, **kw):
+        from pocketpaw.connectors.yaml_engine import ConnectorDef, DirectRESTAdapter
+
+        cdef = ConnectorDef(
+            name="demo",
+            display_name="Demo",
+            auth=auth or {"method": "none"},
+            actions=actions or [{"name": "fetch", "method": "GET"}],
+            **kw,
+        )
+        adapter = DirectRESTAdapter(cdef)
+        adapter._connected = True
+        if base_url:
+            adapter._credentials = {"BASE_URL": base_url}
+        return adapter
+
+    async def test_two_host_connector_both_hosts_succeed(self, monkeypatch):
+        # auth host ≠ API host; both are seeded so a call to EITHER works.
+        _force_guard(monkeypatch, True)
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "false")
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            _fake_getaddrinfo(
+                {
+                    "api.example.com": ["93.184.216.34"],
+                    "auth.example.com": ["93.184.216.35"],
+                }
+            ),
+        )
+
+        async def _fake_inner(self, request):  # noqa: ANN001
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"content-type": "application/json"},
+                json={"host": request.headers.get("Host")},
+            )
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _fake_inner)
+
+        adapter = self._adapter(
+            monkeypatch,
+            auth={"method": "none", "auth_url": "https://auth.example.com/oauth/token"},
+            actions=[
+                {"name": "api_call", "method": "GET", "url": "https://api.example.com/v1/orders"},
+                {
+                    "name": "auth_call",
+                    "method": "GET",
+                    "url": "https://auth.example.com/oauth/token",
+                },
+            ],
+        )
+
+        api = await adapter.execute("api_call", {})
+        assert api.success is True, api.error
+        assert api.data == {"host": "api.example.com"}
+
+        auth = await adapter.execute("auth_call", {})
+        assert auth.success is True, auth.error
+        assert auth.data == {"host": "auth.example.com"}
+
+    async def test_templated_host_resolved_and_allowed(self, monkeypatch):
+        # The connector's base URL is templated; it resolves to a concrete host
+        # that IS its own declared host, so the guard passes by RESOLVED host.
+        _force_guard(monkeypatch, True)
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "false")
+        monkeypatch.setattr(
+            socket, "getaddrinfo", _fake_getaddrinfo({"acme.freshdesk.com": ["93.184.216.34"]})
+        )
+
+        async def _fake_inner(self, request):  # noqa: ANN001
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"content-type": "application/json"},
+                json={"ok": True},
+            )
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _fake_inner)
+
+        adapter = self._adapter(
+            monkeypatch,
+            actions=[
+                {
+                    "name": "tickets",
+                    "method": "GET",
+                    "url": "https://{REGION}.freshdesk.com/api/v2/tickets",
+                }
+            ],
+        )
+        adapter._credentials = {"REGION": "acme"}
+        result = await adapter.execute("tickets", {})
+        assert result.success is True, result.error
+
+    async def test_host_outside_declared_topology_blocked(self, monkeypatch):
+        # The connector declares api.example.com, but the action URL carries a
+        # PER-CALL {host} placeholder filled from params at call time (a classic
+        # SSRF vector: caller-controlled host). The substituted host is NOT in
+        # the connector's declared topology, so the allow-list rejects it BEFORE
+        # any connect — proof the list is meaningful, not the request host echoed
+        # back. evil.example.com resolves to a PUBLIC IP, so it is the allow-list
+        # (not the internal-IP check) that does the blocking.
+        _force_guard(monkeypatch, True)
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "false")
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            _fake_getaddrinfo(
+                {"api.example.com": ["93.184.216.34"], "evil.example.com": ["93.184.216.99"]}
+            ),
+        )
+
+        adapter = self._adapter(
+            monkeypatch,
+            actions=[
+                # The declared host is api.example.com; {host} is a call-time
+                # param, never part of the static allow-list seed.
+                {"name": "fetch", "method": "GET", "url": "https://{host}/v1/x"},
+            ],
+        )
+        # Seed a credential so the connector's OWN declared host is allow-listed,
+        # then drive the request to a different, attacker-supplied host.
+        adapter._credentials = {"BASE_URL": "https://api.example.com"}
+        result = await adapter.execute("fetch", {"host": "evil.example.com"})
+        assert result.success is False
+        assert "egress guard" in result.error.lower()
+        assert "allow-list" in result.error.lower()
+
+    async def test_cookie_jar_persists_across_calls_under_guard(self, monkeypatch):
+        # Concern fix 2: the pinned client is cached per host, so a Set-Cookie
+        # from call 1 is sent back on call 2 (session/cookie-auth stays working).
+        _force_guard(monkeypatch, True)
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "false")
+        monkeypatch.setattr(
+            socket, "getaddrinfo", _fake_getaddrinfo({"api.example.com": ["93.184.216.34"]})
+        )
+
+        seen_cookies: list[str | None] = []
+
+        async def _fake_inner(self, request):  # noqa: ANN001
+            seen_cookies.append(request.headers.get("Cookie"))
+            # First response plants a session cookie; httpx stores it in the
+            # client's cookie jar and replays it on the next request.
+            return httpx.Response(
+                200,
+                request=request,
+                headers={
+                    "content-type": "application/json",
+                    "set-cookie": "sessionid=abc123; Path=/",
+                },
+                json={"ok": True},
+            )
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _fake_inner)
+
+        adapter = self._adapter(
+            monkeypatch,
+            actions=[{"name": "fetch", "method": "GET", "url": "https://api.example.com/v1/x"}],
+        )
+
+        r1 = await adapter.execute("fetch", {})
+        r2 = await adapter.execute("fetch", {})
+        assert r1.success is True and r2.success is True
+
+        # Call 1 sent no cookie; call 2 replayed the cookie the jar stored —
+        # only possible if the SAME (cached) pinned client served both calls.
+        assert seen_cookies[0] is None
+        assert seen_cookies[1] == "sessionid=abc123"
+        # And exactly one pinned client was cached for the host.
+        assert list(adapter._pinned_clients.keys()) == ["api.example.com"]
+        await adapter.disconnect("p")
+        # disconnect tears the cache down.
+        assert adapter._pinned_clients == {}
+
+    async def test_workspace_allowed_hosts_via_connect_config(self, monkeypatch):
+        # A host NOT in the YAML but added per-workspace (through connect config)
+        # is allow-listed — proves the WorkspaceConnector.allowed_hosts wiring.
+        _force_guard(monkeypatch, True)
+        monkeypatch.setenv("POCKETPAW_ALLOW_INTERNAL_URLS", "false")
+        monkeypatch.setattr(
+            socket, "getaddrinfo", _fake_getaddrinfo({"mirror.example.com": ["93.184.216.34"]})
+        )
+
+        async def _fake_inner(self, request):  # noqa: ANN001
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"content-type": "application/json"},
+                json={"ok": True},
+            )
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _fake_inner)
+
+        from pocketpaw.connectors.yaml_engine import ConnectorDef, DirectRESTAdapter
+
+        cdef = ConnectorDef(
+            name="demo",
+            display_name="Demo",
+            auth={"method": "none"},
+            actions=[{"name": "fetch", "method": "GET", "url": "https://mirror.example.com/x"}],
+        )
+        adapter = DirectRESTAdapter(cdef)
+        # connect() captures allowed_hosts from the config blob the cloud layer
+        # folds WorkspaceConnector.allowed_hosts into.
+        await adapter.connect("p", {"allowed_hosts": ["mirror.example.com"]})
+        result = await adapter.execute("fetch", {})
+        assert result.success is True, result.error
+
+
+class TestEgressGuardFailsClosed:
+    """Concern fix 1: a settings-load error must NOT silently disable the guard."""
+
+    def test_fails_closed_on_settings_error(self, monkeypatch, caplog):
+        import logging
+
+        from pocketpaw.connectors import yaml_engine
+        from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
+
+        def _boom():
+            raise RuntimeError("settings blew up")
+
+        # Patch get_settings at its source so the import inside the method hits
+        # the raising stub.
+        monkeypatch.setattr(yaml_engine, "get_settings", _boom, raising=False)
+        import pocketpaw.config as config_mod
+
+        monkeypatch.setattr(config_mod, "get_settings", _boom)
+
+        with caplog.at_level(logging.ERROR):
+            enabled = DirectRESTAdapter._egress_guard_enabled()
+
+        # FAIL CLOSED — guard runs (True) rather than silently turning off.
+        assert enabled is True
+        assert any("FAILING CLOSED" in rec.message for rec in caplog.records)
+
+    def test_returns_flag_when_settings_ok(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import pocketpaw.config as config_mod
+        from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
+
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: SimpleNamespace(connector_egress_guard=True)
+        )
+        assert DirectRESTAdapter._egress_guard_enabled() is True
+        monkeypatch.setattr(
+            config_mod, "get_settings", lambda: SimpleNamespace(connector_egress_guard=False)
+        )
+        assert DirectRESTAdapter._egress_guard_enabled() is False

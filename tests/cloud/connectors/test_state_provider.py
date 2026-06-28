@@ -12,6 +12,12 @@
 #   test: a disabled row's credentials must never reach the legacy fallback's
 #   connect() (the fallback doc read now filters enabled == True), so disable
 #   revokes on the HTTP execute path too, not just the durable seam.
+# Updated: 2026-06-28 (AW-2 connector multi-host egress allow-list) — added
+#   TestCloudStoreAllowedHosts: _get_cloud folds the row's ``allowed_hosts``
+#   field into the returned config dict (so the per-workspace egress additions
+#   reach the adapter's connect() via the config channel), and _set_cloud
+#   strips the key back out before persisting (the dedicated field stays the
+#   single source of truth; the round-trip never duplicates it into config).
 
 from __future__ import annotations
 
@@ -40,6 +46,7 @@ async def _seed_doc(
     pocket_id: str | None = None,
     enabled: bool = True,
     config: dict | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> WorkspaceConnector:
     doc = WorkspaceConnector(
         workspace=workspace,
@@ -48,6 +55,7 @@ async def _seed_doc(
         scope=scope,
         pocket_id=pocket_id,
         config=config if config is not None else {"GITHUB_TOKEN": "ghp_test"},
+        allowed_hosts=allowed_hosts if allowed_hosts is not None else [],
     )
     await doc.insert()
     return doc
@@ -252,6 +260,55 @@ class TestCloudStoreOwnership:
     def test_list_returns_file_rows_only(self, cloud_store):
         cloud_store.set("testsvc", "default", {"k": "v"})
         assert cloud_store.list() == [("testsvc", "default")]
+
+
+class TestCloudStoreAllowedHosts:
+    """AW-2 — the per-workspace egress allow-list field rides the config channel
+    on read and is stripped back out on write."""
+
+    @pytest.mark.asyncio
+    async def test_get_folds_allowed_hosts_into_config(
+        self,
+        mongo_db,  # noqa: ARG002 — wires Beanie
+        cloud_store,
+    ):
+        await _seed_doc(
+            config={"GITHUB_TOKEN": "x"},
+            allowed_hosts=["mirror.example.com", "cdn.example.com"],
+        )
+        got = await cloud_store.get("github", "ws:ws-1")
+        # The dedicated field is folded into config so it reaches connect().
+        assert got == {
+            "GITHUB_TOKEN": "x",
+            "allowed_hosts": ["mirror.example.com", "cdn.example.com"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_get_omits_key_when_no_allowed_hosts(
+        self,
+        mongo_db,  # noqa: ARG002
+        cloud_store,
+    ):
+        # Empty allowed_hosts → no key added (config stays byte-identical).
+        await _seed_doc(config={"GITHUB_TOKEN": "x"}, allowed_hosts=[])
+        assert await cloud_store.get("github", "ws:ws-1") == {"GITHUB_TOKEN": "x"}
+
+    @pytest.mark.asyncio
+    async def test_set_strips_allowed_hosts_from_persisted_config(
+        self,
+        mongo_db,  # noqa: ARG002
+        cloud_store,
+    ):
+        # A round-trip (get folds in, set writes back) must NOT duplicate the
+        # key into the stored config blob — the field stays the source of truth.
+        doc = await _seed_doc(config={"GITHUB_TOKEN": "x"}, allowed_hosts=["mirror.example.com"])
+        folded = await cloud_store.get("github", "ws:ws-1")
+        assert "allowed_hosts" in folded  # present on read
+        await cloud_store.set("github", "ws:ws-1", folded)
+        refreshed = await WorkspaceConnector.get(doc.id)
+        # Stored config has the key stripped; the dedicated field is untouched.
+        assert refreshed.config == {"GITHUB_TOKEN": "x"}
+        assert refreshed.allowed_hosts == ["mirror.example.com"]
 
     @pytest.mark.asyncio
     async def test_get_degrades_softly_when_db_unavailable(self, cloud_store, monkeypatch):
