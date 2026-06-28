@@ -160,6 +160,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud._core.ee_auth_bridge import EEAuthBridgeMiddleware
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
+    from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware
     from pocketpaw_ee.cloud._core.timing import TimingMiddleware
 
     # Boot-time secret for the loopback internal bypass on the
@@ -173,7 +174,9 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
-    #   CSRF → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    #   CSRF → RequestLog → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    # RequestLogMiddleware sits outside Timing so it can log every request
+    # (including timing data) to the workspace audit for the /audit page.
     # The bridge marks genuine *platform admins* (``is_superuser``) as
     # ``full_access`` before the OSS AuthMiddleware reads it, so platform
     # admins reach OSS routes (settings/channels/...) without 403'ing on
@@ -186,6 +189,12 @@ def mount_cloud(app: FastAPI) -> None:
     # middleware calls — TimingMiddleware would then run outermost).
     app.add_middleware(EEAuthBridgeMiddleware)
     app.add_middleware(TimingMiddleware)
+
+    # Request-log middleware — records every API request to the workspace
+    # audit (MongoDB) so the /audit page can show request logs, failures,
+    # and timing. Sits outside TimingMiddleware so it wraps the full
+    # handler chain including the timing measurement.
+    app.add_middleware(RequestLogMiddleware)
 
     # CSRF middleware — outermost on inbound, runs before any route.
     # Cookie-auth callers must echo X-CSRF-Token; Bearer-auth callers
@@ -217,6 +226,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
@@ -229,6 +239,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
+    from pocketpaw_ee.cloud.request_log.router import router as request_log_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
@@ -240,6 +251,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
+    app.include_router(request_log_router, prefix="/api/v1")
+    app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")

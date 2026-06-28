@@ -119,6 +119,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 # Same server as the publish tool — the create + publish hops live together so
@@ -295,6 +297,15 @@ async def _create_landing_site_handler(args: dict) -> dict:
             "create_landing_site requires workspace and user context (call from a "
             "cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_landing_site",
+        status="ok",
+        ok=True,
+    )
 
     content = args.get("content")
     if not isinstance(content, dict) or not content:
@@ -477,6 +488,15 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "create_svelte_site requires workspace and user context (call from a "
             "cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_svelte_site",
+        status="ok",
+        ok=True,
+    )
 
     source = args.get("source")
     if not isinstance(source, dict) or not source:
@@ -684,6 +704,15 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             "edit_svelte_component requires workspace and user context (call from "
             "a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_svelte_component",
+        status="ok",
+        ok=True,
+    )
 
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:

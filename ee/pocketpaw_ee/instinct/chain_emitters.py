@@ -38,6 +38,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pocketpaw_ee.agent.mcp_servers._audit import record_decision
+
 logger = logging.getLogger(__name__)
 
 
@@ -210,6 +212,21 @@ def _emit_human_corrected(
             exc_info=True,
         )
         return None
+    # Fire a workspace audit event for this human decision so it appears
+    # in the activity feed under "decisions".
+    record_decision(
+        workspace_id=workspace_id,
+        actor_id=user_id or "agent",
+        pocket_id=pocket_id,
+        decision_action="human.corrected",
+        outcome=disposition,  # "accepted", "edited", or "rejected"
+        metadata={
+            "disposition": disposition,
+            "note": note or "",
+            "action_id": str(getattr(action, "id", "") or ""),
+            "correlation_id": str(correlation_id),
+        },
+    )
     return entry.id
 
 
@@ -267,6 +284,22 @@ def _emit_decision_completed_rejected(
             correlation_id,
             exc_info=True,
         )
+    # Fire a workspace audit event for this rejection so it appears
+    # in the activity feed under "decisions".
+    record_decision(
+        workspace_id=workspace_id,
+        actor_id=user_id or "agent",
+        pocket_id=pocket_id,
+        decision_action="decision.completed",
+        outcome="rejected",
+        metadata={
+            "passed": False,
+            "action_outcome": "rejected",
+            "reason": reason or "",
+            "action_id": str(getattr(action, "id", "") or ""),
+            "correlation_id": str(correlation_id) if correlation_id else "",
+        },
+    )
 
 
 def _emit_policy_evaluated_approved(
@@ -329,3 +362,17 @@ def _emit_policy_evaluated_approved(
             correlation_id,
             exc_info=True,
         )
+    # Fire a workspace audit event for the post-approval policy evaluation.
+    record_decision(
+        workspace_id=workspace_id,
+        actor_id=user_id or "agent",
+        pocket_id=pocket_id,
+        decision_action="policy.evaluated",
+        outcome="approved",
+        metadata={
+            "policy": "approve_per_row",
+            "passed": True,
+            "evaluator": "instinct",
+            "correlation_id": str(correlation_id),
+        },
+    )

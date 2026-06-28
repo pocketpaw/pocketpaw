@@ -812,12 +812,25 @@ async def _drive_agent_loop(
         yield ("error", {"code": "agent.load_failed", "message": str(e)})
         return
 
+    # Bail early if /agent/stop was called while we loaded the agent
+    # instance — without this the while-loop cancel check below never
+    # runs if build_knowledge_context or pool.run blocks for many
+    # seconds, and the SSE generator stays alive waiting for a terminal
+    # event that never arrives.
+    if await is_cancelled():
+        return
+
     knowledge_context = await build_knowledge_context(
         ctx,
         user_message=user_content,
         attachments=attachments_in,
         mentions=mentions_in,
     )
+    # Bail early if /agent/stop was called while knowledge context was
+    # being built (another blocking point before the cancel-check loop).
+    if await is_cancelled():
+        return
+
     backend_name = (
         instance.config.get("backend", "claude_agent_sdk") if hasattr(instance, "config") else None
     )
@@ -938,7 +951,14 @@ async def _drive_agent_loop(
             wait_set: set[asyncio.Task[Any]] = {next_queue_task}
             if next_event_task is not None:
                 wait_set.add(next_event_task)
-            done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            # 1-second timeout so cancellation is checked periodically during
+            # long-running LLM calls or tool executions — without a timeout the
+            # loop can block here indefinitely (no events yielded → execute_run's
+            # post-loop cancel check never runs → /agent/stop returns 200 but the
+            # SSE stream stays alive).
+            done, _pending = await asyncio.wait(
+                wait_set, return_when=asyncio.FIRST_COMPLETED, timeout=1.0
+            )
             if next_queue_task in done:
                 yield next_queue_task.result()
                 for ev in _drain_side_channel():
@@ -1047,9 +1067,10 @@ async def _iter_agent_events(
     spec: RunSpec, ctx: ScopeContext
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     # Transport writes happen only in ``execute_run`` so the seam stays clean.
+    transport = get_stream_transport()
 
-    async def _never_cancelled() -> bool:
-        return False
+    async def _is_cancelled() -> bool:
+        return await transport.is_cancelled(spec.run_id)
 
     async for ev in _drive_agent_loop(
         ctx,
@@ -1057,7 +1078,7 @@ async def _iter_agent_events(
         attachments_in=list(spec.attachments) if spec.attachments else None,
         mentions_in=list(spec.mentions) if spec.mentions else None,
         history=list(spec.history),
-        is_cancelled=_never_cancelled,
+        is_cancelled=_is_cancelled,
         emit_stream_start=True,
     ):
         yield ev
@@ -1301,6 +1322,17 @@ async def execute_run(spec: RunSpec) -> None:
                 "error",
                 {"code": "agent.run_failed", "message": str(exc)},
             )
+
+    # Check cancellation AFTER the agent loop. _drive_agent_loop now checks the
+    # cancel flag internally (via _iter_agent_events -> real _is_cancelled callback
+    # with a 1-second asyncio.wait timeout), so the loop exits cleanly when the
+    # user hits /agent/stop. Without this the SSE stream stays alive because
+    # execute_run only checked cancellation inside the loop (between events), and
+    # _drive_agent_loop could block on asyncio.wait for the first LLM event for
+    # many seconds without yielding -- the /agent/stop endpoint returned 200 but
+    # the stream never stopped.
+    if await transport.is_cancelled(spec.run_id):
+        cancelled = True
 
     # Drop the typing indicator before persist so a slow Mongo write
     # doesn't leave it stuck on. Only reached on non-cancelled paths;

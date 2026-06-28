@@ -58,6 +58,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_fabric"
@@ -159,6 +161,15 @@ async def _fabric_query_handler(args: dict) -> dict:
             "fabric_query requires workspace context (call from a cloud chat session)."
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_query",
+        status="ok",
+        ok=True,
+    )
+
     type_name = args.get("type_name")
     linked_to = args.get("linked_to")
     link_type = args.get("link_type")
@@ -241,6 +252,15 @@ async def _fabric_stats_handler(args: dict) -> dict:
         return _error_response(
             "fabric_stats requires workspace context (call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_stats",
+        status="ok",
+        ok=True,
+    )
 
     store = _get_fabric_store()
     if store is None:
