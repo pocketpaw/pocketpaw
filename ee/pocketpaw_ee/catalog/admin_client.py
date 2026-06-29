@@ -234,9 +234,7 @@ class LiteLLMAdminClient:
                 "page_size": page_size,
             }
             async with self._client() as client:
-                resp = await client.get(
-                    f"{self._base_url}/user/daily/activity", params=params
-                )
+                resp = await client.get(f"{self._base_url}/user/daily/activity", params=params)
             body = self._json_or_raise(resp, "/user/daily/activity")
             rows = body.get("results")
             if isinstance(rows, list):

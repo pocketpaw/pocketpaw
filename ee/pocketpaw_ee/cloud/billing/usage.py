@@ -213,9 +213,7 @@ async def get_workspace_usage(
             # The proxy splits requests into successful/failed + a combined
             # api_requests; prefer api_requests (the total attempts), falling back to
             # successful_requests for an older shape that lacked api_requests.
-            requests = _int(metrics.get("api_requests")) or _int(
-                metrics.get("successful_requests")
-            )
+            requests = _int(metrics.get("api_requests")) or _int(metrics.get("successful_requests"))
             models_seen.add(model_id)
             existing = per_model.get(model_id)
             if existing is None:
@@ -239,9 +237,7 @@ async def get_workspace_usage(
         per_model = buckets[day]
         day_credits = sum(stats.credits for stats in per_model.values())
         total_credits += day_credits
-        out_buckets.append(
-            UsageBucket(date=day, by_model=per_model, total_credits=day_credits)
-        )
+        out_buckets.append(UsageBucket(date=day, by_model=per_model, total_credits=day_credits))
 
     return WorkspaceUsageResponse(
         start_date=resolved_start,
