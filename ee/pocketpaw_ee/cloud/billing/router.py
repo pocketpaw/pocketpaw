@@ -30,10 +30,16 @@
 #   session returns the buyer to the app's billing page after pay / cancel (the
 #   prior payment-link checkout had nowhere to send them).
 # Updated 2026-06-29 (feat/billing-usage-endpoint): added GET /billing/usage — the
-#   per-workspace USAGE graph (daily usage by model over a date range, derived from
-#   the workspace's LiteLLM proxy usage; spend reported in credits). Workspace-scoped
-#   via ``current_workspace_id`` (same auth as top-up / subscribe); logic lives in
-#   ``billing.usage``. A brand-new workspace with no usage returns an empty 200.
+#   per-workspace USAGE graph (daily usage by model over a date range; spend
+#   reported in credits). Workspace-scoped via ``current_workspace_id`` (same auth
+#   as top-up / subscribe); logic lives in ``billing.usage``. A brand-new workspace
+#   with no usage returns an empty 200.
+# Updated 2026-06-29 (fix/billing-usage-ledger-source): GET /billing/usage now
+#   sources the graph from the workspace's CREDIT LEDGER (the wallet's own meter,
+#   mode-agnostic) rather than the LiteLLM proxy, so the chart matches the wallet in
+#   every metering mode. The route surface is unchanged (same path, auth, and
+#   ``start_date`` / ``end_date`` query params) — only the docstring wording below
+#   is updated to reflect the source.
 
 from __future__ import annotations
 
@@ -87,7 +93,7 @@ async def list_billing_site_plans() -> SitePlanCatalogResponse:
 
 
 # ``YYYY-MM-DD`` — a light date-shape guard at the edge so a malformed param 422s
-# before the service / proxy is reached (the proxy also requires this format).
+# before the service is reached (the service re-validates + clamps the span).
 _DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 
 
@@ -107,15 +113,16 @@ async def get_usage(
 ) -> WorkspaceUsageResponse:
     """Return the caller's workspace's daily usage, broken down by model.
 
-    Daily usage (spend in CREDITS, tokens, requests) per model over
-    ``[start_date, end_date]``, derived from the workspace's LiteLLM proxy usage and
-    scoped to that workspace. When both dates are omitted the window defaults to the
-    last 30 days. The response stays DAILY — the frontend aggregates to weekly /
-    monthly and filters by model client-side.
+    Daily usage (spend in CREDITS and request count per model) over
+    ``[start_date, end_date]``, sourced from the workspace's CREDIT LEDGER (the
+    wallet's own meter) and scoped to that workspace — so the chart matches the
+    wallet in every metering mode. When both dates are omitted the window defaults
+    to the last 30 days. The response stays DAILY — the frontend aggregates to
+    weekly / monthly and filters by model client-side. (``tokens`` is reported as 0:
+    the ledger does not carry a per-entry token count.)
 
-    A brand-new workspace with no provisioned key (or simply no usage in the window)
-    returns an empty contract (no models, no buckets, total 0) at HTTP 200 — not an
-    error.
+    A workspace with no spend in the window returns an empty contract (no models,
+    no buckets, total 0) at HTTP 200 — not an error.
     """
     return await usage_service.get_workspace_usage(
         workspace_id,
