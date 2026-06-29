@@ -29,19 +29,26 @@
 #   threads it to ``billing_service.subscribe(origin=...)`` so the Dodo checkout
 #   session returns the buyer to the app's billing page after pay / cancel (the
 #   prior payment-link checkout had nowhere to send them).
+# Updated 2026-06-29 (feat/billing-usage-endpoint): added GET /billing/usage — the
+#   per-workspace USAGE graph (daily usage by model over a date range, derived from
+#   the workspace's LiteLLM proxy usage; spend reported in credits). Workspace-scoped
+#   via ``current_workspace_id`` (same auth as top-up / subscribe); logic lives in
+#   ``billing.usage``. A brand-new workspace with no usage returns an empty 200.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import service as billing_service
 from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+from pocketpaw_ee.cloud.billing import usage as usage_service
 from pocketpaw_ee.cloud.billing.dto import (
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
     CreateTopupRequest,
     CreateTopupResponse,
+    WorkspaceUsageResponse,
 )
 from pocketpaw_ee.cloud.entitlements.dto import (
     PlanCatalogResponse,
@@ -76,6 +83,44 @@ async def list_billing_site_plans() -> SitePlanCatalogResponse:
     """
     return SitePlanCatalogResponse(
         site_plans=[site_plan_tier_to_dto(t) for t in site_plan_catalog.list_site_plans()]
+    )
+
+
+# ``YYYY-MM-DD`` — a light date-shape guard at the edge so a malformed param 422s
+# before the service / proxy is reached (the proxy also requires this format).
+_DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+
+
+@router.get("/usage", response_model=WorkspaceUsageResponse)
+async def get_usage(
+    workspace_id: str = Depends(current_workspace_id),
+    start_date: str | None = Query(
+        default=None,
+        pattern=_DATE_PATTERN,
+        description="Start of the window, YYYY-MM-DD. Defaults to 30 days ago when omitted.",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        pattern=_DATE_PATTERN,
+        description="End of the window, YYYY-MM-DD. Defaults to today when omitted.",
+    ),
+) -> WorkspaceUsageResponse:
+    """Return the caller's workspace's daily usage, broken down by model.
+
+    Daily usage (spend in CREDITS, tokens, requests) per model over
+    ``[start_date, end_date]``, derived from the workspace's LiteLLM proxy usage and
+    scoped to that workspace. When both dates are omitted the window defaults to the
+    last 30 days. The response stays DAILY — the frontend aggregates to weekly /
+    monthly and filters by model client-side.
+
+    A brand-new workspace with no provisioned key (or simply no usage in the window)
+    returns an empty contract (no models, no buckets, total 0) at HTTP 200 — not an
+    error.
+    """
+    return await usage_service.get_workspace_usage(
+        workspace_id,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
