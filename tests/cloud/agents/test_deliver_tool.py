@@ -1,11 +1,20 @@
 # test_deliver_tool.py — ART-4 deliver_artifact in-process MCP tool.
 #
+# 2026-06-29: deliver now returns the Files module's STABLE download link
+# (``/api/v1/uploads/{file_id}``) instead of a self-minted, expiring presign — the
+# delivered file is already a first-class /files row. Assertions updated to expect
+# the stable url and no ``expires_in_seconds``; the upload + scoping behavior is
+# unchanged.
+#
 # Locks the deliver path's behavior end-to-end against the real EEUploadService +
 # a mongomock-backed Mongo store and a local StorageAdapter rooted in a tmp home:
-#   * single file  → workspace-scoped upload, presigned URL, guessed mime, shows
-#                    in the tenant's file list;
+#   * single file  → workspace-scoped upload, stable /files link, guessed mime,
+#                    shows in the tenant's file list;
 #   * directory    → zipped (application/zip) and the zip round-trips;
 #   * two tenants  → each delivers, ZERO cross-read (Mongo scope + presign gate);
+#   * renderable   → HTML/SVG comes back as the stable link with an attachment-only
+#                    mime (outside INLINE_MIMES), so the download route never
+#                    renders it inline;
 #   * path safety  → ``..`` / absolute / symlink-out / cross-tenant all rejected;
 #   * guards       → missing identity, missing file, and the size cap.
 """Tests for the deliver_artifact agent tool."""
@@ -112,9 +121,10 @@ async def test_deliver_single_file(beanie_db) -> None:
     assert body["ok"] is True
     assert body["filename"] == "report.txt"
     assert body["mime"] == "text/plain"
-    assert body["url"]
     assert body["file_id"]
-    assert body["expires_in_seconds"] > 0
+    # Stable Files-module link, not a self-minted expiring presign.
+    assert body["url"] == f"/api/v1/uploads/{body['file_id']}"
+    assert "expires_in_seconds" not in body
 
     # Visible in the tenant's file list (workspace-scoped Mongo row).
     rec = await MongoFileStore().get_scoped(body["file_id"], workspace="wsA")
@@ -270,43 +280,21 @@ async def test_oversize_rejected(beanie_db, monkeypatch: pytest.MonkeyPatch) -> 
         ("evil.svg", "<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>", "image/svg+xml"),
     ],
 )
-async def test_deliver_renderable_served_as_attachment(
-    beanie_db, monkeypatch: pytest.MonkeyPatch, filename, content, expected_mime
+async def test_deliver_renderable_returns_stable_attachment_link(
+    beanie_db, filename, content, expected_mime
 ) -> None:
-    """A delivered HTML/SVG artifact must download (attachment), never render
-    inline on the storage origin. A spy adapter records the Content-Disposition
-    the deliver path forwards to the (S3) presign."""
+    """A delivered HTML/SVG artifact comes back as the stable Files link, and its
+    mime is one the download route serves as an attachment (outside INLINE_MIMES)
+    — so it downloads, never renders inline on the app origin.
+
+    deliver no longer mints a presign, so it can't render active content on a raw
+    storage origin at all; the attachment policy is now the download route's job
+    (router forces ``attachment`` for non-INLINE mimes). This locks that the
+    renderable types deliver produces are exactly the ones that route downloads.
+    """
     from pocketpaw_ee.agent.mcp_servers.deliver import _deliver_handler
 
-    import pocketpaw.uploads.factory as factory
-
-    recorded: dict[str, str | None] = {}
-    real_build = factory.build_adapter
-
-    class _SpyAdapter:
-        def __init__(self, inner):
-            self._inner = inner
-
-        async def put(self, key, stream, mime):
-            return await self._inner.put(key, stream, mime)
-
-        def open(self, key):
-            return self._inner.open(key)
-
-        async def delete(self, key):
-            return await self._inner.delete(key)
-
-        async def exists(self, key):
-            return await self._inner.exists(key)
-
-        def local_path(self, key):
-            return None
-
-        async def presigned_get(self, key, ttl_seconds, response_content_disposition=None):
-            recorded["disposition"] = response_content_disposition
-            return f"https://signed.example/{key}"
-
-    monkeypatch.setattr(factory, "build_adapter", lambda root: _SpyAdapter(real_build(root)))
+    from pocketpaw.uploads.config import INLINE_MIMES
 
     tokens = _bind("wsA", "uA", "sessA")
     try:
@@ -317,9 +305,10 @@ async def test_deliver_renderable_served_as_attachment(
 
     body = _body(resp)
     assert body["mime"] == expected_mime
-    assert body["url"].startswith("https://signed.example/")
-    assert recorded["disposition"] is not None
-    assert recorded["disposition"].startswith("attachment;")
+    assert body["url"] == f"/api/v1/uploads/{body['file_id']}"
+    assert "expires_in_seconds" not in body
+    # Outside INLINE_MIMES → the stable download route serves it as an attachment.
+    assert expected_mime not in INLINE_MIMES
 
 
 async def test_symlink_inside_dir_not_archived(beanie_db) -> None:
