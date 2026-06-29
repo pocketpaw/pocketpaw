@@ -16,10 +16,14 @@
 #   now 422s at the DTO before the service is reached.
 # Updated 2026-06-29 (feat/billing-usage-endpoint): added the WORKSPACE USAGE
 #   response contract (``UsageModelStats`` / ``UsageBucket`` / ``WorkspaceUsageResponse``)
-#   for ``GET /billing/usage`` — daily usage by model over a date range, derived
-#   from the workspace's LiteLLM proxy usage. The backend stays DAILY (the frontend
-#   aggregates weekly/monthly + filters); spend is reported in CREDITS (the same
-#   denomination the rest of billing uses).
+#   for ``GET /billing/usage`` — daily usage by model over a date range. The backend
+#   stays DAILY (the frontend aggregates weekly/monthly + filters); spend is reported
+#   in CREDITS (the same denomination the rest of billing uses).
+# Updated 2026-06-29 (fix/billing-usage-ledger-source): the usage graph is now
+#   sourced from the workspace's CREDIT LEDGER (the wallet's own meter), not the
+#   LiteLLM proxy — the contract SHAPE is unchanged (the frontend is untouched), but
+#   ``UsageModelStats.tokens`` is 0 from this source (the ledger carries no per-entry
+#   token count). The credit + request figures are accurate.
 
 from __future__ import annotations
 
@@ -80,16 +84,19 @@ class WebhookAck(BaseModel):
 class UsageModelStats(BaseModel):
     """One model's usage within a single day.
 
-    ``credits`` is the day-and-model spend converted to integer credits (the same
-    USD->credits conversion the meter uses: ``round(cost_usd * markup / credit_usd)``,
-    1 credit == $0.01); ``tokens`` is total tokens (prompt + completion); ``requests``
-    is the count of API requests. A model whose rounded credit cost is 0 (sub-credit
-    spend) still appears — usage is real even when the rounded credit cost is 0.
+    ``credits`` is the day-and-model spend in integer credits straight off the
+    wallet's ledger (markup already applied at debit time, 1 credit == $0.01);
+    ``tokens`` is total tokens — currently 0 from the ledger source, which carries
+    no per-entry token count; ``requests`` is the count of charged ledger entries
+    for this model on this day. A model whose credit cost is 0 (sub-credit spend)
+    still appears — usage is real even when the credit cost rounds to 0.
     """
 
     credits: int = Field(..., description="Spend for this model on this day, in credits.")
-    tokens: int = Field(..., description="Total tokens (prompt + completion) for this model.")
-    requests: int = Field(..., description="API request count for this model on this day.")
+    tokens: int = Field(
+        ..., description="Total tokens for this model (0 from the ledger source — no token count)."
+    )
+    requests: int = Field(..., description="Charged request count for this model on this day.")
 
 
 class UsageBucket(BaseModel):
@@ -115,8 +122,8 @@ class WorkspaceUsageResponse(BaseModel):
     a stable legend / color map). ``buckets`` is one entry per day WITH usage, oldest
     first. ``total_credits`` is the grand total over every bucket. The shape is kept
     DAILY on purpose — the frontend aggregates to weekly / monthly and filters by
-    model client-side. A brand-new workspace with no usage (or no provisioned key)
-    yields empty ``models`` + ``buckets`` and ``total_credits`` 0 (HTTP 200).
+    model client-side. A workspace with no spend in the window yields empty
+    ``models`` + ``buckets`` and ``total_credits`` 0 (HTTP 200).
     """
 
     start_date: str

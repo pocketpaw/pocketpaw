@@ -3,48 +3,76 @@
 # Module-level ``async def`` API (NOT a class, per the EE cloud rule, mirroring the
 # rest of billing / credits / metering). One job: build the daily usage graph the
 # frontend renders — daily usage BROKEN DOWN BY MODEL over a date range — from the
-# workspace's LiteLLM proxy usage.
+# workspace's CREDIT LEDGER (the wallet's own meter).
 #
-# THE SEAM (read before changing the conversion — money-adjacent):
-#   * MAPPING: a workspace maps to its LiteLLM VIRTUAL KEY (NOT a user_id). The
-#     provisioning entity owns that mapping (one ``LiteLLMTenantKey`` row per
-#     workspace, the proxy key minted with metadata={workspace_id}); we resolve it
-#     through ``llm_provisioning.service.get_tenant_key`` rather than touching the
-#     doc (entity isolation — only that entity reads its key doc). The proxy's
-#     /user/daily/activity route accepts an ``api_key`` filter, so we scope usage to
-#     exactly that tenant's key. The admin client calls with the deployment MASTER
-#     key (the proxy treats it as admin view), so the api_key filter is honoured.
-#   * CONVERSION: spend USD -> integer credits via the SAME rate card the meter +
-#     spend-ingest use — ``SpendCredits.to_credits(cost_usd) =
-#     round(cost_usd * markup / credit_usd)`` (markup = billing_markup, default 2.5;
-#     credit_usd default 0.01). We deliberately reuse that conversion (via
-#     ``llm_provisioning.service.load_spend_credits``) rather than a flat
-#     ``round(usd * 100)`` so a dollar of usage SHOWN here equals a dollar of usage
-#     BILLED by the meter — the usage graph and the wallet never disagree. (A flat
-#     *100 would ignore the markup and under-report vs. what was charged.)
-#   * READ-ONLY: this is a pure read. It NEVER debits, NEVER touches the credit
-#     ledger or the spend high-water mark, NEVER calls the cutover/metering path.
-#     It only converts numbers for display.
+# THE SOURCE (read before changing — this is the whole point of the module):
+#   * The graph is sourced from the CREDIT LEDGER, not the LiteLLM proxy. The
+#     ledger is the UNIVERSAL meter: every finished run's compute cost is debited
+#     to it as a negative movement with the run's model on ``ref.model``. In the
+#     DEFAULT metering mode (POCKETPAW_LITELLM_SPEND_MODE=off) the meter
+#     (``metering/service.py:bill_run``) debits the ledger DIRECTLY under
+#     ``cause="compute_spend"`` and NOTHING flows through the proxy; after an
+#     off->live cutover the spend-ingest (``llm_provisioning:ingest_tenant_spend``)
+#     debits under ``cause="litellm_spend"``. Only ONE cause is ever active for a
+#     given run, so reading BOTH is safe (no double-count) and the chart matches
+#     the wallet IN EVERY MODE — by construction, since it is literally the
+#     wallet's own decomposition. (The prior version read the proxy's
+#     /user/daily/activity, which a Free/keyless workspace never populates — so a
+#     workspace deep in the negative showed "No usage to chart yet". This is the
+#     fix for that bug.)
+#   * NO CONVERSION HERE. Ledger credits are already markup-applied at debit time
+#     (the meter / spend-ingest convert USD->credits when they write the
+#     movement), so this read does NO ``to_credits`` and touches NO rate card — it
+#     just surfaces the integers the wallet already holds. That is what makes the
+#     graph and the wallet agree exactly.
+#   * ENTITY ISOLATION. Billing must NOT query ``CreditLedgerEntry`` directly — the
+#     credits entity owns reads of its own ledger doc. The (day, model) breakdown
+#     comes through ``credits.service.spend_by_model`` (a sibling of the existing
+#     ``sum_debits_by_cause``), the same boundary the cutover shadow-compare uses.
+#   * READ-ONLY: a pure read. It NEVER debits, NEVER touches the ledger or the
+#     balance, NEVER calls the cutover/metering path. It only reads + folds.
 #
-# EMPTY / NO-KEY CASE: a brand-new workspace with no provisioned key returns an
-# empty contract (no models, no buckets, total 0) at HTTP 200 — NOT an error, and
-# WITHOUT a proxy call (there is no key to scope). Same for a provisioned workspace
-# that simply had no usage in the window (the proxy returns no rows).
+# TOKENS=0 (a deliberate limitation): the ledger ``ref`` does not carry a token
+# count, so per-model ``tokens`` is reported as 0. The credit + request figures are
+# accurate; a follow-up can add ``total_tokens`` to the debit ``ref`` and surface
+# it here. Do NOT try to recover tokens from elsewhere — they aren't on the wallet.
+#
+# UNKNOWN MODEL: a real charged debit whose ``ref.model`` is absent is bucketed
+# under the model id ``"unknown"`` so its credits STILL count toward the day + the
+# grand total — the chart must reconcile with the wallet, and dropping unattributed
+# spend would make it under-report vs. what was charged.
+#
+# EMPTY CASE: a workspace with no spend in the window (a brand-new workspace, or a
+# provisioned one that simply had no usage) yields an empty contract — no models,
+# no buckets, total 0 — at HTTP 200, NOT an error. There is no proxy / key
+# dependency anymore: the empty case is simply "no ledger rows in the window".
 #
 # Rule 6 — validate at entry (a workspace id is required). Rule 7 — the read is
-# tenant-scoped (the key filter IS the tenant scope). Rule 10 — only CloudError
-# subclasses propagate to HTTP; a proxy read failure raises ``LiteLLMAdminError``
-# (a plain exception) which the route surfaces as a 502 via the cloud error path.
+# tenant-scoped (``spend_by_model`` filters on ``workspace``). The DTOs
+# (``WorkspaceUsageResponse`` / ``UsageBucket`` / ``UsageModelStats``) are
+# unchanged so the response contract stays byte-identical and the frontend is
+# untouched.
 #
 # Created 2026-06-29 (feat/billing-usage-endpoint): new module — the GET
 # /billing/usage transform (LiteLLM /user/daily/activity -> WorkspaceUsageResponse).
+# Changed 2026-06-29 (fix/billing-usage-ledger-source): RE-SOURCED the graph from
+# the credit ledger instead of the LiteLLM proxy daily-activity. The chart showed
+# "No usage to chart yet" for any workspace without a LiteLLM virtual key even
+# though the wallet held real ``compute_spend`` — the chart was wired to the one
+# meter (the proxy) that is empty in the default off-mode. Now reads the wallet's
+# own ledger via ``credits.service.spend_by_model`` (mode-agnostic across
+# compute_spend / litellm_spend), so the chart matches the wallet by construction.
+# Removed the proxy plumbing (get_tenant_key, the _DailyActivityClient Protocol,
+# the LiteLLMAdminClient import, the spend_card / rate-card conversion, the
+# record-folding helpers); kept the date-range validator + clamp and the response
+# contract intact. tokens=0 is now intentional (the ledger ref carries no token
+# count).
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import UTC, date, datetime, timedelta
-from typing import Any, Protocol
+from datetime import UTC, date, datetime, time, timedelta
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing.dto import (
@@ -52,8 +80,7 @@ from pocketpaw_ee.cloud.billing.dto import (
     UsageModelStats,
     WorkspaceUsageResponse,
 )
-from pocketpaw_ee.cloud.llm_provisioning import service as provisioning_service
-from pocketpaw_ee.cloud.llm_provisioning.domain import SpendCredits
+from pocketpaw_ee.cloud.credits import service as credits_service
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +90,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WINDOW_DAYS = 30
 
 # A caller-supplied window must be YYYY-MM-DD and span at most a year. The format
-# check fails fast with a clean 400 rather than letting a malformed date reach the
-# proxy (a 502 on the error path); the span clamp bounds the per-request proxy
-# fan-out (the admin client walks pages, so an open-ended range like 2000..2099 is
-# dozens of serial calls). Both apply ONLY to an explicit range — the default
-# window is always sane.
+# check fails fast with a clean 400 rather than letting a malformed date through;
+# the span clamp bounds the per-request fan-out. Both apply ONLY to an explicit
+# range — the default window is always sane.
 _YMD = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MAX_WINDOW_DAYS = 366
 
@@ -97,35 +122,6 @@ def _resolve_explicit_range(start_date: str, end_date: str) -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
-class _DailyActivityClient(Protocol):
-    """The slice of LiteLLMAdminClient this module needs. A Protocol so tests can
-    inject a duck-typed fake (no HTTP) and we never construct an httpx client in a
-    unit test."""
-
-    async def user_daily_activity(
-        self, *, start_date: str, end_date: str, api_key: str, page_size: int = ...
-    ) -> list[dict[str, Any]]: ...
-
-
-def _num(value: Any) -> float:
-    """Coerce a proxy spend value to a float, tolerating None / strings (the proxy
-    occasionally serialises numbers as strings)."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _int(value: Any) -> int:
-    """Coerce a token / request count to a non-negative int, tolerating None /
-    strings. A negative / unparseable value clamps to 0."""
-    try:
-        n = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return n if n > 0 else 0
-
-
 def _default_range() -> tuple[str, str]:
     """The default (start_date, end_date) — the trailing 30 days inclusive of today,
     as ``YYYY-MM-DD`` strings in UTC."""
@@ -134,139 +130,82 @@ def _default_range() -> tuple[str, str]:
     return start.isoformat(), today.isoformat()
 
 
-def _record_date(record: dict[str, Any]) -> str | None:
-    """The ``YYYY-MM-DD`` date of a LiteLLM daily record. The proxy serialises the
-    ``date`` field as an ISO date string; we keep just the date portion. None when
-    a record carries no usable date (skipped rather than bucketed under ''
-    )."""
-    raw = record.get("date")
-    if raw is None:
-        return None
-    s = str(raw).strip()
-    if not s:
-        return None
-    # Tolerate a full ISO timestamp by keeping the date head (the proxy emits a bare
-    # date today, but a future shape change to a datetime must not mis-bucket).
-    return s.split("T", 1)[0]
-
-
-def _model_breakdown(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The ``breakdown.models`` map of a daily record (model id -> {metrics, ...}),
-    or an empty dict when absent/malformed. Defensive across shapes so a partial
-    proxy row never crashes the transform."""
-    breakdown = record.get("breakdown")
-    if not isinstance(breakdown, dict):
-        return {}
-    models = breakdown.get("models")
-    if not isinstance(models, dict):
-        return {}
-    return {str(name): m for name, m in models.items() if isinstance(m, dict)}
-
-
 async def get_workspace_usage(
     workspace_id: str,
     *,
     start_date: str | None = None,
     end_date: str | None = None,
-    spend_card: SpendCredits | None = None,
-    daily_activity_client: _DailyActivityClient | None = None,
+    spend_reader=None,
 ) -> WorkspaceUsageResponse:
     """Build the per-workspace daily usage graph over ``[start_date, end_date]``.
 
-    Resolves the workspace's LiteLLM virtual key, reads its daily activity from the
-    proxy (scoped by that key), and folds each day's per-model breakdown into a
-    ``UsageBucket`` with a ``{credits, tokens, requests}`` block per model. Spend USD
-    is converted to credits with the SAME rate card the meter uses (so the graph and
-    the wallet agree). Returns a ``WorkspaceUsageResponse``.
+    Reads the workspace's spend straight from its CREDIT LEDGER (via
+    ``credits.service.spend_by_model``) and folds it into a ``UsageBucket`` per day
+    with a ``{credits, tokens, requests}`` block per model. Credits are the
+    integers the wallet already holds (markup applied at debit time — NO conversion
+    here), so the graph and the wallet agree by construction in every metering mode
+    (the ledger reads both ``compute_spend`` and ``litellm_spend``). Returns a
+    ``WorkspaceUsageResponse``.
 
-    ``start_date`` / ``end_date`` are ``YYYY-MM-DD``; when BOTH are omitted the window
-    defaults to the trailing 30 days. ``spend_card`` / ``daily_activity_client`` are
-    injectable for tests; production resolves the settings-derived rate card and a
-    master-key admin client.
+    ``start_date`` / ``end_date`` are ``YYYY-MM-DD``; when BOTH are omitted the
+    window defaults to the trailing 30 days. ``spend_reader`` is injectable for
+    pure-unit tests (defaults to ``credits.service.spend_by_model``).
 
-    A workspace with NO provisioned key (or no usage in the window) returns an empty
-    contract (no models, no buckets, total 0) — never an error, and the no-key case
-    makes NO proxy call.
+    ``tokens`` is reported as 0 per model — the ledger ``ref`` does not carry a
+    token count (the credit + request figures are accurate). A workspace with no
+    spend in the window returns an empty contract (no models, no buckets, total 0)
+    at HTTP 200 — never an error.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
 
     if start_date and end_date:
-        # Validate the format + clamp the span before either reaches the proxy.
+        # Validate the format + clamp the span.
         resolved_start, resolved_end = _resolve_explicit_range(start_date, end_date)
     else:
         # Any partial range (only one bound given) falls back to the full default
-        # window — the proxy requires BOTH bounds, so we never send a half range.
+        # window — we never source a half range.
         resolved_start, resolved_end = _default_range()
 
-    # MAPPING: workspace -> its LiteLLM virtual key, via the provisioning entity
-    # (entity isolation — we don't read the key doc directly). No key == a
-    # brand-new workspace with nothing provisioned yet.
-    key = await provisioning_service.get_tenant_key(workspace_id)
-    if not key:
-        # Empty contract, HTTP 200, NO proxy call — there is no key to scope.
-        return WorkspaceUsageResponse(
-            start_date=resolved_start,
-            end_date=resolved_end,
-            models=[],
-            buckets=[],
-            total_credits=0,
-        )
+    # Build the UTC datetime window the ledger read expects: ``since`` is the start
+    # day at 00:00 UTC (inclusive); ``until`` is the day AFTER end_date at 00:00 UTC
+    # (exclusive) so the whole of end_date is included by day. This matches
+    # ``spend_by_model``'s inclusive-since / exclusive-until ``createdAt`` filter.
+    start_day = date.fromisoformat(resolved_start)
+    end_day = date.fromisoformat(resolved_end)
+    since = datetime.combine(start_day, time.min, tzinfo=UTC)
+    until = datetime.combine(end_day + timedelta(days=1), time.min, tzinfo=UTC)
 
-    card = spend_card if spend_card is not None else provisioning_service.load_spend_credits()
-    client = daily_activity_client
-    if client is None:
-        # Lazy import — keep this module free of an import-time httpx dependency, and
-        # so a unit test that injects a fake never constructs a real client.
-        from pocketpaw_ee.catalog.admin_client import LiteLLMAdminClient
+    reader = spend_reader if spend_reader is not None else credits_service.spend_by_model
+    rows = await reader(workspace_id, since=since, until=until)
 
-        client = LiteLLMAdminClient()
-
-    records = await client.user_daily_activity(
-        start_date=resolved_start,
-        end_date=resolved_end,
-        api_key=key,
-    )
-
-    # Fold the daily records into per-day buckets keyed by date. A proxy is expected
-    # to return one record per date for a single-entity query, but we accumulate
-    # defensively so a duplicated date (or a future per-key split) sums correctly.
+    # Fold the (day, model) rows into per-day buckets. ``spend_by_model`` already
+    # aggregates one row per (day, model), so we assign directly; a duplicate
+    # (day, model) would still accumulate defensively.
     buckets: dict[str, dict[str, UsageModelStats]] = {}
     models_seen: set[str] = set()
+    for row in rows:
+        models_seen.add(row.model)
+        per_model = buckets.setdefault(row.day, {})
+        existing = per_model.get(row.model)
+        # ``tokens=0`` intentionally — the ledger ref carries no token count
+        # (see the module header). Credits + requests come straight off the ledger.
+        if existing is None:
+            per_model[row.model] = UsageModelStats(
+                credits=row.credits, tokens=0, requests=row.requests
+            )
+        else:
+            per_model[row.model] = UsageModelStats(
+                credits=existing.credits + row.credits,
+                tokens=0,
+                requests=existing.requests + row.requests,
+            )
 
-    for record in records:
-        day = _record_date(record)
-        if day is None:
-            continue
-        per_model = buckets.setdefault(day, {})
-        for model_id, model_block in _model_breakdown(record).items():
-            metrics = model_block.get("metrics")
-            if not isinstance(metrics, dict):
-                continue
-            credits = card.to_credits(_num(metrics.get("spend")))
-            tokens = _int(metrics.get("total_tokens"))
-            # The proxy splits requests into successful/failed + a combined
-            # api_requests; prefer api_requests (the total attempts), falling back to
-            # successful_requests for an older shape that lacked api_requests.
-            requests = _int(metrics.get("api_requests")) or _int(metrics.get("successful_requests"))
-            models_seen.add(model_id)
-            existing = per_model.get(model_id)
-            if existing is None:
-                per_model[model_id] = UsageModelStats(
-                    credits=credits, tokens=tokens, requests=requests
-                )
-            else:
-                # Accumulate a repeated (date, model) — keeps the transform correct
-                # if the proxy ever returns split rows for the same day+model.
-                per_model[model_id] = UsageModelStats(
-                    credits=existing.credits + credits,
-                    tokens=existing.tokens + tokens,
-                    requests=existing.requests + requests,
-                )
-
-    # Assemble the response: buckets oldest-first, each with its credit total; the
-    # grand total over every bucket; the sorted distinct model list (a stable legend).
+    # Assemble the response: buckets OLDEST-FIRST, each with its credit total; the
+    # grand total over every bucket; the sorted distinct model list (a stable
+    # legend). The "unknown" bucket (debits with no ``ref.model``) is kept so the
+    # total reconciles with the wallet.
     out_buckets: list[UsageBucket] = []
     total_credits = 0
     for day in sorted(buckets):
