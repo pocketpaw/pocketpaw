@@ -32,8 +32,10 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
+import pytest
+from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.billing import usage
 from pocketpaw_ee.cloud.llm_provisioning import service as provisioning
 from pocketpaw_ee.cloud.llm_provisioning.domain import KeyBudget, SpendCredits
@@ -235,6 +237,39 @@ async def test_usage_unprovisioned_workspace_returns_empty_no_proxy_call(mongo_d
     assert result.start_date == "2026-06-01"
     assert result.end_date == "2026-06-30"
     assert client.calls == 0
+
+
+# --- HARDENING (fix/billing-usage-validate): the explicit-range validator + clamp.
+#     A caller-supplied range is format-checked, inverted-checked, and span-clamped
+#     before it reaches the proxy (a clean 400 instead of a 502, and a bounded fan-out). ---
+
+
+def test_resolve_explicit_range_rejects_malformed_dates():
+    # A non-YYYY-MM-DD string fails the format gate; a well-formed but impossible
+    # calendar date (month 13) fails fromisoformat. Both surface ValidationError.
+    with pytest.raises(ValidationError):
+        usage._resolve_explicit_range("garbage", "2026-06-30")
+    with pytest.raises(ValidationError):
+        usage._resolve_explicit_range("2026-13-01", "2026-06-30")
+
+
+def test_resolve_explicit_range_rejects_inverted():
+    with pytest.raises(ValidationError):
+        usage._resolve_explicit_range("2026-06-30", "2026-06-01")
+
+
+def test_resolve_explicit_range_clamps_oversized_span():
+    # A multi-year span clamps to the most recent _MAX_WINDOW_DAYS ending at end_date.
+    start, end = usage._resolve_explicit_range("2023-01-01", "2026-06-30")
+    assert end == "2026-06-30"
+    assert start == (date(2026, 6, 30) - timedelta(days=usage._MAX_WINDOW_DAYS - 1)).isoformat()
+
+
+def test_resolve_explicit_range_passes_valid_window_through():
+    assert usage._resolve_explicit_range("2026-06-01", "2026-06-30") == (
+        "2026-06-01",
+        "2026-06-30",
+    )
 
 
 async def test_usage_walks_every_page_when_has_more(mongo_db):

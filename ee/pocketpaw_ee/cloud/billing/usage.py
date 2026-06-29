@@ -42,7 +42,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+import re
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
@@ -60,6 +61,40 @@ logger = logging.getLogger(__name__)
 # today (today minus 29 days .. today). Inclusive so a 30-day request shows 30 day
 # columns, not 31.
 _DEFAULT_WINDOW_DAYS = 30
+
+# A caller-supplied window must be YYYY-MM-DD and span at most a year. The format
+# check fails fast with a clean 400 rather than letting a malformed date reach the
+# proxy (a 502 on the error path); the span clamp bounds the per-request proxy
+# fan-out (the admin client walks pages, so an open-ended range like 2000..2099 is
+# dozens of serial calls). Both apply ONLY to an explicit range — the default
+# window is always sane.
+_YMD = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MAX_WINDOW_DAYS = 366
+
+
+def _resolve_explicit_range(start_date: str, end_date: str) -> tuple[str, str]:
+    """Validate a caller-supplied ``[start_date, end_date]`` and clamp its span.
+
+    Both bounds must be ``YYYY-MM-DD`` calendar dates with start on or before end;
+    a malformed or inverted range raises ``ValidationError`` (a clean 400). A span
+    over ``_MAX_WINDOW_DAYS`` is clamped to the most recent that many days ending at
+    ``end_date`` (the response stamps the resolved window, so the axis reflects it).
+    """
+    for label, value in (("start_date", start_date), ("end_date", end_date)):
+        if not _YMD.match(value):
+            raise ValidationError("billing.invalid_date", f"{label} must be YYYY-MM-DD")
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except ValueError as exc:
+        raise ValidationError(
+            "billing.invalid_date", "start_date / end_date must be a valid calendar date"
+        ) from exc
+    if start > end:
+        raise ValidationError("billing.invalid_range", "start_date must be on or before end_date")
+    if (end - start).days > _MAX_WINDOW_DAYS - 1:
+        start = end - timedelta(days=_MAX_WINDOW_DAYS - 1)
+    return start.isoformat(), end.isoformat()
 
 
 class _DailyActivityClient(Protocol):
@@ -158,7 +193,8 @@ async def get_workspace_usage(
         raise ValidationError("billing.invalid_workspace", "workspace_id is required")
 
     if start_date and end_date:
-        resolved_start, resolved_end = start_date, end_date
+        # Validate the format + clamp the span before either reaches the proxy.
+        resolved_start, resolved_end = _resolve_explicit_range(start_date, end_date)
     else:
         # Any partial range (only one bound given) falls back to the full default
         # window — the proxy requires BOTH bounds, so we never send a half range.
