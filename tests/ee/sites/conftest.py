@@ -1,5 +1,10 @@
 # tests/ee/sites/conftest.py
 # Created: 2026-06-18 (feat/sites-dedupe-migration, PERF-2).
+# Updated 2026-06-24 (BC-9): added an autouse ``_recording_bus_for_sites`` fixture.
+#   ``publish_pocket`` now emits ``SitePublished`` after a live publish, and
+#   ``emit()`` asserts a bus is initialised; this installs a recording bus for the
+#   whole sites tree (mirroring tests/cloud/conftest.py) so publish tests don't
+#   trip that guard.
 # Merged 2026-06-17 (fix/sites-plan-gate-asymmetry) — UNION of the PERF-2 Beanie
 # settings fixture and the plan-gate default-plan fixture (see below).
 #
@@ -67,6 +72,36 @@ async def _sites_beanie_settings() -> Any:
 
 
 @pytest.fixture(autouse=True)
+def _recording_bus_for_sites():
+    """Install a RecordingBus for every sites test (BC-9).
+
+    ``sites.service.publish_pocket`` now emits ``SitePublished`` after a live
+    publish, and ``emit()`` raises ``AssertionError`` when no bus is initialised
+    (a deliberate "forgot init_realtime" guard). The cloud test tree installs a
+    recording bus autouse via ``tests/cloud/conftest.py``; mirror it here so the
+    sites-tree publish tests don't trip that guard. A test that wants to assert on
+    emitted events can request this fixture by name to read ``bus.events``."""
+    from pocketpaw_ee.cloud._core.realtime import bus as bus_mod
+    from pocketpaw_ee.cloud._core.realtime.events import Event
+
+    class _RecordingBus:
+        def __init__(self) -> None:
+            self.events: list[Event] = []
+
+        async def publish(self, event: Event) -> None:
+            self.events.append(event)
+
+        def subscribe(self, event_type: str, handler) -> None:  # noqa: ARG002
+            return
+
+    rec = _RecordingBus()
+    prev = bus_mod._bus  # type: ignore[attr-defined]
+    bus_mod._bus = rec  # type: ignore[attr-defined]
+    yield rec
+    bus_mod._bus = prev  # type: ignore[attr-defined]
+
+
+@pytest.fixture(autouse=True)
 def _default_sites_plan(request: pytest.FixtureRequest):
     """Default the workspace plan to one that unlocks Sites ('business') for the
     sites mechanics tests, so the new service-level plan gate doesn't reject their
@@ -80,6 +115,6 @@ def _default_sites_plan(request: pytest.FixtureRequest):
 
     with patch(
         "pocketpaw_ee.cloud.workspace.service.get_workspace_plan",
-        new=AsyncMock(return_value="business"),
+        new=AsyncMock(return_value="go"),
     ):
         yield

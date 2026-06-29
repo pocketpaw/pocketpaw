@@ -547,6 +547,12 @@ async def _apply_event_mapping(widget: PawPrintWidget, event: PawPrintEvent) -> 
     except ImportError:
         return None
 
+    # ISO note: paw-print's tenant key is the widget OWNER, a logical, possibly
+    # colon-qualified string (``user:maya``) — NOT a physical-store-path
+    # workspace id (a ``:`` fails the path-traversal allowlist). The Fabric
+    # write is scoped by the object's ``source_*`` provenance + the store's own
+    # in-row guard, not by a per-owner store file, so this keeps the BARE store
+    # rather than threading the owner into the factory (which would ValueError).
     fabric = get_fabric_store()
     if fabric is None:
         return None

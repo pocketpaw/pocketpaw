@@ -216,11 +216,61 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   `POCKETPAW_CLOUD_STREAM_TRANSPORT` (`redis` default — adapter selector for
   future non-Redis backends like NATS JetStream);
   `POCKETPAW_CLOUD_RUN_STREAM_TTL` (default `3600`, the Redis Stream retention
-  after a run terminates). See `docs/plans/2026-05-22-resumable-chat-runs-design.md`.
+  after a run terminates);
+  `POCKETPAW_CLOUD_RUN_JOB_TIMEOUT` (default `1800` = 30 min, the arq per-run
+  job timeout — arq's own default is 300s, which cancels a long agent run
+  mid-generation, so a big coding task halts after ~5 min; lift it for long
+  runs, the 10-minute stale-run sweeper is the backstop). See `docs/plans/2026-05-22-resumable-chat-runs-design.md`.
   A background sweeper runs on cloud startup and every 5 minutes (hardcoded, not
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Per-tenant agent cwd jail (cloud, ART-2)**: In multi-tenant cloud each
+  workspace's chat agent runs with `cwd = ~/.pocketpaw/workspaces/<workspace_id>/agent/<session_id>/`
+  (resolved per-run from the `attach_agent_identity` ContextVars in
+  `ee/pocketpaw_ee/cloud/agent_jail.py`) so one tenant's file ops never
+  co-mingle in the shared home dir. It **fails closed**: a cloud run that
+  reaches the backend with no resolvable `workspace_id` RAISES rather than
+  falling back to `~`. OSS / dedicated installs (no cloud DB initialized) keep
+  `settings.file_jail_path` unchanged. Override the jail root with
+  `POCKETPAW_WORKSPACE_JAIL_ROOT` (default `~/.pocketpaw/workspaces`) to anchor
+  it on a data volume.
+- **Agent jail lifecycle (cloud, ART-3)**: bounds the ART-2 scratch jails so
+  disk scales with active concurrency, not user count (the jail is pure scratch;
+  durability lives in blob storage). Three knobs, all read from the environment
+  in `ee/pocketpaw_ee/cloud/agent_jail.py`:
+  `POCKETPAW_AGENT_JAIL_QUOTA_MB` (default `2048`) — per-workspace size cap
+  measured at RUN-START; an over-quota run is rejected cleanly (a terminal
+  `failed` run with an `agent.jail_over_quota` error frame, never an OOM/crash).
+  `0` disables it.
+  `POCKETPAW_AGENT_JAIL_TTL_GRACE_SECONDS` (default `3600`) — idle grace after
+  which a jail with no active run is garbage-collected.
+  `POCKETPAW_AGENT_JAIL_DISK_WATERMARK_PCT` (default `90`) — box disk-usage
+  high-water mark; over it, the GC evicts least-recently-used IDLE jails first
+  until back under. `0` disables watermark eviction.
+  `POCKETPAW_AGENT_JAIL_GC_ENABLED` (default `true`) — escape hatch to disable
+  the GC sweep entirely. The GC (`ee/pocketpaw_ee/cloud/agent_jail_gc.py`,
+  `sweep_agent_jails`) runs on cloud startup and the same 5-minute heartbeat as
+  the stale-run sweeper, and NEVER evicts a jail whose run is still queued or
+  running (resolved via `run_service.find_active_run_scopes`; a retried
+  interrupted run re-protects its jail by spawning a fresh queued run).
+- **Artifact delivery + storage boot guard (cloud, ART-4)**: the agent's jail is
+  pure scratch — durability lives in blob storage. The `deliver_artifact`
+  in-process MCP tool (`ee/pocketpaw_ee/agent/mcp_servers/deliver.py`, server
+  `pocketpaw_deliver`) lands a built file (or a zipped directory) from the jail
+  into the tenant's blob storage via `EEUploadService.upload` and returns a real
+  presigned download URL — so the agent shares a working link instead of a
+  container path or a `127.0.0.1` preview server. Path safety is jail-scoped
+  (rejects `..`, absolute paths out, symlinks out, another tenant's jail), and
+  `POCKETPAW_DELIVER_MAX_MB` (default `100`) caps artifact size. Because this
+  only works when uploads go to real object storage, `init_cloud_db` runs
+  `verify_cloud_storage_backend()` (`ee/pocketpaw_ee/cloud/uploads/bootstrap.py`,
+  mirroring the memory guard): in cloud, if `POCKETPAW_UPLOAD_ADAPTER` != `s3` it
+  **WARNs loudly** (a local-disk deploy that would silently no-op delivery is
+  visible in the boot logs), and `POCKETPAW_REQUIRE_S3_IN_CLOUD=1` escalates that
+  to a hard boot failure. The multi-tenant-cloud signal both the jail and this
+  guard read is `is_multi_tenant_cloud()` in `ee/pocketpaw_ee/cloud/shared/db.py`
+  (one name for the `get_client() is not None` check).
 - **In-process bus subscribers**: `pocketpaw_ee.cloud._core.realtime.bus.InProcessBus` exposes `subscribe(event_type, handler)` for cloud-side listeners (e.g. the `FileReady` → KB indexer wired in `ee/pocketpaw_ee/cloud/uploads/listeners.py`). Register subscribers from `mount_cloud()` after `init_realtime()` runs. Handler exceptions are logged and swallowed per-handler so one bad listener can't block the rest of the dispatch.
 - **Memory backend (`POCKETPAW_MEMORY_BACKEND`)**: OSS self-hosted defaults to `"file"` (local JSON under `~/.pocketpaw/memory/`). The cloud forces `"mongodb"` via `register_default_backend()` (`ee/pocketpaw_ee/cloud/memory/bootstrap.py`) unless explicitly overridden. The cloud now **fails to boot** if the active store isn't `MongoMemoryStore` (`verify_cloud_memory_backend()` in `init_cloud_db`) — a deliberate guard so a misconfigured backend can never silently write chat history (files-surface chats included) to local disk. Don't set `POCKETPAW_MEMORY_BACKEND=file` on a cloud deployment.
 - **API key required**: The `claude_agent_sdk` backend requires an `ANTHROPIC_API_KEY` when using the Anthropic provider. OAuth tokens from Free/Pro/Max plans are not permitted for third-party use per [Anthropic's policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use). Ollama/local providers do not require an API key.

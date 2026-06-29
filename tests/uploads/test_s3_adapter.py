@@ -126,6 +126,28 @@ async def test_presigned_get_returns_url():
     )
 
 
+async def test_presigned_get_forwards_content_disposition():
+    """A disposition is forwarded as ResponseContentDisposition so non-inline
+    content (delivered HTML/SVG) downloads instead of rendering on the origin."""
+    client = MagicMock()
+    client.generate_presigned_url.return_value = "https://s3.example.com/signed"
+    adapter = _make_adapter(client)
+
+    await adapter.presigned_get(
+        "k", 300, response_content_disposition='attachment; filename="evil.html"'
+    )
+
+    client.generate_presigned_url.assert_called_once_with(
+        "get_object",
+        Params={
+            "Bucket": "test-bucket",
+            "Key": "k",
+            "ResponseContentDisposition": 'attachment; filename="evil.html"',
+        },
+        ExpiresIn=300,
+    )
+
+
 async def test_presigned_get_swallows_errors():
     client = MagicMock()
     client.generate_presigned_url.side_effect = RuntimeError("boom")

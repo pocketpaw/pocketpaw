@@ -23,7 +23,7 @@ def _ws(**kw) -> Workspace:
         name="Acme",
         slug="acme",
         owner="u1",
-        plan="team",
+        plan="go",
         seats=5,
         created_at=datetime(2026, 4, 27, 12, 0, 0, tzinfo=UTC),
         member_count=3,

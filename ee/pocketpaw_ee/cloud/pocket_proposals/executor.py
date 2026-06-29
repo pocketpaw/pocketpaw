@@ -237,12 +237,12 @@ async def execute_approved_pocket_create(
     """
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
     params = getattr(action, "parameters", None) or {}
     blob = params.get(POCKET_CREATE_PARAM_KEY)
     if not isinstance(blob, dict):
         # Not a pocket-create Action at all — no chain was opened for it, so there
-        # is nothing to close. Return without a terminal emit.
+        # is nothing to close. We can't resolve the store's workspace without the
+        # blob either, so bail before opening one.
         logger.warning("approved action %s carries no _pocket_create blob", action.id)
         return
 
@@ -253,6 +253,10 @@ async def execute_approved_pocket_create(
     # Slice 4 abandon-sweeper closes any chain left open).
     correlation_id = _coerce_uuid(blob.get("correlation_id"))
     workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: HTTP approve path (no ``current_workspace`` ContextVar) — scope the
+    # store to the blob's workspace BEFORE ``_fail`` (which calls mark_failed)
+    # so every terminal lands in the tenant's file, not the shared ledger.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     owner_user_id = str(blob.get("user_id") or "")
     approver = str(getattr(action, "approved_by", "") or "") or owner_user_id or "system"
     causation = _coerce_uuid(human_event_id)

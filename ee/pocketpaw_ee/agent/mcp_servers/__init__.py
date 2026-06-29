@@ -17,6 +17,8 @@ Server surfaces (module → server name → tools):
 * ``belt.py`` → ``pocketpaw_belt`` → ``belt_propose_change`` (gated code change)
 * ``connectors.py`` → ``pocketpaw_connectors`` → connector listing + execution
 * ``decisions.py`` → ``pocketpaw_decisions`` → Decision-Graph queries
+* ``deliver.py`` → ``pocketpaw_deliver`` → ``deliver_artifact`` (land a built
+  file/dir in tenant blob storage, return a download URL)
 * ``external_actions.py`` → ``pocketpaw_external_actions`` →
   ``propose_external_action`` (gated connector call — the propose path for
   this backend)
@@ -27,7 +29,8 @@ Server surfaces (module → server name → tools):
   ``instinct_audit`` (READ-ONLY gate visibility, workspace-scoped; proposing
   goes through ``pocketpaw_external_actions``)
 * ``loom.py`` → ``loom`` (stdio config) → codebase orientation reads
-* ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``video_generate``
+* ``media.py`` → ``pocketpaw_media`` → ``image_generate`` / ``audio_generate`` /
+  ``audio_transcribe`` / ``video_generate`` (routed through the LiteLLM proxy)
 * ``meetings.py`` → ``pocketpaw_meetings`` → meeting queries
 * ``planner.py`` → ``pocketpaw_planner`` (opt-in) + ``pocketpaw_pocket_planner``
 * ``pockets.py`` → ``pocketpaw_pocket`` → pocket context + widget pinning

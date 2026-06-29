@@ -30,6 +30,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_foresight"
@@ -104,12 +106,32 @@ def _error(text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _identity() -> tuple[str | None, str | None]:
+    """Resolve the active workspace + user id from the per-stream ContextVars."""
+    try:
+        from pocketpaw_ee.cloud.chat.agent_service import current_user_id, current_workspace_id
+
+        return current_workspace_id(), current_user_id()
+    except Exception:
+        return None, None
+
+
 async def _list_scenarios_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import list_scenarios_for_agent
 
     limit = args.get("limit", 20)
     offset = args.get("offset", 0)
     sub_type = args.get("sub_type")
+
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_list_scenarios",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(
         await list_scenarios_for_agent(limit=limit, offset=offset, sub_type=sub_type)
     )
@@ -118,9 +140,18 @@ async def _list_scenarios_handler(args: dict) -> dict:
 async def _get_scenario_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import get_scenario_for_agent
 
+    ws_id, uid = _identity()
     scenario_id = args.get("scenario_id")
     if not scenario_id or not isinstance(scenario_id, str):
         return _error("get_scenario requires a `scenario_id` (string).")
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_get_scenario",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await get_scenario_for_agent(scenario_id))
 
 
@@ -141,6 +172,16 @@ async def _save_scenario_handler(args: dict) -> dict:
             "scenario YAML — the inner schema (personas, n_ticks, "
             "tier_mix, ...) is documented in the foresight-create-sim skill."
         )
+
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_save_scenario",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(
         await save_scenario_for_agent(
             name=name, sub_type=sub_type, yaml_body=yaml_body, description=description
@@ -168,6 +209,16 @@ async def _update_scenario_handler(args: dict) -> dict:
             "full replace; GET first and pass back the FULL body with the "
             "user's edits applied."
         )
+
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_update_scenario",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(
         await update_scenario_for_agent(
             scenario_id=scenario_id,
@@ -182,9 +233,18 @@ async def _update_scenario_handler(args: dict) -> dict:
 async def _delete_scenario_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import delete_scenario_for_agent
 
+    ws_id, uid = _identity()
     scenario_id = args.get("scenario_id")
     if not scenario_id or not isinstance(scenario_id, str):
         return _error("delete_scenario requires a `scenario_id` (string).")
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_delete_scenario",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await delete_scenario_for_agent(scenario_id))
 
 
@@ -203,6 +263,16 @@ async def _run_scenario_handler(args: dict) -> dict:
             "the scenario via save_scenario first, then pass the returned "
             "id here — the chat surface only supports saved-scenario runs."
         )
+
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_run_scenario",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(
         await run_scenario_for_agent(
             name=name,
@@ -216,8 +286,17 @@ async def _run_scenario_handler(args: dict) -> dict:
 async def _list_runs_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import list_runs_for_agent
 
+    ws_id, uid = _identity()
     limit = args.get("limit", 10)
     offset = args.get("offset", 0)
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_list_runs",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await list_runs_for_agent(limit=limit, offset=offset))
 
 
@@ -227,6 +306,16 @@ async def _get_run_handler(args: dict) -> dict:
     run_id = args.get("run_id")
     if not run_id or not isinstance(run_id, str):
         return _error("get_run requires a `run_id` (string).")
+
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_get_run",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await get_run_for_agent(run_id))
 
 
@@ -244,6 +333,16 @@ async def _list_projected_decisions_handler(args: dict) -> dict:
         return _error("list_projected_decisions `anchor_id` must be a string when set.")
     limit = args.get("limit", 50)
     offset = args.get("offset", 0)
+
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_list_projected_decisions",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(
         await list_projected_decisions_for_agent(
             run_id, anchor_id=anchor_id, limit=limit, offset=offset
@@ -254,9 +353,18 @@ async def _list_projected_decisions_handler(args: dict) -> dict:
 async def _get_aggregate_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import get_aggregate_for_agent
 
+    ws_id, uid = _identity()
     window_days = args.get("window_days")
     if window_days is not None and not isinstance(window_days, int):
         return _error("get_aggregate `window_days` must be an integer when set.")
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_get_aggregate",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await get_aggregate_for_agent(window_days=window_days))
 
 
@@ -266,6 +374,15 @@ async def _get_insights_handler(args: dict) -> dict:
     del args
     from pocketpaw_ee.cloud.foresight.agent_context import get_insights_for_agent
 
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_get_insights",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await get_insights_for_agent())
 
 
@@ -279,17 +396,35 @@ async def _get_insights_handler(args: dict) -> dict:
 async def _list_backtests_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import list_backtests_for_agent
 
+    ws_id, uid = _identity()
     limit = args.get("limit", 10)
     offset = args.get("offset", 0)
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_list_backtests",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await list_backtests_for_agent(limit=limit, offset=offset))
 
 
 async def _get_backtest_handler(args: dict) -> dict:
     from pocketpaw_ee.cloud.foresight.agent_context import get_backtest_for_agent
 
+    ws_id, uid = _identity()
     backtest_id = args.get("backtest_id")
     if not backtest_id or not isinstance(backtest_id, str):
         return _error("get_backtest requires a `backtest_id` (string). Find it via list_backtests.")
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_get_backtest",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await get_backtest_for_agent(backtest_id))
 
 
@@ -299,6 +434,15 @@ async def _get_onboarding_gate_handler(args: dict) -> dict:
     del args
     from pocketpaw_ee.cloud.foresight.agent_context import get_onboarding_gate_for_agent
 
+    ws_id, uid = _identity()
+    record_tool_call(
+        workspace_id=ws_id or "",
+        user_id=uid or "",
+        tool_server="pocketpaw_foresight",
+        tool_name="_get_onboarding_gate",
+        status="ok",
+        ok=True,
+    )
     return _result_payload(await get_onboarding_gate_for_agent())
 
 

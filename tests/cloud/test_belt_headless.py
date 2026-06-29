@@ -62,7 +62,7 @@ index e69de29..3b18e51 100644
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     """Isolated InstinctStore wired into the global resolver the runner reads."""
     st = InstinctStore(tmp_path / "instinct_headless.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 

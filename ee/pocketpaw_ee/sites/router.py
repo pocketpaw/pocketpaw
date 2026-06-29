@@ -18,9 +18,14 @@
 #
 # Updated 2026-05-30 (follow-up item 4): added GET /sites/{site_id}/domains — an
 # authed, tenant-scoped read of the site's domains + statuses (same
-# require_plan_feature("fabric") router gate + require_action_any_workspace
+# require_plan_feature("sites") router gate + require_action_any_workspace
 # scoping as the other authed sites reads) so the Domains tab can rehydrate on
 # reload. A site in another workspace surfaces as a 404 (via the service _load).
+#
+# Updated 2026-06-25 (decouple-sites-from-fabric): the router plan gate moved from
+# require_plan_feature("fabric") to require_plan_feature("sites") — Sites now
+# unlocks on the consumer "sites" flag (go+), decoupled from the enterprise-only
+# Fabric ontology, which keeps the "fabric" flag.
 #
 # Updated 2026-06-17 (pocketpaw#1345 backend half — by-pocket preview + status):
 # added GET /sites/by-pocket/{pocket_id}/preview and
@@ -73,6 +78,17 @@
 # `vite dev` per pocket, HMR in ~ms vs a per-edit rebuild). Carries fabric.write (it
 # spawns a process / mutates server state); a missing pocket is a 404 (the pockets
 # service raises NotFound during materialize). Publish/editable are unchanged.
+# Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
+# edit-bridge): dev_preview_by_pocket now resolves a ``builder_origin`` (the
+# request ``Origin`` header, with the PAW_SITES_BUILDER_ORIGIN env fallback applied
+# in the service) and threads it to dev_preview_pocket → ensure_dev_server →
+# _default_materialize → GeneratorClient.build(builder_origin=..., static_build=
+# False). This makes the dev-server-materialized SOURCE carry SE-1's section anchors
+# + gated edit-bridge (mirroring /editable's origin precedence), so the hover-edit
+# overlay works against the dev server — without it the dev path materialized
+# anchorless source and flipping BRIDGE_IN_DEV regressed the overlay. static_build
+# stays False (no prod build on the dev path — only the generate/scaffold step needs
+# builder_origin for the source injection).
 # Updated 2026-06-19 (P2b-backend — revert endpoint): added POST
 # /sites/by-pocket/{pocket_id}/versions/{version_no}/revert — revert a pocket's site
 # to a prior version by ordinal. Delegates to sites_service.revert_pocket_version,
@@ -121,7 +137,7 @@ from pocketpaw_ee.sites.dto import (
 
 router = APIRouter(
     tags=["Sites"],
-    dependencies=[Depends(require_plan_feature("fabric"))],
+    dependencies=[Depends(require_plan_feature("sites"))],
 )
 
 
@@ -140,6 +156,7 @@ async def publish_site(
         workspace_id=ctx.workspace_id,
         user_id=ctx.user_id,
         pocket_id=body.pocket_id,
+        site_plan_key=body.site_plan_key,
     )
     return sites_service._to_response(doc)
 
@@ -215,6 +232,7 @@ async def preview_by_pocket(
 @router.post("/sites/by-pocket/{pocket_id}/dev-preview", response_model=DevPreviewResponse)
 async def dev_preview_by_pocket(
     pocket_id: str,
+    request: Request,
     ctx: RequestContext = Depends(request_context),
     _: object = Depends(require_action_any_workspace("fabric.write")),
 ) -> DevPreviewResponse:
@@ -227,11 +245,24 @@ async def dev_preview_by_pocket(
     (PERF-3 persistent dir, cached node_modules) and started on an ephemeral port.
     Publish / make_site_editable are unchanged — this is the editing preview only.
 
+    The materialized dev source carries the gated edit-bridge so the hover-edit
+    overlay works against the dev server. The builder origin is resolved the SAME
+    way as ``/editable``: the request's ``Origin`` header (the dashboard the call
+    came from), with the service falling back to the configured
+    ``PAW_SITES_BUILDER_ORIGIN`` when the header is absent, so the dev-served source
+    is anchored + bridged exactly like the static editable build.
+
     Carries fabric.write (it spawns a process / mutates server state), matching the
     other by-pocket write actions. A missing / access-denied pocket surfaces as a
     404 (the pockets service raises NotFound itself during materialize)."""
+    # Mirror /editable's origin resolution: the request Origin header here; the
+    # service applies the PAW_SITES_BUILDER_ORIGIN env fallback when it is blank.
+    builder_origin = request.headers.get("origin") or ""
     return await sites_service.dev_preview_pocket(
-        workspace_id=ctx.workspace_id, user_id=ctx.user_id, pocket_id=pocket_id
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        builder_origin=builder_origin,
     )
 
 

@@ -150,6 +150,87 @@ def _identity() -> tuple[str | None, str | None, str | None]:
 
 
 # ---------------------------------------------------------------------------
+# Audit helpers for connector tool execution (chat agent tools path).
+# Added: 2026-06-22 — the MCP connector_execute / sense_execute handlers
+#   call ``connectors.service.execute`` directly, which has NO audit
+#   instrumentation. These helpers write a runtime audit event (SQLite via
+#   get_audit_logger) AND a workspace audit event (MongoDB via
+#   audit_service.record) so agent connector activity shows up in the
+#   activity feed under the "tool" category. Failures are logged and
+#   swallowed so they never break the tool call.
+# ---------------------------------------------------------------------------
+
+
+def _audit_connector_execute(
+    *,
+    workspace_id: str,
+    user_id: str | None,
+    pocket_id: str | None,
+    connector_name: str,
+    action: str,
+    status: str,
+    ok: bool = True,
+    via_sense: str | None = None,
+) -> None:
+    """Write audit events for a connector execute (READ) or propose (WRITE).
+
+    Two sinks: runtime audit (SQLite, raw event) + workspace audit (MongoDB,
+    rich detail). Never raises.
+    """
+    actor_id = user_id or "agent"
+
+    # 1. Runtime audit via get_audit_logger
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        severity = AuditSeverity.INFO if ok else AuditSeverity.WARNING
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=severity,
+                actor=actor_id,
+                action="connector.execute",
+                target=connector_name,
+                status=status,
+                category="pocket_tool_run",
+                workspace_id=workspace_id,
+                connector_action=action,
+                pocket_id=pocket_id or "",
+                via_sense=via_sense or "",
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the tool
+        logger.warning("connector-execute runtime audit failed", exc_info=True)
+
+    # 2. Workspace audit via audit_service.record (fire-and-forget)
+    try:
+        import asyncio
+
+        from pocketpaw_ee.cloud.audit import service as _audit_service
+
+        target_id = f"{connector_name}.{action}"
+        asyncio.ensure_future(
+            _audit_service.record(
+                workspace_id=workspace_id,
+                actor_id=actor_id,
+                action="workspace.agent.tool_executed",
+                target_type="connector",
+                target_id=target_id,
+                metadata={
+                    "connector": connector_name,
+                    "connector_action": action,
+                    "pocket_id": pocket_id or "",
+                    "status": status,
+                    "ok": ok,
+                    "via_sense": via_sense or "",
+                    "source": "chat_page",
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the tool
+        logger.warning("connector-execute workspace-audit record failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
 
@@ -310,10 +391,38 @@ async def _connector_execute_handler(args: dict) -> dict:
             workspace_id, connector_name, body, user_id=user_id
         )
     except CloudError as exc:
+        _audit_connector_execute(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            connector_name=connector_name,
+            action=action,
+            status=exc.code,
+            ok=False,
+        )
         return _error_response(f"{exc.code}: {exc.message}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("connector_execute failed", exc_info=True)
+        _audit_connector_execute(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            connector_name=connector_name,
+            action=action,
+            status="error",
+            ok=False,
+        )
         return _error_response(f"connector_execute failed: {exc}")
+
+    _audit_connector_execute(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        connector_name=connector_name,
+        action=action,
+        status="ok",
+        ok=result.success,
+    )
 
     return _success_response(
         {
@@ -377,6 +486,15 @@ async def _propose_connector_write(
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean MCP error, never a 500.
         logger.warning("connector_execute propose failed", exc_info=True)
+        _audit_connector_execute(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            connector_name=connector_name,
+            action=action,
+            status="propose_failed",
+            ok=False,
+        )
         return _error_response(
             f"could not send '{action}' on {connector_name!r} for approval: {exc}"
         )
@@ -387,6 +505,15 @@ async def _propose_connector_write(
         action,
         pocket_id,
         action_id,
+    )
+    _audit_connector_execute(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        connector_name=connector_name,
+        action=action,
+        status="pending_approval",
+        ok=True,
     )
     # Pending-shaped success: the human gates the write. ``status`` is the
     # string ``"pending_approval"`` (not an HTTP code) so the agent reads it as
@@ -510,15 +637,56 @@ async def _sense_execute_handler(args: dict) -> dict:
             user_id=user_id,
         )
     except SenseValidationError as exc:
+        _audit_connector_execute(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            connector_name=sense,
+            action=action,
+            status="unknown_sense",
+            ok=False,
+            via_sense=sense,
+        )
         return _error_response(f"unknown sense {sense!r}: {exc}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("sense_execute failed", exc_info=True)
+        _audit_connector_execute(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            connector_name=sense,
+            action=action,
+            status="error",
+            ok=False,
+            via_sense=sense,
+        )
         return _error_response(f"sense_execute failed: {exc}")
 
     # execute_sense OWNS the read-first gate. A False result is a structured
     # refusal (sense.no_provider / sense.action_needs_approval), not a crash.
     if not result.ok:
+        _audit_connector_execute(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            connector_name=result.connector_name or sense,
+            action=action,
+            status="refused",
+            ok=False,
+            via_sense=sense,
+        )
         return _error_response(result.message or result.error or "sense_execute refused")
+
+    _audit_connector_execute(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        pocket_id=pocket_id,
+        connector_name=result.connector_name or sense,
+        action=action,
+        status="ok",
+        ok=True,
+        via_sense=sense,
+    )
 
     # result.data is the underlying ExecuteActionResponse. Flatten it into the
     # SAME shape connector_execute returns (json.dumps uses default=str, so a

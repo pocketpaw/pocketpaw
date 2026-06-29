@@ -8,6 +8,47 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-06-26 (fix/sites-build-subprocess-timeout — stop-gap: bound the build
+# subprocesses): all THREE _SubprocessRunner subprocesses (the generator, `bun
+# install`, and the `bun run build` static build) ran a bare ``await
+# proc.communicate()`` with NO timeout. When adapter-cloudflare's workerd prerender
+# wedges (known upstream SvelteKit hang) the `bun run build` step ran forever, so
+# /editable and publish hung unbounded (tens of minutes). The existing
+# ``reap_build_workerd`` only runs AFTER communicate() returns, so it could not
+# rescue a wedged build.
+#   * Each subprocess is now launched with ``start_new_session=True`` (its own
+#     process group) and run through ``_communicate_bounded(proc, timeout_s, label)``,
+#     which ``asyncio.wait_for``-bounds communicate() and, on timeout, SIGKILLs the
+#     whole process GROUP (``_kill_process_group`` → ``os.killpg`` — kills the leaked
+#     workerd CHILD too, not just the bun parent), reaps the parent, and raises the
+#     internal ``_BuildTimeout``.
+#   * Timeout is ``PAW_SITES_BUILD_TIMEOUT_SEC`` (int, default 120s — a legit build is
+#     ~45-60s, a wedged one runs for minutes, so 120s cleanly separates them); read
+#     once per call via ``_build_timeout_sec()`` with an int-parse-or-fallback.
+#   * Each call site converts ``_BuildTimeout`` into its EXISTING failure contract
+#     (callers unchanged): ``install``/``build_static`` return ``(False, "<step> timed
+#     out after Ns ...")`` — the same ``(ok, msg)`` shape the non-zero-exit path
+#     returns, so build() raises SmokeGateFailed and the caller maps it to a CloudError
+#     (FE degrades to view-only); ``generate`` raises ``RuntimeError`` (its existing
+#     raise-on-failure). ``reap_build_workerd`` is kept (success-path + on a build
+#     timeout, as defensive straggler cleanup).
+#
+# Updated 2026-06-21 (DSV-5 — dynamic svelte sites write-side): build() now SPLITS
+# a svelte pocket's ``source`` content envelope before sending it to the generator.
+# A DYNAMIC svelte pocket stores its live-data bindings
+# (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the same
+# ``source`` dict that holds the ``{path: contents}`` SvelteKit files (the contract
+# DSV-2b's read assumes). The generator's DSV-1 ``GenerateInput`` expects the
+# bindings as FLAT siblings alongside ``source`` (``input.objects`` /
+# ``input.sources`` / ``input.actions`` / ``input.auth`` — what ``parseBindings``
+# reads), NOT nested inside ``source`` (``materializeSource`` writes every
+# ``source`` key to disk as a file, so a binding key mixed in would break the
+# build). ``_split_svelte_source`` peels the binding keys out: the file map goes on
+# ``input.source`` and the bindings spread as flat siblings. A STATIC svelte pocket
+# carries no binding keys, so the split is a no-op and the wire bytes are unchanged.
+# ``build``/``_build_one``'s ``source`` param is widened to ``dict[str, Any]`` to
+# carry the (list/bool) binding values.
+#
 # Updated 2026-06-19 (fix/sites-preview-fresh-build, P0a + P1a — the #1 Paw Sites
 # bug: the editable PREVIEW served STALE anchorless HTML so the hover edit-pill
 # never appeared). ROOT CAUSE: PERF-4 overloaded the ``smoke`` flag — it gated
@@ -126,17 +167,105 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import os
 import shlex
+import signal
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
+
+# Stop-gap timeout that bounds each build subprocess (the generator, `bun install`,
+# and the `bun run build` static build) so a wedged step fails FAST instead of
+# hanging the request unbounded. The static build runs adapter-cloudflare's workerd
+# prerender, which can hang forever on a known upstream SvelteKit bug; without a
+# timeout `/editable` and publish hang for tens of minutes. A legit build is
+# ~45-60s and a wedged one runs for minutes, so the 120s default cleanly separates
+# them. Override with PAW_SITES_BUILD_TIMEOUT_SEC (int seconds). Read once per call
+# via _build_timeout_sec() with an int-parse-or-fallback so a malformed value can
+# never crash the build.
+_DEFAULT_BUILD_TIMEOUT_SEC = 120
+
+
+def _build_timeout_sec() -> int:
+    """Per-subprocess build timeout in seconds (PAW_SITES_BUILD_TIMEOUT_SEC, int,
+    default 120). A malformed/empty value falls back to the default rather than
+    raising — the timeout is a safety net and must never itself break a build."""
+    raw = os.environ.get("PAW_SITES_BUILD_TIMEOUT_SEC")
+    if raw is None:
+        return _DEFAULT_BUILD_TIMEOUT_SEC
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "sites: ignoring non-int PAW_SITES_BUILD_TIMEOUT_SEC=%r, using default %ds",
+            raw,
+            _DEFAULT_BUILD_TIMEOUT_SEC,
+        )
+        return _DEFAULT_BUILD_TIMEOUT_SEC
+
+
+class _BuildTimeout(RuntimeError):
+    """Raised by ``_communicate_bounded`` when a build subprocess exceeds the
+    timeout and is killed. Carries the step ``label`` and the elapsed ``timeout_s``
+    so each call site can convert it into that step's existing failure contract
+    (``install``/``smoke`` → a ``(False, msg)`` tuple; ``generate`` → a
+    ``RuntimeError``). Internal — never surfaces to callers raw."""
+
+    def __init__(self, label: str, timeout_s: int) -> None:
+        self.label = label
+        self.timeout_s = timeout_s
+        super().__init__(f"{label} timed out after {timeout_s}s")
+
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the entire process GROUP of a launched subprocess so leaked workerd
+    CHILDREN die too, not just the parent.
+
+    The build subprocesses are launched with ``start_new_session=True``, so each is
+    its own process-group leader (pgid == pid). ``adapter-cloudflare``'s prerender
+    boots a workerd child that the bun parent never reaps; killing only the parent
+    would leave that child wedged. ``os.killpg(os.getpgid(pid), SIGKILL)`` takes out
+    the whole group. Guards ``ProcessLookupError`` (the proc/group already exited)
+    and ``PermissionError`` (can't signal — nothing we can do) so a best-effort kill
+    never raises into the build path."""
+    pid = proc.pid
+    if pid is None:
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Already dead, or not allowed to signal it — nothing further to do.
+        pass
+
+
+async def _communicate_bounded(
+    proc: asyncio.subprocess.Process, timeout_s: int, label: str
+) -> tuple[bytes, bytes]:
+    """Run ``proc.communicate()`` but bound it by ``timeout_s``. On timeout, kill
+    the proc's whole process group (so leaked workerd children die too), reap the
+    parent, and raise ``_BuildTimeout(label, timeout_s)``.
+
+    Each build subprocess is launched with ``start_new_session=True`` so it leads
+    its own process group; ``_kill_process_group`` SIGKILLs the group. After the
+    kill we ``await proc.wait()`` to REAP the parent (avoid a zombie / a lingering
+    transport) — suppressing any error there since the proc is being torn down
+    anyway. The raised ``_BuildTimeout`` is caught at each call site and converted
+    into that step's existing failure contract."""
+    try:
+        return await asyncio.wait_for(proc.communicate(), timeout_s)
+    except TimeoutError as exc:  # asyncio.TimeoutError IS builtin TimeoutError (3.11+)
+        _kill_process_group(proc)
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        raise _BuildTimeout(label, timeout_s) from exc
+
 
 # Sentinel file (in the per-pocket build dir) recording the install-input
 # fingerprint of the last SUCCESSFUL `bun install`. build() skips install when the
@@ -152,6 +281,44 @@ _INSTALL_INPUT_FILES = ("package.json", "bun.lock", "bun.lockb", "package-lock.j
 # LIVE publish fail-gates on these; a preview build tolerates them (the live
 # publish still gates + rolls back, so a broken edit can never go live).
 _WORKERD_SSR_MARKERS = ("window is not defined", "document is not defined", "No such module")
+
+# DSV-5: a DYNAMIC svelte pocket stores its live-data bindings as SIBLING keys on
+# the same ``source`` content envelope that carries the ``{path: contents}``
+# SvelteKit files (DSV-2b reads ``objects`` off exactly this envelope, and the
+# publish/promote switch versions the whole ``source`` dict). These are the
+# binding keys the generator's DSV-1 ``GenerateInput`` expects as FLAT siblings
+# alongside ``source`` (not nested inside it): ``objects`` (the D1 table defs),
+# ``sources`` (reads), ``actions`` (writes) — lists — and ``auth`` — a bool.
+_SVELTE_BINDING_KEYS = ("objects", "sources", "actions", "auth")
+
+
+def _split_svelte_source(
+    source: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a svelte ``source`` content envelope into ``(files, bindings)``
+    (DSV-5).
+
+    A dynamic svelte pocket persists its live-data bindings
+    (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the SAME
+    dict that holds the ``{relative_path: file_contents}`` SvelteKit files. The
+    generator can't receive them mixed together: ``materializeSource`` writes
+    EVERY ``source`` key to disk as a file (``writeFile(path, contents)`` keyed on
+    the key), so a binding key like ``objects`` (a list value) would be treated as
+    a file path and break the build. DSV-1's ``parseBindings`` instead reads the
+    bindings as FLAT siblings on ``GenerateInput`` (``input.objects`` /
+    ``input.sources`` / ``input.actions`` / ``input.auth``), NOT nested under
+    ``input.source``.
+
+    So this peels the binding keys OUT of the envelope: it returns the file map
+    (everything that is NOT a recognized binding key — written to ``input.source``)
+    and the bindings dict (only the recognized keys that are present — spread as
+    flat siblings on ``GenerateInput``). A STATIC svelte pocket carries no binding
+    keys, so ``bindings`` is empty and ``files`` is the unchanged source map — the
+    pre-DSV-5 wire bytes are preserved exactly."""
+    src = source or {}
+    files = {k: v for k, v in src.items() if k not in _SVELTE_BINDING_KEYS}
+    bindings = {k: src[k] for k in _SVELTE_BINDING_KEYS if k in src}
+    return files, bindings
 
 
 def reap_build_workerd(project_dir: str) -> int:
@@ -336,7 +503,10 @@ class _SubprocessRunner:
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             json.dump(input_json, fh)
             input_path = fh.name
+        timeout_s = _build_timeout_sec()
         try:
+            # start_new_session=True: own process group so a wedged generator (and
+            # any children it leaked) can be killed as a group on timeout.
             proc = await asyncio.create_subprocess_exec(
                 *self._gen_cmd,
                 "build",
@@ -346,8 +516,14 @@ class _SubprocessRunner:
                 out_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
             )
-            stdout, stderr = await proc.communicate()
+            try:
+                stdout, stderr = await _communicate_bounded(proc, timeout_s, "generator")
+            except _BuildTimeout as exc:
+                # Preserve generate()'s raise-on-failure contract: a timed-out
+                # generator is a failed generate.
+                raise RuntimeError(f"generator timed out after {exc.timeout_s}s") from exc
             if proc.returncode != 0:
                 raise RuntimeError(f"generator failed: {stderr.decode()}")
             return json.loads(stdout.decode().strip().splitlines()[-1])
@@ -364,6 +540,9 @@ class _SubprocessRunner:
         # The deps are already made resolvable by build() (_rewrite_ripple_dep runs
         # before the install decision so the dep-hash reflects the final inputs).
         # This just runs `bun install` on the prepared dir.
+        timeout_s = _build_timeout_sec()
+        # start_new_session=True: own process group so a wedged install is killable
+        # as a group on timeout.
         proc = await asyncio.create_subprocess_exec(
             "bun",
             "install",
@@ -371,8 +550,19 @@ class _SubprocessRunner:
             cwd=project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "bun install")
+        except _BuildTimeout as exc:
+            # Preserve install()'s (ok, msg) contract: a timeout is a build failure,
+            # so build() raises SmokeGateFailed → the publish/editable caller maps it
+            # to a CloudError and the FE degrades to view-only (same as a non-zero exit).
+            return (
+                False,
+                f"bun install timed out after {exc.timeout_s}s — killed the build "
+                "(likely a wedged workerd prerender)",
+            )
         if proc.returncode != 0:
             return False, f"bun install failed (exit {proc.returncode}): {stderr.decode()[-500:]}"
         return True, "ok"
@@ -389,6 +579,11 @@ class _SubprocessRunner:
         #     LIVE publish path). A preview build tolerates a would-fail SSR render
         #     (the live publish still gates + rolls back, so a broken edit can't go
         #     live) but still BUILDS so the served preview is fresh + anchored.
+        timeout_s = _build_timeout_sec()
+        # start_new_session=True: own process group. This is the step that wedges —
+        # adapter-cloudflare's workerd prerender can hang forever (upstream SvelteKit
+        # bug). The group kill on timeout takes out the leaked workerd CHILD too, not
+        # just the bun parent.
         proc = await asyncio.create_subprocess_exec(
             "bun",
             "run",
@@ -396,8 +591,21 @@ class _SubprocessRunner:
             cwd=project_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await _communicate_bounded(proc, timeout_s, "build")
+        except _BuildTimeout as exc:
+            # A wedged build (typically the hung workerd prerender) is killed as a
+            # group; still run the defensive reap below for any straggler, then return
+            # the same (False, msg) shape a non-zero exit returns so build() treats it
+            # as a normal build failure (→ SmokeGateFailed → CloudError → view-only FE).
+            reap_build_workerd(project_dir)
+            return (
+                False,
+                f"build timed out after {exc.timeout_s}s — killed the build "
+                "(likely a wedged workerd prerender)",
+            )
         # P1a: reap the prerender-spawned workerd after EVERY build (the leak is
         # independent of the gate), scoped to this build's project dir.
         reap_build_workerd(project_dir)
@@ -446,7 +654,7 @@ class GeneratorClient:
         capture_api_base: str,
         capture_signed_key: str,
         engine: str = "ripple",
-        source: dict[str, str] | None = None,
+        source: dict[str, Any] | None = None,
         builder_origin: str | None = None,
         pocket_id: str | None = None,
         smoke: bool = True,
@@ -462,6 +670,18 @@ class GeneratorClient:
         carries ``rippleSpec`` and OMITS ``source`` (gaining only the
         ``engine: "ripple"`` tag). ``siteConfig`` + ``theme`` are sent on both
         tracks unchanged. Stages 1, 3-8 (install/smoke/...) are track-agnostic.
+
+        DSV-5: a DYNAMIC svelte pocket's ``source`` envelope ALSO carries its
+        live-data bindings (``objects``/``sources``/``actions``/``auth``) as
+        SIBLING keys on the same dict as the files. build() SPLITS the envelope
+        (``_split_svelte_source``) before sending: the file map goes on
+        ``input.source`` and the bindings are spread as FLAT siblings on the
+        generator input (``input.objects`` / ``input.sources`` / ``input.actions``
+        / ``input.auth``) — the exact shape DSV-1's ``parseBindings`` reads, NOT
+        nested under ``source`` (materializeSource would otherwise try to write a
+        binding key as a file and break the build). A STATIC svelte pocket carries
+        no binding keys, so the split is a no-op: ``input.source`` is the unchanged
+        file map and no binding siblings are added (pre-DSV-5 wire bytes).
 
         ``builder_origin`` (SE-2b) makes the site EDITABLE: when set, it rides
         ``siteConfig.builderOrigin`` and the paw-sites generator (SE-1) injects
@@ -536,7 +756,7 @@ class GeneratorClient:
         capture_api_base: str,
         capture_signed_key: str,
         engine: str,
-        source: dict[str, str] | None,
+        source: dict[str, Any] | None,
         builder_origin: str | None,
         pocket_id: str | None,
         smoke: bool,
@@ -569,7 +789,19 @@ class GeneratorClient:
             "siteConfig": site_config,
         }
         if engine == "svelte":
-            input_json["source"] = source or {}
+            # DSV-5: a DYNAMIC svelte pocket carries its live-data bindings
+            # (objects/sources/actions/auth) as SIBLING keys on the same ``source``
+            # envelope that holds the {path: contents} files. Peel them out: the
+            # file map goes on ``input.source`` (materializeSource writes each key
+            # as a file, so a binding key mixed in would break the build), and the
+            # bindings are spread as FLAT siblings on GenerateInput — the exact
+            # shape DSV-1's parseBindings reads (``input.objects`` / ``input.sources``
+            # / ``input.actions`` / ``input.auth``), NOT nested under ``source``. A
+            # STATIC svelte pocket has no binding keys → ``bindings`` is empty and
+            # ``input.source`` is the unchanged file map (pre-DSV-5 wire bytes).
+            files, bindings = _split_svelte_source(source)
+            input_json["source"] = files
+            input_json.update(bindings)
         else:
             input_json["rippleSpec"] = ripple_spec
         gen = await self._runner.generate(input_json, out_dir)

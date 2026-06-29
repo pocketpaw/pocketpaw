@@ -1,15 +1,31 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — create_svelte_site
+# now accepts a DYNAMIC svelte site. The ``source`` envelope may carry live-data
+# bindings (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the
+# {path: contents} file map: the per-value string check now EXEMPTS those binding
+# keys (their values are lists/bools), the JSON schema's ``source`` is loosened to
+# ``additionalProperties: true``, and the handler stamps ``pattern="dynamic"`` when
+# any binding is present (else ``pattern="landing"`` for a static marketing site —
+# unchanged). The generator (generator_client._split_svelte_source) peels the
+# bindings out of ``source`` at publish and passes them as flat siblings on the
+# DSV-1 GenerateInput. Required-file validation is untouched — binding keys never
+# satisfy a §4.3 required FILE key, so they are simply ignored by the missing-keys
+# check.
+#
 # Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — both create handlers now
 # call _require_sites_plan_or_error(workspace_id) right after input validation,
 # delegating to the shared sites.service.require_sites_plan gate. Sites is the
-# "fabric" plan feature; these create tools reach agent_create directly and
-# bypassed the REST router's require_plan_feature("fabric") gate, so a team-plan
+# "sites" plan feature (go+); these create tools reach agent_create directly and
+# bypassed the REST router's require_plan_feature("sites") gate, so a free-plan
 # workspace could create + (then publish) a live site that GET /sites 403'd. On a
 # disallowed plan the handler now returns the plan.feature_denied MCP error
-# ("Sites requires the Business plan — upgrade, or switch workspace") so the chat
+# ("Sites requires the Go plan — upgrade, or switch workspace") so the chat
 # agent surfaces the upgrade message instead of a phantom-created site.
+# Updated: 2026-06-25 (decouple-sites-from-fabric) — the gate moved off the
+# overloaded "fabric" flag onto the dedicated "sites" flag (go+); the Fabric
+# ontology keeps "fabric" (enterprise-only).
 #
 # Updated: 2026-06-04 (feat/sites-svelte-engine) — added the SECOND deterministic
 # create tool ``create_svelte_site`` for the Paw Sites "Svelte track". It mirrors
@@ -103,6 +119,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 # Same server as the publish tool — the create + publish hops live together so
@@ -163,14 +181,36 @@ SVELTE_REQUIRED_PREFIXES = (
     "src/lib/components/",  # at least one section component (Hero, ...)
 )
 
+# DSV-5: a DYNAMIC svelte site carries its live-data bindings as SIBLING keys on
+# the same ``source`` envelope that holds the {path: contents} SvelteKit files —
+# ``objects`` (the D1 table defs) / ``sources`` (reads) / ``actions`` (writes) —
+# lists — and ``auth`` — a bool. These are NOT file entries: their values are
+# lists/bools, not content strings, and they are NOT validated against the §4.3
+# required-file set. The generator (generator_client._split_svelte_source) peels
+# them out of ``source`` at publish and passes them as flat siblings on the DSV-1
+# GenerateInput. Their presence is what makes a svelte site dynamic.
+SVELTE_BINDING_KEYS = ("objects", "sources", "actions", "auth")
 
-def _missing_source_keys(source: dict[str, str]) -> list[str]:
+
+def _has_svelte_bindings(source: dict[str, Any]) -> bool:
+    """True when the ``source`` envelope carries any NON-EMPTY live-data binding
+    (DSV-5) — i.e. the svelte site is DYNAMIC.
+
+    A binding key present but empty (``objects: []`` / ``auth: false``) does NOT
+    make the site dynamic — the same emptiness the generator's ``isDynamic``
+    classifier uses (sources/actions non-empty OR auth true). Used to decide the
+    create ``pattern`` (``"dynamic"`` vs ``"landing"``)."""
+    return any(bool(source.get(k)) for k in SVELTE_BINDING_KEYS)
+
+
+def _missing_source_keys(source: dict[str, Any]) -> list[str]:
     """Return the §4.3 required keys absent from ``source`` (empty list = valid).
 
     Checks the exact composition/resting-frame keys plus that at least one
     ``src/lib/components/*.svelte`` section exists. Used to fail the create
     closed with an actionable message rather than persisting a half-authored
-    map the generator can't build into a page."""
+    map the generator can't build into a page. Binding sibling keys (DSV-5)
+    never satisfy a required FILE key, so they are simply ignored here."""
     missing = [k for k in SVELTE_REQUIRED_EXACT_KEYS if k not in source]
     for prefix in SVELTE_REQUIRED_PREFIXES:
         if not any(k.startswith(prefix) for k in source):
@@ -191,14 +231,14 @@ def _identity() -> tuple[str | None, str | None]:
 
 async def _require_sites_plan_or_error(workspace_id: str) -> dict | None:
     """Gate the create on the workspace's plan. Returns an MCP ``_error_response``
-    when the plan lacks the Sites ("fabric") feature (so the agent surfaces the
+    when the plan lacks the Sites ("sites") feature (so the agent surfaces the
     upgrade message instead of a phantom-created site), or ``None`` when the plan
     is allowed.
 
     Delegates to the SHARED service gate (``sites.service.require_sites_plan``) so
     the in-process create path is gated by the SAME plan check + feature table as
-    the publish path and the HTTP ``require_plan_feature("fabric")`` dependency. A
-    team-plan workspace was the bug: create + publish ran in-process and bypassed
+    the publish path and the HTTP ``require_plan_feature("sites")`` dependency. A
+    free-plan workspace was the bug: create + publish ran in-process and bypassed
     the router gate, deploying a live site that GET /sites then 403'd."""
     from pocketpaw_ee.cloud._core.errors import CloudError
     from pocketpaw_ee.sites.service import require_sites_plan
@@ -258,6 +298,15 @@ async def _create_landing_site_handler(args: dict) -> dict:
             "cloud chat session)."
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_landing_site",
+        status="ok",
+        ok=True,
+    )
+
     content = args.get("content")
     if not isinstance(content, dict) or not content:
         return _error_response(
@@ -266,8 +315,8 @@ async def _create_landing_site_handler(args: dict) -> dict:
             "contact, footer). You provide copy only; the tool builds the page."
         )
 
-    # Plan gate (Sites = "fabric"): reject a team-plan workspace here so the
-    # create can't bypass the router's require_plan_feature("fabric") gate.
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
     if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
         return gate
 
@@ -415,11 +464,19 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__create_svelte_site`` (the Svelte track).
 
     Reads workspace/user identity from the per-stream ContextVars, validates the
-    ``source`` map against the §4.3 required keys, and persists it DIRECTLY via
-    ``agent_create`` (engine="svelte", source=<map>, type="site",
-    pattern="landing", ripple_spec=None, trusted=True). Returns
-    ``{ok, pocket_id, pocket}`` on success; sets ``is_error`` when identity is
-    missing, ``source`` is absent/malformed/incomplete, or the persist fails.
+    ``source`` envelope against the §4.3 required keys, and persists it DIRECTLY
+    via ``agent_create`` (engine="svelte", source=<envelope>, type="site",
+    ripple_spec=None, trusted=True). Returns ``{ok, pocket_id, pocket}`` on
+    success; sets ``is_error`` when identity is missing, ``source`` is
+    absent/malformed/incomplete, or the persist fails.
+
+    DSV-5: the ``source`` envelope may carry live-data bindings
+    (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the file map
+    (their values are lists/bools, exempt from the file-string check). When any is
+    present the pocket is stamped ``pattern="dynamic"`` (a per-tenant D1 site);
+    otherwise ``pattern="landing"`` (a static marketing page, unchanged). The
+    generator peels the bindings out of ``source`` at publish and passes them as
+    flat siblings on the DSV-1 GenerateInput.
 
     Unlike ``create_landing_site`` there is no ``assemble_*`` step — the agent
     authored the SvelteKit components (via the design skills), so the map is
@@ -432,6 +489,15 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "cloud chat session)."
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_svelte_site",
+        status="ok",
+        ok=True,
+    )
+
     source = args.get("source")
     if not isinstance(source, dict) or not source:
         return _error_response(
@@ -441,12 +507,19 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "src/lib/components/*.svelte sections). You write the components; this "
             "tool persists them."
         )
-    # Every value must be a string (file contents) — the map is {path: contents}.
-    bad = [k for k, v in source.items() if not isinstance(v, str)]
+    # Every FILE value must be a string (file contents) — the map is
+    # {path: contents}. DSV-5: the live-data binding siblings
+    # (objects/sources/actions/auth) are NOT files — their values are lists/bools
+    # — so they are excluded from the string check (the generator peels them out of
+    # ``source`` at publish via _split_svelte_source and passes them as flat
+    # GenerateInput siblings).
+    bad = [k for k, v in source.items() if k not in SVELTE_BINDING_KEYS and not isinstance(v, str)]
     if bad:
         return _error_response(
-            "create_svelte_site `source` values must be file-content strings; "
-            f"these keys are not strings: {', '.join(sorted(bad)[:8])}."
+            "create_svelte_site `source` file values must be content strings; "
+            f"these keys are not strings: {', '.join(sorted(bad)[:8])}. (The "
+            "live-data binding keys objects/sources/actions/auth are the only "
+            "non-string siblings allowed on `source`.)"
         )
     missing = _missing_source_keys(source)
     if missing:
@@ -458,8 +531,8 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "and at least one section component."
         )
 
-    # Plan gate (Sites = "fabric"): reject a team-plan workspace here so the
-    # create can't bypass the router's require_plan_feature("fabric") gate.
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
     if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
         return gate
 
@@ -472,11 +545,19 @@ async def _create_svelte_site_handler(args: dict) -> dict:
     color_raw = args.get("color")
     color = color_raw if isinstance(color_raw, str) else ""
 
+    # DSV-5: stamp ``pattern="dynamic"`` when the source envelope carries live-data
+    # bindings (objects/sources/actions/auth), else ``"landing"`` for a static
+    # marketing svelte site. ``pattern="dynamic"`` is what the sites pipeline keys
+    # on to provision the per-tenant D1 + bind it on deploy (it is authoritative in
+    # ``_is_dynamic``), and what the /sites listing + Data tab surface. A static
+    # svelte site keeps ``pattern="landing"`` exactly as before.
+    pattern = "dynamic" if _has_svelte_bindings(source) else "landing"
+
     # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
     # rippleSpec, NO catalog gate (there is no spec to gate). ``engine="svelte"``
     # + ``source`` stamp the svelte track so the generator materializes the map;
-    # ``type_="site"`` + ``pattern="landing"`` keep the site identity the rest of
-    # the pipeline (publish, refine, /sites listing) keys on. ``trusted=True``
+    # ``type_="site"`` + ``pattern`` keep the site identity the rest of the
+    # pipeline (publish, refine, /sites listing) keys on. ``trusted=True``
     # short-circuits the strict catalog gate, which only runs on a non-null
     # rippleSpec anyway — the svelte path passes ``ripple_spec=None``.
     from pocketpaw_ee.cloud.pockets.service import agent_create
@@ -488,7 +569,7 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             name=name,
             description=description,
             type_="site",
-            pattern="landing",
+            pattern=pattern,
             icon=icon,
             color=color,
             ripple_spec=None,
@@ -534,9 +615,15 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
             "Create a Paw Site landing page on the SVELTE TRACK. You AUTHOR the "
             "SvelteKit components yourself (premium hand-written Svelte via the "
             "design skills — the quality bar is the proven spike) and pass them as "
-            "a `source` MAP { relative_path: file_contents }; the tool persists "
-            "the map and stamps the pocket type='site', pattern='landing', "
-            "engine='svelte'. You do NOT compose a rippleSpec, do NOT call "
+            "a `source` ENVELOPE { relative_path: file_contents }; the tool "
+            "persists the map and stamps the pocket type='site', engine='svelte'. "
+            "A site can be STATIC (marketing → pattern='landing') or DYNAMIC "
+            "(backed by the customer's live data → pattern='dynamic'): for a "
+            "dynamic site, declare the live-data bindings as SIBLING keys on the "
+            "same `source` object — `objects` (D1 tables), `sources` (reads), "
+            "`actions` (writes), `auth` (bool) — and author components that consume "
+            "the generated $lib/paw/ helpers; the tool stamps pattern='dynamic' "
+            "when any binding is present. You do NOT compose a rippleSpec, do NOT call "
             "get_widget_spec, do NOT call pocket_specialist. Required `source` "
             "keys (design spec §4.3): 'src/routes/+page.svelte' (imports + "
             "composes the section components), 'src/routes/+layout.svelte' "
@@ -558,12 +645,24 @@ def make_create_svelte_site_tool(tool: Any) -> Any:
                 "source": {
                     "type": "object",
                     "description": (
-                        "The SvelteKit source map { relative_path: file_contents } "
-                        "you authored — paths relative to the project root, values "
-                        "are the file contents as strings. Must include the §4.3 "
-                        "required files (see the tool description)."
+                        "The SvelteKit source ENVELOPE you authored. Mostly a "
+                        "{ relative_path: file_contents } map — paths relative to "
+                        "the project root, file values are content STRINGS, must "
+                        "include the §4.3 required files (see the tool description). "
+                        "For a DYNAMIC site it ALSO carries the live-data bindings "
+                        "as SIBLING keys on the same object: `objects` (array of D1 "
+                        "table defs {name, fields, primaryKey}), `sources` (array of "
+                        "read bindings {name, kind:'data', object}), `actions` (array "
+                        "of write bindings {name, object, op}), and `auth` (bool). "
+                        "Present bindings → the tool stamps pattern='dynamic' and the "
+                        "published site gets a per-tenant D1; absent → a static "
+                        "pattern='landing' page (unchanged)."
                     ),
-                    "additionalProperties": {"type": "string"},
+                    # File values are strings; the binding siblings
+                    # (objects/sources/actions/auth) are arrays/bools — so the
+                    # envelope allows any value type (DSV-5). The handler enforces
+                    # that every NON-binding key's value is a string.
+                    "additionalProperties": True,
                 },
                 "name": {
                     "type": "string",
@@ -605,6 +704,15 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             "edit_svelte_component requires workspace and user context (call from "
             "a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_svelte_component",
+        status="ok",
+        ok=True,
+    )
 
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:

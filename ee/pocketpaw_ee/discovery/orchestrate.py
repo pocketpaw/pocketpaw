@@ -399,7 +399,10 @@ async def run_discovery_and_propose(
 
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
+    # ISO: this can run on a background/HTTP path with no ``current_workspace``
+    # ContextVar — scope the store to the caller's workspace (validated non-empty
+    # above) so the proposals land in the tenant's file.
+    store = get_instinct_store(workspace_id=workspace_id or None)
 
     # 1) Supersede the prior open pair BEFORE filing the new one (so the new pair
     #    is never itself collapsed and the queue never shows two open pairs).

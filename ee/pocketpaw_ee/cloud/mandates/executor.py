@@ -192,7 +192,10 @@ class StationTaskDispatcher:
         from pocketpaw.stores import get_instinct_store
         from pocketpaw_ee.cloud.belt import service as belt_service
 
-        store = get_instinct_store()
+        # ISO: background/dispatch path (no ``current_workspace`` ContextVar) —
+        # scope the store to the caller's workspace so the queued run lands in
+        # the tenant's file.
+        store = get_instinct_store(workspace_id=workspace_id or None)
 
         title = str(task.get("title") or "Belt station task")
         why = str(task.get("why") or "")
@@ -443,18 +446,23 @@ async def execute_approved_plan(
     chokepoint (emit + return), success via the single close at the end."""
     from pocketpaw.stores import get_instinct_store
 
-    store = get_instinct_store()
     dispatch: TaskDispatcher = dispatcher or resolve_dispatcher()
 
     params = getattr(action, "parameters", None) or {}
     blob = params.get(BELT_PLAN_PARAM_KEY)
     if not isinstance(blob, dict):
-        # Not a belt_plan Action — no chain was opened for it here.
+        # Not a belt_plan Action — no chain was opened for it here. We can't
+        # resolve the store's workspace without the blob either, so bail before
+        # opening one.
         logger.warning("approved action %s carries no _belt_plan blob", action.id)
         return
 
     correlation_id = _coerce_uuid(blob.get("correlation_id"))
     workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: HTTP approve path (no ``current_workspace`` ContextVar) — scope the
+    # store to the blob's workspace BEFORE ``_fail`` (which calls mark_failed)
+    # so every terminal lands in the tenant's file, not the shared ledger.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     requested_by = str(blob.get("requested_by") or "")
     mandate_id = str(blob.get("mandate_id") or "")
     shift_id = str(blob.get("shift_id") or "")

@@ -193,6 +193,13 @@ async def propose_customer_decision(
             "payload_summary": summary,
         }
 
+        # ISO note: paw-print's tenant key is the widget OWNER, which is a
+        # logical, possibly colon-qualified string (``user:maya``) used for the
+        # in-row W4a ``workspace_id`` filter on ``store.propose`` below — NOT a
+        # physical-store-path workspace id (those must pass the strict
+        # path-traversal allowlist, which rejects a ``:``). So this path keeps
+        # the BARE store + in-row scoping; it does NOT thread the owner into the
+        # store factory (that would ValueError on a colon-qualified owner).
         store = get_instinct_store()
         action = await store.propose(
             pocket_id=pocket_id or widget_id,

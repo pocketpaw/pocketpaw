@@ -211,7 +211,11 @@ async def _resolve_fabric_objects(
     from pocketpaw.fabric.models import FabricQuery
     from pocketpaw.stores import get_fabric_store
 
-    store = get_fabric_store()
+    # ISO: the ripple resolver runs server-side off a built ctx, not the agent
+    # stream — no ``current_workspace`` ContextVar — so scope the store to
+    # ``ctx.workspace_id`` (validated non-empty above). The store's own W4a row
+    # guard below is then a second, in-file scope.
+    store = get_fabric_store(workspace_id=ctx.workspace_id or None)
     q = FabricQuery(
         type_id=type_id,
         type_name=type_name,

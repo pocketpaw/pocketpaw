@@ -43,11 +43,19 @@
 #   scoped on the type's own ``workspace_id`` now). This supersedes the W4a /
 #   fix/fabric-stats note above that called definitions "global in the schema"
 #   — they carry their own workspace column as of SZD-2.
+# Updated: 2026-06-26 (ISO-1 — physical per-workspace isolation) — the store is
+#   no longer a single shared ``~/.pocketpaw/fabric.db``. ``_store`` now takes
+#   the caller's ``workspace_id`` and routes through
+#   ``pocketpaw.stores.get_fabric_store(workspace_id=...)``, so every read/write
+#   in this router hits that tenant's OWN
+#   ``~/.pocketpaw/workspaces/<id>/fabric.db`` file. The per-endpoint W4a
+#   ``workspace_id`` filter args are UNCHANGED — physical file isolation is
+#   additive defense-in-depth, kept alongside the in-row WHERE-filter, not a
+#   replacement for it.
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -62,6 +70,7 @@ from pocketpaw.fabric.models import (
     PropertyDef,
 )
 from pocketpaw.fabric.store import FabricStore
+from pocketpaw.stores import get_fabric_store
 from pocketpaw_ee.cloud._core.deps import current_workspace_id, require_plan_feature
 from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.shared.deps import require_action_any_workspace
@@ -73,11 +82,18 @@ router = APIRouter(
     dependencies=[Depends(require_license), Depends(require_plan_feature("fabric"))],
 )
 
-_DB_PATH = Path.home() / ".pocketpaw" / "fabric.db"
 
+def _store(workspace_id: str) -> FabricStore:
+    """Return the FabricStore for ``workspace_id`` (ISO-1 — physical isolation).
 
-def _store() -> FabricStore:
-    return FabricStore(_DB_PATH)
+    Routes through the workspace-keyed factory so every Fabric read/write in
+    this router hits the caller's OWN ``~/.pocketpaw/workspaces/<id>/fabric.db``
+    file, not the shared one. ``workspace_id`` is the caller's active workspace,
+    already resolved by ``current_workspace_id`` on each endpoint. The W4a
+    in-row ``workspace_id`` WHERE-filter the endpoints already pass STAYS — the
+    physical file split is additive defense-in-depth on top of it.
+    """
+    return get_fabric_store(workspace_id=workspace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +140,7 @@ async def list_types(workspace_id: str = Depends(current_workspace_id)):
     object row visible to the workspace — type names are tenant metadata on a
     shared deployment.
     """
-    return await _store().list_types(workspace_id=workspace_id)
+    return await _store(workspace_id).list_types(workspace_id=workspace_id)
 
 
 @router.post(
@@ -138,7 +154,7 @@ async def define_type(
     workspace_id: str = Depends(current_workspace_id),
 ):
     """Define an object type stamped with the caller's active workspace (SZD-2)."""
-    return await _store().define_type(
+    return await _store(workspace_id).define_type(
         name=req.name,
         properties=req.properties,
         description=req.description,
@@ -181,7 +197,7 @@ async def list_objects(
     workspace so a tenant never sees another tenant's objects.
     """
     q = FabricQuery(type_id=type_id, type_name=type_name, limit=limit, offset=offset)
-    result = await _store().query(q, workspace_id=workspace_id)
+    result = await _store(workspace_id).query(q, workspace_id=workspace_id)
     return ObjectsListResponse(objects=result.objects, total=result.total)
 
 
@@ -203,7 +219,7 @@ async def list_links(
     W4a — scoped to the caller's active workspace (plus legacy NULL-workspace
     links) so a tenant cannot enumerate another tenant's relationships.
     """
-    links, total = await _store().list_links(
+    links, total = await _store(workspace_id).list_links(
         from_id=from_id,
         to_id=to_id,
         link_type=link_type,
@@ -225,7 +241,7 @@ async def create_object(
     workspace_id: str = Depends(current_workspace_id),
 ):
     """Create an object stamped with the caller's active workspace (W4a)."""
-    return await _store().create_object(
+    return await _store(workspace_id).create_object(
         type_id=req.type_id,
         properties=req.properties,
         source_connector=req.source_connector,
@@ -248,7 +264,7 @@ async def get_object(
     A 404 — not a 403 — is returned for another tenant's object so the
     endpoint never leaks the existence of cross-workspace ids.
     """
-    obj = await _store().get_object(obj_id, workspace_id=workspace_id)
+    obj = await _store(workspace_id).get_object(obj_id, workspace_id=workspace_id)
     if not obj:
         raise HTTPException(404, "Object not found")
     return obj
@@ -264,7 +280,7 @@ async def query_fabric(
     workspace_id: str = Depends(current_workspace_id),
 ):
     """Run an arbitrary FabricQuery, scoped to the caller's workspace (W4a)."""
-    return await _store().query(q, workspace_id=workspace_id)
+    return await _store(workspace_id).query(q, workspace_id=workspace_id)
 
 
 @router.post(
@@ -277,7 +293,7 @@ async def create_link(
     workspace_id: str = Depends(current_workspace_id),
 ):
     """Create a link stamped with the caller's active workspace (W4a)."""
-    return await _store().link(
+    return await _store(workspace_id).link(
         from_id=req.from_id,
         to_id=req.to_id,
         link_type=req.link_type,
@@ -299,4 +315,4 @@ async def fabric_stats(workspace_id: str = Depends(current_workspace_id)):
     names are tenant metadata on a shared deployment, so an unscoped stats here
     leaked another tenant's experimental type names into chat.
     """
-    return await _store().stats(workspace_id=workspace_id)
+    return await _store(workspace_id).stats(workspace_id=workspace_id)

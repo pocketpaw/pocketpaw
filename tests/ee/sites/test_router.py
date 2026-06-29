@@ -11,11 +11,11 @@
 # configured env fallback) and returns the editable SiteResponse.
 #
 # Auth wiring mirrors tests/cloud/test_ee_fabric_list_endpoints.py: the sites
-# router gates on require_plan_feature("fabric") (router level) +
+# router gates on require_plan_feature("sites") (router level) +
 # require_action_any_workspace("fabric.read"), both of which resolve the caller
 # via current_active_user / current_workspace_id, while the handler body reads
 # ctx.workspace_id from request_context. So the app overrides all three plus
-# require_license, and stubs get_workspace_plan -> "business" so the plan gate
+# require_license, and stubs get_workspace_plan -> "go" so the plan gate
 # passes (fabric is a business+ feature). add_error_handler maps the service's
 # NotFound (cross-tenant) to a 404.
 #
@@ -62,7 +62,7 @@ class _FakeCF:
     async def put_worker(self, *, script_name, bundle, bindings=None):
         return True
 
-    async def create_custom_hostname(self, hostname):
+    async def create_custom_hostname(self, hostname, *, features=None):
         return CustomHostname(
             id="ch_1",
             hostname=hostname,
@@ -100,7 +100,7 @@ def _build_app(workspace_id: str, monkeypatch) -> FastAPI:
     from pocketpaw_ee.cloud.license import require_license
     from pocketpaw_ee.sites.router import router as sites_router
 
-    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="business"))
+    monkeypatch.setattr(ws_svc, "get_workspace_plan", AsyncMock(return_value="go"))
 
     fake_user = _FakeUser(workspace_id)
     app = FastAPI()
@@ -267,11 +267,18 @@ async def test_dev_preview_by_pocket_returns_url(beanie_test_db, monkeypatch):
     Vite dev-server URL for the editing preview (P2a). The route delegates to
     sites_service.dev_preview_pocket → the DevServerManager singleton; we inject a
     manager built with fake spawn/port/materialize seams so no real vite is spawned,
-    exercising the real service→manager→endpoint path end to end."""
+    exercising the real service→manager→endpoint path end to end.
+
+    S1: the fake materialize also records the ``builder_origin`` the manager forwards
+    so we assert the endpoint resolves the request ``Origin`` header (the dev source
+    then carries the gated edit-bridge), mirroring the /editable origin precedence."""
     import pocketpaw_ee.sites.dev_server as dev_server_mod
     from pocketpaw_ee.sites.dev_server import DevServerManager
 
-    async def _fake_materialize(*, workspace_id, user_id, pocket_id):
+    seen: dict = {}
+
+    async def _fake_materialize(*, workspace_id, user_id, pocket_id, builder_origin=None):
+        seen["builder_origin"] = builder_origin
         return f"/tmp/site-builds/{pocket_id}"
 
     async def _fake_spawn(cmd, cwd, port):
@@ -296,12 +303,61 @@ async def test_dev_preview_by_pocket_returns_url(beanie_test_db, monkeypatch):
 
     app = _build_app("ws_owner", monkeypatch)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        resp = await c.post("/api/v1/sites/by-pocket/pk1/dev-preview")
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk1/dev-preview",
+            headers={"origin": "https://dash.paw.example"},
+        )
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body == {"pocket_id": "pk1", "url": "http://127.0.0.1:41234/"}
     # The endpoint actually started a server in the singleton.
     assert mgr.live_pocket_ids() == ["pk1"]
+    # S1: the request Origin header was sourced + threaded to materialize (same
+    # precedence /editable uses), so the dev source carries the edit-bridge.
+    assert seen["builder_origin"] == "https://dash.paw.example"
+    await mgr.stop_all()
+
+
+@pytest.mark.asyncio
+async def test_dev_preview_by_pocket_defaults_origin_from_config(beanie_test_db, monkeypatch):
+    """S1: with NO request Origin header, the dev-preview endpoint falls back to the
+    configured PAW_SITES_BUILDER_ORIGIN (the same env fallback /editable uses), so the
+    dev source is still bridged when the call carries no Origin."""
+    import pocketpaw_ee.sites.dev_server as dev_server_mod
+    from pocketpaw_ee.sites.dev_server import DevServerManager
+
+    monkeypatch.setenv("PAW_SITES_BUILDER_ORIGIN", "https://configured.paw.example")
+    seen: dict = {}
+
+    async def _fake_materialize(*, workspace_id, user_id, pocket_id, builder_origin=None):
+        seen["builder_origin"] = builder_origin
+        return f"/tmp/site-builds/{pocket_id}"
+
+    async def _fake_spawn(cmd, cwd, port):
+        class _P:
+            returncode = None
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+            async def wait(self):
+                return 0
+
+        return _P()
+
+    mgr = DevServerManager(
+        _spawn=_fake_spawn, _free_port=lambda: 41235, _materialize=_fake_materialize
+    )
+    monkeypatch.setattr(dev_server_mod, "_MANAGER", mgr)
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/api/v1/sites/by-pocket/pk1/dev-preview")
+    assert resp.status_code == 200, resp.text
+    assert seen["builder_origin"] == "https://configured.paw.example"
     await mgr.stop_all()
 
 

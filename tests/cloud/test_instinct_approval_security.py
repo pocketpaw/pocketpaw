@@ -404,7 +404,7 @@ class TestBlocker2BulkApproveFiresWrites:
         monkeypatch.setattr("pocketpaw_ee.cloud.pockets.action_executor.run_action", _run_action)
         # The bridge lazy-imports get_instinct_store from pocketpaw.stores —
         # point it at the same router_store so propose + execute share state.
-        monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: router_store)
+        monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: router_store)
 
         with patch("pocketpaw_ee.instinct.router._store", return_value=router_store):
             action_id = _propose(

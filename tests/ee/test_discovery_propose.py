@@ -149,15 +149,40 @@ def recording_bus():
 
 @pytest.fixture
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
+    # WORKSPACE-KEYED (fix/cloud-iso-executor-scope): discovery runs OUTSIDE the
+    # agent stream (no current_workspace ContextVar), so run_discovery_and_propose
+    # + the propose sites MUST thread the explicit workspace_id ("w1"). The old
+    # arg-swallowing mock returned ``st`` for any workspace, hiding an unscoped
+    # call. Now a bare/wrong-workspace call gets a DISTINCT empty store and the
+    # "PENDING action exists in w1" assertions fail.
     st = InstinctStore(tmp_path / "instinct_discovery_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    others: dict[str, InstinctStore] = {}
+
+    def _factory(*_a, workspace_id: str | None = None, **_k) -> InstinctStore:
+        ws = str(workspace_id or "")
+        if ws == "w1":
+            return st
+        return others.setdefault(ws, InstinctStore(tmp_path / f"instinct_other_{ws or 'none'}.db"))
+
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", _factory)
     return st
 
 
 @pytest.fixture
 def fabric(tmp_path: Path, monkeypatch) -> FabricStore:
+    # WORKSPACE-KEYED, mirroring ``store`` — and the signature now accepts
+    # ``workspace_id`` (the old ``lambda: fs`` would TypeError once the fabric
+    # factory is called with a workspace, which the executor path now does).
     fs = FabricStore(tmp_path / "fabric_discovery_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_fabric_store", lambda: fs)
+    others: dict[str, FabricStore] = {}
+
+    def _factory(*_a, workspace_id: str | None = None, **_k) -> FabricStore:
+        ws = str(workspace_id or "")
+        if ws == "w1":
+            return fs
+        return others.setdefault(ws, FabricStore(tmp_path / f"fabric_other_{ws or 'none'}.db"))
+
+    monkeypatch.setattr("pocketpaw.stores.get_fabric_store", _factory)
     return fs
 
 

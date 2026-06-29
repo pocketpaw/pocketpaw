@@ -470,9 +470,9 @@ async def send_message(group_id: str, user_id: str, body: SendMessageRequest) ->
         title = (
             f"New message from {sender_name}"
             if is_dm
-            else f"New message in #{group_name}"
+            else f"{sender_name} in #{group_name}"
             if group_name
-            else "New message"
+            else sender_name
         )
 
         notif_tasks = [

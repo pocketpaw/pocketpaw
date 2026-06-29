@@ -43,6 +43,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_decisions"
@@ -193,6 +195,15 @@ async def _decisions_get_handler(args: dict) -> dict:
         )
 
     decision_id_raw = args.get("decision_id")
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_decisions",
+        tool_name="_decisions_get",
+        status="ok",
+        ok=True,
+    )
+
     if not isinstance(decision_id_raw, str) or not decision_id_raw:
         return _error_response("decision_id is required (string UUID)")
     try:
@@ -225,6 +236,15 @@ async def _decisions_find_handler(args: dict) -> dict:
             "no active workspace/agent — decisions_find can only be called "
             "from inside a cloud SSE chat stream"
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_decisions",
+        tool_name="_decisions_find",
+        status="ok",
+        ok=True,
+    )
 
     actor = args.get("actor") or None
     pocket_id = args.get("pocket_id") or None
@@ -277,6 +297,15 @@ async def _decisions_trace_handler(args: dict) -> dict:
         )
 
     decision_id_raw = args.get("decision_id")
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_decisions",
+        tool_name="_decisions_trace",
+        status="ok",
+        ok=True,
+    )
+
     if not isinstance(decision_id_raw, str) or not decision_id_raw:
         return _error_response("decision_id is required (string UUID)")
     try:
@@ -321,6 +350,15 @@ async def _decisions_explain_handler(args: dict) -> dict:
         )
 
     question = args.get("question")
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_decisions",
+        tool_name="_decisions_explain",
+        status="ok",
+        ok=True,
+    )
+
     if not isinstance(question, str) or not question.strip():
         return _error_response("question is required (non-empty string)")
 

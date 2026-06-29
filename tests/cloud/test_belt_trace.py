@@ -175,8 +175,8 @@ def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     handler, the router's ``_store``, and the executor all resolve through
     ``pocketpaw.stores.get_instinct_store`` or the router indirection)."""
     st = InstinctStore(tmp_path / "instinct.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
-    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
+    monkeypatch.setattr("pocketpaw_ee.instinct.router._store", lambda *a, **k: st)
     return st
 
 

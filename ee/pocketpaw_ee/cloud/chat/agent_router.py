@@ -5,6 +5,25 @@ message, submitting a ``Run`` to the configured executor, and tailing the
 run's Redis Stream so durability sits underneath the wire shape the
 frontend already speaks.
 
+Changes: 2026-06-25 (fix/worker-trusts-spec-workspace) — ``post_agent_chat``
+threads the authenticated ``workspace_id`` into ``resolve_scope_context`` via
+``expected_workspace_id``, matching the run worker. The HTTP route already
+validates the workspace (the ``current_workspace_id`` dependency rejects an
+empty one with 400); passing it lets the resolver fall back to it when a scope
+doc's ``workspace`` field is empty and reject a scope whose non-empty doc
+workspace disagrees with the caller's (cross-tenant guard). Keeps the
+synchronous request path consistent with the worker that actually attaches the
+run identity.
+
+Changes: 2026-06-24 (BC-4, integration/billing-credits) — credit hard-block at
+run-start. This module is the SINGLE chokepoint that starts a new chat run
+(``create_run`` + executor submit), so the credit gate sits here, right after
+scope resolution and BEFORE any DB write. When ``settings.billing_enforced`` is
+on, a workspace at balance <= 0 gets 402 (``credits.insufficient``) and NO run /
+user message is persisted; in-flight runs (already past this point) are never
+affected. The flag is OFF by default so OSS / self-host (no ledger) are
+unaffected. See ``credits.service.check_balance``.
+
 Changes: 2026-06-18 (PERF-6, feat/sites-minimal-context) — window the history
 fed to the agent on the SITES EDIT/REFINE surface only. The sites builder got
 progressively slower per edit because ``load_history_for_scope`` loads the FULL
@@ -33,6 +52,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud._core.errors import CloudError
 from pocketpaw_ee.cloud.chat.agent_schemas import CloudAgentChatRequest
 from pocketpaw_ee.cloud.chat.agent_service import (
@@ -126,12 +146,36 @@ async def post_agent_chat(
     workspace_id: str = Depends(current_workspace_id),
 ) -> StreamingResponse:
     try:
+        # Thread the authenticated workspace (fix/worker-trusts-spec-workspace).
+        # The HTTP route already validated it via ``current_workspace_id``; the
+        # resolver uses it the same way the worker does — fall back when the
+        # scope doc's ``workspace`` is empty, reject a scope whose non-empty doc
+        # workspace disagrees with the caller's (cross-tenant guard). Keeps the
+        # synchronous path consistent with the run worker.
         ctx = await resolve_scope_context(
-            scope=scope, scope_id=scope_id, user_id=user_id, agent_id_hint=body.agent_id
+            scope=scope,
+            scope_id=scope_id,
+            user_id=user_id,
+            agent_id_hint=body.agent_id,
+            expected_workspace_id=workspace_id,
         )
         ctx.intent = body.intent
     except InvalidScope:
         raise CloudError(400, "scope.invalid", "Invalid scope") from None
+
+    # BC-4 run-start hard-block. Sit the credit gate at the SINGLE run-start
+    # chokepoint — BEFORE any DB write (no user message, no ChatRunDoc) and
+    # BEFORE the executor submit — so a blocked run leaves no trace and
+    # IN-FLIGHT runs (already past this point) are never killed. Flag-gated:
+    # OFF by default (OSS / self-host run no ledger), ON for the cloud via
+    # ``POCKETPAW_BILLING_ENFORCED``. ``check_balance`` raises
+    # ``InsufficientCredits`` (402, credits.insufficient), which the CloudError
+    # handler maps to the wire — we never raise HTTPException here. Imported
+    # locally to keep the credits package off this hot module's import graph.
+    if get_settings().billing_enforced:
+        from pocketpaw_ee.cloud.credits import service as credits_service
+
+        await credits_service.check_balance(workspace_id)
 
     transport = get_stream_transport()
     # Resolve the surface-aware context preamble AFTER scope is resolved
@@ -220,12 +264,24 @@ async def post_agent_chat(
         cursor = "0"
         while True:
             saw_terminal = False
-            async for ev in transport.read_events(run_id, after=cursor, block_ms=15000):
+            # Short block timeout so cancellation is checked promptly
+            # when the executor hasn't yet written a terminal event
+            # (e.g. blocked on pool.get / build_knowledge_context before
+            # its is_cancelled loop). If the cancel flag is set while
+            # read_events is waiting, we detect it between blocks.
+            async for ev in transport.read_events(run_id, after=cursor, block_ms=2000):
                 cursor = ev.entry_id
                 yield _sse(ev.event, ev.data, entry_id=ev.entry_id)
                 if ev.is_terminal:
                     saw_terminal = True
             if saw_terminal:
+                return
+            # Check if the executor set the cancel flag (via /agent/stop).
+            # If so, yield a terminal event so the client sees the stream
+            # end, even if the executor hasn't written one yet (e.g. it
+            # is blocked before its cancellation loop).
+            if await transport.is_cancelled(run_id):
+                yield _sse("interrupted", {"reason": "user_cancelled"})
                 return
             yield b": ping\n\n"
 

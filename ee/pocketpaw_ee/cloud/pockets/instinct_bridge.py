@@ -222,7 +222,12 @@ async def propose_pocket_write(
 
     approver = _resolve_approver(pocket, backend_config)
 
-    store = get_instinct_store()
+    # ISO: this propose path is reached from BOTH the agent stream (ContextVar
+    # set) AND the REST run_action endpoint (FastAPI Depends, no ContextVar) —
+    # so scope the store to the pocket's workspace explicitly. When the
+    # ContextVar IS set it equals this id (harmless); on the REST path it's the
+    # only correct source.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     action = await store.propose(
         pocket_id=pocket_id,
         title=title or action_name or "Pocket write",
@@ -336,6 +341,23 @@ def _emit_parked_policy_evaluated(
             scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
             payload=payload,
         )
+        # Fire a workspace audit event for this decision.
+        from pocketpaw_ee.agent.mcp_servers._audit import record_decision
+
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id="system",
+            pocket_id=pocket_id,
+            decision_action="policy.evaluated",
+            outcome="parked",
+            metadata={
+                "policy": instinct_policy,
+                "passed": False,
+                "reason": "parked_for_human_approval",
+                "action_id": action_id,
+                "correlation_id": str(correlation_id),
+            },
+        )
         return entry.id
     except Exception:  # noqa: BLE001 — chain emit is best-effort
         logger.warning(
@@ -428,12 +450,20 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
     from pocketpaw_ee.cloud.pockets import action_executor
     from pocketpaw_ee.cloud.pockets import service as pockets_service
 
-    store = get_instinct_store()
     params = getattr(action, "parameters", None) or {}
     blob = params.get("_pocket_write")
     if not isinstance(blob, dict):
+        # Can't resolve the store's workspace without the blob either, so bail
+        # before opening one.
         logger.warning("approved action %s carries no _pocket_write blob", action.id)
         return
+
+    pocket_id = str(action.pocket_id or "")
+    workspace_id = str(blob.get("workspace_id") or "")
+    # ISO: this runs on the HTTP approve path (no ``current_workspace``
+    # ContextVar) — scope the store to the blob's workspace so the
+    # executed/failed mark lands in the tenant's file, not the shared ledger.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     if blob.get("schema") != _POCKET_WRITE_SCHEMA:
         await store.mark_failed(
             action.id,
@@ -441,9 +471,6 @@ async def execute_approved_write(action) -> None:  # type: ignore[no-untyped-def
             "incompatible build and cannot be executed",
         )
         return
-
-    pocket_id = str(action.pocket_id or "")
-    workspace_id = str(blob.get("workspace_id") or "")
     action_name = str(blob.get("action") or "")
     requested_by = str(blob.get("requested_by") or "")
     approver = str(getattr(action, "approved_by", "") or "") or "system"
@@ -718,6 +745,22 @@ def _emit_bridge_chain_close(
             actor=actor,
             scope=[f"workspace:{workspace_id}", f"pocket:{pocket_id}"],
             payload=payload,
+        )
+        # Fire a workspace audit event for the decision completion.
+        from pocketpaw_ee.agent.mcp_servers._audit import record_decision
+
+        record_decision(
+            workspace_id=workspace_id,
+            actor_id=user_id or "agent",
+            pocket_id=pocket_id,
+            decision_action="decision.completed",
+            outcome=action_outcome or "completed",
+            metadata={
+                "passed": passed,
+                "action_outcome": action_outcome or "",
+                "error_class": error_class or "",
+                "correlation_id": str(correlation_id),
+            },
         )
     except Exception:  # noqa: BLE001 — chain close is best-effort
         logger.warning(

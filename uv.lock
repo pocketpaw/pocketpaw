@@ -1377,6 +1377,28 @@ wheels = [
 ]
 
 [[package]]
+name = "dodopayments"
+version = "1.105.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/52/c3/7928365b52facda9f01c3e807f33a382cccf1e4da928ed213df9f578a41e/dodopayments-1.105.0.tar.gz", hash = "sha256:5aa1dcb229c3a3d200913b4e82a42b80757a7044e5457ca962c624f374636230", size = 273364, upload-time = "2026-06-16T22:59:50.637Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/f1/b36366ba09bb4bc962e851a305960813c11a7d4336e88c8c3bccde7b391d/dodopayments-1.105.0-py3-none-any.whl", hash = "sha256:ed3195e91c4a41a7d8023d04158598366773fa9139dc0d215e2cbd3bdfb0193c", size = 389251, upload-time = "2026-06-16T22:59:49.28Z" },
+]
+
+[package.optional-dependencies]
+webhooks = [
+    { name = "standardwebhooks" },
+]
+
+[[package]]
 name = "durationpy"
 version = "0.10"
 source = { registry = "https://pypi.org/simple" }
@@ -5277,6 +5299,7 @@ dependencies = [
     { name = "composio-openai-agents" },
     { name = "daytona" },
     { name = "dnspython" },
+    { name = "dodopayments", extra = ["webhooks"] },
     { name = "fastapi-users", extra = ["beanie", "oauth"] },
     { name = "google-api-python-client" },
     { name = "google-auth" },
@@ -5308,6 +5331,7 @@ requires-dist = [
     { name = "composio-openai-agents", specifier = ">=0.7.0" },
     { name = "daytona", specifier = ">=0.190.0" },
     { name = "dnspython", specifier = ">=2.6.0" },
+    { name = "dodopayments", extras = ["webhooks"], specifier = "==1.105.0" },
     { name = "fastapi-users", extras = ["beanie", "oauth"], specifier = ">=13.0.0" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
     { name = "google-auth", specifier = ">=2.25.0" },
@@ -7047,6 +7071,20 @@ wheels = [
 ]
 
 [[package]]
+name = "standardwebhooks"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "deprecated" },
+    { name = "httpx" },
+    { name = "python-dateutil" },
+    { name = "types-deprecated" },
+    { name = "types-python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c4/7d/04fc3aa177403472d3ddae90953d8f878dc5fd21ba29c02fc9e97e10703f/standardwebhooks-1.0.1.tar.gz", hash = "sha256:b557bb2e4b16ada179a517ec0fe6cbec5acf976c5619922bf29c457f89a451bd", size = 5103, upload-time = "2026-02-18T19:13:06.793Z" }
+
+[[package]]
 name = "starlette"
 version = "0.52.1"
 source = { registry = "https://pypi.org/simple" }
@@ -7251,12 +7289,30 @@ wheels = [
 ]
 
 [[package]]
+name = "types-deprecated"
+version = "1.3.1.20260520"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/86/8cc66b0a4d01826e64f86e0001b8755105d1b6052c654e2448a0e72750ee/types_deprecated-1.3.1.20260520.tar.gz", hash = "sha256:4d0d9e5521432d9ce88169fb8b793b45d70d8e8cc1a7ecd5a4465abbf83c9ab4", size = 8649, upload-time = "2026-05-20T05:55:57.211Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/27/e8fd41f0d41b964870d370e7fc78311193910fe9a15c7399ade4a4aeea58/types_deprecated-1.3.1.20260520-py3-none-any.whl", hash = "sha256:8af853b7ccd3b7685159f3ab2e3b6f7999b6cd7e425cda02749e32a42a96c7d6", size = 9105, upload-time = "2026-05-20T05:55:56.259Z" },
+]
+
+[[package]]
 name = "types-protobuf"
 version = "7.34.1.20260403"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ae/b3/c2e407ea36e0e4355c135127cee1b88a2cc9a2c92eafca50a360ab9f2708/types_protobuf-7.34.1.20260403.tar.gz", hash = "sha256:8d7881867888e667eb9563c08a916fccdc12bdb5f9f34c31d217cce876e36765", size = 68782, upload-time = "2026-04-03T04:18:09.428Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7d/95/24fb0f6fe37b41cf94f9b9912712645e17d8048d4becaf37c1607ddd8e32/types_protobuf-7.34.1.20260403-py3-none-any.whl", hash = "sha256:16d9bbca52ab0f306279958878567df2520f3f5579059419b0ce149a0ad1e332", size = 86011, upload-time = "2026-04-03T04:18:08.245Z" },
+]
+
+[[package]]
+name = "types-python-dateutil"
+version = "2.9.0.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8d/e8/c01bdf0d7c3659428c091fbd693177093639565bcbc86bc20098e6d37cc6/types_python_dateutil-2.9.0.20260518.tar.gz", hash = "sha256:51f02dc03b61c7f6a07df45797d4dfe8a1aa47f0b7db9ad89f6fd3a1a70e1b51", size = 17082, upload-time = "2026-05-18T06:05:24.508Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/22/169273273ca34e9ab0ae2f387ba72ed7e09faaaf834da01d6b89c2bea71a/types_python_dateutil-2.9.0.20260518-py3-none-any.whl", hash = "sha256:d6a9c5bd0de61460c8fdef8ab2b400f956a1a1075cce08d4e2b4434e478c50b8", size = 18431, upload-time = "2026-05-18T06:05:23.641Z" },
 ]
 
 [[package]]
