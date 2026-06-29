@@ -120,6 +120,10 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Daytona SDK — VM/container workspaces for cloud project compute ---
+    # Used by ee/pocketpaw_ee/cloud/daytona/ to provision, sync, and
+    # manage sandboxes. Pinned to 0.190.x API surface.
+    "daytona>=0.190.0",
     # --- Payments gateway (BC-2 — the Gateway primitive) ---
     # Dodo is the only gateway for v1, behind the IPaymentsProvider abstraction
     # in ee/pocketpaw_ee/cloud/billing/providers/ so Razorpay can drop in later.

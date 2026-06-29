@@ -226,6 +226,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.daytona.router import router as daytona_router
     from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
@@ -275,6 +276,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    # Daytona workspace management — provision sandboxes for cloud projects.
+    # The route prefix /api/v1/cloud/projects/{name}/workspace overlaps with
+    # the OSS cloud_projects router (which owns /api/v1/cloud/projects), but
+    # FastAPI resolves the longer match correctly.
+    app.include_router(daytona_router, prefix="/api/v1")
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
