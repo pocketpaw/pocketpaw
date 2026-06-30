@@ -17,6 +17,11 @@
 #   (0/1500/7500/30000/1_000_000); added coverage for the new user-facing display +
 #   price fields (display_name, usage_label, usage_detail, INR/USD prices) the
 #   billing UI renders instead of raw credits.
+# Updated 2026-06-30 (feat/billing-quota-enforcement, chunk 1): added coverage for
+#   the per-plan ``monthly_ceiling`` (the credit-quota cap later chunks enforce):
+#   each tier carries the approved ceiling (free=1000 explicit trial, go/pro/pro_max
+#   = allotment × 1.5, enterprise=None uncapped), and an unknown key built directly
+#   FAILS CLOSED to the Free ceiling (never None/uncapped).
 
 from __future__ import annotations
 
@@ -36,6 +41,16 @@ EXPECTED_ALLOTMENTS = {
     "pro": 7_500,
     "pro_max": 30_000,
     "enterprise": 1_000_000,
+}
+# The per-plan monthly credit CEILING (the cap later chunks enforce). The rule is
+# allotment × 1.5 for the paid usage tiers; Free is an explicit trial cap (its
+# allotment is 0, so ×1.5 can't derive it); Enterprise is uncapped (None).
+EXPECTED_CEILINGS: dict[str, int | None] = {
+    "free": 1_000,
+    "go": 2_250,
+    "pro": 11_250,
+    "pro_max": 45_000,
+    "enterprise": None,
 }
 # The user-facing usage labels the UI shows INSTEAD of raw credits.
 EXPECTED_USAGE_LABELS = {
@@ -83,6 +98,48 @@ def test_list_plans_allotments_are_the_exact_ladder():
     by_key = {p.key: p for p in plans.list_plans()}
     for key, expected in EXPECTED_ALLOTMENTS.items():
         assert by_key[key].monthly_credit_allotment == expected, key
+
+
+def test_list_plans_ceilings_are_the_exact_ladder():
+    """Each tier carries the approved monthly_ceiling, incl. enterprise=None.
+
+    free=1000 (explicit trial cap), go/pro/pro_max = allotment × 1.5, enterprise
+    uncapped (None). This is the cap later chunks enforce against the wallet.
+    """
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key, expected in EXPECTED_CEILINGS.items():
+        assert by_key[key].monthly_ceiling == expected, key
+
+
+def test_paid_tier_ceilings_are_allotment_times_one_point_five():
+    """The go/pro/pro_max ceilings are exactly 1.5× their allotment (the rule)."""
+    by_key = {p.key: p for p in plans.list_plans()}
+    for key in ("go", "pro", "pro_max"):
+        assert by_key[key].monthly_ceiling == int(by_key[key].monthly_credit_allotment * 1.5), key
+
+
+def test_enterprise_ceiling_is_uncapped():
+    """Enterprise is the one uncapped tier — its ceiling is None, never a number."""
+    assert plans.get_plan("enterprise").monthly_ceiling is None
+
+
+def test_free_ceiling_is_the_explicit_trial_cap():
+    """Free's ceiling is the explicit 1000 trial cap (its 0 allotment can't derive it)."""
+    free = plans.get_plan("free")
+    assert free.monthly_credit_allotment == 0
+    assert free.monthly_ceiling == 1_000
+
+
+def test_build_unknown_key_fails_closed_to_free_ceiling():
+    """An unknown key built directly never yields None/uncapped — it caps at Free.
+
+    Callers reach the catalog via get_plan/list_plans (known keys only), but the
+    ceiling default is the fail-closed floor regardless: a stray key must NOT
+    produce an uncapped (None) ceiling.
+    """
+    bogus = plans._build("definitely_not_a_tier")
+    assert bogus.monthly_ceiling == EXPECTED_CEILINGS["free"]
+    assert bogus.monthly_ceiling is not None
 
 
 def test_list_plans_is_cheapest_first():
