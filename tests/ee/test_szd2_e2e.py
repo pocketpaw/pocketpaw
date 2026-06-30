@@ -273,14 +273,14 @@ def recording_bus():
 @pytest.fixture
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     st = InstinctStore(tmp_path / "instinct_szd2_e2e.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
 @pytest.fixture
 def fabric(tmp_path: Path, monkeypatch) -> FabricStore:
     fs = FabricStore(tmp_path / "fabric_szd2_e2e.db")
-    monkeypatch.setattr("pocketpaw.stores.get_fabric_store", lambda: fs)
+    monkeypatch.setattr("pocketpaw.stores.get_fabric_store", lambda *a, **k: fs)
     return fs
 
 

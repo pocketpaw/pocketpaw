@@ -316,7 +316,7 @@ def shared_store(tmp_path: Path, monkeypatch) -> InstinctStore:
     ``pocketpaw.stores.get_instinct_store`` (patched here) — so propose + router-approve
     + executor all share one store."""
     st = InstinctStore(tmp_path / "instinct_rule_roundtrip.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
