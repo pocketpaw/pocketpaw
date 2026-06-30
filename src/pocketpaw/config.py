@@ -50,6 +50,12 @@ Changes:
     SVL-2, landed here so later slices don't touch config). SVL-1 only reads
     the enable flag to stamp an observe-only OutcomeVerdict on a completing
     task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
+  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
+    when true, approved workspace-discovered Instinct rules are merged with
+    template rules at the live gate and govern actions. Off by default; the
+    discovered branch is dead code on the default path. A separate, narrower
+    flag than ``instinct_approval_level``. Env:
+    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
   - 2026-06-18: Added the four layered/learning Instinct gate defaults —
     ``instinct_approval_level`` (default "ASK", dormant),
     ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
@@ -1482,6 +1488,25 @@ class Settings(BaseSettings):
             "hard expiry. On expiry the registry fires an ALERT audit event and "
             "persists the expired handle (no heartbeat extension). Set via "
             "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
+        ),
+    )
+    # Sovereign Zero-Setup Discovery — F6 live enforcement (2026-06-21).
+    # When true, approved workspace-discovered Instinct rules
+    # (rules.service.get_active_rules) are merged with template rules at the
+    # live gate (instinct_dispatch.gate_action) and govern actions. OFF by
+    # default — the template-rule path is unchanged and the discovered branch
+    # is dead code on the default path (get_active_rules is never called).
+    # This is a SEPARATE, NARROWER flag than instinct_approval_level: enforcing
+    # WHICH discovered CEL conditions fire and activating WHETHER escalations can
+    # auto-resolve are independent risk axes and must toggle independently.
+    instinct_enforce_discovered_rules: bool = Field(
+        default=False,
+        description=(
+            "When true, approved workspace-discovered Instinct rules "
+            "(rules.service.get_active_rules) are merged with template rules at "
+            "the live gate. Off by default — the template-rule path is unchanged "
+            "and the whole discovered branch is dead code on the default path. "
+            "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
         ),
     )
 

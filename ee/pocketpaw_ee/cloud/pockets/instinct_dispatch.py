@@ -1,4 +1,18 @@
 # ee/pocketpaw_ee/cloud/pockets/instinct_dispatch.py
+# Updated: 2026-06-21 (feat/szd-finish-enforce, F6 — live enforcement of
+# approved workspace-discovered Instinct rules) — `gate_action` now, when the
+# DEFAULT-OFF `instinct_enforce_discovered_rules` flag is on, loads the
+# workspace's approved discovered rules (`rules.service.get_active_rules`),
+# pocket-scopes them, converts each to an OSS `InstinctRule`, drops any whose
+# CEL `when` fails to parse or errors on a guarded probe, and merges the clean
+# ones FIRST into a model_copy of the template before the UNCHANGED
+# `resolve_instinct` call. The template object is NEVER mutated. Fail-safe:
+# a `get_active_rules` read failure fails OPEN (proceed on the template
+# verdict, WARNING, no 404), and a per-rule CEL error drops THAT rule only —
+# a broken discovered rule is inert, never a silent block or 404. The pure
+# composer is untouched (it must stay import-linter-pure). When the flag is
+# off, `get_active_rules` is never called and `effective_template is template`.
+#
 # Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 3) —
 # `_find_existing_pending_id` now pushes the (action_name, row_id) match INTO
 # the approvals query (limit=1) instead of paging a default list and matching
@@ -56,7 +70,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -68,7 +82,13 @@ from pocketpaw.bundled_templates import (
     PocketTemplate,
     resolve_instinct,
 )
-from pocketpaw.bundled_templates.identifier_resolver import IdentifierResolver
+from pocketpaw.bundled_templates.cel_runtime import CelEvaluationError, evaluate_cel
+from pocketpaw.bundled_templates.identifier_resolver import (
+    IdentifierResolver,
+    TemplateIdentifierResolver,
+)
+from pocketpaw.bundled_templates.schema import InstinctRulesDef
+from pocketpaw.config import get_settings
 from pocketpaw_ee.cloud._core.errors import NotFound
 from pocketpaw_ee.cloud.instinct_approvals import service as approvals_service
 from pocketpaw_ee.cloud.pockets import trust_ledger
@@ -79,6 +99,7 @@ from pocketpaw_ee.cloud.pockets.instinct_triage import (
     TriageProposal,
     classify_lane,
 )
+from pocketpaw_ee.cloud.rules.service import get_active_rules
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +300,121 @@ async def _find_existing_pending_id(
     return None
 
 
+async def _load_discovered_instinct_rules(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    template: PocketTemplate,
+    row_context: dict[str, Any],
+    workspace_context: dict[str, Any] | None,
+    resolver: IdentifierResolver | None,
+    now: datetime,
+) -> list[InstinctRule]:
+    """Load approved workspace-discovered rules, pocket-scope + guard them, and
+    return clean ``InstinctRule`` objects ready to merge into the template.
+
+    Fail-OPEN at every step — a broken discovered rule (or a store outage) is
+    inert, never a block, never a silent 404. The asymmetry with template rules
+    (which keep loud-fail) is deliberate: template rules are authored and
+    version-controlled; discovered rules are inferred and lower-trust, and can
+    only ever ADD a block/escalate, never relax the template floor.
+
+    1. ``get_active_rules`` read failure → log WARNING, return ``[]`` (fall
+       through to the pure template path).
+    2. Filter: keep a rule only if its ``scope.pocket_id`` is null
+       (workspace-wide) OR equals the current ``pocket_id``.
+    3. Convert each surviving wire dict to an ``InstinctRule`` via
+       ``model_validate`` (parses + validates the CEL ``when``). On a parse
+       failure drop THAT rule (WARNING), keep the rest.
+    4. Guarded CEL probe: run each converted rule's ``when`` through
+       ``evaluate_cel`` against the SAME merged context + resolver the composer
+       will use. On ``CelEvaluationError`` drop THAT rule only (WARNING with
+       workspace/rule id) so the composer's own eval is a safe re-run.
+    """
+    try:
+        rows = await get_active_rules(workspace_id)
+    except Exception:  # noqa: BLE001 — fail-OPEN: a store outage never blocks
+        logger.warning(
+            "discovered-rule enforcement: get_active_rules read failed for "
+            "workspace=%s — falling through to the template-only path",
+            workspace_id,
+            exc_info=True,
+        )
+        return []
+
+    # Build the SAME merged context + resolver the composer uses, so the
+    # guarded probe is faithful to the real evaluation (row wins on collision).
+    merged_context: dict[str, Any] = {}
+    if workspace_context:
+        merged_context.update(workspace_context)
+    merged_context.update(row_context)
+    probe_resolver = resolver or TemplateIdentifierResolver(template.state)
+
+    clean: list[InstinctRule] = []
+    for row in rows:
+        rule_id = row.get("id", "<unknown>")
+        # Step 2 — pocket scope. ``None`` pocket_id = workspace-wide.
+        scope = row.get("scope") or {}
+        scope_pocket = scope.get("pocket_id")
+        if scope_pocket is not None and scope_pocket != pocket_id:
+            continue
+
+        # Step 3 — convert + validate the CEL ``when``.
+        try:
+            rule = InstinctRule.model_validate(
+                {"when": row.get("when"), "action": row.get("action")}
+            )
+        except Exception:  # noqa: BLE001 — a malformed discovered rule is dropped
+            logger.warning(
+                "discovered-rule enforcement: dropping unparseable rule "
+                "workspace=%s rule=%s (when=%r action=%r)",
+                workspace_id,
+                rule_id,
+                row.get("when"),
+                row.get("action"),
+            )
+            continue
+
+        # Step 4 — guarded CEL probe. A discovered rule that errors on eval is
+        # dropped here so it never reaches the composer's loud-fail raise path.
+        try:
+            evaluate_cel(rule.when, merged_context, probe_resolver, now=now)
+        except CelEvaluationError as exc:
+            logger.warning(
+                "discovered-rule enforcement: dropping rule whose CEL failed to "
+                "evaluate — workspace=%s rule=%s when=%r: %s",
+                workspace_id,
+                rule_id,
+                rule.when,
+                exc,
+            )
+            continue
+
+        clean.append(rule)
+
+    return clean
+
+
+def _merge_discovered_rules(
+    template: PocketTemplate, discovered: list[InstinctRule]
+) -> PocketTemplate:
+    """Return a shallow copy of ``template`` whose ``instinct_rules.rules`` are
+    the discovered rules FOLLOWED BY the template's own rules.
+
+    Discovered rules go FIRST so a discovered ``block`` wins step-1's first-match
+    short-circuit; for ``require_approval`` / ``notify`` order is immaterial.
+    The template object is NEVER mutated — ``model_copy(deep=False)`` plus a
+    freshly-copied ``InstinctRulesDef`` keeps the original intact for any other
+    reader (100% backward-compat).
+    """
+    base_def = template.instinct_rules
+    merged_def = InstinctRulesDef(
+        escalation=base_def.escalation if base_def else None,
+        rules=[*discovered, *(list(base_def.rules) if base_def else [])],
+    )
+    return template.model_copy(update={"instinct_rules": merged_def}, deep=False)
+
+
 async def gate_action(
     *,
     workspace_id: str,
@@ -338,9 +474,31 @@ async def gate_action(
     """
     level = _coerce_approval_level(approval_level)
 
+    # F6 — merge approved workspace-discovered rules into the template before
+    # the (unchanged) composer call. DEFAULT-OFF: when the flag is off,
+    # `get_active_rules` is never called and `effective_template is template`,
+    # so the entire discovered branch is dead code on the default path.
+    effective_template = template
+    if get_settings().instinct_enforce_discovered_rules:
+        # Pin a stable `now` shared by the guarded probe and the composer so a
+        # time-sensitive CEL `when` evaluates identically in both.
+        if now is None:
+            now = datetime.now(UTC)
+        discovered = await _load_discovered_instinct_rules(
+            workspace_id=workspace_id,
+            pocket_id=pocket_id,
+            template=template,
+            row_context=row_context,
+            workspace_context=workspace_context,
+            resolver=resolver,
+            now=now,
+        )
+        if discovered:
+            effective_template = _merge_discovered_rules(template, discovered)
+
     try:
         decision = resolve_instinct(
-            template,
+            effective_template,
             action_name,
             row_context,
             workspace_context,

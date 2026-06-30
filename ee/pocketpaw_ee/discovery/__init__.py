@@ -17,10 +17,28 @@
 # a DiscoveryRun's OntologyDraft into the two gated Instinct proposals (Fabric
 # objects + a starter Pocket) a human reviews, with key-confidence gating and
 # supersede-on-rerun.
+#
+# Updated 2026-06-20 (S2-K1 / feat/szd-slice2-discovery): added
+# ``KbCompileDigester`` — a second Digester for UNSTRUCTURED exhaust (ticket /
+# email / chat text). It compiles the text into a kb-go wiki ON-BOX via the
+# keyless ``kb convo ingest`` path (never ``kb ingest`` / ``kb build``, which
+# POST to Anthropic) and infers the OntologyDraft from the compiled articles.
+#
+# Updated 2026-06-20 (S2-R1 / feat/szd-slice2-discovery): added ``RuleDraft`` +
+# ``RuleScope`` — the pure-data shape for RULES discovery (the digester output AND
+# the editable ``rule_spec`` blob). ``when`` (CEL) + ``action`` (the template
+# literal) make an approved draft enforcement-ready; the cloud ``rules`` entity
+# persists it.
+#
+# Updated 2026-06-20 (S2-R2 / feat/szd-slice2-discovery): added ``RuleDigester``
+# — the deterministic (no-LLM, on-box) engine that reverse-engineers ``RuleDraft``s
+# from Instinct exhaust (correction history + audit), generalizing the existing
+# 3x-correction → soul-procedural promotion into structured, gate-ready drafts.
 
 from __future__ import annotations
 
 from pocketpaw_ee.discovery.digester import Digester, StructuredShapeDigester
+from pocketpaw_ee.discovery.kb_compile import KbCompileDigester
 from pocketpaw_ee.discovery.models import (
     DraftLink,
     DraftObject,
@@ -34,6 +52,8 @@ from pocketpaw_ee.discovery.orchestrate import (
     assemble_discovery_pocket,
     run_discovery_and_propose,
 )
+from pocketpaw_ee.discovery.rule_digester import RuleDigester
+from pocketpaw_ee.discovery.rule_models import RuleDraft, RuleScope
 from pocketpaw_ee.discovery.run import (
     DEFAULT_SAMPLE_CAP,
     DiscoveryRun,
@@ -44,6 +64,10 @@ from pocketpaw_ee.discovery.run import (
 __all__ = [
     "Digester",
     "StructuredShapeDigester",
+    "KbCompileDigester",
+    "RuleDigester",
+    "RuleDraft",
+    "RuleScope",
     "OntologyDraft",
     "DraftObjectType",
     "DraftObject",

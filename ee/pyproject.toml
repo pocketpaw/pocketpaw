@@ -379,6 +379,19 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
 
 [[tool.importlinter.contracts]]
+name = "Rules — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Discovered governed rules (SZD slice-2). Only ``rules.service`` owns the
+    # InstinctRuleDoc Beanie write; dto/domain go through it. No router this slice
+    # (rules are born via the _instinct_rule gate executor, not over HTTP).
+    "pocketpaw_ee.cloud.rules.dto",
+    "pocketpaw_ee.cloud.rules.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_rule"]
+
+[[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
