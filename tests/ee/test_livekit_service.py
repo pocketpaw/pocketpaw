@@ -3,6 +3,11 @@
 Added TestSelectiveSubscribe: covers the call bot's audio-only selective
 subscribe (Bug A) — auto_subscribe=False on connect and the pure
 _should_subscribe() decision (mic audio in, video / screenshare out).
+
+Added TestSpawnRace: covers the duplicate call-bot spawn race — concurrent
+create_room() for the same group must spawn exactly one agent (per-group
+asyncio.Lock), and create_room() must skip the spawn when a "call-bot" is
+already present in the LiveKit room (cross-replica check via _call_bot_in_room).
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from pocketpaw_ee.cloud.livekit.service import (
     CALL_BOT_USER_ID,
     _active_agents,
     _format_duration,
+    _spawn_locks,
     room_name_for_group,
 )
 
@@ -80,8 +86,9 @@ class TestService:
         This prevents actual HTTP calls by replacing LiveKitAPI with a
         MagicMock that never makes real requests.
         """
-        # Clean up any agents from previous tests
+        # Clean up any agents / spawn locks from previous tests
         _active_agents.clear()
+        _spawn_locks.clear()
 
         # Create the inner 'room' service mock
         mock_room_svc = MagicMock()
@@ -90,6 +97,13 @@ class TestService:
         mock_list_resp = MagicMock()
         mock_list_resp.rooms = []
         mock_room_svc.list_rooms = AsyncMock(return_value=mock_list_resp)
+
+        # Mock list_participants for _call_bot_in_room — empty by default so the
+        # cross-replica call-bot check is negative and create_room proceeds to
+        # spawn (tests that need a call-bot present override this).
+        mock_parts_resp = MagicMock()
+        mock_parts_resp.participants = []
+        mock_room_svc.list_participants = AsyncMock(return_value=mock_parts_resp)
 
         # Create the LiveKitAPI instance mock
         mock_api_instance = MagicMock()
@@ -105,8 +119,9 @@ class TestService:
 
         yield mock_room_svc
 
-        # Clean up any agents created during the test
+        # Clean up any agents / spawn locks created during the test
         _active_agents.clear()
+        _spawn_locks.clear()
         patcher.stop()
 
     @pytest.mark.asyncio
@@ -589,3 +604,134 @@ class TestSelectiveSubscribe:
         mic_pub.subscribed = False
         handler(mic_pub, participant)
         mic_pub.set_subscribed.assert_called_once_with(True)
+
+
+class TestSpawnRace:
+    """Regression: concurrent create_room() must spawn exactly one call-bot.
+
+    Two participants joining the same group call at once issue two concurrent
+    create_room() calls. Before the per-group lock, both passed the
+    ``group_id not in _active_agents`` check before either inserted (the await
+    inside _spawn_agent_process yields between the check and the insert), so two
+    "call-bot" subprocesses joined the room with the same identity and fought.
+    The fix makes check→spawn→insert atomic per group via an asyncio.Lock and
+    adds a best-effort cross-replica check (_call_bot_in_room) against LiveKit
+    room state.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_globals(self):
+        """Reset module-level spawn registries before/after each test.
+
+        Hermeticity: _active_agents and _spawn_locks are process globals, and an
+        asyncio.Lock is bound to the loop it is first used on, so a leaked lock
+        would poison a later test running on a fresh loop.
+        """
+        _active_agents.clear()
+        _spawn_locks.clear()
+        try:
+            yield
+        finally:
+            _active_agents.clear()
+            _spawn_locks.clear()
+
+    @pytest.fixture
+    def mock_lk_existing_room(self):
+        """Mock LiveKitAPI: the room already exists (is_new=False) and no
+        call-bot is present (list_participants returns an empty list)."""
+        mock_room_svc = MagicMock()
+
+        existing_room = MagicMock()
+        existing_room.name = "group-call-g"
+        mock_list_resp = MagicMock()
+        mock_list_resp.rooms = [existing_room]
+        mock_room_svc.list_rooms = AsyncMock(return_value=mock_list_resp)
+
+        mock_parts_resp = MagicMock()
+        mock_parts_resp.participants = []
+        mock_room_svc.list_participants = AsyncMock(return_value=mock_parts_resp)
+
+        mock_api_instance = MagicMock()
+        mock_api_instance.room = mock_room_svc
+        mock_api_instance.__aenter__ = AsyncMock(return_value=mock_api_instance)
+        mock_api_instance.__aexit__ = AsyncMock(return_value=False)
+
+        patcher = patch(
+            "pocketpaw_ee.cloud.livekit.service.LiveKitAPI", return_value=mock_api_instance
+        )
+        patcher.start()
+        try:
+            yield mock_room_svc
+        finally:
+            patcher.stop()
+
+    @pytest.mark.asyncio
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_KEY", "test-key")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_SECRET", "test-secret")
+    async def test_concurrent_create_room_spawns_single_agent(self, mock_lk_existing_room):
+        """Two concurrent create_room() for the same group spawn ONE agent.
+
+        Fails on the pre-lock code: the await in _spawn_agent_process yields
+        between the _active_agents check and the insert, so both calls pass the
+        check and spawn (2). Passes once the per-group asyncio.Lock makes
+        check→spawn→insert atomic.
+        """
+        from pocketpaw_ee.cloud.livekit.service import create_room
+
+        spawn_calls = 0
+
+        async def _fake_spawn(*args, **kwargs):
+            nonlocal spawn_calls
+            spawn_calls += 1
+            # Yield the loop here — this is the exact window the race exploited
+            # (between the _active_agents check and the insert).
+            await asyncio.sleep(0)
+            return MagicMock()  # stand-in proc; _reap is patched out
+
+        with (
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._spawn_agent_process",
+                side_effect=_fake_spawn,
+            ) as mock_spawn,
+            patch(
+                "pocketpaw_ee.cloud.livekit.service._reap_agent_process",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await asyncio.gather(
+                create_room("g", "ws", "u"),
+                create_room("g", "ws", "u"),
+            )
+            # Let any background reap task drain so it doesn't warn on teardown.
+            await asyncio.sleep(0)
+
+        assert spawn_calls == 1, f"expected exactly 1 spawn, got {spawn_calls}"
+        assert mock_spawn.call_count == 1
+        assert list(_active_agents) == ["g"]
+
+    @pytest.mark.asyncio
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_KEY", "test-key")
+    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_SECRET", "test-secret")
+    async def test_create_room_skips_spawn_when_call_bot_already_present(
+        self, mock_lk_existing_room
+    ):
+        """If a "call-bot" is already in the LiveKit room (e.g. spawned by
+        another replica), create_room() must NOT spawn a second one."""
+        from pocketpaw_ee.cloud.livekit.service import create_room
+
+        callbot = MagicMock()
+        callbot.identity = "call-bot"
+        parts_resp = MagicMock()
+        parts_resp.participants = [callbot]
+        mock_lk_existing_room.list_participants = AsyncMock(return_value=parts_resp)
+
+        with patch(
+            "pocketpaw_ee.cloud.livekit.service._spawn_agent_process",
+            new_callable=AsyncMock,
+        ) as mock_spawn:
+            await create_room("g", "ws", "u")
+
+        mock_spawn.assert_not_called()
+        assert "g" not in _active_agents

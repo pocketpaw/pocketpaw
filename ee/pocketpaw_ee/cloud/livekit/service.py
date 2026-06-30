@@ -3,6 +3,15 @@
 Uses the ``livekit-api`` Python SDK to talk to LiveKit Cloud.
 Requires ``LIVEKIT_URL``, ``LIVEKIT_API_KEY``, ``LIVEKIT_API_SECRET``
 environment variables.
+
+Change log:
+- Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
+  spawn with a per-group ``asyncio.Lock`` (``_spawn_locks`` / ``_spawn_lock_for``)
+  so two concurrent joins for the same group can't both pass the
+  check→spawn→insert window and start two "call-bot" subprocesses.
+  ``_call_bot_in_room()`` adds a best-effort cross-replica check against LiveKit
+  room state. Locks are popped in ``_reap_agent_process`` and ``end_room`` to
+  avoid unbounded growth.
 """
 
 from __future__ import annotations
@@ -41,6 +50,28 @@ logger = logging.getLogger(__name__)
 from pocketpaw_ee.cloud.livekit.types import MeetingAgentProtocol  # noqa: E402
 
 _active_agents: dict[str, MeetingAgentProtocol] = {}
+
+# Per-group spawn locks. create_room() holds the lock for a group across the
+# check→spawn→insert sequence so two concurrent joins for the SAME group can't
+# both pass the "_active_agents" check and start duplicate call-bot
+# subprocesses. Keyed by group_id; popped in _reap_agent_process and end_room
+# so the dict doesn't grow unbounded.
+_spawn_locks: dict[str, asyncio.Lock] = {}
+
+
+def _spawn_lock_for(group_id: str) -> asyncio.Lock:
+    """Get-or-create the per-group spawn lock.
+
+    Safe without its own lock: on a single-threaded event loop there is no
+    ``await`` between the ``get`` and the ``set``, so two coroutines can't
+    interleave here and mint two different locks for the same group.
+    """
+    lock = _spawn_locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _spawn_locks[group_id] = lock
+    return lock
+
 
 # Collected meeting-notes payloads from agent subprocesses.
 # Populated by _collect_agent_notes (background reader on stdout pipe)
@@ -265,6 +296,7 @@ async def _reap_agent_process(
         raise
     finally:
         was_registered = _active_agents.pop(group_id, None) is not None
+        _spawn_locks.pop(group_id, None)
         logger.info(
             "Reaped agent subprocess for group %s (exit code %s)",
             group_id,
@@ -532,6 +564,26 @@ async def get_recording_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+async def _call_bot_in_room(room_name: str) -> bool:
+    """Return ``True`` if a participant with identity ``"call-bot"`` is in the room.
+
+    Best-effort cross-replica dedupe: queries LiveKit room state (the shared
+    source of truth) so a call-bot spawned by *another* worker/replica is
+    visible from here, where the per-process ``_active_agents`` dict and
+    ``_spawn_locks`` cannot see it. Fail-open — ANY error returns ``False`` so a
+    transient LiveKit hiccup never blocks a call from starting; the in-process
+    lock + ``_active_agents`` still prevent the same-process duplicate.
+    """
+    try:
+        async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
+            parts_req = ListParticipantsRequest(room=room_name)
+            parts_resp = await lk.room.list_participants(parts_req)
+            return any(p.identity == "call-bot" for p in parts_resp.participants)
+    except Exception as exc:
+        logger.debug("call-bot presence check failed for room %s (fail-open): %s", room_name, exc)
+        return False
+
+
 async def create_room(
     group_id: str,
     workspace_id: str = "",
@@ -629,30 +681,36 @@ async def create_room(
     # Start the meeting notes agent as a managed subprocess so it does not
     # block the server event loop with WebRTC / Deepgram STT processing.
     #
-    # FOLLOW-UP (multi-worker caveat): _active_agents is a per-process dict, so
-    # this guard only dedupes within a single worker. If the API runs with more
-    # than one worker/replica, two workers can each spawn an agent for the same
-    # room (duplicate bots). Needs infra worker-count confirmation before
-    # fixing — e.g. a shared lock/registry or pinning call routing to one
-    # worker. Not addressed here.
-    if group_id not in _active_agents:
-        proc = await _spawn_agent_process(
-            group_id=group_id,
-            room_name=room_name,
-            bot_token=bot_token,
-        )
-        agent_ref = _SubprocessAgentRef(
-            group_id=group_id,
-            room_name=room_name,
-            process=proc,
-        )
-        _active_agents[group_id] = agent_ref
+    # The check -> spawn -> insert below would race without the lock: the
+    # ``await _spawn_agent_process`` yields the event loop between the
+    # membership check and the insert, so two concurrent joins (two
+    # POST /livekit/rooms for the same group) could each pass the check and
+    # spawn a second "call-bot" that fights the first over the shared identity.
+    # The per-group asyncio.Lock makes check -> spawn -> insert atomic in this
+    # process; _call_bot_in_room is a best-effort cross-replica guard against
+    # LiveKit room state. True cross-replica atomicity (only if the API is ever
+    # run multi-replica) would need Redis SETNX or LiveKit agent dispatch.
+    async with _spawn_lock_for(group_id):
+        if group_id not in _active_agents and not await _call_bot_in_room(room_name):
+            proc = await _spawn_agent_process(
+                group_id=group_id,
+                room_name=room_name,
+                bot_token=bot_token,
+            )
+            agent_ref = _SubprocessAgentRef(
+                group_id=group_id,
+                room_name=room_name,
+                process=proc,
+            )
+            _active_agents[group_id] = agent_ref
 
-        # Background task: wait for the subprocess to finish, then clean
-        # up the registry so we don't leak agent references.
-        asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
+            # Background task: wait for the subprocess to finish, then clean
+            # up the registry so we don't leak agent references.
+            asyncio.create_task(_reap_agent_process(group_id, proc, workspace_id))
 
-        logger.info("Started meeting agent subprocess for group %s (room %s)", group_id, room_name)
+            logger.info(
+                "Started meeting agent subprocess for group %s (room %s)", group_id, room_name
+            )
 
     await emit(CallStarted(data={"group_id": group_id, "room_name": room_name}))
 
@@ -713,6 +771,7 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
 
     # Stop the meeting agent first (generates and posts notes)
     agent = _active_agents.pop(group_id, None)
+    _spawn_locks.pop(group_id, None)
     if agent is not None:
         try:
             await agent.stop()
