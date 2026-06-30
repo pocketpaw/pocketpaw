@@ -1,5 +1,14 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-30 (feat/session-supervisor SS-2) — ``_build_options`` now also
+  forwards ``session_handle.session_store`` to the SDK as
+  ``ClaudeAgentOptions.session_store`` when it is non-None. On a resume turn the
+  SDK materializes the conversation from THAT store (a tenancy-keyed custom
+  ``SessionStore``) instead of local disk, and mirrors new transcript lines back
+  via the store's ``append``. The store flows through OPAQUELY — OSS never
+  imports the concrete (possibly ee Mongo-backed) class, so the EE→OSS boundary
+  stays clean. ``None`` leaves ``session_store`` unset (unchanged SS-1 / legacy
+  behavior). Small additive change; the SS-1 resume wiring is untouched.
 Updated: 2026-06-30 (feat/session-supervisor SS-1) — ``run`` accepts an optional
   ``session_handle: SessionHandle | None``. When it carries a non-None
   ``cli_session_id``, ``_build_options`` sets ``ClaudeAgentOptions.resume`` so the
@@ -1713,6 +1722,20 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # ``None`` leaves ``resume`` unset — the unchanged legacy path.
         if resume_session_id:
             options_kwargs["resume"] = resume_session_id
+
+        # Tenancy-keyed session store (feat/session-supervisor SS-2). When the
+        # caller threads a ``session_handle`` carrying a ``session_store``, hand
+        # it to the SDK opaquely (the ``ClaudeAgentOptions.session_store: SessionStore
+        # | None`` field). On a resume turn the SDK materializes the conversation
+        # from THIS store — tenancy-keyed by ``(workspace_id, project_key,
+        # session_id)`` — instead of local disk, and mirrors new transcript
+        # lines back via ``append``. The object satisfies the SDK's ``SessionStore``
+        # protocol by duck typing; OSS never imports the concrete (possibly ee)
+        # class, so it flows through as-is and the EE→OSS boundary stays clean.
+        # Absent / ``None`` leaves ``session_store`` unset — the unchanged SS-1
+        # (and legacy) behavior.
+        if session_handle is not None and session_handle.session_store is not None:
+            options_kwargs["session_store"] = session_handle.session_store
 
         # Create options (after all kwargs are set, including model)
         options = self._ClaudeAgentOptions(**options_kwargs)

@@ -23,6 +23,13 @@ plugin). The ``system_message_override`` field is applied UPSTREAM in
 ``AgentPool.run`` (it swaps the base system prompt before assembly), so it never
 reaches a backend as a kwarg — it rides the existing ``system_prompt`` channel.
 
+Updated: 2026-06-30 (feat/session-supervisor SS-2) — the ``SessionHandle.session_store``
+field is now real: a tenancy-keyed custom SDK ``SessionStore``. The Claude SDK
+backend forwards it OPAQUELY to ``ClaudeAgentOptions.session_store`` so a resume
+turn reconstructs the conversation from OUR durable store (not local disk),
+namespaced by ``(workspace_id, project_key, session_id)`` so one tenant can never
+read another's session. SS-1's ``cli_session_id`` resume wiring is unchanged.
+
 Updated: 2026-06-30 (feat/session-supervisor SS-1) — adds the ``SessionHandle``
 dataclass: native-resume identity for a single agent session. It rides the SAME
 withhold-when-empty contract as the kwargs above — ``AgentPool.run`` forwards a
@@ -93,9 +100,14 @@ class SessionHandle:
       a fresh-process turn resumes the on-disk conversation natively. ``None``
       (turn 1, or any non-supervised run) is the LEGACY path — behavior is
       unchanged from today.
-    * ``session_store`` — carried through OPAQUELY for SS-2 (a custom SDK
-      ``SessionStore``). SS-1 does NOT implement or consume it; it is an inert
-      pass-through field only.
+    * ``session_store`` — a custom SDK ``SessionStore`` (SS-2). The Claude SDK
+      backend forwards it OPAQUELY to ``ClaudeAgentOptions.session_store`` when
+      non-None, so a resume turn materializes the conversation from OUR store
+      (tenancy-keyed by ``(workspace_id, project_key, session_id)`` — see
+      ``pocketpaw.agents.session_store.InMemorySessionStore`` and the ee
+      Mongo-backed ``MongoSessionStore``) instead of local disk. It rides
+      through opaquely so OSS never imports the concrete (possibly ee) store
+      class. ``None`` is the unchanged legacy path.
 
     Like ``deny_mcp_tool_ids`` / ``allow_sdk_tools`` / ``skill_names``, the
     handle rides the withhold-when-empty contract: ``AgentPool.run`` forwards it
