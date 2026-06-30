@@ -8,6 +8,11 @@ Branch under test: **`integration/session-supervisor`** (origin/dev + SS-1..SS-5
 The feature is gated behind **`POCKETPAW_SESSION_SUPERVISOR`** (default off), so the
 default path is unchanged; you opt in to test it.
 
+> **Verified live 2026-06-30** — §1–§3 passed, no bugs: a real two-turn cloud chat
+> captured the native `cli_session_id` into Mongo, a backend restart wiped the warm
+> process, and turn 3 still answered "Teal" (resumed from the store). Flag-off wrote
+> zero `agent_session_runtimes` rows. v1's cold-resume-each-turn limit held as documented.
+
 ## 0. Test-level integration (already green, re-run to confirm)
 
 ```bash
@@ -41,11 +46,18 @@ before any of this ships.
 ## 2. Live stack — supervised resume end to end (flag ON)
 
 Boot the backend with the flag on (full local boot recipe is unchanged; only the
-env var is new):
+env var is new).
+
+**Prerequisites on a cold box** (a ready dev stack already has these): cloud
+features return **401 without a license** — set `POCKETPAW_LICENSE_KEY` — and you
+need a provisioned **workspace + a `pocketpaw`-slug agent + a chat scope**
+(group / session / pocket) to post turns to. A fresh `serve` seeds an admin and a
+workspace; confirm an agent and a group exist (or create one) before §2.
 
 ```bash
 cd pocketPaw
-POCKETPAW_SESSION_SUPERVISOR=true uv run pocketpaw serve --port 8888
+POCKETPAW_SESSION_SUPERVISOR=true POCKETPAW_LICENSE_KEY=<your-key> \
+  uv run pocketpaw serve --port 8888
 # frontend: cd paw-enterprise && VITE_API_URL=http://localhost:8888 ... bun run dev
 ```
 
