@@ -29,6 +29,17 @@ so the runtime map stays bounded over long SaaS uptime. The durable
 pruned runtime COLD and re-resolves the id — the drop is safe. The busy-guard
 still holds: a runtime with ``active_runs > 0`` (e.g. a turn-1 launch in flight,
 which is COLD AND busy) is never pruned.
+
+Updated 2026-06-30 (feat/warm-reuse WH-2): the warm slot is now typed as WH-1's
+``LeasedClient | None`` (was ``Any | None``) on ``SessionRuntime.warm_slot`` and
+``Acquisition.slot`` — a typing/clarity change only. The supervisor still treats
+the slot opaquely and relies entirely on the injected ``teardown`` (WH-1 hands it
+an ASYNC ``_teardown`` that ``await client.disconnect()``s the live ``ClaudeSDKClient``),
+so every release path — idle reap, quota evict, crash, stop — disconnects the live
+client with no leaked process. ``_run_teardown`` now also holds a strong reference
+to each scheduled async-teardown task until it completes (the event loop keeps only
+a weak ref, so a discarded fire-and-forget disconnect could be GC'd mid-flight and
+leak the subprocess).
 """
 
 from __future__ import annotations
@@ -41,6 +52,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+from pocketpaw.agents.backend import LeasedClient
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +97,12 @@ class SessionRuntime:
     # its live turn. ``last_active`` only ranks idle eviction candidates; this
     # counter is the authoritative "busy" signal (mirrors pool.AgentInstance).
     active_runs: int = 0
-    # Opaque live warm slot supplied by the executor (SS-5) — never interpreted
-    # here. Present only while ``tier is WARM``.
-    warm_slot: Any | None = None
+    # Live warm slot supplied by the executor (SS-5) — a WH-1 ``LeasedClient``
+    # holding a connected ``ClaudeSDKClient``. Still treated OPAQUELY here (the
+    # supervisor never reaches into ``.client`` — it releases via ``teardown``);
+    # the concrete type documents what the warm tier holds. Present only while
+    # ``tier is WARM``.
+    warm_slot: LeasedClient | None = None
     # How to release ``warm_slot``. Called best-effort on reap / quota-evict /
     # crash / stop. May be sync or return an awaitable.
     teardown: Callable[[], Any] | None = field(default=None, repr=False)
@@ -121,7 +137,7 @@ class Acquisition:
         return not self.warm_reuse
 
     @property
-    def slot(self) -> Any | None:
+    def slot(self) -> LeasedClient | None:
         """Convenience: the warm slot to reuse (only meaningful when ``warm_reuse``)."""
         return self.runtime.warm_slot
 
@@ -159,6 +175,11 @@ class SessionSupervisor:
         self._now: Callable[[], float] = now or time.monotonic
         self._runtimes: dict[tuple[str, str], SessionRuntime] = {}
         self._reaper_task: asyncio.Task | None = None
+        # Strong references to in-flight async-teardown tasks scheduled by
+        # ``_run_teardown`` from a running loop. The loop keeps only a WEAK ref
+        # to a bare ``create_task`` result, so without this a fire-and-forget
+        # disconnect could be GC'd before it finishes — leaking the live client.
+        self._pending_teardowns: set[asyncio.Task] = set()
         # The reaper wakes at least as often as it would need to honor the TTL,
         # capped so a long TTL doesn't leave slots resident much past expiry.
         self._reap_interval: float = max(1.0, min(30.0, float(warm_ttl)))
@@ -439,12 +460,16 @@ class SessionSupervisor:
         return teardown
 
     def _run_teardown(self, teardown: Callable[[], Any] | None) -> None:
-        """Best-effort sync teardown; schedules an awaitable result on the loop.
+        """Best-effort teardown from a SYNC caller (reap / quota-evict / crash).
 
-        Sync teardowns (the common case, and what tests use) run inline. If a
-        teardown returns a coroutine/awaitable and a loop is running, it is
-        scheduled; with no running loop it is closed so it never warns. Never
-        raises.
+        A sync teardown runs inline. WH-1's ``LeasedClient`` teardown is ASYNC
+        (it ``await client.disconnect()``s the live ``ClaudeSDKClient``), so the
+        call returns a coroutine: when a loop is running (the real callers — the
+        reaper task and the async executor — always run inside one) it is
+        scheduled AND a strong reference is held until it completes, so the
+        disconnect can't be GC'd mid-flight and leak the subprocess. With no
+        running loop the coroutine is closed so it never warns (unreachable for
+        the supervisor's real callers, which are all on the loop). Never raises.
         """
         if teardown is None:
             return
@@ -455,9 +480,12 @@ class SessionSupervisor:
             return
         if inspect.isawaitable(result):
             try:
-                asyncio.get_running_loop().create_task(result)
+                task = asyncio.get_running_loop().create_task(result)
             except RuntimeError:
                 result.close()
+            else:
+                self._pending_teardowns.add(task)
+                task.add_done_callback(self._pending_teardowns.discard)
 
     async def _run_teardown_async(self, teardown: Callable[[], Any] | None) -> None:
         """Await an async teardown to completion (used by ``stop``). Never raises."""
