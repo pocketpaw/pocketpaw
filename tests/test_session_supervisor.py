@@ -243,6 +243,45 @@ def test_per_tenant_quota_skips_busy_candidate() -> None:
     assert td_a2.calls == 0 and a2.runtime.tier is SessionTier.WARM
 
 
+def test_quota_cap_soak_no_unbounded_warm_clients() -> None:
+    """Soak (WH-4): binding warm clients across tenants far beyond the caps never
+    lets the held warm count exceed ``max_warm_per_tenant`` (per tenant) or
+    ``max_warm_global`` (overall), and every evicted slot is disconnected. Proves
+    WARM can't grow unbounded — no leaked ``claude`` processes under load."""
+    clock = FakeClock()
+    PER_TENANT, GLOBAL = 2, 4
+    sup = SessionSupervisor(
+        warm_ttl=10_000, max_warm_per_tenant=PER_TENANT, max_warm_global=GLOBAL, now=clock
+    )
+
+    tenants = ["ws-a", "ws-b", "ws-c"]
+    acqs = []
+    teardowns = []
+    for i in range(12):  # 12 binds round-robin across 3 tenants, all idle
+        clock.advance(1)
+        acq = sup.acquire(tenants[i % 3], f"sess-{i}", "agent", cli_session_id=f"cli-{i}")
+        td = Teardown()
+        sup.bind_warm_slot(acq.runtime, slot=f"slot-{i}", teardown=td)
+        acqs.append(acq)
+        teardowns.append(td)
+
+    warm = [
+        a.runtime
+        for a in acqs
+        if a.runtime.tier is SessionTier.WARM and a.runtime.warm_slot is not None
+    ]
+    # Global cap holds — never more live warm clients than the global ceiling.
+    assert len(warm) <= GLOBAL
+    # Per-tenant cap holds for every tenant.
+    for ws in tenants:
+        assert len([r for r in warm if r.workspace_id == ws]) <= PER_TENANT
+    # Every evicted slot's teardown (the ``disconnect``) fired exactly once — the
+    # released clients can't pile up. evicted == binds - held.
+    evicted = sum(td.calls for td in teardowns)
+    assert evicted == 12 - len(warm)
+    assert evicted > 0  # the soak actually exercised eviction
+
+
 # ===========================================================================
 # Turn-1 routing / capture ownership
 # ===========================================================================
