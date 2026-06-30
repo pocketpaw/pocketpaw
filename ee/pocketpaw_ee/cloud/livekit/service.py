@@ -8,10 +8,10 @@ Change log:
 - Fix duplicate call-bot spawn race: ``create_room()`` now guards the agent
   spawn with a per-group ``asyncio.Lock`` (``_spawn_locks`` / ``_spawn_lock_for``)
   so two concurrent joins for the same group can't both pass the
-  check→spawn→insert window and start two "call-bot" subprocesses.
-  ``_call_bot_in_room()`` adds a best-effort cross-replica check against LiveKit
-  room state. Locks are popped in ``_reap_agent_process`` and ``end_room`` to
-  avoid unbounded growth.
+  check→spawn→insert window and start two "call-bot" subprocesses. The deploy
+  runs a single worker, so this in-process lock fully covers it; true
+  cross-replica dedupe is out of scope here (see the LiveKit Agents migration
+  design doc).
 """
 
 from __future__ import annotations
@@ -54,8 +54,11 @@ _active_agents: dict[str, MeetingAgentProtocol] = {}
 # Per-group spawn locks. create_room() holds the lock for a group across the
 # check→spawn→insert sequence so two concurrent joins for the SAME group can't
 # both pass the "_active_agents" check and start duplicate call-bot
-# subprocesses. Keyed by group_id; popped in _reap_agent_process and end_room
-# so the dict doesn't grow unbounded.
+# subprocesses. Intentionally never popped: an asyncio.Lock is tiny and the key
+# set is bounded by the groups that ever start a call, so leaving entries costs
+# nothing and avoids the re-mint race a concurrent pop-vs-_spawn_lock_for (e.g.
+# a reap/end_room popping a lock another create_room is mid-flight holding)
+# would cause — which would reopen the very double-spawn this guards against.
 _spawn_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -296,7 +299,6 @@ async def _reap_agent_process(
         raise
     finally:
         was_registered = _active_agents.pop(group_id, None) is not None
-        _spawn_locks.pop(group_id, None)
         logger.info(
             "Reaped agent subprocess for group %s (exit code %s)",
             group_id,
@@ -564,26 +566,6 @@ async def get_recording_info(group_id: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-async def _call_bot_in_room(room_name: str) -> bool:
-    """Return ``True`` if a participant with identity ``"call-bot"`` is in the room.
-
-    Best-effort cross-replica dedupe: queries LiveKit room state (the shared
-    source of truth) so a call-bot spawned by *another* worker/replica is
-    visible from here, where the per-process ``_active_agents`` dict and
-    ``_spawn_locks`` cannot see it. Fail-open — ANY error returns ``False`` so a
-    transient LiveKit hiccup never blocks a call from starting; the in-process
-    lock + ``_active_agents`` still prevent the same-process duplicate.
-    """
-    try:
-        async with LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET) as lk:
-            parts_req = ListParticipantsRequest(room=room_name)
-            parts_resp = await lk.room.list_participants(parts_req)
-            return any(p.identity == "call-bot" for p in parts_resp.participants)
-    except Exception as exc:
-        logger.debug("call-bot presence check failed for room %s (fail-open): %s", room_name, exc)
-        return False
-
-
 async def create_room(
     group_id: str,
     workspace_id: str = "",
@@ -686,12 +668,12 @@ async def create_room(
     # membership check and the insert, so two concurrent joins (two
     # POST /livekit/rooms for the same group) could each pass the check and
     # spawn a second "call-bot" that fights the first over the shared identity.
-    # The per-group asyncio.Lock makes check -> spawn -> insert atomic in this
-    # process; _call_bot_in_room is a best-effort cross-replica guard against
-    # LiveKit room state. True cross-replica atomicity (only if the API is ever
-    # run multi-replica) would need Redis SETNX or LiveKit agent dispatch.
+    # The per-group asyncio.Lock makes check -> spawn -> insert atomic. The
+    # deploy runs a single worker so this fully dedupes it; cross-replica dedupe
+    # (only if the API is ever run multi-replica) is the LiveKit Agents
+    # migration's job, not a best-effort participant poll here.
     async with _spawn_lock_for(group_id):
-        if group_id not in _active_agents and not await _call_bot_in_room(room_name):
+        if group_id not in _active_agents:
             proc = await _spawn_agent_process(
                 group_id=group_id,
                 room_name=room_name,
@@ -771,7 +753,6 @@ async def end_room(group_id: str, workspace_id: str = "") -> dict[str, Any]:
 
     # Stop the meeting agent first (generates and posts notes)
     agent = _active_agents.pop(group_id, None)
-    _spawn_locks.pop(group_id, None)
     if agent is not None:
         try:
             await agent.stop()

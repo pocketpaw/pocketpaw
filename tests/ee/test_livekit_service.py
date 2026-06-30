@@ -5,9 +5,8 @@ subscribe (Bug A) — auto_subscribe=False on connect and the pure
 _should_subscribe() decision (mic audio in, video / screenshare out).
 
 Added TestSpawnRace: covers the duplicate call-bot spawn race — concurrent
-create_room() for the same group must spawn exactly one agent (per-group
-asyncio.Lock), and create_room() must skip the spawn when a "call-bot" is
-already present in the LiveKit room (cross-replica check via _call_bot_in_room).
+create_room() for the same group must spawn exactly one agent (the per-group
+asyncio.Lock makes check→spawn→insert atomic).
 """
 
 from __future__ import annotations
@@ -709,29 +708,3 @@ class TestSpawnRace:
         assert spawn_calls == 1, f"expected exactly 1 spawn, got {spawn_calls}"
         assert mock_spawn.call_count == 1
         assert list(_active_agents) == ["g"]
-
-    @pytest.mark.asyncio
-    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_URL", "wss://test.livekit.cloud")
-    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_KEY", "test-key")
-    @patch("pocketpaw_ee.cloud.livekit.service.LIVEKIT_API_SECRET", "test-secret")
-    async def test_create_room_skips_spawn_when_call_bot_already_present(
-        self, mock_lk_existing_room
-    ):
-        """If a "call-bot" is already in the LiveKit room (e.g. spawned by
-        another replica), create_room() must NOT spawn a second one."""
-        from pocketpaw_ee.cloud.livekit.service import create_room
-
-        callbot = MagicMock()
-        callbot.identity = "call-bot"
-        parts_resp = MagicMock()
-        parts_resp.participants = [callbot]
-        mock_lk_existing_room.list_participants = AsyncMock(return_value=parts_resp)
-
-        with patch(
-            "pocketpaw_ee.cloud.livekit.service._spawn_agent_process",
-            new_callable=AsyncMock,
-        ) as mock_spawn:
-            await create_room("g", "ws", "u")
-
-        mock_spawn.assert_not_called()
-        assert "g" not in _active_agents
