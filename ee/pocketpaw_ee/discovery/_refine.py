@@ -1,33 +1,58 @@
-# pocketpaw_ee/discovery/_refine.py — the on-box REFINE pass for discovery (F3).
+# pocketpaw_ee/discovery/_refine.py — the discovery model-lane resolver + REFINE
+# pass (F3).
 #
 # Created: 2026-06-21 (F3 / feat/szd-finish-core) — un-stubs ``opts.refine`` on
 # ``DiscoveryRun``. After the DETERMINISTIC digest produces an ``OntologyDraft``,
-# this pass asks the tenant's ON-BOX model (Ollama) to clean it up: merge
-# near-duplicate types, rename to canonical names, and drop spurious links. It
-# sends the model the DRAFT shape (type names, property names, sample
-# summaries already in the draft) — NOT raw tenant exhaust.
+# this pass asks the discovery model to clean it up: merge near-duplicate types,
+# rename to canonical names, and drop spurious links. It sends the model the
+# DRAFT shape (type names, property names, sample summaries already in the
+# draft) — NOT raw tenant exhaust.
 #
-# SOVEREIGNTY (the whole point of this slice, encoded as mechanical tests):
-# refining touches tenant data, so the model MUST be the tenant's on-box model
-# and NEVER a cloud model. The enforcement point is the hard pin
-# ``resolve_llm_client(settings, force_provider="ollama")`` — we never read
-# ``settings.llm_provider`` (an ``auto`` resolve with a cloud key set would pick
-# Anthropic and leak raw tenant text). ``force_provider="ollama"`` guarantees
-# ``api_key is None`` / ``is_ollama is True``; ``create_openai_client`` then
-# talks to the local Ollama ``/v1`` endpoint with the literal ``"ollama"``
-# sentinel key — no cloud key is ever in the request path.
+# 2026-06-22 — CONFIGURABLE SOVEREIGNTY POSTURE. WHICH model the categorize (F2)
+# and refine (F3) lanes call is governed by ``settings.discovery_sovereign_model``
+# (default True), NOT a code constant:
+#   * sovereign-local (True, the default — unchanged behavior): the model is
+#     hard-pinned to the tenant's on-box Ollama via
+#     ``resolve_llm_client(settings, force_provider="ollama")``. We never read
+#     ``settings.llm_provider`` (an ``auto`` resolve with a cloud key set would
+#     pick Anthropic and leak the inferred shape). The pin guarantees
+#     ``api_key is None`` / ``is_ollama is True``; ``create_openai_client`` then
+#     talks to the local Ollama ``/v1`` endpoint with the literal ``"ollama"``
+#     sentinel key — no cloud key is ever in the request path. Nothing leaves
+#     the box. The safe default for regulated / sovereign tenants.
+#   * configured-provider (False): the model is the workspace's CONFIGURED
+#     provider via ``resolve_llm_client(settings)`` with NO force — anthropic /
+#     openai / openai_compatible / gemini / litellm honored, a CLOUD model
+#     allowed. This is the tenant's EXPLICIT opt-in to send discovery's inferred
+#     data shape to their configured model. Most businesses are fine here
+#     (faster, richer categories); the regulated few keep the default.
 #
-# FAIL CLOSED ON SOVEREIGNTY, SOFT ON AVAILABILITY: if Ollama can't connect
-# (``ollama serve`` down) or returns garbage, we RETURN the original
-# deterministic draft with ``draft.meta["refine"] = "unavailable"`` — we never
-# raise and never fall back to a cloud model. Refine is an enhancement; the
-# deterministic digest is the contract floor. On success we stamp
-# ``draft.meta["refine"] = "applied"``. Mirrors the templated-fallback shape of
-# ``cloud/decisions/explain/extractor.py`` (but the fallback is the draft).
+# FAIL CLOSED ON SOVEREIGNTY, SOFT ON AVAILABILITY: under EITHER posture, if the
+# model can't connect or returns garbage, we RETURN the original deterministic
+# draft with ``draft.meta["refine"] = "unavailable"`` — we never raise. Under the
+# default (sovereign) posture we never fall back to a cloud model; under the
+# opt-in posture the configured (possibly cloud) provider is already the chosen
+# lane, so there is nothing to "fall back" to — an unreachable provider still
+# degrades to the deterministic floor, never a silent re-route. Refine is an
+# enhancement; the deterministic digest is the contract floor. On success we
+# stamp ``draft.meta["refine"] = "applied"``. Mirrors the templated-fallback
+# shape of ``cloud/decisions/explain/extractor.py`` (but the fallback is the
+# draft).
+#
+# The kb ingest/build tripwire (``kb_compile._kb`` refusing ``ingest`` /
+# ``build``) is INDEPENDENT of this posture and stays UNCONDITIONAL — that path
+# POSTs raw tenant text to Anthropic's KB API and is never correct, sovereign or
+# not.
+#
+# FOLLOW-UP: this slice resolves only the ``resolve_llm_client`` providers
+# (ollama / openai / anthropic-api / openai_compatible / gemini / litellm). Using
+# the workspace's configured AGENT BACKEND (e.g. the Claude Code / claude_agent_sdk
+# loop) as the discovery one-shot is a SEPARATE, larger integration — the agent
+# loop is not a chat-completions endpoint — and is left as a future option.
 #
 # ``resolve_on_box_descriptor`` / ``resolve_on_box_client`` are the shared
-# helpers slice F2 (unstructured categorization) also imports for its on-box
-# model call — both lanes resolve the same way so the sovereignty pin lives in
+# helpers slice F2 (unstructured categorization) also imports for its discovery
+# model call — both lanes resolve the same way so the posture decision lives in
 # one place.
 #
 # Pure orchestration over the OSS ``pocketpaw.llm`` client seam + the discovery
@@ -73,31 +98,62 @@ _REFINE_SYSTEM = (
 
 
 def resolve_on_box_descriptor(settings: Settings) -> LLMClient:
-    """Resolve the on-box (Ollama) ``LLMClient`` descriptor — hard-pinned local.
+    """Resolve the discovery-model ``LLMClient`` descriptor — posture-governed.
 
-    SOVEREIGNTY ENFORCEMENT POINT. ``force_provider="ollama"`` is passed
-    unconditionally so this never reads ``settings.llm_provider``: an ``auto``
-    resolve on a tenant with a cloud key configured would otherwise pick
-    Anthropic and leak raw tenant text. The returned descriptor always has
-    ``provider == "ollama"``, ``api_key is None``, ``is_ollama is True``.
+    The provider is chosen by ``settings.discovery_sovereign_model``:
 
-    Shared with slice F2 (unstructured categorization) so both on-box model
-    lanes resolve identically.
+    * **sovereign-local (True, the default)** → ``resolve_llm_client(settings,
+      force_provider="ollama")``. The pin is the enforcement point: this never
+      reads ``settings.llm_provider`` (an ``auto`` resolve on a tenant with a
+      cloud key configured would otherwise pick Anthropic and leak the inferred
+      shape). The descriptor always has ``provider == "ollama"``,
+      ``api_key is None``, ``is_ollama is True`` — nothing leaves the box.
+    * **configured-provider (False)** → ``resolve_llm_client(settings)`` with NO
+      force. The workspace's configured provider is honored (anthropic / openai /
+      openai_compatible / gemini / litellm — a CLOUD model is allowed). This is
+      the tenant's explicit opt-in to send discovery's inferred data shape to
+      their configured model.
+
+    Despite the name (kept stable because slice F2 imports it), this is the
+    single discovery-model resolution point for BOTH the categorize and refine
+    lanes — the posture decision lives here, once.
     """
-    return resolve_llm_client(settings, force_provider="ollama")
+    if settings.discovery_sovereign_model:
+        return resolve_llm_client(settings, force_provider="ollama")
+    return resolve_llm_client(settings)
 
 
 def resolve_on_box_client(settings: Settings) -> Any:
-    """Build the on-box ``AsyncOpenAI`` client bound to the local Ollama endpoint.
+    """Build the ``AsyncOpenAI`` client for the discovery model — posture-governed.
 
     Wraps ``resolve_on_box_descriptor`` + ``create_openai_client`` so callers get
-    a ready-to-use client with one call. The client talks to
-    ``{ollama_host}/v1`` with the literal ``"ollama"`` sentinel key — never a
-    cloud key. ``timeout`` is generous because a local model is slower than a
-    cloud API.
+    a ready-to-use client with one call. Under the default sovereign posture the
+    client talks to ``{ollama_host}/v1`` with the literal ``"ollama"`` sentinel
+    key — never a cloud key. Under the opt-in posture
+    (``discovery_sovereign_model=False``) the client targets the workspace's
+    configured provider (which may be a cloud endpoint with the tenant's
+    configured key). ``timeout`` is generous because a local model is slower than
+    a cloud API.
     """
     descriptor = resolve_on_box_descriptor(settings)
     return descriptor.create_openai_client(timeout=_REFINE_TIMEOUT_S)
+
+
+def resolve_discovery_model_name(settings: Settings) -> str:
+    """Resolve the model NAME the discovery one-shot should request — posture-aware.
+
+    Under the default sovereign posture the model is the on-box
+    ``settings.ollama_model``. Under the opt-in posture the model name comes from
+    the configured provider's resolved descriptor (e.g. ``settings.openai_model``
+    for ``openai``), so the chat-completion request targets the right model for
+    whichever provider the tenant configured. Falls back to ``ollama_model`` if
+    the descriptor carries no usable model name. Shared by F2 (categorize) and F3
+    (refine) so both lanes pick the model the same way.
+    """
+    if settings.discovery_sovereign_model:
+        return settings.ollama_model
+    descriptor = resolve_on_box_descriptor(settings)
+    return descriptor.model or settings.ollama_model
 
 
 def _draft_payload(draft: OntologyDraft) -> dict[str, Any]:
@@ -219,19 +275,25 @@ def _as_float(value: Any, default: float) -> float:
 
 
 async def refine_draft(draft: OntologyDraft, settings: Settings) -> OntologyDraft:
-    """Refine a deterministic ``OntologyDraft`` with the tenant's ON-BOX model.
+    """Refine a deterministic ``OntologyDraft`` with the discovery model.
 
     Sends the model the DRAFT shape (type/property names, sample summaries in
     the draft — never raw exhaust) and asks it to merge/rename types and drop
     spurious links, then applies the cleaned result onto a copy of the draft.
 
-    Sovereignty: the client is hard-pinned to Ollama via ``resolve_on_box_client``
-    (``force_provider="ollama"``). No cloud model is ever reached.
+    Sovereignty posture: the client comes from ``resolve_on_box_client``, which
+    pins Ollama when ``settings.discovery_sovereign_model`` is True (the default —
+    no cloud model is ever reached) and honors the workspace's configured
+    provider (cloud allowed) when it is False. The posture decision lives in the
+    resolver, not here.
 
-    Fail closed on sovereignty, soft on availability: on ANY failure (Ollama
-    down, malformed response, parse error) return the ORIGINAL deterministic
-    draft with ``meta["refine"] = "unavailable"`` — never raise, never fall back
-    to a cloud model. On success stamp ``meta["refine"] = "applied"``.
+    Fail closed on sovereignty, soft on availability: on ANY failure (model
+    unreachable, malformed response, parse error) return the ORIGINAL
+    deterministic draft with ``meta["refine"] = "unavailable"`` — never raise.
+    Under the default posture this also means never reaching a cloud model;
+    under the opt-in posture the configured provider is already the chosen lane,
+    so an unreachable provider degrades to the floor rather than re-routing. On
+    success stamp ``meta["refine"] = "applied"``.
     """
     client = resolve_on_box_client(settings)
     payload = _draft_payload(draft)
@@ -243,7 +305,7 @@ async def refine_draft(draft: OntologyDraft, settings: Settings) -> OntologyDraf
 
     try:
         resp = await client.chat.completions.create(
-            model=settings.ollama_model,
+            model=resolve_discovery_model_name(settings),
             messages=[
                 {"role": "system", "content": _REFINE_SYSTEM},
                 {"role": "user", "content": user_content},
@@ -290,5 +352,6 @@ def _unavailable(draft: OntologyDraft) -> OntologyDraft:
 __all__ = [
     "resolve_on_box_descriptor",
     "resolve_on_box_client",
+    "resolve_discovery_model_name",
     "refine_draft",
 ]
