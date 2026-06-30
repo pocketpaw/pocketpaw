@@ -50,6 +50,19 @@ Changes:
     SVL-2, landed here so later slices don't touch config). SVL-1 only reads
     the enable flag to stamp an observe-only OutcomeVerdict on a completing
     task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
+  - 2026-06-22: Added ``discovery_sovereign_model`` (default True) — the model-lane
+    sovereignty posture for discovery's categorize (F2) / refine (F3) passes.
+    True (default, unchanged behavior): hard-pin the model to the on-box Ollama
+    so tenant data never leaves the box. False: use the workspace's configured
+    provider via ``resolve_llm_client`` — a CLOUD model is allowed (explicit
+    tenant opt-in). The kb ingest/build tripwire holds regardless. Env:
+    POCKETPAW_DISCOVERY_SOVEREIGN_MODEL.
+  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
+    when true, approved workspace-discovered Instinct rules are merged with
+    template rules at the live gate and govern actions. Off by default; the
+    discovered branch is dead code on the default path. A separate, narrower
+    flag than ``instinct_approval_level``. Env:
+    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
   - 2026-06-18: Added the four layered/learning Instinct gate defaults —
     ``instinct_approval_level`` (default "ASK", dormant),
     ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
@@ -1484,6 +1497,25 @@ class Settings(BaseSettings):
             "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
         ),
     )
+    # Sovereign Zero-Setup Discovery — F6 live enforcement (2026-06-21).
+    # When true, approved workspace-discovered Instinct rules
+    # (rules.service.get_active_rules) are merged with template rules at the
+    # live gate (instinct_dispatch.gate_action) and govern actions. OFF by
+    # default — the template-rule path is unchanged and the discovered branch
+    # is dead code on the default path (get_active_rules is never called).
+    # This is a SEPARATE, NARROWER flag than instinct_approval_level: enforcing
+    # WHICH discovered CEL conditions fire and activating WHETHER escalations can
+    # auto-resolve are independent risk axes and must toggle independently.
+    instinct_enforce_discovered_rules: bool = Field(
+        default=False,
+        description=(
+            "When true, approved workspace-discovered Instinct rules "
+            "(rules.service.get_active_rules) are merged with template rules at "
+            "the live gate. Off by default — the template-rule path is unchanged "
+            "and the whole discovered branch is dead code on the default path. "
+            "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
+        ),
+    )
 
     # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
     # The only payment gateway in v1; a provider abstraction
@@ -1695,6 +1727,39 @@ class Settings(BaseSettings):
             "the sweep never auto-deploys or auto-cancels. Tuned above Dodo's "
             "webhook retry window so a transient delay is not flagged. Set via "
             "POCKETPAW_SITE_PENDING_ALERT_HOURS."
+        ),
+    )
+
+    # Sovereign Zero-Setup Discovery — model-lane sovereignty posture (2026-06-22).
+    # Discovery's categorize (F2) and refine (F3) passes send the tenant's data
+    # SHAPE (type/property names, article summaries — never raw exhaust) to a
+    # model. WHICH model is a sovereignty choice, not a code constant:
+    #   * sovereign-local (default, True): the model is hard-pinned to the
+    #     tenant's on-box Ollama. ``api_key is None``; no cloud key ever rides
+    #     into the request path. Nothing leaves the box. This is the safe
+    #     default and matches the original shipped behavior.
+    #   * configured-provider (False): discovery uses the workspace's CONFIGURED
+    #     provider via ``resolve_llm_client(settings)`` — anthropic / openai /
+    #     openai_compatible / gemini / litellm, a CLOUD model is allowed. This is
+    #     the tenant's EXPLICIT opt-in to send discovery exhaust to their own
+    #     configured model. Most businesses are fine here (faster, better
+    #     categories); regulated / sovereign tenants keep the default.
+    # Independent of the kb-ingest tripwire: ``kb ingest`` / ``kb build`` (which
+    # POST raw tenant text to Anthropic's KB API) are NEVER called regardless of
+    # this setting — that path is never correct and stays hard-blocked.
+    discovery_sovereign_model: bool = Field(
+        default=True,
+        description=(
+            "Sovereignty posture for discovery's categorize/refine model call. "
+            "True (default): hard-pin the model to the tenant's on-box Ollama — "
+            "data never leaves the box, no cloud key in the request path "
+            "(sovereign-local, the safe default for regulated tenants). False: "
+            "use the workspace's configured provider via resolve_llm_client — a "
+            "CLOUD model is allowed; this is the tenant's explicit opt-in to send "
+            "discovery's inferred data shape to their configured model (faster, "
+            "richer categories — fine for most businesses). The kb ingest/build "
+            "tripwire holds regardless of this setting. Set via "
+            "POCKETPAW_DISCOVERY_SOVEREIGN_MODEL."
         ),
     )
 

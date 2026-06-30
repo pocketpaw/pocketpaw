@@ -178,9 +178,7 @@ class MongoSessionStore:
         A store bound to a different workspace returns ``None`` — the
         ``workspace`` filter excludes the other tenant's row.
         """
-        doc = await self._find_row(
-            key["project_key"], key["session_id"], self._subpath_of(key)
-        )
+        doc = await self._find_row(key["project_key"], key["session_id"], self._subpath_of(key))
         if doc is None:
             return None
         return list(doc.entries)  # type: ignore[return-value]
