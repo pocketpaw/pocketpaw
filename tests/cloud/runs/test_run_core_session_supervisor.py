@@ -34,6 +34,23 @@
 #     warm_client kwarg; the SessionHandle still carries the cli_session_id
 #     (cold-resume) and on_client_built is present to rebind a fresh slot.
 #   * Flag OFF: NEITHER warm_client NOR on_client_built is added (legacy identical).
+#
+# WARM no-op regression (live smoke 2026-06-30) added 2026-06-30:
+#   The WARM tier was a NO-OP live — every supervised turn rebuilt a fresh
+#   ``claude`` client and turn 1's warm slot was torn down before turn 2. Root
+#   cause: ``_drive_agent_loop`` flagged the run a CRASH (``mark_crashed`` →
+#   ``_drop_slot`` + teardown) on ANY backend ``error`` event, including a benign
+#   trailing one (the real ``claude_sdk`` yields ``error`` THEN ``done`` when a
+#   ResultMessage carries ``is_error`` on a turn that still produced a response —
+#   the leased client stays healthy). These two-turn tests drive the REAL
+#   ``_drive_agent_loop`` against the REAL ``SessionSupervisor`` with a realistic
+#   leased-backend fake pool (it BINDS via ``on_client_built`` like the backend
+#   does after a fresh ``connect()``) and assert: a clean run keeps the slot warm
+#   (baseline — passed pre-fix, isolating the trigger to the error event); a
+#   benign trailing ``error`` + ``done`` MUST keep the slot warm (the repro —
+#   FAILED pre-fix); and a genuine crash (``error`` with NO successful
+#   completion) MUST still drop the slot → COLD cold-resume next turn (no
+#   regression of the v1 crash semantics).
 
 from __future__ import annotations
 
@@ -455,3 +472,219 @@ async def test_wh3_after_reap_cold_resume_no_warm_client(monkeypatch):
 
     # The binding callback is present so the freshly-built client rebinds a slot.
     assert callable(pool.run_kwargs.get("on_client_built"))
+
+
+# --------------------------------------------------------------------------- #
+# WARM no-op regression — two full turns through the REAL supervisor.          #
+# A leased-backend fake pool that BINDS the slot (turn 1) and REUSES it        #
+# (turn 2) exactly as the claude_sdk leased path does.                         #
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingTeardown:
+    """A leased-client teardown that records whether it fired.
+
+    ``True`` means the supervisor tore the warm ``claude`` subprocess down
+    (``mark_crashed`` → ``_drop_slot`` → ``_run_teardown``). On a healthy run the
+    slot must SURVIVE, so this must stay ``False``.
+    """
+
+    def __init__(self) -> None:
+        self.torn_down = False
+
+    def __call__(self) -> None:
+        self.torn_down = True
+
+
+class _StatefulRuntimeService:
+    """SS-3 stand-in that PERSISTS the captured native id across turns.
+
+    Unlike ``_FakeRuntimeService`` (fixed ``prior``), this returns on turn 2
+    whatever turn 1's ``("session_id", ...)`` event wrote — modelling the real
+    durable mapping so the two-turn resume/warm decision is exercised end-to-end.
+    """
+
+    def __init__(self) -> None:
+        self._id: str | None = None
+        self.get_calls = 0
+        self.set_calls = 0
+
+    async def get_cli_session_id(self, ws, session, agent):
+        self.get_calls += 1
+        return self._id
+
+    async def set_cli_session_id(self, ws, session, agent, cli_session_id, project_key=None):
+        self.set_calls += 1
+        self._id = cli_session_id
+
+
+class _LeasedBackendPool:
+    """Realistic fake AgentPool mirroring the claude_sdk leased path.
+
+    * Supervised FRESH-BUILD turn (``on_client_built`` set, no ``warm_client``):
+      build a fake client and BIND it via ``on_client_built`` (as the backend
+      does right after its fresh ``connect()``), stream a normal response + the
+      turn-1 ``session_id`` capture, then emit ``tail_events`` at end-of-stream
+      to mirror whatever the real backend trails the leased-fresh stream with
+      (the live trigger under test), then ``done`` — unless ``omit_done`` models
+      a genuine crash (an error with NO successful completion).
+    * WARM-REUSE turn (``warm_client`` leased): drive the leased client directly
+      — NO new build, NO bind — and stream a short response.
+    """
+
+    def __init__(self, *, tail_events=None, omit_done=False) -> None:
+        self.tail_events = list(tail_events or [])
+        self.omit_done = omit_done
+        self.turns: list[dict[str, Any]] = []
+        self.builds = 0
+        self.reuses = 0
+        self.teardowns: list[_RecordingTeardown] = []
+
+    async def get(self, _agent_id):
+        return SimpleNamespace(config={"backend": "claude_agent_sdk"}, agent_name="A")
+
+    def run(self, agent_id, content, session_key, **kwargs):
+        self.turns.append(kwargs)
+        warm_client = kwargs.get("warm_client")
+        on_built = kwargs.get("on_client_built")
+
+        async def _gen():
+            if warm_client is not None:
+                # Warm reuse: the live subprocess serves this turn directly.
+                self.reuses += 1
+                yield SimpleNamespace(type="message", content="reused-warm", metadata={})
+                yield SimpleNamespace(type="done", content="")
+                return
+            # Supervised fresh build: mirror the backend binding the new client.
+            if on_built is not None:
+                client = SimpleNamespace(name=f"claude-client-{self.builds}")
+                teardown = _RecordingTeardown()
+                on_built(client, "k-options", teardown)
+                self.teardowns.append(teardown)
+            self.builds += 1
+            yield SimpleNamespace(type="message", content="hi there", metadata={})
+            yield SimpleNamespace(
+                type="session_id",
+                content="",
+                metadata={"session_id": "native-abc", "backend": "claude_agent_sdk"},
+            )
+            for ev in self.tail_events:
+                yield ev
+            if not self.omit_done:
+                yield SimpleNamespace(type="done", content="")
+
+        return _gen()
+
+
+async def _drive_turn(monkeypatch, *, pool, sup, rs) -> list[tuple[str, dict]]:
+    """Drive ONE supervised turn of the REAL ``_drive_agent_loop`` against the
+    given (shared-across-turns) ``pool`` / ``sup`` / ``rs``."""
+    monkeypatch.setenv("POCKETPAW_SESSION_SUPERVISOR", "true")
+    monkeypatch.setattr(run_core, "get_agent_pool", lambda: pool)
+
+    async def _fake_knowledge(*a, **k):
+        return ""
+
+    monkeypatch.setattr(run_core, "build_knowledge_context", _fake_knowledge)
+    monkeypatch.setattr(run_core, "build_behavior_instructions", lambda *a, **k: "")
+    monkeypatch.setattr(run_core, "attach_sse_event_sink", lambda *a, **k: None)
+    monkeypatch.setattr(run_core, "attach_agent_identity", lambda **k: None)
+    monkeypatch.setattr(run_core, "detach_sse_event_sink", lambda *a, **k: None)
+    monkeypatch.setattr(run_core, "detach_agent_identity", lambda *a, **k: None)
+    monkeypatch.setattr(run_core, "runtime_service", rs)
+    monkeypatch.setattr(run_core, "MongoSessionStore", _FakeStore)
+    monkeypatch.setattr(run_core, "get_session_supervisor", lambda: sup)
+
+    async def _never_cancelled():
+        return False
+
+    out: list[tuple[str, dict]] = []
+    gen = run_core._drive_agent_loop(
+        _scope_ctx(),
+        user_content="hi",
+        attachments_in=None,
+        mentions_in=None,
+        history=[],
+        is_cancelled=_never_cancelled,
+        emit_stream_start=False,
+    )
+    async for ev in gen:
+        out.append(ev)
+    return out
+
+
+async def test_warm_slot_survives_clean_run_two_turns(monkeypatch):
+    """Baseline: a CLEAN leased-fresh turn 1 keeps its warm slot, so turn 2 reuses
+    it. This PASSED before the fix — it isolates the no-op trigger to the backend
+    error event (a clean fake does not reproduce the bug)."""
+    sup = _RecordingSupervisor()
+    rs = _StatefulRuntimeService()
+    pool = _LeasedBackendPool(tail_events=[])  # clean stream: message, session_id, done
+
+    await _drive_turn(monkeypatch, pool=pool, sup=sup, rs=rs)  # turn 1 (fresh build + bind)
+    # Turn 1 captured + persisted the native id and bound a live warm slot.
+    assert rs._id == "native-abc"
+    assert pool.builds == 1 and pool.teardowns and pool.teardowns[0].torn_down is False
+
+    await _drive_turn(monkeypatch, pool=pool, sup=sup, rs=rs)  # turn 2
+
+    # Turn 2 reused the warm slot — warm_reuse True, the slot was leased, no rebuild.
+    assert sup.acq.warm_reuse is True
+    assert pool.turns[1].get("warm_client") is not None
+    assert pool.reuses == 1
+    assert pool.builds == 1  # no second build
+    assert pool.teardowns[0].torn_down is False  # turn-1 client never torn down
+
+
+async def test_warm_slot_survives_benign_trailing_error_two_turns(monkeypatch):
+    """THE REPRODUCTION: the real claude_sdk yields a benign ``error`` (ResultMessage
+    ``is_error`` on a turn that still produced a response) FOLLOWED by ``done``. The
+    leased ``claude`` client is healthy, so the warm slot must SURVIVE and turn 2
+    must reuse it. Pre-fix, ``_drive_agent_loop`` flagged the run a crash on the
+    error event and dropped the slot → turn 2 ``warm_reuse=False`` (the no-op)."""
+    sup = _RecordingSupervisor()
+    rs = _StatefulRuntimeService()
+    # Mirror the backend: message, session_id, error (benign), done.
+    pool = _LeasedBackendPool(
+        tail_events=[SimpleNamespace(type="error", content="benign result error", metadata={})]
+    )
+
+    out1 = await _drive_turn(monkeypatch, pool=pool, sup=sup, rs=rs)  # turn 1
+    # The error is still surfaced to the stream (diagnostic preserved)...
+    assert any(name == "error" for name, _ in out1)
+    # ...but the warm slot must NOT be torn down (the client is healthy).
+    assert pool.teardowns[0].torn_down is False, "benign trailing error dropped the warm slot"
+
+    await _drive_turn(monkeypatch, pool=pool, sup=sup, rs=rs)  # turn 2
+
+    # The headline assertion: turn 2 reuses the warm slot.
+    assert sup.acq.warm_reuse is True, "WARM no-op: turn 2 rebuilt instead of reusing"
+    assert pool.turns[1].get("warm_client") is not None
+    assert pool.reuses == 1
+    assert pool.builds == 1  # no second build
+
+
+async def test_genuine_crash_two_turns_demotes_to_cold(monkeypatch):
+    """No regression: a GENUINE crash (an ``error`` with NO successful completion —
+    no ``done``) MUST still drop the warm slot → COLD, and turn 2 cold-resumes from
+    the store (resume id threaded, no warm_client)."""
+    sup = _RecordingSupervisor()
+    rs = _StatefulRuntimeService()
+    pool = _LeasedBackendPool(
+        tail_events=[SimpleNamespace(type="error", content="backend blew up", metadata={})],
+        omit_done=True,  # crash: the stream ends without a successful completion
+    )
+
+    await _drive_turn(monkeypatch, pool=pool, sup=sup, rs=rs)  # turn 1 crashes
+    # A real crash tears the warm slot down (demote to COLD).
+    assert pool.teardowns[0].torn_down is True
+    assert "mark_crashed" in sup.calls
+
+    await _drive_turn(monkeypatch, pool=pool, sup=sup, rs=rs)  # turn 2
+
+    # No warm reuse — fresh launch that cold-resumes from the durable mapping.
+    assert sup.acq.warm_reuse is False
+    assert "warm_client" not in pool.turns[1]
+    handle = pool.turns[1].get("session_handle")
+    assert handle is not None and handle.cli_session_id == "native-abc"
+    assert pool.builds == 2  # turn 2 rebuilt (correct for a crashed/COLD runtime)
