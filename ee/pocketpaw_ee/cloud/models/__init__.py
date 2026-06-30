@@ -1,5 +1,16 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-06-30 (feat/session-supervisor SS-3) — added
+``AgentSessionRuntimeDoc`` (the durable, tenant-scoped
+``(workspace, session_id, agent_id) -> cli_session_id`` mapping) to the
+imports, ``__all__``, and ``get_all_documents()`` so the
+``agent_session_runtimes`` collection is wired into ``init_beanie``. Only
+``ee.cloud.agent_sessions.runtime_service`` imports the doc class directly.
+Updated: 2026-06-30 (feat/session-supervisor SS-2) — added ``SessionTranscriptDoc``
+(the durable, tenant-scoped transcript rows backing the Mongo ``SessionStore``)
+to the imports, ``__all__``, and ``get_all_documents()`` so the
+``session_transcripts`` collection is wired into ``init_beanie``. Only
+``ee.cloud.agent_sessions.store`` imports the doc class directly.
 Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2) — added the
 ``Lead`` and ``Site`` tenant-scoped Paw Sites documents (plus their
 ``LeadSource`` / ``SiteDomain`` subdocs) to the imports, ``__all__``, and the
@@ -62,6 +73,7 @@ Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
@@ -117,6 +129,7 @@ from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
@@ -258,6 +271,8 @@ __all__ = [
     "DeepWorkLog",
     "RequestLog",
     "Session",
+    "SessionTranscriptDoc",
+    "AgentSessionRuntimeDoc",
     "Site",
     "SiteDomain",
     "SiteRateCounter",
@@ -293,6 +308,13 @@ def get_all_documents():
         Pocket,
         PocketBackendCredential,
         Session,
+        # Agent-session transcript rows backing the Mongo SessionStore (SS-2).
+        # Only ``ee.cloud.agent_sessions.store`` imports this doc directly.
+        SessionTranscriptDoc,
+        # Durable (workspace, session_id, agent_id) -> cli_session_id mapping
+        # so any turn can resume the native session (SS-3). Only
+        # ``ee.cloud.agent_sessions.runtime_service`` imports this doc directly.
+        AgentSessionRuntimeDoc,
         Comment,
         Notification,
         FileObj,

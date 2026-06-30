@@ -22,6 +22,22 @@ per-entity skill subset the Claude SDK backend materializes into a per-run local
 plugin). The ``system_message_override`` field is applied UPSTREAM in
 ``AgentPool.run`` (it swaps the base system prompt before assembly), so it never
 reaches a backend as a kwarg — it rides the existing ``system_prompt`` channel.
+
+Updated: 2026-06-30 (feat/session-supervisor SS-2) — the ``SessionHandle.session_store``
+field is now real: a tenancy-keyed custom SDK ``SessionStore``. The Claude SDK
+backend forwards it OPAQUELY to ``ClaudeAgentOptions.session_store`` so a resume
+turn reconstructs the conversation from OUR durable store (not local disk),
+namespaced by ``(workspace_id, project_key, session_id)`` so one tenant can never
+read another's session. SS-1's ``cli_session_id`` resume wiring is unchanged.
+
+Updated: 2026-06-30 (feat/session-supervisor SS-1) — adds the ``SessionHandle``
+dataclass: native-resume identity for a single agent session. It rides the SAME
+withhold-when-empty contract as the kwargs above — ``AgentPool.run`` forwards a
+``session_handle`` to ``backend.run`` ONLY when it is non-None, so the backends
+that keep the narrower signature are unaffected, and only the Claude SDK backend
+acts on it today (passing its ``cli_session_id`` as ``ClaudeAgentOptions.resume``
+so a fresh-process turn resumes the on-disk conversation natively instead of
+replaying Mongo history into the prompt). ``None`` is the unchanged legacy path.
 """
 
 from __future__ import annotations
@@ -68,6 +84,39 @@ class BackendInfo:
     supported_providers: list[str] = field(default_factory=list)
     install_hint: dict[str, str] = field(default_factory=dict)
     beta: bool = False
+
+
+@dataclass
+class SessionHandle:
+    """SS-1 — native-resume identity for a single agent session.
+
+    Carries the bookkeeping that lets ONE agent hold a conversation across
+    turns via the Claude Agent SDK's NATIVE ``resume`` instead of replaying
+    Mongo history into the prompt:
+
+    * ``cli_session_id`` — the SDK session id captured on turn 1 (extracted
+      from the init/system message the SDK emits at the start of a run). When
+      set, the Claude SDK backend passes it as ``ClaudeAgentOptions.resume`` so
+      a fresh-process turn resumes the on-disk conversation natively. ``None``
+      (turn 1, or any non-supervised run) is the LEGACY path — behavior is
+      unchanged from today.
+    * ``session_store`` — a custom SDK ``SessionStore`` (SS-2). The Claude SDK
+      backend forwards it OPAQUELY to ``ClaudeAgentOptions.session_store`` when
+      non-None, so a resume turn materializes the conversation from OUR store
+      (tenancy-keyed by ``(workspace_id, project_key, session_id)`` — see
+      ``pocketpaw.agents.session_store.InMemorySessionStore`` and the ee
+      Mongo-backed ``MongoSessionStore``) instead of local disk. It rides
+      through opaquely so OSS never imports the concrete (possibly ee) store
+      class. ``None`` is the unchanged legacy path.
+
+    Like ``deny_mcp_tool_ids`` / ``allow_sdk_tools`` / ``skill_names``, the
+    handle rides the withhold-when-empty contract: ``AgentPool.run`` forwards it
+    to ``backend.run`` ONLY when it is non-None, so backends that keep the
+    narrower signature are unaffected. Only the Claude SDK backend acts on it.
+    """
+
+    cli_session_id: str | None = None
+    session_store: Any | None = None
 
 
 @runtime_checkable

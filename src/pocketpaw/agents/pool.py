@@ -77,7 +77,7 @@ from typing import TYPE_CHECKING, Any
 from pocketpaw.agents.errors import AgentBackendUnavailable, AgentNotFound
 
 if TYPE_CHECKING:
-    from pocketpaw.agents.backend import AgentBackend
+    from pocketpaw.agents.backend import AgentBackend, SessionHandle
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
@@ -403,6 +403,7 @@ class AgentPool:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
+        session_handle: SessionHandle | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -518,6 +519,15 @@ class AgentPool:
             # non-empty. Empty = legacy all-skills advertise behavior.
             if skill_names:
                 run_kwargs["skill_names"] = skill_names
+            # Native-resume handle (feat/session-supervisor SS-1). Same
+            # withhold-when-empty rule as the kwargs above: only the Claude SDK
+            # backend accepts ``session_handle`` (it passes a non-None
+            # ``cli_session_id`` as ``ClaudeAgentOptions.resume`` and routes the
+            # turn down the fresh-launch path); the other backends keep the
+            # narrower signature, so the handle is forwarded ONLY when non-None.
+            # None = legacy warm-client path, unchanged for every existing run.
+            if session_handle is not None:
+                run_kwargs["session_handle"] = session_handle
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
