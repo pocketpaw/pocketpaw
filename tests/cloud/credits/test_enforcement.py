@@ -20,6 +20,12 @@
 # ``check_quota`` chat fast-reject cases (5-7). They fund the wallet so the
 # ``check_balance`` guard is a no-op, then stub ``credits_service.check_quota``
 # to isolate the quota wiring (the chunk-2 quota math is owned by test_quota.py).
+# Changed 2026-06-30 (feat/billing-quota-enforcement, chunk 4): added case 8 —
+# with the flag OFF, the WHOLE pre-flight is skipped: BOTH ``check_balance`` and
+# ``check_quota`` (which live side-by-side in this one chat chokepoint) are never
+# called, even at balance 0. Cases 3 and 7 each assert ONE half; this locks that
+# the single ``if billing_enforced:`` guard gates the entire pre-flight, not just
+# the quota leg.
 
 from __future__ import annotations
 
@@ -401,5 +407,62 @@ async def test_not_enforced_never_calls_check_quota(
 
     assert resp.status_code == 200
     assert quota_calls == []  # the flag-off path never gates
+    assert len(submitted) == 1
+    assert await ChatRunDoc.find_all().count() == 1
+
+
+# ---------------------------------------------------------------------------
+# 8 — NOT enforced -> the WHOLE pre-flight is a no-op: NEITHER check_balance NOR
+#     check_quota is called, even at balance 0.
+#
+# The chat router is the one chokepoint where both credit gates sit side-by-side
+# under a single ``if billing_enforced:``. Case 3 proves balance isn't gated and
+# case 7 proves quota isn't gated; this asserts the guard skips the ENTIRE
+# pre-flight at once (both calls), so a future edit that moves either gate outside
+# the flag would fail here.
+# ---------------------------------------------------------------------------
+
+
+async def test_not_enforced_skips_entire_preflight(
+    cloud_app_client: AsyncClient,
+    mongo_db,  # noqa: ARG001 — forces Beanie init so create_run can persist
+    monkeypatch,
+):
+    from pocketpaw_ee.cloud.chat import agent_router as mod
+    from pocketpaw_ee.cloud.credits import service as credits_service
+    from pocketpaw_ee.cloud.models.chat_run import ChatRunDoc
+
+    calls: list[str] = []
+
+    async def _balance_should_not_run(workspace_id):
+        calls.append(f"balance:{workspace_id}")
+        raise AssertionError("check_balance must NOT be called when the flag is OFF")
+
+    async def _quota_should_not_run(workspace_id):
+        calls.append(f"quota:{workspace_id}")
+        raise AssertionError("check_quota must NOT be called when the flag is OFF")
+
+    monkeypatch.setattr(credits_service, "check_balance", _balance_should_not_run)
+    monkeypatch.setattr(credits_service, "check_quota", _quota_should_not_run)
+
+    # Flag OFF, wallet empty (balance 0) — neither gate may fire.
+    _enforce(monkeypatch, mod, on=False)
+    submitted, _FakeExecutor = _patch_run_internals(mod)
+    monkeypatch.setattr(mod, "get_executor", lambda: _FakeExecutor())
+    monkeypatch.setattr(mod, "get_stream_transport", lambda: _StubTransport())
+
+    with (
+        patch.object(mod, "resolve_scope_context", _fake_resolve),
+        patch.object(mod, "load_history_for_scope", _fake_load_history),
+        patch.object(mod, "_persist_user_message", _fake_persist_user_message),
+        patch.object(mod, "_ensure_scope_session", _fake_ensure_session),
+    ):
+        resp = await cloud_app_client.post(
+            "/cloud/chat/session/s1/agent",
+            json={"content": "hello", "client_message_id": "cq4"},
+        )
+
+    assert resp.status_code == 200
+    assert calls == []  # the entire pre-flight (balance AND quota) was skipped
     assert len(submitted) == 1
     assert await ChatRunDoc.find_all().count() == 1

@@ -21,6 +21,14 @@ Changes:
     deep_work_verify_* pair at the ee/cloud planner terminal
     (``_execute_ready_plan_tasks`` → ``_run_one``). Env:
     POCKETPAW_CLOUD_PLAN_VERIFY_* .
+  - 2026-06-30 (feat/billing-quota-enforcement, chunk 4): Expanded the
+    ``billing_enforced`` field docstring — when the flag is on the run-start 402
+    hard-block now covers TWO conditions (was: balance <= 0 only): balance <= 0
+    (credits.insufficient) AND month-to-date spend >= the per-plan monthly credit
+    ceiling (credits.quota_exceeded), enforced at run start across both the chat
+    HTTP path and the worker/executor. No logic change — the gate was wired in
+    chunk 3; this only documents it. Kept the "default False -> OSS/self-host
+    unaffected" note.
   - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
     ``instinct_template_default_deny`` (default False, env
     POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
@@ -1799,12 +1807,18 @@ class Settings(BaseSettings):
     billing_enforced: bool = Field(
         default=False,
         description=(
-            "Run-start hard-block (BC-4). When True, STARTING a new chat run on a "
-            "workspace whose credit balance is <= 0 is rejected with HTTP 402 "
-            "(credits.insufficient) BEFORE any run row is written; in-flight runs "
-            "are never killed. Default False so OSS / self-host deployments (which "
-            "run no credit ledger) are unaffected; the cloud turns it on via "
-            "POCKETPAW_BILLING_ENFORCED."
+            "Run-start hard-block (BC-4). When True, STARTING a new chat run is "
+            "rejected with HTTP 402 BEFORE any run row is written, on two "
+            "conditions, both gated by this flag and both enforced at run start "
+            "across the synchronous chat HTTP path (chat/agent_router) AND the "
+            "worker/executor path (chat/runs/run_core.execute_run): (1) the "
+            "workspace credit balance is <= 0 -> 402 credits.insufficient; (2) the "
+            "workspace has hit its monthly credit CEILING (per-plan cap from the "
+            "catalog plus any top-ups bought this period; month-to-date spend >= "
+            "that ceiling) -> 402 credits.quota_exceeded. In-flight runs are never "
+            "killed. Default False so OSS / self-host deployments (which run no "
+            "credit ledger) are unaffected; the cloud / subscription (PEE) "
+            "deployments turn it on via POCKETPAW_BILLING_ENFORCED."
         ),
     )
 
