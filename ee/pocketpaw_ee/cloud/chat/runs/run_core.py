@@ -1,6 +1,28 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-30 (feat/session-supervisor SS-5) — ``_drive_agent_loop`` now drives
+  every supervised agent turn through the ``SessionSupervisor`` + the durable
+  ``(workspace, session, agent) -> cli_session_id`` mapping (SS-3
+  ``runtime_service``) + the per-tenant ``MongoSessionStore`` (SS-2), gated
+  behind ``POCKETPAW_SESSION_SUPERVISOR`` (default OFF). When ON: it resolves the
+  stable session identity (``workspace_id`` / ``scope_id`` as the per-conversation
+  key / ``target_agent_id``), recovers any prior native ``cli_session_id`` from
+  the durable mapping, calls ``supervisor.acquire(...)``, builds a
+  ``SessionHandle(cli_session_id=acq.cli_session_id, session_store=MongoSessionStore(ws))``
+  and threads it as ``session_handle=`` into ``pool.run`` so the agent RESUMES
+  its native CLI session (durable across restart, tenant-isolated) instead of
+  replaying Mongo history. The run is bracketed with
+  ``mark_run_start`` / ``mark_run_end`` (the latter in ``finally``); the turn-1
+  ``("session_id", {...})`` event the claude_sdk backend emits is consumed
+  internally (NOT yielded to the SSE transport) and persisted via
+  ``runtime_service.set_cli_session_id`` + ``supervisor.record_cli_session_id``;
+  a crash (pool.run raised, or a backend ``error`` event) flips the runtime to
+  COLD via ``mark_crashed``. v1 does NOT bind a live warm slot (WARM hot-process
+  reuse is a documented fast-follow) — every supervised turn resumes from the
+  store. When OFF, ``sup_acq`` stays ``None``, no supervisor/store/mapping call
+  fires, and ``pool.run`` is invoked WITHOUT a ``session_handle`` — byte-for-byte
+  the legacy path.
 - 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
   lifecycle (the prewarm ``create_task`` + the main agent loop) in
   ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
@@ -130,10 +152,18 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
+from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
+    SessionHandle,
+)
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
+from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
+    get_session_supervisor,
+)
 from pocketpaw_ee.cloud._core.realtime import xproc
+from pocketpaw_ee.cloud.agent_sessions import runtime_service
+from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -219,6 +249,24 @@ def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
 
 def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
+
+
+# Default-OFF flag (feat/session-supervisor SS-5). When truthy, the live executor
+# drives every supervised agent turn through the SessionSupervisor + the durable
+# native-id mapping (SS-3) + the per-tenant Mongo transcript store (SS-2) so the
+# agent RESUMES its native CLI session instead of replaying Mongo history into the
+# prompt. OFF (the default) leaves ``pool.run`` byte-for-byte the legacy path.
+_SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _session_supervisor_enabled() -> bool:
+    """Read the ``POCKETPAW_SESSION_SUPERVISOR`` flag (env, default OFF).
+
+    Mirrors the env-flag pattern the other ee runtime flags use (e.g. the
+    resumable-run executor / transport flags read ``POCKETPAW_*`` straight off
+    ``os.environ``). Truthy = any of ``1/true/yes/on`` (case-insensitive).
+    """
+    return os.environ.get("POCKETPAW_SESSION_SUPERVISOR", "").strip().lower() in _SUPERVISOR_TRUTHY
 
 
 async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
@@ -877,6 +925,24 @@ async def _drive_agent_loop(
     handled_pocket_ids: set[str] = set()
     next_event_task: asyncio.Task[Any] | None = None
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
+    # Supervised native-resume bookkeeping (feat/session-supervisor SS-5).
+    # Pre-init OUTSIDE the ``try`` so the ``finally`` / ``except`` can always
+    # reference them even if setup raised mid-flight. ``sup_acq`` stays ``None``
+    # on the legacy (flag-OFF) path — every supervisor/store call below is then
+    # skipped, so the run is byte-for-byte unchanged.
+    #
+    # Session identity for the SS-3 durable mapping: ``ctx.scope_id`` is the
+    # stable PER-CONVERSATION key (``session:<id>`` / ``group:<id>`` / ``dm:<id>``)
+    # — present on every turn and stable across process restarts. We deliberately
+    # do NOT use ``ctx.session_id`` (the Mongo session-doc id), which
+    # ``resolve_scope_context`` leaves ``None`` on the worker path; ``scope_id`` is
+    # the key SS-3's ``(workspace, session, agent) -> cli_session_id`` map is keyed
+    # on, so resume resolves the same row turn after turn.
+    sup_acq: Any = None
+    sup_run_failed = False
+    sup_workspace_id = ctx.workspace_id
+    sup_session_id = ctx.scope_id
+    sup_agent_id = ctx.target_agent_id
     try:
         session_key = session_key_for(ctx)
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
@@ -933,6 +999,52 @@ async def _drive_agent_loop(
         # narrower signature safe.
         if surface_skills:
             run_kwargs["skill_names"] = surface_skills
+        # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
+        # Flag-gated (default OFF). When ON, route this turn through the
+        # SessionSupervisor: recover any prior native ``cli_session_id`` from the
+        # durable SS-3 mapping, ``acquire`` the runtime (turn 1 owns capture; a
+        # later turn carries the resume id), and thread a ``SessionHandle`` that
+        # pairs that id with this tenant's ``MongoSessionStore`` so the agent
+        # resumes natively (durable, tenant-isolated) instead of replaying
+        # history. ``project_key`` is left ``None`` in v1: the durable mapping and
+        # the supervisor accept ``None`` (informational only), native resume needs
+        # only the ``cli_session_id``, and the SDK derives the store's own
+        # ``(workspace, project_key, session_id)`` key from its ``SessionKey`` at
+        # append/load time. Any failure degrades to the legacy path for THIS turn
+        # (no handle threaded) — a supervisor hiccup never breaks a run.
+        if (
+            _session_supervisor_enabled()
+            and sup_workspace_id
+            and sup_session_id
+            and sup_agent_id
+        ):
+            try:
+                prior_cli = await runtime_service.get_cli_session_id(
+                    sup_workspace_id, sup_session_id, sup_agent_id
+                )
+                supervisor = get_session_supervisor()
+                sup_acq = supervisor.acquire(
+                    sup_workspace_id,
+                    sup_session_id,
+                    sup_agent_id,
+                    cli_session_id=prior_cli,
+                    project_key=None,
+                )
+                run_kwargs["session_handle"] = SessionHandle(
+                    cli_session_id=sup_acq.cli_session_id,
+                    session_store=MongoSessionStore(sup_workspace_id),
+                )
+                supervisor.mark_run_start(sup_acq.runtime)
+            except Exception:
+                logger.warning(
+                    "session-supervisor acquire failed for ws=%s session=%s — "
+                    "falling back to the legacy (no native resume) path this turn",
+                    sup_workspace_id,
+                    sup_session_id,
+                    exc_info=True,
+                )
+                sup_acq = None
+                run_kwargs.pop("session_handle", None)
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -1031,6 +1143,40 @@ async def _drive_agent_loop(
                 meta = getattr(event, "metadata", None) or {}
                 usage_payload = dict(meta) if isinstance(meta, dict) else {}
                 yield ("token_usage", usage_payload)
+            elif etype == "session_id":
+                # Turn-1 native-id capture (feat/session-supervisor SS-5). The
+                # claude_sdk backend emits this ONCE per supervised session — and
+                # only when a ``session_handle`` was threaded (i.e. the flag is
+                # ON), so it never appears on the legacy path. Persist it durably
+                # (SS-3 mapping, for resume after a restart) AND onto the live
+                # supervisor runtime (so subsequent ``acquire`` calls this process
+                # resolve it). Consumed INTERNALLY — NOT yielded to the SSE
+                # transport: the client stream has no ``session_id`` frame, so
+                # keeping it internal leaves the wire identical to today. Best-
+                # effort: a persist failure must never break the in-flight turn.
+                if sup_acq is not None:
+                    sid_meta = getattr(event, "metadata", None) or {}
+                    native_id = sid_meta.get("session_id") if isinstance(sid_meta, dict) else None
+                    if native_id:
+                        try:
+                            await runtime_service.set_cli_session_id(
+                                sup_workspace_id,
+                                sup_session_id,
+                                sup_agent_id,
+                                native_id,
+                                project_key=None,
+                            )
+                            get_session_supervisor().record_cli_session_id(
+                                sup_acq.runtime, native_id, project_key=None
+                            )
+                        except Exception:
+                            logger.warning(
+                                "session-supervisor turn-1 capture persist failed "
+                                "for ws=%s session=%s",
+                                sup_workspace_id,
+                                sup_session_id,
+                                exc_info=True,
+                            )
             elif etype == "error":
                 # Surface backend-yielded errors instead of silently dropping
                 # them — a misconfigured backend (codex_cli without
@@ -1044,9 +1190,23 @@ async def _drive_agent_loop(
                     message[:200],
                 )
                 yield ("error", {"code": "agent.backend_error", "message": message})
+                # Supervised: a backend-yielded error is a run failure — flag it
+                # so ``finally`` demotes the runtime to COLD (keeping its
+                # cli_session_id so the next turn still resumes from the store).
+                sup_run_failed = True
                 break
         for ev in _drain_side_channel():
             yield ev
+    except Exception:
+        # A crash mid-stream (pool.run raised, a transport/store error, etc.) is a
+        # supervised-session failure: flag it so ``finally`` demotes the runtime to
+        # COLD via ``mark_crashed``. Re-raise so ``execute_run``'s existing error
+        # handling is unchanged. ``CancelledError`` / ``GeneratorExit`` are
+        # BaseExceptions and intentionally NOT caught here — a host cancel or an
+        # early consumer-close is a clean stop, not a crash (``mark_run_end`` still
+        # runs in ``finally``).
+        sup_run_failed = True
+        raise
     finally:
         pending = [t for t in (next_event_task, next_queue_task) if t is not None and not t.done()]
         for t in pending:
@@ -1061,6 +1221,20 @@ async def _drive_agent_loop(
             detach_agent_identity(identity_tokens)
         except Exception:
             pass
+        # Release the supervisor busy-counter — and, on a failed run, demote the
+        # runtime to COLD (``mark_crashed`` keeps the cli_session_id so the next
+        # turn still resumes from the store). Best-effort: bookkeeping must never
+        # break teardown. No-op on the legacy path (``sup_acq is None``).
+        if sup_acq is not None:
+            try:
+                _sup = get_session_supervisor()
+                if sup_run_failed:
+                    _sup.mark_crashed(sup_acq.runtime)
+                _sup.mark_run_end(sup_acq.runtime)
+            except Exception:
+                logger.debug(
+                    "session-supervisor run-end bookkeeping failed", exc_info=True
+                )
 
 
 async def _iter_agent_events(
