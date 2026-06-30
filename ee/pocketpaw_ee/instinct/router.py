@@ -2689,7 +2689,7 @@ async def edit_proposal(
             action_title=before.title,
         )
         await store.record_correction(correction)
-        await _forward_to_soul(correction, after)
+        await _forward_to_soul(correction, after, workspace_id)
 
     note = correction.context_summary if correction is not None else None
     _emit_human_corrected(
