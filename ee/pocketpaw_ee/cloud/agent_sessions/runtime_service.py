@@ -25,10 +25,18 @@
 # client, so there is nothing to emit. (ee write-event convention.)
 #
 # Created 2026-06-30 (feat/session-supervisor SS-3): new entity service.
+#
+# Updated 2026-06-30 (fix/session-supervisor-saas-hardening SH-1b):
+# ``set_cli_session_id`` is now a single ATOMIC ``update_one(..., upsert=True)``
+# on the unique ``(workspace, session_id, agent_id)`` key instead of
+# find-then-insert-or-update. Two concurrent turn-1s for the same key no longer
+# race into a DuplicateKeyError — one inserts, the other updates in place.
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
+from typing import Any
 
 from pocketpaw_ee.cloud._core.errors import ValidationError
 from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
@@ -68,33 +76,50 @@ async def set_cli_session_id(
     cli_session_id: str,
     project_key: str | None = None,
 ) -> None:
-    """UPSERT the native ``cli_session_id`` for ``(ws, session, agent)``.
+    """UPSERT the native ``cli_session_id`` for ``(ws, session, agent)`` ATOMICALLY.
 
-    Inserts the row on turn 1 and updates it on a later resume/backfill — the
-    unique ``(workspace, session_id, agent_id)`` index guarantees a single row
-    per key, so this never produces a duplicate. ``project_key`` is recorded
-    when supplied (and left unchanged on update when omitted) so a cold resume
-    can rebuild the full ``SessionHandle``.
+    A single ``update_one(filter, update, upsert=True)`` on the unique
+    ``(workspace, session_id, agent_id)`` key. Mongo's upsert is atomic on that
+    key, so two concurrent turn-1s for the same session no longer race into a
+    DuplicateKeyError — one wins the insert, the other falls through to an update
+    in place. (The old find-then-insert path let both find nothing and both try to
+    insert, so the loser hit the unique index unhandled.)
+
+    ``cli_session_id`` is ``$set`` on every call. ``project_key`` is recorded when
+    supplied (``$set``) and left unchanged on update when omitted; on a fresh
+    insert with no ``project_key`` it is seeded to ``None`` via ``$setOnInsert`` so
+    the row shape is stable. ``updatedAt`` is refreshed on every call and
+    ``createdAt`` stamped only on insert (the raw update bypasses Beanie's
+    timestamp hooks).
     """
     workspace_id = _require("workspace_id", workspace_id)
     session_id = _require("session_id", session_id)
     agent_id = _require("agent_id", agent_id)
     cli_session_id = _require("cli_session_id", cli_session_id)
 
-    doc = await _find_row(workspace_id, session_id, agent_id)
-    if doc is None:
-        doc = AgentSessionRuntimeDoc(
-            workspace=workspace_id,
-            session_id=session_id,
-            agent_id=agent_id,
-            cli_session_id=cli_session_id,
-            project_key=project_key,
-        )
+    now = datetime.now(UTC)
+    update: dict[str, Any] = {
+        "$set": {"cli_session_id": cli_session_id, "updatedAt": now},
+        "$setOnInsert": {"createdAt": now},
+    }
+    if project_key is not None:
+        # Provided → set on both insert and update (only in ``$set`` so it never
+        # collides with ``$setOnInsert``).
+        update["$set"]["project_key"] = project_key
     else:
-        doc.cli_session_id = cli_session_id
-        if project_key is not None:
-            doc.project_key = project_key
-    await doc.save()
+        # Omitted → seed ``None`` on a fresh insert only; leave a prior value
+        # untouched on update.
+        update["$setOnInsert"]["project_key"] = None
+
+    await AgentSessionRuntimeDoc.get_pymongo_collection().update_one(
+        {
+            "workspace": workspace_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+        },
+        update,
+        upsert=True,
+    )
 
 
 async def get_cli_session_id(
