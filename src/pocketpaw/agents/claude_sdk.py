@@ -1,5 +1,21 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-30 (feat/session-supervisor SS-1) — ``run`` accepts an optional
+  ``session_handle: SessionHandle | None``. When it carries a non-None
+  ``cli_session_id``, ``_build_options`` sets ``ClaudeAgentOptions.resume`` so the
+  CLI subprocess RESUMES that on-disk session natively (no Mongo-history replay),
+  and ``run`` routes the turn down the FRESH stateless ``query()`` launch path
+  rather than the warm persistent client (the warm client applies its options
+  only at first ``connect()`` and its cache key omits ``resume``, so a reused warm
+  client would silently ignore a fresh ``resume`` — the documented hazard). The
+  freshly-rebuilt per-turn ``system_prompt`` still rides ``--system-prompt`` on
+  every turn, so a resumed session honors a new system prompt. Turn-1 capture: the
+  SDK's init/system message carries a ``session_id`` in its ``data``; when a
+  ``session_handle`` is present, ``run`` extracts it and surfaces it once as a
+  ``session_id`` ``AgentEvent`` (mirroring the ``token_usage`` event) so the
+  controller can persist it for a later resume (SS-3). ``cli_session_id is None``
+  / no handle = the unchanged legacy warm-client path. ``session_handle`` is
+  forwarded by ``AgentPool.run`` only when non-None (withhold-when-empty idiom).
 Updated: 2026-06-26 (ART-2) — the agent's working directory is now resolved
   PER-RUN via ``_resolve_cwd`` instead of being frozen to
   ``settings.file_jail_path`` at ``__init__``. OSS / dedicated behavior is
@@ -185,7 +201,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from pocketpaw.agents.backend import BackendInfo, BaseAgentBackend, Capability
+from pocketpaw.agents.backend import (
+    BackendInfo,
+    BaseAgentBackend,
+    Capability,
+    SessionHandle,
+)
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.config import Settings
 from pocketpaw.security.rails import is_substring_blocked
@@ -1217,6 +1238,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_mcp_tool_ids: frozenset[str] | None,
         skill_names: frozenset[str],
         stderr_sink: list[str],
+        session_handle: SessionHandle | None = None,
     ) -> _BuiltOptions:
         """Assemble the ``ClaudeAgentOptions`` a turn (or a prewarm) will run on.
 
@@ -1325,15 +1347,25 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception:
             pass  # Don't break agent if connector registry fails
 
+        # Native-resume session id (feat/session-supervisor SS-1). When set, the
+        # CLI subprocess will be launched with ``resume=<id>`` and reloads that
+        # session's transcript NATIVELY, so injecting Mongo ``history`` into the
+        # prompt below would DUPLICATE the conversation. The whole point of the
+        # slice is native continuity INSTEAD of history replay, so a resume turn
+        # skips the injection. ``None`` (legacy / no handle) keeps every existing
+        # cold-start run injecting history exactly as before.
+        resume_session_id = session_handle.cli_session_id if session_handle is not None else None
+
         # Inject prior turns into the system prompt at connect time. The
         # persistent ClaudeSDKClient accumulates new turns natively after
         # connect, but a fresh subprocess (after eviction, restart, or
         # session switch) has empty native history — without this, those
         # cold-start runs lose all conversation context. Reused clients
         # keep the prompt set at first connect and ignore later option
-        # changes, so there's no duplication on the warm path.
+        # changes, so there's no duplication on the warm path. Skipped on a
+        # native-resume turn (the resumed session already carries its history).
         final_prompt = identity
-        if history:
+        if history and not resume_session_id:
             lines = ["# Recent Conversation"]
             for msg in history:
                 role = msg.get("role", "user").capitalize()
@@ -1671,6 +1703,17 @@ class ClaudeSDKBackend(BaseAgentBackend):
 
         options_kwargs["stderr"] = _on_stderr
 
+        # Native-resume (feat/session-supervisor SS-1). When the caller threads a
+        # ``session_handle`` carrying a ``cli_session_id``, set the SDK's
+        # ``resume`` field so the freshly-launched CLI subprocess loads that
+        # session's transcript natively (the ``ClaudeAgentOptions.resume: str |
+        # None`` field). ``run`` routes a resume-bearing turn down the stateless
+        # ``query()`` path precisely so this fresh-launch option is honored (the
+        # warm client applies options only at first ``connect()``). Absent /
+        # ``None`` leaves ``resume`` unset — the unchanged legacy path.
+        if resume_session_id:
+            options_kwargs["resume"] = resume_session_id
+
         # Create options (after all kwargs are set, including model)
         options = self._ClaudeAgentOptions(**options_kwargs)
 
@@ -1796,10 +1839,26 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_sdk_tools: frozenset[str] = frozenset(),
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
+        session_handle: SessionHandle | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
         Yields AgentEvent objects as the agent responds.
+
+        ``session_handle`` (feat/session-supervisor SS-1) carries native-resume
+        identity. When it holds a non-None ``cli_session_id``, the SDK options
+        get ``resume=<cli_session_id>`` (so the CLI subprocess resumes that
+        on-disk session natively instead of replaying Mongo history) and THIS
+        run is routed down the FRESH stateless ``query()`` launch path — never
+        the warm persistent client, whose options freeze at first ``connect()``
+        and whose cache key omits ``resume`` (so a reused warm client would
+        silently ignore a fresh ``resume``). The per-turn ``system_prompt`` is
+        still passed on every turn, so a resumed session honors a rebuilt
+        prompt. When a handle is present, the SDK's turn-1 init/system message
+        ``session_id`` is extracted and surfaced once as a ``session_id``
+        AgentEvent (for the controller to persist — SS-3). ``cli_session_id is
+        None`` / no handle = the UNCHANGED legacy warm-client path. The
+        ``session_store`` field is opaque here (SS-2 owns it).
 
         ``deny_mcp_tool_ids`` is a per-surface MCP-tool deny set threaded down
         from the chat loop (resolved from the request's ``SurfaceProfile``).
@@ -1930,6 +1989,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 allow_sdk_tools=allow_sdk_tools,
                 allow_mcp_tool_ids=allow_mcp_tool_ids,
                 skill_names=skill_names,
+                session_handle=session_handle,
                 stderr_sink=_stderr_lines,
             )
             options = _built.options
@@ -1951,16 +2011,27 @@ class ClaudeSDKBackend(BaseAgentBackend):
                 session_key,
             )
             _persistent_client = None
+            # Native-resume runs (feat/session-supervisor SS-1) MUST take the
+            # fresh stateless ``query()`` launch path, never the warm persistent
+            # client: the warm client applies its options (incl. ``resume``) only
+            # at first ``connect()``, and ``_client_cache_key`` does NOT fold in
+            # ``resume`` — so a reused warm client would silently ignore the fresh
+            # ``resume`` and continue its OWN in-memory conversation instead of
+            # the requested on-disk session. The stateless ``query()`` spawns a
+            # fresh subprocess per call that honors ``options.resume`` directly.
+            _resume_active = (
+                session_handle is not None and session_handle.cli_session_id is not None
+            )
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in
             # ``plugin_digest`` (the skill-identity hash), so a warm client can
             # distinguish a skill run from a non-skill one — a same-skill turn
             # reuses the subprocess and a changed skill set rebuilds it. The
             # materialized plugin dir was cached + adopted above so the warm
-            # subprocess keeps a valid path across turns. The only fallback to
-            # the stateless path now is the original concurrency guard: a sibling
-            # run already holds the lease (_client_in_use).
-            if not self._client_in_use:
+            # subprocess keeps a valid path across turns. Fallbacks to the
+            # stateless path: the original concurrency guard (a sibling run holds
+            # the lease, ``_client_in_use``) OR a native-resume turn.
+            if not self._client_in_use and not _resume_active:
                 try:
                     self._client_in_use = True
                     acquired_lease = True
@@ -2019,6 +2090,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
             _announced_tools: set[str] = set()
             _event_count = 0
             _saw_result = False  # Track if ResultMessage was consumed
+            # feat/session-supervisor SS-1: emit the native session id at most
+            # once per run (from the SDK's turn-1 init/system message). Gated on
+            # an opted-in ``session_handle`` so the legacy stream is byte-identical.
+            _session_id_emitted = False
 
             # Stream responses — release the persistent client guard when done
             try:
@@ -2063,9 +2138,30 @@ class ClaudeSDKBackend(BaseAgentBackend):
                                 yield AgentEvent(type="thinking_done", content="")
                         continue
 
-                    # ========== SystemMessage - metadata, skip ==========
+                    # ========== SystemMessage - metadata ==========
                     if self._SystemMessage and isinstance(event, self._SystemMessage):
                         subtype = getattr(event, "subtype", "")
+                        # feat/session-supervisor SS-1: the SDK's init/system
+                        # message carries the native ``session_id`` in its
+                        # ``data`` dict. When the caller opted into a
+                        # ``session_handle``, capture it on turn 1 and surface it
+                        # ONCE as a ``session_id`` AgentEvent (mirroring the
+                        # ``token_usage`` metadata event) so the controller can
+                        # persist it for a later ``resume`` turn (SS-3). Gated on
+                        # the handle so the legacy stream stays byte-identical.
+                        if session_handle is not None and not _session_id_emitted:
+                            _data = getattr(event, "data", None)
+                            _sid = _data.get("session_id") if isinstance(_data, dict) else None
+                            if _sid:
+                                _session_id_emitted = True
+                                yield AgentEvent(
+                                    type="session_id",
+                                    content="",
+                                    metadata={
+                                        "session_id": _sid,
+                                        "backend": "claude_agent_sdk",
+                                    },
+                                )
                         logger.debug(f"SystemMessage: {subtype}")
                         continue
 
@@ -2294,6 +2390,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         system_prompt=system_prompt,
                         history=history,
                         session_key=session_key,
+                        # Preserve native-resume identity across the crash retry
+                        # (feat/session-supervisor SS-1) so a resumed turn does
+                        # not silently restart a fresh session after a Bun crash.
+                        session_handle=session_handle,
                     ):
                         yield retry_event
                 finally:
