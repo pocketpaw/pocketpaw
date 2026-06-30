@@ -1,9 +1,15 @@
-"""Tests for the LiveKit call service."""
+"""Tests for the LiveKit call service.
+
+Added TestSelectiveSubscribe: covers the call bot's audio-only selective
+subscribe (Bug A) — auto_subscribe=False on connect and the pure
+_should_subscribe() decision (mic audio in, video / screenshare out).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -455,3 +461,131 @@ class TestMeetingNotesPosting:
             mock_create.assert_called_once()
             assert "No speech detected" in mock_create.call_args[1]["content"]
             mock_emit.assert_called_once()
+
+
+class _FakeRoom:
+    """Minimal stand-in for ``livekit.rtc.Room``.
+
+    Records the event handlers the agent registers via ``@room.on(...)`` so a
+    test can fire them directly, and captures the ``RoomOptions`` passed to
+    ``connect`` so we can assert on ``auto_subscribe``.
+    """
+
+    def __init__(self) -> None:
+        self.handlers: dict = {}
+        self.remote_participants: dict = {}
+        self.connect = AsyncMock()
+        self.disconnect = AsyncMock()
+
+    def on(self, event: str):
+        def _register(fn):
+            self.handlers[event] = fn
+            return fn
+
+        return _register
+
+
+class TestSelectiveSubscribe:
+    """Bug A: the call bot must subscribe to mic audio only, never video."""
+
+    def test_should_subscribe_microphone_audio(self):
+        from livekit.rtc import TrackKind, TrackSource
+        from pocketpaw_ee.cloud.livekit.agent import _should_subscribe
+
+        pub = SimpleNamespace(kind=TrackKind.KIND_AUDIO, source=TrackSource.SOURCE_MICROPHONE)
+        assert _should_subscribe(pub) is True
+
+    def test_should_subscribe_untagged_audio(self):
+        # Some publishers leave the source UNKNOWN on a plain audio publish;
+        # treat that as a microphone so we don't drop real speech.
+        from livekit.rtc import TrackKind, TrackSource
+        from pocketpaw_ee.cloud.livekit.agent import _should_subscribe
+
+        pub = SimpleNamespace(kind=TrackKind.KIND_AUDIO, source=TrackSource.SOURCE_UNKNOWN)
+        assert _should_subscribe(pub) is True
+
+    def test_should_not_subscribe_camera_video(self):
+        from livekit.rtc import TrackKind, TrackSource
+        from pocketpaw_ee.cloud.livekit.agent import _should_subscribe
+
+        pub = SimpleNamespace(kind=TrackKind.KIND_VIDEO, source=TrackSource.SOURCE_CAMERA)
+        assert _should_subscribe(pub) is False
+
+    def test_should_not_subscribe_screenshare_video(self):
+        from livekit.rtc import TrackKind, TrackSource
+        from pocketpaw_ee.cloud.livekit.agent import _should_subscribe
+
+        pub = SimpleNamespace(kind=TrackKind.KIND_VIDEO, source=TrackSource.SOURCE_SCREENSHARE)
+        assert _should_subscribe(pub) is False
+
+    def test_should_not_subscribe_screenshare_audio(self):
+        # System audio shared from a screen share is not a participant mic.
+        from livekit.rtc import TrackKind, TrackSource
+        from pocketpaw_ee.cloud.livekit.agent import _should_subscribe
+
+        pub = SimpleNamespace(
+            kind=TrackKind.KIND_AUDIO, source=TrackSource.SOURCE_SCREENSHARE_AUDIO
+        )
+        assert _should_subscribe(pub) is False
+
+    @pytest.mark.asyncio
+    async def test_connect_uses_auto_subscribe_false(self):
+        """The bot must connect with auto_subscribe disabled.
+
+        Auto-subscribe drags in every participant's video, which the bot
+        never uses — the source of the O(N) per-participant load.
+        """
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+            livekit_url="wss://fake.livekit.cloud",
+        )
+        agent._running = False  # exit the keep-alive loop immediately
+
+        fake = _FakeRoom()
+        with patch("livekit.rtc.Room", return_value=fake):
+            await agent._connect_and_transcribe()
+
+        fake.connect.assert_awaited_once()
+        opts = fake.connect.await_args.args[2]
+        assert opts.auto_subscribe is False
+
+    @pytest.mark.asyncio
+    async def test_video_publication_not_subscribed_in_handler(self):
+        """track_published must subscribe mic audio but ignore video."""
+        from livekit.rtc import TrackKind, TrackSource
+        from pocketpaw_ee.cloud.livekit.agent import CallMeetingAgent
+
+        agent = CallMeetingAgent(
+            group_id="g",
+            room_name="group-call-g",
+            bot_token="tok",
+            livekit_url="wss://fake.livekit.cloud",
+        )
+        agent._running = False
+
+        fake = _FakeRoom()
+        with patch("livekit.rtc.Room", return_value=fake):
+            await agent._connect_and_transcribe()
+
+        handler = fake.handlers["track_published"]
+        participant = MagicMock()
+        participant.identity = "user_1"
+        participant.name = "User One"
+
+        video_pub = MagicMock()
+        video_pub.kind = TrackKind.KIND_VIDEO
+        video_pub.source = TrackSource.SOURCE_CAMERA
+        video_pub.subscribed = False
+        handler(video_pub, participant)
+        video_pub.set_subscribed.assert_not_called()
+
+        mic_pub = MagicMock()
+        mic_pub.kind = TrackKind.KIND_AUDIO
+        mic_pub.source = TrackSource.SOURCE_MICROPHONE
+        mic_pub.subscribed = False
+        handler(mic_pub, participant)
+        mic_pub.set_subscribed.assert_called_once_with(True)

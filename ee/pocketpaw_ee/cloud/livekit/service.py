@@ -628,6 +628,13 @@ async def create_room(
 
     # Start the meeting notes agent as a managed subprocess so it does not
     # block the server event loop with WebRTC / Deepgram STT processing.
+    #
+    # FOLLOW-UP (multi-worker caveat): _active_agents is a per-process dict, so
+    # this guard only dedupes within a single worker. If the API runs with more
+    # than one worker/replica, two workers can each spawn an agent for the same
+    # room (duplicate bots). Needs infra worker-count confirmation before
+    # fixing — e.g. a shared lock/registry or pinning call routing to one
+    # worker. Not addressed here.
     if group_id not in _active_agents:
         proc = await _spawn_agent_process(
             group_id=group_id,
