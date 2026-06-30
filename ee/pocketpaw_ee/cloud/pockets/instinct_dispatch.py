@@ -1,4 +1,14 @@
 # ee/pocketpaw_ee/cloud/pockets/instinct_dispatch.py
+# Updated: 2026-06-30 (integration/szd-finish, C1 — fail-open visibility) — each
+# discovered rule dropped at the gate (parse failure at step 3 OR eval failure
+# at step 4) now emits a best-effort AuditEvent via the new
+# `_audit_discovered_rule_dropped` helper (category="instinct_discovered_rule",
+# severity WARNING) carrying workspace_id, pocket_id, rule id/title, the drop
+# reason (parse vs eval), and the exception summary. Previously a user-approved
+# protective rule going inert left only a server-side `logger.warning` — a
+# fail-open in the user's mental model. The audit write is wrapped so an audit
+# failure can never break the gate (mirrors `_audit_triage_decision`).
+#
 # Updated: 2026-06-30 (integration/szd-finish, B1 — gate DoS fix) — the
 # discovered-rule CEL probe in `_load_discovered_instinct_rules` now catches ANY
 # exception, not just `CelEvaluationError`. `evaluate_cel` calls
@@ -249,6 +259,53 @@ def _audit_triage_decision(
         logger.warning("instinct triage-decision audit-log write failed", exc_info=True)
 
 
+def _audit_discovered_rule_dropped(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    rule_id: str,
+    rule_title: str | None,
+    reason: Literal["parse", "eval"],
+    error_summary: str,
+) -> None:
+    """Audit a discovered rule that was dropped at the gate (C1 — fail-open
+    visibility).
+
+    A protective rule a user approved ("refunds over $500 need approval") can
+    go silently INERT if it fails to parse (step 3) or errors on the CEL probe
+    (step 4). Today that emits only a server-side ``logger.warning`` — invisible
+    to the workspace, a fail-open in the user's mental model. Emit a best-effort
+    audit event so every drop leaves a workspace-visible trail: the rule id +
+    title, whether it was a parse or eval drop, and the exception summary.
+
+    Best-effort by contract: an audit failure must NEVER break the gate, so the
+    whole call is wrapped (mirrors ``_audit_triage_decision`` and
+    ``action_executor._audit_action_run``). Severity WARNING — a user-approved
+    protective rule going inert is something the workspace should be able to see.
+    """
+    try:
+        from pocketpaw.security.audit import AuditEvent, AuditSeverity, get_audit_logger
+
+        get_audit_logger().log(
+            AuditEvent.create(
+                severity=AuditSeverity.WARNING,
+                actor="system:instinct-gate",
+                action="instinct.discovered_rule.dropped",
+                target=rule_id,
+                status="dropped",
+                category="instinct_discovered_rule",
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                rule_id=rule_id,
+                rule_title=rule_title,
+                drop_reason=reason,
+                error=error_summary,
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the gate
+        logger.warning("discovered-rule drop audit-log write failed", exc_info=True)
+
+
 def _escalate_body(
     *,
     pocket_id: str,
@@ -380,7 +437,7 @@ async def _load_discovered_instinct_rules(
             rule = InstinctRule.model_validate(
                 {"when": row.get("when"), "action": row.get("action")}
             )
-        except Exception:  # noqa: BLE001 — a malformed discovered rule is dropped
+        except Exception as exc:  # noqa: BLE001 — a malformed discovered rule is dropped
             logger.warning(
                 "discovered-rule enforcement: dropping unparseable rule "
                 "workspace=%s rule=%s (when=%r action=%r)",
@@ -388,6 +445,14 @@ async def _load_discovered_instinct_rules(
                 rule_id,
                 row.get("when"),
                 row.get("action"),
+            )
+            _audit_discovered_rule_dropped(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                rule_id=rule_id,
+                rule_title=row.get("name"),
+                reason="parse",
+                error_summary=f"{type(exc).__name__}: {exc}",
             )
             continue
 
@@ -412,6 +477,14 @@ async def _load_discovered_instinct_rules(
                 rule_id,
                 rule.when,
                 exc,
+            )
+            _audit_discovered_rule_dropped(
+                workspace_id=workspace_id,
+                pocket_id=pocket_id,
+                rule_id=rule_id,
+                rule_title=row.get("name"),
+                reason="eval",
+                error_summary=f"{type(exc).__name__}: {exc}",
             )
             continue
 

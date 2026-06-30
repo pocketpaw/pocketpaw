@@ -371,3 +371,102 @@ async def test_discovered_rule_parse_failure_dropped_others_survive(monkeypatch,
     assert result.decision.verdict == "BLOCK"
     # The bad one was dropped with a warning.
     assert any("discovered" in r.message.lower() for r in caplog.records)
+
+
+# ===========================================================================
+# C1 — audit trail on every dropped discovered rule (fail-open visibility).
+# ===========================================================================
+
+
+@pytest.fixture
+def captured_audit(monkeypatch):
+    """Capture every ``AuditEvent`` the gate logs by swapping the audit-logger
+    factory the (lazily-imported) drop-audit helper calls."""
+    import pocketpaw.security.audit as audit_mod
+
+    events: list[Any] = []
+
+    class _FakeLogger:
+        def log(self, event: Any) -> None:
+            events.append(event)
+
+    monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: _FakeLogger())
+    return events
+
+
+async def test_dropped_eval_rule_emits_audit_event(monkeypatch, captured_audit) -> None:
+    """A discovered rule dropped on the CEL probe emits a best-effort audit
+    event tagged ``drop_reason="eval"`` carrying workspace + rule id + error."""
+    _enable_flag(monkeypatch)
+    # Non-JSON-native row value → raw ValueError on the probe → eval-drop path.
+    _stub_active_rules(
+        monkeypatch,
+        [_discovered(when="value > 100", action="block", rule_id="r-eval", name="big refund")],
+    )
+
+    template = _template(instinct_policy="auto")
+    result = await _gate(template, row_context={"value": {1, 2, 3}})
+
+    assert result.next_step == "proceed"
+    drops = [
+        e
+        for e in captured_audit
+        if e.context.get("category") == "instinct_discovered_rule"
+        and e.context.get("drop_reason") == "eval"
+    ]
+    assert len(drops) == 1
+    ev = drops[0]
+    assert ev.context["workspace_id"] == "w1"
+    assert ev.context["rule_id"] == "r-eval"
+    assert ev.context["rule_title"] == "big refund"
+    assert ev.status == "dropped"
+    assert "ValueError" in ev.context["error"]
+
+
+async def test_dropped_parse_rule_emits_audit_event(monkeypatch, captured_audit) -> None:
+    """A discovered rule dropped at model_validate (unparseable CEL) emits a
+    best-effort audit event tagged ``drop_reason="parse"``."""
+    _enable_flag(monkeypatch)
+    _stub_active_rules(
+        monkeypatch,
+        [_discovered(when="value >>> 100", action="block", rule_id="r-parse", name="malformed")],
+    )
+
+    template = _template(instinct_policy="auto")
+    result = await _gate(template, row_context={"value": 1})
+
+    assert result.next_step == "proceed"
+    drops = [
+        e
+        for e in captured_audit
+        if e.context.get("category") == "instinct_discovered_rule"
+        and e.context.get("drop_reason") == "parse"
+    ]
+    assert len(drops) == 1
+    ev = drops[0]
+    assert ev.context["rule_id"] == "r-parse"
+    assert ev.context["rule_title"] == "malformed"
+    assert ev.status == "dropped"
+
+
+async def test_audit_failure_never_breaks_the_gate(monkeypatch, caplog) -> None:
+    """If the audit-log write itself raises, the gate must still return normally —
+    the drop-audit is strictly best-effort."""
+    _enable_flag(monkeypatch)
+    _stub_active_rules(monkeypatch, [_discovered(when="value > 100", action="block")])
+
+    import pocketpaw.security.audit as audit_mod
+
+    class _BoomLogger:
+        def log(self, event: Any) -> None:
+            raise RuntimeError("audit sink is down")
+
+    monkeypatch.setattr(audit_mod, "get_audit_logger", lambda: _BoomLogger())
+
+    template = _template(instinct_policy="auto")
+    # Non-JSON-native value triggers the eval-drop path → audit attempt → raises,
+    # but the gate must swallow it and proceed.
+    result = await _gate(template, row_context={"value": {1, 2, 3}})
+
+    assert result.next_step == "proceed"
+    assert result.decision.verdict == "EXECUTE"
