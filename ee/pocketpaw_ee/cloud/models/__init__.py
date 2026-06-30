@@ -1,5 +1,11 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-06-30 (feat/session-supervisor SS-3) — added
+``AgentSessionRuntimeDoc`` (the durable, tenant-scoped
+``(workspace, session_id, agent_id) -> cli_session_id`` mapping) to the
+imports, ``__all__``, and ``get_all_documents()`` so the
+``agent_session_runtimes`` collection is wired into ``init_beanie``. Only
+``ee.cloud.agent_sessions.runtime_service`` imports the doc class directly.
 Updated: 2026-06-30 (feat/session-supervisor SS-2) — added ``SessionTranscriptDoc``
 (the durable, tenant-scoped transcript rows backing the Mongo ``SessionStore``)
 to the imports, ``__all__``, and ``get_all_documents()`` so the
@@ -67,6 +73,7 @@ Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
@@ -265,6 +272,7 @@ __all__ = [
     "RequestLog",
     "Session",
     "SessionTranscriptDoc",
+    "AgentSessionRuntimeDoc",
     "Site",
     "SiteDomain",
     "SiteRateCounter",
@@ -303,6 +311,10 @@ def get_all_documents():
         # Agent-session transcript rows backing the Mongo SessionStore (SS-2).
         # Only ``ee.cloud.agent_sessions.store`` imports this doc directly.
         SessionTranscriptDoc,
+        # Durable (workspace, session_id, agent_id) -> cli_session_id mapping
+        # so any turn can resume the native session (SS-3). Only
+        # ``ee.cloud.agent_sessions.runtime_service`` imports this doc directly.
+        AgentSessionRuntimeDoc,
         Comment,
         Notification,
         FileObj,
