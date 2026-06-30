@@ -1,4 +1,16 @@
 # ee/pocketpaw_ee/cloud/pockets/instinct_dispatch.py
+# Updated: 2026-06-30 (integration/szd-finish, B1 — gate DoS fix) — the
+# discovered-rule CEL probe in `_load_discovered_instinct_rules` now catches ANY
+# exception, not just `CelEvaluationError`. `evaluate_cel` calls
+# `celpy.json_to_cel` on each resolved value OUTSIDE its own try/except, so a
+# non-JSON-native row value (a `datetime`/`bytes`/`set` off a Fabric row) raised
+# a RAW `ValueError`/`TypeError` that escaped the probe → escaped `gate_action`
+# (the action_executor caller does not wrap it) → an HTTP 500 that bricked the
+# gate for the WHOLE workspace+pocket, including the template floor, until the
+# rule was archived. Broadened to `except Exception` (one bad rule dropped, rest
+# survive), mirroring the model_validate drop guard above. `CelEvaluationError`
+# import dropped (now unused).
+#
 # Updated: 2026-06-21 (feat/szd-finish-enforce, F6 — live enforcement of
 # approved workspace-discovered Instinct rules) — `gate_action` now, when the
 # DEFAULT-OFF `instinct_enforce_discovered_rules` flag is on, loads the
@@ -82,7 +94,7 @@ from pocketpaw.bundled_templates import (
     PocketTemplate,
     resolve_instinct,
 )
-from pocketpaw.bundled_templates.cel_runtime import CelEvaluationError, evaluate_cel
+from pocketpaw.bundled_templates.cel_runtime import evaluate_cel
 from pocketpaw.bundled_templates.identifier_resolver import (
     IdentifierResolver,
     TemplateIdentifierResolver,
@@ -328,8 +340,12 @@ async def _load_discovered_instinct_rules(
        failure drop THAT rule (WARNING), keep the rest.
     4. Guarded CEL probe: run each converted rule's ``when`` through
        ``evaluate_cel`` against the SAME merged context + resolver the composer
-       will use. On ``CelEvaluationError`` drop THAT rule only (WARNING with
-       workspace/rule id) so the composer's own eval is a safe re-run.
+       will use. On ANY eval error drop THAT rule only (WARNING with
+       workspace/rule id) so the composer's own eval is a safe re-run. The catch
+       is intentionally broad: ``evaluate_cel`` can raise a RAW (non-
+       ``CelEvaluationError``) ``ValueError`` / ``TypeError`` when a resolved
+       row value is not JSON-native, and that must drop the rule, not 500 the
+       whole gate.
     """
     try:
         rows = await get_active_rules(workspace_id)
@@ -377,9 +393,18 @@ async def _load_discovered_instinct_rules(
 
         # Step 4 — guarded CEL probe. A discovered rule that errors on eval is
         # dropped here so it never reaches the composer's loud-fail raise path.
+        # Catch ANY exception, not just CelEvaluationError: ``evaluate_cel``
+        # calls ``celpy.json_to_cel`` on each resolved value OUTSIDE its own
+        # try/except, so a row-context value that is not JSON-native (a
+        # ``datetime`` / ``bytes`` / ``set`` off a Fabric row) raises a RAW
+        # ``ValueError`` / ``TypeError``. If the probe only caught
+        # CelEvaluationError that raw error would escape gate_action (the
+        # executor caller does not wrap it) → a 500 that bricks the gate for the
+        # whole workspace+pocket, including the template floor. Mirror the
+        # model_validate guard above: drop the one bad rule, keep going.
         try:
             evaluate_cel(rule.when, merged_context, probe_resolver, now=now)
-        except CelEvaluationError as exc:
+        except Exception as exc:  # noqa: BLE001 — a discovered rule that errors on eval is dropped
             logger.warning(
                 "discovered-rule enforcement: dropping rule whose CEL failed to "
                 "evaluate — workspace=%s rule=%s when=%r: %s",

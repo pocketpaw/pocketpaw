@@ -317,6 +317,37 @@ async def test_discovered_rule_cel_eval_error_is_dropped_not_blocking(monkeypatc
     assert any("discovered" in r.message.lower() for r in caplog.records)
 
 
+async def test_discovered_rule_non_cel_eval_error_is_dropped_not_500(monkeypatch, caplog) -> None:
+    """B1 — a discovered rule whose CEL probe raises a RAW, non-``CelEvaluationError``
+    exception must still be DROPPED, never escape as an HTTP 500.
+
+    The realistic trigger: a row-context value that is NOT JSON-native (a ``set`` /
+    ``bytes`` coming off a Fabric row). ``evaluate_cel`` resolves the identifier,
+    then calls ``celpy.json_to_cel(value)`` OUTSIDE any try/except — so a non-native
+    value raises a raw ``ValueError`` that is NOT a ``CelEvaluationError``. The
+    guarded probe must catch it, drop ONLY that rule (WARNING), and the gate must
+    return normally on the template floor. If the probe only catches
+    ``CelEvaluationError`` the raw exception propagates uncaught out of
+    ``gate_action`` (the executor caller does not wrap it) → a 500 that bricks the
+    gate for the entire workspace+pocket, including the template floor rules.
+    """
+    _enable_flag(monkeypatch)
+    # ``value`` is a declared column; the row carries a non-JSON-native ``set``
+    # for it → the resolver returns the set → ``json_to_cel`` raises a raw
+    # ValueError on the guarded probe (NOT a CelEvaluationError).
+    _stub_active_rules(monkeypatch, [_discovered(when="value > 100", action="block")])
+
+    template = _template(instinct_policy="auto")
+    with caplog.at_level("WARNING"):
+        # Must NOT raise. On current code the raw ValueError escapes here.
+        result = await _gate(template, row_context={"value": {1, 2, 3}})
+
+    # Dropped, not blocking, not a 500 — the gate falls through to the template.
+    assert result.next_step == "proceed"
+    assert result.decision.verdict == "EXECUTE"
+    assert any("discovered" in r.message.lower() for r in caplog.records)
+
+
 async def test_discovered_rule_parse_failure_dropped_others_survive(monkeypatch, caplog) -> None:
     """A batch with one malformed discovered rule (bad CEL syntax that fails to
     parse at conversion) drops the bad one and keeps the good one firing."""
