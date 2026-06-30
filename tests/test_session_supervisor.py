@@ -15,6 +15,12 @@
 #     later acquire with a recorded id within TTL is WARM reuse.
 #   * Crash → COLD — mark_crashed drops the slot but keeps cli_session_id, so the
 #     next acquire is FRESH and resumes from the stored id.
+#
+# Updated 2026-06-30 (fix/session-supervisor-saas-hardening SH-2): adds the
+# cold-prune coverage — reap_once now removes idle COLD runtimes (past cold_ttl,
+# not busy) from _runtimes to bound memory, never prunes a COLD+busy turn-1 launch,
+# keeps WARM governed by warm_ttl (not cold_ttl), and a pruned key re-creates COLD
+# (and re-resolves its cli_session_id) on the next acquire — proving the drop safe.
 
 from __future__ import annotations
 
@@ -286,6 +292,95 @@ def test_crash_drops_slot_keeps_id_next_acquire_fresh() -> None:
     assert nxt.warm_reuse is False  # FRESH launch
     assert nxt.owns_capture is False  # id known → resume from store
     assert nxt.cli_session_id == "cli-survives"
+
+
+# ===========================================================================
+# Cold-runtime pruning (SH-2 — bounded supervisor memory)
+# ===========================================================================
+
+
+def test_cold_runtime_pruned_past_cold_ttl() -> None:
+    """A COLD runtime idle past cold_ttl is removed from _runtimes by a reaper pass."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, cold_ttl=3600, now=clock)
+
+    acq = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id="cli-1")
+    assert acq.runtime.tier is SessionTier.COLD  # no warm slot bound → COLD
+    assert ("ws-a", "sess-1") in sup._runtimes
+
+    # Idle but under cold_ttl → not pruned.
+    clock.advance(3000)
+    assert sup.reap_once() == 0
+    assert ("ws-a", "sess-1") in sup._runtimes
+
+    # Past cold_ttl → pruned out of the map entirely.
+    clock.advance(601)  # 3601 > 3600
+    assert sup.reap_once() == 1
+    assert ("ws-a", "sess-1") not in sup._runtimes
+
+
+def test_cold_busy_runtime_never_pruned() -> None:
+    """A COLD runtime with active_runs>0 (a turn-1 launch in flight) is never pruned,
+    even far past cold_ttl — the busy-guard wins."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, cold_ttl=3600, now=clock)
+
+    acq = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id=None)  # turn-1
+    sup.mark_run_start(acq.runtime)  # COLD + busy while the turn is in flight
+    assert acq.runtime.tier is SessionTier.COLD and acq.runtime.active_runs == 1
+
+    clock.advance(10_000)  # way past cold_ttl
+    assert sup.reap_once() == 0
+    assert ("ws-a", "sess-1") in sup._runtimes  # survived — busy-guard held
+
+    # Once the turn ends and cold_ttl passes, it becomes prunable.
+    sup.mark_run_end(acq.runtime)
+    clock.advance(3601)
+    assert sup.reap_once() == 1
+    assert ("ws-a", "sess-1") not in sup._runtimes
+
+
+def test_warm_governed_by_warm_ttl_not_cold_ttl() -> None:
+    """A WARM runtime is reaped on warm_ttl (not held to cold_ttl), and a fresh COLD
+    runtime (idle < cold_ttl) survives the same pass."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, cold_ttl=3600, now=clock)
+
+    warm = sup.acquire("ws-a", "warm-1", "agent", cli_session_id="cli-w")
+    td = Teardown()
+    sup.bind_warm_slot(warm.runtime, slot="s", teardown=td)
+
+    fresh_cold = sup.acquire("ws-a", "cold-1", "agent", cli_session_id="cli-c")
+    assert fresh_cold.runtime.tier is SessionTier.COLD
+
+    # Past warm_ttl but well under cold_ttl: the warm slot is reaped; the fresh
+    # COLD runtime is untouched (and the just-reaped warm stays resident as COLD).
+    clock.advance(200)  # 200 > warm_ttl(120), < cold_ttl(3600)
+    assert sup.reap_once() == 1
+    assert td.calls == 1
+    assert warm.runtime.tier is SessionTier.COLD
+    assert ("ws-a", "warm-1") in sup._runtimes  # demoted, not yet cold-pruned
+    assert ("ws-a", "cold-1") in sup._runtimes  # fresh cold survives
+
+
+def test_acquire_after_cold_prune_recreates_and_resolves() -> None:
+    """After a COLD prune, an acquire for that key re-creates the runtime COLD and
+    re-resolves the cli_session_id from the (durable) store arg — the drop is safe."""
+    clock = FakeClock()
+    sup = SessionSupervisor(warm_ttl=120, cold_ttl=3600, now=clock)
+
+    sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id="cli-1")
+    clock.advance(3601)
+    assert sup.reap_once() == 1
+    assert ("ws-a", "sess-1") not in sup._runtimes
+
+    # Caller re-acquires (passing the id recovered from SS-3's Mongo map).
+    again = sup.acquire("ws-a", "sess-1", "agent-x", cli_session_id="cli-1")
+    assert ("ws-a", "sess-1") in sup._runtimes
+    assert again.runtime.tier is SessionTier.COLD
+    assert again.warm_reuse is False
+    assert again.owns_capture is False  # id known → resume, not turn 1
+    assert again.cli_session_id == "cli-1"
 
 
 # ===========================================================================

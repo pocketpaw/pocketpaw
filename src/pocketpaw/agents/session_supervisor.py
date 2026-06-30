@@ -21,6 +21,14 @@ Tier model: COLD (no live slot — next acquire is a fresh launch, resuming from
 the store via ``cli_session_id`` when one exists), WARM (a live slot bound, reused
 within TTL), LIVE (a declared enum value reserved for a future always-on tier —
 no behavior in v1).
+
+Updated 2026-06-30 (fix/session-supervisor-saas-hardening SH-2): ``reap_once`` now
+also PRUNES idle COLD runtimes (removes them from ``_runtimes`` past ``cold_ttl``)
+so the runtime map stays bounded over long SaaS uptime. The durable
+``cli_session_id`` lives in SS-3's Mongo map, so a later ``acquire`` re-creates a
+pruned runtime COLD and re-resolves the id — the drop is safe. The busy-guard
+still holds: a runtime with ``active_runs > 0`` (e.g. a turn-1 launch in flight,
+which is COLD AND busy) is never pruned.
 """
 
 from __future__ import annotations
@@ -134,11 +142,17 @@ class SessionSupervisor:
         self,
         *,
         warm_ttl: float = 120,
+        cold_ttl: float = 3600,
         max_warm_per_tenant: int = 8,
         max_warm_global: int = 64,
         now: Callable[[], float] | None = None,
     ) -> None:
         self._warm_ttl = warm_ttl
+        # How long a COLD runtime (no live slot) may sit idle in ``_runtimes``
+        # before the reaper prunes the descriptor entirely. Much larger than
+        # ``warm_ttl``: freeing the live slot is urgent, dropping the cheap
+        # in-memory descriptor is just memory hygiene (resume rebuilds it).
+        self._cold_ttl = cold_ttl
         self._max_warm_per_tenant = max_warm_per_tenant
         self._max_warm_global = max_warm_global
         # Injected clock — tests pass a fake closure so reap/TTL is deterministic.
@@ -364,25 +378,57 @@ class SessionSupervisor:
             )
 
     def reap_once(self) -> int:
-        """Run one reaper pass: tear down idle warm slots past ``warm_ttl``.
+        """Run one reaper pass: tear down idle WARM slots AND prune idle COLD runtimes.
 
-        Skips any runtime with ``active_runs > 0`` (busy-guard) regardless of how
-        stale ``last_active`` looks. Returns the number of slots reaped. Exposed
-        (not ``_``-private) so tests can drive a deterministic pass with the fake
-        clock instead of waiting on the background loop.
+        Two independent jobs, both gated by the busy-guard:
+
+        * WARM reap — a runtime holding a live warm slot, idle past ``warm_ttl``,
+          has its slot torn down (demoting it to COLD; the descriptor stays
+          resident for a fast resume). Unchanged from v1.
+        * COLD prune — a runtime with NO live slot (``tier is COLD``,
+          ``warm_slot is None``), idle past ``cold_ttl``, is REMOVED from
+          ``_runtimes`` entirely so the map stays bounded over long uptime. Safe
+          because the durable ``cli_session_id`` lives in SS-3's Mongo map: a later
+          ``acquire`` re-creates the runtime COLD and re-resolves the id.
+
+        The busy-guard skips ANY runtime with ``active_runs > 0`` regardless of how
+        stale ``last_active`` looks — a turn-1 fresh launch is COLD AND busy while
+        in flight (v1 binds no warm slot), and pruning it mid-turn would drop live
+        bookkeeping. WARM reaping stays governed by ``warm_ttl`` only; cold pruning
+        by ``cold_ttl`` only.
+
+        Returns the count of runtimes acted on (warm slots reaped + cold runtimes
+        pruned). Exposed (not ``_``-private) so tests can drive a deterministic pass
+        with the fake clock instead of waiting on the background loop.
         """
         now = self._now()
         reaped = 0
+        pruned_keys: list[tuple[str, str]] = []
         for runtime in list(self._runtimes.values()):
+            # Busy-guard — never touch an in-flight runtime (covers a COLD+busy
+            # turn-1 launch as well as a busy warm slot).
+            if runtime.active_runs > 0:
+                continue
+            idle = now - runtime.last_active
             if (
                 runtime.tier is SessionTier.WARM
                 and runtime.warm_slot is not None
-                and runtime.active_runs == 0
-                and (now - runtime.last_active) > self._warm_ttl
+                and idle > self._warm_ttl
             ):
                 self._run_teardown(self._drop_slot(runtime))
                 reaped += 1
-        return reaped
+            elif (
+                runtime.tier is SessionTier.COLD
+                and runtime.warm_slot is None
+                and idle > self._cold_ttl
+            ):
+                # A just-reaped warm runtime (now COLD) is NOT pruned in the same
+                # pass — the ``elif`` skips it; it stays resident until a later pass
+                # finds it idle past ``cold_ttl``.
+                pruned_keys.append(runtime.key)
+        for key in pruned_keys:
+            self._runtimes.pop(key, None)
+        return reaped + len(pruned_keys)
 
     def _drop_slot(self, runtime: SessionRuntime) -> Callable[[], Any] | None:
         """Null the slot fields, demote to COLD, and return the old teardown."""
