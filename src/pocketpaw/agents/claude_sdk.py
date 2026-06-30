@@ -1,5 +1,33 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-06-30 (feat/warm-reuse WH-1) — ``run`` accepts two optional OSS-only
+  params so the SessionSupervisor (WH-2/WH-3) can drive the turn against a
+  caller-LEASED warm client instead of the backend's own ``self._client``:
+  ``warm_client: LeasedClient | None`` and
+  ``on_client_built: Callable[[client, options_key, teardown], None] | None``
+  (forwarded by ``AgentPool.run`` only when set — withhold-when-empty, like the
+  deny/allow/skill kwargs). When either is set, ``run`` computes THIS turn's
+  ``_client_cache_key`` ONCE (recomputed via the pure classmethod with the SAME
+  ``options``/``session_key``/``plugin_digest`` ``_get_or_create_client`` would
+  use, so it is byte-identical and the legacy ``self._client`` call stays
+  untouched) and routes through ``_leased_dispatch``:
+    • WARM REUSE — ``warm_client`` key MATCHES this turn (and not a resume turn,
+      and the lease is not ``busy``) → drive ``warm_client.client.query(message)``
+      directly: NO connect, NO resume, NO history injection (the live client
+      already carries the conversation natively), and it is NEVER disconnected
+      (the supervisor keeps it warm).
+    • SUPERVISED FRESH BUILD — ``on_client_built`` set AND (no ``warm_client`` OR
+      key mismatch OR busy) → build + ``connect()`` a fresh client (carrying
+      ``resume`` only when ``session_handle.cli_session_id`` is set — the
+      cold-recovery path), hand it to ``on_client_built(client, key, teardown)``
+      for the supervisor to OWN (``teardown`` disconnects it) instead of caching
+      on ``self._client``, then run the query against it.
+    • BUSY edge — a ``warm_client`` whose ``busy`` flag is already set (a sibling
+      turn is mid-query on it) falls back to a fresh stateless query for THIS turn
+      and does NOT rebind, so two turns never drive one subprocess concurrently.
+  Neither param → the existing ``self._client`` / ``_get_or_create_client`` path,
+  byte-for-byte unchanged. ``LeasedClient`` lives in ``backend.py`` (generic,
+  ``client: Any``) so the supervisor imports it without a cycle.
 Updated: 2026-06-30 (feat/session-supervisor SS-2) — ``_build_options`` now also
   forwards ``session_handle.session_store`` to the SDK as
   ``ClaudeAgentOptions.session_store`` when it is non-None. On a resume turn the
@@ -206,7 +234,7 @@ import asyncio
 import hashlib
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -214,6 +242,7 @@ from pocketpaw.agents.backend import (
     BackendInfo,
     BaseAgentBackend,
     Capability,
+    LeasedClient,
     SessionHandle,
 )
 from pocketpaw.agents.protocol import AgentEvent
@@ -1851,6 +1880,137 @@ class ClaudeSDKBackend(BaseAgentBackend):
                         self._drop_skills_dir(adopted_digest)
                         self._client_plugin_digest = ""
 
+    async def _leased_dispatch(
+        self,
+        *,
+        message: str,
+        options: Any,
+        this_turn_key: str,
+        resume_active: bool,
+        warm_client: LeasedClient | None,
+        on_client_built: Callable[[Any, str, Callable], None] | None,
+    ) -> tuple[Any, LeasedClient | None]:
+        """feat/warm-reuse WH-1 — route a turn against a caller-LEASED warm client.
+
+        Called by ``run`` only when ``warm_client`` or ``on_client_built`` is set.
+        The backend's own ``self._client`` is NOT involved here — the supervisor
+        owns the leased client's lifecycle, so this never touches ``self._client``,
+        ``acquired_lease``, or ``self._client_in_use``.
+
+        Returns ``(event_stream, warm_lease)``:
+          * ``event_stream`` is the message iterator to stream, or ``None`` to make
+            the caller fall through to a fresh stateless ``query()`` for this turn.
+          * ``warm_lease`` is the ``LeasedClient`` whose ``busy`` flag THIS turn set
+            (the caller clears it in its finally), or ``None`` when no lease is held.
+
+        Three outcomes:
+          1. WARM REUSE — ``warm_client`` key matches, not a resume turn, lease not
+             ``busy`` → drive ``warm_client.client.query(message)`` directly (no
+             connect, no resume, no history injection) and return its receive
+             iterator. The lease stays ``busy`` for the stream's duration and is
+             NEVER disconnected.
+          2. SUPERVISED FRESH BUILD — ``on_client_built`` set and warm reuse did not
+             apply → build + ``connect()`` a fresh client (``options`` already carry
+             ``resume`` iff ``session_handle.cli_session_id`` was set), hand it to
+             ``on_client_built(client, this_turn_key, teardown)`` for the supervisor
+             to own, then query it.
+          3. STATELESS FALLBACK — a busy matching lease, any connect/query failure,
+             or a ``warm_client`` key mismatch with no ``on_client_built`` to rebind
+             → return ``(None, None)`` so the caller runs a fresh stateless query.
+        """
+        # ── 1. Warm reuse ────────────────────────────────────────────────
+        # A resume turn must take a fresh launch (the live client carries its OWN
+        # conversation, not the requested on-disk session), so warm reuse is gated
+        # on ``not resume_active`` as well as an exact key match.
+        if (
+            warm_client is not None
+            and not resume_active
+            and warm_client.options_key == this_turn_key
+        ):
+            # Busy detection: the lease's own ``busy`` flag. Single-threaded
+            # asyncio means the check-then-set below has no ``await`` between it, so
+            # it is atomic — a second concurrent turn can never both see "free" and
+            # then both drive a query. A busy lease falls back to a fresh stateless
+            # client for THIS turn (never blocks, never corrupts the shared client)
+            # and does NOT rebind the slot.
+            if warm_client.busy:
+                logger.info(
+                    "WH-1: leased warm client is busy (concurrent turn) — "
+                    "fresh stateless fallback for this turn"
+                )
+                return None, None
+            warm_client.busy = True
+            try:
+                logger.info(
+                    "WH-1: reusing leased warm client (key match) — "
+                    "no connect, no resume, no history injection"
+                )
+                await warm_client.client.query(message)
+                return self._resilient_receive(warm_client.client), warm_client
+            except Exception as exc:  # noqa: BLE001
+                # The leased client failed mid-send. Release its busy flag (we no
+                # longer drive it) but do NOT disconnect — the supervisor owns it.
+                warm_client.busy = False
+                logger.warning("WH-1: leased warm client query failed, stateless fallback: %s", exc)
+                return None, None
+
+        # ── 2. Supervised fresh build ────────────────────────────────────
+        if on_client_built is not None:
+            try:
+                fresh = self._ClaudeSDKClient(options=options)
+                await fresh.connect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "WH-1: supervised fresh client connect failed, stateless fallback: %s",
+                    exc,
+                )
+                return None, None
+
+            async def _teardown() -> None:
+                """Disconnect the client THIS run built. The supervisor calls this
+                when it drops / replaces the slot — the backend never caches the
+                client on ``self._client``."""
+                try:
+                    await fresh.disconnect()
+                except Exception as disc_exc:  # noqa: BLE001
+                    logger.debug(
+                        "WH-1: leased fresh client teardown disconnect error (ignored): %s",
+                        disc_exc,
+                    )
+
+            try:
+                on_client_built(fresh, this_turn_key, _teardown)
+            except Exception as exc:  # noqa: BLE001
+                # The supervisor refused the slot — tear the client down so it
+                # doesn't leak, then fall back to stateless so the turn completes.
+                logger.warning(
+                    "WH-1: on_client_built raised, tearing down + stateless fallback: %s",
+                    exc,
+                )
+                await _teardown()
+                return None, None
+
+            try:
+                logger.info(
+                    "WH-1: supervised fresh client built + bound (resume=%s) — driving query",
+                    bool(getattr(options, "resume", None)),
+                )
+                await fresh.query(message)
+                # The supervisor now OWNS the client; the backend does not tear it
+                # down here even if the stream later aborts.
+                return self._resilient_receive(fresh), None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "WH-1: supervised fresh client query failed, stateless fallback: %s",
+                    exc,
+                )
+                return None, None
+
+        # ── 3. Stateless fallback ────────────────────────────────────────
+        # ``warm_client`` provided but key-mismatched / resume / busy, and no
+        # ``on_client_built`` to build + rebind → run a fresh stateless query.
+        return None, None
+
     async def run(
         self,
         message: str,
@@ -1863,6 +2023,8 @@ class ClaudeSDKBackend(BaseAgentBackend):
         allow_mcp_tool_ids: frozenset[str] | None = None,
         skill_names: frozenset[str] = frozenset(),
         session_handle: SessionHandle | None = None,
+        warm_client: LeasedClient | None = None,
+        on_client_built: Callable[[Any, str, Callable], None] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Process a message through Claude Agent SDK with streaming.
 
@@ -1914,6 +2076,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
         is non-empty we BYPASS the warm client and run on a fresh stateless query
         whose options carry the materialized plugin. The temp dir is removed in a
         ``finally`` after the stream drains. Empty by default (a no-op).
+
+        ``warm_client`` / ``on_client_built`` (feat/warm-reuse WH-1) let the
+        SessionSupervisor drive the turn against a caller-LEASED warm client
+        instead of the backend's own ``self._client``. When either is set, this
+        turn's ``_client_cache_key`` is computed once and ``_leased_dispatch``
+        routes the turn (warm reuse on a key match, else a supervised fresh build
+        handed to ``on_client_built`` for the supervisor to own, with a busy lease
+        falling back to a fresh stateless query). Neither set → the unchanged
+        legacy ``self._client`` path. See the module docstring for the full table.
         """
         if not self._sdk_available:
             yield AgentEvent(
@@ -1985,6 +2156,12 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # non-owning run (stateless fallback, or a failure before acquisition)
         # can never release a sibling's lease or destroy its subprocess.
         acquired_lease = False
+        # feat/warm-reuse WH-1: the ``LeasedClient`` whose ``busy`` flag THIS run
+        # set on the warm-reuse path. Declared above the try so the finally /
+        # except can always release it (set ``busy=False``) without ever
+        # disconnecting it — the supervisor owns the leased client's lifecycle.
+        # None on every legacy / supervised-fresh / stateless run.
+        _warm_lease: LeasedClient | None = None
         # Resolved LLM client — bound by ``_build_options`` below. Declared above
         # the try (feat/claude-sdk-prewarm) so the ``except`` handler's
         # ``llm.format_api_error`` call is safe even when ``_build_options`` itself
@@ -2045,6 +2222,30 @@ class ClaudeSDKBackend(BaseAgentBackend):
             _resume_active = (
                 session_handle is not None and session_handle.cli_session_id is not None
             )
+            # feat/warm-reuse WH-1: when the caller LEASES a warm client
+            # (``warm_client``) or wants to OWN the freshly-built one
+            # (``on_client_built``), compute THIS turn's cache key ONCE and route
+            # through ``_leased_dispatch`` instead of the backend's own
+            # ``self._client`` path. The key is recomputed via the pure
+            # ``_client_cache_key`` classmethod with the SAME
+            # ``options``/``session_key``/``plugin_digest`` that
+            # ``_get_or_create_client`` would hash internally — byte-identical, so
+            # the legacy ``self._client`` branch below stays untouched. The
+            # supervised paths never set ``acquired_lease`` / ``self._client_in_use``
+            # (they don't own ``self._client``), so the finally / except teardown of
+            # the per-agent warm client cannot misfire on a leased client.
+            if warm_client is not None or on_client_built is not None:
+                this_turn_key = self._client_cache_key(
+                    options, session_key=session_key, plugin_digest=plugin_digest
+                )
+                event_stream, _warm_lease = await self._leased_dispatch(
+                    message=message,
+                    options=options,
+                    this_turn_key=this_turn_key,
+                    resume_active=_resume_active,
+                    warm_client=warm_client,
+                    on_client_built=on_client_built,
+                )
             # fix/claude-sdk-warm-client-skills: the warm-client bypass for skill
             # runs is REMOVED. ``_client_cache_key`` now folds in
             # ``plugin_digest`` (the skill-identity hash), so a warm client can
@@ -2054,7 +2255,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
             # subprocess keeps a valid path across turns. Fallbacks to the
             # stateless path: the original concurrency guard (a sibling run holds
             # the lease, ``_client_in_use``) OR a native-resume turn.
-            if not self._client_in_use and not _resume_active:
+            elif not self._client_in_use and not _resume_active:
                 try:
                     self._client_in_use = True
                     acquired_lease = True
@@ -2457,6 +2658,15 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     content=f"❌ Claude Agent SDK error: {error_msg}",
                 )
         finally:
+            # feat/warm-reuse WH-1: release the leased warm client's ``busy`` flag
+            # (set only on the warm-reuse path) so the supervisor's NEXT turn can
+            # drive it again. Done in the OUTER finally so it runs on every exit
+            # path — normal completion, error, and the Bun-crash retry ``return``
+            # (the recursive retry never carries the lease, so it can't double-set
+            # busy). NEVER disconnect the leased client here — the supervisor owns
+            # its lifecycle and keeps it warm.
+            if _warm_lease is not None:
+                _warm_lease.busy = False
             # Remove the per-run materialized-skills plugin dir (entity-rooms
             # A2) ONLY when this run owns it — i.e. the genuine stateless-
             # fallback case where no warm client adopted the dir
