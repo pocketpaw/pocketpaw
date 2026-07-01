@@ -64,6 +64,7 @@ SECRET_FIELDS: frozenset[str] = frozenset(
         "status_api_key",
         "dodo_payments_api_key",
         "dodo_webhook_secret",
+        "shield_api_token",
     }
 )
 
