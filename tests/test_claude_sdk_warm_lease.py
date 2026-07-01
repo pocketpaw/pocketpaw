@@ -1,4 +1,14 @@
 # tests/test_claude_sdk_warm_lease.py
+# Updated: 2026-07-01 (fix/warm-reuse session_id) — added the session_id-capture
+#   suite (section 6) that pins the fix for the live WARM NO-OP: SS-1 captured the
+#   native session_id ONLY from the init SystemMessage, which never surfaced on the
+#   leased supervised-fresh client, so owns_capture stayed True and warm_reuse never
+#   fired. Three tests: (1) REPRODUCTION — a quirk stream (init SystemMessage with
+#   NO session_id, then a normal assistant message, then a ResultMessage carrying
+#   the id) surfaces exactly one session_id event via the ResultMessage fallback
+#   (pre-fix: zero events); (2) NO-DOUBLE-EMIT — both sources carry the id → exactly
+#   one event (SystemMessage wins, emit-once gate skips the ResultMessage); (3)
+#   LEGACY — session_handle=None → no session_id event from either source.
 # Created: 2026-06-30 (feat/warm-reuse WH-1) — pins the BACKEND half of the WARM
 # perf tier: ``ClaudeSDKBackend.run`` can drive a turn against a caller-LEASED
 # warm ``ClaudeSDKClient`` (owned by the SessionSupervisor, WH-2/WH-3) instead of
@@ -416,3 +426,197 @@ async def test_busy_warm_client_falls_back_to_stateless_without_rebind() -> None
     )
     assert len(client_sink) == 1, "the busy fallback must not build a new persistent client"
     assert lease.busy is True, "this run must not touch the busy flag the sibling turn owns"
+
+
+# ===========================================================================
+# 6. fix/warm-reuse — capture the native session_id from the ResultMessage
+# ===========================================================================
+#
+# The leased supervised-fresh path was a live WARM NO-OP: SS-1 captured the
+# native ``session_id`` ONLY from the init ``SystemMessage``'s
+# ``data["session_id"]``, but on the fresh client that id never surfaced at
+# runtime — so ``owns_capture`` stayed True forever and ``warm_reuse`` never
+# fired. The fix ALSO captures ``session_id`` from the terminal ``ResultMessage``
+# (a direct str field ALWAYS carried), gated on the handle + emit-once. These
+# tests pin: (1) the ResultMessage fallback fires on the quirk stream (real
+# reproduction — see the failing-pre-fix evidence in the PR/commit body), (2) the
+# emit-once gate prevents a double-emit when BOTH sources carry the id, and (3)
+# no handle → no session_id event from either source (legacy stream unchanged).
+
+_RESULT_SID = "11111111-1111-4111-8111-111111111111"
+_BOTH_SID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+class _FakeAssistantMsg:
+    """A normal assistant text message — carries NO session_id."""
+
+    def __init__(self, text: str = "hello from the model"):
+        self.content = text
+
+
+def _result_with_sid(sid: str) -> _FakeResultMsg:
+    """A terminal ResultMessage carrying the native ``session_id`` as a direct str
+    field (types.py: ``ResultMessage.session_id``) — the ALWAYS-present field the
+    fix reads via ``getattr(event, "session_id", None)``."""
+    r = _FakeResultMsg()
+    r.session_id = sid
+    return r
+
+
+class _LeasedFreshSpyClient:
+    """Mirrors the leased supervised-fresh RUNTIME QUIRK: the init ``SystemMessage``
+    arrives but its ``data`` carries NO ``session_id`` (the id never surfaces on
+    the fresh client), a normal assistant message follows, and only the terminal
+    ``ResultMessage`` carries the native id. This is exactly the stream on which
+    SS-1's SystemMessage-only capture was a NO-OP."""
+
+    def __init__(self, options=None, *, result_session_id=_RESULT_SID, **_kw):
+        self.options = options
+        self._result_session_id = result_session_id
+        self.queries: list[str] = []
+        self.connect_count = 0
+        self.disconnect_count = 0
+
+    async def connect(self, prompt=None):
+        self.connect_count += 1
+
+    async def query(self, prompt, session_id="default"):
+        self.queries.append(prompt)
+
+    async def receive_messages(self):
+        # init/system message WITH NO session_id — the runtime quirk.
+        yield _FakeSystemMessage(subtype="init", data={})
+        # a normal assistant message (carries no session_id).
+        yield _FakeAssistantMsg("hello from the model")
+        # terminal ResultMessage carrying the native session_id.
+        yield _result_with_sid(self._result_session_id)
+
+    async def disconnect(self):
+        self.disconnect_count += 1
+
+    async def interrupt(self):
+        pass
+
+
+class _BothSourcesSpyClient:
+    """A stream where BOTH the init ``SystemMessage`` (``data.session_id``) AND the
+    terminal ``ResultMessage`` (``session_id``) carry the SAME native id — proves
+    the emit-once gate: the SystemMessage wins first and the ResultMessage capture
+    is skipped, so exactly ONE ``session_id`` event is emitted."""
+
+    def __init__(self, options=None, *, sid=_BOTH_SID, **_kw):
+        self.options = options
+        self._sid = sid
+        self.queries: list[str] = []
+        self.connect_count = 0
+        self.disconnect_count = 0
+
+    async def connect(self, prompt=None):
+        self.connect_count += 1
+
+    async def query(self, prompt, session_id="default"):
+        self.queries.append(prompt)
+
+    async def receive_messages(self):
+        yield _FakeSystemMessage(subtype="init", data={"session_id": self._sid})
+        yield _FakeAssistantMsg("hello from the model")
+        yield _result_with_sid(self._sid)
+
+    async def disconnect(self):
+        self.disconnect_count += 1
+
+    async def interrupt(self):
+        pass
+
+
+def _spy_factory(cls, sink: list):
+    def _factory(**kwargs):
+        c = cls(**kwargs)
+        sink.append(c)
+        return c
+
+    return _factory
+
+
+async def test_session_id_captured_from_result_message_on_leased_fresh_path() -> None:
+    """REPRODUCTION — a leased supervised-fresh turn (``session_handle`` non-None,
+    ``on_client_built`` set) whose stream carries NO session_id in the init
+    ``SystemMessage`` but DOES carry it on the terminal ``ResultMessage`` must
+    surface EXACTLY ONE ``session_id`` ``AgentEvent`` with that id. Pre-fix (no
+    ResultMessage capture) this stream yields NO session_id event at all — the
+    live WARM NO-OP."""
+    options_sink: list[_Options] = []
+    stateless_options: list[_Options] = []
+    client_sink: list[_SpyClient] = []
+    sdk = _make_sdk(options_sink, stateless_options, client_sink)
+    sdk._AssistantMessage = _FakeAssistantMsg
+    leased_sink: list[_LeasedFreshSpyClient] = []
+    sdk._ClaudeSDKClient = _spy_factory(_LeasedFreshSpyClient, leased_sink)
+
+    def _on_built(client, key, teardown):
+        pass
+
+    handle = SessionHandle()  # non-None, cli_session_id=None → turn-1 supervised fresh
+    events = await _drive_run(sdk, "turn one", session_handle=handle, on_client_built=_on_built)
+
+    sid_events = [e for e in events if e.type == "session_id"]
+    assert len(sid_events) == 1, (
+        "the ResultMessage fallback must surface exactly one session_id event; "
+        f"got {[e.metadata for e in sid_events]}"
+    )
+    assert sid_events[0].metadata["session_id"] == _RESULT_SID, (
+        "the captured id must be the one carried on the terminal ResultMessage"
+    )
+    # sanity: the leased-fresh spy really drove the supervised path for this turn.
+    assert leased_sink and leased_sink[0].queries == ["turn one"]
+
+
+async def test_no_double_emit_when_both_sources_carry_session_id() -> None:
+    """NO-DOUBLE-EMIT — when BOTH the init ``SystemMessage`` and the terminal
+    ``ResultMessage`` carry the id, EXACTLY ONE ``session_id`` event is emitted
+    (from the SystemMessage; the ResultMessage capture is skipped by the emit-once
+    gate)."""
+    options_sink: list[_Options] = []
+    stateless_options: list[_Options] = []
+    client_sink: list[_SpyClient] = []
+    sdk = _make_sdk(options_sink, stateless_options, client_sink)
+    sdk._AssistantMessage = _FakeAssistantMsg
+    both_sink: list[_BothSourcesSpyClient] = []
+    sdk._ClaudeSDKClient = _spy_factory(_BothSourcesSpyClient, both_sink)
+
+    def _on_built(client, key, teardown):
+        pass
+
+    events = await _drive_run(
+        sdk, "turn one", session_handle=SessionHandle(), on_client_built=_on_built
+    )
+
+    sid_events = [e for e in events if e.type == "session_id"]
+    assert len(sid_events) == 1, (
+        "the emit-once gate must yield exactly one session_id event even when both "
+        f"the SystemMessage and ResultMessage carry the id; got {len(sid_events)}"
+    )
+    assert sid_events[0].metadata["session_id"] == _BOTH_SID
+
+
+async def test_no_handle_emits_no_session_id_from_either_source() -> None:
+    """LEGACY — with ``session_handle=None`` neither the init ``SystemMessage`` nor
+    the terminal ``ResultMessage`` may emit a ``session_id`` event, even when both
+    carry the id (the legacy stream stays byte-identical)."""
+    options_sink: list[_Options] = []
+    stateless_options: list[_Options] = []
+    client_sink: list[_SpyClient] = []
+    sdk = _make_sdk(options_sink, stateless_options, client_sink)
+    sdk._AssistantMessage = _FakeAssistantMsg
+    both_sink: list[_BothSourcesSpyClient] = []
+    sdk._ClaudeSDKClient = _spy_factory(_BothSourcesSpyClient, both_sink)
+
+    def _on_built(client, key, teardown):
+        pass
+
+    events = await _drive_run(sdk, "turn one", session_handle=None, on_client_built=_on_built)
+
+    sid_events = [e for e in events if e.type == "session_id"]
+    assert sid_events == [], (
+        "no session_handle → no session_id event may be emitted from either source"
+    )

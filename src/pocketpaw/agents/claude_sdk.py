@@ -1,5 +1,20 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-01 (fix/warm-reuse session_id) — the native ``session_id`` is now
+  ALSO captured from the terminal ``ResultMessage`` (``getattr(event,
+  "session_id", None)``), as a robust FALLBACK to the SS-1 init-``SystemMessage``
+  capture. Root cause of a live WARM NO-OP: on the leased supervised-fresh path
+  the init ``SystemMessage``'s ``data["session_id"]`` did NOT surface at runtime,
+  so ``set_cli_session_id`` never ran, ``runtime.cli_session_id`` stayed None,
+  ``owns_capture`` stayed True forever, and ``warm_reuse`` (= warm_alive AND not
+  owns_capture) never fired. The ``ResultMessage.session_id`` is a direct str
+  field ALWAYS carried on the terminal message of every completed run, so
+  capturing it here guarantees turn-1 capture. Still gated on ``session_handle is
+  not None`` + emit-once (``_session_id_emitted``): the init ``SystemMessage``
+  path still wins first when it fires (no double-emit), and the no-handle legacy
+  stream stays byte-identical. Two INFO logs mark the capture moment + source
+  ("session_id captured from init SystemMessage" / "... from ResultMessage
+  (fallback)") so a live re-smoke can confirm capture now fires.
 Updated: 2026-06-30 (feat/warm-reuse WH-1) — ``run`` accepts two optional OSS-only
   params so the SessionSupervisor (WH-2/WH-3) can drive the turn against a
   caller-LEASED warm client instead of the backend's own ``self._client``:
@@ -2378,6 +2393,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
                             _sid = _data.get("session_id") if isinstance(_data, dict) else None
                             if _sid:
                                 _session_id_emitted = True
+                                logger.info(
+                                    "session_id captured from init SystemMessage (id=%s)",
+                                    _sid,
+                                )
                                 yield AgentEvent(
                                     type="session_id",
                                     content="",
@@ -2447,6 +2466,35 @@ class ClaudeSDKBackend(BaseAgentBackend):
                     # ========== ResultMessage - final result ==========
                     if self._ResultMessage and isinstance(event, self._ResultMessage):
                         _saw_result = True
+                        # feat/warm-reuse fix: capture the native session_id from the
+                        # ResultMessage as a ROBUST FALLBACK. SS-1 captured it from the
+                        # init SystemMessage's ``data["session_id"]`` — that fired for
+                        # the persistent v1 path but NOT for the leased supervised-fresh
+                        # path (code-identical connect->query->receive, but the init's
+                        # session_id doesn't surface at runtime on the fresh client), so
+                        # ``owns_capture`` stayed True forever and WARM reuse / native
+                        # resume never engaged. The ``ResultMessage`` ALWAYS carries the
+                        # native ``session_id`` (types.py: a direct str field) and is the
+                        # terminal message every completed run processes, so capturing it
+                        # here guarantees turn-1 capture. Still gated on the handle +
+                        # emit-once, so the legacy stream stays byte-identical and no
+                        # double-emit if the SystemMessage already surfaced it.
+                        if session_handle is not None and not _session_id_emitted:
+                            _rsid = getattr(event, "session_id", None)
+                            if _rsid:
+                                _session_id_emitted = True
+                                logger.info(
+                                    "session_id captured from ResultMessage (fallback) (id=%s)",
+                                    _rsid,
+                                )
+                                yield AgentEvent(
+                                    type="session_id",
+                                    content="",
+                                    metadata={
+                                        "session_id": _rsid,
+                                        "backend": "claude_agent_sdk",
+                                    },
+                                )
                         is_error = getattr(event, "is_error", False)
                         result = getattr(event, "result", "")
 
