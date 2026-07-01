@@ -89,15 +89,21 @@ def _build_orientation(
                 f" If a Daytona sandbox is provisioned for project "
                 f"'{project_name}', you can use the Daytona MCP tools "
                 f"(read_file, write_file, edit_file, list_dir, shell, "
-                f"run_python, sync_to_s3) to operate directly inside the "
-                f"sandbox VM. Use sync_to_s3 to persist changes to S3."
+                f"run_python, sync_to_s3, start_server, preview_url) to "
+                f"operate directly inside the sandbox VM. Use start_server "
+                f"to start a web server and get a URL; use preview_url to "
+                f"get a URL for an existing server. Use sync_to_s3 to "
+                f"persist changes to S3."
             )
         else:
             daytona_hint = (
                 " If a Daytona sandbox is provisioned, use the Daytona "
                 "MCP tools (read_file, write_file, edit_file, list_dir, "
-                "shell, run_python, sync_to_s3) to operate directly inside "
-                "the sandbox VM. Use sync_to_s3 to persist changes to S3."
+                "shell, run_python, sync_to_s3, start_server, preview_url) "
+                "to operate directly inside the sandbox VM. Use start_server "
+                "to start a web server and get a URL; use preview_url to "
+                "get a URL for an existing server. Use sync_to_s3 to "
+                "persist changes to S3."
             )
         lines.append(daytona_hint)
     else:

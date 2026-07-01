@@ -507,9 +507,7 @@ class DaytonaShellTool(BaseTool):
                 cwd=ctx.project_dir,
                 timeout=self.timeout,
             )
-            output = result.stdout or ""
-            if result.stderr:
-                output += f"\nSTDERR:\n{result.stderr}"
+            output = result.result or ""
             if result.exit_code != 0:
                 output += f"\n\nExit code: {result.exit_code}"
             return output.strip() or "(no output)"
@@ -628,9 +626,7 @@ class DaytonaRunPythonTool(BaseTool):
                 timeout=timeout,
             )
 
-            output = result.stdout or ""
-            if result.stderr:
-                output += f"\nSTDERR:\n{result.stderr}"
+            output = result.result or ""
             if result.exit_code != 0:
                 output += f"\n\nExit code: {result.exit_code}"
 

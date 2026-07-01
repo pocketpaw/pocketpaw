@@ -666,3 +666,48 @@ async def get_workspace_terminal(
         web_terminal_url=web_terminal_url,
         sandbox_id=sandbox_id,
     )
+
+
+class PortPreviewResponse(BaseModel):
+    ok: bool
+    url: str
+    port: int
+    sandbox_id: str
+
+
+@router.get("/cloud/projects/{project_name}/workspace/preview")
+async def get_port_preview(
+    project_name: str,
+    port: int = 8080,
+    http_request: Request = None,
+) -> PortPreviewResponse:
+    """Get a public preview URL for a port in the sandbox.
+
+    If you have a web server running inside the sandbox (e.g. a static
+    file server, a dev server, an API), use this endpoint to get a URL
+    you can open in your browser to view it.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = get_sandbox_id(project_key)
+    if not sandbox_id:
+        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
+
+    client = await _require_daytona()
+
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Sandbox is in state '{info.state}' — must be 'started' for port preview",
+        )
+
+    url = await client.get_port_preview_url(sandbox_id, port)
+
+    return PortPreviewResponse(
+        ok=True,
+        url=url,
+        port=port,
+        sandbox_id=sandbox_id,
+    )

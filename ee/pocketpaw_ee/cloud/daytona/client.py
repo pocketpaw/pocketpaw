@@ -130,6 +130,26 @@ class DaytonaClient:
         logger.debug("Got web terminal URL for sandbox %s", sandbox_id)
         return url
 
+    # ── Port forwarding preview (any port) ───────────────────────────
+
+    async def get_port_preview_url(self, sandbox_id: str, port: int) -> str:
+        """Get a public preview URL for a port running in the sandbox.
+
+        Uses the SDK's ``get_preview_link()`` to obtain the URL and
+        appends the access token so the browser can authenticate.
+        This is how you access a web server running inside the sandbox
+        (e.g. ``python3 -m http.server 8080``) from your own machine.
+        """
+        sb = await self.get_sandbox_instance(sandbox_id)
+        preview = await sb.get_preview_link(port)
+        url = preview.url if hasattr(preview, "url") else str(preview)
+        token = preview.token if hasattr(preview, "token") else ""
+        if token and "token=" not in url:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}token={token}"
+        logger.debug("Got port preview URL for sandbox %s port %d: %s", sandbox_id, port, url)
+        return url
+
     # ── Sandbox lifecycle ────────────────────────────────────────────────
 
     async def create_sandbox(

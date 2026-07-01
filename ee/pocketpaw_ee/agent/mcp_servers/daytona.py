@@ -35,6 +35,8 @@ LIST_DIR_TOOL_ID = f"mcp__{SERVER_NAME}__list_dir"
 SHELL_TOOL_ID = f"mcp__{SERVER_NAME}__shell"
 RUN_PYTHON_TOOL_ID = f"mcp__{SERVER_NAME}__run_python"
 SYNC_TO_S3_TOOL_ID = f"mcp__{SERVER_NAME}__sync_to_s3"
+PREVIEW_URL_TOOL_ID = f"mcp__{SERVER_NAME}__preview_url"
+START_SERVER_TOOL_ID = f"mcp__{SERVER_NAME}__start_server"
 
 DAYTONA_TOOL_IDS = (
     READ_FILE_TOOL_ID,
@@ -44,6 +46,8 @@ DAYTONA_TOOL_IDS = (
     SHELL_TOOL_ID,
     RUN_PYTHON_TOOL_ID,
     SYNC_TO_S3_TOOL_ID,
+    PREVIEW_URL_TOOL_ID,
+    START_SERVER_TOOL_ID,
 )
 
 
@@ -229,9 +233,7 @@ async def _shell_handler(args: dict) -> dict:
             cwd=ctx.project_dir,
             timeout=args.get("timeout", 120),
         )
-        output = result.stdout or ""
-        if result.stderr:
-            output += f"\nSTDERR:\n{result.stderr}"
+        output = result.result or ""
         if result.exit_code != 0:
             output += f"\n\nExit code: {result.exit_code}"
         return _success_response(output.strip() or "(no output)")
@@ -263,9 +265,7 @@ async def _run_python_handler(args: dict) -> dict:
             timeout=timeout,
         )
 
-        output = result.stdout or ""
-        if result.stderr:
-            output += f"\nSTDERR:\n{result.stderr}"
+        output = result.result or ""
         if result.exit_code != 0:
             output += f"\n\nExit code: {result.exit_code}"
 
@@ -307,6 +307,76 @@ async def _sync_to_s3_handler(args: dict) -> dict:
         )
     except Exception as exc:
         return _error_response(f"Sync failed: {exc}")
+
+
+async def _preview_url_handler(args: dict) -> dict:
+    """Get a public preview URL for a port in the sandbox."""
+    port = int(args.get("port", 8080))
+    ctx = await _require_ctx()
+
+    try:
+        url = await ctx.client.get_port_preview_url(ctx.sandbox_id, port)
+        return _success_response({"url": url, "port": port})
+    except Exception as exc:
+        return _error_response(f"Failed to get preview URL: {exc}")
+
+
+async def _start_server_handler(args: dict) -> dict:
+    """Start a web server in the sandbox and return a preview URL."""
+    command = args.get("command", "").strip()
+    port = int(args.get("port", 8080))
+    if not command:
+        return _error_response("command is required")
+
+    ctx = await _require_ctx()
+
+    try:
+        # Write the server command to a temp script and run it via nohup.
+        # This avoids quoting issues with the shell command.
+        script = f"#!/bin/sh\ncd {ctx.project_dir}\n{command}\n"
+        await ctx.client.upload_bytes(
+            ctx.sandbox_id,
+            script.encode("utf-8"),
+            "/tmp/_paw_start_server.sh",
+        )
+        await ctx.client.execute_command(
+            ctx.sandbox_id,
+            "chmod +x /tmp/_paw_start_server.sh",
+            cwd=ctx.project_dir,
+            timeout=10,
+        )
+        await ctx.client.execute_command(
+            ctx.sandbox_id,
+            "nohup /tmp/_paw_start_server.sh > /tmp/server.log 2>&1 &",
+            cwd=ctx.project_dir,
+            timeout=30,
+        )
+
+        # Small delay to let the server bind.
+        await asyncio.sleep(2)
+
+        # Get the preview URL.
+        url = await ctx.client.get_port_preview_url(ctx.sandbox_id, port)
+
+        # Check if anything is listening on the port.
+        check = await ctx.client.execute_command(
+            ctx.sandbox_id,
+            f"ss -tlnp | grep -q ':{port} ' && echo 'running' || echo 'not_running'",
+            cwd=ctx.project_dir,
+            timeout=10,
+        )
+        status = check.result.strip() if check.result else "unknown"
+
+        return _success_response(
+            {
+                "url": url,
+                "port": port,
+                "status": status,
+                "log_cmd": "cat /tmp/server.log",
+            }
+        )
+    except Exception as exc:
+        return _error_response(f"Failed to start server: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -500,10 +570,70 @@ def build_daytona_server() -> tuple[str, Any] | None:
     async def sync_to_s3(args: dict) -> dict:  # type: ignore[no-untyped-def]
         return await _sync_to_s3_handler(args)
 
+    @tool(
+        "preview_url",
+        "Get a public preview URL for a port running in the Daytona sandbox. "
+        "Use this when you start a web server inside the sandbox "
+        "(e.g. ``python3 -m http.server 8080``) and the user needs a link "
+        "to open in their browser. Args: `port` (int, default 8080). "
+        "Returns `{url, port}`.",
+        {
+            "type": "object",
+            "properties": {
+                "port": {
+                    "type": "integer",
+                    "description": "Port number to preview (default: 8080)",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+    )
+    async def preview_url(args: dict) -> dict:  # type: ignore[no-untyped-def]
+        return await _preview_url_handler(args)
+
+    @tool(
+        "start_server",
+        "Start a web server inside the Daytona sandbox and get a public "
+        "preview URL. Use this when you need to run a local web server "
+        "(e.g. ``python3 -m http.server 8080``, ``npx serve``, ``node server.js``) "
+        "and the user needs to view it in their browser. "
+        "The server runs in the background via nohup. "
+        "Args: `command` (required — the server command to run), "
+        "`port` (int, default 8080). Returns `{url, port, status, log_cmd}`.",
+        {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The server command to run (e.g. 'python3 -m http.server 8080')",
+                },
+                "port": {
+                    "type": "integer",
+                    "description": "Port number the server listens on (default: 8080)",
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    )
+    async def start_server(args: dict) -> dict:  # type: ignore[no-untyped-def]
+        return await _start_server_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[read_file, write_file, edit_file, list_dir, shell, run_python, sync_to_s3],
+        tools=[
+            read_file,
+            write_file,
+            edit_file,
+            list_dir,
+            shell,
+            run_python,
+            sync_to_s3,
+            preview_url,
+            start_server,
+        ],
     )
     return SERVER_NAME, server
 
@@ -518,5 +648,7 @@ __all__ = [
     "SHELL_TOOL_ID",
     "RUN_PYTHON_TOOL_ID",
     "SYNC_TO_S3_TOOL_ID",
+    "PREVIEW_URL_TOOL_ID",
+    "START_SERVER_TOOL_ID",
     "build_daytona_server",
 ]
