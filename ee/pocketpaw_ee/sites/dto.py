@@ -94,6 +94,13 @@
 # already-rendered {uid, op} edits and the endpoint returns one verdict per edit.
 # ``op`` rides as an open dict — its {kind:setText|setProp,...} shape is validated
 # downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary.
+# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added NativeArtifactResponse
+# ({pocket_id, body_html, css}) — the response of GET
+# /sites/by-pocket/{pocket_id}/native-artifact. ``body_html`` is the armed svelte
+# build's ``<body>`` inner HTML (the data-uid-stamped leaves + the embedded
+# ``paw-edit-manifest`` script); ``css`` is the built stylesheet(s) concatenated into
+# one string. The native editor injects both into a shadow root to render the site
+# natively instead of framing an iframe.
 
 from __future__ import annotations
 
@@ -381,3 +388,17 @@ class LeafEditsResponse(BaseModel):
 
     pocket_id: str
     results: list[LeafEditVerdict]
+
+
+class NativeArtifactResponse(BaseModel):
+    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the armed
+    svelte build's body + CSS, so the native editor can shadow-render the site
+    instead of framing an iframe. ``body_html`` is the built page's ``<body>`` INNER
+    HTML — the data-uid-stamped editable leaves plus the embedded
+    ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
+    ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
+    a single ``<style>``."""
+
+    pocket_id: str
+    body_html: str
+    css: str

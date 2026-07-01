@@ -43,6 +43,13 @@
 # pocket, fakes ONLY the apply-leaf-edit CLI (generator_client.apply_leaf_edits), and
 # asserts the endpoint returns per-uid verdicts AND persists the edit through the real
 # service→pockets path. A non-svelte pocket is a 422; a missing pocket is a 404.
+#
+# Updated 2026-07-01 (NE-5b — native-artifact endpoint): adds coverage for GET
+# /sites/by-pocket/{pocket_id}/native-artifact. The happy path patches
+# sites_service.get_native_artifact (a real build would spawn bun) and asserts the
+# route returns {pocket_id, body_html, css} AND threads the request Origin header as
+# the builder_origin the armed build needs. A non-svelte pocket (real service, mocked
+# ripple pocket read) is a 422.
 
 from __future__ import annotations
 
@@ -953,3 +960,62 @@ async def test_leaf_edits_route_missing_pocket_is_404(beanie_test_db, monkeypatc
             json={"edits": [{"uid": "x:0", "op": {"kind": "setText", "html": "y"}}]},
         )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# native artifact (NE-5b): GET /sites/by-pocket/{pocket_id}/native-artifact serves
+# the armed svelte build's <body> inner HTML + concatenated CSS as {pocket_id,
+# body_html, css} so the native editor shadow-renders the site. fabric.write (it
+# ensures/triggers the armed build); builder_origin from the request Origin header;
+# a non-svelte pocket is a 422.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_artifact_route_returns_body_and_css(beanie_test_db, monkeypatch):
+    """The endpoint returns {pocket_id, body_html, css} and threads the request Origin
+    header as the builder_origin (the armed build needs it to stamp data-uid + the
+    manifest). The service is patched — a real build would spawn bun."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_get_native_artifact(*, builder_origin=None, **kw):
+        captured["builder_origin"] = builder_origin
+        captured["pocket_id"] = kw.get("pocket_id")
+        return {
+            "pocket_id": "pk1",
+            "body_html": '<h1 data-uid="Hero:headline:0">Hi</h1>',
+            "css": ".hero{color:#0A84FF}",
+        }
+
+    monkeypatch.setattr(sites_service, "get_native_artifact", _fake_get_native_artifact)
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get(
+            "/api/v1/sites/by-pocket/pk1/native-artifact",
+            headers={"Origin": "https://dash.paw.example"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pocket_id"] == "pk1"
+    assert "data-uid" in body["body_html"]
+    assert body["css"] == ".hero{color:#0A84FF}"
+    # The route derived builder_origin from the request Origin header and forwarded
+    # the path's pocket_id.
+    assert captured["builder_origin"] == "https://dash.paw.example"
+    assert captured["pocket_id"] == "pk1"
+
+
+@pytest.mark.asyncio
+async def test_native_artifact_route_non_svelte_is_422(beanie_test_db, monkeypatch):
+    """A ripple pocket has no svelte build → 422 (the service ValidationError maps to
+    422); no build is triggered (the service raises before constructing a generator)."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value={"name": "x", "engine": "ripple", "rippleSpec": {"type": "c"}}),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/api/v1/sites/by-pocket/pk_ripple/native-artifact")
+    assert resp.status_code == 422
