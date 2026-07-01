@@ -1,6 +1,19 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added
+# ``apply_leaf_edits`` — the backend of the native site-editing persist path. It
+# splices the native editor's forwarded ``{uid, op}`` leaf edits into the pocket's
+# svelte ``source`` map via ``generator_client.apply_leaf_edits`` (the paw-sites
+# apply-leaf-edit CLI, a PURE transform — no build/workerd) and persists ONLY the
+# changed files through ``pockets_service.set_svelte_source_file`` (each write
+# auto-writes a Branch draft). Unlike ``edit_svelte_component`` it does NOT
+# republish/rebuild — the editor already rendered the edit optimistically, so
+# persisting the reviewable draft is the whole job. Empty edits / a non-svelte
+# pocket raise ValidationError (422); a missing / cross-tenant pocket surfaces as
+# the pockets service's NotFound / Forbidden (404 / 403). ``_apply`` is an
+# injectable bridge seam so the path is unit-testable without Bun.
+#
 # Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
 # edit-bridge): ``dev_preview_pocket`` gained an optional ``builder_origin`` and
 # threads it to ``get_manager().ensure_dev_server(builder_origin=...)`` so the
@@ -2115,6 +2128,80 @@ def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
             )
         result = result.replace(old, new, 1)
     return result
+
+
+async def apply_leaf_edits(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    edits: list[dict[str, Any]],
+    _apply: Any = None,
+) -> list[dict[str, Any]]:
+    """Persist native-editor leaf edits as a reviewable Branch draft (NE-4b).
+
+    The backend of the native site-editing persist path. The native editor forwards
+    a batch of ``{uid, op}`` leaf edits it has ALREADY rendered optimistically; this
+    splices them into the pocket's svelte ``source`` map via the paw-sites
+    ``apply-leaf-edit`` CLI (a PURE transform — no build, no workerd) and persists
+    each CHANGED file through the pockets service, which auto-writes a Branch draft
+    ArtifactVersion snapshotting the full edited source map. There is NO
+    republish/rebuild: persisting the draft is the whole job — the deliberate UX win
+    over ``edit_svelte_component``'s per-edit iframe rebuild (the editor already
+    shows the change; an approved review is what later takes it live).
+
+    Steps:
+      1. reject an empty edit batch (``ValidationError`` → 422);
+      2. read the pocket (the pockets service's public ``get`` raises NotFound /
+         Forbidden itself — a missing / cross-tenant pocket is 404 / 403) and assert
+         it is a svelte site (else ``ValidationError`` → 422);
+      3. splice via the generator bridge — edits apply IN ORDER, and a rejected edit
+         leaves ITS file byte-identical in the returned source;
+      4. persist ONLY the files whose contents actually changed (so a rejected edit
+         naturally persists nothing and never churns an empty draft), each write
+         auto-writing the Branch draft snapshot;
+      5. return the per-uid verdicts unchanged.
+
+    ``_apply`` is an injectable seam for the generator bridge (defaults to
+    ``generator_client.apply_leaf_edits``) so the orchestration is unit-testable
+    without Bun / workerd.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import generator_client
+
+    if not isinstance(edits, list) or not edits:
+        raise ValidationError(
+            "site_leaf_edit.empty_edits",
+            "apply_leaf_edits requires a non-empty list of {uid, op} leaf edits.",
+        )
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    source_map = pocket["source"]
+
+    # Splice the {uid, op} edits into the source via the apply-leaf-edit CLI. A
+    # RuntimeError (non-zero exit / timed-out splice) propagates to the caller.
+    out = await (_apply or generator_client.apply_leaf_edits)(source=source_map, edits=edits)
+    new_map, results = out["source"], out["results"]
+
+    # Persist ONLY the files that actually changed. A rejected edit leaves its file
+    # byte-identical (the CLI contract), so this comparison naturally skips it — no
+    # empty draft churn. Each set_svelte_source_file write auto-writes a Branch draft
+    # snapshotting the FULL edited map, so after the loop the draft == the fully
+    # edited source. Multi-file safe.
+    for path, contents in new_map.items():
+        if source_map.get(path) != contents:
+            await pockets_service.set_svelte_source_file(
+                pocket_id, user_id, component_path=path, new_source=contents
+            )
+
+    return results
 
 
 async def edit_svelte_component(

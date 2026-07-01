@@ -37,6 +37,12 @@
 # (over the real versions spine) and returns the new draft as a SiteVersionResponse;
 # an unknown version_no is a 404. Also asserts the seeded-site status response now
 # carries a ``deployed_at`` ISO string (None before any deploy).
+#
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): adds coverage for
+# POST /sites/by-pocket/{pocket_id}/leaf-edits. The happy path creates a REAL svelte
+# pocket, fakes ONLY the apply-leaf-edit CLI (generator_client.apply_leaf_edits), and
+# asserts the endpoint returns per-uid verdicts AND persists the edit through the real
+# service→pockets path. A non-svelte pocket is a 422; a missing pocket is a 404.
 
 from __future__ import annotations
 
@@ -851,4 +857,99 @@ async def test_data_rows_by_pocket_unknown_table_is_404(beanie_test_db, monkeypa
     app = _build_app("ws_owner", monkeypatch)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         resp = await c.get("/api/v1/sites/by-pocket/pk_dyn/data/unknown_table")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# native-editing leaf edits (NE-4b): POST /sites/by-pocket/{pocket_id}/leaf-edits
+# persists the native editor's forwarded {uid, op} edits as a reviewable Branch
+# draft (splice via the apply-leaf-edit CLI → set_svelte_source_file), NO rebuild.
+# fabric.write; tenant-scoped; a non-svelte pocket is a 422; a missing pocket a 404.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_leaf_edits_route_persists_and_returns_verdicts(beanie_test_db, monkeypatch):
+    """The endpoint splices + persists a real svelte pocket's edit and returns one
+    verdict per uid. Only the external Bun CLI is faked; the service→pockets persist
+    runs for real, so a re-read shows the new source."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    _view, pocket_id, err = await pockets_service.agent_create(
+        workspace_id="ws_owner",
+        owner_id="user-test-1",
+        name="Bright Smile",
+        type_="site",
+        pattern="landing",
+        ripple_spec=None,
+        engine="svelte",
+        source={
+            "src/lib/components/Hero.svelte": "<h1>Bright Smile</h1>",
+            "src/app.css": ":root{}",
+        },
+        trusted=True,
+    )
+    assert err is None, err
+
+    async def _fake_apply(*, source, edits):
+        new = dict(source)
+        new["src/lib/components/Hero.svelte"] = "<h1>Brighter</h1>"
+        return {"source": new, "results": [{"uid": edits[0]["uid"], "applied": True}]}
+
+    monkeypatch.setattr("pocketpaw_ee.sites.generator_client.apply_leaf_edits", _fake_apply)
+
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/v1/sites/by-pocket/{pocket_id}/leaf-edits",
+            json={
+                "edits": [{"uid": "Hero:headline:0", "op": {"kind": "setText", "html": "Brighter"}}]
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["pocket_id"] == pocket_id
+    assert body["results"] == [{"uid": "Hero:headline:0", "applied": True, "reason": None}]
+    # The edit persisted through the real service → pockets path.
+    wire = await pockets_service.get(pocket_id, "user-test-1")
+    assert wire["source"]["src/lib/components/Hero.svelte"] == "<h1>Brighter</h1>"
+
+
+@pytest.mark.asyncio
+async def test_leaf_edits_route_non_svelte_is_422(beanie_test_db, monkeypatch):
+    """A ripple pocket has no svelte source map → 422 (the service ValidationError
+    maps to a 422); the CLI bridge is never reached."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(return_value={"name": "x", "engine": "ripple", "rippleSpec": {"type": "c"}}),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk_ripple/leaf-edits",
+            json={"edits": [{"uid": "x:0", "op": {"kind": "setText", "html": "y"}}]},
+        )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_leaf_edits_route_missing_pocket_is_404(beanie_test_db, monkeypatch):
+    """A missing / access-denied pocket surfaces as a 404 (the pockets service's
+    NotFound flows through the standard error handler)."""
+    from unittest.mock import AsyncMock
+
+    from pocketpaw_ee.cloud._core.errors import NotFound
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get",
+        AsyncMock(side_effect=NotFound("pocket", "pk_missing")),
+    )
+    app = _build_app("ws_owner", monkeypatch)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/sites/by-pocket/pk_missing/leaf-edits",
+            json={"edits": [{"uid": "x:0", "op": {"kind": "setText", "html": "y"}}]},
+        )
     assert resp.status_code == 404

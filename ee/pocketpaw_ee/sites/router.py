@@ -110,6 +110,14 @@
 #   Both delegate to sites_service; a NON-dynamic pocket → 422 (not_dynamic), a
 #   missing / access-denied pocket → 404 / 403 (the pockets service raises it).
 #   Tenant-scoped on ctx — the data view is read-only (no request body).
+#
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added POST
+# /sites/by-pocket/{pocket_id}/leaf-edits — the native editor forwards its
+# already-rendered {uid, op} leaf edits and this persists them as a reviewable
+# Branch draft (splice via the apply-leaf-edit CLI → set_svelte_source_file), NO
+# rebuild. fabric.write; tenant-scoped; returns one verdict per edit. A non-svelte
+# pocket or empty batch → 422; a missing / access-denied pocket → 404 / 403 (the
+# pockets service raises it). Delegates to sites_service.apply_leaf_edits.
 
 from __future__ import annotations
 
@@ -123,6 +131,9 @@ from pocketpaw_ee.sites.dto import (
     DevPreviewResponse,
     DomainRequest,
     DomainStatusResponse,
+    LeafEditsRequest,
+    LeafEditsResponse,
+    LeafEditVerdict,
     MakeEditableRequest,
     PublishRequest,
     RequestPublishResponse,
@@ -207,6 +218,33 @@ async def make_site_editable(
         builder_origin=builder_origin,
     )
     return sites_service._to_response(doc)
+
+
+@router.post("/sites/by-pocket/{pocket_id}/leaf-edits", response_model=LeafEditsResponse)
+async def apply_leaf_edits_by_pocket(
+    pocket_id: str,
+    body: LeafEditsRequest,
+    ctx: RequestContext = Depends(request_context),
+    _: object = Depends(require_action_any_workspace("fabric.write")),
+) -> LeafEditsResponse:
+    """Persist native-editor leaf edits as a reviewable Branch draft (NE-4b).
+
+    Splices the forwarded ``{uid, op}`` edits into the pocket's svelte source via the
+    paw-sites apply-leaf-edit CLI and writes a draft — NO rebuild (the native editor
+    already renders the change optimistically; skipping the per-edit iframe rebuild
+    is the UX win over the old edit path). Returns one verdict per edit. A missing /
+    access-denied pocket is a 404 (the pockets service raises NotFound); a non-svelte
+    pocket or an empty edit batch is a 422."""
+    results = await sites_service.apply_leaf_edits(
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        pocket_id=pocket_id,
+        edits=[e.model_dump() for e in body.edits],
+    )
+    return LeafEditsResponse(
+        pocket_id=pocket_id,
+        results=[LeafEditVerdict(**r) for r in results],
+    )
 
 
 @router.get("/sites", response_model=list[SiteResponse])
