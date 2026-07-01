@@ -544,8 +544,18 @@ class TestSecretFieldsList:
             "status_api_key",
             "dodo_payments_api_key",
             "dodo_webhook_secret",
+            "shield_api_token",
         }
         assert SECRET_FIELDS == expected
+
+    def test_shield_api_token_is_secret(self):
+        """The shield control-API bearer token must be a SECRET_FIELD so it is
+        stored encrypted and never returned over REST (regression: it was added
+        to config as a plain field, which would have leaked it via
+        Settings.save() -> config.json and GET /api/v1/settings)."""
+        assert "shield_api_token" in SECRET_FIELDS
+        # The socket PATH is not a secret and must stay excluded.
+        assert "shield_api_socket" not in SECRET_FIELDS
 
     def test_non_secrets_excluded(self):
         """Common non-secret fields must NOT be in SECRET_FIELDS."""

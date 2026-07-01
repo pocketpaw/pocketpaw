@@ -68,6 +68,11 @@ Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription
 ``subscription.active`` webhook) to the imports, ``__all__``, and
 ``get_all_documents()`` so the ``billing_subscriptions`` collection is wired into
 ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
+Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added ``InstinctRuleDoc``
+(the persisted, approved, workspace-scoped, owned rule discovered from exhaust) to
+the imports, ``__all__``, and ``get_all_documents()`` so the ``instinct_rules``
+collection is wired into ``init_beanie`` and the ``beanie_test_db`` fixture. Only
+``ee.cloud.rules.service`` imports the doc class directly (import-linter "Rules").
 """
 
 from __future__ import annotations
@@ -108,6 +113,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
+from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
@@ -247,6 +253,7 @@ __all__ = [
     "Group",
     "GroupAgent",
     "InstinctApproval",
+    "InstinctRuleDoc",
     "Invite",
     "Lead",
     "LeadSource",
@@ -343,6 +350,9 @@ def get_all_documents():
         Invite,
         Group,
         InstinctApproval,
+        # Discovered governed rules (SZD slice-2). Only ``ee.cloud.rules.service``
+        # writes it.
+        InstinctRuleDoc,
         Message,
         ReadState,
         RequestLog,

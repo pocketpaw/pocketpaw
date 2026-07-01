@@ -1056,12 +1056,7 @@ async def _drive_agent_loop(
         # ``(workspace, project_key, session_id)`` key from its ``SessionKey`` at
         # append/load time. Any failure degrades to the legacy path for THIS turn
         # (no handle threaded) — a supervisor hiccup never breaks a run.
-        if (
-            _session_supervisor_enabled()
-            and sup_workspace_id
-            and sup_session_id
-            and sup_agent_id
-        ):
+        if _session_supervisor_enabled() and sup_workspace_id and sup_session_id and sup_agent_id:
             try:
                 prior_cli = await runtime_service.get_cli_session_id(
                     sup_workspace_id, sup_session_id, sup_agent_id
@@ -1337,9 +1332,7 @@ async def _drive_agent_loop(
                     _sup.mark_crashed(sup_acq.runtime)
                 _sup.mark_run_end(sup_acq.runtime)
             except Exception:
-                logger.debug(
-                    "session-supervisor run-end bookkeeping failed", exc_info=True
-                )
+                logger.debug("session-supervisor run-end bookkeeping failed", exc_info=True)
 
 
 async def _iter_agent_events(

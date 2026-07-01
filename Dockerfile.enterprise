@@ -220,7 +220,18 @@ RUN pip install --no-cache-dir '.[all]'
 # enterprise image — unlike the root Dockerfile, there is no oss/enterprise
 # build-arg switch).
 COPY ee/ ee/
-RUN pip install --no-cache-dir ./ee
+# Source protection: the Cython compile is gated OFF by default (ee/pyproject.toml),
+# so a plain `pip install ./ee` would now install READABLE .py source — defeating
+# per-tenant IP protection. Build the COMPILED + source-stripped wheel instead
+# (compile ON via HATCH_BUILD_HOOK_ENABLE_CYTHON, then a post-build source strip)
+# and install THAT, so this image carries only .so, no readable enterprise source.
+# gcc/python3-dev/git are installed in the builder base above; add uv (build
+# front-end) + wheel (RECORD-safe repack) for the release script. `rm -rf ee/dist`
+# drops any wheel that rode in from the build context so the glob matches one.
+RUN pip install --no-cache-dir uv wheel
+RUN rm -rf ee/dist \
+    && bash ee/scripts/build_compiled_wheel.sh \
+    && pip install --no-cache-dir ee/dist/pocketpaw_ee-*.whl
 
 # Install Playwright Chromium browser
 RUN playwright install chromium

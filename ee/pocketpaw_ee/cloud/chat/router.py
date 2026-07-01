@@ -676,6 +676,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
+                # Heartbeat: clients ping to keep the socket warm through idle-
+                # closing edge proxies (e.g. Cloudflare drops idle WebSockets
+                # after ~100s). Reply pong and skip the message-handling path.
+                if isinstance(data, dict) and data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
                 msg = WsInbound.model_validate(_normalize_ws_inbound(data))
             except Exception:
                 await websocket.send_json(
