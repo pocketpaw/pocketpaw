@@ -19,7 +19,7 @@ class PolicyContext:
     resource_id: str | None = None
     resource_type: str | None = None
     pocket_access: PocketAccess | None = None
-    plan: str = "team"
+    plan: str = "free"  # base/free floor when no plan supplied (consumer ladder)
     agent_id: str | None = None
     agent_creator_role: WorkspaceRole | None = None
 

@@ -16,6 +16,7 @@ from pocketpaw_ee.cloud._core.errors import (
 )
 from pocketpaw_ee.cloud._core.realtime.events import (
     InstinctApprovalApproved,
+    InstinctApprovalAutoApproved,
     InstinctApprovalCreated,
     InstinctApprovalRejected,
 )
@@ -159,3 +160,72 @@ async def test_decide_requires_user_id() -> None:
     created = await approvals_service.create_approval("w1", "u1", _create_body())
     with pytest.raises(ValidationError):
         await approvals_service.approve("w1", "", created["id"], None)
+
+
+# ---------------------------------------------------------------------------
+# auto_approve — the AUTO-lane single-write decided row (T3 / design MF-1,
+# MF-2). Creates a row already-decided (status="auto_approved",
+# decided_by="system:triager") so the AUTO lane never calls the OSS store
+# and the human queue (which filters on status="pending") never sees it.
+# ---------------------------------------------------------------------------
+
+
+async def test_auto_approve_creates_decided_row(recording_bus) -> None:
+    out = await approvals_service.auto_approve(
+        "w1",
+        "u1",
+        _create_body(),
+        trust_score=0.95,
+        triager_reasoning="trust 0.95 >= 0.9, reversible POST",
+    )
+    assert out["status"] == "auto_approved"
+    assert out["decided_by"] == "system:triager"
+    assert out["decided_at"] is not None
+    # the requester is still recorded (who triggered the action)
+    assert out["requested_by"] == "u1"
+
+
+async def test_auto_approve_emits_auto_approved_event(recording_bus) -> None:
+    out = await approvals_service.auto_approve(
+        "w1",
+        "u1",
+        _create_body(),
+        trust_score=0.95,
+        triager_reasoning="reasoning",
+    )
+    events = [e for e in recording_bus.events if isinstance(e, InstinctApprovalAutoApproved)]
+    assert len(events) == 1
+    assert events[0].data["id"] == out["id"]
+    # the actor on the event is the system triager, not the human
+    assert events[0].data.get("actor") == "system:triager"
+    assert events[0].data.get("trust_score") == 0.95
+    assert events[0].data.get("lane") == "AUTO"
+
+
+async def test_auto_approved_row_excluded_from_pending_list() -> None:
+    # one pending (human queue) + one auto-approved (never in human tray)
+    await approvals_service.create_approval("w1", "u1", _create_body(pocket_id="p_pending"))
+    await approvals_service.auto_approve(
+        "w1",
+        "u1",
+        _create_body(pocket_id="p_auto"),
+        trust_score=0.95,
+        triager_reasoning="r",
+    )
+
+    pending = await approvals_service.list_approvals("w1", "u1", {"status": "pending"})
+    assert [r["pocket_id"] for r in pending] == ["p_pending"]
+
+    auto = await approvals_service.list_approvals("w1", "u1", {"status": "auto_approved"})
+    assert [r["pocket_id"] for r in auto] == ["p_auto"]
+
+
+async def test_auto_approve_requires_workspace_and_user() -> None:
+    with pytest.raises(ValidationError):
+        await approvals_service.auto_approve(
+            "", "u1", _create_body(), trust_score=0.95, triager_reasoning="r"
+        )
+    with pytest.raises(ValidationError):
+        await approvals_service.auto_approve(
+            "w1", "", _create_body(), trust_score=0.95, triager_reasoning="r"
+        )

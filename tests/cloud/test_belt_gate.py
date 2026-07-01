@@ -34,6 +34,15 @@
 # identity through ee.cloud.chat.agent_service ContextVars (set in-test via
 # attach_agent_identity) and the store through pocketpaw.stores.get_instinct_store
 # (patched to a tmp-file store so nothing touches ~/.pocketpaw/instinct.db).
+#
+# Updated: 2026-06-26 (fix/cloud-iso-executor-scope) — the ``store`` fixture's
+# factory mock is now WORKSPACE-FAITHFUL (resolves explicit workspace_id →
+# current_workspace ContextVar → "", seeded store for "w1" only). The old
+# arg-swallowing mock hid C1: the approve-path executor's bare/unscoped store
+# call (run OUTSIDE _identity, no ContextVar) still reached the seeded store, so
+# split-brain isolation passed. The end-to-end test below now approves+executes
+# outside _identity, so it only stays green because the executor threads the
+# blob's workspace_id.
 
 from __future__ import annotations
 
@@ -140,9 +149,30 @@ def local_repo(tmp_path: Path) -> Path:
 def store(tmp_path: Path, monkeypatch) -> InstinctStore:
     """Isolated InstinctStore on a tmp file, wired in everywhere the gate
     reads it (the MCP handler + the executor both lazy-import
-    ``pocketpaw.stores.get_instinct_store``)."""
+    ``pocketpaw.stores.get_instinct_store``).
+
+    WORKSPACE-FAITHFUL mock (fix/cloud-iso-executor-scope): the factory resolves
+    the workspace exactly like the real one — explicit ``workspace_id`` arg →
+    ``current_workspace`` ContextVar → "" — and returns the seeded store ONLY
+    for ``w1`` (the blob/identity workspace). Any other workspace gets a fresh,
+    empty store on a sibling tmp file. The old ``lambda *a, **k: st`` ignored
+    the workspace entirely, so the executor's BARE (pre-fix, no-ContextVar)
+    approve-path call still hit the seeded store and the isolation bug (C1) went
+    green. Now the MCP handler (bare call INSIDE _identity → ContextVar=w1)
+    still resolves to ``st``, but the executor (run OUTSIDE _identity) only does
+    so once it threads the blob's workspace — which is exactly the fix."""
+    from pocketpaw.stores import current_workspace
+
     st = InstinctStore(tmp_path / "instinct_belt_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    others: dict[str, InstinctStore] = {}
+
+    def _factory(*_a, workspace_id: str | None = None, **_k) -> InstinctStore:
+        ws = str((workspace_id if workspace_id is not None else current_workspace.get()) or "")
+        if ws == "w1":
+            return st
+        return others.setdefault(ws, InstinctStore(tmp_path / f"instinct_other_{ws or 'none'}.db"))
+
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", _factory)
     return st
 
 

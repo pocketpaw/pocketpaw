@@ -106,7 +106,7 @@ def _resolve_exp(exp: str | None, days: int | None) -> str:
 def mint_license(
     *,
     org: str,
-    plan: str = "team",
+    plan: str = "go",
     seats: int = 5,
     exp: str | None = None,
     days: int | None = None,
@@ -175,9 +175,9 @@ def _build_parser() -> argparse.ArgumentParser:
     mint_p.add_argument("--org", required=True, help="Organisation / customer name")
     mint_p.add_argument(
         "--plan",
-        default="team",
-        choices=["team", "business", "enterprise"],
-        help="License plan (default: team)",
+        default="go",
+        choices=["free", "go", "pro", "pro_max", "enterprise"],
+        help="License plan (default: go)",
     )
     mint_p.add_argument("--seats", type=int, default=5, help="Seat count (default: 5)")
     exp_group = mint_p.add_mutually_exclusive_group()

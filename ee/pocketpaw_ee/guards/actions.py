@@ -30,12 +30,25 @@
 # the pocket-outcomes count router (ee.cloud.outcomes) can guard
 # ``GET /api/v1/outcomes``.
 #
+# Updated: 2026-06-19 (feat/instinct-gate-integration, security-review FIX 1) —
+# added ``instinct.activate`` (OWNER) gating the workspace route that sets a
+# workspace's ``instinct_approval_level``. A non-ASK level turns on
+# auto-approval of agent WRITE actions workspace-wide, so the switch is
+# OWNER-only — the most restrictive workspace tier.
+#
 # Updated: 2026-06-10 (feat/belt-console-backend, SC-1) — added ``belt.read``
 # (MEMBER) and ``belt.manage`` (ADMIN) so the Belt console router
 # (ee.cloud.belt.router) can guard its read routes (repos list, runs list, run
 # detail) and its add-repo route. ``belt.manage`` is ADMIN because adding a repo
 # root extends the code-change security boundary workspace-wide — it must not be
 # open to every member (mirrors connector.manage / skills.manage).
+#
+# Updated: 2026-07-01 (feat/sec-5-security-proxy, SEC-5) — added
+# ``security.manage`` (OWNER) gating EVERY route on the shield control-plane
+# proxy (ee.cloud.security.router). OWNER because the proxy fronts shield's
+# ban-capable writes (resolve a decision, PATCH the egress deny/allow config)
+# AND its read feed exposes who-tried-to-egress-what; the whole surface is
+# owner-only, mirroring workspace.delete / billing.manage / instinct.activate.
 
 from __future__ import annotations
 
@@ -176,6 +189,13 @@ ACTIONS: dict[str, ActionRule] = {
     "instinct.propose": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "instinct.approve": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
     "instinct.audit": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Activating the layered Instinct gate's triager (setting a workspace's
+    # ``instinct_approval_level`` to a non-ASK value) turns ON AUTO-APPROVAL of
+    # agent WRITE actions for the whole workspace — the single most sensitive
+    # governance switch in the gate. OWNER-only, the most restrictive workspace
+    # tier (mirrors workspace.delete / billing.manage): a mere admin must not
+    # be able to disable the human-in-the-loop for everyone.
+    "instinct.activate": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
     # Connector — workspace-level connector lifecycle.
     # execute is MEMBER so any team member can run actions against enabled connectors.
     # manage (enable/disable/config) is ADMIN because it changes workspace-wide state
@@ -217,6 +237,16 @@ ACTIONS: dict[str, ActionRule] = {
     # diffs), mirroring connector.manage / skills.manage.
     "belt.read": ActionRule(WorkspaceRole.MEMBER, "workspace.insufficient_role"),
     "belt.manage": ActionRule(WorkspaceRole.ADMIN, "workspace.insufficient_role"),
+    # Security — the shield control-plane proxy (ee.cloud.security.router,
+    # SEC-5). OWNER-only, the most restrictive workspace tier (mirrors
+    # workspace.delete / billing.manage / instinct.activate). shield fronts the
+    # ban-capable write endpoints (resolve a decision, PATCH the deny/allow
+    # config) and IS the workspace's egress security gate, so read AND write
+    # must both be owner-gated: a mere admin must not be able to see the
+    # decision stream or flip the security posture for everyone. A single
+    # action guards every route (reads included) because the decision feed
+    # itself carries who-tried-to-egress-what, which is sensitive.
+    "security.manage": ActionRule(WorkspaceRole.OWNER, "workspace.insufficient_role"),
 }
 
 

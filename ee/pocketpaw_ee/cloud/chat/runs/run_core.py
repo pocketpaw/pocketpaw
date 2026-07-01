@@ -1,6 +1,93 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-30 (fix/warm-noop-benign-error) — WARM hot-process reuse was a NO-OP
+  live: a benign backend ``error`` event flipped ``sup_run_failed`` True, so the
+  ``finally`` called ``mark_crashed`` and tore down the session's warm ``claude``
+  client EVERY turn — turn 2 never reused turn 1's slot. The real ``claude_sdk``
+  yields ``error`` THEN ``done`` for a non-fatal ResultMessage ``is_error`` (a turn
+  that still produced a response; the leased client stays healthy), but the error
+  branch ``break``-ed and flagged a crash before seeing the ``done``. Fixed: on the
+  supervised path the error branch now RECORDS the error (``sup_saw_error``) and
+  keeps consuming instead of breaking; ``sup_run_failed`` is decided at stream-end
+  — a trailing error followed by ``done`` (``sup_completed_ok``) keeps the slot
+  warm, while an ``error`` with no successful completion is still a genuine crash
+  that demotes the runtime to COLD (so the next turn cold-resumes from the store).
+  The legacy (flag-OFF) path keeps its original break-and-stop behavior byte-for-byte.
+- 2026-06-30 (feat/warm-reuse WH-3) — the supervised block now keeps a session's
+  ``claude`` client WARM across turns. When ``acquire`` returns a live, eligible
+  warm slot (``warm_reuse`` + ``slot``), the executor LEASES it to the backend
+  via ``run_kwargs["warm_client"]`` so turn 2+ drives the existing subprocess
+  directly (no re-materialize, no reconnect). On such a warm-reuse turn it
+  WITHHOLDS the resume id from the ``SessionHandle`` (``cli_session_id=None``,
+  store still threaded): the backend's warm-reuse path is gated on
+  ``not resume_active``, and the live client already holds THIS session's
+  conversation, so threading resume would silently demote warm reuse to a cold
+  re-materialize. On every other supervised turn (turn 1, a reaped/COLD runtime,
+  crash recovery) the resume id is threaded exactly as SS-5 did (cold-resume).
+  The executor ALSO always hands the backend an ``on_client_built`` callback that
+  binds the freshly-built client back to the supervisor (``bind_warm_slot`` with a
+  ``LeasedClient``) so the NEXT turn can reuse it; it is a no-op on a warm-reuse
+  turn and rebinds the new slot on a key-drift (model/tools changed) turn. Flag
+  OFF is byte-for-byte unchanged: neither ``warm_client`` nor ``on_client_built``
+  is added. (Known follow-up: a leased turn that carries ``skill_names``
+  materializes a per-run skills dir that is cleaned at backend ``cleanup()``, not
+  at the supervisor's per-leased-client teardown — a benign retention gap, no run
+  correctness impact; the clean fix spans the WH-1/WH-2 surface.)
+- 2026-06-30 (feat/session-supervisor SS-5) — ``_drive_agent_loop`` now drives
+  every supervised agent turn through the ``SessionSupervisor`` + the durable
+  ``(workspace, session, agent) -> cli_session_id`` mapping (SS-3
+  ``runtime_service``) + the per-tenant ``MongoSessionStore`` (SS-2), gated
+  behind ``POCKETPAW_SESSION_SUPERVISOR`` (default OFF). When ON: it resolves the
+  stable session identity (``workspace_id`` / ``scope_id`` as the per-conversation
+  key / ``target_agent_id``), recovers any prior native ``cli_session_id`` from
+  the durable mapping, calls ``supervisor.acquire(...)``, builds a
+  ``SessionHandle(cli_session_id=acq.cli_session_id, session_store=MongoSessionStore(ws))``
+  and threads it as ``session_handle=`` into ``pool.run`` so the agent RESUMES
+  its native CLI session (durable across restart, tenant-isolated) instead of
+  replaying Mongo history. The run is bracketed with
+  ``mark_run_start`` / ``mark_run_end`` (the latter in ``finally``); the turn-1
+  ``("session_id", {...})`` event the claude_sdk backend emits is consumed
+  internally (NOT yielded to the SSE transport) and persisted via
+  ``runtime_service.set_cli_session_id`` + ``supervisor.record_cli_session_id``;
+  a crash (pool.run raised, or a backend ``error`` event) flips the runtime to
+  COLD via ``mark_crashed``. v1 does NOT bind a live warm slot (WARM hot-process
+  reuse is a documented fast-follow) — every supervised turn resumes from the
+  store. When OFF, ``sup_acq`` stays ``None``, no supervisor/store/mapping call
+  fires, and ``pool.run`` is invoked WITHOUT a ``session_handle`` — byte-for-byte
+  the legacy path.
+- 2026-06-27 (fix/cloud-artifacts-reland) — ``execute_run`` now wraps the run
+  lifecycle (the prewarm ``create_task`` + the main agent loop) in
+  ``mark_cloud_chat_run`` so the per-tenant cwd jail's fail-closed
+  (``agent_jail.resolve_agent_cwd``) fires ONLY for an actual cloud chat
+  dispatch — not for any workspace-less run in a cloud-connected process. The
+  marker is set BEFORE the prewarm ``create_task`` (``asyncio.create_task``
+  copies the context, carrying it into the prewarm task) and BEFORE the two
+  ``attach_agent_identity`` binds, so a run that reaches the backend WITHOUT
+  binding identity still trips the guard. Fixes the dev-CI regression where the
+  jail hard-failed direct claude_sdk backend tests + a broad ee set once a cloud
+  test left ``is_multi_tenant_cloud()`` True in the process.
+- 2026-06-26 (ART-2) — ``_prewarm_session`` now binds the run's identity
+  (``attach_agent_identity`` with the same ``session_mongo_id`` / ``pocket_id``
+  the stream path uses) around its ``pool.prewarm`` call, then detaches in a
+  ``finally``. The per-tenant cwd jail resolves the agent's working directory
+  from those ContextVars; since prewarm is fired in its own ``create_task``
+  context BEFORE the stream binds identity, without this the cloud cwd resolver
+  would fail closed during warm-up (swallowed) and every cloud session would
+  lose the turn-1 warm. Binding here makes prewarm warm the SAME per-session
+  jail turn 1 will use.
+- 2026-06-25 (fix/worker-trusts-spec-workspace) — ``execute_run`` now threads
+  the authenticated ``spec.workspace_id`` into ``resolve_scope_context`` via the
+  new ``expected_workspace_id`` kwarg, then raises a clean
+  ``CloudError("scope.no_workspace")`` if the resolved ``ctx.workspace_id`` is
+  STILL empty — instead of letting ``_drive_agent_loop`` attach an empty
+  identity. The worker used to re-derive tenancy from the scope doc alone and
+  discard the trusted, route-validated spec workspace; when the doc's
+  ``workspace`` field was empty the identity contextvar became ``""`` and the
+  sites-create MCP tool raised "requires workspace and user context (call from a
+  cloud chat session)". The resolver now falls back to the trusted spec
+  workspace (and rejects a spec that disagrees with a non-empty doc workspace —
+  the cross-tenant guard); this seam adds the loud, scope-specific failure.
 - 2026-06-13 (feat/claude-sdk-prewarm) — ``execute_run`` now fires
   ``_prewarm_session(ctx)`` as a fire-and-forget ``asyncio.create_task`` right
   after the entity-aware profile is resolved, so the agent's Claude CLI
@@ -98,10 +185,19 @@ from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any
 
+from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
+    LeasedClient,
+    SessionHandle,
+)
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
     get_agent_pool,
 )
+from pocketpaw.agents.session_supervisor import (  # type: ignore[import-untyped]
+    get_session_supervisor,
+)
 from pocketpaw_ee.cloud._core.realtime import xproc
+from pocketpaw_ee.cloud.agent_sessions import runtime_service
+from pocketpaw_ee.cloud.agent_sessions.store import MongoSessionStore
 from pocketpaw_ee.cloud.chat.agent_service import (
     ScopeContext,
     ScopeKind,
@@ -111,6 +207,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
     build_knowledge_context,
     detach_agent_identity,
     detach_sse_event_sink,
+    mark_cloud_chat_run,
     push_sse_event,
     session_key_for,
 )
@@ -120,6 +217,7 @@ from pocketpaw_ee.cloud.chat.agent_service import (
 from pocketpaw_ee.cloud.chat.runs import service as run_service
 from pocketpaw_ee.cloud.chat.runs.domain import RunSpec
 from pocketpaw_ee.cloud.chat.runs.transport import get_stream_transport
+from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.surface import (
     SurfaceKind,
     SurfaceMeta,
@@ -185,6 +283,24 @@ def _looks_like_legacy_ripple_spec(candidate: Any) -> bool:
 
 def _stream_ttl() -> int:
     return int(os.environ.get("POCKETPAW_CLOUD_RUN_STREAM_TTL", "3600"))
+
+
+# Default-OFF flag (feat/session-supervisor SS-5). When truthy, the live executor
+# drives every supervised agent turn through the SessionSupervisor + the durable
+# native-id mapping (SS-3) + the per-tenant Mongo transcript store (SS-2) so the
+# agent RESUMES its native CLI session instead of replaying Mongo history into the
+# prompt. OFF (the default) leaves ``pool.run`` byte-for-byte the legacy path.
+_SUPERVISOR_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _session_supervisor_enabled() -> bool:
+    """Read the ``POCKETPAW_SESSION_SUPERVISOR`` flag (env, default OFF).
+
+    Mirrors the env-flag pattern the other ee runtime flags use (e.g. the
+    resumable-run executor / transport flags read ``POCKETPAW_*`` straight off
+    ``os.environ``). Truthy = any of ``1/true/yes/on`` (case-insensitive).
+    """
+    return os.environ.get("POCKETPAW_SESSION_SUPERVISOR", "").strip().lower() in _SUPERVISOR_TRUTHY
 
 
 async def _load_entity_profile_override(workspace_id: str, pocket_id: str) -> dict[str, Any] | None:
@@ -726,16 +842,35 @@ async def _prewarm_session(ctx: ScopeContext) -> None:
             surface_skills = ctx.resolved_profile.skill_names or frozenset()
         surface_skills = surface_skills | _agent_skill_set(instance)
 
-        await pool.prewarm(
-            ctx.target_agent_id,
-            session_key_for(ctx),
-            instructions=behavior_instructions,
-            deny_mcp_tool_ids=surface_deny,
-            allow_sdk_tools=surface_allow,
-            allow_mcp_tool_ids=surface_allow_mcp,
-            system_message_override=surface_sys_override,
-            skill_names=surface_skills,
+        # Bind this run's tenancy for the warm-up so the prewarmed subprocess
+        # connects with the SAME per-tenant cwd jail the first turn will resolve
+        # (ART-2). _prewarm_session runs in its own create_task context, fired
+        # BEFORE the stream binds identity at the _drive_agent_loop seam, so
+        # without this the cloud cwd resolver would fail closed here (swallowed)
+        # and every cloud session would lose the turn-1 warm. Mirrors the
+        # run-path binding exactly (same session_mongo_id / pocket_id) so prewarm
+        # and turn 1 resolve one cwd; detached in finally so it can't leak into
+        # this task's later work.
+        session_mongo_id = ctx.scope_id if ctx.kind is ScopeKind.SESSION else None
+        identity_tokens = attach_agent_identity(
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
+            session_mongo_id=session_mongo_id,
+            pocket_id=ctx.pocket_id,
         )
+        try:
+            await pool.prewarm(
+                ctx.target_agent_id,
+                session_key_for(ctx),
+                instructions=behavior_instructions,
+                deny_mcp_tool_ids=surface_deny,
+                allow_sdk_tools=surface_allow,
+                allow_mcp_tool_ids=surface_allow_mcp,
+                system_message_override=surface_sys_override,
+                skill_names=surface_skills,
+            )
+        finally:
+            detach_agent_identity(identity_tokens)
     except Exception as exc:  # noqa: BLE001 — prewarm must NEVER break a run
         logger.debug("prewarm_session skipped (swallowed): %s", exc)
 
@@ -759,12 +894,25 @@ async def _drive_agent_loop(
         yield ("error", {"code": "agent.load_failed", "message": str(e)})
         return
 
+    # Bail early if /agent/stop was called while we loaded the agent
+    # instance — without this the while-loop cancel check below never
+    # runs if build_knowledge_context or pool.run blocks for many
+    # seconds, and the SSE generator stays alive waiting for a terminal
+    # event that never arrives.
+    if await is_cancelled():
+        return
+
     knowledge_context = await build_knowledge_context(
         ctx,
         user_message=user_content,
         attachments=attachments_in,
         mentions=mentions_in,
     )
+    # Bail early if /agent/stop was called while knowledge context was
+    # being built (another blocking point before the cancel-check loop).
+    if await is_cancelled():
+        return
+
     backend_name = (
         instance.config.get("backend", "claude_agent_sdk") if hasattr(instance, "config") else None
     )
@@ -811,6 +959,34 @@ async def _drive_agent_loop(
     handled_pocket_ids: set[str] = set()
     next_event_task: asyncio.Task[Any] | None = None
     next_queue_task: asyncio.Task[tuple[str, dict[str, Any]]] | None = None
+    # Supervised native-resume bookkeeping (feat/session-supervisor SS-5).
+    # Pre-init OUTSIDE the ``try`` so the ``finally`` / ``except`` can always
+    # reference them even if setup raised mid-flight. ``sup_acq`` stays ``None``
+    # on the legacy (flag-OFF) path — every supervisor/store call below is then
+    # skipped, so the run is byte-for-byte unchanged.
+    #
+    # Session identity for the SS-3 durable mapping: ``ctx.scope_id`` is the
+    # stable PER-CONVERSATION key (``session:<id>`` / ``group:<id>`` / ``dm:<id>``)
+    # — present on every turn and stable across process restarts. We deliberately
+    # do NOT use ``ctx.session_id`` (the Mongo session-doc id), which
+    # ``resolve_scope_context`` leaves ``None`` on the worker path; ``scope_id`` is
+    # the key SS-3's ``(workspace, session, agent) -> cli_session_id`` map is keyed
+    # on, so resume resolves the same row turn after turn.
+    sup_acq: Any = None
+    sup_run_failed = False
+    # WARM no-op fix (2026-06-30): a backend ``error`` event only demotes the warm
+    # slot to COLD when the run did NOT also reach a successful completion. The real
+    # ``claude_sdk`` yields ``error`` THEN ``done`` for a benign, non-fatal
+    # ResultMessage ``is_error`` (the leased client stays alive), so we record the
+    # error here and decide ``sup_run_failed`` at stream-end: a trailing error
+    # followed by ``done`` keeps the slot warm; an error with no completion is a
+    # genuine crash (demote → COLD). Both stay ``False`` on the legacy (flag-OFF)
+    # path, where the error branch keeps its original break-and-stop behavior.
+    sup_saw_error = False
+    sup_completed_ok = False
+    sup_workspace_id = ctx.workspace_id
+    sup_session_id = ctx.scope_id
+    sup_agent_id = ctx.target_agent_id
     try:
         session_key = session_key_for(ctx)
         # Read the per-run tool policy from the PRE-RESOLVED, ENTITY-AWARE
@@ -867,6 +1043,83 @@ async def _drive_agent_loop(
         # narrower signature safe.
         if surface_skills:
             run_kwargs["skill_names"] = surface_skills
+        # --- Supervised native-resume wiring (feat/session-supervisor SS-5) -----
+        # Flag-gated (default OFF). When ON, route this turn through the
+        # SessionSupervisor: recover any prior native ``cli_session_id`` from the
+        # durable SS-3 mapping, ``acquire`` the runtime (turn 1 owns capture; a
+        # later turn carries the resume id), and thread a ``SessionHandle`` that
+        # pairs that id with this tenant's ``MongoSessionStore`` so the agent
+        # resumes natively (durable, tenant-isolated) instead of replaying
+        # history. ``project_key`` is left ``None`` in v1: the durable mapping and
+        # the supervisor accept ``None`` (informational only), native resume needs
+        # only the ``cli_session_id``, and the SDK derives the store's own
+        # ``(workspace, project_key, session_id)`` key from its ``SessionKey`` at
+        # append/load time. Any failure degrades to the legacy path for THIS turn
+        # (no handle threaded) — a supervisor hiccup never breaks a run.
+        if _session_supervisor_enabled() and sup_workspace_id and sup_session_id and sup_agent_id:
+            try:
+                prior_cli = await runtime_service.get_cli_session_id(
+                    sup_workspace_id, sup_session_id, sup_agent_id
+                )
+                supervisor = get_session_supervisor()
+                sup_acq = supervisor.acquire(
+                    sup_workspace_id,
+                    sup_session_id,
+                    sup_agent_id,
+                    cli_session_id=prior_cli,
+                    project_key=None,
+                )
+                # WH-3: turn 2+ keeps this session's ``claude`` client WARM. When
+                # ``acquire`` hands back a live, key-eligible warm slot, LEASE it
+                # to the backend (``warm_client``) so the turn drives the existing
+                # subprocess directly — no re-materialize, no reconnect. The
+                # backend's warm-reuse path is gated on ``not resume_active`` (a
+                # resume id forces a fresh launch), so on a warm-reuse turn we
+                # WITHHOLD the resume id from the ``SessionHandle``: the live client
+                # already carries THIS session's conversation in memory, so resuming
+                # from the store would be redundant AND would silently demote warm
+                # reuse to a cold re-materialize. The store is still threaded
+                # (durable append unchanged). On every other supervised turn
+                # (turn 1, a reaped/COLD runtime, a crash recovery) the resume id IS
+                # threaded — the unchanged SS-5 cold-resume path.
+                warm_turn = sup_acq.warm_reuse and sup_acq.slot is not None
+                run_kwargs["session_handle"] = SessionHandle(
+                    cli_session_id=None if warm_turn else sup_acq.cli_session_id,
+                    session_store=MongoSessionStore(sup_workspace_id),
+                )
+                if warm_turn:
+                    run_kwargs["warm_client"] = sup_acq.slot
+                # Always (on the supervised path) hand the backend a callback that
+                # BINDS the freshly-built client back to the supervisor as this
+                # session's warm slot, so the NEXT turn can reuse it. A no-op on a
+                # warm-reuse turn (the backend drives the leased client and never
+                # builds a fresh one); on a key-drift turn (model/tools changed
+                # mid-session) the backend rebuilds and this rebinds the new slot.
+                # ``_warm_acq`` captures THIS turn's acquisition so the closure
+                # never observes the ``except``-path reset of ``sup_acq``.
+                _warm_acq = sup_acq
+
+                def _on_client_built(client: Any, options_key: str, teardown: Any) -> None:
+                    get_session_supervisor().bind_warm_slot(
+                        _warm_acq.runtime,
+                        LeasedClient(client=client, options_key=options_key),
+                        teardown,
+                    )
+
+                run_kwargs["on_client_built"] = _on_client_built
+                supervisor.mark_run_start(sup_acq.runtime)
+            except Exception:
+                logger.warning(
+                    "session-supervisor acquire failed for ws=%s session=%s — "
+                    "falling back to the legacy (no native resume) path this turn",
+                    sup_workspace_id,
+                    sup_session_id,
+                    exc_info=True,
+                )
+                sup_acq = None
+                run_kwargs.pop("session_handle", None)
+                run_kwargs.pop("warm_client", None)
+                run_kwargs.pop("on_client_built", None)
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -885,7 +1138,14 @@ async def _drive_agent_loop(
             wait_set: set[asyncio.Task[Any]] = {next_queue_task}
             if next_event_task is not None:
                 wait_set.add(next_event_task)
-            done, _pending = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+            # 1-second timeout so cancellation is checked periodically during
+            # long-running LLM calls or tool executions — without a timeout the
+            # loop can block here indefinitely (no events yielded → execute_run's
+            # post-loop cancel check never runs → /agent/stop returns 200 but the
+            # SSE stream stays alive).
+            done, _pending = await asyncio.wait(
+                wait_set, return_when=asyncio.FIRST_COMPLETED, timeout=1.0
+            )
             if next_queue_task in done:
                 yield next_queue_task.result()
                 for ev in _drain_side_channel():
@@ -901,6 +1161,11 @@ async def _drive_agent_loop(
             etype = getattr(event, "type", None)
             econtent = getattr(event, "content", "")
             if etype == "done":
+                # The backend reached a successful completion (it only yields
+                # ``done`` when no exception aborted the stream). A preceding
+                # benign ``error`` event is therefore NOT a crash — the warm slot
+                # must survive (WARM no-op fix).
+                sup_completed_ok = True
                 next_event_task = None
                 break
             next_event_task = asyncio.create_task(_next_event())
@@ -958,6 +1223,40 @@ async def _drive_agent_loop(
                 meta = getattr(event, "metadata", None) or {}
                 usage_payload = dict(meta) if isinstance(meta, dict) else {}
                 yield ("token_usage", usage_payload)
+            elif etype == "session_id":
+                # Turn-1 native-id capture (feat/session-supervisor SS-5). The
+                # claude_sdk backend emits this ONCE per supervised session — and
+                # only when a ``session_handle`` was threaded (i.e. the flag is
+                # ON), so it never appears on the legacy path. Persist it durably
+                # (SS-3 mapping, for resume after a restart) AND onto the live
+                # supervisor runtime (so subsequent ``acquire`` calls this process
+                # resolve it). Consumed INTERNALLY — NOT yielded to the SSE
+                # transport: the client stream has no ``session_id`` frame, so
+                # keeping it internal leaves the wire identical to today. Best-
+                # effort: a persist failure must never break the in-flight turn.
+                if sup_acq is not None:
+                    sid_meta = getattr(event, "metadata", None) or {}
+                    native_id = sid_meta.get("session_id") if isinstance(sid_meta, dict) else None
+                    if native_id:
+                        try:
+                            await runtime_service.set_cli_session_id(
+                                sup_workspace_id,
+                                sup_session_id,
+                                sup_agent_id,
+                                native_id,
+                                project_key=None,
+                            )
+                            get_session_supervisor().record_cli_session_id(
+                                sup_acq.runtime, native_id, project_key=None
+                            )
+                        except Exception:
+                            logger.warning(
+                                "session-supervisor turn-1 capture persist failed "
+                                "for ws=%s session=%s",
+                                sup_workspace_id,
+                                sup_session_id,
+                                exc_info=True,
+                            )
             elif etype == "error":
                 # Surface backend-yielded errors instead of silently dropping
                 # them — a misconfigured backend (codex_cli without
@@ -971,9 +1270,43 @@ async def _drive_agent_loop(
                     message[:200],
                 )
                 yield ("error", {"code": "agent.backend_error", "message": message})
+                if sup_acq is not None:
+                    # Supervised: a backend ``error`` event is NOT automatically a
+                    # crash. The leased ``claude`` client can stay alive and healthy
+                    # while the SDK reports a benign/non-fatal ResultMessage
+                    # ``is_error`` (a turn that still produced a response) — and the
+                    # real backend then yields ``done`` right after. Record the
+                    # error but KEEP consuming: a trailing ``done`` proves the run
+                    # completed (the warm slot must survive for reuse), while an
+                    # error with no completion is a genuine failure. ``sup_run_failed``
+                    # is decided at stream-end from ``sup_saw_error`` + the
+                    # ``sup_completed_ok`` ``done`` signal.
+                    sup_saw_error = True
+                    continue
+                # Legacy (flag-OFF) path: byte-for-byte unchanged — surface the
+                # error and stop the stream.
+                sup_run_failed = True
                 break
+        # Supervised crash determination (WARM no-op fix): an ``error`` event demotes
+        # the warm slot only when the stream did NOT also reach a successful
+        # completion. A benign trailing error followed by ``done`` (the leased client
+        # is healthy) keeps the slot warm for reuse; an error with no ``done`` is a
+        # genuine failure → ``mark_crashed`` (COLD) in the ``finally``. No-op on the
+        # legacy path (``sup_acq is None``) and on a clean run (``sup_saw_error`` False).
+        if sup_acq is not None and sup_saw_error and not sup_completed_ok:
+            sup_run_failed = True
         for ev in _drain_side_channel():
             yield ev
+    except Exception:
+        # A crash mid-stream (pool.run raised, a transport/store error, etc.) is a
+        # supervised-session failure: flag it so ``finally`` demotes the runtime to
+        # COLD via ``mark_crashed``. Re-raise so ``execute_run``'s existing error
+        # handling is unchanged. ``CancelledError`` / ``GeneratorExit`` are
+        # BaseExceptions and intentionally NOT caught here — a host cancel or an
+        # early consumer-close is a clean stop, not a crash (``mark_run_end`` still
+        # runs in ``finally``).
+        sup_run_failed = True
+        raise
     finally:
         pending = [t for t in (next_event_task, next_queue_task) if t is not None and not t.done()]
         for t in pending:
@@ -988,15 +1321,28 @@ async def _drive_agent_loop(
             detach_agent_identity(identity_tokens)
         except Exception:
             pass
+        # Release the supervisor busy-counter — and, on a failed run, demote the
+        # runtime to COLD (``mark_crashed`` keeps the cli_session_id so the next
+        # turn still resumes from the store). Best-effort: bookkeeping must never
+        # break teardown. No-op on the legacy path (``sup_acq is None``).
+        if sup_acq is not None:
+            try:
+                _sup = get_session_supervisor()
+                if sup_run_failed:
+                    _sup.mark_crashed(sup_acq.runtime)
+                _sup.mark_run_end(sup_acq.runtime)
+            except Exception:
+                logger.debug("session-supervisor run-end bookkeeping failed", exc_info=True)
 
 
 async def _iter_agent_events(
     spec: RunSpec, ctx: ScopeContext
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     # Transport writes happen only in ``execute_run`` so the seam stays clean.
+    transport = get_stream_transport()
 
-    async def _never_cancelled() -> bool:
-        return False
+    async def _is_cancelled() -> bool:
+        return await transport.is_cancelled(spec.run_id)
 
     async for ev in _drive_agent_loop(
         ctx,
@@ -1004,7 +1350,7 @@ async def _iter_agent_events(
         attachments_in=list(spec.attachments) if spec.attachments else None,
         mentions_in=list(spec.mentions) if spec.mentions else None,
         history=list(spec.history),
-        is_cancelled=_never_cancelled,
+        is_cancelled=_is_cancelled,
         emit_stream_start=True,
     ):
         yield ev
@@ -1042,6 +1388,41 @@ async def _handle_interrupted_cleanup(
         logger.debug("interrupted stream write failed", exc_info=True)
 
 
+async def _reject_if_over_jail_quota(spec: RunSpec, ctx: ScopeContext, transport: Any) -> bool:
+    """ART-3 per-workspace agent-jail quota, enforced at RUN-START.
+
+    The agent writes through its native subprocess tools (Write/Bash), so we
+    can't cheaply gate each individual write; instead we measure the workspace's
+    total jail size ONCE here — before spinning up the agent — and reject the run
+    CLEANLY when it's over quota. The rejection is a terminal ``failed`` run with
+    a clear message and an ``error`` stream frame, never an OOM/crash that takes
+    the worker (and every other tenant on the box) down. Returns ``True`` when
+    the run was rejected (the caller returns early), ``False`` to proceed. Off
+    cloud / under quota it is a no-op returning ``False``.
+    """
+    from pocketpaw_ee.cloud import agent_jail
+
+    quota_error = agent_jail.check_workspace_jail_quota(ctx.workspace_id)
+    if not quota_error:
+        return False
+    logger.warning("run %s rejected — agent jail over quota: %s", spec.run_id, quota_error)
+    try:
+        await transport.append_event(
+            spec.run_id, "error", {"code": "agent.jail_over_quota", "message": quota_error}
+        )
+    except Exception:
+        logger.debug("over-quota error frame append failed for %s", spec.run_id, exc_info=True)
+    try:
+        await run_service.mark_terminal(spec.run_id, status="failed", error=quota_error)
+    except Exception:
+        logger.exception("mark_terminal(failed) failed for over-quota run %s", spec.run_id)
+    try:
+        await transport.set_ttl(spec.run_id, _stream_ttl())
+    except Exception:
+        logger.debug("over-quota stream ttl set failed for %s", spec.run_id, exc_info=True)
+    return True
+
+
 async def execute_run(spec: RunSpec) -> None:
     """Run the agent for ``spec`` and write every event to the transport.
 
@@ -1049,12 +1430,33 @@ async def execute_run(spec: RunSpec) -> None:
     persistence purposes (no assistant message created).
     """
     transport = get_stream_transport()
+    # Thread the authenticated, route-validated workspace from the spec into
+    # scope resolution (fix/worker-trusts-spec-workspace). The HTTP route stamps
+    # ``spec.workspace_id`` from the ``current_workspace_id`` dependency (which
+    # rejects an empty workspace with 400), so it is the trusted tenancy. The
+    # resolver uses it to FALL BACK when the scope doc's ``workspace`` field is
+    # empty/missing and to REJECT a spec whose workspace disagrees with a
+    # non-empty doc workspace. Before this, the worker re-derived tenancy from
+    # the doc alone and a blank doc workspace blanked the whole identity — the
+    # sites-create MCP tool then raised "requires workspace and user context".
     ctx = await resolve_scope_context(
         scope=spec.context_type,
         scope_id=spec.scope_id,
         user_id=spec.user_id,
         agent_id_hint=spec.agent_id,
+        expected_workspace_id=spec.workspace_id,
     )
+    # Even with the spec fallback, a doc + spec that BOTH lack a usable workspace
+    # must fail cleanly here — never attach an empty identity downstream (the
+    # contextvar-reading MCP tools would surface a confusing error deep inside
+    # the tool instead of at this seam). ``attach_agent_identity`` also rejects
+    # empties as defense-in-depth; this gives a scope-specific code first.
+    if not ctx.workspace_id:
+        raise CloudError(
+            400,
+            "scope.no_workspace",
+            "Could not resolve a workspace for this run's scope",
+        )
     ctx.intent = spec.intent
 
     # Mirror agent_router._ensure_scope_session so _drive_agent_loop's
@@ -1100,78 +1502,109 @@ async def execute_run(spec: RunSpec) -> None:
     # to the surface base (today's behavior).
     ctx.resolved_profile = await _resolve_entity_profile(ctx)
 
-    # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
-    # subprocess for this session NOW — concurrently with the remaining pre-turn
-    # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
-    # knowledge-context build, soul recall, SSE setup, prompt assembly). By the
-    # time pool.run reaches the first connect(), the subprocess is already live
-    # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
-    # forget: _prewarm_session swallows every error, so it can never delay or
-    # break this run; the task is intentionally not awaited.
-    asyncio.create_task(_prewarm_session(ctx))
+    # ART-3: reject a run whose workspace agent-jail is over quota BEFORE the
+    # prewarm + mark-running + agent spin-up, so a tenant that filled its scratch
+    # quota fails fast and cleanly instead of crashing the shared box mid-run.
+    if await _reject_if_over_jail_quota(spec, ctx, transport):
+        return
 
-    await _mark_running(spec.run_id)
-    await _broadcast_agent_typing(ctx, active=True)
+    # Mark this dispatch as a live cloud CHAT run for the per-tenant cwd jail's
+    # fail-closed (fix/cloud-artifacts-reland). ``agent_jail.resolve_agent_cwd``
+    # refuses to fall back to the shared home dir on a workspace-less run ONLY
+    # when this marker is set — so a workspace-less run in a cloud-connected
+    # process that ISN'T a chat dispatch (a direct backend test, the CLI, a
+    # background job) cleanly falls back instead of hard-failing. Set HERE, at
+    # the common dispatch ancestor and BEFORE the prewarm ``create_task`` and
+    # the two ``attach_agent_identity`` binds, so (a) the prewarm task inherits
+    # it (``asyncio.create_task`` copies the context) and (b) a run that reaches
+    # the backend WITHOUT binding identity — the real mis-tenanting bug — still
+    # trips the guard. Reset in the context manager's finally so it never leaks
+    # past this run. The post-loop persist below resolves no cwd, so it sits
+    # outside the marked region.
+    with mark_cloud_chat_run():
+        # PREWARM (feat/claude-sdk-prewarm): kick off warming the agent's CLI
+        # subprocess for this session NOW — concurrently with the remaining pre-turn
+        # work below (mark-running, typing broadcast, and inside _drive_agent_loop:
+        # knowledge-context build, soul recall, SSE setup, prompt assembly). By the
+        # time pool.run reaches the first connect(), the subprocess is already live
+        # and turn 1 reuses it instead of paying the ~12s cold connect. Fire-and-
+        # forget: _prewarm_session swallows every error, so it can never delay or
+        # break this run; the task is intentionally not awaited.
+        asyncio.create_task(_prewarm_session(ctx))
 
-    full_text = ""
-    cancelled = False
-    error: Exception | None = None
-    backend_error_message: str | None = None
-    # Per-run token metering (W3a). The backend yields a ``token_usage`` event
-    # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
-    # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
-    # multi-turn agent loop can report usage more than once) so the final
-    # ``stream_end`` frame and the persisted run doc carry actual counts instead
-    # of the old hardcoded ``{}``.
-    usage: dict[str, Any] = {}
-    try:
-        async for event_name, event_data in _iter_agent_events(spec, ctx):
-            if await transport.is_cancelled(spec.run_id):
-                cancelled = True
-                break
-            if event_name == "chunk":
-                content = event_data.get("content", "")
-                if isinstance(content, str):
-                    full_text += content
-            elif event_name == "token_usage":
-                if isinstance(event_data, dict) and event_data:
-                    usage = event_data
-            await transport.append_event(spec.run_id, event_name, event_data)
-            if event_name == "error":
-                # ``_drive_agent_loop`` already broke out after yielding this.
-                # The frame is terminal for the client (TERMINAL_EVENTS); stop
-                # writing and route to the failed-mark path below so the doc
-                # doesn't get flipped to ``completed`` by the empty-text branch.
-                backend_error_message = str(event_data.get("message") or "")
-                break
-    except asyncio.CancelledError:
-        # The task itself was cancelled (worker shutdown, host signal). Run
-        # the interrupted-cleanup INSIDE the except clause so the bare
-        # ``raise`` below re-raises the original CancelledError instance —
-        # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
-        # and the original traceback. The cleanup is shielded so a second
-        # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
-        # and strand the doc in ``running`` with no terminal stream frame.
-        logger.info("execute_run %s cancelled by host", spec.run_id)
+        await _mark_running(spec.run_id)
+        await _broadcast_agent_typing(ctx, active=True)
+
+        full_text = ""
+        cancelled = False
+        error: Exception | None = None
+        backend_error_message: str | None = None
+        # Per-run token metering (W3a). The backend yields a ``token_usage`` event
+        # carrying the real prompt / completion / cached token counts; ``_drive_agent_loop``
+        # surfaces it as a ``("token_usage", {...})`` tuple. Keep the LATEST one (a
+        # multi-turn agent loop can report usage more than once) so the final
+        # ``stream_end`` frame and the persisted run doc carry actual counts instead
+        # of the old hardcoded ``{}``.
+        usage: dict[str, Any] = {}
         try:
-            await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+            async for event_name, event_data in _iter_agent_events(spec, ctx):
+                if await transport.is_cancelled(spec.run_id):
+                    cancelled = True
+                    break
+                if event_name == "chunk":
+                    content = event_data.get("content", "")
+                    if isinstance(content, str):
+                        full_text += content
+                elif event_name == "token_usage":
+                    if isinstance(event_data, dict) and event_data:
+                        usage = event_data
+                await transport.append_event(spec.run_id, event_name, event_data)
+                if event_name == "error":
+                    # ``_drive_agent_loop`` already broke out after yielding this.
+                    # The frame is terminal for the client (TERMINAL_EVENTS); stop
+                    # writing and route to the failed-mark path below so the doc
+                    # doesn't get flipped to ``completed`` by the empty-text branch.
+                    backend_error_message = str(event_data.get("message") or "")
+                    break
         except asyncio.CancelledError:
-            # The outer await is cancelled but the shielded inner task
-            # continues running to completion in the background. That's
-            # exactly what we want; just don't re-raise from this layer —
-            # let the original cancel propagate after the except clause.
-            pass
-        except Exception:
-            logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
-        raise
-    except Exception as exc:
-        error = exc
-        logger.exception("execute_run %s crashed", spec.run_id)
-        await transport.append_event(
-            spec.run_id,
-            "error",
-            {"code": "agent.run_failed", "message": str(exc)},
-        )
+            # The task itself was cancelled (worker shutdown, host signal). Run
+            # the interrupted-cleanup INSIDE the except clause so the bare
+            # ``raise`` below re-raises the original CancelledError instance —
+            # preserving the cancel-reason arq supplies via ``task.cancel(msg)``
+            # and the original traceback. The cleanup is shielded so a second
+            # cancel (SIGKILL grace window) can't abort mark_terminal mid-flight
+            # and strand the doc in ``running`` with no terminal stream frame.
+            logger.info("execute_run %s cancelled by host", spec.run_id)
+            try:
+                await asyncio.shield(_handle_interrupted_cleanup(spec, ctx, full_text, transport))
+            except asyncio.CancelledError:
+                # The outer await is cancelled but the shielded inner task
+                # continues running to completion in the background. That's
+                # exactly what we want; just don't re-raise from this layer —
+                # let the original cancel propagate after the except clause.
+                pass
+            except Exception:
+                logger.exception("interrupted cleanup raised after shield for %s", spec.run_id)
+            raise
+        except Exception as exc:
+            error = exc
+            logger.exception("execute_run %s crashed", spec.run_id)
+            await transport.append_event(
+                spec.run_id,
+                "error",
+                {"code": "agent.run_failed", "message": str(exc)},
+            )
+
+    # Check cancellation AFTER the agent loop. _drive_agent_loop now checks the
+    # cancel flag internally (via _iter_agent_events -> real _is_cancelled callback
+    # with a 1-second asyncio.wait timeout), so the loop exits cleanly when the
+    # user hits /agent/stop. Without this the SSE stream stays alive because
+    # execute_run only checked cancellation inside the loop (between events), and
+    # _drive_agent_loop could block on asyncio.wait for the first LLM event for
+    # many seconds without yielding -- the /agent/stop endpoint returned 200 but
+    # the stream never stopped.
+    if await transport.is_cancelled(spec.run_id):
+        cancelled = True
 
     # Drop the typing indicator before persist so a slow Mongo write
     # doesn't leave it stuck on. Only reached on non-cancelled paths;

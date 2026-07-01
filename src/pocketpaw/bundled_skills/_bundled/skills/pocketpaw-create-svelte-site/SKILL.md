@@ -48,6 +48,21 @@ So: **do NOT call `get_widget_spec`. Do NOT draft a `rippleSpec`. Do NOT
 call `pocket_specialist__create`. Do NOT delegate to a subagent.** Author
 the components, assemble the `source` map, and call `create_svelte_site`.
 
+**Two kinds of svelte site — static and dynamic.** Most of this skill builds
+a **STATIC** marketing page (prerendered HTML, no live data). But a svelte
+site can also be **DYNAMIC** — backed by the customer's **own live data** (a
+per-tenant database), with reads AND writes: a guestbook that lists entries
+and lets visitors add one, a public booking list, a submissions board. You
+declare the data layer as bindings on the same `source` envelope and author
+components that read/write it through generated helpers. The full recipe is in
+**[Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)**
+below — read it when the user wants live data, not a brochure. Everything up
+to STEP 4 (authoring, the prerender rule, the source map) applies to both;
+the dynamic section layers the data bindings on top. (The ripple track has a
+sibling brain, `pocketpaw-create-dynamic-site`, for the same live-data idea —
+this skill is the svelte-track equivalent; keep the two data-authoring models
+in step.)
+
 ## The quality bar
 
 A landing page **sells**. It reads top to bottom as a conversion funnel:
@@ -206,8 +221,11 @@ Notes that the tool enforces, so get them right:
 ## STEP 3 — Call `create_svelte_site`
 
 Hand the source map to the tool. It persists the pocket stamped
-`type="site"` + `pattern="landing"` + `engine="svelte"` with your map as
-`source` — directly, with no rippleSpec and no specialist.
+`type="site"` + `engine="svelte"` with your map as `source` — directly, with
+no rippleSpec and no specialist. It stamps `pattern="landing"` for a static
+site, or **`pattern="dynamic"` automatically when your `source` carries
+live-data bindings** (`objects`/`sources`/`actions`/`auth` — see the dynamic
+section). You don't pass `pattern`; the tool derives it from the bindings.
 
 ```
 mcp__pocketpaw_sites_manager__create_svelte_site(
@@ -237,6 +255,165 @@ claim a phantom publish. (If a component sets resting state only in
 `onMount`, the smoke build still passes but the baked HTML is wrong — which
 is exactly why the prerender rule above is non-negotiable.)
 
+## Dynamic svelte sites — live data on the svelte track
+
+Everything above builds a **static** page. A **dynamic** svelte site is backed
+by the customer's **own live database** (a per-tenant Cloudflare D1), with
+**reads and writes**. You still author premium Svelte exactly as above — the
+difference is you also **declare a data layer** and **wire components to it**.
+
+### How it works (the contract)
+
+You declare the data layer as **four sibling keys on the same `source`
+envelope** that already holds your `{path: contents}` files:
+
+| key | type | what it is |
+|---|---|---|
+| `objects` | array | the **tables** — each `{ name, fields, primaryKey }` |
+| `sources` | array | the **reads** — each `{ name, kind: "data", object, ... }` |
+| `actions` | array | the **writes** — each `{ name, object, op }` |
+| `auth` | bool | gate the site behind sign-in (omit / `false` = public) |
+
+These live **alongside** your file keys on `source` — not nested, not a
+separate argument. `create_svelte_site` peels them off, stamps the pocket
+`pattern="dynamic"`, and at publish the generator provisions the D1, runs a
+migration from `objects`, compiles read/write **remote functions**, and emits
+typed helpers into the **reserved `src/lib/paw/` namespace** (it owns that
+folder — never author files under `src/lib/paw/` yourself; it's a build error).
+
+The exact binding shapes (they're validated at generate time — a `source`/
+`action` that names an undeclared `object` fails the build):
+
+```jsonc
+// objects[] — a table
+{ "name": "entry",
+  "fields": { "id": "text", "name": "text", "message": "text", "created": "timestamp" },
+  "primaryKey": "id" }
+// field types: "text" | "integer" | "real" | "boolean" | "timestamp"
+
+// sources[] — a read binding
+{ "name": "entries", "kind": "data", "object": "entry",
+  "orderBy": "created desc", "limit": 100,
+  "refresh": "pocket_open" }   // "pocket_open" | "interval" | "manual" | "live"
+
+// actions[] — a write binding
+{ "name": "sign", "object": "entry", "op": "insert" }   // op: "insert" | "update" | "delete"
+```
+
+### Authoring components against the data layer
+
+The generator emits typed helpers your components import from `$lib/paw/`. You
+do **not** write the D1 queries, the migration, or the remote functions — you
+**consume** the generated handles:
+
+- **Read** — `import { useSource } from '$lib/paw/sources';` then
+  `const entries = useSource('entries');` gives a reactive handle with a stable
+  shape: `entries.loading`, `entries.data` (the rows), `entries.error`, and
+  `entries.refresh()`. Use `entries.data` directly in markup
+  (`{#each entries.data as e}`). `useSource` is typed to the EXACT source names
+  you declared — an unknown name is a compile error.
+- **Write** — the simplest, most robust write is a **native form**: each write
+  `action` compiles to a SvelteKit remote `form` you spread onto a `<form>` so
+  the write works progressively (even with JS off) and re-runs the affected
+  source on success. Import the action helper and spread it:
+  `import { useAction } from '$lib/paw/actions';` then
+  `const sign = useAction('sign');` and `<form {...sign}> ... </form>` with
+  plain `name=`d inputs matching the object's non-primary-key fields. (Prefer
+  the spread-onto-`<form>` shape over a detached RPC call — it's the
+  progressively-enhanced path the generator guarantees.)
+
+### The prerender rule still applies — with a twist
+
+A dynamic source's first paint is the **empty/loading** frame at prerender
+time (D1 isn't queried until the client hydrates and `useSource` runs). So:
+**render a graceful resting frame in markup** — an empty-state message, a
+skeleton, or the form on its own — never gate the section's *structure* behind
+`entries.loading`. With JS off, a dynamic section should still show its heading,
+its form, and a "no entries yet" line — the live rows fill in on hydrate.
+
+### Auth (optional)
+
+Set `"auth": true` on the `source` envelope to gate the whole site behind
+sign-in. The generator scaffolds the signup/login/logout flow + sessions and
+guards the data remote functions so reads/writes require a signed-in user. Your
+components consume the generated auth surface from `$lib/paw/` (the same
+reserved namespace). Leave `auth` off (or `false`) for a public site — the
+guestbook below is public.
+
+### Worked example — a public guestbook (1 table, 1 read, 1 write)
+
+A guestbook: visitors see past entries and add their own. One table (`entry`),
+one read source (`entries`), one write action (`sign`), public (no `auth`).
+
+**The bindings (siblings on `source`):**
+
+```jsonc
+{
+  // ... the §4.3 file keys (+page.svelte, +layout.svelte, +page.ts, app.css) ...
+  "src/lib/components/Guestbook.svelte": "<the component below>",
+
+  // ── live-data bindings, siblings on the SAME source object ──
+  "objects": [
+    { "name": "entry",
+      "fields": { "id": "text", "name": "text", "message": "text", "created": "timestamp" },
+      "primaryKey": "id" }
+  ],
+  "sources": [
+    { "name": "entries", "kind": "data", "object": "entry",
+      "orderBy": "created desc", "limit": 100, "refresh": "pocket_open" }
+  ],
+  "actions": [
+    { "name": "sign", "object": "entry", "op": "insert" }
+  ]
+}
+```
+
+**The component (`src/lib/components/Guestbook.svelte`)** — reads via
+`useSource`, writes via the action form, resting frame in markup:
+
+```svelte
+<script>
+  import { useSource } from '$lib/paw/sources';
+  import { useAction } from '$lib/paw/actions';
+
+  const entries = useSource('entries');   // { loading, data, error, refresh }
+  const sign = useAction('sign');         // spread onto <form> below
+</script>
+
+<section class="guestbook" id="guestbook">
+  <h2>Guestbook</h2>
+
+  <!-- WRITE: a native form — works with JS off, re-runs `entries` on success -->
+  <form {...sign} class="gb-form">
+    <input name="name" placeholder="Your name" required />
+    <textarea name="message" placeholder="Say hi" required></textarea>
+    <button type="submit">Sign the guestbook</button>
+  </form>
+
+  <!-- READ: resting frame is in markup; rows fill in on hydrate -->
+  {#if entries.error}
+    <p class="gb-error">Couldn't load entries. Try again.</p>
+  {:else if entries.data && entries.data.length}
+    <ul class="gb-list">
+      {#each entries.data as e}
+        <li><strong>{e.name}</strong><span>{e.message}</span></li>
+      {/each}
+    </ul>
+  {:else}
+    <p class="gb-empty">No entries yet — be the first to sign.</p>
+  {/if}
+</section>
+
+<style>
+  /* real styles via the design skills — omitted here for brevity */
+</style>
+```
+
+Then `+page.svelte` imports and renders `<Guestbook />` like any other section,
+and you call `create_svelte_site(source = <the envelope with bindings>)`. The
+tool sees the bindings, stamps `pattern="dynamic"`, and publish provisions the
+D1 + wires the read/write layer. Done.
+
 ## Quality bar — done right when
 
 1. **You authored real Svelte.** Premium hand-written components via the
@@ -256,9 +433,11 @@ is exactly why the prerender rule above is non-negotiable.)
 ## Related tools (via MCP)
 
 - `mcp__pocketpaw_sites_manager__create_svelte_site` — **the create step.**
-  Pass the `source` map you authored; the tool persists the pocket stamped
-  `type="site"` + `pattern="landing"` + `engine="svelte"`. Returns
-  `{ok, pocket_id, pocket}`.
+  Pass the `source` envelope you authored; the tool persists the pocket stamped
+  `type="site"` + `engine="svelte"`, and `pattern="landing"` (static) or
+  `pattern="dynamic"` (when `source` carries `objects`/`sources`/`actions`/
+  `auth` bindings — see [Dynamic svelte sites](#dynamic-svelte-sites--live-data-on-the-svelte-track)).
+  Returns `{ok, pocket_id, pocket}`.
 - `mcp__pocketpaw_sites_manager__publish` — publish the pocket as a live
   site; show the user the `url`.
 - `mcp__pocketpaw_pocket__list_pockets` — find an existing pocket if the

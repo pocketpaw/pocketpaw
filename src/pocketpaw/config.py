@@ -1,10 +1,83 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
+    (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
+    Dodo subscription checkout session returns the buyer to after pay / cancel when
+    the /billing/subscribe request carries no Origin (or usable Referer) header.
+    Return urls become ``{base}/settings/billing?checkout=success|cancel``; empty
+    default omits the redirect when no origin is available.
+  - 2026-06-26 (WU-F billing cutover): Added ``litellm_spend_mode``
+    (Literal off|shadow|live, default 'off'; POCKETPAW_LITELLM_SPEND_MODE) — the
+    three-position billing-cutover switch that supersedes the
+    ``litellm_spend_ingest_enabled`` bool. 'off' keeps BC-3 per-run metering as
+    today; 'shadow' runs a read-only per-tenant compare (litellm spend vs BC-3
+    ledger, ZERO debits) that records a reconciliation row; 'live' makes LiteLLM
+    the sole meter (proxy-spend sweep debits + BC-3 sweep gated off). The legacy
+    bool is kept for back-compat and resolved by ``effective_spend_mode()`` — an
+    existing ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` maps to 'shadow' (NOT
+    'live') while the new mode is left at 'off', so deploying WU-F can never
+    auto-flip an old bool-setter into live billing; 'live' requires an explicit
+    POCKETPAW_LITELLM_SPEND_MODE=live.
+  - 2026-06-26: Added the L2 cross-backend harness-failover settings (MCG-10) —
+    ``backend_failover_enabled`` (default False; kill-switch — when False the
+    new ``AgentRouter.run_with_failover`` behaves exactly like ``run`` and no
+    harness switch ever happens) and ``backend_failover_chain`` (default
+    ["claude_agent_sdk", "codex_cli", "opencode"]; the ordered list of agent
+    HARNESSES to try when the whole primary lane is down — distinct from L1's
+    LiteLLM model/account failover, which cannot escape a provider-wide
+    outage). Only a lane-level failure (overload/unavailable/auth that
+    persists after the backend's own retries) before any token is streamed
+    triggers a switch; each harness is tried at most once. Env:
+    POCKETPAW_BACKEND_FAILOVER_ENABLED / POCKETPAW_BACKEND_FAILOVER_CHAIN
+    (JSON list). The EE cloud run path wiring is a follow-up — this ships the
+    mechanism + the OSS hook only.
+  - 2026-06-24: Added ``dodo_plan_products`` (default {}, env
+    POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object) — the BC-7 mapping of plan
+    tier key -> Dodo recurring product id. ``subscribe`` reads it to open a
+    recurring checkout; the subscription webhook reverses it (product_id ->
+    plan key) to know which tier renewed. A before-validator degrades a
+    malformed env string to {} so a typo can't crash settings load.
+  - 2026-06-24: Added ``billing_enforced`` (default False, env
+    POCKETPAW_BILLING_ENFORCED) — the BC-4 run-start hard-block flag. When
+    True the cloud rejects STARTING a new chat run on a zero-or-negative
+    credit balance with HTTP 402; in-flight runs are untouched. Off by
+    default so OSS / self-host stay unaffected.
+  - 2026-06-23: Added the deep_work Self-Verifying Loop flags (SVL-1) —
+    ``deep_work_verify_loop_enabled`` (default False; kill-switch — when
+    False deep_work tasks complete exactly as before) and
+    ``deep_work_verify_max_requeues`` (default 2; the requeue bound read by
+    SVL-2, landed here so later slices don't touch config). SVL-1 only reads
+    the enable flag to stamp an observe-only OutcomeVerdict on a completing
+    task. Env: POCKETPAW_DEEP_WORK_VERIFY_* .
+  - 2026-06-22: Added ``discovery_sovereign_model`` (default True) — the model-lane
+    sovereignty posture for discovery's categorize (F2) / refine (F3) passes.
+    True (default, unchanged behavior): hard-pin the model to the on-box Ollama
+    so tenant data never leaves the box. False: use the workspace's configured
+    provider via ``resolve_llm_client`` — a CLOUD model is allowed (explicit
+    tenant opt-in). The kb ingest/build tripwire holds regardless. Env:
+    POCKETPAW_DISCOVERY_SOVEREIGN_MODEL.
+  - 2026-06-21: Added ``instinct_enforce_discovered_rules`` (default False, F6) —
+    when true, approved workspace-discovered Instinct rules are merged with
+    template rules at the live gate and govern actions. Off by default; the
+    discovered branch is dead code on the default path. A separate, narrower
+    flag than ``instinct_approval_level``. Env:
+    POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES.
+  - 2026-06-18: Added the four layered/learning Instinct gate defaults —
+    ``instinct_approval_level`` (default "ASK", dormant),
+    ``instinct_auto_approve_threshold`` (0.9), ``instinct_dry_run_mode``
+    (False), ``instinct_optimistic_ttl_seconds`` (300). Global host-wide
+    defaults for the 4-lane triage router; per-workspace overrides land
+    with the gate integration layer. Dormant on ship (ASK escalates
+    everything). Env: POCKETPAW_INSTINCT_* .
   - 2026-06-10: Added ``belt_repo_allowlist`` — the security boundary for the
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
+    the same-box shield daemon's control-API UNIX socket + Bearer token. The
+    cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
+    is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -224,6 +297,33 @@ class Settings(BaseSettings):
         description=("Ordered list of fallback backends to try if the primary backend fails"),
     )
 
+    # L2 cross-backend harness failover (MCG-10) — distinct from the generic
+    # ``fallback_backends`` above. This is the harness-level escape hatch for a
+    # provider-wide outage: when the whole Claude Code lane is down (an
+    # Anthropic-wide overload that Claude Code's own ``--fallback-model`` cannot
+    # escape, because that stays in Anthropic's capacity pool), switch to a
+    # DIFFERENT backend harness. Only fires on a lane-level failure (overload /
+    # unavailable / auth that survives the backend's own retries) AND only if
+    # nothing was streamed to the user yet (a half-streamed turn can't be
+    # replayed). Off by default so behavior is unchanged unless opted in.
+    backend_failover_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable L2 cross-backend (harness) failover. When True, "
+            "AgentRouter.run_with_failover switches to the next harness in "
+            "backend_failover_chain if the primary lane is down before any "
+            "token is streamed. Off by default."
+        ),
+    )
+    backend_failover_chain: list[str] = Field(
+        default_factory=lambda: ["claude_agent_sdk", "codex_cli", "opencode"],
+        description=(
+            "Ordered list of agent HARNESSES to try on a lane-level failure "
+            "(Claude Code -> Codex -> opencode). Each harness is tried at most "
+            "once; the chain is consulted only when backend_failover_enabled."
+        ),
+    )
+
     # Claude Agent SDK Settings
     claude_sdk_provider: str = Field(
         default="anthropic",
@@ -421,6 +521,30 @@ class Settings(BaseSettings):
             "whenever its confidence in the cheap tier falls below this "
             "threshold. High by default — a wrong skip produces a broken "
             "pocket, so the router is deliberately conservative."
+        ),
+    )
+    deep_work_verify_loop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch for the deep_work Self-Verifying Loop. When False "
+            "(default) deep_work tasks complete exactly as before — no outcome "
+            "verification, byte-for-byte today's behaviour. When True, every "
+            "task that completes successfully has its result checked against "
+            "the success_criteria captured at intake and the resulting "
+            "OutcomeVerdict is stamped on the task's metadata "
+            "(``verify_verdict``) and logged. The verdict is observe-only in "
+            "this slice (SVL-1): the task's status is NOT changed by the "
+            "verification — that is the requeue slice (SVL-2)."
+        ),
+    )
+    deep_work_verify_max_requeues: int = Field(
+        default=2,
+        description=(
+            "Max verify-driven requeues a single deep_work task may take "
+            "before the loop stops requeuing and escalates instead. Used by "
+            "the requeue slice (SVL-2); landed here so later slices don't have "
+            "to touch config. SVL-1 only READS deep_work_verify_loop_enabled "
+            "and ignores this bound."
         ),
     )
     auto_install_bundled_skills: bool = Field(
@@ -866,6 +990,31 @@ class Settings(BaseSettings):
             "Allowlisted root directories a Belt code-change proposal's repo "
             "must live under. A repo path resolving outside every root is "
             "refused. Empty → defaults to the cwd's parent (the workspace root)."
+        ),
+    )
+
+    # Shield — the same-box Go security daemon (deny-by-default connector
+    # egress + agent-decision control plane). shield serves a control API on a
+    # UNIX socket; the cloud ``/api/v1/security/*`` router proxies it,
+    # OWNER-gated, and degrades cleanly when shield is absent (a socket that is
+    # unset / missing / unreachable → a typed available:false read or a 409
+    # write, never a 500). The Bearer token authenticates the backend → shield
+    # hop over the socket; it is NEVER logged. Env auto-derives
+    # POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
+    shield_api_socket: str = Field(
+        default="/run/shield/api.sock",
+        description=(
+            "Filesystem path to shield's control-API UNIX socket. The cloud "
+            "security proxy connects here via an httpx UDS transport. When the "
+            "socket is missing or unreachable the proxy degrades to a typed "
+            "'shield_not_deployed' / 'unreachable' response."
+        ),
+    )
+    shield_api_token: str = Field(
+        default="",
+        description=(
+            "Bearer token the cloud security proxy presents to shield over the "
+            "socket. Sent as 'Authorization: Bearer <token>'. Never logged."
         ),
     )
 
@@ -1330,6 +1479,319 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Layered/learning Instinct gate — GLOBAL DEFAULTS (2026-06-18 design).
+    # These are the host-wide defaults for the 4-lane triage router that
+    # turns the binary escalate/execute Instinct gate into a learning gate.
+    # They are DORMANT by default: `instinct_approval_level="ASK"` makes the
+    # lane classifier always escalate, so shipping these changes zero
+    # behavior. A per-workspace override (a field on the workspace document)
+    # lands with the integration layer; until an admin opts a workspace into
+    # "TRIAGE", the global default governs and every escalate goes to a
+    # human. A support engineer setting the env var changes the default for
+    # NEW workspaces only — it cannot silently upgrade existing tenants.
+    instinct_approval_level: str = Field(
+        default="ASK",
+        description=(
+            "Global default triager activation level for the layered Instinct "
+            "gate: 'ASK' (dormant — every escalate goes to a human), 'TRIAGE' "
+            "(triager active — auto/optimistic/batch lanes live), or 'TRUSTED' "
+            "(reserved; treated as TRIAGE today). Per-workspace overrides live "
+            "on the workspace document. Set via POCKETPAW_INSTINCT_APPROVAL_LEVEL."
+        ),
+    )
+    instinct_auto_approve_threshold: float = Field(
+        default=0.9,
+        description=(
+            "Trust-score bar (0.0-1.0) a (pocket, action) pair must reach for "
+            "the AUTO/OPTIMISTIC lanes. A score below this escalates. Money- "
+            "moving and DELETE actions never AUTO regardless of score (a hard "
+            "blast-radius floor). Set via POCKETPAW_INSTINCT_AUTO_APPROVE_THRESHOLD."
+        ),
+    )
+    instinct_dry_run_mode: bool = Field(
+        default=False,
+        description=(
+            "When true, the Instinct gate routes escalating writes to the "
+            "DRY_RUN lane: the write is resolved and audited but never sent to "
+            "the backend (a governance rehearsal). BLOCK verdicts still block. "
+            "Set via POCKETPAW_INSTINCT_DRY_RUN_MODE."
+        ),
+    )
+    instinct_optimistic_ttl_seconds: int = Field(
+        default=300,
+        description=(
+            "Seconds an OPTIMISTIC-lane compensation handle stays live before "
+            "hard expiry. On expiry the registry fires an ALERT audit event and "
+            "persists the expired handle (no heartbeat extension). Set via "
+            "POCKETPAW_INSTINCT_OPTIMISTIC_TTL_SECONDS."
+        ),
+    )
+    # Sovereign Zero-Setup Discovery — F6 live enforcement (2026-06-21).
+    # When true, approved workspace-discovered Instinct rules
+    # (rules.service.get_active_rules) are merged with template rules at the
+    # live gate (instinct_dispatch.gate_action) and govern actions. OFF by
+    # default — the template-rule path is unchanged and the discovered branch
+    # is dead code on the default path (get_active_rules is never called).
+    # This is a SEPARATE, NARROWER flag than instinct_approval_level: enforcing
+    # WHICH discovered CEL conditions fire and activating WHETHER escalations can
+    # auto-resolve are independent risk axes and must toggle independently.
+    instinct_enforce_discovered_rules: bool = Field(
+        default=False,
+        description=(
+            "When true, approved workspace-discovered Instinct rules "
+            "(rules.service.get_active_rules) are merged with template rules at "
+            "the live gate. Off by default — the template-rule path is unchanged "
+            "and the whole discovered branch is dead code on the default path. "
+            "Set via POCKETPAW_INSTINCT_ENFORCE_DISCOVERED_RULES."
+        ),
+    )
+
+    # Billing — Dodo Payments gateway (BC-2, the Gateway primitive).
+    # The only payment gateway in v1; a provider abstraction
+    # (``ee.cloud.billing.providers``) keeps Razorpay et al. a later swap.
+    # All three are optional so a non-billing deployment boots fine; the Dodo
+    # provider raises a clear ValidationError when a billing call is made
+    # without the key configured.
+    dodo_payments_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments API bearer token, used to authenticate the server-side "
+            "DodoPayments client when creating a one-time top-up checkout. Set via "
+            "POCKETPAW_DODO_PAYMENTS_API_KEY. None disables Dodo top-ups."
+        ),
+    )
+    dodo_environment: str = Field(
+        default="test_mode",
+        description=(
+            "Dodo Payments environment — 'test_mode' (default) or 'live_mode'. "
+            "Selects the API base URL the DodoPayments client targets. Set via "
+            "POCKETPAW_DODO_ENVIRONMENT."
+        ),
+    )
+    dodo_billing_country: str = Field(
+        default="US",
+        description=(
+            "Default ISO-3166 alpha-2 country prefilled on the Dodo hosted "
+            "checkout's billing address. Drives which payment methods Dodo "
+            "surfaces — e.g. 'IN' (with INR products) is required for UPI to "
+            "appear; 'US' shows cards. The buyer can still change it on the "
+            "hosted page. Set via POCKETPAW_DODO_BILLING_COUNTRY."
+        ),
+    )
+    dodo_webhook_secret: str | None = Field(
+        default=None,
+        description=(
+            "Dodo Payments webhook signing secret (Standard Webhooks / 'whsec_…'). "
+            "Used to VERIFY the signature on every inbound /billing/webhooks/dodo "
+            "POST before the payload is trusted. Set via "
+            "POCKETPAW_DODO_WEBHOOK_SECRET. NEVER logged."
+        ),
+    )
+    dodo_credit_product_id: str | None = Field(
+        default=None,
+        description=(
+            "Dodo product id for the credits SKU. A one-time top-up adds this "
+            "product to the cart with a pay-what-you-want amount equal to the "
+            "purchased credits (1 credit == $0.01 == 1 cent, the currency's lowest "
+            "denomination). Set via POCKETPAW_DODO_CREDIT_PRODUCT_ID."
+        ),
+    )
+    dodo_plan_products: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of plan tier key -> Dodo RECURRING product id (BC-7 "
+            "subscriptions). ``subscribe(plan_key)`` looks the product up here to "
+            "open a recurring checkout; the inbound subscription webhook reverses "
+            "the lookup (product_id -> plan key) to know which tier renewed (and "
+            "thus the monthly credit allotment from the plan catalog). Set via "
+            "POCKETPAW_DODO_PLAN_PRODUCTS as a JSON object, e.g. "
+            '{"team":"prod_team","business":"prod_biz"}. Default empty disables '
+            "subscriptions (subscribe raises a clear ValidationError)."
+        ),
+    )
+    dodo_checkout_return_base: str = Field(
+        default="",
+        description=(
+            "Fallback base URL the Dodo subscription CHECKOUT SESSION returns the "
+            "buyer to after pay / cancel, used ONLY when the /billing/subscribe "
+            "request carries no Origin (and no usable Referer) header. The return "
+            "urls become ``{base}/settings/billing?checkout=success|cancel``. Set "
+            "via POCKETPAW_DODO_CHECKOUT_RETURN_BASE (e.g. https://app.example.com). "
+            "Default empty: when both this and the request Origin are absent the "
+            "redirect is omitted (the checkout still works, the buyer just isn't "
+            "auto-returned)."
+        ),
+    )
+
+    # Billing — compute-cost metering rate card (BC-3, the Meter + Price
+    # primitives). A completed chat run is billed by its real compute cost times
+    # a flat markup, converted from USD into integer credits. These two settings
+    # ARE the rate card: keeping them declarative (a flat multiplier + the credit
+    # denomination) leaves room for a tiered card later without changing the
+    # debit path. ``credits = round(cost_usd * markup / credit_usd)``.
+    billing_markup: float = Field(
+        default=2.5,
+        description=(
+            "Flat markup applied to a chat run's real compute cost before it is "
+            "billed to the workspace wallet (covers infra + margin). The metered "
+            "credit charge is round(cost_usd * billing_markup / credit_usd). Set "
+            "via POCKETPAW_BILLING_MARKUP."
+        ),
+    )
+    credit_usd: float = Field(
+        default=0.01,
+        description=(
+            "USD value of one credit (1 credit == $0.01 == 1 cent, the lowest "
+            "currency denomination — the same denomination Dodo top-ups use). "
+            "Divides the marked-up compute cost to yield integer credits. Set via "
+            "POCKETPAW_CREDIT_USD."
+        ),
+    )
+    billing_enforced: bool = Field(
+        default=False,
+        description=(
+            "Run-start hard-block (BC-4). When True, STARTING a new chat run on a "
+            "workspace whose credit balance is <= 0 is rejected with HTTP 402 "
+            "(credits.insufficient) BEFORE any run row is written; in-flight runs "
+            "are never killed. Default False so OSS / self-host deployments (which "
+            "run no credit ledger) are unaffected; the cloud turns it on via "
+            "POCKETPAW_BILLING_ENFORCED."
+        ),
+    )
+
+    # Per-tenant LiteLLM virtual-key provisioning (MCG-8). The cloud mints a
+    # budgeted, rate-limited virtual key per workspace on the LiteLLM proxy so the
+    # proxy enforces a spend ceiling + rate caps per tenant and attributes spend
+    # to the workspace. These knobs are the key's provisioning defaults — NOT
+    # secrets; the proxy master key stays in POCKETPAW_LITELLM_API_KEY.
+    tenant_max_budget_usd: float = Field(
+        default=0.0,
+        description=(
+            "USD budget ceiling minted onto each tenant's LiteLLM virtual key, "
+            "enforced by the proxy over POCKETPAW_TENANT_BUDGET_DURATION. 0 == no "
+            "budget cap (the proxy applies no ceiling). Set via "
+            "POCKETPAW_TENANT_MAX_BUDGET_USD."
+        ),
+    )
+    tenant_budget_duration: str = Field(
+        default="30d",
+        description=(
+            "Reset window for a tenant key's budget — a LiteLLM duration string "
+            "(e.g. '30d', '1mo'). Empty == the budget never resets. Set via "
+            "POCKETPAW_TENANT_BUDGET_DURATION."
+        ),
+    )
+    tenant_rpm_limit: int = Field(
+        default=0,
+        description=(
+            "Requests-per-minute cap minted onto each tenant's LiteLLM virtual key. "
+            "0 == no RPM cap. Set via POCKETPAW_TENANT_RPM_LIMIT."
+        ),
+    )
+    tenant_tpm_limit: int = Field(
+        default=0,
+        description=(
+            "Tokens-per-minute cap minted onto each tenant's LiteLLM virtual key. "
+            "0 == no TPM cap. Set via POCKETPAW_TENANT_TPM_LIMIT."
+        ),
+    )
+    litellm_spend_ingest_enabled: bool = Field(
+        default=False,
+        description=(
+            "DEPRECATED back-compat flag for the MCG-8 spend sweep — superseded by "
+            "POCKETPAW_LITELLM_SPEND_MODE (WU-F). Left in place so an existing "
+            "deployment that set POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true is not "
+            "silently flipped into live billing by deploying WU-F: when the new mode "
+            "is left at its 'off' default and this bool is True, "
+            "``effective_spend_mode()`` resolves to 'shadow' (read-only "
+            "reconciliation, ZERO debits) — NOT 'live'. Making LiteLLM the sole meter "
+            "requires an EXPLICIT POCKETPAW_LITELLM_SPEND_MODE=live (a money-meter "
+            "flip must be a conscious operator choice). A one-time deprecation notice "
+            "is logged when this bool is seen. The flag is ignored once the mode is "
+            "set to any non-'off' value. Set via POCKETPAW_LITELLM_SPEND_INGEST_ENABLED."
+        ),
+    )
+    litellm_spend_mode: Literal["off", "shadow", "live"] = Field(
+        default="off",
+        description=(
+            "The billing-cutover mode for LiteLLM proxy spend (WU-F). Replaces the "
+            "POCKETPAW_LITELLM_SPEND_INGEST bool with a three-position switch so the "
+            "cutover to LiteLLM as the single meter happens through a SAFE "
+            "shadow-compare phase:\n"
+            "  * 'off'    (default) — nothing changes; BC-3 per-run metering bills "
+            "as today, no proxy-spend sweep runs.\n"
+            "  * 'shadow' — the safe compare. A per-tenant sweep reads /spend/logs, "
+            "converts cost->credits, sums the BC-3 compute_spend ledger debits over "
+            "the same window, and records a reconciliation row (litellm vs bc3 + "
+            "delta + coverage_gap). It performs ZERO debits — BC-3 keeps billing — "
+            "so an operator can confirm the two meters agree BEFORE cutting over.\n"
+            "  * 'live'   — LiteLLM is the sole meter: the proxy-spend sweep debits "
+            "litellm_spend AND BC-3's per-run metering sweep is gated OFF, so "
+            "exactly one meter charges each unit of usage (no double-bill window).\n"
+            "Provisioning the per-tenant key is unaffected by this mode (always on). "
+            "Set via POCKETPAW_LITELLM_SPEND_MODE."
+        ),
+    )
+    litellm_reconcile_gap_threshold_credits: int = Field(
+        default=10,
+        description=(
+            "Shadow-compare coverage-gap threshold in CREDITS (WU-F). During "
+            "POCKETPAW_LITELLM_SPEND_MODE=shadow, a reconciliation row is flagged "
+            "``coverage_gap=true`` when |litellm_credits - bc3_credits| exceeds this "
+            "many credits — a discrepancy big enough to mean traffic is bypassing "
+            "the proxy OR the USD->credits conversion disagrees, which must be "
+            "resolved before flipping to 'live'. 1 credit == $0.01, so the default "
+            "10 ≈ $0.10 of tolerated per-tenant-per-window drift (rounding noise). "
+            "Set via POCKETPAW_LITELLM_RECONCILE_GAP_THRESHOLD_CREDITS."
+        ),
+    )
+    site_pending_alert_hours: float = Field(
+        default=24.0,
+        description=(
+            "Charge-first reconciliation threshold. A PAID Paw Site is created "
+            "PENDING and deployed only when its subscription.active webhook "
+            "confirms payment; the pending-site sweeper logs at WARNING any site "
+            "still pending (not deployed) longer than this many hours, so an "
+            "operator can investigate a lost / delayed webhook. Visibility only — "
+            "the sweep never auto-deploys or auto-cancels. Tuned above Dodo's "
+            "webhook retry window so a transient delay is not flagged. Set via "
+            "POCKETPAW_SITE_PENDING_ALERT_HOURS."
+        ),
+    )
+
+    # Sovereign Zero-Setup Discovery — model-lane sovereignty posture (2026-06-22).
+    # Discovery's categorize (F2) and refine (F3) passes send the tenant's data
+    # SHAPE (type/property names, article summaries — never raw exhaust) to a
+    # model. WHICH model is a sovereignty choice, not a code constant:
+    #   * sovereign-local (default, True): the model is hard-pinned to the
+    #     tenant's on-box Ollama. ``api_key is None``; no cloud key ever rides
+    #     into the request path. Nothing leaves the box. This is the safe
+    #     default and matches the original shipped behavior.
+    #   * configured-provider (False): discovery uses the workspace's CONFIGURED
+    #     provider via ``resolve_llm_client(settings)`` — anthropic / openai /
+    #     openai_compatible / gemini / litellm, a CLOUD model is allowed. This is
+    #     the tenant's EXPLICIT opt-in to send discovery exhaust to their own
+    #     configured model. Most businesses are fine here (faster, better
+    #     categories); regulated / sovereign tenants keep the default.
+    # Independent of the kb-ingest tripwire: ``kb ingest`` / ``kb build`` (which
+    # POST raw tenant text to Anthropic's KB API) are NEVER called regardless of
+    # this setting — that path is never correct and stays hard-blocked.
+    discovery_sovereign_model: bool = Field(
+        default=True,
+        description=(
+            "Sovereignty posture for discovery's categorize/refine model call. "
+            "True (default): hard-pin the model to the tenant's on-box Ollama — "
+            "data never leaves the box, no cloud key in the request path "
+            "(sovereign-local, the safe default for regulated tenants). False: "
+            "use the workspace's configured provider via resolve_llm_client — a "
+            "CLOUD model is allowed; this is the tenant's explicit opt-in to send "
+            "discovery's inferred data shape to their configured model (faster, "
+            "richer categories — fine for most businesses). The kb ingest/build "
+            "tripwire holds regardless of this setting. Set via "
+            "POCKETPAW_DISCOVERY_SOVEREIGN_MODEL."
+        ),
+    )
+
     # Pocket data-source refresh — cost controls (RFC 04 M3).
     # A pocket source binding may declare an `interval` or `webhook` refresh
     # trigger. Both are AUTO-refresh: they re-run a source without a human in
@@ -1544,6 +2006,28 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("dodo_plan_products", mode="before")
+    @classmethod
+    def _parse_dodo_plan_products(cls, v: object) -> object:
+        """Accept a JSON-object env string for the plan->product map.
+
+        pydantic-settings parses JSON for dict fields, but a hand-set
+        ``POCKETPAW_DODO_PLAN_PRODUCTS`` that isn't valid JSON (or isn't an
+        object) should degrade to an empty mapping — subscriptions then fail
+        loudly at ``subscribe`` time with a clear ``plan_unconfigured`` error
+        rather than crashing the entire settings load at boot. A dict passes
+        straight through.
+        """
+        if v is None or v == "":
+            return {}
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+            except ValueError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return v
+
     @field_validator("composio_toolkits", mode="before")
     @classmethod
     def _parse_composio_toolkits_csv(cls, v: object) -> object:
@@ -1592,6 +2076,36 @@ class Settings(BaseSettings):
             )
             self.kb_scopes = [self.kb_scope]
         return self
+
+    def effective_spend_mode(self) -> Literal["off", "shadow", "live"]:
+        """Resolve the LiteLLM billing-cutover mode, honouring the legacy bool.
+
+        WU-F replaced the ``litellm_spend_ingest_enabled`` bool with the
+        three-position ``litellm_spend_mode`` switch. Resolution, in order:
+
+          1. An EXPLICIT ``POCKETPAW_LITELLM_SPEND_MODE`` (any non-'off' value)
+             wins outright — ``shadow`` and ``live`` are taken as set.
+          2. Mode unset / 'off' + the legacy bool True → ``shadow`` (NOT ``live``).
+          3. Mode unset / 'off' + the legacy bool False/unset → ``off``.
+
+        WHY the legacy bool maps to ``shadow`` and NEVER ``live`` (money safety):
+        WU-F adds the FIRST periodic ingestion caller (the cutover sweep on the
+        heartbeat + worker boot). Under WU-C the bool toggled an ingestion path
+        that had NO periodic caller, so a deployment could carry
+        ``POCKETPAW_LITELLM_SPEND_INGEST_ENABLED=true`` harmlessly. If WU-F resolved
+        that bool to ``live``, merely DEPLOYING WU-F would start LiteLLM debiting AND
+        gate BC-3 off — a billing-meter flip with no operator decision. So ``live``
+        requires an EXPLICIT ``POCKETPAW_LITELLM_SPEND_MODE=live`` and is never
+        inferred. The legacy bool resolves to ``shadow`` — it reads + compares but
+        debits nothing — so an old deployment gets the (safe) reconciliation signal
+        and the operator must consciously set the mode to ``live`` to bill. See
+        ``warn_legacy_spend_bool_once`` for the one-time startup notice.
+        """
+        if self.litellm_spend_mode != "off":
+            return self.litellm_spend_mode
+        if self.litellm_spend_ingest_enabled:
+            return "shadow"
+        return "off"
 
     def save(self) -> None:
         """Save settings to config file.

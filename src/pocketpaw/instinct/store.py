@@ -1,5 +1,56 @@
 # Instinct store — async SQLite operations for the decision pipeline.
 # Created: 2026-03-28 — Action lifecycle + audit log.
+# Updated: 2026-06-26 (ISO-4 — audit-lock keyed outside the evictable instance)
+#   — the audit-append lock (``_log_lock``, which serializes the chain
+#   read-head + insert in ``_log``) is no longer a per-instance
+#   ``asyncio.Lock`` set in ``__init__``. It is now a PROPERTY that fetches a
+#   process-global lock keyed by ``db_path`` from ``pocketpaw._store_locks``.
+#   The ISO-2 security review flagged the hole: under the ISO-1/2 bounded-LRU
+#   store factory, a workspace's store can be evicted and rebuilt for the same
+#   file while an append is in flight, so two instances with two per-instance
+#   locks let their appends race and fork the chain. A db_path-keyed lock makes
+#   every instance for the same file share ONE lock; different tenants (files)
+#   still never contend. The two ``async with self._log_lock`` call sites are
+#   unchanged — the property is transparent.
+# Updated: 2026-06-26 (ISO-2 — physical per-workspace isolation) — added
+#   aclose(): a best-effort WAL-checkpoint + state reset the workspace-keyed
+#   store factory (src/pocketpaw/stores.py) runs when it evicts a per-workspace
+#   InstinctStore from its bounded LRU. The store still holds no long-lived
+#   connection; aclose exists only so an idle tenant's write-ahead-log sidecar
+#   gets truncated instead of growing across 128+ cached tenants. ISO-2 gives
+#   each workspace its OWN instinct.db (~/.pocketpaw/workspaces/<id>/instinct.db),
+#   so the W2b audit hash-chain below is now PER-FILE: each tenant's chain has its
+#   own genesis→…→head and ``verify_audit_chain`` runs PER WORKSPACE (a tenant's
+#   auditor verifies only that tenant's chain — the correct multi-tenant model).
+#   The W4a in-row ``workspace_id`` read-filter is UNCHANGED — physical file
+#   isolation is ADDITIVE defense-in-depth layered on top of it. The store class
+#   itself is workspace-agnostic; isolation is entirely in which file the factory
+#   hands it.
+# Updated: 2026-06-21 (F4 — edit-in-review) — added ``update_parameters(action_id,
+#   params)``: a thin, status-preserving write of the JSON ``parameters`` bag (does NOT
+#   touch ``status``/``approved_*``), used by the router's PATCH proposal-edit endpoint
+#   to persist a re-validated, tenancy-pinned blob on a PENDING action before approval.
+# Updated: 2026-06-18 (feat/branch-primitive-instinct-gate, BP-3) — ADDITIVE
+#   generic scope on the actions table. ``instinct_actions`` now carries a
+#   nullable ``scope_type`` column (additive ALTER, mirrors the assignee /
+#   workspace_id migrations). ``propose`` accepts an optional ``scope_type`` and
+#   stamps it; ``_row_to_action`` reads it back. The per-pocket READS
+#   (``_query_actions`` → ``list_actions`` / ``for_pocket`` / ``pending`` and
+#   ``pending_count``) are now SCOPE-AWARE: a caller that passes ``scope_type``
+#   filters on ``(scope_type, scope_id)`` — the ``scope_id`` reuses the
+#   ``pocket_id`` argument/column — while a caller that omits it keeps the legacy
+#   pocket_id path EXACTLY. Legacy rows (scope_type NULL) are unaffected by a
+#   non-scoped read and still match the plain pocket_id filter. ``scope_type`` is
+#   a READ FILTER + a write column only — it is NOT folded into the W2b audit
+#   hash (the chain stays content-bound + global).
+# Updated: 2026-06-16 (feat/instinct-smart-triage) — added the additive
+#   ``auto_approve(action_id, *, verdict, reasoning, confidence=None)`` method
+#   for the EE smart-approval auto-triage path (``instinct.auto_triage``). It is
+#   a sibling of ``approve``: same atomic ``_update_status`` chokepoint, same
+#   hash-chained W2b audit append, but it writes ``event="action_auto_approved"``
+#   with ``actor="system:triager"`` and packs the triager's verdict + reasoning
+#   into the audit ``context`` so a machine approval is as auditable as a human
+#   one. Purely additive — no existing method's behaviour changed.
 # Updated: 2026-06-10 (sov/r2a review fixes) — two store-level fixes:
 #   FIX 1 — added ``get_audit_entry(audit_id, workspace_id=None)``: a direct
 #     single-row SELECT by id with the same ``workspace_id = ? OR workspace_id
@@ -81,6 +132,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -100,6 +152,8 @@ from pocketpaw.instinct.models import (
     OutcomeVerdict,
 )
 from pocketpaw.instinct.trace import FabricObjectSnapshot, ReasoningTrace
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_outcome(outcome: str | OutcomeVerdict | None) -> str | None:
@@ -255,6 +309,11 @@ CREATE TABLE IF NOT EXISTS instinct_actions (
     approved_at TEXT,
     rejected_reason TEXT,
     assignee TEXT,
+    -- Generic scope (BP-3): the artifact scope_type this Action belongs to
+    -- ("pocket" / "site" / "dashboard" / …). NULL = legacy pocket-scoped row;
+    -- a non-scoped read still matches it via the plain pocket_id filter. When
+    -- set, the read filters on (scope_type, scope_id) with scope_id == pocket_id.
+    scope_type TEXT,
     -- Tenancy (W4a): the owning workspace. NULL = legacy/global row written
     -- before tenancy or by a non-cloud OSS caller; a scoped read still sees it.
     workspace_id TEXT,
@@ -326,6 +385,14 @@ _WORKSPACE_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_audit_workspace ON instinct_audit(workspace_id)",
 )
 
+# Generic-scope index (BP-3). Created AFTER the ALTER that adds scope_type for
+# the same reason the workspace indexes are — on a pre-BP-3 DB the column does
+# not exist until the ALTER lands. The compound (scope_type, pocket_id) index
+# serves the scope-aware (scope_type, scope_id) read; scope_id reuses pocket_id.
+_SCOPE_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_actions_scope ON instinct_actions(scope_type, pocket_id)",
+)
+
 
 class InstinctStore:
     """Async SQLite store for the decision pipeline."""
@@ -333,13 +400,29 @@ class InstinctStore:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = str(db_path)
         self._initialized = False
-        # Serializes the audit-chain read-head + insert in _log (REVIEW-1):
-        # each _log opens its own connection, so without this lock two
-        # concurrent _log calls could both read the same prev_hash before
-        # either inserts, forking the chain and producing false-positive
-        # tamper reports in verify_audit_chain. Per-instance (not module-level)
-        # so separate tenants/stores don't contend.
-        self._log_lock = asyncio.Lock()
+
+    @property
+    def _log_lock(self) -> asyncio.Lock:
+        """The lock serializing this file's audit-chain read-head + insert.
+
+        Held across the prev_hash read + the append in ``_log``: each ``_log``
+        opens its own connection, so without it two concurrent appends could
+        both read the same prev_hash before either inserts, forking the chain
+        and producing false-positive tamper reports in ``verify_audit_chain``.
+
+        ISO-4: the lock is now keyed by ``db_path`` in a PROCESS-GLOBAL registry
+        (``pocketpaw._store_locks``), not stored on this instance. The ISO-2
+        security review flagged that a per-instance lock does NOT cover the
+        bounded-LRU eviction window: when the store factory evicts a workspace's
+        InstinctStore and builds a fresh one for the same file, two instances
+        briefly coexist, and per-instance locks let their appends race and fork
+        that tenant's chain. A db_path-keyed lock makes every instance for the
+        same file share ONE lock, closing that window. Different tenants (files)
+        still get different locks and never contend.
+        """
+        from pocketpaw._store_locks import audit_lock_for
+
+        return audit_lock_for(self._db_path)
 
     async def _ensure_schema(self) -> None:
         if self._initialized:
@@ -374,10 +457,18 @@ class InstinctStore:
                     await db.execute(f"ALTER TABLE {_tbl} ADD COLUMN workspace_id TEXT")
                 except aiosqlite.OperationalError:
                     pass
+            # Additive migration (BP-3): the generic ``scope_type`` column on a
+            # pre-existing actions table. Same swallow-the-duplicate pattern.
+            # Pre-existing rows keep NULL scope_type (legacy pocket-scoped; a
+            # non-scoped read still matches them via the plain pocket_id filter).
+            try:
+                await db.execute("ALTER TABLE instinct_actions ADD COLUMN scope_type TEXT")
+            except aiosqlite.OperationalError:
+                pass
             # Tenancy indexes created only after the column is guaranteed to
             # exist — see _WORKSPACE_INDEX_SQL note above. Inside SCHEMA_SQL this
-            # would fail on a pre-W4a DB.
-            for _idx in _WORKSPACE_INDEX_SQL:
+            # would fail on a pre-W4a DB. The scope index follows the same rule.
+            for _idx in (*_WORKSPACE_INDEX_SQL, *_SCOPE_INDEX_SQL):
                 await db.execute(_idx)
             await db.commit()
         self._initialized = True
@@ -385,6 +476,29 @@ class InstinctStore:
     def _conn(self) -> aiosqlite.Connection:
         """Return a new connection context manager."""
         return aiosqlite.connect(self._db_path)
+
+    async def aclose(self) -> None:
+        """Release this store's on-disk resources (ISO-2).
+
+        Like ``FabricStore``, ``InstinctStore`` holds NO long-lived connection —
+        every method opens and closes its own ``aiosqlite.connect()`` per call —
+        so there is no socket or cursor to close. What CAN accumulate is a
+        write-ahead-log sidecar (``instinct.db-wal`` / ``-shm``). Under
+        per-workspace physical isolation (ISO-2) the store factory caches up to
+        128 per-workspace handles and evicts the least-recently-used; ``aclose``
+        is what the factory runs on eviction so an idle tenant's WAL is truncated
+        rather than left to grow, and the next ``_ensure_schema`` re-runs cleanly
+        on the cold handle.
+
+        Best-effort and idempotent: a checkpoint failure (DB never created, WAL
+        not in use, file vanished) is swallowed — eviction must never raise.
+        """
+        self._initialized = False
+        try:
+            async with aiosqlite.connect(self._db_path) as db:
+                await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:  # noqa: BLE001 — eviction cleanup is best-effort
+            logger.debug("InstinctStore.aclose checkpoint skipped", exc_info=True)
 
     # --- Actions ---
 
@@ -403,8 +517,10 @@ class InstinctStore:
         fabric_snapshots: list[FabricObjectSnapshot] | None = None,
         assignee: str | None = None,
         workspace_id: str | None = None,
+        scope_type: str | None = None,
     ) -> Action:
         action = Action(
+            scope_type=scope_type,
             pocket_id=pocket_id,
             title=title,
             description=description,
@@ -422,8 +538,9 @@ class InstinctStore:
                 "INSERT INTO instinct_actions"
                 " (id, pocket_id, title, description,"
                 " category, status, priority, trigger,"
-                " recommendation, parameters, context, assignee, workspace_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " recommendation, parameters, context, assignee, workspace_id,"
+                " scope_type)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     action.id,
                     pocket_id,
@@ -438,6 +555,7 @@ class InstinctStore:
                     action.context.model_dump_json(),
                     assignee,
                     workspace_id,
+                    scope_type,
                 ),
             )
             await db.commit()
@@ -472,6 +590,53 @@ class InstinctStore:
             approved_at=datetime.now().isoformat(),
             event="action_approved",
             actor=approver,
+        )
+
+    async def auto_approve(
+        self,
+        action_id: str,
+        *,
+        approver: str = "system:triager",
+        verdict: str,
+        reasoning: str,
+        confidence: float | None = None,
+    ) -> Action | None:
+        """Auto-approve an action on a triager verdict, fully audited.
+
+        Additive sibling of :meth:`approve` for the smart-approval auto-triage
+        path (EE ``instinct.auto_triage``). The only differences from a human
+        approval are:
+
+        * ``event="action_auto_approved"`` (distinct from ``action_approved``
+          so the audit/ledger query surface can tell a machine approval from a
+          human one), and
+        * the triager's ``verdict`` + ``reasoning`` (+ optional ``confidence``)
+          are packed into the audit ``context`` so an auto-approval carries the
+          same "why" an auditor or insurer needs — every auto-approval is as
+          auditable as a human one.
+
+        The actor defaults to ``system:triager``. The write goes through the
+        SAME ``_update_status`` chokepoint as ``approve`` / ``reject``, so the
+        row flip and the hash-chained audit append land atomically and the
+        tamper-evident chain (W2b) covers auto-approvals identically to human
+        approvals. ``require_status=PENDING`` guards against double-flipping an
+        action that a concurrent path already resolved.
+        """
+        audit_context: dict[str, Any] = {
+            "triager_verdict": verdict,
+            "triager_reasoning": reasoning,
+        }
+        if confidence is not None:
+            audit_context["triager_confidence"] = confidence
+        return await self._update_status(
+            action_id,
+            ActionStatus.APPROVED,
+            approved_by=approver,
+            approved_at=datetime.now().isoformat(),
+            event="action_auto_approved",
+            actor=approver,
+            require_status=ActionStatus.PENDING,
+            audit_context=audit_context,
         )
 
     async def reject(
@@ -693,25 +858,61 @@ class InstinctStore:
                 row = await cur.fetchone()
                 return self._row_to_action(row) if row else None
 
+    async def update_parameters(self, action_id: str, parameters: dict[str, Any]) -> Action | None:
+        """Persist a new ``parameters`` JSON bag on an Action, status-preserving.
+
+        F4 (edit-in-review) — the PATCH proposal-edit endpoint mutates only the editable
+        sub-fields of a PENDING discovery proposal's blob and writes the re-validated,
+        tenancy-pinned ``parameters`` back here. This is a CONTENT write only: it touches
+        ``parameters`` + ``updated_at`` and NEVER ``status`` / ``approved_*`` / chain
+        terminals (the approve click stays a separate, deliberate step). Returns the
+        reloaded Action, or ``None`` if the id doesn't resolve.
+        """
+        await self._ensure_schema()
+        async with self._conn() as db:
+            cur = await db.execute(
+                "UPDATE instinct_actions SET parameters = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                (json.dumps(parameters or {}), action_id),
+            )
+            await db.commit()
+            if cur.rowcount == 0:
+                return None
+        return await self.get_action(action_id)
+
     async def pending(
         self,
         pocket_id: str | None = None,
         assignee: str | None = None,
         workspace_id: str | None = None,
+        scope_type: str | None = None,
     ) -> list[Action]:
         return await self._query_actions(
             status=ActionStatus.PENDING,
             pocket_id=pocket_id,
             assignee=assignee,
             workspace_id=workspace_id,
+            scope_type=scope_type,
         )
 
     async def pending_count(
-        self, pocket_id: str | None = None, workspace_id: str | None = None
+        self,
+        pocket_id: str | None = None,
+        workspace_id: str | None = None,
+        scope_type: str | None = None,
     ) -> int:
         cond = "WHERE status = 'pending'"
         params: list[Any] = []
-        if pocket_id:
+        # BP-3 — scope-aware count, mirroring ``_query_actions``: a scope_type
+        # selects (scope_type, scope_id) with scope_id == pocket_id; omitting it
+        # keeps the legacy pocket_id-only path so legacy rows still count.
+        if scope_type is not None:
+            cond += " AND scope_type = ?"
+            params.append(scope_type)
+            if pocket_id:
+                cond += " AND pocket_id = ?"
+                params.append(pocket_id)
+        elif pocket_id:
             cond += " AND pocket_id = ?"
             params.append(pocket_id)
         # W4a — scope the count to the caller's workspace (plus legacy NULL rows)
@@ -735,10 +936,20 @@ class InstinctStore:
         status: ActionStatus | None = None,
         limit: int = 50,
         workspace_id: str | None = None,
+        scope_type: str | None = None,
     ) -> list[Action]:
-        """Public method — list actions with optional filters and limit."""
+        """Public method — list actions with optional filters and limit.
+
+        BP-3 — ``scope_type`` makes the listing scope-aware: with it, the
+        ``pocket_id`` filter is read as the generic scope id within
+        ``scope_type``; without it, the legacy pocket_id-only path runs.
+        """
         return await self._query_actions(
-            status=status, pocket_id=pocket_id, limit=limit, workspace_id=workspace_id
+            status=status,
+            pocket_id=pocket_id,
+            limit=limit,
+            workspace_id=workspace_id,
+            scope_type=scope_type,
         )
 
     async def _query_actions(
@@ -748,13 +959,25 @@ class InstinctStore:
         limit: int = 500,
         assignee: str | None = None,
         workspace_id: str | None = None,
+        scope_type: str | None = None,
     ) -> list[Action]:
         conditions: list[str] = []
         params: list[Any] = []
         if status:
             conditions.append("status = ?")
             params.append(status.value)
-        if pocket_id:
+        # BP-3 — scope-aware artifact filter. When ``scope_type`` is given the
+        # caller is selecting a GENERIC artifact: filter on (scope_type,
+        # scope_id) where ``scope_id`` reuses the ``pocket_id`` column. When
+        # ``scope_type`` is omitted the legacy pocket_id-only path runs EXACTLY
+        # as before, so pre-BP-3 rows (scope_type NULL) keep matching unchanged.
+        if scope_type is not None:
+            conditions.append("scope_type = ?")
+            params.append(scope_type)
+            if pocket_id:
+                conditions.append("pocket_id = ?")
+                params.append(pocket_id)
+        elif pocket_id:
             conditions.append("pocket_id = ?")
             params.append(pocket_id)
         if assignee:
@@ -1015,14 +1238,22 @@ class InstinctStore:
     async def verify_audit_chain(self) -> dict[str, Any]:
         """Walk the audit hash chain and report whether it is intact.
 
-        The chain is GLOBAL (each row's ``prev_hash`` links to the previous
-        *hashed* row across the whole ledger, not within a pocket), so
+        The chain spans the WHOLE FILE (each row's ``prev_hash`` links to the
+        previous *hashed* row in this ledger, not within a pocket), so
         verification always runs over the entire table in insertion order
         (``rowid``). It recomputes each row's ``entry_hash`` from the row's
         canonical content + the recomputed running ``prev_hash`` and compares
         against the stored value. The first row that fails to match is the
         break point — any insertion, edit, or deletion of a hashed row shifts
         or invalidates every subsequent link.
+
+        ISO-2: under per-workspace physical isolation each workspace has its OWN
+        ``instinct.db``, so "the whole ledger" here is exactly ONE tenant's
+        ledger — the chain is per-workspace, with its own genesis→…→head, and
+        this verifies that tenant's chain independently. (On a single-tenant OSS
+        install, or the legacy shared file, it verifies the one shared chain, as
+        before. The method is workspace-agnostic — isolation is entirely in which
+        file the factory opened.)
 
         Legacy boundary: rows written before W2b have a NULL ``entry_hash``.
         They are counted as ``legacy_unhashed`` and skipped — the chain is
@@ -1270,6 +1501,10 @@ class InstinctStore:
         # ``_ensure_schema`` — use a key check so ``aiosqlite.Row`` (which
         # raises IndexError on unknown keys) doesn't break the read.
         assignee = row["assignee"] if "assignee" in row.keys() else None
+        # BP-3 — read the generic scope_type back. Key-checked like ``assignee``
+        # so a pre-migration row missing the column doesn't raise. NULL/absent
+        # stays None (legacy pocket scope).
+        scope_type = row["scope_type"] if "scope_type" in row.keys() else None
         # The SQLite layer stamps created_at/updated_at as ISO strings.
         # Forward them on the rebuilt Action so consumers (outcome window
         # filters, age sorting) see real history instead of "now". Old
@@ -1278,6 +1513,7 @@ class InstinctStore:
         updated_at = _parse_iso(row["updated_at"]) if "updated_at" in row.keys() else None
         return Action(
             id=row["id"],
+            scope_type=scope_type,
             pocket_id=row["pocket_id"],
             title=row["title"],
             description=row["description"] or "",

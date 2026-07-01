@@ -81,8 +81,23 @@ def instinct_store(tmp_path: Path) -> InstinctStore:
 @pytest.fixture(autouse=True)
 def patch_instinct_store(monkeypatch, instinct_store: InstinctStore):
     """Patch the sweeper's lazy ``ee.api.get_instinct_store`` lookup so
-    the test's fixture wins."""
-    monkeypatch.setattr("pocketpaw_ee.api.get_instinct_store", lambda: instinct_store)
+    the test's fixture wins.
+
+    NOTE (fix/cloud-iso-executor-scope): unlike the executor/propose mocks,
+    this one is INTENTIONALLY workspace-agnostic. The abandon-sweeper
+    (``decisions/_action_sweeper.py``) reads ALL pending parked Actions from a
+    SINGLE store via direct SQL with no per-tenant filter — it is multi-tenant
+    by design and calls ``get_instinct_store()`` bare. Per-workspace store
+    isolation (ISO) is NOT yet threaded through the sweeper; doing so means
+    enumerating each workspace's store file and sweeping each, which is tracked
+    as a follow-up beyond the C1 approval-executor scope. So we still return the
+    one seeded store here (all sweeper tests seed a single workspace, ``ws-A``)
+    and the factory accepts — but ignores — an explicit ``workspace_id`` so it
+    won't TypeError if the resolution path ever passes one."""
+    monkeypatch.setattr(
+        "pocketpaw_ee.api.get_instinct_store",
+        lambda *a, workspace_id=None, **k: instinct_store,
+    )
 
 
 async def _seed_pending_action(

@@ -59,27 +59,29 @@ router = APIRouter(
 @router.get("", response_model=list[ConnectorResponse])
 async def list_connectors(
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> list[ConnectorResponse]:
     """List all available connectors with this workspace's enabled state.
 
-    Always returns the full registry catalog — disabled connectors carry
-    ``enabled=false`` / ``status="disconnected"``. The frontend filters
-    into "Connected" vs "Available" rails on its own.
+    Filters results based on the user's connector permissions. Always returns
+    the full registry catalog for users with full access; restricted users
+    only see connectors they are allowed to use.
     """
-    return await connectors_service.list_connectors(workspace_id)
+    return await connectors_service.list_connectors(workspace_id, user_id=user_id)
 
 
 @router.get("/widget-recipes", response_model=list[WidgetRecipeResponse])
 async def list_widget_recipes(
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> list[WidgetRecipeResponse]:
     """Default home widgets every enabled connector contributes.
 
     Feeds the AddWidgetPicker's "From connectors" rail. Disabled
     connectors return zero recipes. Frontend compiles each recipe to a
-    Ripple UISpec at render time.
+    Ripple UISpec at render time. Filtered by connector permissions.
     """
-    return await connectors_service.list_widget_recipes(workspace_id)
+    return await connectors_service.list_widget_recipes(workspace_id, user_id=user_id)
 
 
 @router.post(
@@ -100,6 +102,8 @@ async def execute_action(
       chat WebSocket bus (PR-9 lands the listener; today returns 503
       ``connector.local_agent_unavailable``).
     - ``sandbox`` actions return 501 — reserved.
+
+    Gated by connector-level permissions in addition to RBAC.
     """
     return await connectors_service.execute(workspace_id, name, body, user_id=user_id)
 
@@ -108,9 +112,13 @@ async def execute_action(
 async def get_connector(
     name: str,
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> ConnectorDetailResponse:
-    """Detail row for one connector — actions list + saved config."""
-    return await connectors_service.get_connector(workspace_id, name)
+    """Detail row for one connector — actions list + saved config.
+
+    Gated by connector-level permissions.
+    """
+    return await connectors_service.get_connector(workspace_id, name, user_id=user_id)
 
 
 @router.post(
@@ -122,6 +130,7 @@ async def enable_connector(
     name: str,
     body: EnableConnectorRequest | None = None,
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> ConnectorResponse:
     """Enable a connector for this workspace.
 
@@ -129,7 +138,9 @@ async def enable_connector(
     the scope/config. The actual OAuth flow runs in
     ``api/v1/oauth_integrations.py``; this endpoint records the workspace's
     intent to use the connector and the scope it was granted at.
+    Gated by connector-level permissions in addition to RBAC.
     """
+    await connectors_service.assert_connector_allowed(workspace_id, user_id, name)
     payload = body or EnableConnectorRequest()
     return await connectors_service.enable_connector(workspace_id, name, payload)
 
@@ -142,8 +153,13 @@ async def enable_connector(
 async def disable_connector(
     name: str,
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> ConnectorResponse:
-    """Soft-disable a connector. Config + history survive."""
+    """Soft-disable a connector. Config + history survive.
+
+    Gated by connector-level permissions in addition to RBAC.
+    """
+    await connectors_service.assert_connector_allowed(workspace_id, user_id, name)
     return await connectors_service.disable_connector(workspace_id, name)
 
 
@@ -183,6 +199,11 @@ async def update_config(
     name: str,
     body: UpdateConnectorConfigRequest,
     workspace_id: str = Depends(current_workspace_id),
+    user_id: str = Depends(current_user_id),
 ) -> ConnectorResponse:
-    """Merge-patch the saved config for one connector."""
+    """Merge-patch the saved config for one connector.
+
+    Gated by connector-level permissions in addition to RBAC.
+    """
+    await connectors_service.assert_connector_allowed(workspace_id, user_id, name)
     return await connectors_service.update_config(workspace_id, name, body)

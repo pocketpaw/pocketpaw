@@ -121,13 +121,13 @@ def test_app(tmp_path: Path, monkeypatch):
       - current_active_user: returns a fake admin (instinct.approve/audit
         are ADMIN-tier; admin satisfies the workspace-action guard).
       - current_workspace_id: returns the fake user's active workspace.
-      - workspace_service.get_workspace_plan: returns 'business' so the
+      - workspace_service.get_workspace_plan: returns 'enterprise' so the
         require_plan_feature('instinct') gate added in #1060 passes.
     """
     fake_user = _FakeUser()
 
     # instinct is an enterprise-tier feature in PLAN_FEATURES; team and
-    # business plans don't include it, so the require_plan_feature guard
+    # non-enterprise plans don't include it, so the require_plan_feature guard
     # only passes at enterprise. Mirror the AsyncMock pattern from
     # tests/cloud/test_plan_feature_gate.py so the patch reaches the same
     # module attribute the guard reads from.

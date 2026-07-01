@@ -83,6 +83,14 @@
 # `_source_transform` helper is pure (no imports beyond typing); the connectors
 # service is imported LAZILY inside `_run_connector_binding` (same pattern as
 # the sense resolver import) so the static graph stays clean and cycle-free.
+# Updated: 2026-06-19 (feat/typed-ripplespec-phase2) — DUAL-PATH READER. The
+#   spec-reading entry points (`_parse_bindings`, `selected_source_keys`,
+#   `run_sources`) now accept `RippleSpec | dict | None`. A new `_sources_block`
+#   helper reads `spec.sources` from a typed RippleSpec or `.get("sources")`
+#   from a legacy flat dict — so a stored legacy dict and a promoted typed spec
+#   both run identically (no migration, promote-on-read). The OSS-only
+#   `pocketpaw.bundled_templates.schema` import keeps the import-linter contract
+#   clean (no `models.*` dependency).
 
 from __future__ import annotations
 
@@ -90,11 +98,12 @@ import asyncio
 import logging
 import time
 import urllib.parse
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
 
+from pocketpaw.bundled_templates.schema import RippleSpec
 from pocketpaw.security.url_validators import validate_external_url_strict
 from pocketpaw_ee.cloud.pockets._http_guard import (
     _HTTP_TIMEOUT,
@@ -242,7 +251,7 @@ def _audit_source_run(
                 action="pocket.sources.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_source_run",
                 pocket_id=pocket_id,
                 base_url=_strip_query(base_url),
                 ran=ran,
@@ -285,8 +294,25 @@ def _select_sources(
     return dict(bindings)
 
 
+def _sources_block(ripple_spec: RippleSpec | dict | None) -> dict[str, Any]:
+    """Return the ``sources`` block from a ``RippleSpec | dict | None`` reader input.
+
+    Phase-2 dual-path: when handed a typed ``RippleSpec`` read its ``sources``
+    field; when handed a legacy flat dict use the existing ``.get("sources")``
+    path. ``None`` / a non-dict ``sources`` value yields an empty dict, exactly
+    as the prior ``(ripple_spec or {}).get("sources") or {}`` expression did.
+    """
+    if isinstance(ripple_spec, RippleSpec):
+        raw = ripple_spec.sources
+    elif isinstance(ripple_spec, dict):
+        raw = ripple_spec.get("sources")
+    else:
+        raw = None
+    return raw if isinstance(raw, dict) else {}
+
+
 def selected_source_keys(
-    ripple_spec: dict,
+    ripple_spec: RippleSpec | dict | None,
     *,
     trigger: str | None = None,
     only_source: str | None = None,
@@ -299,6 +325,8 @@ def selected_source_keys(
     entries (which ``_parse_bindings`` turns into parse errors, not bindings)
     are correctly excluded — they are never runnable.
 
+    Accepts a typed ``RippleSpec`` or a legacy flat dict (Phase-2 dual-path).
+
     Used by the ``sources/run`` route to decide, when no backend is
     configured, whether the request is a benign no-op (nothing selected →
     empty result) or a real misconfiguration (a runnable source was authored
@@ -309,13 +337,19 @@ def selected_source_keys(
     return list(selected.keys())
 
 
-def _parse_bindings(ripple_spec: dict) -> tuple[dict[str, SourceBinding], list[dict]]:
+def _parse_bindings(
+    ripple_spec: RippleSpec | dict | None,
+) -> tuple[dict[str, SourceBinding], list[dict]]:
     """Parse ``rippleSpec.sources`` into SourceBinding objects.
 
     Returns ``(valid_bindings, parse_errors)``. A malformed entry becomes a
     parse error rather than aborting the whole run.
+
+    Phase-2 dual-path: accepts a typed ``RippleSpec`` (reads ``spec.sources``)
+    or a legacy flat dict (the existing ``.get("sources")`` path). Either way a
+    malformed / absent ``sources`` block yields no bindings.
     """
-    raw = (ripple_spec or {}).get("sources") or {}
+    raw = _sources_block(ripple_spec)
     bindings: dict[str, SourceBinding] = {}
     errors: list[dict] = []
     if not isinstance(raw, dict):
@@ -565,7 +599,7 @@ async def run_sources(
     *,
     pocket_id: str,
     user_id: str,
-    ripple_spec: dict,
+    ripple_spec: RippleSpec | dict | None,
     base_url: str,
     auth_type: str,
     auth_header: str | None,

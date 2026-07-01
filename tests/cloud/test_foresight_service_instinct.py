@@ -90,7 +90,13 @@ def isolated_instinct_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     test_store = InstinctStore(tmp_path / "instinct-test.db")
 
-    def _factory() -> InstinctStore:
+    # Accept (and ignore) ``workspace_id`` — these tests exercise the W4c IN-ROW
+    # workspace filter on a SINGLE physical store (the W4cWorkspaceScoping class
+    # queries this very store with explicit workspace_id), so the factory must
+    # return the one store regardless of the arg. The signature just has to
+    # tolerate the explicit ``workspace_id`` the service now threads through
+    # (fix/cloud-iso-executor-scope) instead of TypeError-ing.
+    def _factory(*_a, workspace_id: str | None = None, **_k) -> InstinctStore:
         return test_store
 
     monkeypatch.setattr(stores_mod, "get_instinct_store", _factory)

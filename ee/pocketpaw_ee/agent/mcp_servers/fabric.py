@@ -34,8 +34,9 @@
 #     workspace (fix/fabric-stats-workspace-scope: the original instance-wide
 #     stats leaked another tenant's experimental type names into chat on a
 #     shared box). Counts mirror fabric_query's visibility exactly; the type
-#     list holds only types with object rows visible to the workspace (type
-#     DEFINITIONS are global in the schema — see FabricStore.list_types).
+#     list holds only the caller workspace's own types (SZD-2: the
+#     fabric_object_types table now carries a workspace_id; a NULL workspace_id
+#     is a legacy/global type visible to all — see FabricStore.list_types).
 #
 # Read-only: neither tool writes anything. FabricCreateTool is deliberately
 # NOT wrapped — ontology writes from the SDK backend should arrive as gated
@@ -56,6 +57,8 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+
+from ._audit import record_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +161,15 @@ async def _fabric_query_handler(args: dict) -> dict:
             "fabric_query requires workspace context (call from a cloud chat session)."
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_query",
+        status="ok",
+        ok=True,
+    )
+
     type_name = args.get("type_name")
     linked_to = args.get("linked_to")
     link_type = args.get("link_type")
@@ -240,6 +252,15 @@ async def _fabric_stats_handler(args: dict) -> dict:
         return _error_response(
             "fabric_stats requires workspace context (call from a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=_user_id,
+        tool_server="pocketpaw_fabric",
+        tool_name="_fabric_stats",
+        status="ok",
+        ok=True,
+    )
 
     store = _get_fabric_store()
     if store is None:

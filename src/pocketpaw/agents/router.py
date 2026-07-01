@@ -3,6 +3,17 @@
 Uses the backend registry to lazily discover and instantiate the
 configured agent backend. Supports optional user-configured fallback
 backends if the primary backend fails.
+
+Changes:
+  - 2026-06-26 (MCG-10): Added ``run_with_failover`` — the OSS hook for L2
+    cross-backend HARNESS failover. When ``settings.backend_failover_enabled``
+    is True it drives the run through ``BackendFailoverRunner`` over
+    ``settings.backend_failover_chain`` (Claude Code -> Codex -> opencode),
+    switching harnesses only on a pre-stream lane-down failure and audit-
+    logging each switch. When the flag is False it is a thin pass-through to
+    ``run`` (behavior unchanged). Distinct from the generic ``fallback_backends``
+    path in ``run`` (which trips on ANY failure, with no streaming guard). The
+    EE cloud run path wiring is a follow-up.
 """
 
 import asyncio
@@ -12,6 +23,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from pocketpaw.agents.backend import BackendInfo
+from pocketpaw.agents.failover import BackendFailoverRunner
 from pocketpaw.agents.protocol import AgentEvent
 from pocketpaw.agents.registry import get_backend_class
 from pocketpaw.config import Settings
@@ -210,6 +222,59 @@ class AgentRouter:
             content=last_error or "All configured backends failed",
         )
         yield AgentEvent(type="done", content="")
+
+    def _failover_backend_factory(self, backend_name: str) -> Any:
+        """Resolve a harness name to a (cached) backend instance for failover.
+
+        Reuses the already-initialized primary instance when the name matches
+        the active backend, otherwise reuses/creates a cached instance via the
+        same path the generic fallback uses — so the failover chain shares warm
+        subprocesses with the rest of the router instead of spawning a fresh
+        one per attempt. Returns None if the harness is unavailable.
+        """
+        if backend_name == self._active_backend_name and self._backend is not None:
+            return self._backend
+        return self._get_fallback_backend(backend_name)
+
+    async def run_with_failover(
+        self,
+        message: str,
+        *,
+        system_prompt: str | None = None,
+        history: list[dict] | None = None,
+        session_key: str | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Run with L2 cross-backend (harness) failover when enabled.
+
+        This is the MCG-10 hook. When ``backend_failover_enabled`` is False it
+        delegates to :meth:`run` (identical behavior, including the generic
+        ``fallback_backends`` path). When True it drives the run through
+        :class:`BackendFailoverRunner` over ``backend_failover_chain``, which
+        switches HARNESSES only on a pre-stream lane-down failure (overload /
+        unavailable / auth) and audit-logs every switch.
+
+        The EE cloud run path (``run_core``) calling this is a follow-up; the
+        mechanism + this hook ship in the OSS slice.
+        """
+        if not self.settings.backend_failover_enabled:
+            async for event in self.run(
+                message,
+                system_prompt=system_prompt,
+                history=history,
+                session_key=session_key,
+            ):
+                yield event
+            return
+
+        chain = self.settings.backend_failover_chain or [self.settings.agent_backend]
+        runner = BackendFailoverRunner(chain, self._failover_backend_factory)
+        async for event in runner.run(
+            message,
+            system_prompt=system_prompt,
+            history=history,
+            session_key=session_key,
+        ):
+            yield event
 
     async def stop(self) -> None:
         """Stop all backend instances."""

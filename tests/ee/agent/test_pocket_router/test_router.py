@@ -535,7 +535,7 @@ def _isolated_instinct_store(monkeypatch, tmp_path):
     from pocketpaw.instinct.store import InstinctStore
 
     st = InstinctStore(tmp_path / "w2c_router_instinct.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 

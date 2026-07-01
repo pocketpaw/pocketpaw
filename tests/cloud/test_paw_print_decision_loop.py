@@ -74,7 +74,7 @@ def stores(tmp_path: Path, monkeypatch):
     """
     pp_store = PawPrintStore(tmp_path / "paw_print_loop.db")
     instinct_store = InstinctStore(tmp_path / "instinct_loop.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: instinct_store)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: instinct_store)
     monkeypatch.setattr("pocketpaw.stores.get_paw_print_store", lambda: pp_store)
     return pp_store, instinct_store
 
@@ -84,7 +84,7 @@ def client(stores, monkeypatch):
     pp_store, _ = stores
     app = FastAPI()
     app.include_router(router)
-    monkeypatch.setattr("pocketpaw_ee.paw_print.router._store", lambda: pp_store)
+    monkeypatch.setattr("pocketpaw_ee.paw_print.router._store", lambda *a, **k: pp_store)
     return TestClient(app)
 
 

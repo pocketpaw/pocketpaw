@@ -34,6 +34,18 @@
 # ``PocketUpdated`` bus event — so reconcile rides the same rails as every
 # other pocket mutation and never pokes the Pocket Beanie doc directly
 # (the cloud "Beanie writes only from service.py" import-linter contract).
+#
+# Modified 2026-06-19 (feat/typed-ripplespec-phase1): the template-owned region
+# partition is now DERIVED from ``TemplateLayer.model_fields`` (the typed
+# layer-split model in ``pocketpaw.bundled_templates.schema``) instead of a
+# hand-maintained tuple — single source of truth shared with ``service.update``.
+# ``_build_reconciled_spec`` overlays the template-owned regions via the typed
+# ``RippleSpec.with_template_layer`` merge, which preserves the instance-owned
+# regions (``state`` / ``selections``) structurally rather than by string list.
+# Behaviour is unchanged — the existing reconcile tests stay green; the typed
+# model just makes "reconcile never touches state" a type boundary, not a
+# convention. The reconcile service still exchanges flat dicts at its
+# boundaries (the typed model is used INTERNALLY only).
 """Template Reconcile service — re-apply template-owned regions, preserve
 instance-owned regions.
 
@@ -49,6 +61,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from pocketpaw.bundled_templates.schema import RippleSpec, TemplateLayer
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.cloud.pockets.dto import UpdatePocketRequest
 from pocketpaw_ee.cloud.shared.errors import Forbidden, NotFound, ValidationError
@@ -57,10 +70,13 @@ logger = logging.getLogger(__name__)
 
 # The rippleSpec regions the TEMPLATE owns. Reconcile overwrites exactly
 # these keys from the source template and leaves every other key (notably
-# ``state``) exactly as the instance has it. Order is the canonical display
-# order used in the diff. Keep in sync with the design doc's P2.4 partition
-# and RFC 03's template schema.
-_TEMPLATE_OWNED_REGIONS: tuple[str, ...] = ("ui", "actions", "sources", "shape")
+# ``state``) exactly as the instance has it. DERIVED from the typed
+# ``TemplateLayer`` so there is ONE source of truth for the partition shared
+# with ``service.update``'s clobber-fix — a field added to ``TemplateLayer``
+# automatically becomes template-owned here (and a test pins the invariant).
+# ``model_fields`` is insertion-ordered, which is the canonical display order
+# used in the diff: ("ui", "actions", "sources", "shape").
+_TEMPLATE_OWNED_REGIONS: tuple[str, ...] = tuple(TemplateLayer.model_fields)
 
 
 def _resolve_template_owned(
@@ -113,7 +129,26 @@ def _build_reconciled_spec(
     are preserved verbatim. No input is mutated. This is intentionally a
     region-level overwrite, NOT the node-id-keyed ``merge_ripple_spec`` walk
     — reconcile owns whole regions, not individual UI nodes.
+
+    Implemented via the typed ``RippleSpec.with_template_layer`` merge: it
+    overlays exactly the template-owned regions ``template_owned`` provides
+    and preserves every instance-owned + passthrough key on the existing spec.
+    ``template_owned`` carries ONLY keys from ``_TEMPLATE_OWNED_REGIONS`` (built
+    by ``_resolve_template_owned``), so promoting it to a ``TemplateLayer`` is
+    safe even under the layer's ``extra="forbid"``. Falls back to the prior
+    deepcopy-overlay if the existing spec cannot be promoted (corrupt spec),
+    so reconcile never drops the template refresh.
     """
+    spec = RippleSpec.from_flat_dict(existing_spec)
+    if spec is not None:
+        # Only the regions the template actually provides — an absent region is
+        # NOT cleared (matches the prior "if region in template_owned" guard).
+        layer = TemplateLayer.model_validate(
+            {k: v for k, v in template_owned.items() if k in _TEMPLATE_OWNED_REGIONS}
+        )
+        return spec.with_template_layer(layer).to_flat_dict()
+
+    # Fallback: existing spec unpromotable — preserve the historical behaviour.
     out: dict[str, Any] = copy.deepcopy(existing_spec) if isinstance(existing_spec, dict) else {}
     for region in _TEMPLATE_OWNED_REGIONS:
         if region in template_owned:

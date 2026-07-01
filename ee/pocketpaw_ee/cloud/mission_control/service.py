@@ -195,6 +195,35 @@ def _require_workspace(ctx: RequestContext) -> str:
     return ctx.workspace_id
 
 
+def _record_deep_work_audit(
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Fire-and-forget audit recording for deep work operations.
+
+    Never raises — failures are logged and swallowed so an audit outage
+    cannot block a legitimate operation.
+    """
+    import asyncio
+
+    from pocketpaw_ee.cloud.deep_work_log import service as _dw_log_service
+
+    asyncio.ensure_future(
+        _dw_log_service.record(
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata or {},
+        )
+    )
+
+
 async def _visible_pocket_ids(ctx: RequestContext, *, project_id: str | None = None) -> set[str]:
     """Return the set of pocket ids the caller can see in their workspace.
 
@@ -410,7 +439,9 @@ async def agent_list_work_items(
     # block must run even when the workspace has zero visible pockets. Tasks
     # below have their own workspace-level tenancy and are NOT gated by
     # pocket visibility.
-    store = get_instinct_store()
+    # ISO: HTTP path (no ``current_workspace`` ContextVar) — scope the store
+    # file to the caller's workspace (the W4c in-row filter below is additive).
+    store = get_instinct_store(workspace_id=workspace_id or None)
     # W4c — scope the instinct reads to the caller's workspace (plus legacy
     # NULL rows) at the store/SQL layer so a tenant never reads another
     # tenant's Nudges off the shared DB. The pocket-visibility filter below
@@ -592,7 +623,7 @@ async def agent_bulk_approve(
     from uuid import uuid4
 
     body = BulkActionRequest.model_validate(body)
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
 
     bulk_id = uuid4().hex
     approved: list[dict] = []
@@ -638,7 +669,8 @@ async def agent_bulk_approve(
     # Handle nudges via Instinct store
     if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
-        store = get_instinct_store()
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
         eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
         nudge_approved, nudge_missing, _ = await store.bulk_approve(
             eligible, approver=ctx.user_id, note=body.note
@@ -653,6 +685,18 @@ async def agent_bulk_approve(
         for action in nudge_approved:
             executed.append(await _execute_bulk_approved_nudge(action, ctx=ctx))
 
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.approved",
+        target_type="bulk",
+        metadata={
+            "bulk_id": bulk_id,
+            "approved": approved,
+            "missing": missing,
+            "executed": executed,
+        },
+    )
     return {
         "bulk_id": bulk_id,
         "approved": approved,
@@ -683,7 +727,7 @@ async def agent_bulk_reject(
             "mission_control.reason_required",
             "bulk-reject requires a reason — pass a non-empty string in ``reason``.",
         )
-    _require_workspace(ctx)
+    workspace_id = _require_workspace(ctx)
 
     from uuid import uuid4
 
@@ -727,7 +771,8 @@ async def agent_bulk_reject(
     # Handle nudges via Instinct store
     if nudge_store_ids:
         visible = await _visible_pocket_ids(ctx)
-        store = get_instinct_store()
+        # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+        store = get_instinct_store(workspace_id=workspace_id or None)
         eligible, blocked = await _split_ids_by_tenancy(store, nudge_store_ids, visible)
         nudge_rejected, nudge_missing, _ = await store.bulk_reject(
             eligible, reason=body.reason, rejector=ctx.user_id
@@ -737,6 +782,13 @@ async def agent_bulk_reject(
         missing.extend(nudge_id_map.get(bid, bid) for bid in blocked)
 
     # no-event: per-item block/reject inside the loops already emit events
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.rejected",
+        target_type="bulk",
+        metadata={"bulk_id": bulk_id, "rejected": rejected, "missing": missing},
+    )
     return {
         "bulk_id": bulk_id,
         "rejected": rejected,
@@ -786,7 +838,8 @@ async def agent_outcomes_summary(
     body = OutcomesQueryRequest.model_validate(body)
     workspace_id = _require_workspace(ctx)
     visible = await _visible_pocket_ids(ctx)
-    store = get_instinct_store()
+    # ISO: HTTP path (no ContextVar) — scope the store to the caller.
+    store = get_instinct_store(workspace_id=workspace_id or None)
     cutoff = datetime.now() - _window_to_delta(body.window)
 
     # Pull a generous slice and filter in Python. ``list_actions`` does
@@ -936,6 +989,13 @@ async def agent_bulk_reassign(
             skipped.append(raw_id)
 
     # no-event: per-item agent_reassign_task already emits TaskUpdated per row
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.reassigned",
+        target_type="bulk",
+        metadata={"bulk_id": bulk_id, "affected": affected, "skipped": skipped},
+    )
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
@@ -989,6 +1049,18 @@ async def agent_bulk_snooze(
             skipped.append(raw_id)
 
     # no-event: per-item agent_update_task already emits TaskUpdated per row
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.snoozed",
+        target_type="bulk",
+        metadata={
+            "bulk_id": bulk_id,
+            "affected": affected,
+            "skipped": skipped,
+            "until_iso": body.until_iso,
+        },
+    )
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
@@ -1032,6 +1104,13 @@ async def agent_bulk_revert(
             )
             skipped.append(raw_id)
 
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.item.reverted",
+        target_type="bulk",
+        metadata={"bulk_id": bulk_id, "affected": affected, "skipped": skipped},
+    )
     return {"bulk_id": bulk_id, "affected": affected, "skipped": skipped}
 
 
@@ -1249,7 +1328,16 @@ async def agent_create_cycle(ctx: RequestContext, body: CreateCycleRequest | dic
     # tenancy via ``_ensure_project_in_workspace`` (raises NotFound when
     # the project isn't in this workspace), and emits ``cycle.created``
     # — no second emit needed from here per Rule 9.
-    return await cycles_service.agent_create_cycle(ctx, cycles_body)
+    result = await cycles_service.agent_create_cycle(ctx, cycles_body)
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.created",
+        target_type="cycle",
+        target_id=str(result.id) if hasattr(result, "id") else body.name,
+        metadata={"name": body.name, "project_id": body.project_id, "scope": body.scope},
+    )
+    return result
 
 
 async def agent_attach_cycle_items(
@@ -1291,6 +1379,14 @@ async def agent_attach_cycle_items(
         except NotFound:
             skipped.append(task_id)
 
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.items_attached",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"attached": attached, "skipped": skipped},
+    )
     return AttachCycleItemsResponse(
         attached=attached,
         skipped=skipped,
@@ -1341,6 +1437,14 @@ async def agent_detach_cycle_items(
             doc.completed = completed
             await doc.save()
 
+    _record_deep_work_audit(
+        workspace_id=workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.cycle.items_detached",
+        target_type="cycle",
+        target_id=cycle_id,
+        metadata={"detached": detached, "skipped": skipped},
+    )
     return DetachCycleItemsResponse(
         detached=detached,
         skipped=skipped,

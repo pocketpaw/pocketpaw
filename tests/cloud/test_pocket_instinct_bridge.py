@@ -37,7 +37,7 @@ def store(tmp_path, monkeypatch):
     temp-backed store and never touch ``~/.pocketpaw/instinct.db``.
     """
     st = InstinctStore(tmp_path / "instinct_bridge_test.db")
-    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda: st)
+    monkeypatch.setattr("pocketpaw.stores.get_instinct_store", lambda *a, **k: st)
     return st
 
 
@@ -304,3 +304,116 @@ async def test_execute_approved_write_no_outcome_emits_nothing(store, monkeypatc
     await instinct_bridge.execute_approved_write(approved)
 
     assert emitted == []
+
+
+# ---------------------------------------------------------------------------
+# T8 — trust feedback at the SINGLE write site (execute_approved_write).
+# ---------------------------------------------------------------------------
+
+
+def _capture_trust(monkeypatch):
+    """Patch trust_ledger.record_correction on its import target and capture
+    every call. The bridge calls it best-effort after mark_executed."""
+    calls: list[dict] = []
+
+    async def _record(workspace_id, pocket_id, action, was_auto_approved):
+        calls.append(
+            {
+                "workspace_id": workspace_id,
+                "pocket_id": pocket_id,
+                "action": action,
+                "was_auto_approved": was_auto_approved,
+            }
+        )
+
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.trust_ledger.record_correction", _record)
+    return calls
+
+
+async def test_trust_feedback_human_approver_records_false(store, monkeypatch):
+    """T-34: a human approver → record_correction(was_auto_approved=False),
+    exactly ONE row written, after a successful execution."""
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    async def _run_action(**kwargs):
+        return {"ok": True, "action": kwargs["action"], "status": 200}
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor", _get_creds
+    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.action_executor.run_action", _run_action)
+    calls = _capture_trust(monkeypatch)
+
+    action_id = await instinct_bridge.propose_pocket_write(
+        pocket=_pocket(),
+        backend_config=None,
+        parked_write=_park(),
+        requested_by="requester-9",
+    )
+    approved = await store.approve(action_id, approver="user:alice")
+    await instinct_bridge.execute_approved_write(approved)
+
+    assert len(calls) == 1, "trust feedback must be written exactly ONCE"
+    assert calls[0]["was_auto_approved"] is False
+    assert calls[0]["workspace_id"] == "w1"
+    assert calls[0]["pocket_id"] == "pocket-1"
+    assert calls[0]["action"] == "mark_renewed"
+
+
+async def test_trust_feedback_system_triager_records_true(store, monkeypatch):
+    """T-33: a system:triager approver → record_correction(
+    was_auto_approved=True), exactly ONE row."""
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    async def _run_action(**kwargs):
+        return {"ok": True, "action": kwargs["action"], "status": 200}
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor", _get_creds
+    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.action_executor.run_action", _run_action)
+    calls = _capture_trust(monkeypatch)
+
+    action_id = await instinct_bridge.propose_pocket_write(
+        pocket=_pocket(),
+        backend_config=None,
+        parked_write=_park(),
+        requested_by="requester-9",
+    )
+    approved = await store.approve(action_id, approver="system:triager")
+    await instinct_bridge.execute_approved_write(approved)
+
+    assert len(calls) == 1
+    assert calls[0]["was_auto_approved"] is True
+
+
+async def test_trust_feedback_not_written_on_failed_execution(store, monkeypatch):
+    """A rejected post-approval write (allowlist miss) → NO trust feedback.
+    The write never landed, so it must not move the trust score."""
+
+    async def _get_creds(workspace_id, pocket_id):
+        return ("https://api.example.com", "bearer", None, "tok", [], None)
+
+    async def _run_action(**kwargs):
+        return {"ok": False, "code": "not_allowed", "error": "nope"}
+
+    monkeypatch.setattr(
+        "pocketpaw_ee.cloud.pockets.service.get_pocket_backend_for_executor", _get_creds
+    )
+    monkeypatch.setattr("pocketpaw_ee.cloud.pockets.action_executor.run_action", _run_action)
+    calls = _capture_trust(monkeypatch)
+
+    action_id = await instinct_bridge.propose_pocket_write(
+        pocket=_pocket(),
+        backend_config=None,
+        parked_write=_park(),
+        requested_by="requester-9",
+    )
+    approved = await store.approve(action_id, approver="user:alice")
+    await instinct_bridge.execute_approved_write(approved)
+
+    assert calls == []

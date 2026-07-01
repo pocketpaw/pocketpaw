@@ -1,4 +1,12 @@
 # service.py — EEUploadService: workspace-scoped upload pipeline on top of OSS.
+# Updated: 2026-06-26 — ART-4 security follow-up. ``presigned_get`` now forwards
+#   a Content-Disposition to the storage adapter: ``attachment; filename="…"``
+#   for any mime NOT in ``INLINE_MIMES`` (mirroring the streaming download
+#   route's policy in uploads/router.py), ``None`` (adapter default → inline)
+#   for inline-safe types (images, pdf, plain text). This closes the gap where
+#   an S3 presigned GET served delivered HTML/SVG/JS INLINE on the storage
+#   origin — the deliver_artifact path relaxes the mime allowlist, so without
+#   this an agent-built .html could render active content from its download URL.
 # Updated: 2026-05-17 — pocketpaw#1118 P1. Added ``write_text_file()`` —
 #   a programmatic text-content write path for callers that have bytes
 #   in memory rather than an inbound HTTP ``UploadFile``. The cloud
@@ -28,7 +36,7 @@ from uuid import uuid4
 from fastapi import UploadFile
 
 from pocketpaw.uploads.adapter import StorageAdapter
-from pocketpaw.uploads.config import UploadSettings
+from pocketpaw.uploads.config import INLINE_MIMES, UploadSettings
 from pocketpaw.uploads.errors import NotFound
 from pocketpaw.uploads.factory import build_adapter
 from pocketpaw.uploads.file_store import FileRecord
@@ -41,6 +49,29 @@ from pocketpaw.uploads.service import (
 from pocketpaw_ee.cloud.realtime.emit import emit
 from pocketpaw_ee.cloud.realtime.events import FileDeleted, FileReady
 from pocketpaw_ee.cloud.uploads.mongo_store import MongoFileStore
+
+
+def _safe_disposition_filename(filename: str) -> str:
+    """Strip characters that could break out of a ``Content-Disposition``
+    header value (quotes, backslashes, control chars). Returns ``"download"``
+    when nothing usable remains."""
+    cleaned = "".join(c for c in (filename or "") if c.isprintable() and c not in '"\\\r\n')
+    return cleaned or "download"
+
+
+def _download_disposition(mime: str, filename: str) -> str | None:
+    """``Content-Disposition`` to serve a presigned download with, or ``None``.
+
+    Mirrors the streaming download route (``uploads/router.py``): mimes in
+    ``INLINE_MIMES`` (images, pdf, plain text) may render inline, so we return
+    ``None`` and leave the adapter/object default untouched (byte-identical to
+    before). Everything else — including the HTML/SVG/JS the deliver_artifact
+    path can now store — is forced to ``attachment`` so a presigned GET
+    downloads it instead of rendering active content on the storage origin.
+    """
+    if mime in INLINE_MIMES:
+        return None
+    return f'attachment; filename="{_safe_disposition_filename(filename)}"'
 
 
 class _NullMeta:
@@ -222,7 +253,14 @@ class EEUploadService:
         if rec is None:
             raise NotFound()
         await self._assert_can_read(rec, requester_id, workspace)
-        url = await self._adapter.presigned_get(rec.storage_key, ttl_seconds)
+        # Force a download for anything that isn't inline-safe so a presigned
+        # GET can't render active content (HTML/SVG/JS) on the storage origin —
+        # the deliver_artifact path stores arbitrary mimes, so this is the gate
+        # that keeps a delivered .html from rendering from its download URL.
+        disposition = _download_disposition(rec.mime, rec.filename)
+        url = await self._adapter.presigned_get(
+            rec.storage_key, ttl_seconds, response_content_disposition=disposition
+        )
         return rec, url
 
     async def delete(

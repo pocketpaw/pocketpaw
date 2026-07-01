@@ -50,6 +50,19 @@ Updated: 2026-06-13 (feat/claude-sdk-prewarm) — added ``prewarm``, which eager
   digest matches too. Fire-and-forget: never raises (the backend's ``prewarm``
   swallows its own errors; this guards instance load + prompt assembly). The EE
   trigger fires it as a background task in ``run_core.execute_run``.
+Updated: 2026-06-26 (feat/mcg-3-pool-route-model) — ``_build`` now routes the
+  per-agent ``config.model`` onto the correct backend Settings field via
+  ``pocketpaw.llm.providers.base.route_model`` instead of the old brittle
+  ``"claude" in backend`` / ``"openai" in backend`` / ``"google" in backend``
+  substring chain. That chain silently dropped the per-agent model for
+  ``codex_cli``, ``opencode``, ``deep_agents``, ``copilot_sdk`` and
+  ``langchain_react`` (and even wrote OpenAI Agents' model to the wrong field,
+  ``openai_model`` instead of ``openai_agents_model``). ``route_model`` is
+  driven by ``_BACKEND_MODEL_ATTR`` (+ the langchain_react->deep_agents_model
+  alias) so it covers every registered backend and preserves the composite
+  ``provider:model`` / ``provider/model`` formats verbatim. Legacy backend names
+  are resolved through ``_LEGACY_BACKENDS`` before routing so old agent docs
+  still map to the right field. Empty model stays a no-op (backend default).
 """
 
 from __future__ import annotations
@@ -64,7 +77,9 @@ from typing import TYPE_CHECKING, Any
 from pocketpaw.agents.errors import AgentBackendUnavailable, AgentNotFound
 
 if TYPE_CHECKING:
-    from pocketpaw.agents.backend import AgentBackend
+    from collections.abc import Callable
+
+    from pocketpaw.agents.backend import AgentBackend, LeasedClient, SessionHandle
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
@@ -390,6 +405,9 @@ class AgentPool:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
+        session_handle: SessionHandle | None = None,
+        warm_client: LeasedClient | None = None,
+        on_client_built: Callable[[Any, str, Callable], None] | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -433,6 +451,14 @@ class AgentPool:
         their narrower signature). The Claude SDK backend materializes exactly
         those skills into a throwaway local plugin so ONLY the named skills are
         surfaced to the agent for this run. Empty = legacy all-skills behavior.
+
+        ``warm_client`` / ``on_client_built`` (feat/warm-reuse WH-1) let the
+        SessionSupervisor (WH-2/WH-3) drive the turn against a caller-LEASED warm
+        client. They ride the SAME withhold-when-empty contract as the kwargs
+        above — forwarded to the backend's ``run`` ONLY when set, so the 6
+        non-Claude backends keep their narrower signature and only the Claude SDK
+        backend acts on them. Both unset (the default) = the unchanged legacy
+        warm-client path.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -505,6 +531,25 @@ class AgentPool:
             # non-empty. Empty = legacy all-skills advertise behavior.
             if skill_names:
                 run_kwargs["skill_names"] = skill_names
+            # Native-resume handle (feat/session-supervisor SS-1). Same
+            # withhold-when-empty rule as the kwargs above: only the Claude SDK
+            # backend accepts ``session_handle`` (it passes a non-None
+            # ``cli_session_id`` as ``ClaudeAgentOptions.resume`` and routes the
+            # turn down the fresh-launch path); the other backends keep the
+            # narrower signature, so the handle is forwarded ONLY when non-None.
+            # None = legacy warm-client path, unchanged for every existing run.
+            if session_handle is not None:
+                run_kwargs["session_handle"] = session_handle
+            # Leased warm-client seam (feat/warm-reuse WH-1). Same
+            # withhold-when-empty rule: only the Claude SDK backend accepts
+            # ``warm_client`` / ``on_client_built`` (it drives the turn against the
+            # leased client or hands the supervisor a freshly-built one); the other
+            # backends keep the narrower signature, so each is forwarded ONLY when
+            # set. Both unset = the unchanged legacy warm-client path.
+            if warm_client is not None:
+                run_kwargs["warm_client"] = warm_client
+            if on_client_built is not None:
+                run_kwargs["on_client_built"] = on_client_built
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event
@@ -524,8 +569,9 @@ class AgentPool:
     async def _build(self, agent_doc: Any) -> AgentInstance:
         """Build a new AgentInstance from an Agent document."""
         from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
-        from pocketpaw.agents.registry import get_backend_class
+        from pocketpaw.agents.registry import _LEGACY_BACKENDS, get_backend_class
         from pocketpaw.config import Settings
+        from pocketpaw.llm.providers.base import route_model
         from pocketpaw.tools.policy import OPT_IN_MCP_SERVERS, ToolPolicy
 
         agent_id = str(agent_doc.id)
@@ -535,15 +581,21 @@ class AgentPool:
         settings = Settings.load()
         settings.agent_backend = config.get("backend", "claude_agent_sdk")
 
-        # Map model to the correct settings field based on backend
+        # Map the per-agent model onto the Settings field the chosen backend
+        # actually reads, for EVERY registered backend — the old ``"claude" in
+        # backend`` substring routing silently dropped the model for codex_cli /
+        # opencode / deep_agents / copilot_sdk / langchain_react. ``route_model``
+        # is the single source of truth (driven by ``_BACKEND_MODEL_ATTR`` +
+        # the langchain_react->deep_agents alias) and preserves the composite
+        # ``provider:model`` / ``provider/model`` formats verbatim. An empty
+        # model is a no-op, so the backend falls through to its own default.
+        # Catalog existence-validation is NOT done here — it lives upstream in
+        # the picker / EE catalog layer (MCG-1/4); OSS can't import EE.
+        # Resolve legacy backend names to their canonical key first so an old
+        # agent doc (e.g. ``claude_code``) still routes to the right field.
         model = config.get("model", "")
-        if model:
-            if "claude" in settings.agent_backend:
-                settings.claude_sdk_model = model
-            elif "openai" in settings.agent_backend:
-                settings.openai_model = model
-            elif "google" in settings.agent_backend:
-                settings.google_adk_model = model
+        canonical_backend = _LEGACY_BACKENDS.get(settings.agent_backend, settings.agent_backend)
+        route_model(settings, canonical_backend, model)
 
         # Instantiate backend
         backend_cls = get_backend_class(settings.agent_backend)

@@ -6,6 +6,17 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
+#     default (`enable-by-default = false`) so dev / CI / editable installs stay
+#     fast and readable — the ~25-min compile only fires when
+#     HATCH_BUILD_HOOK_ENABLE_CYTHON=1. The static source `exclude` was removed;
+#     the source-free compiled wheel is produced by the release build
+#     `ee/scripts/build_compiled_wheel.sh` (compile-on + post-build strip), which
+#     the enterprise Docker image installs. See
+#     [tool.hatch.build.targets.wheel(.hooks.cython)] below.
+#   - 2026-06-14 (ee-cython): introduced the hatch-cython compile of pocketpaw_ee
+#     to native .so for per-tenant source protection. See [build-system] below;
+#     the MIT core is unchanged and readable.
 #   - 2026-06-12 (connector-store-unification CS-3): registered the
 #     `pocketpaw.connector_state_stores` entry-point
 #     (CloudConnectorStateStoreProvider) so the ConnectorRegistry's durable
@@ -20,7 +31,7 @@
 # (0.5+) so an incompatible core can't be pulled in silently. Bump the floor
 # here when EE starts depending on a feature added in a newer core patch.
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-cython"]
 build-backend = "hatchling.build"
 
 [project]
@@ -120,6 +131,21 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Daytona SDK — VM/container workspaces for cloud project compute ---
+    # Used by ee/pocketpaw_ee/cloud/daytona/ to provision, sync, and
+    # manage sandboxes. Pinned to 0.190.x API surface.
+    "daytona>=0.190.0",
+    # --- Payments gateway (BC-2 — the Gateway primitive) ---
+    # Dodo is the only gateway for v1, behind the IPaymentsProvider abstraction
+    # in ee/pocketpaw_ee/cloud/billing/providers/ so Razorpay can drop in later.
+    # PINNED to 1.105.0: the supply-chain rule on this machine enforces a 7-day
+    # minimum release age. The newest dodopayments (1.105.1) was published
+    # 2026-06-18 (<7 days ago) so it is BLOCKED; 1.105.0 (released 2026-06-16)
+    # is the latest version that satisfies the age guard. The ``[webhooks]``
+    # extra pulls ``standardwebhooks<2,>=1.0.1`` (stable since 2024) — the
+    # Standard Webhooks HMAC-SHA256 verifier the inbound webhook route uses to
+    # prove a payload came from Dodo before any credits are granted.
+    "dodopayments[webhooks]==1.105.0",
 ]
 
 [project.optional-dependencies]
@@ -166,6 +192,11 @@ cloud = "pocketpaw_ee.extensions:CloudEmbeddingProvider"
 [project.entry-points."pocketpaw.memory_backends"]
 mongodb = "pocketpaw_ee.extensions:MongoMemoryBackendProvider"
 
+# ISO-3: the workspace-keyed store provider. Activates the StoreProvider seam
+# ISO-1 added; returns the per-workspace file store via the OSS helper.
+[project.entry-points."pocketpaw.stores"]
+cloud = "pocketpaw_ee.extensions:CloudStoreProvider"
+
 [project.entry-points."pocketpaw.capabilities"]
 cloud = "pocketpaw_ee.extensions:CloudCapabilityProvider"
 
@@ -200,6 +231,7 @@ composio = "pocketpaw_ee.extensions:CloudComposioMcpProvider"
 meetings = "pocketpaw_ee.extensions:CloudMeetingsMcpProvider"
 sites = "pocketpaw_ee.extensions:CloudSitesMcpProvider"
 media = "pocketpaw_ee.extensions:CloudMediaMcpProvider"
+deliver = "pocketpaw_ee.extensions:CloudDeliverMcpProvider"
 loom = "pocketpaw_ee.extensions:CloudLoomMcpProvider"
 belt = "pocketpaw_ee.extensions:CloudBeltMcpProvider"
 external_actions = "pocketpaw_ee.extensions:CloudExternalActionsMcpProvider"
@@ -223,6 +255,45 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["pocketpaw_ee"]
+# Source protection for pocketpaw_ee is a TWO-part mechanism, intentionally NOT
+# a static `exclude` here:
+#   1. The cython build hook below is gated OFF by default (see its comment), so
+#      the ordinary wheel — the one dev / CI / editable installs build — is fast
+#      (~15s) and contains readable .py source. That wheel is valid and non-empty.
+#   2. The source-free COMPILED wheel (only .so; no .py/.c) is produced by the
+#      release build `ee/scripts/build_compiled_wheel.sh`, which compiles with the
+#      hook ON and then strips the source in a post-build step (regenerating
+#      RECORD via the `wheel` tool). The enterprise Docker image installs THAT.
+# A static `exclude = ["**/*.py", ...]` was tried and REJECTED: with the hook OFF
+# it strips source from the default wheel too (leaving an empty, broken wheel),
+# and neither hatch-cython nor a build hook can conditionally drop source. Source
+# removal therefore lives in the release build's strip step, never here — so the
+# default readable wheel stays valid and non-empty.
+
+[tool.hatch.build.targets.wheel.hooks.cython]
+# Cython compile GATE — OFF by default. Without this, hatch-cython's build hook
+# runs on every ee install (editable `uv sync --group ee`, CI test jobs,
+# `pip install ./ee`), firing the ~25-min compile unconditionally (this hung CI).
+# Gated off, those installs stay fast and produce readable pure-Python wheels.
+# Set HATCH_BUILD_HOOK_ENABLE_CYTHON=1 to turn the compile ON and emit native
+# .so artifacts — `build_compiled_wheel.sh` and the enterprise Docker stage do
+# this to build the source-protected release wheel.
+enable-by-default = false
+dependencies = ["hatch-cython"]
+
+[tool.hatch.build.targets.wheel.hooks.cython.options]
+# hatch-cython otherwise derives the source dir from the PROJECT name
+# (pocketpaw-ee, hyphenated) which doesn't match the package dir pocketpaw_ee
+# (underscore) → it would glob ./pocketpaw-ee/** and compile NOTHING. Pin the
+# real package dir so all of pocketpaw_ee is compiled to .so.
+src = "pocketpaw_ee"
+
+[tool.hatch.build.targets.wheel.hooks.cython.options.directives]
+language_level = 3
+# Don't treat Python annotations as C types — FastAPI/Pydantic use annotations
+# as runtime metadata. Without this, a router arg like `x: str = Depends(...)`
+# makes Cython coerce the arg to str → "Expected str, got Depends" at import.
+annotation_typing = false
 
 # RFC 08 PR 3 — Foresight CAMEL hard-dep promotion. The QBTRIX fork's
 # only change vs upstream camel-ai==0.2.90 is removing the psutil<6 cap
@@ -266,6 +337,12 @@ source_modules = [
     "pocketpaw_ee.cloud.pockets._http_guard",
     "pocketpaw_ee.cloud.pockets.action_executor",
     "pocketpaw_ee.cloud.pockets.actions_ops",
+    # feat/invoke-tool-v1 — the click-driven tool executor. It dispatches a
+    # connector-action grant through ``connectors.service.execute`` and
+    # receives the per-pocket allowlist by parameter from the router. It must
+    # NEVER import a Beanie document class directly (no ``models.pocket_backend``):
+    # the router/service own Beanie access.
+    "pocketpaw_ee.cloud.pockets.tool_executor",
     # P2.4 Template Reconcile — the reconcile service resolves the pocket
     # (spec + slug) and writes the reconciled spec entirely through
     # `pockets.service`; it must never import the Pocket Beanie model.
@@ -308,6 +385,16 @@ source_modules = [
     # ``outcomes.service``. Receives backend creds + bindings by
     # parameter — never imports a Beanie document class directly.
     "pocketpaw_ee.cloud.pockets.saga",
+    # Layered/learning Instinct gate foundation (2026-06-18 design). Three
+    # pure helper modules for the 4-lane triage router. None writes a
+    # Beanie document: ``instinct_triage`` is a pure classifier (no I/O),
+    # ``trust_ledger`` reads/writes a JSONL sidecar under ~/.pocketpaw, and
+    # ``instinct_compensation_registry`` is an in-memory TTL registry that
+    # persists expired handles to a JSONL sidecar. The gate's Beanie writes
+    # still go exclusively through ``instinct_approvals.service``.
+    "pocketpaw_ee.cloud.pockets.instinct_triage",
+    "pocketpaw_ee.cloud.pockets.trust_ledger",
+    "pocketpaw_ee.cloud.pockets.instinct_compensation_registry",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.pocket",
@@ -342,6 +429,19 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
 
 [[tool.importlinter.contracts]]
+name = "Rules — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Discovered governed rules (SZD slice-2). Only ``rules.service`` owns the
+    # InstinctRuleDoc Beanie write; dto/domain go through it. No router this slice
+    # (rules are born via the _instinct_rule gate executor, not over HTTP).
+    "pocketpaw_ee.cloud.rules.dto",
+    "pocketpaw_ee.cloud.rules.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_rule"]
+
+[[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
@@ -353,6 +453,17 @@ source_modules = [
 forbidden_modules = ["pocketpaw_ee.cloud.models.notification"]
 
 [[tool.importlinter.contracts]]
+name = "FileVersions — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.file_versions.router",
+    "pocketpaw_ee.cloud.file_versions.dto",
+    "pocketpaw_ee.cloud.file_versions.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.file_version"]
+
+[[tool.importlinter.contracts]]
 name = "FabricIngest — Beanie writes only from service.py"
 type = "forbidden"
 allow_indirect_imports = "true"
@@ -362,6 +473,25 @@ source_modules = [
     "pocketpaw_ee.cloud.fabric_ingest.firestore_reader",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.fabric_ingest_state"]
+
+[[tool.importlinter.contracts]]
+name = "Jobs — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Only ``jobs.service`` owns the WorkspaceJobDoc Beanie write. The router,
+    # dto, domain, registry, the entry-point plugin loader, the ARQ worker
+    # entrypoint, and the built-in jobs all go through the service — none may
+    # import the Beanie doc directly.
+    "pocketpaw_ee.cloud.jobs.router",
+    "pocketpaw_ee.cloud.jobs.dto",
+    "pocketpaw_ee.cloud.jobs.domain",
+    "pocketpaw_ee.cloud.jobs.registry",
+    "pocketpaw_ee.cloud.jobs.plugins",
+    "pocketpaw_ee.cloud.jobs.worker",
+    "pocketpaw_ee.cloud.jobs.builtin.score_applications",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_job"]
 
 [[tool.importlinter.contracts]]
 name = "Sessions — Beanie writes only from service.py"
@@ -504,6 +634,21 @@ source_modules = [
     "pocketpaw_ee.cloud.cycles.scheduler",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.cycle"]
+
+[[tool.importlinter.contracts]]
+name = "LLM provisioning — Beanie writes only from service.py"
+# MCG-8: the per-tenant LiteLLM virtual-key mapping (LiteLLMTenantKey) is written
+# only by llm_provisioning.service. The domain layer carries framework-free value
+# objects and must never import the Beanie doc (same entity-isolation boundary the
+# credit / foresight entities use).
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.llm_provisioning.domain",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.litellm_key",
+]
 
 [[tool.importlinter.contracts]]
 name = "Foresight — Beanie writes only from service.py"

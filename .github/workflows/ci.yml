@@ -16,6 +16,10 @@
 # image-build time). Lives in this workflow (not workflow_run) because the
 # repo's default branch is main — workflow_run triggers only fire from the
 # default branch's file, and main lags dev.
+# Updated: 2026-06-27 — CI speed: the `test` job now runs the full 3.11/3.12/
+# 3.13 matrix only on push to dev/main; PRs test 3.12 alone (the prod version,
+# per the Dockerfile), so version-specific breaks are still caught at the merge
+# gate. The duplicate full-suite run in tests.yaml was removed in the same pass.
 name: CI
 
 on:
@@ -159,7 +163,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # PRs test only the prod version (3.12, per the Dockerfile) for speed;
+        # the full 3.11/3.12/3.13 matrix runs on push to dev/main so version-
+        # specific breaks are still caught at the merge gate.
+        python-version: ${{ (github.event_name == 'push') && fromJSON('["3.11", "3.12", "3.13"]') || fromJSON('["3.12"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -226,6 +233,15 @@ jobs:
     #   COOLIFY_API_TOKEN   — a Coolify API token with deploy permission
     # While the secrets are unset the job warns and exits green, so dev CI
     # doesn't go red before the one-time Coolify setup is done.
+    #
+    # Paw Sites toolchain (feat/paw-sites-prod-deploy, DEP-4): Dockerfile.enterprise
+    # bundles bun + the paw-sites generator + the @ripple-ui/svelte tarball so a live
+    # publish works. The vendored trees (deploy/paw-sites/, deploy/ripple/) are
+    # gitignored, so they are NOT in Coolify's clone — the Coolify app's build config
+    # MUST set the CLONE source for both:
+    #     PAW_SITES_SOURCE=clone   RIPPLE_SOURCE=clone
+    # (Coolify owns the docker build; this job only fires the webhook, so the args
+    # live in Coolify's app settings, not here.) See deploy/README-build.md.
     name: Deploy to Coolify
     runs-on: ubuntu-latest
     needs: [lint, build, test-oss, test, import-linter]

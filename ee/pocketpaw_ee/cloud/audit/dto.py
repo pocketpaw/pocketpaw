@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 class ListAuditRequest(BaseModel):
     q: str | None = Field(default=None, max_length=200)
-    category: Literal["decision", "data", "config", "security"] | None = None
+    category: Literal["decision", "data", "config", "security", "tool"] | None = None
     pocket_id: str | None = None
     actor: str | None = None
     limit: int = Field(default=200, ge=1, le=1000)
