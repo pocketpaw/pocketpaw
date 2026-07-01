@@ -425,6 +425,16 @@ def mount_cloud(app: FastAPI) -> None:
 
     app.include_router(belt_console_router, prefix="/api/v1")
 
+    # Security control plane — the /api/v1/security/* proxy to shield, the
+    # same-box Go daemon that serves an egress-decision control API on a UNIX
+    # socket (feat/sec-5-security-proxy SEC-5). GET decisions/stats/config,
+    # PATCH config, POST decisions/{id}/resolve — every route OWNER-gated
+    # (security.manage). Degrades to a typed available:false (reads) / 409
+    # (writes) when shield is absent, so the /security page renders without it.
+    from pocketpaw_ee.cloud.security.router import router as security_router
+
+    app.include_router(security_router, prefix="/api/v1")
+
     # Belt MANDATES — the standing-JOB primitive (feat/belt-mandates). The
     # /belt/mandates surface: charter CRUD, patrol intake (feedback), sightings
     # read, manual shift trigger (foreman → plan gate), and the pawprints feed.
