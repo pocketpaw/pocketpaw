@@ -17,6 +17,7 @@ Created: 2026-07-01
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ EDIT_FILE_TOOL_ID = f"mcp__{SERVER_NAME}__edit_file"
 LIST_DIR_TOOL_ID = f"mcp__{SERVER_NAME}__list_dir"
 SHELL_TOOL_ID = f"mcp__{SERVER_NAME}__shell"
 RUN_PYTHON_TOOL_ID = f"mcp__{SERVER_NAME}__run_python"
+SYNC_TO_S3_TOOL_ID = f"mcp__{SERVER_NAME}__sync_to_s3"
 
 DAYTONA_TOOL_IDS = (
     READ_FILE_TOOL_ID,
@@ -41,6 +43,7 @@ DAYTONA_TOOL_IDS = (
     LIST_DIR_TOOL_ID,
     SHELL_TOOL_ID,
     RUN_PYTHON_TOOL_ID,
+    SYNC_TO_S3_TOOL_ID,
 )
 
 
@@ -276,6 +279,36 @@ async def _run_python_handler(args: dict) -> dict:
         return _error_response(f"Sandbox Python execution failed: {exc}")
 
 
+async def _sync_to_s3_handler(args: dict) -> dict:
+    """Sync all sandbox files back to S3 storage."""
+    ctx = await _require_ctx()
+
+    try:
+        from pocketpaw_ee.cloud.daytona.router import (
+            _sync_directory_from_sandbox_to_s3,
+        )
+
+        # Timeout after 120s so the tool always returns even if a file
+        # operation hangs. The sync uploads files incrementally, so partial
+        # data is already persisted if we time out.
+        await asyncio.wait_for(
+            _sync_directory_from_sandbox_to_s3(
+                ctx.client,
+                ctx.sandbox_id,
+                ctx.project_key,
+                ctx.project_dir,
+            ),
+            timeout=120,
+        )
+        return _success_response({"ok": True, "message": "All files synced to S3"})
+    except TimeoutError:
+        return _success_response(
+            {"ok": True, "message": "Sync timed out — partial data may have been synced"}
+        )
+    except Exception as exc:
+        return _error_response(f"Sync failed: {exc}")
+
+
 # ---------------------------------------------------------------------------
 # Server builder
 # ---------------------------------------------------------------------------
@@ -452,10 +485,25 @@ def build_daytona_server() -> tuple[str, Any] | None:
     async def run_python(args: dict) -> dict:  # type: ignore[no-untyped-def]
         return await _run_python_handler(args)
 
+    @tool(
+        "sync_to_s3",
+        "Sync all files from the Daytona sandbox back to S3 storage. "
+        "Call this after you finish your edit-run-verify loop to persist "
+        "your changes. No arguments needed.",
+        {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    )
+    async def sync_to_s3(args: dict) -> dict:  # type: ignore[no-untyped-def]
+        return await _sync_to_s3_handler(args)
+
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[read_file, write_file, edit_file, list_dir, shell, run_python],
+        tools=[read_file, write_file, edit_file, list_dir, shell, run_python, sync_to_s3],
     )
     return SERVER_NAME, server
 
@@ -469,5 +517,6 @@ __all__ = [
     "LIST_DIR_TOOL_ID",
     "SHELL_TOOL_ID",
     "RUN_PYTHON_TOOL_ID",
+    "SYNC_TO_S3_TOOL_ID",
     "build_daytona_server",
 ]

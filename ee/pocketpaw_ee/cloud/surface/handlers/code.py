@@ -89,16 +89,15 @@ def _build_orientation(
                 f" If a Daytona sandbox is provisioned for project "
                 f"'{project_name}', you can use the Daytona MCP tools "
                 f"(read_file, write_file, edit_file, list_dir, shell, "
-                f"run_python) to operate directly inside the sandbox VM. "
-                f"When done editing, call sync-and-finish to save changes "
-                f"to S3 and stop the sandbox."
+                f"run_python, sync_to_s3) to operate directly inside the "
+                f"sandbox VM. Use sync_to_s3 to persist changes to S3."
             )
         else:
             daytona_hint = (
                 " If a Daytona sandbox is provisioned, use the Daytona "
                 "MCP tools (read_file, write_file, edit_file, list_dir, "
-                "shell, run_python) to operate directly inside the sandbox "
-                "VM. When done, call sync-and-finish to save to S3."
+                "shell, run_python, sync_to_s3) to operate directly inside "
+                "the sandbox VM. Use sync_to_s3 to persist changes to S3."
             )
         lines.append(daytona_hint)
     else:
@@ -135,11 +134,11 @@ def _build_procedure(is_s3: bool) -> str:
                 "This is a cloud-storage project — files are in S3, not on the local "
                 "disk. If a Daytona sandbox is provisioned and synced, use the "
                 "Daytona MCP tools (read_file, write_file, edit_file, list_dir, "
-                "shell, run_python) to operate directly inside the sandbox VM — "
-                "all file I/O and command execution happens there. After you finish "
-                "your edit-run-verify loop, ALWAYS call the sync-and-finish endpoint "
-                "(POST /cloud/projects/{name}/workspace/sync-and-finish) to persist "
-                "your work back to S3 and stop the sandbox to save compute. If no "
+                "shell, run_python, sync_to_s3) to operate directly inside "
+                "the sandbox VM — all file I/O, command execution, and "
+                "sync-to-S3 happens there. After you finish "
+                "your edit-run-verify loop, call the sync_to_s3 tool to persist "
+                "your work back to S3. If no "
                 "Daytona sandbox is provisioned, use the cloud project REST API "
                 "endpoints (/cloud/projects/{name}/files/*) to browse, read, and "
                 "write files. If the user mentions S3 or cloud storage, you already "

@@ -177,9 +177,17 @@ async def _sync_directory_from_sandbox_to_s3(
     # Recursively list all files in the sandbox directory.
     files_to_download: list[str] = []
     stack = [sandbox_dir]
+    visited_dirs: set[str] = set()
 
     while stack:
         current_dir = stack.pop()
+
+        # Guard against re-visiting the same directory (prevents infinite
+        # loops from `.` / `..` entries or symlink cycles).
+        if current_dir in visited_dirs:
+            continue
+        visited_dirs.add(current_dir)
+
         try:
             entries = await client.list_files(sandbox_id, current_dir)
         except Exception as exc:
@@ -187,12 +195,15 @@ async def _sync_directory_from_sandbox_to_s3(
             continue
 
         for entry in entries:
-            # FileInfo has .name and .is_dir
-            entry_path = (
-                f"{current_dir}/{entry.name}"
-                if current_dir != sandbox_dir
-                else f"{sandbox_dir}/{entry.name}"
-            )
+            name = entry.name
+            # Skip self / parent directory entries that some filesystems
+            # include in listings — they would re-add the current dir to
+            # the stack and cause an infinite loop.
+            if name in (".", ".."):
+                continue
+
+            entry_path = f"{current_dir}/{name}"
+
             if entry.is_dir:
                 stack.append(entry_path)
             else:
@@ -573,16 +584,13 @@ async def sync_and_finish(
     project_name: str,
     http_request: Request,
 ) -> dict:
-    """Sync project files from the Daytona sandbox back to S3, then stop
-    (or archive) the sandbox to save compute.
+    """Sync project files from the Daytona sandbox back to S3.
 
     Use this when the agent has finished its edit-run-verify loop and the
     results should be persisted to the project's storage. This is the
     "commit and push" equivalent for Daytona-backed cloud projects.
 
-    Two-phase:
-      1. Sandbox → S3 sync (all files persisted)
-      2. Sandbox stopped (compute saved; VM state preserved for restart)
+    Sandbox is left running — does not stop it.
     """
     workspace_id, user_id = _resolve_ids(http_request)
     project_key = await _require_project(workspace_id, user_id, project_name)
@@ -593,7 +601,7 @@ async def sync_and_finish(
 
     client = await _require_daytona()
 
-    # Phase 1: Sync sandbox → S3.
+    # Ensure sandbox is running.
     info = await client.get_sandbox_by_id(sandbox_id)
     if info.state != "started":
         if info.state in ("stopped", "paused"):
@@ -616,16 +624,9 @@ async def sync_and_finish(
 
     update_sync_timestamp(project_key)
 
-    # Phase 2: Stop the sandbox (preserves state for restart).
-    try:
-        await client.stop_sandbox(sandbox_id)
-        logger.info("Sandbox %s stopped after sync-and-finish", sandbox_id)
-    except Exception as exc:
-        logger.warning("Failed to stop sandbox %s after sync: %s", sandbox_id, exc)
-
     return {
         "ok": True,
-        "message": "Files synced to S3 and workspace stopped",
+        "message": "Files synced to S3",
         "sandbox_id": sandbox_id,
     }
 

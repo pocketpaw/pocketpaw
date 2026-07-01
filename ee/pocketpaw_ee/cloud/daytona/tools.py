@@ -688,6 +688,56 @@ class DaytonaRunPythonTool(BaseTool):
 
 
 # ---------------------------------------------------------------------------
+# SyncToS3Tool — Daytona-aware
+# ---------------------------------------------------------------------------
+
+
+class DaytonaSyncToS3Tool(BaseTool):
+    """Sync all files from the Daytona sandbox to S3 storage."""
+
+    @property
+    def name(self) -> str:
+        return "sync_to_s3"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Sync all files from the Daytona sandbox back to S3 storage. "
+            "Call this after you finish your edit-run-verify loop to persist "
+            "your changes."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        from pocketpaw_ee.cloud.daytona.context import resolve_daytona_context
+        from pocketpaw_ee.cloud.daytona.router import (
+            _sync_directory_from_sandbox_to_s3,
+        )
+
+        ctx = await resolve_daytona_context()
+        if ctx is None:
+            return self._error("No Daytona sandbox is active")
+
+        try:
+            await _sync_directory_from_sandbox_to_s3(
+                ctx.client,
+                ctx.sandbox_id,
+                ctx.project_key,
+                ctx.project_dir,
+            )
+            return "All files synced to S3"
+        except Exception as exc:
+            return self._error(f"Sync failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -700,6 +750,9 @@ def get_daytona_tools() -> list[BaseTool]:
     ToolRegistry when registered. Safe to call on any install — the tools
     check for a sandbox context at execution time and fall back to local FS
     when none is found.
+
+    ``sync_to_s3`` is an additional tool (no OSS counterpart) that syncs
+    all sandbox files back to S3 storage.
     """
     return [
         DaytonaReadFileTool(),
@@ -708,6 +761,7 @@ def get_daytona_tools() -> list[BaseTool]:
         DaytonaListDirTool(),
         DaytonaShellTool(),
         DaytonaRunPythonTool(),
+        DaytonaSyncToS3Tool(),
     ]
 
 
@@ -718,5 +772,6 @@ __all__ = [
     "DaytonaListDirTool",
     "DaytonaShellTool",
     "DaytonaRunPythonTool",
+    "DaytonaSyncToS3Tool",
     "get_daytona_tools",
 ]
