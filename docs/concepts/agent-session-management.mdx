@@ -143,19 +143,26 @@ native ids, and quota cross-starvation (see
 
 ## Status and deferred work
 
-**v1 (this design):** native resume substrate, durable tenancy-keyed store, the
-runtime mapping, the supervisor (COLD/WARM + per-tenant quota), and the
-flag-gated executor wiring. Every supervised turn resumes from the store.
+**Shipped (flag-gated, off by default):**
+
+- **v1 substrate** — native resume, durable tenancy-keyed store, the runtime
+  mapping, the supervisor (COLD/WARM + per-tenant quota), flag-gated executor
+  wiring.
+- **SaaS hardening** — atomic store `append`/upsert (no read-modify-write race)
+  and a COLD-runtime memory prune.
+- **WARM hot-process reuse** — the supervisor owns a per-session live
+  `ClaudeSDKClient`; turn 2+ reuses it (zero re-materialize), `resume` is the
+  cold-recovery path only. Bounded by the per-tenant warm quota + idle reaper, so
+  cold sessions still cost zero process. `claude_sdk` backend only.
 
 **Deferred / follow-up:**
 
-- **WARM hot-process reuse** — keeping a per-session client live to skip
-  re-materialization (v1 resumes cold each turn).
 - **LIVE / attach tier** — an attachable long-running process surfaced through
-  `cmux` for watch-and-steer.
-- Atomic store `append`/upsert (the v1 path is read-modify-write).
-- A COLD-runtime memory prune for very long SaaS uptime.
+  `cmux` for watch-and-steer (builds on WARM).
 - Codex native resume parity.
+- Skills + leased-client teardown reclaiming the materialized skills dir at
+  per-client teardown (currently reclaimed at backend `cleanup()` — benign
+  retention gap).
 
 ## Related
 

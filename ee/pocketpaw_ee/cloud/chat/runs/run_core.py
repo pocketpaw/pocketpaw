@@ -1,6 +1,39 @@
 """Agent-run core — the loop the executor invokes for every chat run.
 
 Changes:
+- 2026-06-30 (fix/warm-noop-benign-error) — WARM hot-process reuse was a NO-OP
+  live: a benign backend ``error`` event flipped ``sup_run_failed`` True, so the
+  ``finally`` called ``mark_crashed`` and tore down the session's warm ``claude``
+  client EVERY turn — turn 2 never reused turn 1's slot. The real ``claude_sdk``
+  yields ``error`` THEN ``done`` for a non-fatal ResultMessage ``is_error`` (a turn
+  that still produced a response; the leased client stays healthy), but the error
+  branch ``break``-ed and flagged a crash before seeing the ``done``. Fixed: on the
+  supervised path the error branch now RECORDS the error (``sup_saw_error``) and
+  keeps consuming instead of breaking; ``sup_run_failed`` is decided at stream-end
+  — a trailing error followed by ``done`` (``sup_completed_ok``) keeps the slot
+  warm, while an ``error`` with no successful completion is still a genuine crash
+  that demotes the runtime to COLD (so the next turn cold-resumes from the store).
+  The legacy (flag-OFF) path keeps its original break-and-stop behavior byte-for-byte.
+- 2026-06-30 (feat/warm-reuse WH-3) — the supervised block now keeps a session's
+  ``claude`` client WARM across turns. When ``acquire`` returns a live, eligible
+  warm slot (``warm_reuse`` + ``slot``), the executor LEASES it to the backend
+  via ``run_kwargs["warm_client"]`` so turn 2+ drives the existing subprocess
+  directly (no re-materialize, no reconnect). On such a warm-reuse turn it
+  WITHHOLDS the resume id from the ``SessionHandle`` (``cli_session_id=None``,
+  store still threaded): the backend's warm-reuse path is gated on
+  ``not resume_active``, and the live client already holds THIS session's
+  conversation, so threading resume would silently demote warm reuse to a cold
+  re-materialize. On every other supervised turn (turn 1, a reaped/COLD runtime,
+  crash recovery) the resume id is threaded exactly as SS-5 did (cold-resume).
+  The executor ALSO always hands the backend an ``on_client_built`` callback that
+  binds the freshly-built client back to the supervisor (``bind_warm_slot`` with a
+  ``LeasedClient``) so the NEXT turn can reuse it; it is a no-op on a warm-reuse
+  turn and rebinds the new slot on a key-drift (model/tools changed) turn. Flag
+  OFF is byte-for-byte unchanged: neither ``warm_client`` nor ``on_client_built``
+  is added. (Known follow-up: a leased turn that carries ``skill_names``
+  materializes a per-run skills dir that is cleaned at backend ``cleanup()``, not
+  at the supervisor's per-leased-client teardown — a benign retention gap, no run
+  correctness impact; the clean fix spans the WH-1/WH-2 surface.)
 - 2026-06-30 (feat/session-supervisor SS-5) — ``_drive_agent_loop`` now drives
   every supervised agent turn through the ``SessionSupervisor`` + the durable
   ``(workspace, session, agent) -> cli_session_id`` mapping (SS-3
@@ -153,6 +186,7 @@ from datetime import datetime
 from typing import Any
 
 from pocketpaw.agents.backend import (  # type: ignore[import-untyped]
+    LeasedClient,
     SessionHandle,
 )
 from pocketpaw.agents.pool import (  # type: ignore[import-untyped]
@@ -940,6 +974,16 @@ async def _drive_agent_loop(
     # on, so resume resolves the same row turn after turn.
     sup_acq: Any = None
     sup_run_failed = False
+    # WARM no-op fix (2026-06-30): a backend ``error`` event only demotes the warm
+    # slot to COLD when the run did NOT also reach a successful completion. The real
+    # ``claude_sdk`` yields ``error`` THEN ``done`` for a benign, non-fatal
+    # ResultMessage ``is_error`` (the leased client stays alive), so we record the
+    # error here and decide ``sup_run_failed`` at stream-end: a trailing error
+    # followed by ``done`` keeps the slot warm; an error with no completion is a
+    # genuine crash (demote → COLD). Both stay ``False`` on the legacy (flag-OFF)
+    # path, where the error branch keeps its original break-and-stop behavior.
+    sup_saw_error = False
+    sup_completed_ok = False
     sup_workspace_id = ctx.workspace_id
     sup_session_id = ctx.scope_id
     sup_agent_id = ctx.target_agent_id
@@ -1025,10 +1069,44 @@ async def _drive_agent_loop(
                     cli_session_id=prior_cli,
                     project_key=None,
                 )
+                # WH-3: turn 2+ keeps this session's ``claude`` client WARM. When
+                # ``acquire`` hands back a live, key-eligible warm slot, LEASE it
+                # to the backend (``warm_client``) so the turn drives the existing
+                # subprocess directly — no re-materialize, no reconnect. The
+                # backend's warm-reuse path is gated on ``not resume_active`` (a
+                # resume id forces a fresh launch), so on a warm-reuse turn we
+                # WITHHOLD the resume id from the ``SessionHandle``: the live client
+                # already carries THIS session's conversation in memory, so resuming
+                # from the store would be redundant AND would silently demote warm
+                # reuse to a cold re-materialize. The store is still threaded
+                # (durable append unchanged). On every other supervised turn
+                # (turn 1, a reaped/COLD runtime, a crash recovery) the resume id IS
+                # threaded — the unchanged SS-5 cold-resume path.
+                warm_turn = sup_acq.warm_reuse and sup_acq.slot is not None
                 run_kwargs["session_handle"] = SessionHandle(
-                    cli_session_id=sup_acq.cli_session_id,
+                    cli_session_id=None if warm_turn else sup_acq.cli_session_id,
                     session_store=MongoSessionStore(sup_workspace_id),
                 )
+                if warm_turn:
+                    run_kwargs["warm_client"] = sup_acq.slot
+                # Always (on the supervised path) hand the backend a callback that
+                # BINDS the freshly-built client back to the supervisor as this
+                # session's warm slot, so the NEXT turn can reuse it. A no-op on a
+                # warm-reuse turn (the backend drives the leased client and never
+                # builds a fresh one); on a key-drift turn (model/tools changed
+                # mid-session) the backend rebuilds and this rebinds the new slot.
+                # ``_warm_acq`` captures THIS turn's acquisition so the closure
+                # never observes the ``except``-path reset of ``sup_acq``.
+                _warm_acq = sup_acq
+
+                def _on_client_built(client: Any, options_key: str, teardown: Any) -> None:
+                    get_session_supervisor().bind_warm_slot(
+                        _warm_acq.runtime,
+                        LeasedClient(client=client, options_key=options_key),
+                        teardown,
+                    )
+
+                run_kwargs["on_client_built"] = _on_client_built
                 supervisor.mark_run_start(sup_acq.runtime)
             except Exception:
                 logger.warning(
@@ -1040,6 +1118,8 @@ async def _drive_agent_loop(
                 )
                 sup_acq = None
                 run_kwargs.pop("session_handle", None)
+                run_kwargs.pop("warm_client", None)
+                run_kwargs.pop("on_client_built", None)
         agent_iter = pool.run(
             ctx.target_agent_id,
             user_content,
@@ -1081,6 +1161,11 @@ async def _drive_agent_loop(
             etype = getattr(event, "type", None)
             econtent = getattr(event, "content", "")
             if etype == "done":
+                # The backend reached a successful completion (it only yields
+                # ``done`` when no exception aborted the stream). A preceding
+                # benign ``error`` event is therefore NOT a crash — the warm slot
+                # must survive (WARM no-op fix).
+                sup_completed_ok = True
                 next_event_task = None
                 break
             next_event_task = asyncio.create_task(_next_event())
@@ -1185,11 +1270,31 @@ async def _drive_agent_loop(
                     message[:200],
                 )
                 yield ("error", {"code": "agent.backend_error", "message": message})
-                # Supervised: a backend-yielded error is a run failure — flag it
-                # so ``finally`` demotes the runtime to COLD (keeping its
-                # cli_session_id so the next turn still resumes from the store).
+                if sup_acq is not None:
+                    # Supervised: a backend ``error`` event is NOT automatically a
+                    # crash. The leased ``claude`` client can stay alive and healthy
+                    # while the SDK reports a benign/non-fatal ResultMessage
+                    # ``is_error`` (a turn that still produced a response) — and the
+                    # real backend then yields ``done`` right after. Record the
+                    # error but KEEP consuming: a trailing ``done`` proves the run
+                    # completed (the warm slot must survive for reuse), while an
+                    # error with no completion is a genuine failure. ``sup_run_failed``
+                    # is decided at stream-end from ``sup_saw_error`` + the
+                    # ``sup_completed_ok`` ``done`` signal.
+                    sup_saw_error = True
+                    continue
+                # Legacy (flag-OFF) path: byte-for-byte unchanged — surface the
+                # error and stop the stream.
                 sup_run_failed = True
                 break
+        # Supervised crash determination (WARM no-op fix): an ``error`` event demotes
+        # the warm slot only when the stream did NOT also reach a successful
+        # completion. A benign trailing error followed by ``done`` (the leased client
+        # is healthy) keeps the slot warm for reuse; an error with no ``done`` is a
+        # genuine failure → ``mark_crashed`` (COLD) in the ``finally``. No-op on the
+        # legacy path (``sup_acq is None``) and on a clean run (``sup_saw_error`` False).
+        if sup_acq is not None and sup_saw_error and not sup_completed_ok:
+            sup_run_failed = True
         for ev in _drain_side_channel():
             yield ev
     except Exception:
