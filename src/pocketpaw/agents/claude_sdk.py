@@ -1053,20 +1053,120 @@ class ClaudeSDKBackend(BaseAgentBackend):
         "\n\n# Recent Conversation",
     )
 
+    # The soul "# Key Knowledge" block is a MID-prompt volatile section, unlike
+    # the tail markers above. ``AgentPool._assemble_system_prompt`` splices it in
+    # RIGHT AFTER the stable soul identity via
+    # ``f"{system_prompt}\n\n# Key Knowledge\n{knowledge_lines}"`` (pool.py:243-245),
+    # where ``knowledge_lines = "\n".join(f"- {k}" for k in ctx.knowledge)`` — so
+    # every item is a ``- ``-prefixed line and the block sits EARLY (char ~1.4k of
+    # a ~44k prefix), sandwiched between the stable ``ctx.identity`` before it and
+    # the stable authoritative ``instructions`` (ripple LAW) + ``<runtime-identity>``
+    # + tool docs after it. Its ``ctx.knowledge`` items are ALL volatile soul state
+    # (self-image confidences, an incrementing bond level, a growing memory count,
+    # recalled semantic/procedural memories — see ``soul/_bridge.py``), NONE of
+    # them behavioral instructions. Live instrumentation proved two consecutive
+    # turns' prefixes differed by exactly the incrementing "Bond level" / "Memories"
+    # digits inside this block, so the prefix digest changed every turn and the
+    # warm subprocess was rebuilt every turn (warm reuse NEVER fired).
+    #
+    # Because it is mid-prompt, the tail cut above cannot touch it, and adding it
+    # to ``_VOLATILE_PROMPT_MARKERS`` (a tail cut) would strip ~97% of the real
+    # behavioral prefix (over-strip — a real ``instructions``/identity change would
+    # then wrongly reuse a stale client). So we EXCISE it IN PLACE, keeping every
+    # stable byte before and after it.
+    _SOUL_KNOWLEDGE_BLOCK_HEADER = "\n\n# Key Knowledge\n"
+
+    @classmethod
+    def _strip_soul_knowledge_block(cls, text: str) -> str:
+        """Surgically remove the mid-prompt soul "# Key Knowledge" block.
+
+        Structure-anchored, not blank-line-anchored: pool.py builds the block as
+        the header followed by a run of ``- ``-prefixed item lines. A recalled
+        memory's ``content`` can itself contain newlines (soul/_bridge.py:106),
+        so an item may WRAP onto continuation lines — those are absorbed into the
+        block as long as they are not separated from the items by a blank line.
+        The block ENDS at the first blank line whose following line does NOT
+        resume ``- `` items: that blank line is the ``\\n\\n`` join before the
+        next stable section (the authoritative ``instructions`` / runtime docs).
+        This deliberately terminates at a blank line rather than swallowing text
+        up to a heuristic anchor, so a stable section that follows in plain prose
+        (e.g. the ripple LAW ``instructions``) is NEVER over-stripped.
+
+        Robustness:
+        * ``rfind`` + a ``- `` item guard select the MACHINE-built block, so a
+          user-authored "# Key Knowledge" heading in persona/identity prose (no
+          ``- `` items under it) is left untouched and still keys the prefix.
+        * Block as the LAST section (no trailing blank line) → removed to EOS.
+        * Header absent (empty ``ctx.knowledge`` / legacy path) → byte-identical.
+        """
+        header = cls._SOUL_KNOWLEDGE_BLOCK_HEADER
+        # Select the machine-built block: the LAST header immediately followed by
+        # a ``- `` item line. Walk backwards past any prose heading collisions.
+        search_from = len(text)
+        while True:
+            start = text.rfind(header, 0, search_from)
+            if start == -1:
+                return text
+            body_start = start + len(header)
+            if text[body_start : body_start + 2] == "- ":
+                break
+            search_from = start
+        n = len(text)
+        i = body_start
+        block_end = body_start
+        while i < n:
+            nl = text.find("\n", i)
+            line_end = n if nl == -1 else nl
+            line = text[i:line_end]
+            if line.startswith("- "):
+                # An item line — extend the block through it.
+                block_end = line_end
+                i = line_end + 1
+                continue
+            if line == "":
+                # A blank line: it is internal to the block only if a later line
+                # resumes ``- `` items; otherwise it is the ``\n\n`` join before
+                # the next stable section, so the block ends here.
+                j = line_end + 1
+                while j < n and text[j] == "\n":
+                    j += 1
+                nl2 = text.find("\n", j)
+                nxt_end = n if nl2 == -1 else nl2
+                if text[j:nxt_end].startswith("- "):
+                    i = line_end + 1
+                    continue
+                break
+            # A non-blank, non-item line with NO preceding blank line is a wrapped
+            # continuation of the current item's content — absorb it.
+            block_end = line_end
+            i = line_end + 1
+        return text[:start] + text[block_end:]
+
     @classmethod
     def _behavior_prefix(cls, system_prompt: Any) -> str:
         """Return the stable behavioral prefix of ``system_prompt``.
 
-        Strips the volatile per-turn tail (KB block, soul memories, injected
-        history) so two turns that differ only in retrieved context hash to the
-        same value. On Windows the SDK may pass ``system_prompt`` as a
-        ``{type: "file", path: ...}`` dict — there is no inline text to key on,
-        so fall back to the path (stable per connect) repr.
+        Two independent volatile strips run here so two turns that differ only
+        in per-turn soul/retrieval state hash to the same value:
+
+        1. The MID-prompt soul "# Key Knowledge" block is excised in place
+           (``_strip_soul_knowledge_block``) — its bond level / memory count /
+           recalled memories increment every turn but carry no behavioral
+           instructions.
+        2. The volatile per-turn TAIL (KB block, soul-memory recall, injected
+           history) is cut at the earliest ``_VOLATILE_PROMPT_MARKERS`` marker.
+
+        A REAL behavioral change (different persona/identity, override, or
+        ``instructions``) still lands in the retained text, so it changes the
+        digest and forces a warm-client rebuild. On Windows the SDK may pass
+        ``system_prompt`` as a ``{type: "file", path: ...}`` dict — there is no
+        inline text to key on, so fall back to the path (stable per connect).
         """
         if isinstance(system_prompt, dict):
             return f"file:{system_prompt.get('path', '')}"
         if not isinstance(system_prompt, str):
             return ""
+        system_prompt = cls._strip_soul_knowledge_block(system_prompt)
         cut = len(system_prompt)
         for marker in cls._VOLATILE_PROMPT_MARKERS:
             idx = system_prompt.find(marker)
