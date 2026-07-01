@@ -80,10 +80,27 @@ def _build_orientation(
         lines.append(
             f"This project is backed by cloud storage (S3). "
             f"The storage key prefix is **{current_dir}**. "
-            f"Files are NOT directly on the local filesystem — "
-            f"use the cloud project REST API or a synced Daytona sandbox "
-            f"to access them."
+            f"Files are NOT directly on the local filesystem. "
         )
+        # If a project_name is known, check for a Daytona sandbox.
+        daytona_hint = ""
+        if project_name:
+            daytona_hint = (
+                f" If a Daytona sandbox is provisioned for project "
+                f"'{project_name}', you can use the Daytona MCP tools "
+                f"(read_file, write_file, edit_file, list_dir, shell, "
+                f"run_python) to operate directly inside the sandbox VM. "
+                f"When done editing, call sync-and-finish to save changes "
+                f"to S3 and stop the sandbox."
+            )
+        else:
+            daytona_hint = (
+                " If a Daytona sandbox is provisioned, use the Daytona "
+                "MCP tools (read_file, write_file, edit_file, list_dir, "
+                "shell, run_python) to operate directly inside the sandbox "
+                "VM. When done, call sync-and-finish to save to S3."
+            )
+        lines.append(daytona_hint)
     else:
         lines.append(f"Your working directory is **{current_dir}**.")
 
@@ -116,11 +133,17 @@ def _build_procedure(is_s3: bool) -> str:
         lines.extend(
             [
                 "This is a cloud-storage project — files are in S3, not on the local "
-                "disk. If a Daytona sandbox is provisioned and synced, you can use "
-                "Bash/Read/Write/Edit there. Otherwise, use the cloud project REST "
-                "API endpoints (/cloud/projects/{name}/files/*) to browse, read, "
-                "and write files. If the user mentions S3 or cloud storage, you "
-                "already know the storage key prefix — no need to ask.",
+                "disk. If a Daytona sandbox is provisioned and synced, use the "
+                "Daytona MCP tools (read_file, write_file, edit_file, list_dir, "
+                "shell, run_python) to operate directly inside the sandbox VM — "
+                "all file I/O and command execution happens there. After you finish "
+                "your edit-run-verify loop, ALWAYS call the sync-and-finish endpoint "
+                "(POST /cloud/projects/{name}/workspace/sync-and-finish) to persist "
+                "your work back to S3 and stop the sandbox to save compute. If no "
+                "Daytona sandbox is provisioned, use the cloud project REST API "
+                "endpoints (/cloud/projects/{name}/files/*) to browse, read, and "
+                "write files. If the user mentions S3 or cloud storage, you already "
+                "know the storage key prefix — no need to ask.",
             ]
         )
     else:

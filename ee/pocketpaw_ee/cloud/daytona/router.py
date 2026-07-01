@@ -11,11 +11,12 @@ project storage.
 
 Endpoints:
 
-  POST   /cloud/projects/{name}/workspace    — Provision Daytona sandbox
-  GET    /cloud/projects/{name}/workspace     — Get sandbox status
-  DELETE /cloud/projects/{name}/workspace     — Destroy sandbox
+  POST   /cloud/projects/{name}/workspace                  — Provision Daytona sandbox
+  GET    /cloud/projects/{name}/workspace                   — Get sandbox status
+  DELETE /cloud/projects/{name}/workspace                   — Destroy sandbox
   POST   /cloud/projects/{name}/workspace/sync-to-sandbox   — S3 → Sandbox
   POST   /cloud/projects/{name}/workspace/sync-to-s3        — Sandbox → S3
+  POST   /cloud/projects/{name}/workspace/sync-and-finish   — Sandbox → S3 → stop sandbox
   GET    /cloud/projects/{name}/workspace/terminal           — Get web terminal URL
 
 Key integration points:
@@ -25,16 +26,14 @@ Key integration points:
   • The project key pattern: ``projects/{workspace_id}/{user_id}/{name}/``
 
 Moved from OSS to EE: 2026-06-24
+Updated: 2026-07-01 — uses shared store module; added sync-and-finish endpoint.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -42,63 +41,18 @@ from pydantic import BaseModel
 from pocketpaw.api.v1.cloud_projects import _ADAPTER, _require_project, _resolve_ids
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.daytona.config import daytona_enabled
+from pocketpaw_ee.cloud.daytona.store import (
+    get_sandbox_id,
+    remove_sandbox_id,
+    set_sandbox_id,
+    update_sync_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Daytona Workspaces"])
 
 # ── Helpers ────────────────────────────────────────────────────────────────
-
-# In-memory mapping: project_key -> sandbox_id
-# This maps a cloud project to its Daytona sandbox so we don't re-provision.
-# Persisted to ~/.pocketpaw/daytona_workspace_map.json
-_workspace_map: dict[str, dict] = {}
-_MAP_PATH = Path.home() / ".pocketpaw" / "daytona_workspace_map.json"
-
-
-def _load_workspace_map() -> dict[str, dict]:
-    """Load the workspace mapping from disk."""
-    if _workspace_map:
-        return _workspace_map
-    try:
-        if _MAP_PATH.exists():
-            with open(_MAP_PATH) as f:
-                data = json.load(f)
-                _workspace_map.update(data)
-    except Exception as exc:
-        logger.warning("Failed to load Daytona workspace map: %s", exc)
-    return _workspace_map
-
-
-def _save_workspace_map() -> None:
-    """Persist the workspace mapping to disk."""
-    try:
-        _MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_MAP_PATH, "w") as f:
-            json.dump(_workspace_map, f, indent=2)
-    except Exception as exc:
-        logger.warning("Failed to save Daytona workspace map: %s", exc)
-
-
-def _get_sandbox_id(project_key: str) -> str | None:
-    """Get the sandbox ID for a project key, or None."""
-    mapping = _load_workspace_map()
-    entry = mapping.get(project_key)
-    return entry.get("sandbox_id") if entry else None
-
-
-def _set_sandbox_id(project_key: str, sandbox_id: str, sandbox_name: str) -> None:
-    """Record the sandbox ID for a project key."""
-    mapping = _load_workspace_map()
-    mapping[project_key] = {"sandbox_id": sandbox_id, "sandbox_name": sandbox_name}
-    _save_workspace_map()
-
-
-def _remove_sandbox_id(project_key: str) -> None:
-    """Remove the sandbox mapping for a project key."""
-    mapping = _load_workspace_map()
-    mapping.pop(project_key, None)
-    _save_workspace_map()
 
 
 async def _require_daytona() -> DaytonaClient:
@@ -350,7 +304,7 @@ async def provision_workspace(
     client = await _require_daytona()
 
     # Idempotency: check if a sandbox already exists for this project.
-    existing_id = _get_sandbox_id(project_key)
+    existing_id = get_sandbox_id(project_key)
     if existing_id:
         try:
             existing = await client.get_sandbox_by_id(existing_id)
@@ -372,7 +326,7 @@ async def provision_workspace(
                 )
         except Exception:
             # Sandbox might have been deleted externally — clean up.
-            _remove_sandbox_id(project_key)
+            remove_sandbox_id(project_key)
 
     # Create a new sandbox.
     sandbox_name = f"paw-{project_name}-{workspace_id[:8]}"
@@ -388,7 +342,7 @@ async def provision_workspace(
         raise HTTPException(status_code=502, detail=f"Failed to create workspace: {exc}")
 
     # Record the mapping.
-    _set_sandbox_id(project_key, info.id, sandbox_name)
+    set_sandbox_id(project_key, info.id, sandbox_name)
 
     # Kick off background provisioning + sync.
     asyncio.create_task(_provision_and_sync(client, info.id, project_key))
@@ -447,7 +401,7 @@ async def get_workspace_status(
     workspace_id, user_id = _resolve_ids(http_request)
     project_key = await _require_project(workspace_id, user_id, project_name)
 
-    sandbox_id = _get_sandbox_id(project_key)
+    sandbox_id = get_sandbox_id(project_key)
     if not sandbox_id:
         return WorkspaceStatusResponse(
             ok=True,
@@ -491,7 +445,7 @@ async def get_workspace_status(
         )
     except Exception:
         # Sandbox might have been deleted externally.
-        _remove_sandbox_id(project_key)
+        remove_sandbox_id(project_key)
         return WorkspaceStatusResponse(
             ok=True,
             project_name=project_name,
@@ -511,7 +465,7 @@ async def delete_workspace(
     workspace_id, user_id = _resolve_ids(http_request)
     project_key = await _require_project(workspace_id, user_id, project_name)
 
-    sandbox_id = _get_sandbox_id(project_key)
+    sandbox_id = get_sandbox_id(project_key)
     if not sandbox_id:
         return {"ok": True, "message": "No workspace to delete"}
 
@@ -521,7 +475,7 @@ async def delete_workspace(
     except Exception as exc:
         logger.warning("Failed to delete sandbox %s: %s", sandbox_id, exc)
 
-    _remove_sandbox_id(project_key)
+    remove_sandbox_id(project_key)
     return {"ok": True, "message": "Workspace deleted"}
 
 
@@ -538,7 +492,7 @@ async def sync_to_sandbox(
     workspace_id, user_id = _resolve_ids(http_request)
     project_key = await _require_project(workspace_id, user_id, project_name)
 
-    sandbox_id = _get_sandbox_id(project_key)
+    sandbox_id = get_sandbox_id(project_key)
     if not sandbox_id:
         raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
 
@@ -581,7 +535,7 @@ async def sync_to_s3(
     workspace_id, user_id = _resolve_ids(http_request)
     project_key = await _require_project(workspace_id, user_id, project_name)
 
-    sandbox_id = _get_sandbox_id(project_key)
+    sandbox_id = get_sandbox_id(project_key)
     if not sandbox_id:
         raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
 
@@ -609,12 +563,71 @@ async def sync_to_s3(
     )
 
     # Update the last synced timestamp.
-    mapping = _load_workspace_map()
-    if project_key in mapping:
-        mapping[project_key]["last_synced_at"] = datetime.utcnow().isoformat()
-        _save_workspace_map()
+    update_sync_timestamp(project_key)
 
     return {"ok": True, "message": "Files synced from sandbox to S3"}
+
+
+@router.post("/cloud/projects/{project_name}/workspace/sync-and-finish")
+async def sync_and_finish(
+    project_name: str,
+    http_request: Request,
+) -> dict:
+    """Sync project files from the Daytona sandbox back to S3, then stop
+    (or archive) the sandbox to save compute.
+
+    Use this when the agent has finished its edit-run-verify loop and the
+    results should be persisted to the project's storage. This is the
+    "commit and push" equivalent for Daytona-backed cloud projects.
+
+    Two-phase:
+      1. Sandbox → S3 sync (all files persisted)
+      2. Sandbox stopped (compute saved; VM state preserved for restart)
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    project_key = await _require_project(workspace_id, user_id, project_name)
+
+    sandbox_id = get_sandbox_id(project_key)
+    if not sandbox_id:
+        raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
+
+    client = await _require_daytona()
+
+    # Phase 1: Sync sandbox → S3.
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        if info.state in ("stopped", "paused"):
+            await client.start_sandbox(sandbox_id)
+            await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=60)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Sandbox is in state '{info.state}' — must be 'started' for sync",
+            )
+
+    project_dir = await client.get_project_dir(sandbox_id)
+
+    await _sync_directory_from_sandbox_to_s3(
+        client,
+        sandbox_id,
+        project_key,
+        project_dir,
+    )
+
+    update_sync_timestamp(project_key)
+
+    # Phase 2: Stop the sandbox (preserves state for restart).
+    try:
+        await client.stop_sandbox(sandbox_id)
+        logger.info("Sandbox %s stopped after sync-and-finish", sandbox_id)
+    except Exception as exc:
+        logger.warning("Failed to stop sandbox %s after sync: %s", sandbox_id, exc)
+
+    return {
+        "ok": True,
+        "message": "Files synced to S3 and workspace stopped",
+        "sandbox_id": sandbox_id,
+    }
 
 
 @router.get("/cloud/projects/{project_name}/workspace/terminal")
@@ -630,7 +643,7 @@ async def get_workspace_terminal(
     workspace_id, user_id = _resolve_ids(http_request)
     project_key = await _require_project(workspace_id, user_id, project_name)
 
-    sandbox_id = _get_sandbox_id(project_key)
+    sandbox_id = get_sandbox_id(project_key)
     if not sandbox_id:
         raise HTTPException(status_code=404, detail="No workspace provisioned for this project")
 

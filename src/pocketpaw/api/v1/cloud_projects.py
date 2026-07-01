@@ -23,6 +23,7 @@ import re
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -52,6 +53,7 @@ class CreateCloudProjectRequest(BaseModel):
     """Request body for creating a new cloud project."""
 
     project_name: str
+    provision_workspace: bool = False
 
 
 class CreateCloudProjectResponse(BaseModel):
@@ -63,6 +65,8 @@ class CreateCloudProjectResponse(BaseModel):
     local_path: str
     workspace_id: str
     user_id: str
+    sandbox_id: str = ""
+    sandbox_state: str = ""
 
 
 class CloneGitRepoRequest(BaseModel):
@@ -70,6 +74,7 @@ class CloneGitRepoRequest(BaseModel):
 
     repo_url: str
     include_git: bool = False
+    provision_workspace: bool = False
 
 
 async def _empty_stream() -> AsyncIterator[bytes]:
@@ -226,6 +231,94 @@ async def _upload_directory(local_dir: str, project_key: str, include_git: bool 
                 ) from exc
 
 
+# ── Optional Daytona workspace provisioning ─────────────────────────────────
+
+
+async def _maybe_provision_workspace(
+    workspace_id: str,
+    user_id: str,
+    project_name: str,
+) -> tuple[str, str]:
+    """If Daytona is configured, provision a sandbox for the project.
+
+    Returns ``(sandbox_id, sandbox_state)`` or ``("", "")`` when Daytona
+    is not available.
+    """
+    try:
+        from pocketpaw_ee.cloud.daytona.client import get_daytona_client
+        from pocketpaw_ee.cloud.daytona.config import daytona_enabled
+
+        if not daytona_enabled():
+            return ("", "")
+
+        client = get_daytona_client()
+        if client is None:
+            return ("", "")
+
+        sandbox_name = f"paw-{project_name}-{workspace_id[:8]}"
+        info = await client.create_sandbox(name=sandbox_name)
+
+        # Record the mapping.
+        from pocketpaw_ee.cloud.daytona.store import set_sandbox_id
+
+        set_sandbox_id(
+            f"projects/{workspace_id}/{user_id}/{project_name}/",
+            info.id,
+            sandbox_name,
+        )
+
+        # Kick off background sync (S3 → sandbox after sandbox starts).
+        import asyncio
+
+        asyncio.create_task(
+            _background_sync_after_provision(client, info.id, workspace_id, user_id, project_name)
+        )
+
+        return (info.id, info.state)
+    except Exception as exc:
+        logger.warning("Auto-provision workspace failed (non-fatal): %s", exc)
+        return ("", "")
+
+
+async def _background_sync_after_provision(
+    client: Any,
+    sandbox_id: str,
+    workspace_id: str,
+    user_id: str,
+    project_name: str,
+) -> None:
+    """Wait for sandbox to start, then sync project files into it."""
+    project_key = f"projects/{workspace_id}/{user_id}/{project_name}/"
+    try:
+        await client.wait_for_sandbox(sandbox_id, target_state="started", timeout=120)
+        project_dir = await client.get_project_dir(sandbox_id)
+
+        from pocketpaw_ee.cloud.daytona.config import daytona_enabled
+
+        if daytona_enabled():
+            # Re-import the sync function from router module.
+            # Router uses the EE storage adapter; we use the same one.
+            from pocketpaw_ee.cloud.daytona.router import (
+                _sync_directory_from_s3_to_sandbox,
+            )
+
+            await _sync_directory_from_s3_to_sandbox(client, sandbox_id, project_key, project_dir)
+
+        from pocketpaw_ee.cloud.daytona.store import update_sync_timestamp
+
+        update_sync_timestamp(project_key)
+        logger.info(
+            "Auto-provision complete: sandbox=%s project=%s",
+            sandbox_id,
+            project_key,
+        )
+    except Exception as exc:
+        logger.warning("Background sync after provision failed: %s", exc)
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+
 @router.post("/cloud/projects")
 async def create_cloud_project(
     req: CreateCloudProjectRequest,
@@ -242,6 +335,10 @@ async def create_cloud_project(
     ``user_id`` is extracted from the authenticated request context
     (API key or OAuth token), falling back to ``"local"`` in self-hosted
     single-user mode.
+
+    When ``provision_workspace`` is true and Daytona is configured, a
+    sandbox VM is provisioned for the project and files are synced from
+    S3 into it automatically.
 
     Returns 409 if a project with the same name already exists.
     """
@@ -283,6 +380,12 @@ async def create_cloud_project(
 
     filesystem_path = await _project_filesystem_path(workspace_id, user_id, name)
 
+    # Optionally provision a Daytona sandbox.
+    sandbox_id = ""
+    sandbox_state = ""
+    if req.provision_workspace:
+        sandbox_id, sandbox_state = await _maybe_provision_workspace(workspace_id, user_id, name)
+
     return CreateCloudProjectResponse(
         ok=True,
         project_name=name,
@@ -290,6 +393,8 @@ async def create_cloud_project(
         local_path=filesystem_path,
         workspace_id=workspace_id,
         user_id=user_id,
+        sandbox_id=sandbox_id,
+        sandbox_state=sandbox_state,
     )
 
 
@@ -385,6 +490,14 @@ async def clone_git_repo(
 
     filesystem_path = await _project_filesystem_path(workspace_id, user_id, project_name)
 
+    # Optionally provision a Daytona sandbox.
+    sandbox_id = ""
+    sandbox_state = ""
+    if req.provision_workspace:
+        sandbox_id, sandbox_state = await _maybe_provision_workspace(
+            workspace_id, user_id, project_name
+        )
+
     return CreateCloudProjectResponse(
         ok=True,
         project_name=project_name,
@@ -392,6 +505,8 @@ async def clone_git_repo(
         local_path=filesystem_path,
         workspace_id=workspace_id,
         user_id=user_id,
+        sandbox_id=sandbox_id,
+        sandbox_state=sandbox_state,
     )
 
 
