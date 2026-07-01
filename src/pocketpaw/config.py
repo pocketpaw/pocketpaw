@@ -74,6 +74,10 @@ Changes:
     Belt & Pulley code-change gate (BS-3). A ``belt_propose_change`` proposal's
     repo path must resolve inside one of these roots; empty defaults to the
     cwd's parent. Env: POCKETPAW_BELT_REPO_ALLOWLIST (JSON list).
+  - 2026-07-01: Added ``shield_api_socket`` + ``shield_api_token`` (SEC-5) —
+    the same-box shield daemon's control-API UNIX socket + Bearer token. The
+    cloud ``/api/v1/security/*`` proxy reads these to reach shield; the token
+    is never logged. Env: POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
   - 2026-06-10: Added ``loom_bin`` + ``loom_model_path`` — the codebase
     orientation (loom) MCP server settings. ``loom_model_path`` defaults
     to None, which disables the loom MCP server; set it to a built
@@ -986,6 +990,31 @@ class Settings(BaseSettings):
             "Allowlisted root directories a Belt code-change proposal's repo "
             "must live under. A repo path resolving outside every root is "
             "refused. Empty → defaults to the cwd's parent (the workspace root)."
+        ),
+    )
+
+    # Shield — the same-box Go security daemon (deny-by-default connector
+    # egress + agent-decision control plane). shield serves a control API on a
+    # UNIX socket; the cloud ``/api/v1/security/*`` router proxies it,
+    # OWNER-gated, and degrades cleanly when shield is absent (a socket that is
+    # unset / missing / unreachable → a typed available:false read or a 409
+    # write, never a 500). The Bearer token authenticates the backend → shield
+    # hop over the socket; it is NEVER logged. Env auto-derives
+    # POCKETPAW_SHIELD_API_SOCKET / POCKETPAW_SHIELD_API_TOKEN.
+    shield_api_socket: str = Field(
+        default="/run/shield/api.sock",
+        description=(
+            "Filesystem path to shield's control-API UNIX socket. The cloud "
+            "security proxy connects here via an httpx UDS transport. When the "
+            "socket is missing or unreachable the proxy degrades to a typed "
+            "'shield_not_deployed' / 'unreachable' response."
+        ),
+    )
+    shield_api_token: str = Field(
+        default="",
+        description=(
+            "Bearer token the cloud security proxy presents to shield over the "
+            "socket. Sent as 'Authorization: Bearer <token>'. Never logged."
         ),
     )
 
