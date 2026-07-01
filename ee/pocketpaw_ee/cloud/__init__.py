@@ -304,6 +304,10 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(jobs_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
+    from pocketpaw_ee.cloud.media.router import router as media_router
+
+    # /studio generated media — serve + list (EE layer).
+    app.include_router(media_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
     # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
     app.include_router(meetings_webhooks_router, prefix="/api/v1")
