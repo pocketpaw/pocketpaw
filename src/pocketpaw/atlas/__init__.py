@@ -1,4 +1,8 @@
 # atlas/__init__.py — package exports for the atlas primitive (AT-1).
+# Updated: 2026-07-02 (feat/atlas-overlay, AT-5) — export the live overlay
+# (AtlasOverlay / OverlaidEntry), the EntitlementProvider protocol, and the
+# OSS DefaultEntitlementProvider next to the store, so consumers can render
+# context-aware (workspace-scoped, fail-closed) atlas answers.
 # Updated: 2026-07-02 (feat/atlas-compiler, AT-4) — export the compiler
 # (compile_atlas / write_artifact / check_artifact) and the startup
 # connector-drift check next to the store.
@@ -9,12 +13,22 @@
 
 from pocketpaw.atlas.compile import check_artifact, compile_atlas, write_artifact
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
+from pocketpaw.atlas.overlay import (
+    AtlasOverlay,
+    DefaultEntitlementProvider,
+    EntitlementProvider,
+    OverlaidEntry,
+)
 from pocketpaw.atlas.store import AtlasStore, check_connector_drift, get_atlas_store
 
 __all__ = [
     "AtlasEntry",
     "AtlasModel",
+    "AtlasOverlay",
     "AtlasStore",
+    "DefaultEntitlementProvider",
+    "EntitlementProvider",
+    "OverlaidEntry",
     "check_artifact",
     "check_connector_drift",
     "compile_atlas",

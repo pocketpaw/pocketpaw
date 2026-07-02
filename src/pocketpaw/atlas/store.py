@@ -17,6 +17,12 @@
 # ``connector:*`` name set against the live connector YAML scan (the same
 # dirs ConnectorRegistry reads) and logs a WARNING on mismatch — name-set
 # compare only, no recompile, never raises.
+# Updated: 2026-07-02 (feat/atlas-overlay, AT-5) — additive ``search_scored``
+# (``search`` now delegates to it): returns ``(score, entry)`` pairs so the
+# overlay (``atlas/overlay.py``) can re-rank available connectors above
+# unavailable ones at equal relevance without touching the base scoring.
+# Store API otherwise unchanged; the primer and drift check keep the
+# unfiltered OS-level view.
 
 from __future__ import annotations
 
@@ -90,8 +96,20 @@ class AtlasStore:
         field). Entries with zero overlap are dropped; ties keep seed
         order (stable sort).
         """
+        if limit <= 0:
+            return []
+        return [entry for _, entry in self.search_scored(query, limit=limit)]
+
+    def search_scored(self, query: str, limit: int | None = None) -> list[tuple[float, AtlasEntry]]:
+        """Like :meth:`search` but returns ``(score, entry)`` pairs.
+
+        Added for the overlay (AT-5), which needs the base relevance score
+        to re-rank available connectors above unavailable ones WITHOUT
+        changing this scoring. ``limit=None`` returns every match so the
+        overlay can filter before truncating.
+        """
         tokens = _tokenize(query)
-        if not tokens or limit <= 0:
+        if not tokens:
             return []
 
         scored: list[tuple[float, AtlasEntry]] = []
@@ -110,7 +128,7 @@ class AtlasStore:
                 scored.append((score, entry))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [entry for _, entry in scored[:limit]]
+        return scored if limit is None else scored[:limit]
 
     def describe(self, entry_id: str) -> AtlasEntry | None:
         """Return the full entry for a stable id, or None if unknown."""
