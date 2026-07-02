@@ -7,6 +7,13 @@
 # patched in every test so NO network call is made; the patch records the
 # subscription_info / data / vapid args each call receives so we can assert
 # the send was signed with the tenant key and carried the payload.
+#
+# Updated: 2026-07-02 (fix/push-vapid-pem-send) — the signing assertions now
+# expect a parsed ``Vapid01`` instance (not the raw PEM string) as
+# ``vapid_private_key``, and a new ``test_send_vapid_key_is_consumable_by_pywebpush``
+# regression-guards that the key handed to webpush can actually sign — the
+# original bug passed a PEM string that pywebpush's ``from_string`` could not
+# parse, failing every send.
 
 from __future__ import annotations
 
@@ -100,12 +107,49 @@ async def test_send_signs_with_tenant_private_key(enc_key, monkeypatch) -> None:
 
     await push_service.send_to_user("w1", "u1", PushPayload(title="t", body="b"))
 
-    # The PEM handed to webpush is the tenant key from the chokepoint, and it
-    # is a real private PEM (never the public key, never ciphertext).
-    assert captured["vapid_private_key"] == expected_pem
-    assert "BEGIN PRIVATE KEY" in captured["vapid_private_key"]
+    # The key handed to webpush is the tenant key from the chokepoint, parsed
+    # into a Vapid01 signer (NOT the raw PEM string — pywebpush's from_string
+    # can't parse a PKCS#8 PEM). Its private value matches the tenant PEM, so
+    # it's the real key (never the public key, never ciphertext).
+    from py_vapid import Vapid01
+
+    signer = captured["vapid_private_key"]
+    assert isinstance(signer, Vapid01)
+    expected_signer = Vapid01.from_pem(expected_pem.encode())
+    assert (
+        signer.private_key.private_numbers().private_value
+        == expected_signer.private_key.private_numbers().private_value
+    )
     # The contact claim is present and non-personal by default.
     assert captured["vapid_claims"]["sub"].startswith("mailto:")
+
+
+async def test_send_vapid_key_is_consumable_by_pywebpush(enc_key, monkeypatch) -> None:
+    # Regression for fix/push-vapid-pem-send: the value handed to webpush as
+    # vapid_private_key must be something pywebpush can actually sign with. The
+    # original bug passed the raw PKCS#8 PEM string, which pywebpush feeds to
+    # py_vapid.Vapid.from_string() — that only accepts raw/DER base64 keys and
+    # dies on a PEM ("ASN.1 parsing error: invalid length"), failing every
+    # send. This test proves the passed key both is a Vapid01 AND can sign a
+    # claim set without raising, i.e. it survives the real pywebpush path.
+    await _seed("w1", "u1", "https://push.example/a")
+    await push_service.get_vapid_public_key("w1")
+
+    captured: dict = {}
+
+    def fake_webpush(**kwargs):
+        captured.update(kwargs)
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(push_service, "webpush", fake_webpush)
+    result = await push_service.send_to_user("w1", "u1", PushPayload(title="t", body="b"))
+
+    assert result.sent == 1
+    # Signing is exactly what webpush does internally with this value; if the
+    # key were a bare PEM string this would raise instead of returning headers.
+    signer = captured["vapid_private_key"]
+    headers = signer.sign({"sub": "mailto:x@example.test", "aud": "https://fcm.googleapis.com"})
+    assert "Authorization" in headers
 
 
 async def test_send_contact_is_configurable(enc_key, monkeypatch) -> None:

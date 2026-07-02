@@ -21,6 +21,13 @@
 # ``# no-event``; wiring sends to real product events + WS-vs-push dedupe is
 # the follow-up (#1393), NOT here.
 #
+# Updated: 2026-07-02 (fix/push-vapid-pem-send) — the send path handed the raw
+# PKCS#8 PEM *string* to ``webpush(vapid_private_key=...)``, which routes it
+# through ``py_vapid.Vapid.from_string`` (raw/DER-base64 only) and failed EVERY
+# send with an ASN.1 "invalid length" error — no Web Push ever left the box.
+# Now we parse the PEM into a ``Vapid01`` instance (``from_pem``) once per
+# fan-out and hand webpush the instance, which it consumes directly.
+#
 # Responsibilities:
 #   - ``get_vapid_public_key(workspace_id)`` — return the workspace's VAPID
 #     public key, generating the keypair on first call (generate-once /
@@ -321,6 +328,14 @@ async def send_to_user(
 
     # Single chokepoint read of the tenant private key for the whole fan-out.
     private_pem = await get_decrypted_private_pem(workspace_id)
+    # Build the Vapid signer ONCE from the PEM. ``webpush`` accepts a Vapid01
+    # instance directly; passing the raw PEM *string* instead routes it through
+    # ``py_vapid.Vapid.from_string``, which only parses raw/DER base64 keys —
+    # given a PKCS#8 PEM it strips the newlines, base64-decodes the
+    # ``-----BEGIN-----`` header to garbage, and dies with an ASN.1
+    # "invalid length" error, failing EVERY send. ``from_pem`` handles the PEM
+    # our keypair generator emits, so hand webpush the parsed instance.
+    vapid = Vapid01.from_pem(private_pem.encode())
     vapid_claims = {"sub": _vapid_contact()}
     data = payload.model_dump_json(exclude_none=True)
 
@@ -334,7 +349,7 @@ async def send_to_user(
                 webpush,
                 subscription_info=subscription_info,
                 data=data,
-                vapid_private_key=private_pem,
+                vapid_private_key=vapid,
                 # ``vapid_claims`` is mutated in place by py-vapid (it stamps
                 # ``exp``/``aud``), so hand each call its own copy.
                 vapid_claims=dict(vapid_claims),
