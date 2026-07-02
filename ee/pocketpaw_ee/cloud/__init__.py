@@ -351,6 +351,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.mission_control.router import router as mission_control_router
     from pocketpaw_ee.cloud.notifications.router import router as notifications_router
     from pocketpaw_ee.cloud.outcomes.router import router as outcomes_router
+    from pocketpaw_ee.cloud.push.router import router as push_router
     from pocketpaw_ee.cloud.tasks.router import router as tasks_router
     from pocketpaw_ee.cloud.uploads.router import router as uploads_router
     from pocketpaw_ee.fabric.router import router as fabric_router
@@ -363,6 +364,8 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(knowledge_router, prefix="/api/v1")
     app.include_router(uploads_router, prefix="/api/v1")
     app.include_router(notifications_router, prefix="/api/v1")
+    # Web Push — VAPID public key + subscribe/unsubscribe (pocketpaw#1391).
+    app.include_router(push_router, prefix="/api/v1")
     app.include_router(tasks_router, prefix="/api/v1")
     app.include_router(files_router, prefix="/api/v1")
     # file_versions (ART-1) — versioned file-write storage spine. Shares the
@@ -812,6 +815,16 @@ def mount_cloud(app: FastAPI) -> None:
 
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
+
+    # Push notifications fan-out (#1393) — v1 product events
+    # (agent.stream_end / instinct.approval.created / meeting.started) →
+    # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
+    # desktop app and a browser tab open is notified exactly once. Same
+    # constraint as the other bus subscribers: register AFTER init_realtime
+    # installed the singleton bus.
+    from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
+
+    register_push_event_listeners()
 
     # In-process daily-snapshot scheduler — opt-in via env var.
     #

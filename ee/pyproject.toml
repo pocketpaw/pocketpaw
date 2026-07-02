@@ -146,6 +146,11 @@ dependencies = [
     # Standard Webhooks HMAC-SHA256 verifier the inbound webhook route uses to
     # prove a payload came from Dodo before any credits are granted.
     "dodopayments[webhooks]==1.105.0",
+    # --- Web Push (VAPID) — pocketpaw#1391 ---
+    # py-vapid signs the VAPID JWT for Web Push; ee/pocketpaw_ee/cloud/push/
+    # uses it for the per-workspace keypair + subscribe/unsubscribe endpoints.
+    "py-vapid>=1.9.0",
+    "pywebpush>=2.3.0",
 ]
 
 [project.optional-dependencies]
@@ -492,6 +497,22 @@ source_modules = [
     "pocketpaw_ee.cloud.jobs.builtin.score_applications",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.workspace_job"]
+
+[[tool.importlinter.contracts]]
+name = "Push — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    "pocketpaw_ee.cloud.push.router",
+    "pocketpaw_ee.cloud.push.dto",
+    "pocketpaw_ee.cloud.push.domain",
+    "pocketpaw_ee.cloud.push.dispatch",
+    "pocketpaw_ee.cloud.push.listeners",
+]
+forbidden_modules = [
+    "pocketpaw_ee.cloud.models.push_subscription",
+    "pocketpaw_ee.cloud.models.vapid_keypair",
+]
 
 [[tool.importlinter.contracts]]
 name = "Sessions — Beanie writes only from service.py"

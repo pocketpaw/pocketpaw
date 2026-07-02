@@ -11,6 +11,13 @@ Updated: 2026-06-30 (feat/session-supervisor SS-2) — added ``SessionTranscript
 to the imports, ``__all__``, and ``get_all_documents()`` so the
 ``session_transcripts`` collection is wired into ``init_beanie``. Only
 ``ee.cloud.agent_sessions.store`` imports the doc class directly.
+Updated: 2026-06-09 (feat/push-subscription-store, pocketpaw#1391) — added the
+``PushSubscription`` (with its ``PushKeys`` subdoc) and ``VapidKeypair``
+tenant-scoped Web Push documents to the imports and ``get_all_documents()``
+registry so the push-subscription store + per-workspace VAPID keypair are
+wired into ``init_beanie``. Only ``ee.cloud.push.service`` imports those doc
+classes directly (import-linter contract); they're kept out of ``__all__`` so
+they can't be star-imported into routers/DTOs/domains.
 Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2) — added the
 ``Lead`` and ``Site`` tenant-scoped Paw Sites documents (plus their
 ``LeadSource`` / ``SiteDomain`` subdocs) to the imports, ``__all__``, and the
@@ -131,6 +138,7 @@ from pocketpaw_ee.cloud.models.planner import PlanSession, PlanSessionAgentGap
 from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
+from pocketpaw_ee.cloud.models.push_subscription import PushSubscription
 from pocketpaw_ee.cloud.models.read_state import ReadState
 from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
@@ -145,6 +153,7 @@ from pocketpaw_ee.cloud.models.task_attachment import TaskAttachment
 from pocketpaw_ee.cloud.models.task_event import TaskEvent
 from pocketpaw_ee.cloud.models.temporal_sweep_state import TemporalSweepStateDoc
 from pocketpaw_ee.cloud.models.user import OAuthAccount, User, WorkspaceMembership
+from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
 from pocketpaw_ee.cloud.models.workspace import Workspace, WorkspaceSettings
 from pocketpaw_ee.cloud.models.workspace_job import WorkspaceJobDoc
 
@@ -386,6 +395,8 @@ def get_all_documents():
         Lead,
         Site,
         SiteRateCounter,
+        PushSubscription,
+        VapidKeypair,
         WorkspaceSensePreference,
         AuditEvent,
         AuditWebhook,
