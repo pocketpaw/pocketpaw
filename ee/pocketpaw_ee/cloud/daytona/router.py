@@ -35,10 +35,19 @@ import asyncio
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from pocketpaw.api.v1.cloud_projects import _ADAPTER, _require_project, _resolve_ids
+from pocketpaw.api.v1.schemas.files import (
+    BrowseResponse,
+    FileActionResponse,
+    FileEntry,
+    MkdirRequest,
+    RenameRequest,
+    WriteFileRequest,
+)
 from pocketpaw_ee.cloud.daytona.client import DaytonaClient, get_daytona_client
 from pocketpaw_ee.cloud.daytona.config import daytona_enabled
 from pocketpaw_ee.cloud.daytona.store import (
@@ -711,3 +720,285 @@ async def get_port_preview(
         port=port,
         sandbox_id=sandbox_id,
     )
+
+
+# ── Sandbox file operations (Daytona sandbox as primary filesystem) ─────
+#
+# These endpoints let the frontend list, read, write, and manage files
+# directly inside the Daytona sandbox — used when the explorer is in
+# "daytona" mode for a cloud project with a provisioned sandbox.
+#
+# Paths in these endpoints are RELATIVE to the sandbox's project directory
+# (e.g. "src/index.ts", "README.md"). The backend joins with the sandbox's
+# project_dir to form the absolute path.
+#
+# Each endpoint:
+#   1. Resolves workspace_id + user_id + project_name
+#   2. Looks up the sandbox_id from the workspace map store
+#   3. Ensures the sandbox is running
+#   4. Translates the relative path to an absolute sandbox path
+#   5. Delegates to the DaytonaClient
+
+
+async def _require_sandbox(
+    workspace_id: str,
+    user_id: str,
+    project_name: str,
+) -> tuple[DaytonaClient, str, str, str]:
+    """Resolve project → sandbox_id → sandbox project_dir.
+
+    Returns ``(client, sandbox_id, project_key, project_dir)`` or raises
+    HTTPException if the project or sandbox doesn't exist.
+    """
+    project_key = f"projects/{workspace_id}/{user_id}/{project_name}/"
+
+    sandbox_id = get_sandbox_id(project_key)
+    if not sandbox_id:
+        raise HTTPException(
+            status_code=404,
+            detail="No workspace provisioned for this project — provision one first",
+        )
+
+    client = await _require_daytona()
+    info = await client.get_sandbox_by_id(sandbox_id)
+    if info.state != "started":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Sandbox is in state '{info.state}' — must be 'started' for file operations",
+        )
+
+    project_dir = await client.get_project_dir(sandbox_id)
+    return client, sandbox_id, project_key, project_dir
+
+
+def _sandbox_abs_path(project_dir: str, relative_path: str) -> str:
+    """Join project_dir with a relative path, normalising slashes."""
+    clean = relative_path.strip("/")
+    if not clean or clean == ".":
+        return project_dir
+    return f"{project_dir}/{clean}"
+
+
+@router.get("/cloud/projects/{project_name}/workspace/files/browse")
+async def browse_sandbox_files(
+    project_name: str,
+    path: str = Query("", description="Relative path within the project"),
+    http_request: Request = None,
+) -> BrowseResponse:
+    """List the contents of a directory inside the Daytona sandbox.
+
+    ``path`` is relative to the project root. Empty string or ``"."``
+    lists the project root.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    # Also verify the project marker exists in S3
+    project_key = await _require_project(workspace_id, user_id, project_name)
+    client, sandbox_id, _, project_dir = await _require_sandbox(
+        workspace_id, user_id, project_name
+    )
+
+    remote_path = _sandbox_abs_path(project_dir, path)
+
+    try:
+        entries = await client.list_files(sandbox_id, remote_path)
+    except Exception as exc:
+        logger.warning("sandbox browse failed: path=%s  err=%s", remote_path, exc)
+        return BrowseResponse(path=path, error="Could not list directory")
+
+    files = [
+        FileEntry(
+            name=e.name,
+            isDir=e.is_dir,
+            size=str(e.size) if not e.is_dir and e.size > 0 else "",
+        )
+        for e in entries
+    ]
+    return BrowseResponse(path=path, files=files)
+
+
+@router.get("/cloud/projects/{project_name}/workspace/files/content")
+async def read_sandbox_file(
+    project_name: str,
+    path: str = Query(..., description="Relative file path within the project"),
+    http_request: Request = None,
+):
+    """Read a file from the Daytona sandbox and return its raw content.
+
+    ``path`` is relative to the project root. The response uses the
+    file's MIME type for syntax highlighting in the browser.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    await _require_project(workspace_id, user_id, project_name)
+    client, sandbox_id, _, project_dir = await _require_sandbox(
+        workspace_id, user_id, project_name
+    )
+
+    if not path or path.strip("/") == "":
+        raise HTTPException(status_code=400, detail="Cannot read a directory")
+
+    remote_path = _sandbox_abs_path(project_dir, path)
+
+    try:
+        data = await client.download_file(sandbox_id, remote_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found in sandbox")
+    except Exception as exc:
+        logger.warning("sandbox read failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail="Could not read file") from exc
+
+    # Guess MIME type from the file name
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(path)
+    return Response(content=data, media_type=mime or "application/octet-stream")
+
+
+@router.post("/cloud/projects/{project_name}/workspace/files/write")
+async def write_sandbox_file(
+    project_name: str,
+    req: WriteFileRequest,
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Create or overwrite a file in the Daytona sandbox.
+
+    The body ``path`` is relative to the project root. Parent directories
+    are created automatically.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    await _require_project(workspace_id, user_id, project_name)
+    client, sandbox_id, _, project_dir = await _require_sandbox(
+        workspace_id, user_id, project_name
+    )
+
+    relative = req.path.strip("/")
+    if not relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+
+    remote_path = _sandbox_abs_path(project_dir, relative)
+
+    # Create parent directory in sandbox.
+    parent = os.path.dirname(remote_path)
+    try:
+        await client.create_folder(sandbox_id, parent)
+    except Exception:
+        pass
+
+    try:
+        await client.upload_bytes(
+            sandbox_id, req.content.encode("utf-8"), remote_path
+        )
+    except Exception as exc:
+        logger.warning("sandbox write failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail=f"Write failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=relative)
+
+
+@router.post("/cloud/projects/{project_name}/workspace/files/mkdir")
+async def mkdir_sandbox(
+    project_name: str,
+    req: MkdirRequest,
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Create a directory inside the Daytona sandbox."""
+    workspace_id, user_id = _resolve_ids(http_request)
+    await _require_project(workspace_id, user_id, project_name)
+    client, sandbox_id, _, project_dir = await _require_sandbox(
+        workspace_id, user_id, project_name
+    )
+
+    relative = req.path.strip("/")
+    if not relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+
+    remote_path = _sandbox_abs_path(project_dir, relative)
+
+    try:
+        await client.create_folder(sandbox_id, remote_path, mode="755")
+    except Exception as exc:
+        logger.warning("sandbox mkdir failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail=f"Mkdir failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=relative)
+
+
+@router.delete("/cloud/projects/{project_name}/workspace/files/delete")
+async def delete_sandbox_item(
+    project_name: str,
+    path: str = Query(..., description="Relative path to delete"),
+    recursive: bool = Query(False, description="Delete directories recursively"),
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Delete a file or directory inside the Daytona sandbox."""
+    workspace_id, user_id = _resolve_ids(http_request)
+    await _require_project(workspace_id, user_id, project_name)
+    client, sandbox_id, _, project_dir = await _require_sandbox(
+        workspace_id, user_id, project_name
+    )
+
+    relative = path.strip("/")
+    if not relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+
+    remote_path = _sandbox_abs_path(project_dir, relative)
+
+    try:
+        await client.delete_file(sandbox_id, remote_path, recursive=recursive)
+    except Exception as exc:
+        logger.warning("sandbox delete failed: path=%s  err=%s", remote_path, exc)
+        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+
+    return FileActionResponse(ok=True)
+
+
+@router.patch("/cloud/projects/{project_name}/workspace/files/rename")
+async def rename_sandbox_item(
+    project_name: str,
+    req: RenameRequest,
+    http_request: Request = None,
+) -> FileActionResponse:
+    """Rename or move a file/directory inside the Daytona sandbox.
+
+    Both ``path`` and ``new_path`` are relative to the project root.
+    Parent directories of the destination are created automatically.
+    """
+    workspace_id, user_id = _resolve_ids(http_request)
+    await _require_project(workspace_id, user_id, project_name)
+    client, sandbox_id, _, project_dir = await _require_sandbox(
+        workspace_id, user_id, project_name
+    )
+
+    old_relative = req.path.strip("/")
+    new_relative = req.new_path.strip("/")
+    if not old_relative:
+        raise HTTPException(status_code=400, detail="path must not be empty")
+    if not new_relative:
+        raise HTTPException(status_code=400, detail="new_path must not be empty")
+
+    old_remote = _sandbox_abs_path(project_dir, old_relative)
+    new_remote = _sandbox_abs_path(project_dir, new_relative)
+
+    # Create parent directory of destination.
+    parent = os.path.dirname(new_remote)
+    try:
+        await client.create_folder(sandbox_id, parent)
+    except Exception:
+        pass
+
+    # Daytona SDK doesn't have a direct rename — we copy then delete.
+    try:
+        data = await client.download_file(sandbox_id, old_remote)
+        await client.upload_bytes(sandbox_id, data, new_remote)
+        await client.delete_file(sandbox_id, old_remote, recursive=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Source file not found")
+    except Exception as exc:
+        logger.warning(
+            "sandbox rename failed: old=%s new=%s  err=%s",
+            old_remote,
+            new_remote,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail=f"Rename failed: {exc}") from exc
+
+    return FileActionResponse(ok=True, path=new_relative)
