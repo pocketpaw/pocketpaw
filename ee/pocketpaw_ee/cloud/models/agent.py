@@ -8,6 +8,12 @@
 # its own skill set (direct refs + enabled plugins). These fold into the
 # per-run skill materialization (run_core) so they apply on EVERY run the
 # agent does, independent of the surface/entity profile.
+# Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): added top-level
+# ``disabled: bool = False``. When True the run pool (AgentPool.get) refuses to
+# resolve the agent on EVERY path at once — a soft-disable that revokes the
+# agent everywhere while letting in-flight runs finish. Top-level (not on
+# AgentConfig) so toggling it bumps the doc's ``updatedAt`` and the pool's
+# staleness check + explicit cache invalidation both see the change.
 
 """Agent configuration document."""
 
@@ -62,6 +68,9 @@ class Agent(TimestampedDocument):
     config: AgentConfig = Field(default_factory=AgentConfig)
     visibility: str = Field(default="private", pattern="^(private|workspace|public)$")
     owner: str  # User ID
+    # Soft-disable / revoke-everywhere (AW-4). True == the run pool refuses to
+    # resolve this agent on any NEW request; in-flight runs are unaffected.
+    disabled: bool = False
 
     class Settings:
         name = "agents"
