@@ -29,6 +29,13 @@ and one `skill` entry per BUNDLED skill; the store's lexical search
 gains a cheap deterministic suffix normalizer (stemming) so inflected
 query words match singular keywords. Installed (non-bundled) skills
 stay with the system-prompt skills block.
+Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — live Fabric schema
+introspection (EE-only, fail-closed): an optional per-run
+FabricIntrospector (atlas/fabric.py) lets atlas_search surface
+synthetic `fabric:<entity-type>` cards for the CALLING workspace's live
+ontology and atlas_describe answer `fabric:<type>` with properties +
+links. Never compiled into atlas.json; absent/erroring introspector →
+gracefully absent (OSS default).
 -->
 
 # Atlas — the OS self-model
@@ -236,6 +243,54 @@ workspace-connector view and pass it to
 `build_atlas_context_server(provider=...)`. The OSS `"default"` scope reads
 live file-store state and is fully functional today.
 
+## Live Fabric schema introspection (`atlas/fabric.py`, EE-only)
+
+Fabric — the typed workspace ontology (typed objects like Customer /
+Competitor, typed links like `competes_with`) — is EE cloud and **per
+tenant**: its entries are dynamic, so they are NEVER compiled into
+`atlas.json` (which stays global and byte-deterministic). Since AT-7 the
+atlas tools can still answer "what entity types exist in THIS workspace?"
+live, through an optional per-run introspector:
+
+- **`FabricIntrospector` protocol** — structural, like
+  `EntitlementProvider`: `list_entity_types() -> list[str]` and
+  `describe_entity_type(name) -> dict | None` (properties + link types).
+  `build_atlas_context_server(provider=..., introspector=...)` accepts it
+  next to the provider; the tool closures capture it per run.
+- **Search** — with an introspector, `atlas_search` additionally matches
+  the intent against live entity-type names and their property names
+  (exact/stemmed token match, camel-case split, the store's own suffix
+  normalizer) and APPENDS up to 3 synthetic cards — id
+  `fabric:<entity-type>`, tool-layer-only kind `fabric` (not part of
+  `AtlasKind`; fabric cards are built at answer time, never `AtlasEntry`
+  rows) — **after** the compiled-entry results. Compiled results are never
+  displaced or re-ranked by fabric hits.
+- **Describe** — `atlas_describe("fabric:<type>")` returns the live schema:
+  sorted `properties`, `links` (`{name, from_type, to_type}` dicts),
+  `workspace_scoped: true`, and a narrative pointing back at
+  `primitive:fabric`.
+- **OSS absence** — without an introspector (the OSS default) nothing about
+  live Fabric exists: `fabric:*` ids answer as unknown ids (and never
+  appear in the known-ids listing), no fabric cards ever surface, and the
+  only Fabric knowledge is the compiled `primitive:fabric` narrative.
+- **Fail-closed** — an introspector that raises (listing OR describing) is
+  treated exactly like an absent one: DEBUG log, no crash, no partial
+  leak. Malformed shapes (non-string names, non-list properties) are
+  dropped, not propagated.
+
+**EE wiring** (`claude_sdk.py` `_get_mcp_servers`): the introspector is
+built only when the run's tenant scope is a real `ws:<id>` (via
+`_tenant_scope_key()` — the OSS `"default"` scope and the blank-id
+sentinel get none; there is no ambient OSS fabric registry, the
+`JSONFileFabricRegistry` mock needs an explicit registry file) AND
+`pocketpaw_ee.fabric` imports. `build_workspace_fabric_introspector(ws_id)`
+binds a `WorkspaceFabricRegistry` (SQLite-backed, workspace-scoped) to the
+run's workspace id — per run, never a process-global — and degrades to
+`None` on import or construction failure (DEBUG log). Tests:
+`tests/atlas/test_fabric_introspection.py` (fake + raising introspectors;
+the real EE adapter test is import-guarded and skips when `pocketpaw_ee`
+isn't installed).
+
 ## Agent tools (`pocketpaw_atlas` MCP server)
 
 The `pocketpaw_atlas` in-process MCP server is registered on the Claude Agent
@@ -253,6 +308,9 @@ path), so it is ambient on every agent run. Two tools:
   and keyword hits rank highest. `available` appears on
   connector cards only (overlay, AT-5); available connectors rank above
   unavailable ones at equal relevance, and non-granted entries are absent.
+  With a fabric introspector (AT-7, EE), up to 3 synthetic
+  `fabric:<entity-type>` cards (kind `fabric`) ride AFTER the compiled
+  results when the intent matches live workspace entity types.
 - **When:** before guessing whether the OS can do something or which
   primitive fits an intent.
 
@@ -267,7 +325,9 @@ path), so it is ambient on every agent run. Two tools:
   `connect_hint` pointing at the integrations surface route (looked up from
   the seed's `surface:integrations` entry, not hard-coded), a filtered
   (non-granted) id answers exactly like an unknown id, and the known-ids
-  listing carries only ids the calling context may see.
+  listing carries only ids the calling context may see. With a fabric
+  introspector (AT-7, EE), `fabric:<type>` ids answer with the live
+  workspace schema (properties + links); without one they are unknown ids.
 - **When:** after `atlas_search` picks a candidate, or before explaining /
   exercising a primitive.
 
@@ -305,6 +365,10 @@ provider = DefaultEntitlementProvider(scope_key="default")  # or "ws:<id>"
 AtlasOverlay.search(store, "invoices", provider, limit=5)   # OverlaidEntry list
 AtlasOverlay.describe(store, "connector:stripe", provider)  # None if filtered
 
+from pocketpaw.atlas import FabricIntrospector, build_workspace_fabric_introspector
+introspector = build_workspace_fabric_introspector("ws-1")  # None on OSS installs
+# build_atlas_context_server(provider=..., introspector=...) serves fabric:* live
+
 from pocketpaw.atlas import check_artifact, compile_atlas, write_artifact
 compile_atlas()      # authored + extracted entries, sorted by id
 write_artifact()     # what `pocketpaw atlas build` calls
@@ -317,4 +381,7 @@ drift warning; `test_overlay.py` pins the fail-closed filter, availability
 annotation + re-ranking, no-leak describe, and the MCP handlers under
 stubbed providers; `test_widgets_skills.py` pins widget/skill extraction,
 intent-phrase search without exact names, the `get_widget_spec` routing in
-`how`, the bundled-only skill guarantee, and the exact stemming rules).
+`how`, the bundled-only skill guarantee, and the exact stemming rules;
+`test_fabric_introspection.py` pins the AT-7 fabric seam: fake-introspector
+search/describe, compiled results never displaced, OSS absence, raising →
+absent fail-closed, and the import-guarded real EE adapter).

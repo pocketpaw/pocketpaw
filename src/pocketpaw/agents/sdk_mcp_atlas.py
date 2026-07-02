@@ -23,6 +23,16 @@
 # connectors at the integrations surface, and non-granted entries are
 # ABSENT everywhere (search, describe, known-ids error — fail-closed, no
 # leakage). ``provider=None`` keeps the pre-AT-5 global behavior.
+#
+# Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — the server also takes an
+# optional per-run ``FabricIntrospector`` (``atlas/fabric.py``): live
+# workspace-ontology (EE Fabric) introspection. With one, atlas_search
+# APPENDS synthetic ``fabric:<entity-type>`` cards (tool-layer kind
+# ``fabric``) after compiled-entry results — never displacing them — and
+# atlas_describe answers ``fabric:<type>`` ids with the live schema
+# (properties + links). Absent (OSS default) or erroring introspector →
+# fabric ids are unknown ids and no fabric cards appear (fail-closed);
+# workspace ontology is per-tenant and NEVER enters the compiled artifact.
 
 from __future__ import annotations
 
@@ -31,6 +41,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pocketpaw.atlas.fabric import FabricIntrospector
     from pocketpaw.atlas.overlay import EntitlementProvider
 
 logger = logging.getLogger(__name__)
@@ -60,7 +71,11 @@ def _text_result(text: str, *, is_error: bool = False) -> dict:
     return out
 
 
-async def _atlas_search_handler(args: dict, provider: EntitlementProvider | None = None) -> dict:
+async def _atlas_search_handler(
+    args: dict,
+    provider: EntitlementProvider | None = None,
+    introspector: FabricIntrospector | None = None,
+) -> dict:
     """Rank atlas entries for an intent and return capability cards.
 
     Backs the ``atlas_search`` MCP tool. Cards are intentionally thin
@@ -68,7 +83,11 @@ async def _atlas_search_handler(args: dict, provider: EntitlementProvider | None
     with ``atlas_describe`` on the id it picks. With a *provider* (AT-5),
     results are the calling context's view: non-granted entries are
     absent, connector cards carry ``available``, and available
-    connectors rank above unavailable ones at equal relevance.
+    connectors rank above unavailable ones at equal relevance. With an
+    *introspector* (AT-7), live workspace entity types matching the
+    intent are APPENDED as synthetic ``fabric:*`` cards after the
+    compiled-entry results — never displacing them; an erroring
+    introspector contributes nothing (fail-closed).
     """
     from pocketpaw.atlas.store import get_atlas_store
 
@@ -89,7 +108,15 @@ async def _atlas_search_handler(args: dict, provider: EntitlementProvider | None
         overlaid = [
             (o.entry, o.available) for o in AtlasOverlay.search(store, intent, provider, limit=5)
         ]
-    if not overlaid:
+
+    fabric_cards: list[dict[str, Any]] = []
+    if introspector is not None:
+        # Fail-closed inside: any introspector error yields [] (DEBUG log).
+        from pocketpaw.atlas.fabric import search_entity_types
+
+        fabric_cards = search_entity_types(introspector, intent)
+
+    if not overlaid and not fabric_cards:
         return _text_result(f"No atlas entries matched intent: {intent!r}. Try broader wording.")
 
     cards: list[dict[str, Any]] = []
@@ -105,10 +132,17 @@ async def _atlas_search_handler(args: dict, provider: EntitlementProvider | None
         if available is not None:
             card["available"] = available
         cards.append(card)
+    # Fabric cards ride AFTER every compiled-entry card (AT-7): live
+    # ontology hits are additive context, never displacing OS answers.
+    cards.extend(fabric_cards)
     return _text_result(json.dumps({"results": cards}, ensure_ascii=False))
 
 
-async def _atlas_describe_handler(args: dict, provider: EntitlementProvider | None = None) -> dict:
+async def _atlas_describe_handler(
+    args: dict,
+    provider: EntitlementProvider | None = None,
+    introspector: FabricIntrospector | None = None,
+) -> dict:
     """Return the full atlas entry for a stable id.
 
     Backs the ``atlas_describe`` MCP tool. Unknown ids return an error
@@ -117,7 +151,11 @@ async def _atlas_describe_handler(args: dict, provider: EntitlementProvider | No
     unknown id (and the known-ids listing carries only visible ids), so
     describe can never confirm a filtered entry exists; an unavailable
     connector's card carries ``available: false`` plus a pointer to the
-    integrations surface (route looked up from the store).
+    integrations surface (route looked up from the store). With an
+    *introspector* (AT-7), ``fabric:<type>`` ids answer with the live
+    workspace schema (properties + links); absent or erroring
+    introspector, fabric ids fall through to the unknown-id path —
+    indistinguishable from ids that never existed (fail-closed).
     """
     from pocketpaw.atlas.store import get_atlas_store
 
@@ -127,6 +165,15 @@ async def _atlas_describe_handler(args: dict, provider: EntitlementProvider | No
             "Error: pass `id` as a non-empty string (e.g. 'primitive:instinct').",
             is_error=True,
         )
+
+    if introspector is not None:
+        # Fail-closed inside: a miss OR a raising introspector returns None,
+        # and the id falls through to the normal unknown-id error below.
+        from pocketpaw.atlas.fabric import describe_fabric_id
+
+        fabric_payload = describe_fabric_id(introspector, entry_id.strip())
+        if fabric_payload is not None:
+            return _text_result(json.dumps(fabric_payload, ensure_ascii=False))
 
     store = get_atlas_store()
     if provider is None:
@@ -167,13 +214,17 @@ async def _atlas_describe_handler(args: dict, provider: EntitlementProvider | No
 
 def build_atlas_context_server(
     provider: EntitlementProvider | None = None,
+    introspector: FabricIntrospector | None = None,
 ) -> tuple[str, Any] | None:
     """Build the in-process SDK MCP server, or None if the SDK is unavailable.
 
     ``provider`` is the per-run entitlement/availability context (AT-5);
     the tool closures capture it so every ``atlas_search`` /
     ``atlas_describe`` call answers for THAT context. ``None`` serves the
-    global (pre-overlay) view.
+    global (pre-overlay) view. ``introspector`` (AT-7) is the per-run live
+    Fabric (workspace-ontology) view — EE-wired, constructed with the run's
+    workspace id; ``None`` (the OSS default) means nothing about live
+    Fabric exists beyond the compiled ``primitive:fabric`` narrative.
     """
     try:
         from claude_agent_sdk import create_sdk_mcp_server, tool
@@ -211,7 +262,7 @@ def build_atlas_context_server(
         },
     )
     async def atlas_search(args):  # type: ignore[no-untyped-def]
-        return await _atlas_search_handler(args, provider)
+        return await _atlas_search_handler(args, provider, introspector)
 
     @tool(
         "atlas_describe",
@@ -236,7 +287,7 @@ def build_atlas_context_server(
         },
     )
     async def atlas_describe(args):  # type: ignore[no-untyped-def]
-        return await _atlas_describe_handler(args, provider)
+        return await _atlas_describe_handler(args, provider, introspector)
 
     server = create_sdk_mcp_server(
         name=SERVER_NAME,
