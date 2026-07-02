@@ -1,5 +1,12 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-02 (feat/atlas-overlay AT-5) — the ``pocketpaw_atlas`` server
+  is now built with a per-run ``DefaultEntitlementProvider``
+  (``atlas/overlay.py``): the connector scope key resolves from THIS backend
+  instance's ``_extra_subprocess_env`` (``ws:<POCKETPAW_WORKSPACE_ID>`` when an
+  isolated cloud run attached tenancy, else the OSS ``"default"`` scope), so
+  atlas answers carry the calling workspace's connector availability and the
+  fail-closed entitlement filter — never keyed off a process-global flag.
 Updated: 2026-07-02 (feat/atlas-core AT-1) — registered the ``pocketpaw_atlas``
   in-process MCP server (``agents/sdk_mcp_atlas.py``) alongside
   ``pocketpaw_widgets``: built in ``_get_mcp_servers`` behind the same tool
@@ -930,10 +937,26 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # packaged data (pocketpaw.atlas), no cloud dependency. Lets the
         # agent query what the OS is and can do (paw meanings of Pocket /
         # Instinct / Fabric / ...) before guessing from LLM priors.
+        #
+        # AT-5: the server carries a per-run entitlement/availability
+        # provider so atlas answers reflect the CALLING workspace, not a
+        # global view. The connector scope key comes from THIS backend
+        # instance's per-run context — ``_extra_subprocess_env`` carries
+        # ``POCKETPAW_WORKSPACE_ID`` when an isolated cloud run attached
+        # tenancy via ``attach_subprocess_env`` (cloud connector rows are
+        # keyed ``ws:<workspace_id>``, see ee cloud connectors service);
+        # otherwise the OSS single-user ``"default"`` scope the builtin
+        # connector tools use. Never a process-global mode flag
+        # (repo lesson #1570/#1574).
         try:
             from pocketpaw.agents.sdk_mcp_atlas import build_atlas_context_server
+            from pocketpaw.atlas.overlay import DEFAULT_SCOPE_KEY, DefaultEntitlementProvider
 
-            atlas_server = build_atlas_context_server()
+            _atlas_ws_id = self._extra_subprocess_env.get("POCKETPAW_WORKSPACE_ID", "")
+            _atlas_scope = f"ws:{_atlas_ws_id}" if _atlas_ws_id else DEFAULT_SCOPE_KEY
+            atlas_server = build_atlas_context_server(
+                provider=DefaultEntitlementProvider(scope_key=_atlas_scope)
+            )
             if atlas_server is not None:
                 name, cfg_entry = atlas_server
                 if self._policy.is_mcp_server_allowed(name):
