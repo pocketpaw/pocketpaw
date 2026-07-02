@@ -1,6 +1,18 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-02 (harden native-editing endpoints): (1) ``get_native_artifact``
+# now routes its arm build through ``_build_or_cloud_error`` (like the publish paths)
+# so a missing-toolchain / non-zero build / SmokeGateFailed becomes a clean
+# CloudError (``sites.generator_failed``) instead of an opaque 500 (DEP-3); (2)
+# ``apply_leaf_edits`` wraps the leaf-edit CLI bridge + result parse and maps its
+# RuntimeError / KeyError / IndexError / TypeError to ``Internal("sites.leaf_edit_failed")``
+# — a structured envelope, not a 500; and (3) it now SPLITS a dynamic svelte pocket's
+# source envelope (``_split_svelte_source``) so the CLI receives ONLY the file map and
+# the persist loop is CONFINED to the input file keyspace — a binding key
+# (objects/sources/actions/auth) or a CLI-invented path is never written back as a
+# component file.
+#
 # Updated 2026-07-01 (NE-5b — native-artifact endpoint): added
 # ``get_native_artifact`` — the backend of the native shadow-render path. It ensures
 # the pocket's ARMED svelte build (builder_origin set, so the paw-sites generator
@@ -2275,18 +2287,51 @@ async def apply_leaf_edits(
         )
     source_map = pocket["source"]
 
-    # Splice the {uid, op} edits into the source via the apply-leaf-edit CLI. A
-    # RuntimeError (non-zero exit / timed-out splice) propagates to the caller.
-    out = await (_apply or generator_client.apply_leaf_edits)(source=source_map, edits=edits)
-    new_map, results = out["source"], out["results"]
+    # DSV-5 binding-key safety: a DYNAMIC svelte pocket's source envelope carries its
+    # live-data bindings (objects/sources/actions/auth) as SIBLING keys of the
+    # {path: contents} SvelteKit files. Split them out exactly like the build path
+    # (_split_svelte_source): the leaf-edit CLI must receive ONLY the file map (it
+    # treats every source key as a file, so a binding key mixed in would break the
+    # splice), and the persist loop below is CONFINED to this input file keyspace so a
+    # binding key is never written back as a component file and a brand-new key the
+    # CLI might invent is never persisted.
+    files, _bindings = generator_client._split_svelte_source(source_map)
 
-    # Persist ONLY the files that actually changed. A rejected edit leaves its file
-    # byte-identical (the CLI contract), so this comparison naturally skips it — no
-    # empty draft churn. Each set_svelte_source_file write auto-writes a Branch draft
-    # snapshotting the FULL edited map, so after the loop the draft == the fully
-    # edited source. Multi-file safe.
+    # Splice the {uid, op} edits into the file map via the apply-leaf-edit CLI. The
+    # bridge raises a bare RuntimeError on a non-zero exit / timed-out splice, and the
+    # result parse can KeyError / IndexError / TypeError on malformed CLI output — map
+    # them all to a clean CloudError (sites.leaf_edit_failed → 5xx) so the client gets
+    # a structured envelope with a reason instead of an opaque unhandled 500 (the
+    # cloud error handler maps ONLY CloudError). A CloudError raised inside is
+    # re-raised unchanged; the cause is chained for logs, never leaked to the client.
+    try:
+        out = await (_apply or generator_client.apply_leaf_edits)(source=files, edits=edits)
+        new_map, results = out["source"], out["results"]
+    except CloudError:
+        raise
+    except (RuntimeError, KeyError, IndexError, TypeError) as exc:
+        logger.error("sites.apply_leaf_edits: leaf-edit bridge failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.leaf_edit_failed",
+                "Applying the edits failed — the editing toolchain is unavailable or "
+                "returned an unexpected result. See server logs for details.",
+            ),
+            exc,
+        ) from exc
+
+    # Persist ONLY the files that actually changed, CONFINED to the input file
+    # keyspace. A rejected edit leaves its file byte-identical (the CLI contract), so
+    # this comparison naturally skips it — no empty draft churn. A binding key or a
+    # brand-new path the CLI echoed / invented is NOT in ``files``, so it is skipped
+    # too (never persisted as a component file — set_svelte_source_file would
+    # otherwise overwrite a live-data binding or 404 on an unknown path). Each write
+    # auto-writes a Branch draft snapshotting the FULL edited map, so after the loop
+    # the draft == the fully edited source. Multi-file safe.
     for path, contents in new_map.items():
-        if source_map.get(path) != contents:
+        if path not in files:
+            continue
+        if files.get(path) != contents:
             await pockets_service.set_svelte_source_file(
                 pocket_id, user_id, component_path=path, new_source=contents
             )
@@ -2354,7 +2399,16 @@ async def get_native_artifact(
     # the caller passes none, exactly like make_site_editable.
     origin = (builder_origin or "").strip() or _builder_origin()
     generator = _generator or GeneratorClient()
-    build = await generator.build(
+    # DEP-3: route the arm build through _build_or_cloud_error (the SAME helper the
+    # publish paths at ~1152 / ~1293 use) so a missing-toolchain / non-zero build /
+    # SmokeGateFailed becomes a clean CloudError (sites.generator_failed → 5xx)
+    # instead of escaping as an opaque unhandled 500. Unlike edit_svelte_component's
+    # preview build (map_smoke_gate=False, which preserves its
+    # rollback-on-SmokeGateFailed contract), this is a READ-ONLY render with no source
+    # mutation to roll back, so SmokeGateFailed is mapped too (default
+    # map_smoke_gate=True) — the caller just gets a structured error.
+    build = await _build_or_cloud_error(
+        generator,
         ripple_spec=ripple_spec,
         theme=theme,
         # Transient, per-pocket-stable id — cosmetic here (it only rides the built

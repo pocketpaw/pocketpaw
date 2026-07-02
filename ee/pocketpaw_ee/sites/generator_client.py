@@ -8,6 +8,13 @@
 # behind a _runner so the orchestration is unit-testable without Bun/workerd.
 # Created: 2026-05-30 (feat/paw-sites-backend, Task 2.3).
 #
+# Updated 2026-07-02 (harden apply_leaf_edits temp-file cleanup): ``apply_leaf_edits``
+# now assigns ``input_path = fh.name`` BEFORE ``json.dump`` inside the ``with`` and
+# wraps creation + write + exec in ONE guarded try/finally, so a serialization
+# failure mid-``json.dump`` no longer leaves ``input_path`` unbound (NameError in the
+# cleanup) nor leaks the delete=False tempfile — the finally only unlinks a path that
+# was assigned and still exists.
+#
 # Updated 2026-07-01 (NE-4b — native-editing leaf-edit bridge): added the
 # module-level ``apply_leaf_edits(source, edits, *, _exec=None)`` coroutine — the
 # Python bridge to the paw-sites ``apply-leaf-edit`` CLI (NE-4a). It shells out to
@@ -671,11 +678,18 @@ async def apply_leaf_edits(
     ``asyncio.create_subprocess_exec``): a test passes a fake returning a stub proc
     with a canned ``communicate()`` so the bridge is unit-testable without Bun.
     """
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-        json.dump({"source": source, "edits": edits}, fh)
-        input_path = fh.name
-    timeout_s = _build_timeout_sec()
+    # Assign input_path FIRST (before json.dump) so a serialization failure can't
+    # leave the created temp file un-tracked: NamedTemporaryFile(delete=False)
+    # materializes the file immediately, so if json.dump raises mid-write we still
+    # need its path to clean it up. ONE outer try/finally covers creation + write +
+    # exec, and the finally is guarded (only unlink a path that was assigned AND still
+    # exists) so it never NameErrors on an early failure and never leaks the tempfile.
+    input_path = ""
     try:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            input_path = fh.name
+            json.dump({"source": source, "edits": edits}, fh)
+        timeout_s = _build_timeout_sec()
         # start_new_session=True: own process group so a wedged splice (and any
         # children it leaked) can be killed as a group on timeout — same as generate().
         proc = await (_exec or asyncio.create_subprocess_exec)(
@@ -696,7 +710,8 @@ async def apply_leaf_edits(
             raise RuntimeError(f"apply-leaf-edit failed: {stderr.decode()}")
         return json.loads(stdout.decode().strip().splitlines()[-1])
     finally:
-        os.unlink(input_path)
+        if input_path and os.path.exists(input_path):
+            os.unlink(input_path)
 
 
 class GeneratorClient:

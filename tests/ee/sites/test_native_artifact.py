@@ -1,5 +1,9 @@
 # tests/ee/sites/test_native_artifact.py — the native-artifact render path (NE-5b).
 # Created 2026-07-01 (feat/native-editing-ne4b).
+# Updated 2026-07-02: + test_native_artifact_build_failure_maps_to_cloud_error — DEP-3
+# hardening: a generator build failure (SmokeGateFailed / missing toolchain) now
+# surfaces as a clean CloudError (sites.generator_failed), not an opaque 500, because
+# get_native_artifact routes its build through _build_or_cloud_error.
 #
 # Under test: sites_service.get_native_artifact — the backend of the native
 # shadow-render path. It ensures the pocket's ARMED svelte build (builder_origin set,
@@ -24,7 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pocketpaw_ee.cloud._core.errors import NotFound, ValidationError
+from pocketpaw_ee.cloud._core.errors import CloudError, NotFound, ValidationError
 from pocketpaw_ee.cloud.pockets import service as pockets_service
 from pocketpaw_ee.sites import service as sites_service
 
@@ -233,3 +237,41 @@ async def test_native_artifact_missing_pocket_raises_not_found(beanie_test_db):
             builder_origin="https://dash.paw.example",
             _generator=_NoBuildGenerator(),
         )
+
+
+class _SmokeGateFailGenerator:
+    """A generator whose build raises SmokeGateFailed — the failure a misconfigured
+    toolchain / broken build produces. DEP-3 routes get_native_artifact's build
+    through _build_or_cloud_error, so this must surface as a clean CloudError, not an
+    opaque 500."""
+
+    async def build(self, **kw):
+        from pocketpaw_ee.sites.generator_client import SmokeGateFailed
+
+        raise SmokeGateFailed("workerd SSR render failed")
+
+
+@pytest.mark.asyncio
+async def test_native_artifact_build_failure_maps_to_cloud_error(beanie_test_db):
+    """DEP-3: a generator build failure (SmokeGateFailed / missing toolchain / non-zero
+    build) is mapped to a clean CloudError (sites.generator_failed) instead of escaping
+    as an opaque unhandled 500 — get_native_artifact routes its build through
+    _build_or_cloud_error like the publish paths, NOT a bare generator.build()."""
+    pocket_id = await _make_svelte_pocket("ws1", "u1")
+
+    with pytest.raises(CloudError) as excinfo:
+        await sites_service.get_native_artifact(
+            workspace_id="ws1",
+            user_id="u1",
+            pocket_id=pocket_id,
+            builder_origin="https://dash.paw.example",
+            _generator=_SmokeGateFailGenerator(),
+        )
+
+    # A structured envelope with the DEP-3 machine code + a 5xx status — not a bare
+    # RuntimeError / SmokeGateFailed escaping as an unhandled 500.
+    assert excinfo.value.code == "sites.generator_failed"
+    assert excinfo.value.status_code >= 500
+    # SmokeGateFailed is a RuntimeError subclass, so confirm what surfaced is the
+    # mapped CloudError, not the raw RuntimeError.
+    assert not isinstance(excinfo.value, RuntimeError)
