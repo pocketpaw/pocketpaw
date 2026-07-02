@@ -6,6 +6,11 @@ Created: 2026-07-02 (feat/atlas-core, AT-1) — first end-to-end slice:
 hand-authored paw.atlas/v1 seed (10 primitives), AtlasStore
 loader/search/describe, and the pocketpaw_atlas in-process MCP server
 registered on the Claude Agent SDK backend next to pocketpaw_widgets.
+Updated: 2026-07-02 (feat/atlas-surface, AT-3) — surface map + primer:
+the seed gains 21 kind="surface" entries (the paw-enterprise client's
+user-facing routes), primitives with a natural home route carry it in
+their `surface` field, and the context_builder injects an always-on
+"Paw OS Primer" block generated from the store.
 -->
 
 # Atlas — the OS self-model
@@ -17,13 +22,52 @@ the OS itself is and can do. The paw primitives carry paw-specific meanings
 typed knowledge graph, Belt = code assembly line, ...) that differ from LLM
 default meanings — atlas gives an agent ground truth instead of priors.
 
-The v1 seed (`src/pocketpaw/atlas/data/atlas.json`, schema `paw.atlas/v1`)
+The seed (`src/pocketpaw/atlas/data/atlas.json`, schema `paw.atlas/v1`)
 ships 10 `primitive` entries: Pocket, Instinct, Fabric, Connector, Ripple,
 Soul, Branch, workspace-jobs, Sites, Belt. Each entry carries a stable `id`
 (`primitive:pocket`), a one-line `summary`, a `narrative` (when to reach for
 it and what it pairs with), `how` (the tool/verb/API that exercises it), and
-search `keywords`. The kinds `capability`, `surface`, `connector`, `widget`,
-and `skill` are reserved for later slices.
+search `keywords`. The kinds `capability`, `connector`, `widget`, and
+`skill` are reserved for later slices.
+
+## Surface entries (`kind: "surface"`)
+
+The seed also maps the paw-enterprise client so agents know the frontend
+exists and can tell users where to go. Each `surface:*` entry mirrors a REAL
+user-facing route in `paw-enterprise/src/routes/` and carries the route path
+in its `surface` field:
+
+| id | route | what the user does there |
+|----|-------|--------------------------|
+| `surface:home` | `/` | OS home: widget grid, activity river, chat pill |
+| `surface:chat` | `/chat` | rooms rail (DMs, agents, groups, channels, entity rooms) |
+| `surface:pockets` | `/pockets` | pocket list + live canvas detail |
+| `surface:sites` | `/sites` | published-sites gallery, create→publish flow |
+| `surface:belt` | `/belt` | develop-station console: runs + diff viewer |
+| `surface:paw-print` | `/paw-print` | org-wide decision feed (Instinct corrections) |
+| `surface:decisions-graph` | `/decisions-graph` | visual query layer over decision history |
+| `surface:mission-control` | `/mission-control` | operator work feed (cycles, analytics) |
+| `surface:agents` | `/agents` | agent list + per-agent editor |
+| `surface:settings` | `/settings` | personal settings (profile, security, API keys, …) |
+| `surface:integrations` | `/settings/workspace/integrations` | third-party credentials |
+| `surface:workspace-admin` | `/settings/workspace` | workspace admin incl. plan info |
+| `surface:knowledge` | `/knowledge` | KB browser |
+| `surface:files` | `/files` | file browser |
+| `surface:studio` | `/studio` | media generation gallery |
+| `surface:code` | `/code` | in-browser IDE |
+| `surface:foresight` | `/foresight` | scenario rehearsal |
+| `surface:calendar` | `/calendar` | workspace calendar |
+| `surface:meetings` | `/meetings` | meetings timeline |
+| `surface:activity` | `/activity` | workspace activity feed |
+| `surface:audit` | `/audit` | audit log |
+
+Primitives with a natural home route cross-link it in their own `surface`
+field so `atlas_describe` answers include where to see the result:
+`primitive:pocket` → `/pockets`, `primitive:instinct` → `/paw-print`,
+`primitive:connector` → `/settings/workspace/integrations`,
+`primitive:sites` → `/sites`, `primitive:belt` → `/belt`. (There is no
+dedicated billing route in the client today; plan info lives on
+`/settings/workspace`.)
 
 ## Agent tools (`pocketpaw_atlas` MCP server)
 
@@ -51,6 +95,25 @@ path), so it is ambient on every agent run. Two tools:
   ids so the agent can self-correct.
 - **When:** after `atlas_search` picks a candidate, or before explaining /
   exercising a primitive.
+
+## Always-on primer block (context_builder)
+
+`AgentContextBuilder._build_atlas_primer()`
+(`src/pocketpaw/bootstrap/context_builder.py`) injects a compact "Paw OS
+Primer" block (block #8b, `atlas_primer`) into every built system prompt:
+
+- one-paragraph OS identity ("you run inside paw-os …"),
+- one line per primitive, generated at build time from the atlas store (a
+  seed edit can never drift from the prompt),
+- the standing instruction to call `atlas_search` before guessing about OS
+  capabilities and to include the `surface` route ("see it at /sites") when
+  pointing a user somewhere after an action.
+
+It renders at ~1.6K chars (~400 est. tokens) with a hard 2000-char
+(`_INJECTION_CAPS["atlas_primer"]`, ~500-token) ceiling, ships at the same
+MEDIUM priority as the skills block (#8), and is wrapped in try/except so an
+atlas load failure never breaks prompt building. Tests:
+`tests/atlas/test_primer_block.py`.
 
 ## Python surface
 
