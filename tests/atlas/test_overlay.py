@@ -25,6 +25,7 @@ from pocketpaw.agents.sdk_mcp_atlas import (
 )
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
 from pocketpaw.atlas.overlay import (
+    DEFAULT_SCOPE_KEY,
     AtlasOverlay,
     DefaultEntitlementProvider,
     EntitlementProvider,
@@ -374,3 +375,33 @@ class TestMcpHandlersWithProvider:
         cards = _cards(out)
         assert "primitive:instinct" in [c["id"] for c in cards[:3]]
         assert all("available" not in c for c in cards)
+
+
+class TestTenantScopeKey:
+    """The backend's scope resolution fails CLOSED on a blank workspace id
+    (security audit AT-5 IMPORTANT-1): tenancy attached with an empty
+    POCKETPAW_WORKSPACE_ID must resolve to a sentinel scope that matches no
+    connector rows — never the shared "default" bucket."""
+
+    def _backend(self):
+        from pocketpaw.agents.claude_sdk import ClaudeSDKBackend
+
+        return ClaudeSDKBackend.__new__(ClaudeSDKBackend)
+
+    def test_no_tenancy_env_is_default_scope(self):
+        backend = self._backend()
+        backend._extra_subprocess_env = {}
+        assert backend._tenant_scope_key() == DEFAULT_SCOPE_KEY
+
+    def test_workspace_id_maps_to_ws_scope(self):
+        backend = self._backend()
+        backend._extra_subprocess_env = {"POCKETPAW_WORKSPACE_ID": "w-123"}
+        assert backend._tenant_scope_key() == "ws:w-123"
+
+    def test_blank_workspace_id_fails_closed_to_sentinel(self):
+        backend = self._backend()
+        for blank in ("", "   "):
+            backend._extra_subprocess_env = {"POCKETPAW_WORKSPACE_ID": blank}
+            scope = backend._tenant_scope_key()
+            assert scope == "ws:__missing-workspace-id__"
+            assert scope != DEFAULT_SCOPE_KEY
