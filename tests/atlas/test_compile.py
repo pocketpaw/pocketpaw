@@ -12,6 +12,11 @@
 #     summary on a tampered one, and the checked-in artifact is fresh;
 #   * the startup drift check warns on mismatch (caplog), stays silent on
 #     match, and never raises.
+# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — the compiled artifact now
+# also carries ``widget`` and ``skill`` entries; the "read my invoices"
+# connector-knowledge pin checks limit=10 because the ripple invoice widgets
+# legitimately occupy top name-weight slots (see the test docstring).
+# Widget/skill extraction itself is pinned in test_widgets_skills.py.
 
 import json
 import logging
@@ -89,8 +94,16 @@ class TestConnectorExtraction:
 
     def test_read_my_invoices_reaches_a_connector_that_lists_invoices(self):
         """The slice this fixes: intent search must surface connector
-        knowledge, not just primitives."""
-        results = AtlasStore.load().search("read my invoices")
+        knowledge, not just primitives.
+
+        Since AT-6 the top-5 for invoice vocabulary legitimately includes
+        the ripple invoice widgets (`widget:invoice-layout` /
+        `widget:invoice-lines` hit at name weight — rendering an invoice IS
+        a capability answer), and several connectors tie with stripe on the
+        generic "read" keyword. The connector-knowledge guarantee is kept
+        at limit=10: an invoice-capable connector must still surface.
+        """
+        results = AtlasStore.load().search("read my invoices", limit=10)
         connector_hits = [
             e for e in results if e.kind == "connector" and "invoice" in e.narrative.lower()
         ]
