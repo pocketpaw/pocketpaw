@@ -16,13 +16,18 @@
 # updated: authored ids are a subset (still exact per authored kind), every
 # entry kind is one of the four compiled kinds, and search-ranking pins are
 # unchanged (they must survive the 41 new entries).
+# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — the artifact now also
+# carries extracted ``widget`` (ripple catalog) and ``skill`` (bundled
+# skills) entries; COMPILED_KINDS widened to six. Search-ranking pins are
+# otherwise unchanged and must survive the ~165 new entries (widget/skill
+# specific pins live in tests/atlas/test_widgets_skills.py).
 
 import json
 
 from pocketpaw.atlas.model import ATLAS_SCHEMA_V1, AtlasModel
 from pocketpaw.atlas.store import _DATA_PATH, AtlasStore, get_atlas_store
 
-COMPILED_KINDS = ("primitive", "surface", "connector", "sense")
+COMPILED_KINDS = ("primitive", "surface", "connector", "sense", "widget", "skill")
 
 EXPECTED_PRIMITIVE_IDS = {
     "primitive:pocket",

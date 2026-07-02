@@ -14,6 +14,9 @@
 # compiled artifact (``atlas/data/atlas.json``, now built by
 # ``atlas/compile.py`` from ``atlas/authored/*.json`` + the connector YAMLs)
 # sets to true. Hand-authored files omit it (defaults false).
+# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — no schema change: the
+# previously reserved ``widget`` (ripple canvas catalog) and ``skill``
+# (bundled skills) kinds are now emitted by the compiler.
 
 from __future__ import annotations
 
@@ -24,9 +27,10 @@ from pydantic import BaseModel, Field
 # Schema identifier the seed file must carry at its top level.
 ATLAS_SCHEMA_V1 = "paw.atlas/v1"
 
-# ``primitive`` and ``surface`` are hand-authored; ``connector`` and
-# ``sense`` are extracted by the compiler (AT-4); the rest are reserved so
-# later tasks can add entries without a schema bump.
+# ``primitive`` and ``surface`` are hand-authored; ``connector``, ``sense``
+# (AT-4), ``widget``, and ``skill`` (AT-6) are extracted by the compiler;
+# ``capability`` stays reserved so a later task can add entries without a
+# schema bump.
 AtlasKind = Literal["primitive", "capability", "surface", "connector", "sense", "widget", "skill"]
 
 

@@ -1217,6 +1217,188 @@
       "surface": "/settings/workspace/integrations"
     },
     {
+      "how": "a user invokes it as /belt in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:belt",
+      "keywords": [
+        "belt"
+      ],
+      "kind": "skill",
+      "name": "belt",
+      "narrative": "Run the Belt & Pulley develop station: take a coding task, ORIENT in the codebase first, develop the change in a station worktree, then PROPOSE the diff through the Instinct gate for a human to review. Invoke when the user asks to write, edit, fix, refactor, or implement code on the /belt surface: \"implement this\", \"fix this bug\", \"add this feature\", \"refactor...\". You do NOT build a dashboard or a ui-spec and you do NOT create a pocket. You NEVER apply the change to the user's branches directly, NEVER push, NEVER merge — every change leaves the station ONLY as a proposal through mcp__pocketpaw_belt__belt_propose_change, and you NEVER claim success unless the gate tool returned ok. The loop is orient → develop → propose. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full station playbook when a develop-station task is actually requested.",
+      "requires": [],
+      "summary": "Run the Belt & Pulley develop station: take a coding task, ORIENT in the codebase first, develop the change in a station worktree, then PROPOSE the diff through the Instinct gate for a human to…",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /code in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:code",
+      "keywords": [
+        "code"
+      ],
+      "kind": "skill",
+      "name": "code",
+      "narrative": "Edit and run code in the workspace, then verify it works. Invoke when the user asks to write, edit, run, fix, refactor, or debug code: \"write a script that...\", \"edit this function\", \"run the tests\", \"fix this bug\", \"refactor...\", \"add a feature to...\", \"why is this failing\" (especially on the /code surface). You do NOT build a dashboard or a ui-spec and you do NOT create a pocket — you use the built-in Bash / Read / Write / Edit / Glob / Grep tools to change files and run them. This is the coding brain: explore, edit, run, and VERIFY before claiming done. The workspace is jailed and destructive shell is blocked. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full edit→run→verify loop when a coding task is actually requested.",
+      "requires": [],
+      "summary": "Edit and run code in the workspace, then verify it works.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /foresight-create-sim in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:foresight-create-sim",
+      "keywords": [
+        "foresight-create-sim"
+      ],
+      "kind": "skill",
+      "name": "foresight-create-sim",
+      "narrative": "Create, edit, and run Foresight scenarios via the workspace's typed MCP tools (with a curl fallback for power users / SDKs without the in-process server). Triggered when the user asks to rehearse / simulate / project / forecast / branch a decision — \"rehearse the renewal\", \"what if we cut price 10%\", \"simulate the org change before we announce\", \"forecast Q3 churn\", \"branch the launch decision\". The skill teaches the chat agent how to discover existing scenarios, synthesize the YAML body, save it via the ``save_scenario`` MCP tool, and (on explicit user confirmation) execute the run via ``run_scenario``. Workspace context is automatic — no env vars, no headers.",
+      "requires": [],
+      "summary": "Create, edit, and run Foresight scenarios via the workspace's typed MCP tools (with a curl fallback for power users / SDKs without the in-process server).",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /github in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:github",
+      "keywords": [
+        "github"
+      ],
+      "kind": "skill",
+      "name": "github",
+      "narrative": "Work with a GitHub repo, org, or account inside a pocket/room that has the GitHub connector bound. Invoke when the user wants to read from GitHub in the chat — \"list the open issues on acme/api\", \"what PRs are waiting on review\", \"show me the latest release\", \"search the org for where we set the timeout\", \"is the build green\". This skill teaches the GitHub read surface (issues, PRs, repos, code/issue search, Actions runs, releases) and the read-first workflow: you can read freely; writing (opening issues) needs approval and is blocked in v1. It is auto-surfaced into a room when the GitHub connector is bound to that pocket, so you only see it when GitHub is actually available.",
+      "requires": [],
+      "summary": "Work with a GitHub repo, org, or account inside a pocket/room that has the GitHub connector bound.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /gmail in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:gmail",
+      "keywords": [
+        "gmail"
+      ],
+      "kind": "skill",
+      "name": "gmail",
+      "narrative": "Work with the user's Gmail inside a pocket/room that has the Gmail connector bound. Invoke when the user wants to find, read, triage, or send email from the chat — \"search my inbox for the invoice from Acme\", \"what did Sarah email me yesterday\", \"reply to the last message from legal\", \"draft and send a follow-up to the candidate\", \"label these as Done\". This skill teaches the Gmail action surface (search, read, send, labels, trash) and the safe-by-default workflow: read before you act, confirm before you send or destroy. It is auto-surfaced into a room when the Gmail connector is bound to that pocket, so you only see it when Gmail is actually available.",
+      "requires": [],
+      "summary": "Work with the user's Gmail inside a pocket/room that has the Gmail connector bound.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-create-dynamic-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-dynamic-site",
+      "keywords": [
+        "pocketpaw-create-dynamic-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-dynamic-site",
+      "narrative": "Build a DYNAMIC Paw Site — a published website backed by the customer's OWN LIVE DATA (a per-tenant Cloudflare D1), with reads AND writes, not a static brochure. Invoke when the user wants a site that LISTS live records and/or has a form that SAVES records: \"a guestbook site\", \"a public booking list people can add to\", \"a submissions board\", \"an order tracker page\", \"a site where visitors sign up and it remembers them\". This is the live-data authoring brain — YOU author a rippleSpec that carries both the UI and the dynamic data bindings (objects = the D1 tables, sources = read bindings, actions = write bindings, optional auth), and a deterministic tool persists the pocket stamped type=\"site\" + pattern=\"dynamic\" so publish scaffolds the D1 migration + read/write remote functions. For a STATIC marketing page use pocketpaw-create-paw-site (ripple) or pocketpaw-create-svelte-site (svelte); for publishing an EXISTING pocket use pocketpaw-create-site. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full dynamic-site authoring brain when a live-data site is actually requested.",
+      "requires": [],
+      "summary": "Build a DYNAMIC Paw Site — a published website backed by the customer's OWN LIVE DATA (a per-tenant Cloudflare D1), with reads AND writes, not a static brochure.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-create-paw-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-paw-site",
+      "keywords": [
+        "pocketpaw-create-paw-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-paw-site",
+      "narrative": "Build a marketing landing page as a Paw Site — a real, standalone website composed by conversion role (navbar, hero, services, social proof, pricing, CTA, lead form, footer) and rendered statically to the edge. Invoke when the user describes a BRAND-NEW marketing / landing site: \"build a dentist landing site\", \"make a marketing page for my bakery\", \"a landing page for my SaaS\", or when the create-site flow routes a new-site request here. This is the marketing-first authoring brain — it composes a sales page, NOT a dashboard. You provide the COPY only; a deterministic tool assembles the page structure and stamps the pocket with type=\"site\" + pattern=\"landing\" so the published page renders as a landing page. For publishing an EXISTING pocket as a site, use pocketpaw-create-site (Path A). Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full marketing brain when a landing site is actually requested.",
+      "requires": [],
+      "summary": "Build a marketing landing page as a Paw Site — a real, standalone website composed by conversion role (navbar, hero, services, social proof, pricing, CTA, lead form, footer) and rendered statically…",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-create-pocket in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-pocket",
+      "keywords": [
+        "pocketpaw-create-pocket"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-pocket",
+      "narrative": "Create a new PocketPaw pocket — an interactive app, viewer, dashboard, composer, browser, wizard, or feed — with enterprise-quality design. Invoke when the user asks to create / build / make a pocket, dashboard, tracker, tool, viewer, recipe, todo, kanban, profile, or any other workspace canvas. The skill bundles PocketPaw's full design guidance, the 150-widget catalog reference, pattern-first decision logic, and the canonical invocation flow. Loading this skill into context keeps the chat agent's always-on system prompt small while still delivering rich design quality when pocket creation is actually requested.",
+      "requires": [],
+      "summary": "Create a new PocketPaw pocket — an interactive app, viewer, dashboard, composer, browser, wizard, or feed — with enterprise-quality design.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-create-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-site",
+      "keywords": [
+        "pocketpaw-create-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-site",
+      "narrative": "Publish a PocketPaw pocket as a live Paw Site — a real, standalone website deployed to the edge. Invoke when the user asks to publish / ship / put online a pocket as a website or site, \"make a site from this pocket\", \"turn this dashboard into a website\", or \"/pocketpaw-create-site\". A site is always published FROM a pocket: if the user describes a brand-new site (\"build a dentist landing site\"), build the landing pocket with the create-paw-site marketing brain, then publish it. The skill bundles the publish flow and the create-paw-site → publish two-step so the chat agent reuses the marketing brain instead of rebuilding the page. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full publish flow when a site is actually requested.",
+      "requires": [],
+      "summary": "Publish a PocketPaw pocket as a live Paw Site — a real, standalone website deployed to the edge.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-create-svelte-site in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-create-svelte-site",
+      "keywords": [
+        "pocketpaw-create-svelte-site"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-create-svelte-site",
+      "narrative": "Build a marketing landing page as a Paw Site on the SVELTE TRACK — a real, standalone website you author as premium hand-written SvelteKit components, prerendered statically to the edge. Invoke when the user asks for a BRAND-NEW marketing / landing site AND the create flow is on the Svelte engine (\"Use Svelte pages\" toggle → engine=\"svelte\"): \"build a dentist landing site\", \"make a marketing page for my bakery\", \"a landing page for my SaaS\". This is the component-authoring brain — YOU write the Svelte sections (Hero, Pricing, Faq, ...) at the quality bar of the proven spike, assemble them into a source map, and a deterministic tool persists the pocket stamped type=\"site\" + pattern=\"landing\" + engine=\"svelte\" so the published page renders from your components. You do NOT compose a rippleSpec, do NOT call get_widget_spec, do NOT use the pocket specialist. For the ripple track (the default engine) use pocketpaw-create-paw-site; for publishing an EXISTING pocket use pocketpaw-create-site. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full Svelte authoring brain when a svelte-track site is actually requested.",
+      "requires": [],
+      "summary": "Build a marketing landing page as a Paw Site on the SVELTE TRACK — a real, standalone website you author as premium hand-written SvelteKit components, prerendered statically to the edge.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-edit-pocket in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-edit-pocket",
+      "keywords": [
+        "pocketpaw-edit-pocket"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-edit-pocket",
+      "narrative": "Edit an existing PocketPaw pocket — add / remove / rename / move / redesign widgets, or mutate state — by delegating to the pocket edit specialist. Invoke when the user asks to change something on the canvas they're currently looking at: \"add a chart\", \"remove that card\", \"mark task 1 as done\", \"filter to overdue\", \"rebuild this as a kanban\", \"make this less cluttered\". The chat agent decides WHAT and WHERE; the specialist applies the granular mutations via ``pocket_specialist__edit``. The skill body sits outside the chat agent's system prompt until invoked, keeping always-on context lean.",
+      "requires": [],
+      "summary": "Edit an existing PocketPaw pocket — add / remove / rename / move / redesign widgets, or mutate state — by delegating to the pocket edit specialist.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-pocket-planner in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-pocket-planner",
+      "keywords": [
+        "pocketpaw-pocket-planner"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-pocket-planner",
+      "narrative": "Plan a complex PocketPaw pocket before building it. Invoke when the pocket_specialist create path returns a ``plan_kit`` (template-match failed and the request looks like a custom multi-widget app). The skill teaches the agent to call ``mcp__pocketpaw_pocket_planner__plan_pocket``, render the brief in chat as markdown, iterate with the user, then walk the todos to build via ``POST /api/v1/pockets/<id>/spec/merge``. Sibling to ``pocketpaw-pocket-specialist`` — that skill applies edits; this one plans the initial build.",
+      "requires": [],
+      "summary": "Plan a complex PocketPaw pocket before building it.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /pocketpaw-pocket-specialist in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:pocketpaw-pocket-specialist",
+      "keywords": [
+        "pocketpaw-pocket-specialist"
+      ],
+      "kind": "skill",
+      "name": "pocketpaw-pocket-specialist",
+      "narrative": "Apply a rippleSpec edit to a PocketPaw pocket via the server-side merge endpoint. Invoke when the pocket_specialist subagent is asked to mutate a live pocket — add a widget, change props, patch state, redesign a section. The skill teaches the agent the rippleSpec shape, the four interactivity conventions (client-side push, value/label split, lowercase column ids, validate-push-clear-increment hygiene), and the single ``POST /api/v1/pockets/<id>/spec/merge`` endpoint that replaces the 17-tool LangChain edit surface.",
+      "requires": [],
+      "summary": "Apply a rippleSpec edit to a PocketPaw pocket via the server-side merge endpoint.",
+      "surface": ""
+    },
+    {
+      "how": "a user invokes it as /studio in chat; the agent loads it via the Skill tool (bundled Claude Code plugin). Workspace-installed skills are discovered via the system-prompt skills block, not atlas.",
+      "id": "skill:studio",
+      "keywords": [
+        "studio"
+      ],
+      "kind": "skill",
+      "name": "studio",
+      "narrative": "Generate media — images and short videos — from a text description and lay the results out in a gallery. Invoke when the user asks to create visual media: \"generate an image of...\", \"make a video of...\", \"create a poster for...\", \"render an illustration\", \"animate...\", or any describe-to-media request (especially on the /studio surface). You do NOT build a dashboard or a ui-spec — you call a deterministic media tool that produces the asset and adds it to a gallery pocket that opens on the canvas. This is the media-generation brain: pick image vs video by intent, write a vivid prompt, call the tool, and relay any provider/key error plainly. Loading this skill keeps the chat agent's always-on system prompt small while still delivering the full media flow when generation is actually requested.",
+      "requires": [],
+      "summary": "Generate media — images and short videos — from a text description and lay the results out in a gallery.",
+      "surface": ""
+    },
+    {
       "how": "",
       "id": "surface:activity",
       "keywords": [
@@ -1623,6 +1805,2537 @@
       "requires": [],
       "summary": "Workspace administration: name, plan, members, channels, integrations, memory, policy, SSO, voice, advanced.",
       "surface": "/settings/workspace"
+    },
+    {
+      "how": "call get_widget_spec([\"accordion\"]) for the full prop schema, then emit a {\"type\": \"accordion\"} node in a rippleSpec",
+      "id": "widget:accordion",
+      "keywords": [
+        "accordion",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "accordion",
+      "narrative": "The 'accordion' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"accordion\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'accordion' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"alert\"]) for the full prop schema, then emit a {\"type\": \"alert\"} node in a rippleSpec",
+      "id": "widget:alert",
+      "keywords": [
+        "alert",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "alert",
+      "narrative": "The 'alert' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"alert\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'alert' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"analyst-bar\"]) for the full prop schema, then emit a {\"type\": \"analyst-bar\"} node in a rippleSpec",
+      "id": "widget:analyst-bar",
+      "keywords": [
+        "analyst-bar",
+        "dashboard",
+        "analyst control bar"
+      ],
+      "kind": "widget",
+      "name": "analyst-bar",
+      "narrative": "The 'analyst-bar' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: analyst control bar. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"analyst-bar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'analyst-bar' canvas widget (dashboard) — the catalog widget for analyst control bar.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"analytics-dashboard\"]) for the full prop schema, then emit a {\"type\": \"analytics-dashboard\"} node in a rippleSpec",
+      "id": "widget:analytics-dashboard",
+      "keywords": [
+        "analytics-dashboard",
+        "dashboard",
+        "product",
+        "web analytics"
+      ],
+      "kind": "widget",
+      "name": "analytics-dashboard",
+      "narrative": "The 'analytics-dashboard' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: product; web analytics. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"analytics-dashboard\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'analytics-dashboard' canvas widget (dashboard) — the catalog widget for product.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"api-key\"]) for the full prop schema, then emit a {\"type\": \"api-key\"} node in a rippleSpec",
+      "id": "widget:api-key",
+      "keywords": [
+        "api-key",
+        "vertical"
+      ],
+      "kind": "widget",
+      "name": "api-key",
+      "narrative": "The 'api-key' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"api-key\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'api-key' canvas widget in the vertical category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"app-shell\"]) for the full prop schema, then emit a {\"type\": \"app-shell\"} node in a rippleSpec",
+      "id": "widget:app-shell",
+      "keywords": [
+        "app-shell",
+        "layout",
+        "full app shell"
+      ],
+      "kind": "widget",
+      "name": "app-shell",
+      "narrative": "The 'app-shell' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: full app shell. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"app-shell\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'app-shell' canvas widget (layout) — the catalog widget for full app shell.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"article-meta\"]) for the full prop schema, then emit a {\"type\": \"article-meta\"} node in a rippleSpec",
+      "id": "widget:article-meta",
+      "keywords": [
+        "article-meta",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "article-meta",
+      "narrative": "The 'article-meta' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"article-meta\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'article-meta' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"ask-user-questions\"]) for the full prop schema, then emit a {\"type\": \"ask-user-questions\"} node in a rippleSpec",
+      "id": "widget:ask-user-questions",
+      "keywords": [
+        "ask-user-questions",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "ask-user-questions",
+      "narrative": "The 'ask-user-questions' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"ask-user-questions\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'ask-user-questions' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"audit-log\"]) for the full prop schema, then emit a {\"type\": \"audit-log\"} node in a rippleSpec",
+      "id": "widget:audit-log",
+      "keywords": [
+        "audit-log",
+        "vertical",
+        "audit log",
+        "activity log"
+      ],
+      "kind": "widget",
+      "name": "audit-log",
+      "narrative": "The 'audit-log' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: audit log; activity log. Key props: entries, groupBy, showFilters. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"audit-log\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'audit-log' canvas widget (vertical) — the catalog widget for audit log.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"avatar\"]) for the full prop schema, then emit a {\"type\": \"avatar\"} node in a rippleSpec",
+      "id": "widget:avatar",
+      "keywords": [
+        "avatar",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "avatar",
+      "narrative": "The 'avatar' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"avatar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'avatar' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"avatar-group\"]) for the full prop schema, then emit a {\"type\": \"avatar-group\"} node in a rippleSpec",
+      "id": "widget:avatar-group",
+      "keywords": [
+        "avatar-group",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "avatar-group",
+      "narrative": "The 'avatar-group' widget is part of ripple's closed canvas catalog (category: inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"avatar-group\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'avatar-group' canvas widget in the inline category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"badge\"]) for the full prop schema, then emit a {\"type\": \"badge\"} node in a rippleSpec",
+      "id": "widget:badge",
+      "keywords": [
+        "badge",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "badge",
+      "narrative": "The 'badge' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"badge\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'badge' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"breadcrumb\"]) for the full prop schema, then emit a {\"type\": \"breadcrumb\"} node in a rippleSpec",
+      "id": "widget:breadcrumb",
+      "keywords": [
+        "breadcrumb",
+        "layout",
+        "context trail"
+      ],
+      "kind": "widget",
+      "name": "breadcrumb",
+      "narrative": "The 'breadcrumb' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: context trail. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"breadcrumb\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'breadcrumb' canvas widget (layout) — the catalog widget for context trail.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"bulk-action-bar\"]) for the full prop schema, then emit a {\"type\": \"bulk-action-bar\"} node in a rippleSpec",
+      "id": "widget:bulk-action-bar",
+      "keywords": [
+        "bulk-action-bar",
+        "dashboard",
+        "bulk action bar"
+      ],
+      "kind": "widget",
+      "name": "bulk-action-bar",
+      "narrative": "The 'bulk-action-bar' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: bulk action bar. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"bulk-action-bar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'bulk-action-bar' canvas widget (dashboard) — the catalog widget for bulk action bar.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"button\"]) for the full prop schema, then emit a {\"type\": \"button\"} node in a rippleSpec",
+      "id": "widget:button",
+      "keywords": [
+        "button",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "button",
+      "narrative": "The 'button' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"button\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'button' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"c4\"]) for the full prop schema, then emit a {\"type\": \"c4\"} node in a rippleSpec",
+      "id": "widget:c4",
+      "keywords": [
+        "c4",
+        "display",
+        "c4 architecture diagram"
+      ],
+      "kind": "widget",
+      "name": "c4",
+      "narrative": "The 'c4' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: c4 architecture diagram. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"c4\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'c4' canvas widget (display) — the catalog widget for c4 architecture diagram.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"calendar\"]) for the full prop schema, then emit a {\"type\": \"calendar\"} node in a rippleSpec",
+      "id": "widget:calendar",
+      "keywords": [
+        "calendar",
+        "data",
+        "month view",
+        "schedule"
+      ],
+      "kind": "widget",
+      "name": "calendar",
+      "narrative": "The 'calendar' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: calendar; month view; schedule. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"calendar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'calendar' canvas widget (data) — the catalog widget for calendar.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"callout\"]) for the full prop schema, then emit a {\"type\": \"callout\"} node in a rippleSpec",
+      "id": "widget:callout",
+      "keywords": [
+        "callout",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "callout",
+      "narrative": "The 'callout' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"callout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'callout' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"card\"]) for the full prop schema, then emit a {\"type\": \"card\"} node in a rippleSpec",
+      "id": "widget:card",
+      "keywords": [
+        "card",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "card",
+      "narrative": "The 'card' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"card\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'card' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"chart\"]) for the full prop schema, then emit a {\"type\": \"chart\"} node in a rippleSpec",
+      "id": "widget:chart",
+      "keywords": [
+        "chart",
+        "data"
+      ],
+      "kind": "widget",
+      "name": "chart",
+      "narrative": "The 'chart' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Key props: type, data, height. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"chart\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'chart' canvas widget in the data category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"checkbox\"]) for the full prop schema, then emit a {\"type\": \"checkbox\"} node in a rippleSpec",
+      "id": "widget:checkbox",
+      "keywords": [
+        "checkbox",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "checkbox",
+      "narrative": "The 'checkbox' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"checkbox\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'checkbox' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"checklist-layout\"]) for the full prop schema, then emit a {\"type\": \"checklist-layout\"} node in a rippleSpec",
+      "id": "widget:checklist-layout",
+      "keywords": [
+        "checklist-layout",
+        "layout",
+        "launch checklist",
+        "runbook",
+        "pre-flight"
+      ],
+      "kind": "widget",
+      "name": "checklist-layout",
+      "narrative": "The 'checklist-layout' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: launch checklist; runbook; pre-flight. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"checklist-layout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'checklist-layout' canvas widget (layout) — the catalog widget for launch checklist.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"chip\"]) for the full prop schema, then emit a {\"type\": \"chip\"} node in a rippleSpec",
+      "id": "widget:chip",
+      "keywords": [
+        "chip",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "chip",
+      "narrative": "The 'chip' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"chip\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'chip' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"citation\"]) for the full prop schema, then emit a {\"type\": \"citation\"} node in a rippleSpec",
+      "id": "widget:citation",
+      "keywords": [
+        "citation",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "citation",
+      "narrative": "The 'citation' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"citation\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'citation' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"coachmark\"]) for the full prop schema, then emit a {\"type\": \"coachmark\"} node in a rippleSpec",
+      "id": "widget:coachmark",
+      "keywords": [
+        "coachmark",
+        "overlay",
+        "product tour",
+        "onboarding hint",
+        "first-time-user walkthrough"
+      ],
+      "kind": "widget",
+      "name": "coachmark",
+      "narrative": "The 'coachmark' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: product tour; onboarding hint; first-time-user walkthrough. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"coachmark\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'coachmark' canvas widget (overlay) — the catalog widget for product tour.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"code\"]) for the full prop schema, then emit a {\"type\": \"code\"} node in a rippleSpec",
+      "id": "widget:code",
+      "keywords": [
+        "code",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "code",
+      "narrative": "The 'code' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"code\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'code' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"code-block\"]) for the full prop schema, then emit a {\"type\": \"code-block\"} node in a rippleSpec",
+      "id": "widget:code-block",
+      "keywords": [
+        "code-block",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "code-block",
+      "narrative": "The 'code-block' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"code-block\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'code-block' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"code-editor\"]) for the full prop schema, then emit a {\"type\": \"code-editor\"} node in a rippleSpec",
+      "id": "widget:code-editor",
+      "keywords": [
+        "code-editor",
+        "input",
+        "code editor"
+      ],
+      "kind": "widget",
+      "name": "code-editor",
+      "narrative": "The 'code-editor' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: code editor. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"code-editor\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'code-editor' canvas widget (input) — the catalog widget for code editor.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"collapsible\"]) for the full prop schema, then emit a {\"type\": \"collapsible\"} node in a rippleSpec",
+      "id": "widget:collapsible",
+      "keywords": [
+        "collapsible",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "collapsible",
+      "narrative": "The 'collapsible' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"collapsible\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'collapsible' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"color-picker\"]) for the full prop schema, then emit a {\"type\": \"color-picker\"} node in a rippleSpec",
+      "id": "widget:color-picker",
+      "keywords": [
+        "color-picker",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "color-picker",
+      "narrative": "The 'color-picker' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"color-picker\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'color-picker' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"combobox\"]) for the full prop schema, then emit a {\"type\": \"combobox\"} node in a rippleSpec",
+      "id": "widget:combobox",
+      "keywords": [
+        "combobox",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "combobox",
+      "narrative": "The 'combobox' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"combobox\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'combobox' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"command-palette\"]) for the full prop schema, then emit a {\"type\": \"command-palette\"} node in a rippleSpec",
+      "id": "widget:command-palette",
+      "keywords": [
+        "command-palette",
+        "overlay",
+        "command palette",
+        "cmd-k",
+        "quick-jump",
+        "search-all"
+      ],
+      "kind": "widget",
+      "name": "command-palette",
+      "narrative": "The 'command-palette' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: command palette; cmd-k; quick-jump; search-all. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"command-palette\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'command-palette' canvas widget (overlay) — the catalog widget for command palette.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"comment-thread\"]) for the full prop schema, then emit a {\"type\": \"comment-thread\"} node in a rippleSpec",
+      "id": "widget:comment-thread",
+      "keywords": [
+        "comment-thread",
+        "vertical",
+        "comments",
+        "discussion thread"
+      ],
+      "kind": "widget",
+      "name": "comment-thread",
+      "narrative": "The 'comment-thread' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: comments; discussion thread. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"comment-thread\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'comment-thread' canvas widget (vertical) — the catalog widget for comments.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"company-header\"]) for the full prop schema, then emit a {\"type\": \"company-header\"} node in a rippleSpec",
+      "id": "widget:company-header",
+      "keywords": [
+        "company-header",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "company-header",
+      "narrative": "The 'company-header' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"company-header\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'company-header' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"comparison-layout\"]) for the full prop schema, then emit a {\"type\": \"comparison-layout\"} node in a rippleSpec",
+      "id": "widget:comparison-layout",
+      "keywords": [
+        "comparison-layout",
+        "layout",
+        "compare x vs y",
+        "feature compare",
+        "feature",
+        "product comparison"
+      ],
+      "kind": "widget",
+      "name": "comparison-layout",
+      "narrative": "The 'comparison-layout' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: compare x vs y; feature compare; feature; product comparison. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"comparison-layout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'comparison-layout' canvas widget (layout) — the catalog widget for compare x vs y.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"comparison-table\"]) for the full prop schema, then emit a {\"type\": \"comparison-table\"} node in a rippleSpec",
+      "id": "widget:comparison-table",
+      "keywords": [
+        "comparison-table",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "comparison-table",
+      "narrative": "The 'comparison-table' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"comparison-table\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'comparison-table' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"confirm-dialog\"]) for the full prop schema, then emit a {\"type\": \"confirm-dialog\"} node in a rippleSpec",
+      "id": "widget:confirm-dialog",
+      "keywords": [
+        "confirm-dialog",
+        "overlay",
+        "confirm before destructive action"
+      ],
+      "kind": "widget",
+      "name": "confirm-dialog",
+      "narrative": "The 'confirm-dialog' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: confirm before destructive action. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"confirm-dialog\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'confirm-dialog' canvas widget (overlay) — the catalog widget for confirm before destructive action.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"container\"]) for the full prop schema, then emit a {\"type\": \"container\"} node in a rippleSpec",
+      "id": "widget:container",
+      "keywords": [
+        "container",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "container",
+      "narrative": "The 'container' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"container\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'container' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"context-menu\"]) for the full prop schema, then emit a {\"type\": \"context-menu\"} node in a rippleSpec",
+      "id": "widget:context-menu",
+      "keywords": [
+        "context-menu",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "context-menu",
+      "narrative": "The 'context-menu' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"context-menu\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'context-menu' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"copy\"]) for the full prop schema, then emit a {\"type\": \"copy\"} node in a rippleSpec",
+      "id": "widget:copy",
+      "keywords": [
+        "copy",
+        "display",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "copy",
+      "narrative": "The 'copy' widget is part of ripple's closed canvas catalog (category: display, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"copy\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'copy' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"dashboard\"]) for the full prop schema, then emit a {\"type\": \"dashboard\"} node in a rippleSpec",
+      "id": "widget:dashboard",
+      "keywords": [
+        "dashboard"
+      ],
+      "kind": "widget",
+      "name": "dashboard",
+      "narrative": "The 'dashboard' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"dashboard\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'dashboard' canvas widget in the dashboard category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"dashboard-slot\"]) for the full prop schema, then emit a {\"type\": \"dashboard-slot\"} node in a rippleSpec",
+      "id": "widget:dashboard-slot",
+      "keywords": [
+        "dashboard-slot",
+        "dashboard"
+      ],
+      "kind": "widget",
+      "name": "dashboard-slot",
+      "narrative": "The 'dashboard-slot' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"dashboard-slot\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'dashboard-slot' canvas widget in the dashboard category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"data-grid\"]) for the full prop schema, then emit a {\"type\": \"data-grid\"} node in a rippleSpec",
+      "id": "widget:data-grid",
+      "keywords": [
+        "data-grid",
+        "data",
+        "sortable table",
+        "data grid"
+      ],
+      "kind": "widget",
+      "name": "data-grid",
+      "narrative": "The 'data-grid' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: sortable table; data grid. Key props: columns, rows, pageSize, searchable, defaultSort, dense. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"data-grid\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'data-grid' canvas widget (data) — the catalog widget for sortable table.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"date-picker\"]) for the full prop schema, then emit a {\"type\": \"date-picker\"} node in a rippleSpec",
+      "id": "widget:date-picker",
+      "keywords": [
+        "date-picker",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "date-picker",
+      "narrative": "The 'date-picker' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"date-picker\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'date-picker' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"definition-list\"]) for the full prop schema, then emit a {\"type\": \"definition-list\"} node in a rippleSpec",
+      "id": "widget:definition-list",
+      "keywords": [
+        "definition-list",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "definition-list",
+      "narrative": "The 'definition-list' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"definition-list\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'definition-list' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"diff\"]) for the full prop schema, then emit a {\"type\": \"diff\"} node in a rippleSpec",
+      "id": "widget:diff",
+      "keywords": [
+        "diff",
+        "display",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "diff",
+      "narrative": "The 'diff' widget is part of ripple's closed canvas catalog (category: display, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"diff\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'diff' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"discover-card\"]) for the full prop schema, then emit a {\"type\": \"discover-card\"} node in a rippleSpec",
+      "id": "widget:discover-card",
+      "keywords": [
+        "discover-card",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "discover-card",
+      "narrative": "The 'discover-card' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"discover-card\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'discover-card' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"dropdown-menu\"]) for the full prop schema, then emit a {\"type\": \"dropdown-menu\"} node in a rippleSpec",
+      "id": "widget:dropdown-menu",
+      "keywords": [
+        "dropdown-menu",
+        "overlay",
+        "toolbar overflow",
+        "row actions"
+      ],
+      "kind": "widget",
+      "name": "dropdown-menu",
+      "narrative": "The 'dropdown-menu' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: toolbar overflow; row actions. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"dropdown-menu\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'dropdown-menu' canvas widget (overlay) — the catalog widget for toolbar overflow.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"embed\"]) for the full prop schema, then emit a {\"type\": \"embed\"} node in a rippleSpec",
+      "id": "widget:embed",
+      "keywords": [
+        "embed",
+        "escape"
+      ],
+      "kind": "widget",
+      "name": "embed",
+      "narrative": "The 'embed' widget is part of ripple's closed canvas catalog (category: escape); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Key props: mode, url, height, title, srcdoc. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"embed\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'embed' canvas widget in the escape category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"empty-state\"]) for the full prop schema, then emit a {\"type\": \"empty-state\"} node in a rippleSpec",
+      "id": "widget:empty-state",
+      "keywords": [
+        "empty-state",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "empty-state",
+      "narrative": "The 'empty-state' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"empty-state\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'empty-state' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"entity-detail\"]) for the full prop schema, then emit a {\"type\": \"entity-detail\"} node in a rippleSpec",
+      "id": "widget:entity-detail",
+      "keywords": [
+        "entity-detail",
+        "layout",
+        "record",
+        "profile",
+        "entity detail page",
+        "entity facts"
+      ],
+      "kind": "widget",
+      "name": "entity-detail",
+      "narrative": "The 'entity-detail' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: record; profile; entity detail page; entity facts. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"entity-detail\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'entity-detail' canvas widget (layout) — the catalog widget for record.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"error-state\"]) for the full prop schema, then emit a {\"type\": \"error-state\"} node in a rippleSpec",
+      "id": "widget:error-state",
+      "keywords": [
+        "error-state",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "error-state",
+      "narrative": "The 'error-state' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"error-state\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'error-state' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"exec-dashboard\"]) for the full prop schema, then emit a {\"type\": \"exec-dashboard\"} node in a rippleSpec",
+      "id": "widget:exec-dashboard",
+      "keywords": [
+        "exec-dashboard",
+        "dashboard",
+        "exec",
+        "leadership weekly review"
+      ],
+      "kind": "widget",
+      "name": "exec-dashboard",
+      "narrative": "The 'exec-dashboard' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: exec; leadership weekly review. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"exec-dashboard\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'exec-dashboard' canvas widget (dashboard) — the catalog widget for exec.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"file-upload\"]) for the full prop schema, then emit a {\"type\": \"file-upload\"} node in a rippleSpec",
+      "id": "widget:file-upload",
+      "keywords": [
+        "file-upload",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "file-upload",
+      "narrative": "The 'file-upload' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"file-upload\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'file-upload' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"filter-bar\"]) for the full prop schema, then emit a {\"type\": \"filter-bar\"} node in a rippleSpec",
+      "id": "widget:filter-bar",
+      "keywords": [
+        "filter-bar",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "filter-bar",
+      "narrative": "The 'filter-bar' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"filter-bar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'filter-bar' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"flex\"]) for the full prop schema, then emit a {\"type\": \"flex\"} node in a rippleSpec",
+      "id": "widget:flex",
+      "keywords": [
+        "flex",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "flex",
+      "narrative": "The 'flex' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"flex\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'flex' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"follow-up\"]) for the full prop schema, then emit a {\"type\": \"follow-up\"} node in a rippleSpec",
+      "id": "widget:follow-up",
+      "keywords": [
+        "follow-up",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "follow-up",
+      "narrative": "The 'follow-up' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"follow-up\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'follow-up' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"form\"]) for the full prop schema, then emit a {\"type\": \"form\"} node in a rippleSpec",
+      "id": "widget:form",
+      "keywords": [
+        "form",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "form",
+      "narrative": "The 'form' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"form\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'form' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"form-layout\"]) for the full prop schema, then emit a {\"type\": \"form-layout\"} node in a rippleSpec",
+      "id": "widget:form-layout",
+      "keywords": [
+        "form-layout",
+        "layout",
+        "signup",
+        "contact",
+        "multi-field form",
+        "multi-field"
+      ],
+      "kind": "widget",
+      "name": "form-layout",
+      "narrative": "The 'form-layout' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: signup; contact; multi-field form; multi-field. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"form-layout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'form-layout' canvas widget (layout) — the catalog widget for signup.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"funnel\"]) for the full prop schema, then emit a {\"type\": \"funnel\"} node in a rippleSpec",
+      "id": "widget:funnel",
+      "keywords": [
+        "funnel",
+        "data",
+        "conversion funnel"
+      ],
+      "kind": "widget",
+      "name": "funnel",
+      "narrative": "The 'funnel' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: funnel; conversion funnel. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"funnel\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'funnel' canvas widget (data) — the catalog widget for funnel.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"gantt\"]) for the full prop schema, then emit a {\"type\": \"gantt\"} node in a rippleSpec",
+      "id": "widget:gantt",
+      "keywords": [
+        "gantt",
+        "data",
+        "roadmap",
+        "sprint plan"
+      ],
+      "kind": "widget",
+      "name": "gantt",
+      "narrative": "The 'gantt' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: gantt; roadmap; sprint plan. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"gantt\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'gantt' canvas widget (data) — the catalog widget for gantt.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"gauge\"]) for the full prop schema, then emit a {\"type\": \"gauge\"} node in a rippleSpec",
+      "id": "widget:gauge",
+      "keywords": [
+        "gauge",
+        "data",
+        "monitoring gauge",
+        "dial"
+      ],
+      "kind": "widget",
+      "name": "gauge",
+      "narrative": "The 'gauge' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: monitoring gauge; dial. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"gauge\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'gauge' canvas widget (data) — the catalog widget for monitoring gauge.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"glass-card\"]) for the full prop schema, then emit a {\"type\": \"glass-card\"} node in a rippleSpec",
+      "id": "widget:glass-card",
+      "keywords": [
+        "glass-card",
+        "layout",
+        "glass-tinted card surface"
+      ],
+      "kind": "widget",
+      "name": "glass-card",
+      "narrative": "The 'glass-card' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: glass-tinted card surface. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"glass-card\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'glass-card' canvas widget (layout) — the catalog widget for glass-tinted card surface.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"grid\"]) for the full prop schema, then emit a {\"type\": \"grid\"} node in a rippleSpec",
+      "id": "widget:grid",
+      "keywords": [
+        "grid",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "grid",
+      "narrative": "The 'grid' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"grid\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'grid' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"heading\"]) for the full prop schema, then emit a {\"type\": \"heading\"} node in a rippleSpec",
+      "id": "widget:heading",
+      "keywords": [
+        "heading",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "heading",
+      "narrative": "The 'heading' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"heading\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'heading' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"heatmap\"]) for the full prop schema, then emit a {\"type\": \"heatmap\"} node in a rippleSpec",
+      "id": "widget:heatmap",
+      "keywords": [
+        "heatmap",
+        "data",
+        "cohort grid",
+        "activity"
+      ],
+      "kind": "widget",
+      "name": "heatmap",
+      "narrative": "The 'heatmap' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: heatmap; cohort grid; activity. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"heatmap\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'heatmap' canvas widget (data) — the catalog widget for heatmap.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"hero\"]) for the full prop schema, then emit a {\"type\": \"hero\"} node in a rippleSpec",
+      "id": "widget:hero",
+      "keywords": [
+        "hero",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "hero",
+      "narrative": "The 'hero' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"hero\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'hero' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"highlight\"]) for the full prop schema, then emit a {\"type\": \"highlight\"} node in a rippleSpec",
+      "id": "widget:highlight",
+      "keywords": [
+        "highlight",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "highlight",
+      "narrative": "The 'highlight' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"highlight\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'highlight' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"hover-card\"]) for the full prop schema, then emit a {\"type\": \"hover-card\"} node in a rippleSpec",
+      "id": "widget:hover-card",
+      "keywords": [
+        "hover-card",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "hover-card",
+      "narrative": "The 'hover-card' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"hover-card\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'hover-card' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"icon\"]) for the full prop schema, then emit a {\"type\": \"icon\"} node in a rippleSpec",
+      "id": "widget:icon",
+      "keywords": [
+        "icon",
+        "display",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "icon",
+      "narrative": "The 'icon' widget is part of ripple's closed canvas catalog (category: display, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"icon\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'icon' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"image\"]) for the full prop schema, then emit a {\"type\": \"image\"} node in a rippleSpec",
+      "id": "widget:image",
+      "keywords": [
+        "image",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "image",
+      "narrative": "The 'image' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"image\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'image' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"input\"]) for the full prop schema, then emit a {\"type\": \"input\"} node in a rippleSpec",
+      "id": "widget:input",
+      "keywords": [
+        "input"
+      ],
+      "kind": "widget",
+      "name": "input",
+      "narrative": "The 'input' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"input\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'input' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"invoice-layout\"]) for the full prop schema, then emit a {\"type\": \"invoice-layout\"} node in a rippleSpec",
+      "id": "widget:invoice-layout",
+      "keywords": [
+        "invoice-layout",
+        "layout",
+        "invoice",
+        "quote",
+        "receipt"
+      ],
+      "kind": "widget",
+      "name": "invoice-layout",
+      "narrative": "The 'invoice-layout' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: invoice; quote; receipt. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"invoice-layout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'invoice-layout' canvas widget (layout) — the catalog widget for invoice.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"invoice-lines\"]) for the full prop schema, then emit a {\"type\": \"invoice-lines\"} node in a rippleSpec",
+      "id": "widget:invoice-lines",
+      "keywords": [
+        "invoice-lines",
+        "vertical"
+      ],
+      "kind": "widget",
+      "name": "invoice-lines",
+      "narrative": "The 'invoice-lines' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"invoice-lines\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'invoice-lines' canvas widget in the vertical category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"kanban\"]) for the full prop schema, then emit a {\"type\": \"kanban\"} node in a rippleSpec",
+      "id": "widget:kanban",
+      "keywords": [
+        "kanban",
+        "data",
+        "board",
+        "sprint board"
+      ],
+      "kind": "widget",
+      "name": "kanban",
+      "narrative": "The 'kanban' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: kanban; board; sprint board. Key props: columns, columnKey. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"kanban\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'kanban' canvas widget (data) — the catalog widget for kanban.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"kbd\"]) for the full prop schema, then emit a {\"type\": \"kbd\"} node in a rippleSpec",
+      "id": "widget:kbd",
+      "keywords": [
+        "kbd",
+        "display",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "kbd",
+      "narrative": "The 'kbd' widget is part of ripple's closed canvas catalog (category: display, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"kbd\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'kbd' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"kv-table\"]) for the full prop schema, then emit a {\"type\": \"kv-table\"} node in a rippleSpec",
+      "id": "widget:kv-table",
+      "keywords": [
+        "kv-table",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "kv-table",
+      "narrative": "The 'kv-table' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"kv-table\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'kv-table' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"link-preview\"]) for the full prop schema, then emit a {\"type\": \"link-preview\"} node in a rippleSpec",
+      "id": "widget:link-preview",
+      "keywords": [
+        "link-preview",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "link-preview",
+      "narrative": "The 'link-preview' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"link-preview\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'link-preview' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"loading\"]) for the full prop schema, then emit a {\"type\": \"loading\"} node in a rippleSpec",
+      "id": "widget:loading",
+      "keywords": [
+        "loading",
+        "display",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "loading",
+      "narrative": "The 'loading' widget is part of ripple's closed canvas catalog (category: display, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"loading\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'loading' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"location-picker\"]) for the full prop schema, then emit a {\"type\": \"location-picker\"} node in a rippleSpec",
+      "id": "widget:location-picker",
+      "keywords": [
+        "location-picker",
+        "layout",
+        "pick a place",
+        "address picker"
+      ],
+      "kind": "widget",
+      "name": "location-picker",
+      "narrative": "The 'location-picker' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: pick a place; address picker. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"location-picker\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'location-picker' canvas widget (layout) — the catalog widget for pick a place.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"map\"]) for the full prop schema, then emit a {\"type\": \"map\"} node in a rippleSpec",
+      "id": "widget:map",
+      "keywords": [
+        "map",
+        "layout",
+        "geographic map",
+        "locations",
+        "route"
+      ],
+      "kind": "widget",
+      "name": "map",
+      "narrative": "The 'map' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: geographic map; locations; route. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"map\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'map' canvas widget (layout) — the catalog widget for geographic map.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"markdown\"]) for the full prop schema, then emit a {\"type\": \"markdown\"} node in a rippleSpec",
+      "id": "widget:markdown",
+      "keywords": [
+        "markdown",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "markdown",
+      "narrative": "The 'markdown' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"markdown\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'markdown' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"master-detail\"]) for the full prop schema, then emit a {\"type\": \"master-detail\"} node in a rippleSpec",
+      "id": "widget:master-detail",
+      "keywords": [
+        "master-detail",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "master-detail",
+      "narrative": "The 'master-detail' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"master-detail\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'master-detail' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"mention\"]) for the full prop schema, then emit a {\"type\": \"mention\"} node in a rippleSpec",
+      "id": "widget:mention",
+      "keywords": [
+        "mention",
+        "input",
+        "mention picker"
+      ],
+      "kind": "widget",
+      "name": "mention",
+      "narrative": "The 'mention' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: mention picker. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"mention\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'mention' canvas widget (input) — the catalog widget for mention picker.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"metric\"]) for the full prop schema, then emit a {\"type\": \"metric\"} node in a rippleSpec",
+      "id": "widget:metric",
+      "keywords": [
+        "metric",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "metric",
+      "narrative": "The 'metric' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"metric\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'metric' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"modal\"]) for the full prop schema, then emit a {\"type\": \"modal\"} node in a rippleSpec",
+      "id": "widget:modal",
+      "keywords": [
+        "modal",
+        "overlay",
+        "modal dialog",
+        "focused dialog",
+        "quick form"
+      ],
+      "kind": "widget",
+      "name": "modal",
+      "narrative": "The 'modal' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: modal dialog; focused dialog; quick form. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"modal\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'modal' canvas widget (overlay) — the catalog widget for modal dialog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"model-viewer\"]) for the full prop schema, then emit a {\"type\": \"model-viewer\"} node in a rippleSpec",
+      "id": "widget:model-viewer",
+      "keywords": [
+        "model-viewer",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "model-viewer",
+      "narrative": "The 'model-viewer' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Key props: src, alt, poster, autoRotate, cameraControls, height. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"model-viewer\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'model-viewer' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"multi-select\"]) for the full prop schema, then emit a {\"type\": \"multi-select\"} node in a rippleSpec",
+      "id": "widget:multi-select",
+      "keywords": [
+        "multi-select",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "multi-select",
+      "narrative": "The 'multi-select' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"multi-select\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'multi-select' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"news-card\"]) for the full prop schema, then emit a {\"type\": \"news-card\"} node in a rippleSpec",
+      "id": "widget:news-card",
+      "keywords": [
+        "news-card",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "news-card",
+      "narrative": "The 'news-card' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"news-card\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'news-card' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"notification-center\"]) for the full prop schema, then emit a {\"type\": \"notification-center\"} node in a rippleSpec",
+      "id": "widget:notification-center",
+      "keywords": [
+        "notification-center",
+        "overlay",
+        "notification bell",
+        "inbox"
+      ],
+      "kind": "widget",
+      "name": "notification-center",
+      "narrative": "The 'notification-center' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: notification bell; inbox. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"notification-center\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'notification-center' canvas widget (overlay) — the catalog widget for notification bell.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"number-input\"]) for the full prop schema, then emit a {\"type\": \"number-input\"} node in a rippleSpec",
+      "id": "widget:number-input",
+      "keywords": [
+        "number-input",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "number-input",
+      "narrative": "The 'number-input' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"number-input\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'number-input' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"ops-dashboard\"]) for the full prop schema, then emit a {\"type\": \"ops-dashboard\"} node in a rippleSpec",
+      "id": "widget:ops-dashboard",
+      "keywords": [
+        "ops-dashboard",
+        "dashboard",
+        "on-call",
+        "incidents",
+        "sre"
+      ],
+      "kind": "widget",
+      "name": "ops-dashboard",
+      "narrative": "The 'ops-dashboard' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: on-call; incidents; sre. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"ops-dashboard\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'ops-dashboard' canvas widget (dashboard) — the catalog widget for on-call.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"order-status\"]) for the full prop schema, then emit a {\"type\": \"order-status\"} node in a rippleSpec",
+      "id": "widget:order-status",
+      "keywords": [
+        "order-status",
+        "layout",
+        "order tracking",
+        "shipment status",
+        "order",
+        "shipment tracking"
+      ],
+      "kind": "widget",
+      "name": "order-status",
+      "narrative": "The 'order-status' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: order tracking; shipment status; order; shipment tracking. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"order-status\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'order-status' canvas widget (layout) — the catalog widget for order tracking.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"org-chart\"]) for the full prop schema, then emit a {\"type\": \"org-chart\"} node in a rippleSpec",
+      "id": "widget:org-chart",
+      "keywords": [
+        "org-chart",
+        "vertical",
+        "org chart",
+        "team tree"
+      ],
+      "kind": "widget",
+      "name": "org-chart",
+      "narrative": "The 'org-chart' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: org chart; team tree. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"org-chart\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'org-chart' canvas widget (vertical) — the catalog widget for org chart.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"otp-input\"]) for the full prop schema, then emit a {\"type\": \"otp-input\"} node in a rippleSpec",
+      "id": "widget:otp-input",
+      "keywords": [
+        "otp-input",
+        "input",
+        "one-time password input"
+      ],
+      "kind": "widget",
+      "name": "otp-input",
+      "narrative": "The 'otp-input' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: one-time password input. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"otp-input\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'otp-input' canvas widget (input) — the catalog widget for one-time password input.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"page-header\"]) for the full prop schema, then emit a {\"type\": \"page-header\"} node in a rippleSpec",
+      "id": "widget:page-header",
+      "keywords": [
+        "page-header",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "page-header",
+      "narrative": "The 'page-header' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"page-header\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'page-header' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"people-picker\"]) for the full prop schema, then emit a {\"type\": \"people-picker\"} node in a rippleSpec",
+      "id": "widget:people-picker",
+      "keywords": [
+        "people-picker",
+        "vertical"
+      ],
+      "kind": "widget",
+      "name": "people-picker",
+      "narrative": "The 'people-picker' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"people-picker\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'people-picker' canvas widget in the vertical category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"permission-matrix\"]) for the full prop schema, then emit a {\"type\": \"permission-matrix\"} node in a rippleSpec",
+      "id": "widget:permission-matrix",
+      "keywords": [
+        "permission-matrix",
+        "vertical"
+      ],
+      "kind": "widget",
+      "name": "permission-matrix",
+      "narrative": "The 'permission-matrix' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"permission-matrix\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'permission-matrix' canvas widget in the vertical category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"pipeline-dashboard\"]) for the full prop schema, then emit a {\"type\": \"pipeline-dashboard\"} node in a rippleSpec",
+      "id": "widget:pipeline-dashboard",
+      "keywords": [
+        "pipeline-dashboard",
+        "dashboard",
+        "sales pipeline",
+        "quota tracker"
+      ],
+      "kind": "widget",
+      "name": "pipeline-dashboard",
+      "narrative": "The 'pipeline-dashboard' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: sales pipeline; quota tracker. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"pipeline-dashboard\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'pipeline-dashboard' canvas widget (dashboard) — the catalog widget for sales pipeline.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"popover\"]) for the full prop schema, then emit a {\"type\": \"popover\"} node in a rippleSpec",
+      "id": "widget:popover",
+      "keywords": [
+        "popover",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "popover",
+      "narrative": "The 'popover' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"popover\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'popover' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"pricing-table\"]) for the full prop schema, then emit a {\"type\": \"pricing-table\"} node in a rippleSpec",
+      "id": "widget:pricing-table",
+      "keywords": [
+        "pricing-table",
+        "vertical",
+        "pricing",
+        "plans",
+        "tiers"
+      ],
+      "kind": "widget",
+      "name": "pricing-table",
+      "narrative": "The 'pricing-table' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: pricing; plans; tiers. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"pricing-table\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'pricing-table' canvas widget (vertical) — the catalog widget for pricing.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"progress\"]) for the full prop schema, then emit a {\"type\": \"progress\"} node in a rippleSpec",
+      "id": "widget:progress",
+      "keywords": [
+        "progress",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "progress",
+      "narrative": "The 'progress' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"progress\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'progress' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"progress-ring\"]) for the full prop schema, then emit a {\"type\": \"progress-ring\"} node in a rippleSpec",
+      "id": "widget:progress-ring",
+      "keywords": [
+        "progress-ring",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "progress-ring",
+      "narrative": "The 'progress-ring' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"progress-ring\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'progress-ring' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"project-dashboard\"]) for the full prop schema, then emit a {\"type\": \"project-dashboard\"} node in a rippleSpec",
+      "id": "widget:project-dashboard",
+      "keywords": [
+        "project-dashboard",
+        "dashboard",
+        "delivery",
+        "project status"
+      ],
+      "kind": "widget",
+      "name": "project-dashboard",
+      "narrative": "The 'project-dashboard' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: delivery; project status. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"project-dashboard\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'project-dashboard' canvas widget (dashboard) — the catalog widget for delivery.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"pros-cons\"]) for the full prop schema, then emit a {\"type\": \"pros-cons\"} node in a rippleSpec",
+      "id": "widget:pros-cons",
+      "keywords": [
+        "pros-cons",
+        "display",
+        "pros vs cons"
+      ],
+      "kind": "widget",
+      "name": "pros-cons",
+      "narrative": "The 'pros-cons' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: pros vs cons. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"pros-cons\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'pros-cons' canvas widget (display) — the catalog widget for pros vs cons.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"qr\"]) for the full prop schema, then emit a {\"type\": \"qr\"} node in a rippleSpec",
+      "id": "widget:qr",
+      "keywords": [
+        "qr",
+        "display",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "qr",
+      "narrative": "The 'qr' widget is part of ripple's closed canvas catalog (category: display, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"qr\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'qr' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"quote\"]) for the full prop schema, then emit a {\"type\": \"quote\"} node in a rippleSpec",
+      "id": "widget:quote",
+      "keywords": [
+        "quote",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "quote",
+      "narrative": "The 'quote' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"quote\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'quote' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"radio-group\"]) for the full prop schema, then emit a {\"type\": \"radio-group\"} node in a rippleSpec",
+      "id": "widget:radio-group",
+      "keywords": [
+        "radio-group",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "radio-group",
+      "narrative": "The 'radio-group' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"radio-group\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'radio-group' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"range-bar\"]) for the full prop schema, then emit a {\"type\": \"range-bar\"} node in a rippleSpec",
+      "id": "widget:range-bar",
+      "keywords": [
+        "range-bar",
+        "input",
+        "range slider"
+      ],
+      "kind": "widget",
+      "name": "range-bar",
+      "narrative": "The 'range-bar' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: range slider. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"range-bar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'range-bar' canvas widget (input) — the catalog widget for range slider.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"rating\"]) for the full prop schema, then emit a {\"type\": \"rating\"} node in a rippleSpec",
+      "id": "widget:rating",
+      "keywords": [
+        "rating",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "rating",
+      "narrative": "The 'rating' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"rating\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'rating' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"report-layout\"]) for the full prop schema, then emit a {\"type\": \"report-layout\"} node in a rippleSpec",
+      "id": "widget:report-layout",
+      "keywords": [
+        "report-layout",
+        "layout",
+        "quarterly",
+        "status report write-up",
+        "status write-up"
+      ],
+      "kind": "widget",
+      "name": "report-layout",
+      "narrative": "The 'report-layout' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: quarterly; status report write-up; status write-up. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"report-layout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'report-layout' canvas widget (layout) — the catalog widget for quarterly.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"rich-text\"]) for the full prop schema, then emit a {\"type\": \"rich-text\"} node in a rippleSpec",
+      "id": "widget:rich-text",
+      "keywords": [
+        "rich-text",
+        "display",
+        "rich text editor"
+      ],
+      "kind": "widget",
+      "name": "rich-text",
+      "narrative": "The 'rich-text' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: rich text editor. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"rich-text\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'rich-text' canvas widget (display) — the catalog widget for rich text editor.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"ripple-frame\"]) for the full prop schema, then emit a {\"type\": \"ripple-frame\"} node in a rippleSpec",
+      "id": "widget:ripple-frame",
+      "keywords": [
+        "ripple-frame",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "ripple-frame",
+      "narrative": "The 'ripple-frame' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"ripple-frame\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'ripple-frame' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"sankey\"]) for the full prop schema, then emit a {\"type\": \"sankey\"} node in a rippleSpec",
+      "id": "widget:sankey",
+      "keywords": [
+        "sankey",
+        "data",
+        "flow diagram"
+      ],
+      "kind": "widget",
+      "name": "sankey",
+      "narrative": "The 'sankey' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: sankey; flow diagram. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"sankey\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'sankey' canvas widget (data) — the catalog widget for sankey.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"saved-views\"]) for the full prop schema, then emit a {\"type\": \"saved-views\"} node in a rippleSpec",
+      "id": "widget:saved-views",
+      "keywords": [
+        "saved-views",
+        "dashboard",
+        "saved filter",
+        "view picker"
+      ],
+      "kind": "widget",
+      "name": "saved-views",
+      "narrative": "The 'saved-views' widget is part of ripple's closed canvas catalog (category: dashboard); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: saved filter; view picker. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"saved-views\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'saved-views' canvas widget (dashboard) — the catalog widget for saved filter.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"search\"]) for the full prop schema, then emit a {\"type\": \"search\"} node in a rippleSpec",
+      "id": "widget:search",
+      "keywords": [
+        "search",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "search",
+      "narrative": "The 'search' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"search\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'search' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"section\"]) for the full prop schema, then emit a {\"type\": \"section\"} node in a rippleSpec",
+      "id": "widget:section",
+      "keywords": [
+        "section",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "section",
+      "narrative": "The 'section' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"section\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'section' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"segmented\"]) for the full prop schema, then emit a {\"type\": \"segmented\"} node in a rippleSpec",
+      "id": "widget:segmented",
+      "keywords": [
+        "segmented",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "segmented",
+      "narrative": "The 'segmented' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"segmented\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'segmented' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"select\"]) for the full prop schema, then emit a {\"type\": \"select\"} node in a rippleSpec",
+      "id": "widget:select",
+      "keywords": [
+        "select",
+        "input",
+        "filter a list by status",
+        "category"
+      ],
+      "kind": "widget",
+      "name": "select",
+      "narrative": "The 'select' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: filter a list by status; category. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"select\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'select' canvas widget (input) — the catalog widget for filter a list by status.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"separator\"]) for the full prop schema, then emit a {\"type\": \"separator\"} node in a rippleSpec",
+      "id": "widget:separator",
+      "keywords": [
+        "separator",
+        "layout",
+        "inline"
+      ],
+      "kind": "widget",
+      "name": "separator",
+      "narrative": "The 'separator' widget is part of ripple's closed canvas catalog (category: layout, inline); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"separator\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'separator' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"settings-list\"]) for the full prop schema, then emit a {\"type\": \"settings-list\"} node in a rippleSpec",
+      "id": "widget:settings-list",
+      "keywords": [
+        "settings-list",
+        "vertical"
+      ],
+      "kind": "widget",
+      "name": "settings-list",
+      "narrative": "The 'settings-list' widget is part of ripple's closed canvas catalog (category: vertical); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"settings-list\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'settings-list' canvas widget in the vertical category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"sheet\"]) for the full prop schema, then emit a {\"type\": \"sheet\"} node in a rippleSpec",
+      "id": "widget:sheet",
+      "keywords": [
+        "sheet",
+        "overlay",
+        "slide-in editor"
+      ],
+      "kind": "widget",
+      "name": "sheet",
+      "narrative": "The 'sheet' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: slide-in editor. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"sheet\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'sheet' canvas widget (overlay) — the catalog widget for slide-in editor.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"sidebar\"]) for the full prop schema, then emit a {\"type\": \"sidebar\"} node in a rippleSpec",
+      "id": "widget:sidebar",
+      "keywords": [
+        "sidebar",
+        "layout",
+        "left nav rail",
+        "sections"
+      ],
+      "kind": "widget",
+      "name": "sidebar",
+      "narrative": "The 'sidebar' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: left nav rail; sections. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"sidebar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'sidebar' canvas widget (layout) — the catalog widget for left nav rail.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"skeleton\"]) for the full prop schema, then emit a {\"type\": \"skeleton\"} node in a rippleSpec",
+      "id": "widget:skeleton",
+      "keywords": [
+        "skeleton",
+        "display",
+        "loading placeholder"
+      ],
+      "kind": "widget",
+      "name": "skeleton",
+      "narrative": "The 'skeleton' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: loading placeholder. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"skeleton\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'skeleton' canvas widget (display) — the catalog widget for loading placeholder.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"slider\"]) for the full prop schema, then emit a {\"type\": \"slider\"} node in a rippleSpec",
+      "id": "widget:slider",
+      "keywords": [
+        "slider",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "slider",
+      "narrative": "The 'slider' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"slider\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'slider' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"soul-status\"]) for the full prop schema, then emit a {\"type\": \"soul-status\"} node in a rippleSpec",
+      "id": "widget:soul-status",
+      "keywords": [
+        "soul-status",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "soul-status",
+      "narrative": "The 'soul-status' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"soul-status\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'soul-status' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"source-card\"]) for the full prop schema, then emit a {\"type\": \"source-card\"} node in a rippleSpec",
+      "id": "widget:source-card",
+      "keywords": [
+        "source-card",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "source-card",
+      "narrative": "The 'source-card' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"source-card\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'source-card' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"sources-bar\"]) for the full prop schema, then emit a {\"type\": \"sources-bar\"} node in a rippleSpec",
+      "id": "widget:sources-bar",
+      "keywords": [
+        "sources-bar",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "sources-bar",
+      "narrative": "The 'sources-bar' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"sources-bar\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'sources-bar' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"sparkline\"]) for the full prop schema, then emit a {\"type\": \"sparkline\"} node in a rippleSpec",
+      "id": "widget:sparkline",
+      "keywords": [
+        "sparkline",
+        "data"
+      ],
+      "kind": "widget",
+      "name": "sparkline",
+      "narrative": "The 'sparkline' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"sparkline\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'sparkline' canvas widget in the data category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"split\"]) for the full prop schema, then emit a {\"type\": \"split\"} node in a rippleSpec",
+      "id": "widget:split",
+      "keywords": [
+        "split",
+        "layout"
+      ],
+      "kind": "widget",
+      "name": "split",
+      "narrative": "The 'split' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"split\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'split' canvas widget in the layout category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"stat\"]) for the full prop schema, then emit a {\"type\": \"stat\"} node in a rippleSpec",
+      "id": "widget:stat",
+      "keywords": [
+        "stat",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "stat",
+      "narrative": "The 'stat' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"stat\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'stat' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"status-dot\"]) for the full prop schema, then emit a {\"type\": \"status-dot\"} node in a rippleSpec",
+      "id": "widget:status-dot",
+      "keywords": [
+        "status-dot",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "status-dot",
+      "narrative": "The 'status-dot' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"status-dot\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'status-dot' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"steps\"]) for the full prop schema, then emit a {\"type\": \"steps\"} node in a rippleSpec",
+      "id": "widget:steps",
+      "keywords": [
+        "steps",
+        "display",
+        "how-to"
+      ],
+      "kind": "widget",
+      "name": "steps",
+      "narrative": "The 'steps' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: steps; how-to. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"steps\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'steps' canvas widget (display) — the catalog widget for steps.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"switch\"]) for the full prop schema, then emit a {\"type\": \"switch\"} node in a rippleSpec",
+      "id": "widget:switch",
+      "keywords": [
+        "switch",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "switch",
+      "narrative": "The 'switch' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"switch\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'switch' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"table\"]) for the full prop schema, then emit a {\"type\": \"table\"} node in a rippleSpec",
+      "id": "widget:table",
+      "keywords": [
+        "table",
+        "data"
+      ],
+      "kind": "widget",
+      "name": "table",
+      "narrative": "The 'table' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Key props: columns, rows, sortable, searchable. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"table\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'table' canvas widget in the data category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"tabs\"]) for the full prop schema, then emit a {\"type\": \"tabs\"} node in a rippleSpec",
+      "id": "widget:tabs",
+      "keywords": [
+        "tabs",
+        "layout",
+        "multi-section view of one entity"
+      ],
+      "kind": "widget",
+      "name": "tabs",
+      "narrative": "The 'tabs' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: multi-section view of one entity. Key props: tabs, defaultValue, text, density, events. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"tabs\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'tabs' canvas widget (layout) — the catalog widget for multi-section view of one entity.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"terminal\"]) for the full prop schema, then emit a {\"type\": \"terminal\"} node in a rippleSpec",
+      "id": "widget:terminal",
+      "keywords": [
+        "terminal",
+        "display",
+        "shell output"
+      ],
+      "kind": "widget",
+      "name": "terminal",
+      "narrative": "The 'terminal' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: terminal; shell output. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"terminal\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'terminal' canvas widget (display) — the catalog widget for terminal.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"text\"]) for the full prop schema, then emit a {\"type\": \"text\"} node in a rippleSpec",
+      "id": "widget:text",
+      "keywords": [
+        "text",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "text",
+      "narrative": "The 'text' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"text\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'text' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"textarea\"]) for the full prop schema, then emit a {\"type\": \"textarea\"} node in a rippleSpec",
+      "id": "widget:textarea",
+      "keywords": [
+        "textarea",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "textarea",
+      "narrative": "The 'textarea' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"textarea\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'textarea' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"ticker\"]) for the full prop schema, then emit a {\"type\": \"ticker\"} node in a rippleSpec",
+      "id": "widget:ticker",
+      "keywords": [
+        "ticker",
+        "research"
+      ],
+      "kind": "widget",
+      "name": "ticker",
+      "narrative": "The 'ticker' widget is part of ripple's closed canvas catalog (category: research); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"ticker\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'ticker' canvas widget in the research category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"time-picker\"]) for the full prop schema, then emit a {\"type\": \"time-picker\"} node in a rippleSpec",
+      "id": "widget:time-picker",
+      "keywords": [
+        "time-picker",
+        "input"
+      ],
+      "kind": "widget",
+      "name": "time-picker",
+      "narrative": "The 'time-picker' widget is part of ripple's closed canvas catalog (category: input); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"time-picker\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'time-picker' canvas widget in the input category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"timeline\"]) for the full prop schema, then emit a {\"type\": \"timeline\"} node in a rippleSpec",
+      "id": "widget:timeline",
+      "keywords": [
+        "timeline",
+        "data",
+        "event history"
+      ],
+      "kind": "widget",
+      "name": "timeline",
+      "narrative": "The 'timeline' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: timeline; event history. Key props: events, density. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"timeline\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'timeline' canvas widget (data) — the catalog widget for timeline.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"toast\"]) for the full prop schema, then emit a {\"type\": \"toast\"} node in a rippleSpec",
+      "id": "widget:toast",
+      "keywords": [
+        "toast",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "toast",
+      "narrative": "The 'toast' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"toast\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'toast' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"tooltip\"]) for the full prop schema, then emit a {\"type\": \"tooltip\"} node in a rippleSpec",
+      "id": "widget:tooltip",
+      "keywords": [
+        "tooltip",
+        "overlay"
+      ],
+      "kind": "widget",
+      "name": "tooltip",
+      "narrative": "The 'tooltip' widget is part of ripple's closed canvas catalog (category: overlay); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"tooltip\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'tooltip' canvas widget in the overlay category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"tree\"]) for the full prop schema, then emit a {\"type\": \"tree\"} node in a rippleSpec",
+      "id": "widget:tree",
+      "keywords": [
+        "tree",
+        "data",
+        "file tree",
+        "folder tree"
+      ],
+      "kind": "widget",
+      "name": "tree",
+      "narrative": "The 'tree' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: file tree; folder tree. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"tree\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'tree' canvas widget (data) — the catalog widget for file tree.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"tree-table\"]) for the full prop schema, then emit a {\"type\": \"tree-table\"} node in a rippleSpec",
+      "id": "widget:tree-table",
+      "keywords": [
+        "tree-table",
+        "data",
+        "hierarchical table"
+      ],
+      "kind": "widget",
+      "name": "tree-table",
+      "narrative": "The 'tree-table' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: hierarchical table. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"tree-table\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'tree-table' canvas widget (data) — the catalog widget for hierarchical table.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"treemap\"]) for the full prop schema, then emit a {\"type\": \"treemap\"} node in a rippleSpec",
+      "id": "widget:treemap",
+      "keywords": [
+        "treemap",
+        "data",
+        "breakdown rectangles"
+      ],
+      "kind": "widget",
+      "name": "treemap",
+      "narrative": "The 'treemap' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: treemap; breakdown rectangles. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"treemap\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'treemap' canvas widget (data) — the catalog widget for treemap.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"trend\"]) for the full prop schema, then emit a {\"type\": \"trend\"} node in a rippleSpec",
+      "id": "widget:trend",
+      "keywords": [
+        "trend",
+        "display"
+      ],
+      "kind": "widget",
+      "name": "trend",
+      "narrative": "The 'trend' widget is part of ripple's closed canvas catalog (category: display); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"trend\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'trend' canvas widget in the display category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"virtual-list\"]) for the full prop schema, then emit a {\"type\": \"virtual-list\"} node in a rippleSpec",
+      "id": "widget:virtual-list",
+      "keywords": [
+        "virtual-list",
+        "data"
+      ],
+      "kind": "widget",
+      "name": "virtual-list",
+      "narrative": "The 'virtual-list' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"virtual-list\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'virtual-list' canvas widget in the data category of the closed catalog.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"wizard-layout\"]) for the full prop schema, then emit a {\"type\": \"wizard-layout\"} node in a rippleSpec",
+      "id": "widget:wizard-layout",
+      "keywords": [
+        "wizard-layout",
+        "layout",
+        "multi-step setup",
+        "onboarding flow",
+        "onboarding"
+      ],
+      "kind": "widget",
+      "name": "wizard-layout",
+      "narrative": "The 'wizard-layout' widget is part of ripple's closed canvas catalog (category: layout); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. Reach for it when the brief says: multi-step setup; onboarding flow; onboarding. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"wizard-layout\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'wizard-layout' canvas widget (layout) — the catalog widget for multi-step setup.",
+      "surface": ""
+    },
+    {
+      "how": "call get_widget_spec([\"workflow\"]) for the full prop schema, then emit a {\"type\": \"workflow\"} node in a rippleSpec",
+      "id": "widget:workflow",
+      "keywords": [
+        "workflow",
+        "data"
+      ],
+      "kind": "widget",
+      "name": "workflow",
+      "narrative": "The 'workflow' widget is part of ripple's closed canvas catalog (category: data); only catalog types render — an invented type shows the user a red 'Unknown widget type' box. This card is a discovery pointer, not the prop contract — call get_widget_spec([\"workflow\"]) for the full prop schema before emitting the node.",
+      "requires": [
+        "primitive:ripple"
+      ],
+      "summary": "Ripple 'workflow' canvas widget in the data category of the closed catalog.",
+      "surface": ""
     }
   ],
   "generated": true,
