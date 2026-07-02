@@ -1,10 +1,13 @@
 # atlas/model.py — pydantic schema for the atlas OS self-model (AT-1).
 # Created: 2026-07-02 (feat/atlas-core). Defines paw.atlas/v1: a flat list
-# of capability entries (primitives today; capabilities, surfaces,
-# connectors, widgets, and skills reserved) that the seed data file
-# (``atlas/data/atlas.json``) must validate against. The store
-# (``atlas/store.py``) loads and searches these models; the
-# ``pocketpaw_atlas`` in-process MCP server serves them to agents.
+# of capability entries that the seed data file (``atlas/data/atlas.json``)
+# must validate against. The store (``atlas/store.py``) loads and searches
+# these models; the ``pocketpaw_atlas`` in-process MCP server serves them
+# to agents.
+# Updated: 2026-07-02 (feat/atlas-surface, AT-3) — the seed now carries
+# ``surface`` entries (the paw-enterprise client's user-facing routes) next
+# to the primitives, and primitives with a natural home route populate
+# their ``surface`` field. Docstrings updated to match; no schema change.
 
 from __future__ import annotations
 
@@ -15,7 +18,7 @@ from pydantic import BaseModel, Field
 # Schema identifier the seed file must carry at its top level.
 ATLAS_SCHEMA_V1 = "paw.atlas/v1"
 
-# ``primitive`` is the only kind seeded in v1; the rest are reserved so
+# ``primitive`` and ``surface`` are seeded today; the rest are reserved so
 # later tasks can add entries without a schema bump.
 AtlasKind = Literal["primitive", "capability", "surface", "connector", "widget", "skill"]
 
@@ -30,7 +33,7 @@ class AtlasEntry(BaseModel):
     """
 
     id: str = Field(description="Stable id, e.g. 'primitive:pocket'.")
-    kind: AtlasKind = Field(description="Entry kind; only 'primitive' is seeded in v1.")
+    kind: AtlasKind = Field(description="Entry kind; 'primitive' and 'surface' are seeded.")
     name: str = Field(description="Display name, e.g. 'Pocket'.")
     summary: str = Field(description="One-line description for ranked result cards.")
     narrative: str = Field(
@@ -42,11 +45,15 @@ class AtlasEntry(BaseModel):
     )
     surface: str = Field(
         default="",
-        description="Optional route pointer (e.g. '/belt'); empty in the v1 seed.",
+        description=(
+            "Optional route pointer to the frontend surface (e.g. '/belt'). "
+            "Set on every kind='surface' entry and on primitives with a "
+            "natural home route."
+        ),
     )
     requires: list[str] = Field(
         default_factory=list,
-        description="Optional entry ids this one depends on; empty in the v1 seed.",
+        description="Optional entry ids this one depends on.",
     )
     keywords: list[str] = Field(
         default_factory=list,

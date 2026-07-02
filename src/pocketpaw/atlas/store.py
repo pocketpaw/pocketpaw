@@ -6,7 +6,10 @@
 # (name/keyword hits weighted above summary/narrative — no external
 # deps), and returns a full entry by id. A module-level lazy singleton
 # (``get_atlas_store``) mirrors the repo's other registry getters so the
-# MCP tools and any future primer block share one parsed model.
+# MCP tools and the context_builder primer block share one parsed model.
+# Updated: 2026-07-02 (feat/atlas-surface, AT-3) — no code change; the seed
+# now also carries kind="surface" entries (frontend routes), which search
+# and describe serve exactly like primitives.
 
 from __future__ import annotations
 
