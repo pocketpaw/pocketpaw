@@ -1,5 +1,10 @@
 # ee/pocketpaw_ee/cloud/security/router.py — the /api/v1/security/* shield proxy.
 # Created: 2026-07-01 (feat/sec-5-security-proxy, SEC-5).
+# Fixed: 2026-07-02 (live-smoke) — shield serves its control API under a /v1
+#   prefix (GET /v1/config, /v1/stats, /v1/decisions, POST /v1/decisions/{id}/
+#   resolve — see paw-shield internal/api). The proxy was forwarding to the
+#   bare paths (/config, …), so every call 404'd against a real shield. Forward
+#   under _SHIELD_API_PREFIX so the read + write paths reach shield's routes.
 #
 # A FastAPI router that maps 1:1 to shield's control API (served on a same-box
 # UNIX socket) and fronts it for the dashboard:
@@ -47,6 +52,10 @@ from pocketpaw_ee.cloud.license import require_license
 from pocketpaw_ee.cloud.security import config as shield_config
 
 logger = logging.getLogger(__name__)
+
+# shield versions its control API under /v1 (internal/api). The per-route paths
+# below are the bare resource paths; the proxy prepends this prefix on the wire.
+_SHIELD_API_PREFIX = "/v1"
 
 router = APIRouter(
     prefix="/security",
@@ -153,7 +162,7 @@ async def _proxy_get(
         return _no_shield_read()
     try:
         async with client:
-            resp = await client.get(path, params=params)
+            resp = await client.get(f"{_SHIELD_API_PREFIX}{path}", params=params)
     except _UNREACHABLE_ERRORS:
         # Log the reason (never the token / Authorization header) so operators
         # can see shield is down without leaking the credential.
@@ -174,7 +183,7 @@ async def _proxy_write(
         return _no_shield_write()
     try:
         async with client:
-            resp = await client.request(method, path, json=json_body)
+            resp = await client.request(method, f"{_SHIELD_API_PREFIX}{path}", json=json_body)
     except _UNREACHABLE_ERRORS:
         logger.warning("shield unreachable on %s %s — returning 409", method, path)
         return _no_shield_write()
