@@ -1,6 +1,14 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-02 (feat/svl-5-cloud-verify): Added the CLOUD planner-terminal
+    Self-Verifying Loop flags (SVL-5) — ``cloud_plan_verify_loop_enabled``
+    (default False; kill-switch — when False cloud plan tasks auto-complete
+    exactly as before) and ``cloud_plan_verify_max_requeues`` (default 2; the
+    verify-requeue bound, SEPARATE from any error-retry budget). Mirrors the
+    deep_work_verify_* pair at the ee/cloud planner terminal
+    (``_execute_ready_plan_tasks`` → ``_run_one``). Env:
+    POCKETPAW_CLOUD_PLAN_VERIFY_* .
   - 2026-06-28 (AW-7 template gate deny-on-no-match): Added
     ``instinct_template_default_deny`` (default False, env
     POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) — the host-wide default for the
@@ -566,6 +574,34 @@ class Settings(BaseSettings):
             "the requeue slice (SVL-2); landed here so later slices don't have "
             "to touch config. SVL-1 only READS deep_work_verify_loop_enabled "
             "and ignores this bound."
+        ),
+    )
+    cloud_plan_verify_loop_enabled: bool = Field(
+        default=False,
+        description=(
+            "Kill-switch for the Self-Verifying Loop at the CLOUD planner "
+            "terminal (ee/cloud plan-task execution — the paw-enterprise "
+            "product path). When False (default) plan tasks auto-complete "
+            "exactly as before — no outcome verification, byte-for-byte "
+            "today's behaviour. When True, every plan task that finishes its "
+            "agent run has its output checked against the cloud Task's "
+            "success_criteria and the OutcomeVerdict is stamped on the task "
+            "(``verify.verdict``). SOLVED / UNKNOWN complete exactly as "
+            "today; PARTIAL / NOT_SOLVED is requeued with the unmet criteria "
+            "fed back to the next attempt, bounded by "
+            "cloud_plan_verify_max_requeues, then failed with a stamped "
+            "``verify.escalation_reason``."
+        ),
+    )
+    cloud_plan_verify_max_requeues: int = Field(
+        default=2,
+        description=(
+            "Max verify-driven requeues a single CLOUD plan task may take "
+            "before the loop stops requeuing and fails the task with "
+            "``verify.escalation_reason='budget_exhausted'``. SEPARATE from "
+            "any error-retry budget — verify requeues and error retries "
+            "never share a counter. Mirrors deep_work_verify_max_requeues "
+            "at the cloud planner terminal (SVL-5)."
         ),
     )
     auto_install_bundled_skills: bool = Field(
