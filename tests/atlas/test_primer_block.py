@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 import pocketpaw.atlas.store as atlas_store_mod
@@ -34,7 +36,11 @@ class _StubBootstrap:
 
 
 def _builder() -> AgentContextBuilder:
-    return AgentContextBuilder(bootstrap_provider=_StubBootstrap())
+    # Hermetic: a mock memory manager keeps the builder off the machine-global
+    # memory backend config (pattern from tests/test_agents_md.py).
+    mock_memory = MagicMock()
+    mock_memory.get_context_for_agent = AsyncMock(return_value="")
+    return AgentContextBuilder(bootstrap_provider=_StubBootstrap(), memory_manager=mock_memory)
 
 
 @pytest.fixture(autouse=True)

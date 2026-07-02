@@ -567,9 +567,14 @@ class AgentContextBuilder:
             # the whole block stays comfortably under the token budget.
             gist = entry.summary.split(";")[0].strip().rstrip(".")
             if len(gist) > 110:
-                # Cut at a word boundary so a line never ends mid-word.
-                gist = gist[:108].rsplit(" ", 1)[0].rstrip(" ,:(") + "…"
-            lines.append(f"- {entry.name}: {gist}.")
+                # Cut at a word boundary so a line never ends mid-word, and
+                # drop an unclosed parenthetical so the cut reads clean.
+                gist = gist[:108].rsplit(" ", 1)[0]
+                if gist.count("(") > gist.count(")"):
+                    gist = gist[: gist.rindex("(")]
+                gist = gist.rstrip(" ,.:;(") + "…"
+            suffix = "" if gist.endswith("…") else "."
+            lines.append(f"- {entry.name}: {gist}{suffix}")
 
         return (
             "\n# Paw OS Primer\n"
