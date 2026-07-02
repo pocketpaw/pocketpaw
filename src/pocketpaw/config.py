@@ -1,6 +1,15 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-06-28 (AW-1 connector egress guard): Added
+    ``connector_egress_guard`` (default False; env
+    POCKETPAW_CONNECTOR_EGRESS_GUARD) — the kill-switch for routing
+    DirectREST connector HTTP through the SSRF egress guard
+    (``assert_egress_allowed`` + the pinned-IP transport). OFF by default so
+    flipping it on per-deployment closes the connector SSRF bypass without
+    risking live connectors in the same change. The existing
+    ``POCKETPAW_ALLOW_INTERNAL_URLS`` flag stays the dev escape that permits
+    internal/loopback hosts when the guard is on.
   - 2026-06-28 (fix/billing-checkout-sessions): Added ``dodo_checkout_return_base``
     (default "", env POCKETPAW_DODO_CHECKOUT_RETURN_BASE) — the fallback base URL a
     Dodo subscription checkout session returns the buyer to after pay / cancel when
@@ -1038,6 +1047,16 @@ class Settings(BaseSettings):
     a2a_trusted_agents: list[str] = Field(
         default_factory=list,
         description="Explicitly allowed A2A agent base URLs for task delegation (prevents SSRF)",
+    )
+    connector_egress_guard: bool = Field(
+        default=False,
+        description=(
+            "Route DirectREST connector HTTP through the SSRF egress guard "
+            "(host allow-list, DNS pre-resolve + internal-range reject, pinned-IP "
+            "transport). OFF by default — a safe-rollout kill-switch; flip on "
+            "per-deployment to close the connector SSRF bypass. "
+            "POCKETPAW_ALLOW_INTERNAL_URLS permits internal hosts when set."
+        ),
     )
     api_rate_limit_per_key: int = Field(
         default=60,

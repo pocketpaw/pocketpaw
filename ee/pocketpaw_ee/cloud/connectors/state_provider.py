@@ -7,6 +7,13 @@
 #   Discovered by core via the ``pocketpaw.connector_state_stores``
 #   entry-point (see ``CloudConnectorStateStoreProvider`` in
 #   ``pocketpaw_ee/extensions.py``); core never imports this module.
+# Updated: 2026-06-28 (AW-2 connector multi-host egress allow-list) — _get_cloud
+#   folds the row's ``allowed_hosts`` field into the returned config dict under
+#   the ``allowed_hosts`` key so the per-workspace egress allow-list additions
+#   reach the adapter's connect() through the existing config channel (the
+#   registry seam only carries the config dict, not the whole doc). _set_cloud
+#   strips the key back out before persisting so the dedicated field stays the
+#   single source of truth and the round-trip never duplicates it into config.
 #
 # Scope-key namespacing (the contract with ``connectors/service.py``):
 #   ``ws:<workspace_id>``     — the workspace's row for a connector name
@@ -110,7 +117,16 @@ class CloudConnectorStateStore:
             return None
         # An enabled row with empty config is still a valid binding (CLI/no-cred
         # connectors) — return the dict, never coerce {} to None.
-        return dict(doc.config)
+        config = dict(doc.config)
+        # AW-2 — fold the per-workspace egress allow-list additions into the
+        # config blob under ``allowed_hosts`` so they reach the adapter's
+        # connect() through the established config channel (the registry seam
+        # only carries the config dict). The adapter layers these on top of its
+        # YAML-declared hosts. ``_set_cloud`` strips the key back out before
+        # persisting so it never leaks into the stored config blob.
+        if getattr(doc, "allowed_hosts", None):
+            config["allowed_hosts"] = list(doc.allowed_hosts)
+        return config
 
     def set(self, name: str, scope_key: str, config: dict[str, Any]) -> Any:
         parsed = _parse_scope_key(scope_key)
@@ -136,7 +152,12 @@ class CloudConnectorStateStore:
                     ident,
                 )
                 return
-            doc.config = dict(config)
+            # AW-2 — ``allowed_hosts`` is a dedicated WorkspaceConnector field
+            # that _get_cloud folds into the config dict on read; strip it back
+            # out here so the round-trip never duplicates it into the stored
+            # config blob (the field stays the single source of truth).
+            persisted = {k: v for k, v in config.items() if k != "allowed_hosts"}
+            doc.config = persisted
             # no-event: registry-seam config mirror of a row the connectors
             # service owns; service-level writes emit their own events.
             await doc.save()
