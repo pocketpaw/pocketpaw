@@ -85,6 +85,35 @@ from pocketpaw_ee.cloud.planner.dto import (
 logger = logging.getLogger(__name__)
 
 
+def _record_deep_work_audit(
+    workspace_id: str,
+    actor_id: str,
+    action: str,
+    target_type: str,
+    target_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Fire-and-forget audit recording for deep work operations.
+
+    Never raises — failures are logged and swallowed so an audit outage
+    cannot block a legitimate operation.
+    """
+    import asyncio
+
+    from pocketpaw_ee.cloud.deep_work_log import service as _dw_log_service
+
+    asyncio.ensure_future(
+        _dw_log_service.record(
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            metadata=metadata or {},
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -181,6 +210,22 @@ async def agent_plan_project(ctx: RequestContext, body: PlanProjectRequest) -> P
         )
     except Exception:
         logger.exception("failed to kick off plan task execution")
+
+    _record_deep_work_audit(
+        workspace_id=ctx.workspace_id,
+        actor_id=ctx.user_id or "system",
+        action="deep_work.plan.generated",
+        target_type="plan_session",
+        target_id=session.id,
+        metadata={
+            "project_id": project.id,
+            "project_name": project.name,
+            "task_count": len(session.task_ids),
+            "agent_gap_count": len(session.agent_gaps),
+            "prd_file_id": session.prd_file_id,
+            "deep_research": body.deep_research,
+        },
+    )
 
     return _session_to_dto(session)
 

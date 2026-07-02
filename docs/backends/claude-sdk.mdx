@@ -205,6 +205,21 @@ AgentEvent(type="done", content="")
 
 All backends use the same `AgentEvent` format, defined in `agents/backend.py`.
 
+## Native session resume
+
+This backend can continue a conversation by resuming the SDK's **native session**
+instead of replaying chat history into the prompt each turn. When `run()` receives
+a `SessionHandle` carrying a `cli_session_id`, it sets `ClaudeAgentOptions.resume`
+and launches a fresh subprocess that reloads that session's transcript; the
+per-turn system prompt is still applied, so a resumed turn honors fresh
+instructions and KB context. A `session_store` on the handle points the SDK at a
+custom `SessionStore` (durable, tenancy-keyed) so resume reads from there rather
+than local disk.
+
+This path is owned by the session supervisor and gated behind
+`POCKETPAW_SESSION_SUPERVISOR` (off by default). See
+[Agent Session Management](/concepts/agent-session-management) for the full design.
+
 ## Related
 
 <CardGroup>

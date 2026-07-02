@@ -48,6 +48,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_instinct"
@@ -187,6 +189,15 @@ async def _instinct_pending_handler(args: dict) -> dict:
     actions = [_serialize_action(a) for a in pending]
     actions, truncated = _cap_rows(actions)
 
+    record_tool_call(
+        workspace_id=workspace_id or "",
+        user_id=_user_id or "",
+        tool_server="pocketpaw_instinct",
+        tool_name="_instinct_pending",
+        status="ok",
+        ok=True,
+    )
+
     return _success_response(
         {
             "count": len(pending),
@@ -233,6 +244,15 @@ async def _instinct_audit_handler(args: dict) -> dict:
 
     rows = [_serialize_audit_entry(e) for e in entries]
     rows, truncated = _cap_rows(rows)
+
+    record_tool_call(
+        workspace_id=workspace_id or "",
+        user_id=_user_id or "",
+        tool_server="pocketpaw_instinct",
+        tool_name="_instinct_audit",
+        status="ok",
+        ok=True,
+    )
 
     return _success_response(
         {

@@ -21,6 +21,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_meetings"
@@ -101,6 +103,15 @@ async def _schedule_meeting_handler(args: dict) -> dict:
             "from inside a cloud SSE chat stream"
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_meetings",
+        tool_name="_schedule_meeting",
+        status="ok",
+        ok=True,
+    )
+
     provider = args.get("provider")
     if provider not in ("zoom", "google_meet"):
         return _error_response("provider must be 'zoom' or 'google_meet'")
@@ -134,9 +145,18 @@ async def _schedule_meeting_handler(args: dict) -> dict:
 
 
 async def _list_meetings_handler(args: dict) -> dict:
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_list_meetings",
+        status="ok",
+        ok=True,
+    )
 
     from pocketpaw_ee.cloud.meetings import service as ms
     from pocketpaw_ee.cloud.meetings.dto import ListMeetingsRequest
@@ -162,9 +182,18 @@ async def _list_meetings_handler(args: dict) -> dict:
 
 
 async def _cancel_meeting_handler(args: dict) -> dict:
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_cancel_meeting",
+        status="ok",
+        ok=True,
+    )
 
     meeting_id = args.get("meeting_id")
     if not isinstance(meeting_id, str) or not meeting_id:
@@ -185,9 +214,18 @@ async def _cancel_meeting_handler(args: dict) -> dict:
 
 
 async def _search_meetings_handler(args: dict) -> dict:
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_search_meetings",
+        status="ok",
+        ok=True,
+    )
 
     query = args.get("query")
     if not isinstance(query, str) or not query.strip():
@@ -223,9 +261,18 @@ async def _send_bot_handler(args: dict) -> dict:
     Recall.ai must be configured (``RECALL_API_KEY``). The transcript is
     pushed back via webhook and is also fetchable on demand.
     """
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_send_bot",
+        status="ok",
+        ok=True,
+    )
 
     meeting_id = args.get("meeting_id")
     if not isinstance(meeting_id, str) or not meeting_id:
@@ -269,9 +316,18 @@ async def _find_transcript_handler(args: dict) -> dict:
     the agent gets structured context to respond from, instead of a bare
     "transcript not found" that produces vague "empty transcript" replies.
     """
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_find_transcript",
+        status="ok",
+        ok=True,
+    )
 
     meeting_id = args.get("meeting_id")
     if not isinstance(meeting_id, str) or not meeting_id:
@@ -307,9 +363,18 @@ async def _read_transcript_handler(args: dict) -> dict:
     the same cleaning the KB indexer applies. Falls through to the shared
     'not ready' explanation when there's no stored transcript yet.
     """
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_read_transcript",
+        status="ok",
+        ok=True,
+    )
 
     meeting_id = args.get("meeting_id")
     if not isinstance(meeting_id, str) or not meeting_id:
@@ -450,9 +515,18 @@ async def _transcript_not_ready_response(workspace_id: str, meeting_id: str) -> 
 
 
 async def _check_bot_handler(args: dict) -> dict:
-    workspace_id, _ = _identity()
+    workspace_id, user_id = _identity()
     if not workspace_id:
         return _error_response("no active workspace")
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id or "",
+        tool_server="pocketpaw_meetings",
+        tool_name="_check_bot",
+        status="ok",
+        ok=True,
+    )
 
     meeting_id = args.get("meeting_id")
     if not isinstance(meeting_id, str) or not meeting_id:

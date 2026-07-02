@@ -107,6 +107,8 @@ class ShellProcess:
         env["LANG"] = "C.UTF-8"
 
         # Start bash with the slave as its stdin/stdout/stderr.
+        # Explicitly set cwd to $HOME so the terminal doesn't inherit the
+        # server process's working directory (which is typically pocketpaw/).
         self._proc = await asyncio.create_subprocess_exec(
             "bash",
             "--login",
@@ -116,6 +118,7 @@ class ShellProcess:
             close_fds=True,
             preexec_fn=lambda: os.setsid(),
             env=env,
+            cwd=os.path.expanduser("~"),
         )
 
         # Close the slave end in the parent — only the child needs it.

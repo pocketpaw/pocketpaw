@@ -6,6 +6,17 @@
 # depends on the OSS core package `pocketpaw`.
 #
 # Changes:
+#   - 2026-07-01 (ee-cython gate): the cython build hook is now GATED OFF by
+#     default (`enable-by-default = false`) so dev / CI / editable installs stay
+#     fast and readable — the ~25-min compile only fires when
+#     HATCH_BUILD_HOOK_ENABLE_CYTHON=1. The static source `exclude` was removed;
+#     the source-free compiled wheel is produced by the release build
+#     `ee/scripts/build_compiled_wheel.sh` (compile-on + post-build strip), which
+#     the enterprise Docker image installs. See
+#     [tool.hatch.build.targets.wheel(.hooks.cython)] below.
+#   - 2026-06-14 (ee-cython): introduced the hatch-cython compile of pocketpaw_ee
+#     to native .so for per-tenant source protection. See [build-system] below;
+#     the MIT core is unchanged and readable.
 #   - 2026-06-12 (connector-store-unification CS-3): registered the
 #     `pocketpaw.connector_state_stores` entry-point
 #     (CloudConnectorStateStoreProvider) so the ConnectorRegistry's durable
@@ -20,7 +31,7 @@
 # (0.5+) so an incompatible core can't be pulled in silently. Bump the floor
 # here when EE starts depending on a feature added in a newer core patch.
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-cython"]
 build-backend = "hatchling.build"
 
 [project]
@@ -120,6 +131,10 @@ dependencies = [
     # ``OASIS_RECSYS_AVAILABLE`` in
     # ``ee/pocketpaw_ee/foresight/substrate/oasis/__init__.py``.
     "igraph>=0.11",
+    # --- Daytona SDK — VM/container workspaces for cloud project compute ---
+    # Used by ee/pocketpaw_ee/cloud/daytona/ to provision, sync, and
+    # manage sandboxes. Pinned to 0.190.x API surface.
+    "daytona>=0.190.0",
     # --- Payments gateway (BC-2 — the Gateway primitive) ---
     # Dodo is the only gateway for v1, behind the IPaymentsProvider abstraction
     # in ee/pocketpaw_ee/cloud/billing/providers/ so Razorpay can drop in later.
@@ -240,6 +255,45 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["pocketpaw_ee"]
+# Source protection for pocketpaw_ee is a TWO-part mechanism, intentionally NOT
+# a static `exclude` here:
+#   1. The cython build hook below is gated OFF by default (see its comment), so
+#      the ordinary wheel — the one dev / CI / editable installs build — is fast
+#      (~15s) and contains readable .py source. That wheel is valid and non-empty.
+#   2. The source-free COMPILED wheel (only .so; no .py/.c) is produced by the
+#      release build `ee/scripts/build_compiled_wheel.sh`, which compiles with the
+#      hook ON and then strips the source in a post-build step (regenerating
+#      RECORD via the `wheel` tool). The enterprise Docker image installs THAT.
+# A static `exclude = ["**/*.py", ...]` was tried and REJECTED: with the hook OFF
+# it strips source from the default wheel too (leaving an empty, broken wheel),
+# and neither hatch-cython nor a build hook can conditionally drop source. Source
+# removal therefore lives in the release build's strip step, never here — so the
+# default readable wheel stays valid and non-empty.
+
+[tool.hatch.build.targets.wheel.hooks.cython]
+# Cython compile GATE — OFF by default. Without this, hatch-cython's build hook
+# runs on every ee install (editable `uv sync --group ee`, CI test jobs,
+# `pip install ./ee`), firing the ~25-min compile unconditionally (this hung CI).
+# Gated off, those installs stay fast and produce readable pure-Python wheels.
+# Set HATCH_BUILD_HOOK_ENABLE_CYTHON=1 to turn the compile ON and emit native
+# .so artifacts — `build_compiled_wheel.sh` and the enterprise Docker stage do
+# this to build the source-protected release wheel.
+enable-by-default = false
+dependencies = ["hatch-cython"]
+
+[tool.hatch.build.targets.wheel.hooks.cython.options]
+# hatch-cython otherwise derives the source dir from the PROJECT name
+# (pocketpaw-ee, hyphenated) which doesn't match the package dir pocketpaw_ee
+# (underscore) → it would glob ./pocketpaw-ee/** and compile NOTHING. Pin the
+# real package dir so all of pocketpaw_ee is compiled to .so.
+src = "pocketpaw_ee"
+
+[tool.hatch.build.targets.wheel.hooks.cython.options.directives]
+language_level = 3
+# Don't treat Python annotations as C types — FastAPI/Pydantic use annotations
+# as runtime metadata. Without this, a router arg like `x: str = Depends(...)`
+# makes Cython coerce the arg to str → "Expected str, got Depends" at import.
+annotation_typing = false
 
 # RFC 08 PR 3 — Foresight CAMEL hard-dep promotion. The QBTRIX fork's
 # only change vs upstream camel-ai==0.2.90 is removing the psutil<6 cap
@@ -373,6 +427,19 @@ source_modules = [
     "pocketpaw_ee.cloud.instinct_approvals.domain",
 ]
 forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_approval"]
+
+[[tool.importlinter.contracts]]
+name = "Rules — Beanie writes only from service.py"
+type = "forbidden"
+allow_indirect_imports = "true"
+source_modules = [
+    # Discovered governed rules (SZD slice-2). Only ``rules.service`` owns the
+    # InstinctRuleDoc Beanie write; dto/domain go through it. No router this slice
+    # (rules are born via the _instinct_rule gate executor, not over HTTP).
+    "pocketpaw_ee.cloud.rules.dto",
+    "pocketpaw_ee.cloud.rules.domain",
+]
+forbidden_modules = ["pocketpaw_ee.cloud.models.instinct_rule"]
 
 [[tool.importlinter.contracts]]
 name = "Notifications — Beanie writes only from service.py"

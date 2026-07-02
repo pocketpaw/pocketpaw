@@ -26,6 +26,64 @@ from typing import Any
 from pocketpaw.audit.store import get_audit_store
 from pocketpaw.security.audit import get_audit_logger
 
+# ── Friendly labels for rbac.deny:* actions ─────────────────────────────
+# When a user is denied access to a guarded page, the raw action
+# (e.g. ``rbac.deny:audit.read``) shows up in the activity feed. These
+# labels give the user a clear, human-readable message about what was
+# denied and why.
+_RBAC_DENY_LABELS: dict[str, str] = {
+    "audit.read": (
+        "Access denied — you don't have permission to view the Audit Log. "
+        "Only workspace admins and owners can access audit records."
+    ),
+    "workspace.view": "Access denied — you're not a member of this workspace.",
+    "workspace.update": "Access denied — only admins can update workspace settings.",
+    "workspace.delete": "Access denied — only the workspace owner can delete the workspace.",
+    "workspace.invite": "Access denied — only admins can invite members.",
+    "workspace.member.remove": "Access denied — only admins can remove members.",
+    "workspace.member.role_change": "Access denied — only admins can change member roles.",
+    "agent.run": "Access denied — you don't have permission to run agents in this workspace.",
+    "agent.create": "Access denied — you don't have permission to create agents.",
+    "agent.edit": "Access denied — you don't have permission to edit this agent.",
+    "agent.delete": "Access denied — you don't have permission to delete this agent.",
+    "pocket.read": "Access denied — you don't have access to this pocket.",
+    "pocket.edit": "Access denied — you don't have edit access to this pocket.",
+    "pocket.delete": "Access denied — you don't have permission to delete this pocket.",
+    "billing.view": "Access denied — only admins can view billing info.",
+    "billing.manage": "Access denied — only the workspace owner can manage billing.",
+    "fleet.install": "Access denied — only admins can install fleet templates.",
+    "instinct.approve": "Access denied — only admins can approve instinct actions.",
+    "instinct.audit": "Access denied — only admins can view the instinct audit trail.",
+    "instinct.activate": (
+        "Access denied — only the workspace owner can change instinct approval settings."
+    ),
+    "connector.manage": "Access denied — only admins can manage connectors.",
+    "skills.manage": "Access denied — only admins can manage API skills.",
+    "uploads.manage": "Access denied — only admins can manage uploads.",
+    "belt.manage": "Access denied — only admins can manage Belt console repos.",
+    "admin.perf": "Access denied — only the workspace owner can access performance data.",
+}
+
+
+def _rbac_deny_description(action: str, target: str, detail: str) -> str:
+    """Build a human-readable description for an ``rbac.deny:*`` event.
+
+    Uses the pre-defined label map when available; falls back to a
+    structured summary that includes the action name and detail so the
+    frontend can display a meaningful message even for unmapped actions.
+    """
+    # Strip the ``rbac.deny:`` prefix to get the guarded action name.
+    deny_action = action.removeprefix("rbac.deny:")
+    label = _RBAC_DENY_LABELS.get(deny_action)
+    if label:
+        return label
+    # Fallback: show the action + detail so the frontend can render
+    # something useful even for newly-registered actions that don't
+    # have a label yet.
+    detail_suffix = f" ({detail})" if detail else ""
+    return f"Access denied — {deny_action.replace('.', ' ')}{detail_suffix}"
+
+
 logger = logging.getLogger(__name__)
 
 # Module-level guard so a second ``register_audit_bridge()`` call (e.g. a
@@ -37,13 +95,17 @@ _BRIDGE_REGISTERED = False
 # Map free-form writer categories (``pocket_backend_config``,
 # ``pocket_embed``, ``skills_config``, ``pocket_router``, …) to the strict
 # ``AuditEntry.category`` literal set
-# (``decision`` / ``data`` / ``config`` / ``security``). The original value
-# is preserved in ``metadata.source_category`` so nothing is lost.
+# (``decision`` / ``data`` / ``config`` / ``security`` / ``tool``). The
+# original value is preserved in ``metadata.source_category`` so nothing
+# is lost.
 _CATEGORY_MAP: dict[str, str] = {
     "pocket_backend_config": "config",
     "pocket_embed": "config",
     "skills_config": "config",
     "pocket_router": "decision",
+    "pocket_tool_run": "tool",
+    "pocket_action_run": "tool",
+    "pocket_source_run": "tool",
 }
 
 # Writer ``status`` values from ``AuditEvent`` are free-form
@@ -72,7 +134,7 @@ def _coerce_category(raw: Any) -> str:
     """
     if isinstance(raw, str) and raw in _CATEGORY_MAP:
         return _CATEGORY_MAP[raw]
-    if isinstance(raw, str) and raw in ("decision", "data", "config", "security"):
+    if isinstance(raw, str) and raw in ("decision", "data", "config", "security", "tool"):
         return raw
     return "config"
 
@@ -124,10 +186,24 @@ def _mirror_to_store(event_dict: dict) -> None:
         workspace_id = ctx.get("workspace_id")
 
         source_category = ctx.pop("category", None)
+        # Use action-based category when no explicit writer category is set.
+        # This catches tool_use/tool_error events from the agent loop's tool
+        # registry (which calls audit.log_tool_use() without a category).
+        if source_category is None and action in (
+            "tool_use",
+            "tool_error",
+        ):
+            source_category = "pocket_tool_run"
         category = _coerce_category(source_category)
         status = _coerce_status(event_dict.get("status"))
 
-        description = f"{action} on {target}" if target else action
+        # For rbac.deny events, build a friendly description so the
+        # activity feed shows something meaningful instead of the raw
+        # action string. Other events keep the standard format.
+        if action.startswith("rbac.deny:"):
+            description = _rbac_deny_description(action, target, ctx.get("detail", ""))
+        else:
+            description = f"{action} on {target}" if target else action
         if not description:
             description = "audit event"
 

@@ -24,19 +24,37 @@
 #   catalog (each tier -> annual price + the Cloudflare features it resells). Like
 #   /billing/plans it is tenant-independent (no workspace scoping); the frontend
 #   (BC-11) reads it to render the publish tier picker.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): POST /billing/subscribe now
+#   reads the buyer's Origin (fallback Referer) header via ``_request_origin`` and
+#   threads it to ``billing_service.subscribe(origin=...)`` so the Dodo checkout
+#   session returns the buyer to the app's billing page after pay / cancel (the
+#   prior payment-link checkout had nowhere to send them).
+# Updated 2026-06-29 (feat/billing-usage-endpoint): added GET /billing/usage — the
+#   per-workspace USAGE graph (daily usage by model over a date range; spend
+#   reported in credits). Workspace-scoped via ``current_workspace_id`` (same auth
+#   as top-up / subscribe); logic lives in ``billing.usage``. A brand-new workspace
+#   with no usage returns an empty 200.
+# Updated 2026-06-29 (fix/billing-usage-ledger-source): GET /billing/usage now
+#   sources the graph from the workspace's CREDIT LEDGER (the wallet's own meter,
+#   mode-agnostic) rather than the LiteLLM proxy, so the chart matches the wallet in
+#   every metering mode. The route surface is unchanged (same path, auth, and
+#   ``start_date`` / ``end_date`` query params) — only the docstring wording below
+#   is updated to reflect the source.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Request
 
 from pocketpaw_ee.cloud.billing import plans as plan_catalog
 from pocketpaw_ee.cloud.billing import service as billing_service
 from pocketpaw_ee.cloud.billing import site_plans as site_plan_catalog
+from pocketpaw_ee.cloud.billing import usage as usage_service
 from pocketpaw_ee.cloud.billing.dto import (
     CreateSubscriptionRequest,
     CreateSubscriptionResponse,
     CreateTopupRequest,
     CreateTopupResponse,
+    WorkspaceUsageResponse,
 )
 from pocketpaw_ee.cloud.entitlements.dto import (
     PlanCatalogResponse,
@@ -74,6 +92,45 @@ async def list_billing_site_plans() -> SitePlanCatalogResponse:
     )
 
 
+# ``YYYY-MM-DD`` — a light date-shape guard at the edge so a malformed param 422s
+# before the service is reached (the service re-validates + clamps the span).
+_DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+
+
+@router.get("/usage", response_model=WorkspaceUsageResponse)
+async def get_usage(
+    workspace_id: str = Depends(current_workspace_id),
+    start_date: str | None = Query(
+        default=None,
+        pattern=_DATE_PATTERN,
+        description="Start of the window, YYYY-MM-DD. Defaults to 30 days ago when omitted.",
+    ),
+    end_date: str | None = Query(
+        default=None,
+        pattern=_DATE_PATTERN,
+        description="End of the window, YYYY-MM-DD. Defaults to today when omitted.",
+    ),
+) -> WorkspaceUsageResponse:
+    """Return the caller's workspace's daily usage, broken down by model.
+
+    Daily usage (spend in CREDITS and request count per model) over
+    ``[start_date, end_date]``, sourced from the workspace's CREDIT LEDGER (the
+    wallet's own meter) and scoped to that workspace — so the chart matches the
+    wallet in every metering mode. When both dates are omitted the window defaults
+    to the last 30 days. The response stays DAILY — the frontend aggregates to
+    weekly / monthly and filters by model client-side. (``tokens`` is reported as 0:
+    the ledger does not carry a per-entry token count.)
+
+    A workspace with no spend in the window returns an empty contract (no models,
+    no buckets, total 0) at HTTP 200 — not an error.
+    """
+    return await usage_service.get_workspace_usage(
+        workspace_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 @router.post("/topup", response_model=CreateTopupResponse)
 async def create_topup(
     body: CreateTopupRequest,
@@ -94,9 +151,31 @@ async def create_topup(
     return CreateTopupResponse(checkout_url=result["checkout_url"])
 
 
+def _request_origin(request: Request) -> str:
+    """The buyer's app origin, for building the post-checkout return_url.
+
+    Prefer the ``Origin`` header (sent by the browser on the fetch); fall back to
+    deriving ``scheme://host`` from ``Referer`` when Origin is absent (some
+    same-origin navigations omit Origin). Empty string when neither is usable —
+    the service then falls back to the ``dodo_checkout_return_base`` config.
+    """
+    origin = (request.headers.get("origin") or "").strip()
+    if origin:
+        return origin
+    referer = (request.headers.get("referer") or "").strip()
+    if referer:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(referer)
+        if parts.scheme and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    return ""
+
+
 @router.post("/subscribe", response_model=CreateSubscriptionResponse)
 async def create_subscription(
     body: CreateSubscriptionRequest,
+    request: Request,
     workspace_id: str = Depends(current_workspace_id),
     user_id: str = Depends(current_user_id),
 ) -> CreateSubscriptionResponse:
@@ -106,10 +185,15 @@ async def create_subscription(
     upgraded and credits are NOT granted here — both land when Dodo posts a
     verified ``subscription.active`` to the public webhook; each renewal then
     grants the tier's monthly allotment additively (unused credits roll over).
+
+    The buyer's ``Origin`` (fallback ``Referer``) header is threaded into the
+    checkout's return_url / cancel_url so Dodo returns them to the app's billing
+    page after pay / cancel — without it the buyer is stranded on the gateway.
     """
     result = await billing_service.subscribe(
         workspace_id=workspace_id,
         user_id=user_id,
         plan_key=body.plan_key,
+        origin=_request_origin(request),
     )
     return CreateSubscriptionResponse(checkout_url=result["checkout_url"])

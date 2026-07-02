@@ -225,6 +225,17 @@ The web dashboard (`frontend/`) is vanilla JS/CSS/HTML served via FastAPI+Jinja2
   env-configurable), marking queued/running `ChatRunDoc`s older than 10 minutes as
   `interrupted` so runs abandoned by a backend restart surface a retry affordance
   instead of leaving clients subscribed forever.
+- **Session supervisor config**: `POCKETPAW_SESSION_SUPERVISOR` (default OFF). When
+  truthy (`1`/`true`/`yes`/`on`), the cloud chat executor drives every agent turn
+  through the `SessionSupervisor` + the durable `(workspace, session, agent) ->
+  cli_session_id` map (`ee/.../agent_sessions/runtime_service.py`) + the per-tenant
+  `MongoSessionStore`, so the agent RESUMES its native CLI session (durable across
+  restart, tenant-isolated) instead of replaying Mongo history into the prompt. OFF
+  leaves `pool.run` byte-for-byte the legacy path, and any supervisor/store error
+  during a turn falls back to legacy for that turn. v1 resumes cold from the store
+  each turn (no warm hot-process reuse yet). Design:
+  `docs/concepts/agent-session-management.mdx`; smoke:
+  `docs/handoff/2026-06-30-session-supervisor-smoke.md`.
 - **Per-tenant agent cwd jail (cloud, ART-2)**: In multi-tenant cloud each
   workspace's chat agent runs with `cwd = ~/.pocketpaw/workspaces/<workspace_id>/agent/<session_id>/`
   (resolved per-run from the `attach_agent_identity` ContextVars in

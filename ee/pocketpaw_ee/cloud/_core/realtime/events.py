@@ -37,6 +37,11 @@
 #   jobs primitive. Queued is emitted at dispatch; Updated on a terminal
 #   transition by the ARQ worker. Worker-side emits route over the xproc
 #   bridge to the web bus, the same path ``PocketUpdated`` uses.
+# Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added
+#   ``RuleCreated`` (type="instinct.rule.created") and ``RuleArchived``
+#   (type="instinct.rule.archived") for the discovered-rules entity. Emitted by
+#   ``rules.service`` on every state-mutating call per cloud rule 9 (emit on
+#   every write).
 # Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``AgentDisabled``
 #   (type="agent.disabled") and ``AgentEnabled`` (type="agent.enabled") for the
 #   agent soft-disable / revoke-everywhere flow. Emitted by ``agents.service``
@@ -927,6 +932,21 @@ class InstinctApprovalAutoApproved(Event):
 @dataclass
 class BulkActionDispatched(Event):
     EVENT_TYPE: ClassVar[str] = "pocket.bulk_action.dispatched"
+
+
+# Discovered governed rules (SZD slice-2 / S2-R1). Emitted by
+# ``rules.service`` on every state-mutating call — ``created`` when an approved
+# rule lands, ``archived`` when one is retired/superseded. ``data`` carries the
+# rule id + workspace + owner so a downstream WS fan-out can refresh the
+# workspace's rule list without re-reading the doc.
+@dataclass
+class RuleCreated(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.rule.created"
+
+
+@dataclass
+class RuleArchived(Event):
+    EVENT_TYPE: ClassVar[str] = "instinct.rule.archived"
 
 
 # Outcome event emission (RFC 03 v2 / Wave 3c). Fires AFTER a write
