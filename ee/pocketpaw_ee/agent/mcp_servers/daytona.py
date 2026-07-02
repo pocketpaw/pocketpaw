@@ -558,8 +558,7 @@ def build_daytona_server() -> tuple[str, Any] | None:
     @tool(
         "sync_to_s3",
         "Sync all files from the Daytona sandbox back to S3 storage. "
-        "Call this after you finish your edit-run-verify loop to persist "
-        "your changes. No arguments needed.",
+        "No arguments needed.",
         {
             "type": "object",
             "properties": {},

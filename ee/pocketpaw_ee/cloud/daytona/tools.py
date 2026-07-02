@@ -698,9 +698,7 @@ class DaytonaSyncToS3Tool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Sync all files from the Daytona sandbox back to S3 storage. "
-            "Call this after you finish your edit-run-verify loop to persist "
-            "your changes."
+            "Sync all files from the Daytona sandbox back to S3 storage."
         )
 
     @property
