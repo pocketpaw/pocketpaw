@@ -23,6 +23,12 @@
 # unavailable ones at equal relevance without touching the base scoring.
 # Store API otherwise unchanged; the primer and drift check keep the
 # unfiltered OS-level view.
+# Updated: 2026-07-02 (feat/atlas-widgets, AT-6) — cheap deterministic suffix
+# normalizer (``_stem``: strip ing/ed/es/s then a trailing e, 3+ char stems,
+# no external deps) applied to BOTH index and query tokens, so plural /
+# inflected query words match singular keywords ("competitors" now hits a
+# "competitor" keyword). Field weights and the search_scored / search /
+# describe signatures are unchanged.
 
 from __future__ import annotations
 
@@ -54,6 +60,43 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
 
 
+def _stem(token: str) -> str:
+    """Cheap deterministic suffix normalizer (AT-6) — no external deps.
+
+    Fixes the plural/inflection miss class the atlas eval documented
+    ("competitors" query token never matched a "competitor" keyword).
+    Exact rules, applied in order to an already-lowercased token:
+
+    1. Strip the FIRST matching suffix of ``ing`` / ``ed`` / ``es`` when
+       the remaining stem keeps >= 3 chars.
+    2. Otherwise strip a trailing ``s`` (but never ``ss`` — "less",
+       "address" stay put) when the stem keeps >= 3 chars.
+    3. Finally strip one trailing ``e`` when the stem keeps >= 3 chars,
+       so pairs like approve/approved and site/sites normalize to the
+       same stem ("approv", "sit").
+
+    Applied identically to index and query tokens, so equal tokens always
+    keep matching; this only ADDS matches between inflected forms. It is
+    intentionally not a full stemmer (use/using still differ) — cheap and
+    deterministic beats linguistically complete here.
+    """
+    for suffix in ("ing", "ed", "es"):
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            token = token[: -len(suffix)]
+            break
+    else:
+        if token.endswith("s") and not token.endswith("ss") and len(token) - 1 >= 3:
+            token = token[:-1]
+    if token.endswith("e") and len(token) - 1 >= 3:
+        token = token[:-1]
+    return token
+
+
+def _stem_set(text: str) -> set[str]:
+    """Tokenize *text* and normalize every token to its stem."""
+    return {_stem(token) for token in _tokenize(text)}
+
+
 class AtlasStore:
     """In-memory view over the atlas self-model with lexical search."""
 
@@ -61,14 +104,15 @@ class AtlasStore:
         self._model = model
         self._by_id: dict[str, AtlasEntry] = {e.id: e for e in model.entries}
         # Pre-tokenized fields per entry, so search doesn't re-tokenize the
-        # narrative on every call.
+        # narrative on every call. Tokens are stem-normalized (``_stem``,
+        # AT-6) so inflected query words match singular index words.
         self._index: list[tuple[AtlasEntry, set[str], set[str], set[str], set[str]]] = [
             (
                 entry,
-                set(_tokenize(entry.name)),
-                set(_tokenize(" ".join(entry.keywords))),
-                set(_tokenize(entry.summary)),
-                set(_tokenize(entry.narrative)),
+                _stem_set(entry.name),
+                _stem_set(" ".join(entry.keywords)),
+                _stem_set(entry.summary),
+                _stem_set(entry.narrative),
             )
             for entry in model.entries
         ]
@@ -108,14 +152,17 @@ class AtlasStore:
         changing this scoring. ``limit=None`` returns every match so the
         overlay can filter before truncating.
         """
-        tokens = _tokenize(query)
+        # Query tokens go through the same stem normalizer as the index
+        # (AT-6): "competitors" scores against a "competitor" keyword. Two
+        # query words that share a stem collapse into one scoring token.
+        tokens = _stem_set(query)
         if not tokens:
             return []
 
         scored: list[tuple[float, AtlasEntry]] = []
         for entry, name_t, keyword_t, summary_t, narrative_t in self._index:
             score = 0.0
-            for token in set(tokens):
+            for token in tokens:
                 if token in name_t:
                     score += _NAME_WEIGHT
                 elif token in keyword_t:
