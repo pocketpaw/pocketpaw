@@ -10,11 +10,19 @@
 # its ``surface`` field); new search/describe tests pin "publish a website"
 # → sites with the /sites route populated, and primitives cross-linked to
 # their home surfaces.
+# Updated: 2026-07-02 (feat/atlas-compiler, AT-4) — the data file is now the
+# COMPILED artifact carrying extracted ``connector`` and ``sense`` entries
+# next to the authored ones, with ``generated: true``. Loader assertions
+# updated: authored ids are a subset (still exact per authored kind), every
+# entry kind is one of the four compiled kinds, and search-ranking pins are
+# unchanged (they must survive the 41 new entries).
 
 import json
 
 from pocketpaw.atlas.model import ATLAS_SCHEMA_V1, AtlasModel
 from pocketpaw.atlas.store import _DATA_PATH, AtlasStore, get_atlas_store
+
+COMPILED_KINDS = ("primitive", "surface", "connector", "sense")
 
 EXPECTED_PRIMITIVE_IDS = {
     "primitive:pocket",
@@ -70,13 +78,21 @@ class TestLoader:
     def test_loads_and_validates_seed(self):
         store = AtlasStore.load()
         assert store.model.schema_ == ATLAS_SCHEMA_V1
-        assert {e.id for e in store.entries} == EXPECTED_PRIMITIVE_IDS | EXPECTED_SURFACE_IDS
+        assert store.model.generated is True, "the data file is the compiled artifact"
+        ids = {e.id for e in store.entries}
+        # Authored entries are exact per kind; extracted connector/sense
+        # entries ride alongside (their exact set is pinned by the compiler
+        # tests against the repo's connector YAMLs).
+        assert {i for i in ids if i.startswith("primitive:")} == EXPECTED_PRIMITIVE_IDS
+        assert {i for i in ids if i.startswith("surface:")} == EXPECTED_SURFACE_IDS
+        assert any(i.startswith("connector:") for i in ids)
+        assert any(i.startswith("sense:") for i in ids)
 
     def test_all_seed_entries_are_complete(self):
         """Every entry has the load-bearing fields filled: a one-line
         summary, a narrative, and search keywords."""
         for entry in AtlasStore.load().entries:
-            assert entry.kind in ("primitive", "surface")
+            assert entry.kind in COMPILED_KINDS
             assert entry.name
             assert entry.summary and "\n" not in entry.summary.strip()
             assert entry.narrative
