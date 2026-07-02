@@ -42,6 +42,10 @@
 #   (type="instinct.rule.archived") for the discovered-rules entity. Emitted by
 #   ``rules.service`` on every state-mutating call per cloud rule 9 (emit on
 #   every write).
+# Updated: 2026-06-28 (feat/aiam-agent-revoke, AW-4) — added ``AgentDisabled``
+#   (type="agent.disabled") and ``AgentEnabled`` (type="agent.enabled") for the
+#   agent soft-disable / revoke-everywhere flow. Emitted by ``agents.service``
+#   on disable / enable, mirroring ``AgentDeleted``'s payload shape.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -388,6 +392,21 @@ class AgentUpdated(Event):
 @dataclass
 class AgentDeleted(Event):
     EVENT_TYPE: ClassVar[str] = "agent.deleted"
+
+
+@dataclass
+class AgentDisabled(Event):
+    # Soft-disable (AW-4): the agent is revoked everywhere at once — the run
+    # pool refuses to resolve it on any path until re-enabled. Mirrors
+    # AgentDeleted's payload shape so audit/analytics listeners can key off it.
+    EVENT_TYPE: ClassVar[str] = "agent.disabled"
+
+
+@dataclass
+class AgentEnabled(Event):
+    # Re-enable (AW-4): clears the soft-disable flag; the pool resolves the
+    # agent again on the next get() (the disable already invalidated the cache).
+    EVENT_TYPE: ClassVar[str] = "agent.enabled"
 
 
 @dataclass

@@ -11,6 +11,13 @@ five knowledge mutation endpoints (POST text/url/urls/upload, DELETE) now
 require ``require_agent_owner_or_admin`` — same guard as PATCH/DELETE agent
 CRUD. Previously they had no RBAC guard beyond ``require_license``, so any
 workspace member could inject content into any agent's knowledge base.
+
+Updated 2026-06-28 (feat/aiam-agent-revoke, AW-4): added
+``PATCH /agents/{id}/disable`` and ``PATCH /agents/{id}/enable`` for the agent
+soft-disable / revoke-everywhere flow. Both carry the SAME owner/admin guard
+(``require_agent_owner_or_admin``) + ``current_user_id`` as DELETE — symmetric
+tenant-scope protection, so a cross-workspace / non-owner caller cannot revoke
+or restore an agent it doesn't own.
 """
 
 from __future__ import annotations
@@ -119,6 +126,35 @@ async def delete_agent(
     ctx = agents_service.legacy_ctx(user_id)
     await agents_service.delete(ctx, agent_id)
     return Response(status_code=204)
+
+
+@router.patch(
+    "/{agent_id}/disable",
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
+async def disable_agent(
+    agent_id: str,
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Soft-disable an agent — revoke it everywhere at once (AW-4).
+
+    Same owner/admin guard as DELETE: symmetric tenant-scope protection.
+    """
+    ctx = agents_service.legacy_ctx(user_id)
+    return agent_to_dict(await agents_service.disable(ctx, agent_id))
+
+
+@router.patch(
+    "/{agent_id}/enable",
+    dependencies=[Depends(require_agent_owner_or_admin)],
+)
+async def enable_agent(
+    agent_id: str,
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Re-enable a soft-disabled agent (AW-4)."""
+    ctx = agents_service.legacy_ctx(user_id)
+    return agent_to_dict(await agents_service.enable(ctx, agent_id))
 
 
 # ---------------------------------------------------------------------------
