@@ -46,6 +46,7 @@ def test_profile_out_keys_match_existing_wire_shape() -> None:
         "emailVerified",
         "activeWorkspace",
         "workspaces",
+        "mfa_enabled",
     }
 
 
@@ -59,6 +60,8 @@ def test_auth_user_to_profile_out_field_mapping() -> None:
     assert dump["emailVerified"] is True
     assert dump["activeWorkspace"] == "w1"
     assert dump["workspaces"] == [{"workspace": "w1", "role": "owner"}]
+    assert dump["mfa_enabled"] is False
+    assert auth_user_to_profile_out(_user(mfa_enabled=True)).model_dump()["mfa_enabled"] is True
 
 
 def test_auth_user_with_no_active_workspace() -> None:

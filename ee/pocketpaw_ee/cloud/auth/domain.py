@@ -38,6 +38,7 @@ class AuthUser:
     workspaces: tuple[WorkspaceMembershipRef, ...]
     is_verified: bool
     is_superuser: bool
+    mfa_enabled: bool = False
 
 
 __all__ = ["AuthUser", "WorkspaceMembershipRef"]

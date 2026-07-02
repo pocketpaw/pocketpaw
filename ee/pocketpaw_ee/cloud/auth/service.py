@@ -48,6 +48,7 @@ def _to_domain(doc: _UserDoc) -> AuthUser:
         workspaces=tuple(_membership_to_domain(m) for m in doc.workspaces),
         is_verified=doc.is_verified,
         is_superuser=doc.is_superuser,
+        mfa_enabled=doc.mfa_enabled,
     )
 
 
