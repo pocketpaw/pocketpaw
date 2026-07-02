@@ -506,6 +506,8 @@ source_modules = [
     "pocketpaw_ee.cloud.push.router",
     "pocketpaw_ee.cloud.push.dto",
     "pocketpaw_ee.cloud.push.domain",
+    "pocketpaw_ee.cloud.push.dispatch",
+    "pocketpaw_ee.cloud.push.listeners",
 ]
 forbidden_modules = [
     "pocketpaw_ee.cloud.models.push_subscription",
