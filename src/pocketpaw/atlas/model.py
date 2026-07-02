@@ -8,6 +8,12 @@
 # ``surface`` entries (the paw-enterprise client's user-facing routes) next
 # to the primitives, and primitives with a natural home route populate
 # their ``surface`` field. Docstrings updated to match; no schema change.
+# Updated: 2026-07-02 (feat/atlas-compiler, AT-4) — additive only, still
+# paw.atlas/v1: new ``sense`` kind (extracted from the senses vocabulary by
+# the compiler) and a top-level ``generated`` provenance flag that the
+# compiled artifact (``atlas/data/atlas.json``, now built by
+# ``atlas/compile.py`` from ``atlas/authored/*.json`` + the connector YAMLs)
+# sets to true. Hand-authored files omit it (defaults false).
 
 from __future__ import annotations
 
@@ -18,9 +24,10 @@ from pydantic import BaseModel, Field
 # Schema identifier the seed file must carry at its top level.
 ATLAS_SCHEMA_V1 = "paw.atlas/v1"
 
-# ``primitive`` and ``surface`` are seeded today; the rest are reserved so
+# ``primitive`` and ``surface`` are hand-authored; ``connector`` and
+# ``sense`` are extracted by the compiler (AT-4); the rest are reserved so
 # later tasks can add entries without a schema bump.
-AtlasKind = Literal["primitive", "capability", "surface", "connector", "widget", "skill"]
+AtlasKind = Literal["primitive", "capability", "surface", "connector", "sense", "widget", "skill"]
 
 
 class AtlasEntry(BaseModel):
@@ -62,9 +69,19 @@ class AtlasEntry(BaseModel):
 
 
 class AtlasModel(BaseModel):
-    """The full self-model document: schema tag + entries."""
+    """The full self-model document: schema tag + entries.
+
+    ``generated`` is the provenance header (AT-4): true on the compiled
+    artifact written by ``pocketpaw atlas build``, absent/false on the
+    hand-authored source files under ``atlas/authored/``. Additive field —
+    the schema stays paw.atlas/v1.
+    """
 
     schema_: Literal["paw.atlas/v1"] = Field(alias="schema", default=ATLAS_SCHEMA_V1)
+    generated: bool = Field(
+        default=False,
+        description="True when this document was written by the atlas compiler.",
+    )
     entries: list[AtlasEntry] = Field(default_factory=list)
 
     model_config = {"populate_by_name": True}

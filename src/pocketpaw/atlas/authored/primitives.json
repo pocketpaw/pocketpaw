@@ -1,0 +1,243 @@
+{
+  "schema": "paw.atlas/v1",
+  "entries": [
+    {
+      "id": "primitive:pocket",
+      "kind": "primitive",
+      "name": "Pocket",
+      "summary": "Workspace container holding agents, data, tools, connectors, KB scope, and Instinct rules; the \"app\" primitive.",
+      "narrative": "A Pocket is the 'app' primitive of the OS: one workspace container that holds agents, data, tools, connectors, KB scope, and Instinct rules. Reach for it when the user wants an interactive app, dashboard, or tracker — anything with a canvas and state. Pockets pair with Ripple (which renders their UI from a rippleSpec), with Connectors (which scope data into them), and with Sites (which publish a pocket as a standalone website). NOT clothing — a Pocket is a workspace app container.",
+      "how": "pocket_specialist__create / POST /api/v1/pockets (create), pocket_specialist__edit + POST /api/v1/pockets/<id>/spec/merge (edit)",
+      "surface": "/pockets",
+      "requires": [],
+      "keywords": [
+        "app",
+        "dashboard",
+        "tracker",
+        "workspace",
+        "canvas",
+        "container",
+        "tool",
+        "viewer",
+        "kanban",
+        "todo",
+        "build"
+      ]
+    },
+    {
+      "id": "primitive:instinct",
+      "kind": "primitive",
+      "name": "Instinct",
+      "summary": "The decision pipeline: agents PROPOSE actions, humans approve/reject/edit at a gate; captures reasoning traces.",
+      "narrative": "Instinct is the governance primitive: agents PROPOSE actions instead of executing them, and humans approve, reject, or edit each proposal at a gate. Every decision captures a reasoning trace. It is becoming a multi-lane triage router (auto / optimistic / escalate / dry-run + a trust ledger), with ASK as the default lane. Reach for it whenever an agent action needs governance — approvals, human review of agent writes, gated side effects. It pairs with Branch (which builds propose→review→merge on top of the gate) and Belt (where the human mans the Instinct gate on proposed diffs). NOT a biology term — Instinct is the approval pipeline.",
+      "how": "Instinct action store + gate APIs; agents emit proposals, humans resolve them at the gate",
+      "surface": "/paw-print",
+      "requires": [],
+      "keywords": [
+        "approve",
+        "approval",
+        "reject",
+        "review",
+        "gate",
+        "governance",
+        "propose",
+        "human in the loop",
+        "permission",
+        "triage",
+        "trust",
+        "audit"
+      ]
+    },
+    {
+      "id": "primitive:fabric",
+      "kind": "primitive",
+      "name": "Fabric",
+      "summary": "Typed ontology layer: typed objects (Customer, Competitor, Product…) and typed links (competes_with, raised, hired).",
+      "narrative": "Fabric is the workspace's knowledge graph: a typed ontology layer of typed objects (Customer, Competitor, Product, …) connected by typed links (competes_with, raised, hired). Reach for it when the user needs structured entities and relationships rather than free text — CRM-like records, competitor maps, org graphs. It pairs with Connectors (which feed external data into typed objects) and Pockets (which render fabric-backed views). NOT textile — Fabric is the typed object/link layer.",
+      "how": "fabric query surface (e.g. fabric_query / fabric_stats MCP tools where a fabric server is bound)",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "ontology",
+        "knowledge graph",
+        "typed objects",
+        "entities",
+        "relationships",
+        "links",
+        "crm",
+        "records",
+        "graph",
+        "customer",
+        "competitor"
+      ]
+    },
+    {
+      "id": "primitive:connector",
+      "kind": "primitive",
+      "name": "Connector",
+      "summary": "Workspace-scoped data integration to external systems (Gmail, GCalendar, GDrive, Postgres…), each a typed YAML definition declaring senses.",
+      "narrative": "A Connector is a workspace-scoped data integration to an external system — Gmail, Google Calendar, Google Drive, Postgres, GitHub, and so on. Each connector is a typed YAML definition declaring its senses (what it can read and act on). Reach for it when the user wants their external data or accounts wired into the workspace. Connectors pair with Pockets (they bind into a pocket's scope), Fabric (they feed typed objects), and skills (a bound connector auto-surfaces its skill into the room). NOT an electrical part — a Connector is a data integration.",
+      "how": "connector registry + typed YAML definitions; bind a connector to a pocket to expose its senses",
+      "surface": "/settings/workspace/integrations",
+      "requires": [],
+      "keywords": [
+        "integration",
+        "gmail",
+        "calendar",
+        "drive",
+        "postgres",
+        "github",
+        "external data",
+        "sync",
+        "bind",
+        "senses",
+        "oauth",
+        "connect"
+      ]
+    },
+    {
+      "id": "primitive:ripple",
+      "kind": "primitive",
+      "name": "Ripple",
+      "summary": "Generative UI layer: pockets describe WHAT to show as a rippleSpec; Ripple renders it as live Svelte UI (~190 widgets).",
+      "narrative": "Ripple is the generative UI layer of the OS: a pocket (or the chat agent) describes WHAT to show as a rippleSpec — a declarative JSON tree — and Ripple renders it as live Svelte UI from a catalog of ~190 widgets. Reach for it whenever UI needs to be produced from a description: dashboards, charts, forms, feeds, flows. It pairs with Pockets (every pocket canvas is a rippleSpec) and Sites (landing pages render ripple specs on the edge). NOT a water effect — Ripple is the widget rendering layer.",
+      "how": "author a rippleSpec; get_widget_spec / get_inline_widget_help fetch canonical prop schemas, start_flow scaffolds multi-step flows",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "ui",
+        "widgets",
+        "render",
+        "rippleSpec",
+        "svelte",
+        "chart",
+        "form",
+        "generative ui",
+        "canvas",
+        "spec",
+        "component"
+      ]
+    },
+    {
+      "id": "primitive:soul",
+      "kind": "primitive",
+      "name": "Soul",
+      "summary": "Persistent agent identity/memory (.soul files, OCEAN personality, 5-tier memory: core/episodic/semantic/procedural/…).",
+      "narrative": "Soul is the persistent agent identity and memory primitive: identity lives in portable .soul files with an OCEAN personality model and a 5-tier memory architecture (core / episodic / semantic / procedural / …). Reach for it when an agent needs to remember across sessions, carry a stable personality, or migrate identity between platforms. It pairs with the chat agent (soul recall feeds prompt context) and the Digital Soul Protocol (the open spec behind the file format). NOT a religious term — Soul is agent identity + memory.",
+      "how": "soul CLI / soul memory APIs: soul remember, soul recall, soul status against a .soul file",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "memory",
+        "identity",
+        "personality",
+        "remember",
+        "recall",
+        "persistent",
+        "ocean",
+        "episodic",
+        "semantic",
+        "procedural",
+        ".soul"
+      ]
+    },
+    {
+      "id": "primitive:branch",
+      "kind": "primitive",
+      "name": "Branch",
+      "summary": "Universal version-control + review for any artifact keyed by (scope_type, scope_id): propose → branch → review → merge/publish + revert.",
+      "narrative": "Branch is universal version-control + review for ANY artifact, keyed by (scope_type, scope_id): propose → branch → review → merge/publish, plus diff and revert. It is built on the Instinct gate + Journal, so every merge is a governed decision with history. Reach for it when a change to an artifact (a site, a spec, a config) should be reviewed before it goes live, or when the user wants to compare or roll back versions. Sites are the first consumer. NOT only git — Branch versions any workspace artifact.",
+      "how": "branch primitive APIs: propose / review / merge / publish / revert on a (scope_type, scope_id) artifact",
+      "surface": "",
+      "requires": [
+        "primitive:instinct"
+      ],
+      "keywords": [
+        "version",
+        "review",
+        "merge",
+        "publish",
+        "revert",
+        "diff",
+        "propose",
+        "draft",
+        "rollback",
+        "history",
+        "changes"
+      ]
+    },
+    {
+      "id": "primitive:workspace-jobs",
+      "kind": "primitive",
+      "name": "workspace-jobs",
+      "summary": "ARQ-backed durable async-work primitive for long-running named jobs with writeback under a system identity.",
+      "narrative": "workspace-jobs is the durable async-work primitive: ARQ-backed, long-running named jobs that survive restarts and write results back under a system identity. Reach for it when work outlives a chat turn — imports, crawls, bulk enrichment, scheduled processing — anything that should keep running after the user walks away. It pairs with Connectors (long syncs run as jobs) and Pockets (job writeback lands in pocket data).",
+      "how": "enqueue a named job on the ARQ-backed workspace-jobs queue; results write back under the system identity",
+      "surface": "",
+      "requires": [],
+      "keywords": [
+        "background",
+        "async",
+        "job",
+        "queue",
+        "long-running",
+        "durable",
+        "schedule",
+        "worker",
+        "arq",
+        "batch",
+        "import"
+      ]
+    },
+    {
+      "id": "primitive:sites",
+      "kind": "primitive",
+      "name": "Sites",
+      "summary": "Publish a pocket as a real standalone website on the edge (static landing or dynamic with per-tenant D1).",
+      "narrative": "Sites publishes a pocket as a real standalone website on the edge — either a static landing page or a dynamic site backed by a per-tenant D1 database (reads AND writes against the customer's own live data). Reach for it when the user wants something ON THE WEB: a marketing page, a public guestbook, a booking list. A site is always published FROM a pocket; Sites pairs with Pocket (the source artifact), Ripple (landing rendering), and Branch (sites are the first consumer of propose→review→publish).",
+      "how": "publish flow: build/pick a pocket stamped type=\"site\", then publish it to the edge",
+      "surface": "/sites",
+      "requires": [
+        "primitive:pocket"
+      ],
+      "keywords": [
+        "website",
+        "publish",
+        "landing page",
+        "edge",
+        "domain",
+        "public",
+        "d1",
+        "static",
+        "dynamic",
+        "deploy",
+        "online"
+      ]
+    },
+    {
+      "id": "primitive:belt",
+      "kind": "primitive",
+      "name": "Belt",
+      "summary": "Autonomous software assembly line: AI runs the stations (orient → develop → propose), the human mans the Instinct gate; changes leave only as proposed diffs.",
+      "narrative": "Belt is the autonomous software assembly line: AI runs the stations — orient in the codebase, develop the change in a station worktree, propose the diff — and the human mans the Instinct gate. Changes NEVER land directly on the user's branches; they leave the station only as proposed diffs for review. Reach for it when the user asks to implement, fix, or refactor code with governed delivery. It pairs with Instinct (the gate every diff passes through) and Branch (governed change of artifacts generally). NOT a clothing item — Belt is the code assembly line.",
+      "how": "belt develop station: orient → develop → mcp__pocketpaw_belt__belt_propose_change through the Instinct gate",
+      "surface": "/belt",
+      "requires": [
+        "primitive:instinct"
+      ],
+      "keywords": [
+        "code",
+        "implement",
+        "fix",
+        "refactor",
+        "assembly line",
+        "diff",
+        "station",
+        "develop",
+        "propose change",
+        "coding",
+        "autonomous"
+      ]
+    }
+  ]
+}

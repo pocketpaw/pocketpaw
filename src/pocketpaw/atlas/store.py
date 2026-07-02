@@ -10,17 +10,28 @@
 # Updated: 2026-07-02 (feat/atlas-surface, AT-3) — no code change; the seed
 # now also carries kind="surface" entries (frontend routes), which search
 # and describe serve exactly like primitives.
+# Updated: 2026-07-02 (feat/atlas-compiler, AT-4) — the data file is now the
+# COMPILED artifact (authored primitives/surfaces + extracted connector and
+# sense entries; see ``atlas/compile.py``). New lightweight startup drift
+# check: the first ``get_atlas_store()`` call compares the artifact's
+# ``connector:*`` name set against the live connector YAML scan (the same
+# dirs ConnectorRegistry reads) and logs a WARNING on mismatch — name-set
+# compare only, no recompile, never raises.
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
 
-# The hand-authored seed ships inside the package (hatchling includes
-# non-Python files under src/pocketpaw in the wheel).
+logger = logging.getLogger(__name__)
+
+# The compiled artifact ships inside the package (hatchling includes
+# non-Python files under src/pocketpaw in the wheel). Built by
+# ``pocketpaw atlas build`` from atlas/authored/ + the connector YAMLs.
 _DATA_PATH = Path(__file__).parent / "data" / "atlas.json"
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -106,15 +117,76 @@ class AtlasStore:
         return self._by_id.get(entry_id)
 
 
+def _scan_live_connector_names() -> set[str]:
+    """Names of connector definitions visible to the live registry.
+
+    Mirrors ``ConnectorRegistry._scan``'s directories (home dir +
+    CWD ``connectors/``) but reads only the YAML ``name:`` field — no
+    adapters, no state store, no registry construction. Cheap enough to
+    run once at first store load.
+    """
+    import yaml
+
+    from pocketpaw.connectors.registry import _default_home_connectors_dir
+
+    names: set[str] = set()
+    for directory in (_default_home_connectors_dir(), Path("connectors")):
+        if not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.yaml")):
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                name = raw.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+            except Exception:  # noqa: BLE001 — malformed YAML never breaks the check
+                continue
+    return names
+
+
+def check_connector_drift(store: AtlasStore, live_names: set[str] | None = None) -> bool:
+    """Warn (never raise) when the compiled artifact's connector set is stale.
+
+    Compares the ``connector:*`` ids in the artifact against the live
+    connector name set (scanned from the YAML dirs when not passed in).
+    Returns True when drift was detected and a WARNING was logged. Kept
+    deliberately cheap: a name-set compare, no recompile.
+    """
+    try:
+        atlas_names = {e.id.split(":", 1)[1] for e in store.entries if e.kind == "connector"}
+        if live_names is None:
+            live_names = _scan_live_connector_names()
+        if atlas_names == live_names:
+            return False
+        missing = sorted(live_names - atlas_names)
+        extra = sorted(atlas_names - live_names)
+        logger.warning(
+            "atlas is stale — run `pocketpaw atlas build` "
+            "(connectors missing from atlas: %s; in atlas but not live: %s)",
+            ", ".join(missing) or "none",
+            ", ".join(extra) or "none",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001 — the drift check must never raise
+        logger.debug("atlas connector drift check skipped: %s", exc)
+        return False
+
+
 _store: AtlasStore | None = None
 
 
 def get_atlas_store() -> AtlasStore:
-    """Module-level lazy singleton — one parsed model per process."""
+    """Module-level lazy singleton — one parsed model per process.
+
+    The first load also runs the connector drift check (WARNING-only,
+    never raises) so a stale compiled artifact is visible in the logs of
+    whichever process serves atlas first (MCP server, primer build, CLI).
+    """
     global _store
     if _store is None:
         _store = AtlasStore.load()
+        check_connector_drift(_store)
     return _store
 
 
-__all__ = ["AtlasStore", "get_atlas_store"]
+__all__ = ["AtlasStore", "check_connector_drift", "get_atlas_store"]
