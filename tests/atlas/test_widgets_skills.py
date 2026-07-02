@@ -125,18 +125,25 @@ class TestSkillExtraction:
 
 class TestStemming:
     def test_exact_strip_rules(self):
-        """Pin the documented normalizer rules: ing/ed/es → s → trailing e,
-        3+ char stems only, ss never stripped."""
+        """Pin the documented normalizer rules: ies→y / s / ing / ed to a
+        fixpoint, no trailing-e strip, ss/us/is never stripped."""
         assert _stem("competitors") == "competitor"
         assert _stem("competitor") == "competitor"
-        assert _stem("matches") == _stem("matching") == "match"
-        assert _stem("approved") == _stem("approve") == "approv"
-        assert _stem("sites") == _stem("site")
         assert _stem("boards") == "board"
-        # Guards: short stems and double-s stay put.
+        assert _stem("companies") == "company"
+        # Fixpoint consistency: inflection chains land on the SAME stem.
+        assert _stem("meetings") == _stem("meeting") == "meet"
+        assert _stem("connected") == "connect"
+        # No e-strip: these were real collisions with catalog vocabulary.
+        assert _stem("state") == "state"  # never "stat" (widget:stat)
+        assert _stem("notes") == "note"  # never "not"
+        assert _stem("sites") == "site"  # never "sit"
+        # Guards: short stems, double-s/us/is stay put.
         assert _stem("as") == "as"
         assert _stem("less") == "less"
-        assert _stem("using") == "using"  # 2-char stem — not stripped
+        assert _stem("status") == "status"
+        assert _stem("analysis") == "analysis"
+        assert _stem("using") == "using"  # 3-char stem — ing needs >= 4
 
     def test_plural_query_matches_singular_keyword(self):
         """The eval-documented miss class: a plural query token must now hit

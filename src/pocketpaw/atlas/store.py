@@ -65,31 +65,37 @@ def _stem(token: str) -> str:
 
     Fixes the plural/inflection miss class the atlas eval documented
     ("competitors" query token never matched a "competitor" keyword).
-    Exact rules, applied in order to an already-lowercased token:
+    Exact rules, applied to an already-lowercased token and REPEATED to a
+    fixpoint (so "meetings" → "meeting" → "meet" and a bare "meeting"
+    reach the SAME stem — a single pass left them unequal):
 
-    1. Strip the FIRST matching suffix of ``ing`` / ``ed`` / ``es`` when
-       the remaining stem keeps >= 3 chars.
-    2. Otherwise strip a trailing ``s`` (but never ``ss`` — "less",
-       "address" stay put) when the stem keeps >= 3 chars.
-    3. Finally strip one trailing ``e`` when the stem keeps >= 3 chars,
-       so pairs like approve/approved and site/sites normalize to the
-       same stem ("approv", "sit").
+    1. ``ies`` → ``y`` when the stem keeps >= 3 chars ("companies" →
+       "company").
+    2. Strip a trailing ``s`` (but never ``ss``/``us``/``is`` — "less",
+       "status", "analysis" stay put) when the stem keeps >= 3 chars.
+    3. Strip ``ing`` when the stem keeps >= 4 chars ("meeting" → "meet").
+    4. Strip ``ed`` when the stem keeps >= 4 chars ("connected" →
+       "connect").
 
-    Applied identically to index and query tokens, so equal tokens always
-    keep matching; this only ADDS matches between inflected forms. It is
-    intentionally not a full stemmer (use/using still differ) — cheap and
-    deterministic beats linguistically complete here.
+    Deliberately NO trailing-``e`` strip: it collided real vocabulary
+    ("state" → "stat" hit widget:stat at name weight, "notes" → "not",
+    "sites" → "sit"). Applied identically to index and query tokens, so
+    equal tokens always keep matching; this only ADDS matches between
+    inflected forms. Intentionally not a full stemmer (approve/approved
+    still differ) — cheap, deterministic, collision-averse.
     """
-    for suffix in ("ing", "ed", "es"):
-        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
-            token = token[: -len(suffix)]
-            break
-    else:
-        if token.endswith("s") and not token.endswith("ss") and len(token) - 1 >= 3:
+    while True:
+        before = token
+        if token.endswith("ies") and len(token) - 3 >= 3:
+            token = token[:-3] + "y"
+        elif token.endswith("s") and not token.endswith(("ss", "us", "is")) and len(token) - 1 >= 3:
             token = token[:-1]
-    if token.endswith("e") and len(token) - 1 >= 3:
-        token = token[:-1]
-    return token
+        elif token.endswith("ing") and len(token) - 3 >= 4:
+            token = token[:-3]
+        elif token.endswith("ed") and len(token) - 2 >= 4:
+            token = token[:-2]
+        if token == before:
+            return token
 
 
 def _stem_set(text: str) -> set[str]:
