@@ -113,6 +113,23 @@ def create_api_app():
         allow_headers=["*"],
     )
 
+    # --- Access log (outermost, opt-in) ----------------------------------
+    # When POCKETPAW_ACCESS_LOG_PATH is set, append one nginx-combined line per
+    # request so shield's CrowdSec can detect probing. Added LAST so it wraps
+    # every other layer and records the final status. Recording the REAL client
+    # IP (CF-Connecting-IP / X-Forwarded-For) matters — the deploy sits behind
+    # Cloudflare + Traefik, so logging the proxy IP would make CrowdSec ban the
+    # proxy. When the path is unset the middleware is NOT added — default
+    # deploys are byte-for-byte unchanged.
+    try:
+        _access_log_path = Settings.load().access_log_path
+    except Exception:
+        _access_log_path = None
+    if _access_log_path:
+        from pocketpaw.api.access_log import AccessLogMiddleware
+
+        app.add_middleware(AccessLogMiddleware, log_path=_access_log_path)
+
     # --- WebSocket handler helper ----------------------------------------
     async def _handle_ws(
         websocket: WebSocket,

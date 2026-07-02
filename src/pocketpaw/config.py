@@ -65,6 +65,12 @@ Changes:
     bools' SHIPPED meaning is the full acting loop, and mapping them to
     shadow would silently strip requeue/escalate from any deployment that
     already set them. The legacy bools stay for back-compat.
+  - 2026-07-02 (feat/shield-access-log): Added ``access_log_path`` (default None,
+    env POCKETPAW_ACCESS_LOG_PATH) — when set, ``pocketpaw serve`` appends an
+    nginx-combined HTTP access log there (via the access_log middleware) so
+    shield's CrowdSec can detect probing. The logged IP is the REAL client IP
+    (CF-Connecting-IP → X-Forwarded-For leftmost → peer), never the CF/Traefik
+    proxy. Unset → middleware not added; default deploys byte-for-byte unchanged.
   - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
     (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
     False; when True AND deep_work_verify_loop_enabled is on, every completing
@@ -1644,6 +1650,18 @@ class Settings(BaseSettings):
         description=(
             "Bearer token the cloud security proxy presents to shield over the "
             "socket. Sent as 'Authorization: Bearer <token>'. Never logged."
+        ),
+    )
+    access_log_path: str | None = Field(
+        default=None,
+        description=(
+            "Filesystem path for an nginx-combined HTTP access log emitted by "
+            "``pocketpaw serve``. When set, one access-log line per request is "
+            "appended here so shield's CrowdSec can detect probing/scanning. The "
+            "real client IP is resolved from CF-Connecting-IP / X-Forwarded-For "
+            "(the deploy sits behind Cloudflare + Traefik) so CrowdSec bans the "
+            "attacker, not the proxy. Unset/empty → no access log is written and "
+            "the middleware is not added (default deploys are unchanged)."
         ),
     )
 
