@@ -26,6 +26,13 @@
 # Named ``CLOUD_*`` to match the sibling ``CLOUD_PUSH_CONTACT`` — this cloud
 # layer reads its own knobs from ``os.environ`` directly.
 #
+# Updated 2026-07-02: the leading edge now fires DETACHED (a background task,
+# like the trailing flush) instead of being awaited inline. ``submit`` is
+# awaited by the realtime bus handler, which the bus dispatches on the chat-send
+# request path — awaiting the push fan-out there coupled send latency to
+# delivery. ``submit`` now returns promptly and the leading push runs in the
+# background.
+#
 # Scope: in-process (single backend). The state lives in module-level dicts, so
 # two backend replicas would each fire their own leading push. That's the
 # documented v1 limit; the ``submit`` seam is the swap point for a Redis-backed
@@ -53,6 +60,36 @@ _Emit = Callable[[], Awaitable[None]]
 
 _tasks: dict[_Key, asyncio.Task] = {}
 _pending: dict[_Key, _Emit] = {}
+# In-flight DETACHED leading-edge emits. Held only to keep a strong reference so
+# the event loop can't garbage-collect a leading push mid-send; each removes
+# itself on completion. See ``_spawn_detached`` / ``submit``.
+_leading: set[asyncio.Task] = set()
+
+
+async def _guarded_emit(emit: _Emit) -> None:
+    """Await one emit, logging (not raising) on failure.
+
+    The leading edge runs detached (no caller to catch its exception), so a
+    failed send must be swallowed here or it would surface as an unretrieved
+    task exception.
+    """
+    try:
+        await emit()
+    except Exception:
+        logger.exception("push: leading-edge emit failed")
+
+
+def _spawn_detached(emit: _Emit) -> None:
+    """Fire one emit as a background task, decoupled from the caller.
+
+    ``submit`` is awaited by the realtime bus handler, which the bus dispatches
+    INLINE on the chat-send request path — awaiting delivery there would couple
+    send latency to the Web Push fan-out. Running the leading emit detached
+    (like the trailing flush already is) lets ``submit`` return promptly.
+    """
+    task = asyncio.create_task(_guarded_emit(emit))
+    _leading.add(task)
+    task.add_done_callback(_leading.discard)
 
 
 def _coalesce_seconds() -> float:
@@ -95,11 +132,13 @@ async def submit(key: _Key, emit: _Emit) -> None:
         _pending[key] = emit
         return
 
-    # Leading edge. Reserve the window SYNCHRONOUSLY (before the await) so a
+    # Leading edge. Reserve the window SYNCHRONOUSLY (before scheduling) so a
     # second submit arriving while this leading emit is in flight coalesces
-    # instead of racing to a second leading push.
+    # instead of racing to a second leading push. Fire the leading emit DETACHED
+    # (not awaited) so this ``submit`` — dispatched inline by the realtime bus on
+    # the chat-send request path — returns without blocking on the push fan-out.
     _tasks[key] = asyncio.create_task(_cooldown(key, seconds))
-    await emit()
+    _spawn_detached(emit)
 
 
 async def _cooldown(key: _Key, seconds: float) -> None:
@@ -130,10 +169,11 @@ def reset() -> None:
     caller that needs the cancellations to finish cleanly on a live loop (tests,
     graceful shutdown) should use :func:`aclose` instead.
     """
-    for task in _tasks.values():
+    for task in (*_tasks.values(), *_leading):
         task.cancel()
     _tasks.clear()
     _pending.clear()
+    _leading.clear()
 
 
 async def aclose() -> None:
@@ -143,13 +183,14 @@ async def aclose() -> None:
     its ``finally`` before the loop moves on, so no cancellation callback lands
     on an already-closed loop.
     """
-    tasks = list(_tasks.values())
+    tasks = [*_tasks.values(), *_leading]
     for task in tasks:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
     _tasks.clear()
     _pending.clear()
+    _leading.clear()
 
 
 __all__ = ["aclose", "reset", "submit"]
