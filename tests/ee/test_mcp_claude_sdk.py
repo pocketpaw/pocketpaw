@@ -61,6 +61,7 @@ from unittest.mock import patch
 
 from pocketpaw_ee.agent.mcp_servers.belt import SERVER_NAME as _BELT_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.connectors import SERVER_NAME as _CONNECTORS_MCP_SERVER_NAME
+from pocketpaw_ee.agent.mcp_servers.daytona import SERVER_NAME as _DAYTONA_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.decisions import SERVER_NAME as _DECISIONS_MCP_SERVER_NAME
 from pocketpaw_ee.agent.mcp_servers.external_actions import (
     SERVER_NAME as _EXTERNAL_ACTIONS_MCP_SERVER_NAME,
@@ -135,6 +136,9 @@ def _strip_builtin_servers(result: dict) -> dict:
     # read-only.
     out.pop(_FABRIC_MCP_SERVER_NAME, None)
     out.pop(_INSTINCT_MCP_SERVER_NAME, None)
+    # ``pocketpaw_daytona`` is always-on too — the /code surface scopes access
+    # via its profile allowlist, same regime as fabric / instinct / media.
+    out.pop(_DAYTONA_MCP_SERVER_NAME, None)
     return out
 
 
