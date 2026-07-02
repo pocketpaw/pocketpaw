@@ -44,6 +44,7 @@ class ProfileOut(BaseModel):
     emailVerified: bool  # noqa: N815 - intentional camelCase wire key
     activeWorkspace: str | None  # noqa: N815 - intentional camelCase wire key
     workspaces: list[WorkspaceMembershipDto]
+    mfa_enabled: bool  # snake_case: matches the paw-enterprise auth types wire key
 
 
 def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
@@ -57,6 +58,7 @@ def auth_user_to_profile_out(user: AuthUser) -> ProfileOut:
         workspaces=[
             WorkspaceMembershipDto(workspace=m.workspace, role=m.role) for m in user.workspaces
         ],
+        mfa_enabled=user.mfa_enabled,
     )
 
 
