@@ -1,4 +1,9 @@
 # tests/unit/test_bulk_executor.py
+# Updated: 2026-07-02 (AW-7 follow-up — security) — added the AW-7
+#   TEMPLATE-level deny-on-no-match section: flag ON + mutating + no-rule-match
+#   PARKS into the batch approval bucket; flag ON + read (is_mutating=False)
+#   still FIRES; flag OFF (default) is unchanged; a matched execute/notify rule
+#   is never re-bucketed by the flip.
 # Created: 2026-05-28 (feat/rfc-03-v2-bulk) — unit tests for the bulk
 # fan-out planner (``bulk_executor.plan_bulk_execution``). Pins the
 # RFC 03 v2 bulk-action execution model: per-row Instinct composition,
@@ -645,3 +650,131 @@ def test_bulk_approval_request_type_check() -> None:
     )
     plan = plan_bulk_execution(template, "bulk_op", [{"id": "r1", "score": 1}], now=FROZEN_NOW)
     assert isinstance(plan.approval_request, BulkApprovalRequest)
+
+
+# ---------------------------------------------------------------------------
+# AW-7 — TEMPLATE-level deny-on-no-match (bulk security hole fix)
+# ---------------------------------------------------------------------------
+#
+# Added: 2026-07-02 (AW-7 follow-up — security). AW-7 threaded the
+# per-workspace ``instinct_template_default_deny`` flag through the router +
+# temporal dispatcher, but the bulk fan-out still bucketed a no-rule-match
+# EXECUTE (reason "auto") into ``executions`` — which ``_fire_executions`` fires
+# un-re-gated — so an uncovered MUTATING bulk action executed ungated with the
+# flag ON. ``plan_bulk_execution`` now takes ``template_default_deny`` +
+# ``is_mutating`` (EE-computed) and, when both are True, routes a no-rule-match
+# default EXECUTE into the batch APPROVAL bucket instead. These tests pin:
+#   * flag ON + mutating + no-rule-match  → PARKS (approval bucket, not fired)
+#   * flag ON + read (is_mutating=False)  → FIRES (a read has nothing to govern)
+#   * flag OFF (default)                  → UNCHANGED (row fires)
+#   * scope: a MATCHED execute/notify rule is NEVER re-bucketed by the flip.
+
+
+def test_aw7_flag_on_mutating_no_rule_match_parks_into_approval() -> None:
+    """Flag ON + is_mutating + a clean row (no rule matches → verdict
+    EXECUTE, reason 'auto') → the row is routed to the batch APPROVAL
+    bucket, NOT ``executions``. This is the bulk deny-by-default fix."""
+    template = _minimal_template()  # auto policy, no rules
+    rows = [
+        {"id": "r1", "score": 1},
+        {"id": "r2", "score": 2},
+    ]
+    plan = plan_bulk_execution(
+        template,
+        "bulk_op",
+        rows,
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=True,
+    )
+
+    # No row fires — every uncovered mutating row parked.
+    assert plan.executions == []
+    assert plan.blocked == []
+    # ONE consolidated batch approval covers both rows.
+    assert plan.approval_request is not None
+    assert plan.approval_request.row_ids == ["r1", "r2"]
+    # A pure deny-on-no-match batch gets its own truthful reason.
+    assert plan.approval_request.reason == "template_default_deny"
+    # The per-row decisions still carry the underlying EXECUTE/auto verdict.
+    for rid in ("r1", "r2"):
+        decision = plan.approval_request.per_row_decisions[rid]
+        assert decision.verdict == "EXECUTE"
+        assert decision.reason == "auto"
+
+
+def test_aw7_flag_on_read_only_still_fires() -> None:
+    """Flag ON but is_mutating=False (a read: read_only marker / GET /
+    HEAD) → the row still FIRES. A read has nothing to govern, so the
+    deny-by-default flip never gates it."""
+    template = _minimal_template()  # auto policy, no rules
+    rows = [{"id": "r1", "score": 1}]
+    plan = plan_bulk_execution(
+        template,
+        "bulk_op",
+        rows,
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=False,
+    )
+
+    assert [r.row_id for r in plan.executions] == ["r1"]
+    assert all(r.verdict == "EXECUTE" for r in plan.executions)
+    assert plan.approval_request is None
+
+
+def test_aw7_flag_off_is_unchanged() -> None:
+    """Flag OFF (the default) → identical to before AW-7: an uncovered
+    mutating row fires. This is the day-one, zero-behavior-change path."""
+    template = _minimal_template()  # auto policy, no rules
+    rows = [{"id": "r1", "score": 1}, {"id": "r2", "score": 2}]
+
+    # Explicit OFF.
+    plan_off = plan_bulk_execution(
+        template,
+        "bulk_op",
+        rows,
+        now=FROZEN_NOW,
+        template_default_deny=False,
+        is_mutating=True,
+    )
+    assert [r.row_id for r in plan_off.executions] == ["r1", "r2"]
+    assert plan_off.approval_request is None
+
+    # Default (no kwargs) must match explicit OFF exactly.
+    plan_default = plan_bulk_execution(template, "bulk_op", rows, now=FROZEN_NOW)
+    assert [r.row_id for r in plan_default.executions] == ["r1", "r2"]
+    assert plan_default.approval_request is None
+
+
+def test_aw7_notify_only_author_floor_is_never_re_bucketed() -> None:
+    """Scope guard: the flip is the no-rule-match ('auto') default ONLY. An
+    action with a ``notify_only`` author floor returns NOTIFY_AND_EXECUTE
+    (reason 'notify_only', NOT 'auto') — an explicit policy decision — so it
+    keeps firing even with the flag ON + is_mutating; it is never overridden."""
+    template = _minimal_template(
+        actions=[
+            {
+                "name": "bulk_op",
+                "label": "Bulk op",
+                "kind": "bulk",
+                "instinct_policy": "notify_only",
+                "outcomes_emitted": ["thing_done"],
+            }
+        ],
+    )
+    rows = [{"id": "r1", "score": 1}]
+    plan = plan_bulk_execution(
+        template,
+        "bulk_op",
+        rows,
+        now=FROZEN_NOW,
+        template_default_deny=True,
+        is_mutating=True,
+    )
+
+    # The notify_only author floor → NOTIFY_AND_EXECUTE fires, not parked.
+    assert [r.row_id for r in plan.executions] == ["r1"]
+    assert plan.executions[0].verdict == "NOTIFY_AND_EXECUTE"
+    assert plan.executions[0].decision.reason == "notify_only"
+    assert plan.approval_request is None

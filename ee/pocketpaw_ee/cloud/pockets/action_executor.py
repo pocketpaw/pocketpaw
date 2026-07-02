@@ -1027,8 +1027,7 @@ async def run_action(
             # default-deny flip does not gate it.
             template_default_deny=template_default_deny,
             is_mutating=(
-                binding.method in ("POST", "PUT", "PATCH", "DELETE")
-                and not binding.read_only
+                binding.method in ("POST", "PUT", "PATCH", "DELETE") and not binding.read_only
             ),
         )
         if gate.next_step == "blocked":

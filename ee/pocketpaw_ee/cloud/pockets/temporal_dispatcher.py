@@ -232,8 +232,7 @@ async def _dispatch_one_edge(
         )
     except Exception:  # noqa: BLE001 — a flag read failure falls back to OFF (dormant)
         logger.warning(
-            "temporal sweep: pocket=%s could not resolve template_default_deny — "
-            "treating as OFF",
+            "temporal sweep: pocket=%s could not resolve template_default_deny — treating as OFF",
             pocket_id,
             exc_info=True,
         )
