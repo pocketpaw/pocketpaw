@@ -104,9 +104,7 @@ async def _unread_count(user_id: str, group_id: str) -> int:
 
         return await unread_service.unread_count(user_id, group_id)
     except Exception:
-        logger.exception(
-            "push: unread count failed for user=%s group=%s", user_id, group_id
-        )
+        logger.exception("push: unread count failed for user=%s group=%s", user_id, group_id)
         return 1
 
 

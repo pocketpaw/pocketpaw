@@ -177,9 +177,7 @@ def new_message_env(monkeypatch):
     monkeypatch.setattr(listeners, "_unread_count", fake_count)
 
 
-async def test_new_message_notifies_other_members_with_count(
-    notify_calls, new_message_env
-) -> None:
+async def test_new_message_notifies_other_members_with_count(notify_calls, new_message_env) -> None:
     event = MessageSent(
         data={
             "group_id": "g1",
