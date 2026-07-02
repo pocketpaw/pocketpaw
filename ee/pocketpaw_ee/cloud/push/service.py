@@ -21,6 +21,13 @@
 # ``# no-event``; wiring sends to real product events + WS-vs-push dedupe is
 # the follow-up (#1393), NOT here.
 #
+# Updated: 2026-07-02 (fix/push-vapid-pem-send) — the send path handed the raw
+# PKCS#8 PEM *string* to ``webpush(vapid_private_key=...)``, which routes it
+# through ``py_vapid.Vapid.from_string`` (raw/DER-base64 only) and failed EVERY
+# send with an ASN.1 "invalid length" error — no Web Push ever left the box.
+# Now we parse the PEM into a ``Vapid01`` instance (``from_pem``) once per
+# fan-out and hand webpush the instance, which it consumes directly.
+#
 # Responsibilities:
 #   - ``get_vapid_public_key(workspace_id)`` — return the workspace's VAPID
 #     public key, generating the keypair on first call (generate-once /
@@ -54,7 +61,7 @@ from pymongo.errors import DuplicateKeyError
 from pywebpush import WebPushException, webpush  # type: ignore[import-untyped]
 
 from pocketpaw_ee.cloud._core import crypto
-from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound
+from pocketpaw_ee.cloud._core.errors import ConflictError, NotFound, ValidationError
 from pocketpaw_ee.cloud.models.push_subscription import PushKeys as _PushKeysDoc
 from pocketpaw_ee.cloud.models.push_subscription import PushSubscription as _PushSubscriptionDoc
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair as _VapidKeypairDoc
@@ -82,6 +89,49 @@ def _vapid_contact() -> str:
     project default so no individual's address is ever hardcoded.
     """
     return os.environ.get(_PUSH_CONTACT_ENV, "").strip() or _DEFAULT_PUSH_CONTACT
+
+
+# Total request timeout (seconds) handed to ``webpush`` → ``requests.post``.
+# Never ``None`` — see the send loop for why an unbounded timeout is dangerous.
+_SEND_TIMEOUT_SECONDS = 10
+
+
+# Endpoint SSRF guard. A subscription ``endpoint`` is attacker-controlled (any
+# authenticated user POSTs it), stored verbatim, and later POSTed to by the
+# send path via ``requests``. Without validation a user could register
+# ``http://169.254.169.254/…`` (cloud metadata) or an internal host and then
+# self-trigger a send to make the backend fetch it (blind SSRF). We only ever
+# talk to the real browser push services, so allowlist their hosts and require
+# https. Suffix match so regional/sharded subdomains are covered.
+_ALLOWED_PUSH_HOST_SUFFIXES = (
+    "push.services.mozilla.com",  # Firefox (autopush)
+    "fcm.googleapis.com",  # Chrome / Chromium / Edge (FCM)
+    "web.push.apple.com",  # Safari / WebKit
+    "notify.windows.com",  # legacy Windows WNS (*.notify.windows.com)
+)
+
+
+def _validate_push_endpoint(endpoint: str) -> None:
+    """Reject any subscription endpoint that isn't a real push-service URL.
+
+    Requires ``https`` and a host under one of the known browser push-service
+    domains. Raises :class:`ValidationError` otherwise, so an SSRF payload
+    (internal host, metadata IP, non-https scheme) never reaches storage or the
+    outbound ``requests.post`` in the send path.
+    """
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(endpoint)
+    host = (parts.hostname or "").lower()
+    ok = parts.scheme == "https" and any(
+        host == suffix or host.endswith("." + suffix) for suffix in _ALLOWED_PUSH_HOST_SUFFIXES
+    )
+    if not ok:
+        raise ValidationError(
+            "push.endpoint_invalid",
+            "Push endpoint must be an https URL of a known browser push service.",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Mapping helpers — Beanie doc ↔ domain
@@ -193,6 +243,9 @@ async def subscribe(
     the request header.
     """
     body = SubscribeRequest.model_validate(body)
+    # SSRF guard: only store endpoints that point at a real browser push
+    # service (see _validate_push_endpoint). Rejected before any DB write.
+    _validate_push_endpoint(body.endpoint)
     keys_doc = _PushKeysDoc(p256dh=body.keys.p256dh, auth=body.keys.auth)
 
     # Workspace-scoped precheck: only an endpoint already owned by THIS
@@ -281,9 +334,7 @@ async def _delete_by_endpoint(workspace_id: str, endpoint: str) -> None:
     gone (404/410). Kept here so this service stays the sole Beanie writer
     for the push collection (ee/cloud rule §2 + the import-linter contract).
     """
-    doc = await _PushSubscriptionDoc.find_one(
-        {"endpoint": endpoint, "workspace": workspace_id}
-    )
+    doc = await _PushSubscriptionDoc.find_one({"endpoint": endpoint, "workspace": workspace_id})
     if doc is not None:
         await doc.delete()  # no-event: dead-endpoint cleanup, no consumers until #1393
 
@@ -321,6 +372,14 @@ async def send_to_user(
 
     # Single chokepoint read of the tenant private key for the whole fan-out.
     private_pem = await get_decrypted_private_pem(workspace_id)
+    # Build the Vapid signer ONCE from the PEM. ``webpush`` accepts a Vapid01
+    # instance directly; passing the raw PEM *string* instead routes it through
+    # ``py_vapid.Vapid.from_string``, which only parses raw/DER base64 keys —
+    # given a PKCS#8 PEM it strips the newlines, base64-decodes the
+    # ``-----BEGIN-----`` header to garbage, and dies with an ASN.1
+    # "invalid length" error, failing EVERY send. ``from_pem`` handles the PEM
+    # our keypair generator emits, so hand webpush the parsed instance.
+    vapid = Vapid01.from_pem(private_pem.encode())
     vapid_claims = {"sub": _vapid_contact()}
     data = payload.model_dump_json(exclude_none=True)
 
@@ -334,10 +393,17 @@ async def send_to_user(
                 webpush,
                 subscription_info=subscription_info,
                 data=data,
-                vapid_private_key=private_pem,
+                vapid_private_key=vapid,
                 # ``vapid_claims`` is mutated in place by py-vapid (it stamps
                 # ``exp``/``aud``), so hand each call its own copy.
                 vapid_claims=dict(vapid_claims),
+                # webpush() passes this straight to ``requests.post``; without
+                # it the default is ``timeout=None`` = block forever. Each send
+                # runs in an ``asyncio.to_thread`` worker, so one push endpoint
+                # that accepts the connection but never responds would park a
+                # thread-pool slot indefinitely — enough of them starve the
+                # shared pool and stall EVERY ``to_thread`` in the process.
+                timeout=_SEND_TIMEOUT_SECONDS,
             )
             result.sent += 1
         except WebPushException as exc:
