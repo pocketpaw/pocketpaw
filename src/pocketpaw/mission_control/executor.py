@@ -1,6 +1,19 @@
 """Mission Control Task Executor.
 
 Created: 2026-02-05
+Updated: 2026-07-02 — LLM-as-judge SHADOW stamp (J-1, #1168): inside the
+  existing ``deep_work_verify_loop_enabled`` block, AFTER the deterministic
+  verdict is computed and stamped, when ``deep_work_verify_judge_shadow_enabled``
+  is ALSO on the LlmJudgeVerdictProvider scores the same (output,
+  success_criteria) and its verdict is stamped observe-only on
+  ``task.metadata["verify_judge_verdict"]`` plus ONE structured log line
+  comparing the two verdicts at status level (``verify judge shadow:
+  deterministic=<s> judge=<s> agree=<bool> task=<id>``). The judge verdict
+  NEVER feeds the requeue/escalate decision in any branch — the deterministic
+  verdict alone drives behaviour, exactly as today. Judge exceptions are
+  swallowed to a debug log (shadow must never break completion). Judge flag
+  off ⇒ the provider is never constructed (no subprocess); loop flag off ⇒
+  the whole block is skipped, byte-for-byte today's behaviour.
 Updated: 2026-06-23 — Self-Verifying Loop (SVL-3): a no-progress / oscillation
   guard now runs INSIDE the PARTIAL / NOT_SOLVED branch, BEFORE the SVL-2
   budget-bounded requeue decision. When there is a prior attempt to compare
@@ -97,6 +110,7 @@ from pocketpaw.agents.router import AgentRouter  # noqa: E402
 from pocketpaw.bus.events import SystemEvent  # noqa: E402
 from pocketpaw.bus.queue import get_message_bus  # noqa: E402
 from pocketpaw.config import get_settings  # noqa: E402
+from pocketpaw.instinct.judge_provider import LlmJudgeVerdictProvider  # noqa: E402
 from pocketpaw.instinct.models import OutcomeStatus  # noqa: E402
 from pocketpaw.instinct.verdict_provider import DeterministicVerdictProvider  # noqa: E402
 from pocketpaw.mission_control.manager import get_mission_control_manager  # noqa: E402
@@ -328,6 +342,35 @@ class MCTaskExecutor:
                         verdict.status,
                         verdict.summary,
                     )
+
+                    # J-1 (shadow): when the judge flag is ALSO on, score the
+                    # SAME (output, criteria) with the LLM-as-judge provider
+                    # and stamp its verdict ALONGSIDE the deterministic one —
+                    # observe-only. The judge verdict NEVER feeds the
+                    # requeue/escalate decision below; the deterministic
+                    # verdict alone drives behaviour, exactly as today. Any
+                    # judge failure is swallowed to a debug log — shadow must
+                    # never break task completion.
+                    if get_settings().deep_work_verify_judge_shadow_enabled:
+                        try:
+                            judge_verdict = await LlmJudgeVerdictProvider().verify(
+                                task_fresh.output, success_criteria
+                            )
+                            task_fresh.metadata["verify_judge_verdict"] = judge_verdict.model_dump()
+                            logger.info(
+                                "verify judge shadow: deterministic=%s judge=%s agree=%s task=%s",
+                                verdict.status.value,
+                                judge_verdict.status.value,
+                                verdict.status == judge_verdict.status,
+                                task_id,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "verify judge shadow failed for task %s — "
+                                "ignored (shadow never breaks completion)",
+                                task_id,
+                                exc_info=True,
+                            )
 
                     # SVL-2: act on the verdict. SOLVED / UNKNOWN pass through
                     # as DONE — a passing (or uncheckable) result is NEVER
