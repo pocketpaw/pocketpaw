@@ -166,9 +166,19 @@ registry), resolved per call so mid-session connects are reflected. The
 scope key is per run, never a process-global: the Claude Agent SDK backend
 builds the provider with `ws:<POCKETPAW_WORKSPACE_ID>` when an isolated
 cloud run attached tenancy via `attach_subprocess_env`, else the OSS
-single-user `"default"` scope. An EE provider that consults a tenant plan
-just implements the same two-method protocol and is passed to
-`build_atlas_context_server(provider=...)`.
+single-user `"default"` scope. Tenancy attached with a BLANK workspace id
+fails closed to a sentinel scope that matches no rows — never the shared
+`"default"` bucket.
+
+**Cloud availability caveat (honest scope of v1):** the `ws:<id>` plumbing
+is in place, but the cloud connector state store intentionally does not
+enumerate tenant rows, so under a real cloud scope every connector currently
+reports `available: false` (conservative — nothing leaks, hints still point
+at the integrations surface). Live per-tenant availability lands with the EE
+provider slice: implement the same two-method protocol against the EE
+workspace-connector view and pass it to
+`build_atlas_context_server(provider=...)`. The OSS `"default"` scope reads
+live file-store state and is fully functional today.
 
 ## Agent tools (`pocketpaw_atlas` MCP server)
 

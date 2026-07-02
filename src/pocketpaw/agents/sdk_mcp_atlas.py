@@ -154,8 +154,10 @@ async def _atlas_describe_handler(args: dict, provider: EntitlementProvider | No
     if overlaid.available is not None:
         payload["available"] = overlaid.available
         if overlaid.available is False:
-            integrations = store.describe(_INTEGRATIONS_SURFACE_ID)
-            route = integrations.surface if integrations is not None else ""
+            # Route the lookup through the overlay: a provider that filters
+            # the integrations surface must not leak its route via the hint.
+            integrations = AtlasOverlay.describe(store, _INTEGRATIONS_SURFACE_ID, provider)
+            route = integrations.entry.surface if integrations is not None else ""
             if route:
                 payload["connect_hint"] = (
                     f"Not connected in this workspace yet — connect it at {route}."
