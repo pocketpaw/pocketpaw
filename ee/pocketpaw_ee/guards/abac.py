@@ -21,6 +21,11 @@
 #   Other display-only flags (studio, code, deep_work, chain_flow, fleet, belt,
 #   foresight) are surfaced to the UI but not yet enforced. ``automations`` stays
 #   on pro+; ``audit``/``sso``/``instinct``/``custom_roles`` stay enterprise-only.
+# Updated 2026-07-02 (feat/game-surface) — added the ``game`` flag (the /game
+#   creation surface: vibe → living world as a Pocket type="game") on the SAME
+#   tiers as ``studio`` (go+). ENFORCED by the in-process create path
+#   (``game.service.require_game_plan``, mirroring the Sites gate), so a
+#   free-plan workspace can't compose game worlds through the chat agent.
 
 from __future__ import annotations
 
@@ -61,6 +66,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "agents",
         "memory",
         "studio",
+        "game",
         "sites",
     },
     # Paw Pro — daily drivers. Adds automations + knowledge_base + display flags
@@ -72,6 +78,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "agents",
         "memory",
         "studio",
+        "game",
         "sites",
         "automations",
         "knowledge_base",
@@ -88,6 +95,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "agents",
         "memory",
         "studio",
+        "game",
         "sites",
         "automations",
         "knowledge_base",
@@ -106,6 +114,7 @@ PLAN_FEATURES: dict[str, set[str]] = {
         "agents",
         "memory",
         "studio",
+        "game",
         "sites",
         "automations",
         "knowledge_base",

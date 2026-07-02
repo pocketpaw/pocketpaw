@@ -32,6 +32,12 @@
 # startup assertion (``_assert_registry_complete``, run at module import)
 # guarantees every ``SurfaceKind`` has exactly one row and no row names a bogus
 # kind — resolving the design's open question (keep the enum + assert).
+#
+# Changes: 2026-07-02 (feat/game-surface) — added the GAME row (/game — the
+# creation surface: describe a living world, the system composes it as a Pocket
+# type="game"). Its ``profile_resolver`` (``_game_profile``) mirrors STUDIO's:
+# ripple OFF (compose a world, not a ui-spec dashboard), the ``game`` skill,
+# and an MCP allow-list scoped to the deterministic ``create_game_world`` tool.
 
 from __future__ import annotations
 
@@ -51,6 +57,7 @@ from pocketpaw_ee.cloud.surface.handlers import (
     calendar,
     code,
     files,
+    game,
     generic,
     home,
     knowledge,
@@ -160,6 +167,13 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
 # None-degrade path as the loom/media imports below). Do NOT drift the id.
 _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
 
+# The deterministic world-composition tool the /game creation surface scopes to.
+# Spelled as a LITERAL for the same reason belt's gate tool id was: the canonical
+# constant (``CREATE_GAME_WORLD_TOOL_ID`` / ``GAME_TOOL_IDS``) lands with the
+# game MCP server commit; swap this literal for the imported constant when it
+# does (same None-degrade path as the media import below). Do NOT drift the id.
+_GAME_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_game__create_game_world"})
+
 
 class _McpToolIds(NamedTuple):
     """The lazily-loaded per-mode MCP allow-lists.
@@ -267,6 +281,19 @@ def _studio_profile(_meta: SurfaceMeta) -> SurfaceProfile:
         ripple_mode="off",
         allow_mcp_tool_ids=_mcp_tool_ids().studio_allow,
         skill_names=frozenset({"studio"}),
+    )
+
+
+def _game_profile(_meta: SurfaceMeta) -> SurfaceProfile:
+    # Game: the creation surface (vibe → living world as a Pocket type="game").
+    # Ripple OFF so the agent composes a world via the deterministic
+    # create_game_world tool instead of defaulting to a ripple ui-spec
+    # dashboard; scoped to the game MCP tool (+ general-everywhere); the `game`
+    # skill carries the vibe→dials→world flow. Mirrors _studio_profile.
+    return SurfaceProfile(
+        ripple_mode="off",
+        allow_mcp_tool_ids=_GAME_TOOL_IDS,
+        skill_names=frozenset({"game"}),
     )
 
 
@@ -392,6 +419,12 @@ SURFACES: list[SurfaceSpec] = [
         _route_for(SurfaceKind.BELT),
         belt.build_preamble,
         profile_resolver=_belt_profile,
+    ),
+    SurfaceSpec(
+        SurfaceKind.GAME,
+        _route_for(SurfaceKind.GAME),
+        game.build_preamble,
+        profile_resolver=_game_profile,
     ),
     SurfaceSpec(SurfaceKind.GENERIC, _route_for(SurfaceKind.GENERIC), generic.build_preamble),
 ]

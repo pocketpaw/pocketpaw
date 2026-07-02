@@ -17,6 +17,9 @@ and the ``Branding`` -> ``BrandingOut`` mapping in ``workspace_to_dto``.
 2026-06-19 (feat/instinct-gate-integration, security-review FIX 1): added
 ``SetApprovalLevelRequest`` — the closed-enum body for the OWNER-only route
 that activates the layered Instinct gate's triager for a workspace.
+2026-07-02 (feat/game-surface): added ``"game"`` to ``VALID_ROUTES`` so
+route-permission grants can name the new /game creation surface (mirrors
+how "studio" / "belt" joined the set with their surfaces).
 """
 
 from __future__ import annotations
@@ -329,6 +332,7 @@ class SetMemberRoutePermissionsRequest(BaseModel):
             "foresight",
             "sites",
             "belt",
+            "game",
             "paw-print",
             "audit",
             "settings",

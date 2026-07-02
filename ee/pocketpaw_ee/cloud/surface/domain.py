@@ -61,6 +61,13 @@
 # so the belt handler's ``build_preamble`` injects them into the preamble and
 # tells the agent NOT to ask for the repo (and to pass exactly these into
 # ``belt_propose_change``). Absent → the handler keeps the ask-first behavior.
+# Changes: 2026-07-02 (feat/game-surface) — added the ``GAME`` chat-bearing
+# surface (/game — describe a living world, the system COMPOSES it as a Pocket
+# type="game"; NPCs are Souls with memory/grudges; creation-first, not
+# play-first). Its ``ripple_mode="off"`` profile lives on the SURFACES registry
+# row (``surface_registry._game_profile``) so the agent composes a world via the
+# deterministic ``create_game_world`` tool instead of defaulting to a ripple
+# ui-spec dashboard — the same regime STUDIO / CODE / BELT use.
 
 from __future__ import annotations
 
@@ -101,6 +108,7 @@ class SurfaceKind(StrEnum):
     STUDIO = "studio"  # /studio — describe→generate media (image + video)
     CODE = "code"  # /code — agent edits + runs code in the workspace
     BELT = "belt"  # /belt — the develop station (orient→develop→propose via gate)
+    GAME = "game"  # /game — creation surface: describe a living world, the system composes it
     GENERIC = "generic"  # any unknown surface — agent still gets a usable preamble
 
 
