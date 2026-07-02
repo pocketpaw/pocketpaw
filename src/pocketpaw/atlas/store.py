@@ -83,7 +83,7 @@ class AtlasStore:
         scored: list[tuple[float, AtlasEntry]] = []
         for entry, name_t, keyword_t, summary_t, narrative_t in self._index:
             score = 0.0
-            for token in tokens:
+            for token in set(tokens):
                 if token in name_t:
                     score += _NAME_WEIGHT
                 elif token in keyword_t:
