@@ -167,13 +167,6 @@ _SITES_SVELTE_CREATE_DENY: frozenset[str] = frozenset(
 # None-degrade path as the loom/media imports below). Do NOT drift the id.
 _BELT_GATE_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_belt__belt_propose_change"})
 
-# The deterministic world-composition tool the /game creation surface scopes to.
-# Spelled as a LITERAL for the same reason belt's gate tool id was: the canonical
-# constant (``CREATE_GAME_WORLD_TOOL_ID`` / ``GAME_TOOL_IDS``) lands with the
-# game MCP server commit; swap this literal for the imported constant when it
-# does (same None-degrade path as the media import below). Do NOT drift the id.
-_GAME_TOOL_IDS: frozenset[str] = frozenset({"mcp__pocketpaw_game__create_game_world"})
-
 
 class _McpToolIds(NamedTuple):
     """The lazily-loaded per-mode MCP allow-lists.
@@ -190,6 +183,7 @@ class _McpToolIds(NamedTuple):
     sites_allow: frozenset[str] | None
     studio_allow: frozenset[str] | None
     belt_allow: frozenset[str] | None
+    game_allow: frozenset[str] | None
 
 
 # Built lazily + memoized: pulling the EE mcp-server tool-id constants at module
@@ -210,6 +204,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
     logger = logging.getLogger(__name__)
     try:
         from pocketpaw_ee.agent.mcp_servers.foresight import FORESIGHT_TOOL_IDS
+        from pocketpaw_ee.agent.mcp_servers.game import GAME_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.loom import LOOM_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
         from pocketpaw_ee.agent.mcp_servers.sites import SITES_TOOL_IDS
@@ -227,6 +222,10 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             # (so the agent grounds itself before coding) UNION the Instinct
             # gate tool (so it proposes the diff through the gate).
             belt_allow=frozenset(LOOM_TOOL_IDS) | _BELT_GATE_TOOL_IDS,
+            # /game (the creation surface) scopes to the deterministic
+            # world-composition tool (create_game_world), same crossing rule
+            # as the media ids above.
+            game_allow=frozenset(GAME_TOOL_IDS),
         )
     except Exception:  # noqa: BLE001 — degrade to no restriction, never break chat
         logger.warning(
@@ -239,6 +238,7 @@ def _load_mcp_tool_ids() -> _McpToolIds:
             sites_allow=None,
             studio_allow=None,
             belt_allow=None,
+            game_allow=None,
         )
 
 
@@ -289,10 +289,11 @@ def _game_profile(_meta: SurfaceMeta) -> SurfaceProfile:
     # Ripple OFF so the agent composes a world via the deterministic
     # create_game_world tool instead of defaulting to a ripple ui-spec
     # dashboard; scoped to the game MCP tool (+ general-everywhere); the `game`
-    # skill carries the vibe→dials→world flow. Mirrors _studio_profile.
+    # skill carries the vibe→dials→world flow. Mirrors _studio_profile;
+    # game_allow is None when the import degraded.
     return SurfaceProfile(
         ripple_mode="off",
-        allow_mcp_tool_ids=_GAME_TOOL_IDS,
+        allow_mcp_tool_ids=_mcp_tool_ids().game_allow,
         skill_names=frozenset({"game"}),
     )
 

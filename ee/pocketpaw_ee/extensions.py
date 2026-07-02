@@ -30,6 +30,13 @@ Updated: 2026-06-10 (feat/studio-code-migration) — added ``CloudMediaMcpProvid
 video generation in-process server (``pocketpaw_media``) to the
 claude_agent_sdk cloud chat backend, mirroring ``CloudSitesMcpProvider``.
 
+Updated: 2026-07-02 (feat/game-surface, PW-2) — added ``CloudGameMcpProvider``
+(``pocketpaw.mcp_servers`` entry ``game``) exposing the GAME deterministic
+world-composition in-process server (``pocketpaw_game``, tool
+``create_game_world``) to the claude_agent_sdk cloud chat backend, mirroring
+``CloudMediaMcpProvider``. The /game surface scopes access via its profile
+allow-list.
+
 Updated: 2026-06-10 (feat/belt-loom-mcp, BS-1) — added ``CloudLoomMcpProvider``
 (``pocketpaw.mcp_servers`` entry ``loom``) registering the external loom
 codebase-orientation binary as a STDIO MCP server (server name ``loom``;
@@ -776,6 +783,36 @@ class CloudMediaMcpProvider:
         from pocketpaw_ee.agent.mcp_servers.media import MEDIA_TOOL_IDS
 
         return list(MEDIA_TOOL_IDS)
+
+
+class CloudGameMcpProvider:
+    """`pocketpaw.mcp_servers` — the GAME deterministic world-composition
+    in-process server (``pocketpaw_game``). Hosts ``create_game_world`` only.
+
+    Ambient (NOT in ``OPT_IN_MCP_SERVERS``) so the bundled ``game`` skill can
+    call it on any cloud chat agent that hits a "compose me a living world"
+    request without an explicit opt-in — the same regime the sites manager +
+    media + pocket specialist use. The cloud chat agent runs on the
+    claude_agent_sdk backend, which only sees in-process MCP servers (a plain
+    BaseTool is invisible to it), so world composition MUST be surfaced here.
+    The /game surface scopes access via its profile allow-list; surfaces whose
+    allowlists don't name the game tool id simply never see it.
+    """
+
+    def build_server(self) -> tuple[str, Any] | None:
+        try:
+            from pocketpaw_ee.agent.mcp_servers.game import build_game_server
+
+            return build_game_server()
+        except ImportError:
+            # claude_agent_sdk not installed — the game server is unavailable,
+            # same as the other in-process servers.
+            return None
+
+    def tool_ids(self) -> list[str]:
+        from pocketpaw_ee.agent.mcp_servers.game import GAME_TOOL_IDS
+
+        return list(GAME_TOOL_IDS)
 
 
 class CloudDeliverMcpProvider:
