@@ -1,5 +1,12 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-02 (feat/atlas-core AT-1) — registered the ``pocketpaw_atlas``
+  in-process MCP server (``agents/sdk_mcp_atlas.py``) alongside
+  ``pocketpaw_widgets``: built in ``_get_mcp_servers`` behind the same tool
+  policy gate, its two tool ids (``atlas_search`` / ``atlas_describe``) added to
+  the allowlist in ``_collect_mcp_tool_ids`` and to the mode-scope grant, so the
+  agent can query the OS self-model (paw primitive meanings) instead of guessing
+  capabilities from LLM priors. Pure core — the atlas seed is packaged data.
 Updated: 2026-07-01 (fix/warm-reuse session_id) — the native ``session_id`` is now
   ALSO captured from the terminal ``ResultMessage`` (``getattr(event,
   "session_id", None)``), as a robust FALLBACK to the SS-1 init-``SystemMessage``
@@ -918,6 +925,24 @@ class ClaudeSDKBackend(BaseAgentBackend):
         except Exception as exc:  # noqa: BLE001
             logger.debug("pocketpaw_widgets MCP server not registered: %s", exc)
 
+        # In-process MCP server: the atlas OS self-model (atlas_search,
+        # atlas_describe). Pure core — the hand-authored seed ships as
+        # packaged data (pocketpaw.atlas), no cloud dependency. Lets the
+        # agent query what the OS is and can do (paw meanings of Pocket /
+        # Instinct / Fabric / ...) before guessing from LLM priors.
+        try:
+            from pocketpaw.agents.sdk_mcp_atlas import build_atlas_context_server
+
+            atlas_server = build_atlas_context_server()
+            if atlas_server is not None:
+                name, cfg_entry = atlas_server
+                if self._policy.is_mcp_server_allowed(name):
+                    servers[name] = cfg_entry
+                else:
+                    logger.info("MCP server '%s' blocked by tool policy", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("pocketpaw_atlas MCP server not registered: %s", exc)
+
         # EE-provided in-process MCP servers — cloud pocket context, Mission
         # Control tasks, the planner, and the pocket specialist. Discovered
         # via the ``pocketpaw.mcp_servers`` entry-point (see
@@ -985,7 +1010,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         """Collect the in-process MCP tool ids to add to the SDK allowlist.
 
         An MCP tool is only callable if its id is on the allowlist. This
-        gathers the core ripple widget-spec ids plus every cloud
+        gathers the core ripple widget-spec + atlas self-model ids plus every cloud
         ``pocketpaw.mcp_servers`` provider's ``tool_ids()`` (which includes
         the ``pocketpaw_pocket`` server's writable ``add_widget`` tool).
 
@@ -995,9 +1020,10 @@ class ClaudeSDKBackend(BaseAgentBackend):
         server name is the segment between the first and second ``__``.
         """
         from pocketpaw._registry import providers as _ext_providers
+        from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
         from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
-        ids: list[str] = list(WIDGET_TOOL_IDS)
+        ids: list[str] = list(WIDGET_TOOL_IDS) + list(ATLAS_TOOL_IDS)
         for provider in _ext_providers("pocketpaw.mcp_servers"):
             try:
                 tool_ids = list(provider.tool_ids())
@@ -1617,15 +1643,22 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # Per-MODE restrictive MCP allow-list (distinct from the additive
         # ``allow_sdk_tools`` above). ``None`` keeps every MCP tool (broad
         # surfaces like /chat). When set, keep only MCP tools that are in the
-        # mode's set, in the pocket-creation grant, a ripple widget tool, OR
-        # from an always-allowed server (connectors + pocket lifecycle).
+        # mode's set, in the pocket-creation grant, a ripple widget / atlas
+        # tool, OR from an always-allowed server (connectors + pocket
+        # lifecycle).
         # Built-in SDK tools (Read/Write/Bash/...) are NEVER filtered here —
         # only ``mcp__*`` ids — so scoping a mode can't strip core tools.
         # Applied AFTER deny so a denied id can't sneak back via the grant.
         if allow_mcp_tool_ids is not None:
+            from pocketpaw.agents.sdk_mcp_atlas import ATLAS_TOOL_IDS
             from pocketpaw.agents.sdk_mcp_widgets import WIDGET_TOOL_IDS
 
-            grant = allow_mcp_tool_ids | POCKET_CREATION_GRANT | frozenset(WIDGET_TOOL_IDS)
+            grant = (
+                allow_mcp_tool_ids
+                | POCKET_CREATION_GRANT
+                | frozenset(WIDGET_TOOL_IDS)
+                | frozenset(ATLAS_TOOL_IDS)
+            )
             before_count = len(allowed_tools)
             allowed_tools = [
                 t
