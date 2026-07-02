@@ -1,4 +1,25 @@
 # ee/pocketpaw_ee/cloud/pockets/instinct_dispatch.py
+# Updated: 2026-06-28 (AW-7 — template gate deny-on-no-match) — `gate_action`
+# takes two new kwargs, `template_default_deny` (default False) and
+# `is_mutating` (default True), that close the TEMPLATE-level deny-by-default
+# hole. Before AW-7, a template BOUND to a pocket that declared NO rule
+# matching an action yielded `resolve_instinct`'s default EXECUTE verdict
+# (reason="auto", no matched_rules) → `next_step="proceed"` → the write fired.
+# Now, when `template_default_deny` is ON and the action `is_mutating`
+# (POST/PUT/PATCH/DELETE and NOT read_only — the executor computes this from
+# the parsed binding and passes it in), that no-rule-match EXECUTE is routed
+# to the human-pending path (`next_step="pending_approval"`) instead — the
+# same `_escalate_to_human` persistence the ESCALATE_APPROVAL verdict uses.
+# READS (read_only / GET / HEAD → `is_mutating=False`) still proceed ungated:
+# a read has nothing to govern. The flip is SCOPED to the no-rule-match
+# default ONLY — a rule that matched and said EXECUTE (or a `notify_only`
+# author floor → NOTIFY_AND_EXECUTE) is an explicit policy decision and is
+# NEVER overridden. When the flag is OFF (default) every path is byte-
+# identical to before. The per-workspace override and global config default
+# that feed `template_default_deny` are resolved in `pockets/service.py`
+# (`resolve_workspace_template_default_deny`) and threaded by the router,
+# mirroring `instinct_approval_level` exactly.
+#
 # Updated: 2026-06-30 (integration/szd-finish, C1 — fail-open visibility) — each
 # discovered rule dropped at the gate (parse failure at step 3 OR eval failure
 # at step 4) now emits a best-effort AuditEvent via the new
@@ -528,6 +549,8 @@ async def gate_action(
     now: datetime | None = None,
     approval_level: ApprovalLevel | str | None = ApprovalLevel.ASK,
     dry_run_mode: bool = False,
+    template_default_deny: bool = False,
+    is_mutating: bool = True,
 ) -> InstinctGateResult:
     """Resolve the template-level Instinct verdict for one action+row.
 
@@ -564,6 +587,19 @@ async def gate_action(
     to DRY_RUN — but only AFTER the BLOCK and ASK floors, so a BLOCK row is
     still blocked and a dormant workspace still escalates to a human even
     when dry-run is globally on.
+
+    ``template_default_deny`` + ``is_mutating`` (AW-7) close the TEMPLATE-level
+    deny-by-default hole. When a bound template declares NO rule matching this
+    action, ``resolve_instinct`` returns its default EXECUTE verdict
+    (``reason="auto"``, no matched rules). If ``template_default_deny`` is True
+    AND ``is_mutating`` is True, that no-rule-match EXECUTE is routed to the
+    human-pending path instead of proceeding — finishing deny-by-default at the
+    template layer. READS (``is_mutating=False`` — the executor sets this for a
+    ``read_only`` / GET / HEAD binding) always proceed: a read has nothing to
+    govern. The flip is scoped to the no-rule-match default ONLY — a rule that
+    matched and returned EXECUTE, or a ``notify_only`` author floor
+    (NOTIFY_AND_EXECUTE), is an explicit policy decision and is never
+    overridden. Default OFF → byte-identical to the prior gate.
 
     Errors:
         ``InstinctResolutionError`` from the composer (unknown action
@@ -633,6 +669,44 @@ async def gate_action(
             park=park,
             level=level,
             dry_run_mode=dry_run_mode,
+        )
+
+    # AW-7 — TEMPLATE-level deny-on-no-match. The verdict is EXECUTE /
+    # NOTIFY_AND_EXECUTE (the BLOCK and ESCALATE_APPROVAL branches returned
+    # above). When the template declared NO rule that matched this action,
+    # `resolve_instinct` returns its default EXECUTE verdict — `reason="auto"`
+    # with no matched rules. That, plus `is_mutating`, is exactly the case
+    # deny-by-default must close: a write a bound template does not explicitly
+    # govern should park for a human, not fire silently.
+    #
+    # Scope is deliberately tight:
+    #   * verdict EXECUTE + reason "auto"  — the no-rule-match default ONLY. A
+    #     rule that matched and returned EXECUTE has a NON-"auto" reason; a
+    #     `notify_only` author floor returns NOTIFY_AND_EXECUTE. Both are
+    #     explicit policy decisions, never overridden here.
+    #   * is_mutating  — POST/PUT/PATCH/DELETE and NOT read_only (the executor
+    #     computes this from the parsed binding). A read (read_only / GET /
+    #     HEAD) has nothing to govern, so it always proceeds.
+    #   * template_default_deny  — the per-workspace/global opt-in. OFF (the
+    #     default) keeps every path byte-identical to the prior gate.
+    no_rule_matched = decision.verdict == "EXECUTE" and decision.reason == "auto"
+    if template_default_deny and is_mutating and no_rule_matched:
+        logger.info(
+            "instinct gate: template default-deny parks uncovered mutating "
+            "action=%s pocket=%s row=%s (no matching rule)",
+            action_name,
+            pocket_id,
+            row_id,
+        )
+        return await _escalate_to_human(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            pocket_id=pocket_id,
+            action_name=action_name,
+            row_id=row_id,
+            row_context=row_context,
+            decision=decision,
+            park=park,
         )
 
     # EXECUTE / NOTIFY_AND_EXECUTE — proceed. Notify rules carry through.

@@ -1,4 +1,9 @@
 # tests/cloud/test_instinct_gate_config.py
+# Updated: 2026-06-28 (AW-7 template gate deny-on-no-match) — pins the new
+# `instinct_template_default_deny` config field (default False, env
+# POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY) and its per-workspace resolution
+# (`resolve_workspace_template_default_deny` — workspace field → global default
+# → False, degrading safe on a bad id), mirroring the approval_level coverage.
 # Created: 2026-06-18 (feat/instinct-gate-foundation, T5) — config-default
 # tests for the layered/learning Instinct gate's four global settings
 # (2026-06-18 gate-layered-learning design).
@@ -59,6 +64,17 @@ def test_env_overrides_optimistic_ttl(monkeypatch) -> None:
     assert Settings().instinct_optimistic_ttl_seconds == 600
 
 
+def test_template_default_deny_defaults_off() -> None:
+    """AW-7 — the template deny-by-default ships DORMANT (False), so shipping
+    the flag changes zero behavior."""
+    assert Settings().instinct_template_default_deny is False
+
+
+def test_env_overrides_template_default_deny(monkeypatch) -> None:
+    monkeypatch.setenv("POCKETPAW_INSTINCT_TEMPLATE_DEFAULT_DENY", "true")
+    assert Settings().instinct_template_default_deny is True
+
+
 # ---------------------------------------------------------------------------
 # T-25 / T6 — per-workspace override resolution.
 # ---------------------------------------------------------------------------
@@ -105,3 +121,48 @@ async def test_resolution_degrades_safe_on_bad_id() -> None:
 
     level = await pockets_service.resolve_workspace_approval_level("not-an-objectid")
     assert level == "ASK"
+
+
+# ---------------------------------------------------------------------------
+# AW-7 — per-workspace template-default-deny resolution (mirrors the
+# approval_level resolution above).
+# ---------------------------------------------------------------------------
+
+
+async def _make_workspace_deny(flag: bool | None) -> str:
+    from pocketpaw_ee.cloud.models.workspace import Workspace
+
+    ws = Workspace(name="W", slug=f"wd-{flag}", owner="u1")
+    if flag is not None:
+        ws.instinct_template_default_deny = flag
+    await ws.insert()
+    return str(ws.id)
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_workspace_template_deny_field_overrides_global_default() -> None:
+    """A workspace that set the field True resolves True even though the global
+    default is False — the per-workspace opt-in."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    ws_id = await _make_workspace_deny(True)
+    assert await pockets_service.resolve_workspace_template_default_deny(ws_id) is True
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_workspace_template_deny_unset_falls_back_to_global_default() -> None:
+    """A workspace with no field set uses the global default (False)."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    ws_id = await _make_workspace_deny(None)
+    assert await pockets_service.resolve_workspace_template_default_deny(ws_id) is False
+
+
+@pytest.mark.usefixtures("mongo_db")
+async def test_workspace_template_deny_degrades_safe_on_bad_id() -> None:
+    """A malformed / unknown workspace id resolves to the global default (False),
+    never silently parks — a read failure must never start gating writes."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    out = await pockets_service.resolve_workspace_template_default_deny("not-an-objectid")
+    assert out is False
