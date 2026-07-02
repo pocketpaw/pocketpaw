@@ -67,14 +67,14 @@ async def test_vapid_key_endpoint_serves_public_only(app_client, enc_key) -> Non
 
 async def test_subscribe_then_unsubscribe_round_trip(app_client) -> None:
     body = {
-        "endpoint": "https://push.example/xyz",
+        "endpoint": "https://fcm.googleapis.com/fcm/send/xyz",
         "keys": {"p256dh": "PUB", "auth": "AUTH"},
         "expirationTime": None,
     }
     sub_resp = await app_client.post("/api/v1/push/subscribe", json=body)
     assert sub_resp.status_code == 200
     sub = sub_resp.json()
-    assert sub["endpoint"] == "https://push.example/xyz"
+    assert sub["endpoint"] == "https://fcm.googleapis.com/fcm/send/xyz"
     assert "id" in sub
     # Response carries no key material at all.
     assert "keys" not in sub and "p256dh" not in sub_resp.text
@@ -84,14 +84,14 @@ async def test_subscribe_then_unsubscribe_round_trip(app_client) -> None:
     assert sub_resp2.json()["id"] == sub["id"]
 
     un_resp = await app_client.post(
-        "/api/v1/push/unsubscribe", json={"endpoint": "https://push.example/xyz"}
+        "/api/v1/push/unsubscribe", json={"endpoint": "https://fcm.googleapis.com/fcm/send/xyz"}
     )
     assert un_resp.status_code == 200
     assert un_resp.json() == {"removed": True}
 
     # Second unsubscribe is a no-op.
     un_resp2 = await app_client.post(
-        "/api/v1/push/unsubscribe", json={"endpoint": "https://push.example/xyz"}
+        "/api/v1/push/unsubscribe", json={"endpoint": "https://fcm.googleapis.com/fcm/send/xyz"}
     )
     assert un_resp2.json() == {"removed": False}
 
@@ -100,7 +100,7 @@ async def test_subscribe_captures_user_agent_header(app_client) -> None:
     from pocketpaw_ee.cloud.push import service as push_service
 
     body = {
-        "endpoint": "https://push.example/ua",
+        "endpoint": "https://fcm.googleapis.com/fcm/send/ua",
         "keys": {"p256dh": "PUB", "auth": "AUTH"},
         "expirationTime": None,
     }
@@ -119,7 +119,7 @@ async def test_subscribe_captures_user_agent_header(app_client) -> None:
 
 async def test_subscribe_response_exposes_created_at(app_client) -> None:
     body = {
-        "endpoint": "https://push.example/ts",
+        "endpoint": "https://fcm.googleapis.com/fcm/send/ts",
         "keys": {"p256dh": "PUB", "auth": "AUTH"},
         "expirationTime": None,
     }
@@ -135,7 +135,7 @@ async def test_subscribe_foreign_workspace_endpoint_returns_409(app_client) -> N
 
     # Seed an endpoint owned by a DIFFERENT workspace (w2).
     foreign = {
-        "endpoint": "https://push.example/owned-by-w2",
+        "endpoint": "https://fcm.googleapis.com/fcm/send/owned-by-w2",
         "keys": {"p256dh": "PUB", "auth": "AUTH"},
         "expirationTime": None,
     }

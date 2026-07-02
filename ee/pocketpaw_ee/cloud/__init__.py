@@ -812,6 +812,16 @@ def mount_cloud(app: FastAPI) -> None:
     register_meeting_notification_listeners()
     register_meeting_calendar_listeners()
 
+    # Push notifications fan-out (#1393) — v1 product events
+    # (agent.stream_end / instinct.approval.created / meeting.started) →
+    # ``dispatch.notify``, which forks WS-vs-Web-Push so a user with both the
+    # desktop app and a browser tab open is notified exactly once. Same
+    # constraint as the other bus subscribers: register AFTER init_realtime
+    # installed the singleton bus.
+    from pocketpaw_ee.cloud.push.listeners import register_push_event_listeners
+
+    register_push_event_listeners()
+
     # In-process daily-snapshot scheduler — opt-in via env var.
     #
     # Default OFF in tests + dev (each pytest run would otherwise spawn a

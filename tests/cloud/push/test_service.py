@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 from cryptography.fernet import Fernet
-from pocketpaw_ee.cloud._core.errors import ConflictError
+from pocketpaw_ee.cloud._core.errors import ConflictError, ValidationError
 from pocketpaw_ee.cloud.models.vapid_keypair import VapidKeypair
 from pocketpaw_ee.cloud.push import service as push_service
 from pocketpaw_ee.cloud.push.dto import UnsubscribeRequest
@@ -33,12 +33,52 @@ def enc_key(monkeypatch):
     return key
 
 
-def _sub_body(endpoint: str = "https://push.example/abc") -> dict:
+def _sub_body(endpoint: str = "https://fcm.googleapis.com/fcm/send/abc") -> dict:
     return {
         "endpoint": endpoint,
         "keys": {"p256dh": "PUB256", "auth": "AUTHSECRET"},
         "expirationTime": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Subscribe — SSRF guard: only real push-service endpoints are accepted
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata (http)
+        "https://169.254.169.254/latest/meta-data/",  # metadata over https
+        "http://localhost:8888/api/v1/anything",  # internal service
+        "https://evil.example.com/collect",  # arbitrary external host
+        "https://fcm.googleapis.com.evil.com/x",  # allowlist-suffix spoof
+        "ftp://fcm.googleapis.com/x",  # non-https scheme
+    ],
+)
+async def test_subscribe_rejects_non_push_endpoint(enc_key, endpoint) -> None:
+    # Regression for the SSRF guard: an attacker-controlled endpoint that is not
+    # an https URL of a known browser push service must be rejected before any
+    # DB write, so the send path can never be coerced into POSTing to an
+    # internal/metadata host.
+    with pytest.raises(ValidationError):
+        await push_service.subscribe("w1", "u1", _sub_body(endpoint))
+    # Nothing was persisted.
+    assert await push_service.list_for_user("w1", "u1") == []
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://fcm.googleapis.com/fcm/send/abc",
+        "https://updates.push.services.mozilla.com/wpush/v2/abc",
+        "https://web.push.apple.com/abc",
+    ],
+)
+async def test_subscribe_accepts_known_push_hosts(enc_key, endpoint) -> None:
+    sub = await push_service.subscribe("w1", "u1", _sub_body(endpoint))
+    assert sub.endpoint == endpoint
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +88,7 @@ def _sub_body(endpoint: str = "https://push.example/abc") -> dict:
 
 async def test_subscribe_persists() -> None:
     sub = await push_service.subscribe("w1", "u1", _sub_body())
-    assert sub.endpoint == "https://push.example/abc"
+    assert sub.endpoint == "https://fcm.googleapis.com/fcm/send/abc"
     assert sub.workspace_id == "w1"
     assert sub.user_id == "u1"
     assert sub.keys.p256dh == "PUB256"
@@ -97,12 +137,12 @@ async def test_subscribe_default_user_agent_is_empty() -> None:
 
 
 async def test_subscribe_distinct_endpoints_create_rows() -> None:
-    await push_service.subscribe("w1", "u1", _sub_body("https://push.example/one"))
-    await push_service.subscribe("w1", "u1", _sub_body("https://push.example/two"))
+    await push_service.subscribe("w1", "u1", _sub_body("https://fcm.googleapis.com/fcm/send/one"))
+    await push_service.subscribe("w1", "u1", _sub_body("https://fcm.googleapis.com/fcm/send/two"))
     rows = await push_service.list_for_user("w1", "u1")
     assert {r.endpoint for r in rows} == {
-        "https://push.example/one",
-        "https://push.example/two",
+        "https://fcm.googleapis.com/fcm/send/one",
+        "https://fcm.googleapis.com/fcm/send/two",
     }
 
 
@@ -147,21 +187,25 @@ async def test_subscribe_exposes_created_at() -> None:
 async def test_unsubscribe_removes_row() -> None:
     await push_service.subscribe("w1", "u1", _sub_body())
     removed = await push_service.unsubscribe(
-        "w1", "u1", UnsubscribeRequest(endpoint="https://push.example/abc")
+        "w1", "u1", UnsubscribeRequest(endpoint="https://fcm.googleapis.com/fcm/send/abc")
     )
     assert removed is True
     assert await push_service.list_for_user("w1", "u1") == []
 
 
 async def test_unsubscribe_missing_returns_false() -> None:
-    removed = await push_service.unsubscribe("w1", "u1", {"endpoint": "https://push.example/nope"})
+    removed = await push_service.unsubscribe(
+        "w1", "u1", {"endpoint": "https://fcm.googleapis.com/fcm/send/nope"}
+    )
     assert removed is False
 
 
 async def test_unsubscribe_is_workspace_scoped() -> None:
     await push_service.subscribe("w1", "u1", _sub_body())
     # Another workspace can't delete w1's row even with the right endpoint.
-    removed = await push_service.unsubscribe("w2", "u1", {"endpoint": "https://push.example/abc"})
+    removed = await push_service.unsubscribe(
+        "w2", "u1", {"endpoint": "https://fcm.googleapis.com/fcm/send/abc"}
+    )
     assert removed is False
     assert len(await push_service.list_for_user("w1", "u1")) == 1
 
