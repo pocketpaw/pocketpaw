@@ -1,5 +1,13 @@
 """
 Claude Agent SDK backend for PocketPaw.
+Updated: 2026-07-02 (feat/atlas-fabric AT-7) — the ``pocketpaw_atlas`` server
+  additionally gets a per-run live Fabric introspector (``atlas/fabric.py``)
+  when — and only when — the tenant scope is a real ``ws:<id>`` (not the OSS
+  ``"default"`` scope, not the blank-id sentinel, now the module constant
+  ``_SENTINEL_TENANT_SCOPE``) AND ``pocketpaw_ee.fabric`` imports; import or
+  construction failure degrades to no-introspector (fail-closed, DEBUG log).
+  Lets agents ask atlas "what entity types exist in THIS workspace" without
+  ever baking per-tenant ontology into the compiled artifact.
 Updated: 2026-07-02 (feat/atlas-overlay AT-5) — the ``pocketpaw_atlas`` server
   is now built with a per-run ``DefaultEntitlementProvider``
   (``atlas/overlay.py``): the connector scope key resolves from THIS backend
@@ -315,6 +323,12 @@ _DEFAULT_IDENTITY = (
 )
 
 _HTTP_TRANSPORTS: frozenset[str] = frozenset({"http", "sse", "streamable-http"})
+
+# Fail-closed sentinel scope minted by ``_tenant_scope_key`` when tenancy is
+# attached with a BLANK workspace id (AT-5). Matches no connector rows and
+# must never unlock per-workspace features (e.g. the AT-7 Fabric
+# introspector) — a half-attached tenancy degrades to "nothing available".
+_SENTINEL_TENANT_SCOPE = "ws:__missing-workspace-id__"
 
 # Universal pocket-creation grant. When a surface imposes a restrictive MCP
 # allow-list (``SurfaceProfile.allow_mcp_tool_ids``), these ids are always kept
@@ -949,12 +963,31 @@ class ClaudeSDKBackend(BaseAgentBackend):
         # not enumerate tenant rows, so cloud runs conservatively report
         # every connector unavailable until the EE availability provider
         # lands. The OSS ``"default"`` scope reads live file-store state.
+        #
+        # AT-7: a real ``ws:<id>`` scope ALSO gets a live Fabric
+        # introspector (EE workspace ontology — entity types, properties,
+        # links) so atlas can answer "what entity types exist in THIS
+        # workspace". Built per run with the run's workspace id, never a
+        # process-global. The builder degrades to None (fail-closed, DEBUG
+        # log) when pocketpaw_ee isn't importable or construction fails;
+        # the "default" scope and the blank-id sentinel get NO introspector
+        # (the OSS JSONFileFabricRegistry needs an explicit registry file —
+        # there is no ambient OSS fabric registry to wire today).
         try:
             from pocketpaw.agents.sdk_mcp_atlas import build_atlas_context_server
             from pocketpaw.atlas.overlay import DefaultEntitlementProvider
 
+            tenant_scope = self._tenant_scope_key()
+            fabric_introspector = None
+            if tenant_scope.startswith("ws:") and tenant_scope != _SENTINEL_TENANT_SCOPE:
+                from pocketpaw.atlas.fabric import build_workspace_fabric_introspector
+
+                fabric_introspector = build_workspace_fabric_introspector(
+                    tenant_scope[len("ws:") :]
+                )
             atlas_server = build_atlas_context_server(
-                provider=DefaultEntitlementProvider(scope_key=self._tenant_scope_key())
+                provider=DefaultEntitlementProvider(scope_key=tenant_scope),
+                introspector=fabric_introspector,
             )
             if atlas_server is not None:
                 name, cfg_entry = atlas_server
@@ -1265,7 +1298,7 @@ class ClaudeSDKBackend(BaseAgentBackend):
         if raw is None:
             return DEFAULT_SCOPE_KEY
         ws = raw.strip()
-        return f"ws:{ws}" if ws else "ws:__missing-workspace-id__"
+        return f"ws:{ws}" if ws else _SENTINEL_TENANT_SCOPE
 
     @classmethod
     def _client_cache_key(

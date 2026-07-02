@@ -1,4 +1,9 @@
 # atlas/__init__.py — package exports for the atlas primitive (AT-1).
+# Updated: 2026-07-02 (feat/atlas-fabric, AT-7) — export the live Fabric
+# introspection seam (FabricIntrospector protocol, the EE-wired
+# build_workspace_fabric_introspector hook, and RegistryFabricIntrospector)
+# so EE wiring and tests can bind a workspace's live ontology to the atlas
+# tools; OSS installs get None from the builder (fail-closed).
 # Updated: 2026-07-02 (feat/atlas-overlay, AT-5) — export the live overlay
 # (AtlasOverlay / OverlaidEntry), the EntitlementProvider protocol, and the
 # OSS DefaultEntitlementProvider next to the store, so consumers can render
@@ -12,6 +17,11 @@
 # and can do, instead of guessing from LLM priors.
 
 from pocketpaw.atlas.compile import check_artifact, compile_atlas, write_artifact
+from pocketpaw.atlas.fabric import (
+    FabricIntrospector,
+    RegistryFabricIntrospector,
+    build_workspace_fabric_introspector,
+)
 from pocketpaw.atlas.model import AtlasEntry, AtlasModel
 from pocketpaw.atlas.overlay import (
     AtlasOverlay,
@@ -28,7 +38,10 @@ __all__ = [
     "AtlasStore",
     "DefaultEntitlementProvider",
     "EntitlementProvider",
+    "FabricIntrospector",
     "OverlaidEntry",
+    "RegistryFabricIntrospector",
+    "build_workspace_fabric_introspector",
     "check_artifact",
     "check_connector_drift",
     "compile_atlas",
