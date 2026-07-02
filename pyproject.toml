@@ -544,4 +544,5 @@ ignore_imports = [
     # dashboard_lifecycle drains the EE InProcessExecutor on shutdown via a
     # try/except runtime import; the OSS core never imports EE statically.
     "pocketpaw.dashboard_lifecycle -> pocketpaw_ee.cloud.chat.runs.executor",
+    "pocketpaw.api.v1.cloud_projects -> pocketpaw_ee.cloud.daytona",
 ]
