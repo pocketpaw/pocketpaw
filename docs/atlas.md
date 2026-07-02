@@ -166,15 +166,17 @@ deps, fully deterministic:
   order via a stable sort. These weights are unchanged since AT-1.
 - **Suffix normalizer (AT-6)** — both index and query tokens are stem
   normalized so inflected query words match singular keywords
-  ("competitors" now hits a `competitor` keyword; "matching" hits
-  `matches`). Exact rules, applied in order to a lowercased token:
-  1. strip the first matching suffix of `ing` / `ed` / `es` when the stem
-     keeps ≥ 3 chars;
-  2. otherwise strip a trailing `s` (never `ss`) when the stem keeps
+  ("competitors" now hits a `competitor` keyword; "meetings" and
+  "meeting" both reach the `meet` stem). Exact rules, repeated to a
+  fixpoint on a lowercased token:
+  1. `ies` → `y` when the stem keeps ≥ 3 chars (companies → company);
+  2. strip a trailing `s` (never `ss`/`us`/`is`) when the stem keeps
      ≥ 3 chars;
-  3. finally strip one trailing `e` when the stem keeps ≥ 3 chars (so
-     approve/approved and site/sites share a stem).
-  It is intentionally not a full stemmer (use/using still differ) — cheap
+  3. strip `ing` when the stem keeps ≥ 4 chars (meeting → meet);
+  4. strip `ed` when the stem keeps ≥ 4 chars (connected → connect).
+  There is deliberately NO trailing-`e` strip — it collided with real
+  catalog vocabulary (state → stat, notes → not, sites → sit).
+  It is intentionally not a full stemmer (approve/approved still differ) — cheap
   and deterministic over linguistically complete. Known remaining
   weakness (documented by the atlas eval): generic review/approve
   vocabulary can still pull sibling primitives close together; fixing
