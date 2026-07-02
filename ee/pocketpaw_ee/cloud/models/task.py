@@ -15,6 +15,13 @@
 #   empty) carrying the planner's machine-verifiable criteria. No
 #   migration — Mongo absorbs them on next write; old docs read back as
 #   ``[]``. Unblocks completion-time verification (pocketpaw#1162).
+# Updated: 2026-07-02 (feat/svl-5-cloud-verify) — added ``verify``
+#   (dict, default empty): Self-Verifying Loop state stamped by the
+#   cloud planner terminal (SVL-5). Keys: ``verdict`` (last
+#   OutcomeVerdict dump), ``feedback`` (cumulative rejected-attempt
+#   records), ``requeue_count`` (verify-driven requeues, SEPARATE from
+#   error retries), ``escalation_reason`` (budget_exhausted |
+#   no_progress). No migration — old docs read back as ``{}``.
 """Task document — Mission Control work-item primitive.
 
 Embedded sub-documents:
@@ -117,6 +124,17 @@ class Task(TimestampedDocument):
     # verification (pocketpaw#1162). Old docs read back as ``[]``.
     success_criteria: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
+
+    # Self-Verifying Loop state stamped by the cloud planner terminal
+    # (SVL-5). Keys: ``verdict`` — the last OutcomeVerdict dump for a
+    # verified run; ``feedback`` — cumulative rejected-attempt records
+    # (attempt, status, summary, unmet_criteria[{criterion, detail}]);
+    # ``requeue_count`` — verify-driven requeues, SEPARATE from any
+    # error-retry counter; ``escalation_reason`` — ``budget_exhausted``
+    # | ``no_progress`` when the loop gave up. Empty when the
+    # ``cloud_plan_verify_loop_enabled`` flag is off or the task never
+    # ran through the planner terminal. Old docs read back as ``{}``.
+    verify: dict[str, Any] = Field(default_factory=dict)
 
     due_at: datetime | None = None
     blocked_reason: str | None = None
