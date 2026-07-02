@@ -158,6 +158,14 @@ def check_connector_drift(store: AtlasStore, live_names: set[str] | None = None)
             live_names = _scan_live_connector_names()
         if atlas_names == live_names:
             return False
+        if not live_names:
+            # No connector YAMLs visible from this process (installed wheel,
+            # CWD outside the repo). That's an environment fact, not a stale
+            # artifact — rebuilding wouldn't change anything. Stay quiet.
+            logger.debug(
+                "atlas connector drift check skipped: no live connector definitions visible"
+            )
+            return False
         missing = sorted(live_names - atlas_names)
         extra = sorted(atlas_names - live_names)
         logger.warning(
