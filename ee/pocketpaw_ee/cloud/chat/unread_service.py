@@ -76,6 +76,27 @@ async def list_unreads(user_id: str, workspace_id: str) -> list[dict]:
     return out
 
 
+async def unread_count(user_id: str, group_id: str) -> int:
+    """Unread message count for a single ``(user, group)`` pair.
+
+    The per-group half of :func:`list_unreads`, exposed so callers that only
+    care about one conversation (e.g. the push new-message notifier) can get a
+    count without scanning every group the user belongs to. Same safe default:
+    a user with no ReadState row — or a row whose ``last_read_message_id`` is
+    the empty string — counts the group's full ``message_count`` (everything
+    is unread until a ``mark_read`` corrects it).
+    """
+    state = await _get_read_state(user_id, group_id)
+    if state is not None and state.last_read_message_id:
+        return await _count_messages_after(group_id, state.last_read_message_id)
+
+    try:
+        group = await _GroupDoc.get(PydanticObjectId(group_id))
+    except Exception:
+        group = None
+    return group.message_count if group else 0
+
+
 async def mark_read(user_id: str, group_id: str, last_message_id: str) -> None:
     """Upsert read state for (user, group). Resets mention_unread to 0.
 
@@ -123,4 +144,4 @@ async def bump_mention(user_id: str, group_id: str) -> None:
     )
 
 
-__all__ = ["bump_mention", "list_unreads", "mark_read"]
+__all__ = ["bump_mention", "list_unreads", "mark_read", "unread_count"]

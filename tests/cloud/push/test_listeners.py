@@ -15,6 +15,7 @@ import pytest
 from pocketpaw_ee.cloud._core.realtime.events import (
     AgentStreamEnd,
     InstinctApprovalCreated,
+    MessageSent,
 )
 from pocketpaw_ee.cloud.meetings.events import MeetingStarted
 from pocketpaw_ee.cloud.push import listeners
@@ -29,6 +30,18 @@ def notify_calls(monkeypatch):
 
     monkeypatch.setattr(listeners.dispatch, "notify", fake_notify)
     return calls
+
+
+@pytest.fixture(autouse=True)
+def _no_coalesce(monkeypatch):
+    """Run on_new_message with the coalescer OFF (pass-through) so these tests
+    assert the recipient/payload logic directly. The leading-edge throttle has
+    its own dedicated suite in test_coalesce.py. ``reset()`` clears any window
+    state so a lingering task can't leak into the next test."""
+    monkeypatch.setenv("CLOUD_PUSH_COALESCE_SECONDS", "0")
+    listeners.coalesce.reset()
+    yield
+    listeners.coalesce.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -138,4 +151,127 @@ async def test_meeting_started_notifies_group_for_livekit(notify_calls, monkeypa
 
 async def test_meeting_started_noop_without_meeting(notify_calls) -> None:
     await listeners.on_meeting_started(MeetingStarted(data={"workspace_id": "w1"}))
+    assert notify_calls == []
+
+
+# ---------------------------------------------------------------------------
+# new-message (message.sent) — user↔user notifications
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def new_message_env(monkeypatch):
+    """Patch the group + unread lookups so on_new_message needs no Mongo."""
+
+    async def fake_ws_id(group_id):
+        return "w-msg"
+
+    async def fake_members(group_id):
+        return ["alice", "bob", "carol"]
+
+    async def fake_count(user_id, group_id):
+        return 3
+
+    monkeypatch.setattr(listeners, "_group_workspace_id", fake_ws_id)
+    monkeypatch.setattr(listeners, "_group_member_ids", fake_members)
+    monkeypatch.setattr(listeners, "_unread_count", fake_count)
+
+
+async def test_new_message_notifies_other_members_with_count(
+    notify_calls, new_message_env
+) -> None:
+    event = MessageSent(
+        data={
+            "group_id": "g1",
+            "sender_id": "alice",
+            "senderName": "Alice",
+            "senderType": "user",
+        }
+    )
+    await listeners.on_new_message(event)
+
+    # Alice is the sender → excluded; only bob + carol are notified.
+    assert {uid for _, uid, _ in notify_calls} == {"bob", "carol"}
+    assert all(ws == "w-msg" for ws, _, _ in notify_calls)
+    # Title names the sender; body carries ONLY the count (no message text).
+    assert all(p["title"] == "Alice" for _, _, p in notify_calls)
+    assert all(p["body"] == "3 new messages" for _, _, p in notify_calls)
+    # Collapse per-conversation so a later message updates the same toast.
+    assert all(p["tag"] == "g1" for _, _, p in notify_calls)
+
+
+async def test_new_message_body_never_leaks_content(notify_calls, new_message_env) -> None:
+    secret = "wire me $10k to account 12345"
+    event = MessageSent(
+        data={
+            "group_id": "g1",
+            "sender_id": "alice",
+            "senderName": "Alice",
+            "senderType": "user",
+            "content": secret,
+        }
+    )
+    await listeners.on_new_message(event)
+
+    assert notify_calls  # sanity: it did notify
+    for _, _, payload in notify_calls:
+        assert secret not in payload["body"]
+        assert secret not in payload["title"]
+
+
+async def test_new_message_singular_count_body(notify_calls, monkeypatch) -> None:
+    async def fake_ws_id(group_id):
+        return "w"
+
+    async def fake_members(group_id):
+        return ["a", "b"]
+
+    async def fake_count(user_id, group_id):
+        return 1
+
+    monkeypatch.setattr(listeners, "_group_workspace_id", fake_ws_id)
+    monkeypatch.setattr(listeners, "_group_member_ids", fake_members)
+    monkeypatch.setattr(listeners, "_unread_count", fake_count)
+
+    event = MessageSent(
+        data={"group_id": "g", "sender_id": "a", "senderName": "A", "senderType": "user"}
+    )
+    await listeners.on_new_message(event)
+
+    assert notify_calls
+    assert all(p["body"] == "1 new message" for _, _, p in notify_calls)
+
+
+async def test_new_message_skips_agent_authored(notify_calls, monkeypatch) -> None:
+    # An agent-authored message.sent (senderType != "user") must not fire here;
+    # agent replies are covered by on_agent_complete (agent.stream_end).
+    async def boom(*_a, **_k):
+        raise AssertionError("agent-authored message must not resolve recipients")
+
+    monkeypatch.setattr(listeners, "_group_workspace_id", boom)
+
+    await listeners.on_new_message(
+        MessageSent(data={"group_id": "g", "sender_id": "bot", "senderType": "agent"})
+    )
+    assert notify_calls == []
+
+
+async def test_new_message_noop_without_group(notify_calls) -> None:
+    await listeners.on_new_message(MessageSent(data={"sender_id": "a", "senderType": "user"}))
+    assert notify_calls == []
+
+
+async def test_new_message_noop_when_sender_is_only_member(notify_calls, monkeypatch) -> None:
+    async def fake_ws_id(group_id):
+        return "w"
+
+    async def fake_members(group_id):
+        return ["solo"]
+
+    monkeypatch.setattr(listeners, "_group_workspace_id", fake_ws_id)
+    monkeypatch.setattr(listeners, "_group_member_ids", fake_members)
+
+    await listeners.on_new_message(
+        MessageSent(data={"group_id": "g", "sender_id": "solo", "senderType": "user"})
+    )
     assert notify_calls == []

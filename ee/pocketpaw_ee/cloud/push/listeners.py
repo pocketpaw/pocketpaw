@@ -7,6 +7,14 @@
 # resolving recipients + a small {title, body, url?} payload, registered from
 # ``mount_cloud`` after ``init_realtime`` installs the singleton bus.
 #
+# Updated: 2026-07-02 (feat/push-user-message-notifications) — wired
+# ``message.sent`` → ``on_new_message`` so a human-to-human message notifies the
+# group's OTHER human members. The body is generic-with-a-count ("N new
+# messages") — the message text never reaches the OS notification surface
+# (lock-screen privacy). Only the human ``message_add`` path emits
+# ``message.sent``; agent replies ride ``agent.stream_end`` (on_agent_complete),
+# so there is no double-notify.
+#
 # v1 events wired (those with a real emission point + a resolvable recipient):
 #   - agent.stream_end           → agent-complete. Recipients = the group's
 #                                  human members (resolved off the group the
@@ -35,7 +43,7 @@ import logging
 from typing import Any
 
 from pocketpaw_ee.cloud._core.realtime.events import Event
-from pocketpaw_ee.cloud.push import dispatch
+from pocketpaw_ee.cloud.push import coalesce, dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +91,32 @@ async def _dispatch(workspace_id: str, user_id: str, payload: dict[str, Any]) ->
             workspace_id,
             user_id,
         )
+
+
+async def _unread_count(user_id: str, group_id: str) -> int:
+    """Unread count for one (user, group), for the new-message body. Best-effort.
+
+    Falls back to ``1`` on any error so the notification body still reads
+    sensibly ("1 new message") rather than "0 new messages".
+    """
+    try:
+        from pocketpaw_ee.cloud.chat import unread_service
+
+        return await unread_service.unread_count(user_id, group_id)
+    except Exception:
+        logger.exception(
+            "push: unread count failed for user=%s group=%s", user_id, group_id
+        )
+        return 1
+
+
+def _count_body(count: int) -> str:
+    """Generic, content-free body carrying only the unread count.
+
+    The message text is deliberately NOT included — a human-to-human push
+    lands on the lock screen, so only the count crosses that surface.
+    """
+    return "1 new message" if count <= 1 else f"{count} new messages"
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +194,69 @@ async def on_meeting_started(event: Event) -> None:
         await _dispatch(workspace_id, recipient, payload)
 
 
+async def on_new_message(event: Event) -> None:
+    """message.sent → notify a group's OTHER human members of a new message.
+
+    Generic-with-a-count: the title names the sender, the body is only the
+    unread count ("N new messages") — the message text never reaches the OS
+    notification surface. The sender is excluded (no self-ping), and the
+    WS-vs-Web-Push dedupe in ``dispatch.notify`` means only members with no
+    live connection actually receive a Web Push.
+
+    Only the human ``message_add`` path emits ``message.sent``; the
+    ``senderType != "user"`` guard is defensive belt-and-braces so an
+    agent-authored message can never double-fire alongside
+    ``on_agent_complete`` (agent.stream_end).
+
+    ``message.sent`` carries the wire dict (camelCase ``senderName`` /
+    ``senderType``) plus ``group_id`` + ``sender_id`` but NO ``workspace_id``,
+    so the workspace is resolved from the group — mirroring on_agent_complete.
+
+    Each send is routed through the leading-edge coalescer (push/coalesce.py):
+    the first message pings instantly, a burst within the cooldown collapses to
+    one trailing send. The emit closure recomputes the unread count at send
+    time, so both the leading and any trailing push carry a current count.
+    """
+    data = event.data or {}
+    group_id = data.get("group_id")
+    if not group_id:
+        return
+    if data.get("senderType") not in (None, "user"):
+        return
+
+    workspace_id = await _group_workspace_id(group_id)
+    if not workspace_id:
+        return
+
+    sender_id = data.get("sender_id")
+    recipients = [uid for uid in await _group_member_ids(group_id) if uid != sender_id]
+    if not recipients:
+        return
+
+    title = data.get("senderName") or "New message"
+    url = f"/?join={group_id}"
+    for recipient in recipients:
+        # ``recipient`` is bound as a default arg so the closure captures THIS
+        # iteration's value (the other captured names are constant per call).
+        # The count is recomputed inside so a coalesced trailing send reflects
+        # the accumulated unread total. ``tag`` is the group id so the OS
+        # collapses a conversation's notifications into one updating toast.
+        async def _emit(recipient: str = recipient) -> None:
+            count = await _unread_count(recipient, group_id)
+            await _dispatch(
+                workspace_id,
+                recipient,
+                {
+                    "title": title,
+                    "body": _count_body(count),
+                    "url": url,
+                    "tag": group_id,
+                },
+            )
+
+        await coalesce.submit((workspace_id, recipient, group_id), _emit)
+
+
 # ---------------------------------------------------------------------------
 # Registration — called from mount_cloud() after init_realtime.
 # ---------------------------------------------------------------------------
@@ -178,6 +275,7 @@ def register_push_event_listeners() -> None:
     bus.subscribe("agent.stream_end", on_agent_complete)
     bus.subscribe("instinct.approval.created", on_guardian_block)
     bus.subscribe("meeting.started", on_meeting_started)
+    bus.subscribe("message.sent", on_new_message)
     logger.info("registered v1 product events → push notification dispatch")
 
 
@@ -185,5 +283,6 @@ __all__ = [
     "on_agent_complete",
     "on_guardian_block",
     "on_meeting_started",
+    "on_new_message",
     "register_push_event_listeners",
 ]
