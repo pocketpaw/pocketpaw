@@ -1,5 +1,9 @@
 <!--
   Connectors documentation.
+  Updated: 2026-07-02 (AW-3 egress default-close) — clarified the "Development
+  against localhost" section: the egress guard rejects internal/metadata IPs BY
+  DEFAULT; POCKETPAW_ALLOW_INTERNAL_URLS opens the escape ONLY when set to an
+  explicit truthy value; unset ⇒ reject (safe production posture).
   Updated: 2026-06-28 (AW-1/AW-2 connector egress guard) — added the "Egress
   allow-list (SSRF protection)" section: the POCKETPAW_CONNECTOR_EGRESS_GUARD
   flag (default-deny posture, off by default for safe rollout), the optional
@@ -304,16 +308,22 @@ supported (the resolved-IP internal check still applies to them).
 
 ### Development against localhost
 
+The egress guard **rejects internal/loopback/private/metadata IPs by default**.
+When `POCKETPAW_ALLOW_INTERNAL_URLS` is unset (or set to anything other than an
+explicit truthy value), a resolved internal IP is blocked — this is the safe
+production posture and needs no configuration.
+
 For local development against internal hosts (Ollama, a dev API on `127.0.0.1`),
-set the dev escape:
+set the dev escape **explicitly**:
 
 ```bash
 POCKETPAW_ALLOW_INTERNAL_URLS=true
 ```
 
-This permits resolved internal IPs **while the guard still enforces the
-allow-list** — so a localhost connector keeps working in development without
-disabling the guard entirely.
+Only an explicit `true` / `1` opens the escape. It permits resolved internal
+IPs **while the guard still enforces the allow-list** — so a localhost connector
+keeps working in development without disabling the guard entirely. This is a
+dev-only flag; leave it unset in production so internal IPs stay rejected.
 
 ### Guarantees
 

@@ -20,9 +20,20 @@
 #   lookup between the check and the connect — closing the DNS-rebind TOCTOU.
 #   The EE ``_http_guard`` re-exports these so it stays the canonical entry
 #   point; the OSS connector engine imports them directly (the OSS->EE import
-#   boundary forbids importing ``pocketpaw_ee`` from core). When
-#   ``POCKETPAW_ALLOW_INTERNAL_URLS`` is set (dev escape) internal resolved
-#   IPs are permitted so localhost connectors keep working in development.
+#   boundary forbids importing ``pocketpaw_ee`` from core). The egress guard is
+#   DEFAULT-CLOSED on internal IPs: it uses ``_egress_allow_internal()`` (not
+#   the permissive ``_allow_internal()`` that legacy config-URL validation
+#   uses), which permits internal resolved IPs ONLY when
+#   ``POCKETPAW_ALLOW_INTERNAL_URLS`` is EXPLICITLY truthy — the dev escape for
+#   localhost connectors. Unset ⇒ reject, matching the EE ``_http_guard``.
+# Updated: 2026-07-02 (AW-3 egress default-close fix) — closed the default-OPEN
+#   SSRF hole: ``assert_egress_allowed`` previously called ``_allow_internal()``,
+#   which returns True when the env var is UNSET (its correct behaviour for
+#   permissive config-URL validation). With the connector guard ON but the env
+#   var unset (the realistic prod state) a resolved internal/metadata IP
+#   (169.254.169.254) slipped through and got pinned. The egress guard now uses
+#   ``_egress_allow_internal()`` which defaults to reject. ``_allow_internal()``
+#   is unchanged — ``validate_external_url`` stays permissive-by-design.
 # Updated: 2026-06-28 (AW-2 cookie-jar fix) — ``PinnedTransport`` now RESTORES
 #   the request's original (hostname) URL after the inner transport returns.
 #   ``httpx.AsyncClient`` runs ``cookies.extract_cookies(response)`` AFTER the
@@ -108,6 +119,27 @@ def _allow_internal() -> bool:
         val = _read_dotenv_flag()
     if val is None:
         return True
+    return val.strip().lower() in _TRUTHY
+
+
+def _egress_allow_internal() -> bool:
+    """Egress-guard variant of :func:`_allow_internal` — DEFAULTS TO REJECT.
+
+    The egress guard (:func:`assert_egress_allowed`) protects outbound
+    connector HTTP against SSRF, so its internal-IP block must be default-ON.
+    Unlike :func:`_allow_internal` (which is permissive-by-design for config
+    URLs and returns True when the flag is unset), this returns True ONLY when
+    ``POCKETPAW_ALLOW_INTERNAL_URLS`` is EXPLICITLY truthy ("true"/"1"/…) — the
+    dev escape that keeps localhost connectors working in development. Unset or
+    any non-truthy value ⇒ False (reject internal IPs), matching the EE
+    ``_http_guard._assert_host_external`` which rejects internal hosts
+    unconditionally.
+    """
+    val = os.getenv("POCKETPAW_ALLOW_INTERNAL_URLS")
+    if val is None:
+        val = _read_dotenv_flag()
+    if val is None:
+        return False
     return val.strip().lower() in _TRUTHY
 
 
@@ -268,8 +300,11 @@ async def assert_egress_allowed(url: str, allowed_hosts: set[str] | frozenset[st
       allow-list-confusion vectors (the real host can hide after the ``@``).
     * The hostname MUST be in ``allowed_hosts`` (compared case-insensitively).
     * DNS resolves the host and EVERY resolved IP is rejected if internal
-      (loopback / RFC1918 / link-local / metadata / reserved), unless the dev
-      escape ``POCKETPAW_ALLOW_INTERNAL_URLS`` permits internal hosts.
+      (loopback / RFC1918 / link-local / metadata / reserved) BY DEFAULT.
+      Internal IPs are permitted ONLY when ``POCKETPAW_ALLOW_INTERNAL_URLS`` is
+      EXPLICITLY truthy (the dev escape for localhost connectors); when the flag
+      is unset the guard rejects — default-closed, matching the EE
+      ``_http_guard`` which rejects internal hosts unconditionally.
 
     Returns an :class:`EgressTarget` carrying the single pinned IP. The caller
     MUST dial that IP via :class:`PinnedTransport` so the connection cannot be
@@ -303,7 +338,7 @@ async def assert_egress_allowed(url: str, allowed_hosts: set[str] | frozenset[st
     if not ips:
         raise EgressError(f"host '{host}' resolved to no addresses")
 
-    allow_internal = _allow_internal()
+    allow_internal = _egress_allow_internal()
     for ip in ips:
         if _ip_is_internal(ip) and not allow_internal:
             raise EgressError(f"host '{host}' resolves to an internal address")

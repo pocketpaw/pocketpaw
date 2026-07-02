@@ -30,6 +30,13 @@
 #       error instead of silently disabling the guard (concern fix 1);
 #     * explicit ``allowed_hosts:`` (YAML) and per-workspace allowed_hosts (via
 #       connect() config) are layered on top of the auto-seeded hosts.
+# Updated: 2026-07-02 (AW-3 egress default-close) — added
+#   ``test_internal_rejected_when_flag_unset``: with POCKETPAW_ALLOW_INTERNAL_URLS
+#   UNSET (delenv, not just "false"), an allow-listed host resolving to a
+#   metadata IP is still rejected — proves the guard is default-closed. Also
+#   dropped the dead ``yaml_engine.get_settings`` no-op patch in
+#   ``TestEgressGuardFailsClosed`` (the method imports get_settings locally from
+#   pocketpaw.config, so only the config_mod patch is load-bearing).
 
 from __future__ import annotations
 
@@ -131,6 +138,23 @@ class TestAssertEgressAllowed:
         )
         with pytest.raises(EgressError, match="internal address"):
             await assert_egress_allowed("https://rebind.example.com/", {"rebind.example.com"})
+
+    async def test_internal_rejected_when_flag_unset(self, monkeypatch):
+        """AW-3 default-close: with POCKETPAW_ALLOW_INTERNAL_URLS UNSET (the
+        realistic prod state), an allow-listed host that resolves to a metadata
+        IP must STILL be rejected. Before the fix the egress guard reused the
+        permissive ``_allow_internal()`` (unset ⇒ True), so this pinned the
+        internal address — default-OPEN SSRF. The guard now defaults to reject."""
+        # The autouse fixture pins the flag to "false"; delete it entirely so we
+        # exercise the genuine unset path, not the explicit-false path.
+        monkeypatch.delenv("POCKETPAW_ALLOW_INTERNAL_URLS", raising=False)
+        monkeypatch.setattr(
+            socket, "getaddrinfo", _fake_getaddrinfo({"metadata.example.com": ["169.254.169.254"]})
+        )
+        with pytest.raises(EgressError, match="internal address"):
+            await assert_egress_allowed(
+                "https://metadata.example.com/latest/meta-data", {"metadata.example.com"}
+            )
 
     async def test_internal_allowed_with_dev_escape(self, monkeypatch):
         # POCKETPAW_ALLOW_INTERNAL_URLS=true is the documented dev escape.
@@ -579,15 +603,14 @@ class TestEgressGuardFailsClosed:
     def test_fails_closed_on_settings_error(self, monkeypatch, caplog):
         import logging
 
-        from pocketpaw.connectors import yaml_engine
         from pocketpaw.connectors.yaml_engine import DirectRESTAdapter
 
         def _boom():
             raise RuntimeError("settings blew up")
 
-        # Patch get_settings at its source so the import inside the method hits
-        # the raising stub.
-        monkeypatch.setattr(yaml_engine, "get_settings", _boom, raising=False)
+        # ``_egress_guard_enabled`` imports get_settings locally from
+        # pocketpaw.config, so patch it there — that binding is what the method
+        # actually resolves.
         import pocketpaw.config as config_mod
 
         monkeypatch.setattr(config_mod, "get_settings", _boom)
