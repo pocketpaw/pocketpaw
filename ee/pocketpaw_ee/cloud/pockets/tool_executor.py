@@ -95,6 +95,16 @@ async def run_tool(
         tool=tool,
         result=result,
     )
+    # Also record to the workspace audit (MongoDB) for the rich-activity
+    # feed so agent tool executions show up with proper target detail and
+    # are visible via GET /workspaces/{id}/audit.
+    _record_workspace_tool_audit(
+        workspace_id=workspace_id,
+        pocket_id=pocket_id,
+        user_id=user_id,
+        tool=tool,
+        result=result,
+    )
     return result
 
 
@@ -109,7 +119,7 @@ def _audit_tool_run(
     """Write ONE append-only audit-log entry for a ``run_tool`` invocation.
 
     Mirrors ``action_executor._audit_action_run`` — category
-    ``pocket_backend_config``, action ``pocket.tools.run``, ``target`` the
+    ``pocket_tool_run``, action ``pocket.tools.run``, ``target`` the
     pocket, ``actor`` the clicking user, ``workspace_id`` logged so entries are
     tenant-filterable. Severity by outcome: a successful READ (``ok`` True and
     NOT a pending write-proposal) is normal operation → ``INFO``; everything
@@ -139,7 +149,7 @@ def _audit_tool_run(
                 action="pocket.tools.run",
                 target=pocket_id,
                 status=status,
-                category="pocket_backend_config",
+                category="pocket_tool_run",
                 workspace_id=workspace_id,
                 tool=tool,
                 code=code,
@@ -147,6 +157,50 @@ def _audit_tool_run(
         )
     except Exception:  # noqa: BLE001 — audit must never break the run
         logger.warning("pocket tool-run audit-log write failed", exc_info=True)
+
+
+def _record_workspace_tool_audit(
+    *,
+    workspace_id: str,
+    pocket_id: str,
+    user_id: str,
+    tool: str,
+    result: dict[str, Any],
+) -> None:
+    """Write a workspace audit event for a tool execution.
+
+    Mirrors the runtime audit above but records into the workspace audit
+    (MongoDB) so agent tool executions appear in the rich-activity feed
+    (GET /workspaces/{id}/audit) with proper target detail. Never raises
+    — an audit failure must not break the run.
+    """
+    try:
+        from pocketpaw_ee.cloud.audit import service as _audit_service
+
+        code = result.get("code") or "ok"
+        ok = result.get("ok")
+
+        # Use asyncio.create_task to fire-and-forget — the record() call is
+        # async and we're in a sync helper called from an async function.
+        import asyncio
+
+        asyncio.ensure_future(
+            _audit_service.record(
+                workspace_id=workspace_id,
+                actor_id=user_id,
+                action="workspace.agent.tool_executed",
+                target_type="tool",
+                target_id=tool,
+                metadata={
+                    "pocket_id": pocket_id,
+                    "code": code,
+                    "ok": ok,
+                    "source": "pocket_page",
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — audit must never break the run
+        logger.warning("pocket tool-run workspace-audit record failed", exc_info=True)
 
 
 async def _run_tool_dispatch(

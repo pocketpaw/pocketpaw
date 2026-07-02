@@ -1,6 +1,46 @@
 # ee/pocketpaw_ee/sites/service.py — Sites control-plane orchestration. Sole
 # owner of Site writes.
 #
+# Updated 2026-07-02 (harden native-editing endpoints): (1) ``get_native_artifact``
+# now routes its arm build through ``_build_or_cloud_error`` (like the publish paths)
+# so a missing-toolchain / non-zero build / SmokeGateFailed becomes a clean
+# CloudError (``sites.generator_failed``) instead of an opaque 500 (DEP-3); (2)
+# ``apply_leaf_edits`` wraps the leaf-edit CLI bridge + result parse and maps its
+# RuntimeError / KeyError / IndexError / TypeError to ``Internal("sites.leaf_edit_failed")``
+# — a structured envelope, not a 500; and (3) it now SPLITS a dynamic svelte pocket's
+# source envelope (``_split_svelte_source``) so the CLI receives ONLY the file map and
+# the persist loop is CONFINED to the input file keyspace — a binding key
+# (objects/sources/actions/auth) or a CLI-invented path is never written back as a
+# component file.
+#
+# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added
+# ``get_native_artifact`` — the backend of the native shadow-render path. It ensures
+# the pocket's ARMED svelte build (builder_origin set, so the paw-sites generator
+# stamps ``data-uid`` on the editable leaves + embeds the ``paw-edit-manifest``
+# script) via a DIRECT ``GeneratorClient.build`` (smoke=False, the same arm/preview
+# gate ``make_site_editable`` uses) and returns the built ``<body>`` inner HTML +
+# concatenated CSS as a dict, so the native editor can inject it into a shadow root
+# instead of framing an iframe. The built static output is located by the returned
+# ``BuildResult.project_dir`` + ``.svelte-kit/cloudflare/index.html`` — the SAME tree
+# ``_default_bundle_reader`` reads ``_worker.js`` from and ``local_server`` copies to
+# serve. A non-svelte pocket raises ValidationError (422); a missing / cross-tenant
+# pocket surfaces the pockets service's NotFound / Forbidden (404 / 403).
+# ``_generator`` + ``_read_built`` are injectable seams so the path is unit-testable
+# without Bun / a real build.
+#
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added
+# ``apply_leaf_edits`` — the backend of the native site-editing persist path. It
+# splices the native editor's forwarded ``{uid, op}`` leaf edits into the pocket's
+# svelte ``source`` map via ``generator_client.apply_leaf_edits`` (the paw-sites
+# apply-leaf-edit CLI, a PURE transform — no build/workerd) and persists ONLY the
+# changed files through ``pockets_service.set_svelte_source_file`` (each write
+# auto-writes a Branch draft). Unlike ``edit_svelte_component`` it does NOT
+# republish/rebuild — the editor already rendered the edit optimistically, so
+# persisting the reviewable draft is the whole job. Empty edits / a non-svelte
+# pocket raise ValidationError (422); a missing / cross-tenant pocket surfaces as
+# the pockets service's NotFound / Forbidden (404 / 403). ``_apply`` is an
+# injectable bridge seam so the path is unit-testable without Bun.
+#
 # Updated 2026-06-26 (feat/sites-dev-bridge-source, S1 — dev source carries the
 # edit-bridge): ``dev_preview_pocket`` gained an optional ``builder_origin`` and
 # threads it to ``get_manager().ensure_dev_server(builder_origin=...)`` so the
@@ -422,6 +462,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -461,6 +502,12 @@ logger = logging.getLogger(__name__)
 # The control plane reads the Worker bundle adapter-cloudflare emits here.
 _WORKER_BUNDLE_REL = ".svelte-kit/cloudflare/_worker.js"
 
+# The prerendered static site adapter-cloudflare emits (index.html + the
+# ``_app/...`` assets) — the SAME tree ``_default_bundle_reader`` reads
+# ``_worker.js`` from and ``local_server.persist_site`` copies to serve. NE-5b reads
+# the armed build's index.html + CSS from here.
+_CLOUDFLARE_BUILD_REL = ".svelte-kit/cloudflare"
+
 # BP-2: the source pocket is the versionable artifact behind a site. The Branch
 # primitive (BP-1) keys every version on (scope_type, scope_id); for a site the
 # scope is the pocket it is published from.
@@ -491,6 +538,74 @@ _MAX_PENDING_DEPLOY_INPUT_BYTES = 4_000_000
 
 def _default_bundle_reader(project_dir: str) -> bytes:
     return Path(project_dir, _WORKER_BUNDLE_REL).read_bytes()
+
+
+def _extract_body_inner(html: str) -> str:
+    """Return the INNER HTML of the built page's ``<body>`` (NE-5b).
+
+    The prerendered ``index.html`` wraps the data-uid-stamped leaves + the embedded
+    ``<script id="paw-edit-manifest">`` in ``<body>…</body>``; the native editor
+    injects only that inner markup into a shadow root, so the ``<html>``/``<head>``
+    chrome is stripped. Falls back to the whole document if (defensively) no body tag
+    is present — a prerendered SvelteKit page always has one."""
+    m = re.search(r"<body[^>]*>(.*)</body>", html, re.DOTALL | re.IGNORECASE)
+    return (m.group(1) if m else html).strip()
+
+
+def _extract_css(html: str, cloudflare_dir: Path) -> str:
+    """Concatenate the built page's CSS into ONE string the native editor injects as
+    a single ``<style>`` (NE-5b).
+
+    Collects, in document order: (1) any inline ``<style>…</style>`` blocks
+    (SvelteKit can inline critical CSS), then (2) every ``<link rel="stylesheet">``
+    stylesheet, read from disk under the built ``.svelte-kit/cloudflare/`` tree. The
+    prerendered index links assets with either a RELATIVE (``./_app/…``) or ABSOLUTE
+    (``/_app/…``) href, so both are resolved against the build dir. Each resolved
+    path is contained to the build tree (a ``../`` traversal in a hand-authored
+    component's link is refused) before it is read."""
+    parts: list[str] = []
+    for style in re.findall(r"<style[^>]*>(.*?)</style>", html, re.DOTALL | re.IGNORECASE):
+        if style.strip():
+            parts.append(style.strip())
+
+    root = cloudflare_dir.resolve()
+    for tag in re.findall(r"<link\b[^>]*>", html, re.IGNORECASE):
+        if not re.search(r"""rel\s*=\s*["']?stylesheet""", tag, re.IGNORECASE):
+            continue
+        href_m = re.search(r"""href\s*=\s*["']([^"']+)["']""", tag, re.IGNORECASE)
+        if not href_m:
+            continue
+        rel = href_m.group(1).split("?", 1)[0].split("#", 1)[0]
+        if rel.startswith("./"):
+            rel = rel[2:]
+        rel = rel.lstrip("/")
+        if not rel:
+            continue
+        css_path = (cloudflare_dir / rel).resolve()
+        # Refuse to read outside the built output tree (defensive — the hrefs come
+        # from our own generator, but a component author controls the leaf markup).
+        try:
+            css_path.relative_to(root)
+        except ValueError:
+            continue
+        if css_path.is_file():
+            text = css_path.read_text(encoding="utf-8").strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def _read_native_artifact(project_dir: str) -> tuple[str, str]:
+    """Read the armed build's ``<body>`` inner HTML + concatenated CSS from the built
+    static output (NE-5b) — the default ``_read_built`` seam.
+
+    ``project_dir`` is the ``BuildResult.project_dir`` the generator returns; the
+    prerendered site lives under ``<project_dir>/.svelte-kit/cloudflare/`` (the SAME
+    tree ``_default_bundle_reader`` / ``local_server`` read). Returns
+    ``(body_html, css)``."""
+    cloudflare_dir = Path(project_dir, _CLOUDFLARE_BUILD_REL)
+    html = (cloudflare_dir / "index.html").read_text(encoding="utf-8")
+    return _extract_body_inner(html), _extract_css(html, cloudflare_dir)
 
 
 async def _build_or_cloud_error(
@@ -2115,6 +2230,208 @@ def apply_edits(source: str, edits: list[dict[str, str]]) -> str:
             )
         result = result.replace(old, new, 1)
     return result
+
+
+async def apply_leaf_edits(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    edits: list[dict[str, Any]],
+    _apply: Any = None,
+) -> list[dict[str, Any]]:
+    """Persist native-editor leaf edits as a reviewable Branch draft (NE-4b).
+
+    The backend of the native site-editing persist path. The native editor forwards
+    a batch of ``{uid, op}`` leaf edits it has ALREADY rendered optimistically; this
+    splices them into the pocket's svelte ``source`` map via the paw-sites
+    ``apply-leaf-edit`` CLI (a PURE transform — no build, no workerd) and persists
+    each CHANGED file through the pockets service, which auto-writes a Branch draft
+    ArtifactVersion snapshotting the full edited source map. There is NO
+    republish/rebuild: persisting the draft is the whole job — the deliberate UX win
+    over ``edit_svelte_component``'s per-edit iframe rebuild (the editor already
+    shows the change; an approved review is what later takes it live).
+
+    Steps:
+      1. reject an empty edit batch (``ValidationError`` → 422);
+      2. read the pocket (the pockets service's public ``get`` raises NotFound /
+         Forbidden itself — a missing / cross-tenant pocket is 404 / 403) and assert
+         it is a svelte site (else ``ValidationError`` → 422);
+      3. splice via the generator bridge — edits apply IN ORDER, and a rejected edit
+         leaves ITS file byte-identical in the returned source;
+      4. persist ONLY the files whose contents actually changed (so a rejected edit
+         naturally persists nothing and never churns an empty draft), each write
+         auto-writing the Branch draft snapshot;
+      5. return the per-uid verdicts unchanged.
+
+    ``_apply`` is an injectable seam for the generator bridge (defaults to
+    ``generator_client.apply_leaf_edits``) so the orchestration is unit-testable
+    without Bun / workerd.
+    """
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+    from pocketpaw_ee.sites import generator_client
+
+    if not isinstance(edits, list) or not edits:
+        raise ValidationError(
+            "site_leaf_edit.empty_edits",
+            "apply_leaf_edits requires a non-empty list of {uid, op} leaf edits.",
+        )
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component source map to edit.",
+        )
+    source_map = pocket["source"]
+
+    # DSV-5 binding-key safety: a DYNAMIC svelte pocket's source envelope carries its
+    # live-data bindings (objects/sources/actions/auth) as SIBLING keys of the
+    # {path: contents} SvelteKit files. Split them out exactly like the build path
+    # (_split_svelte_source): the leaf-edit CLI must receive ONLY the file map (it
+    # treats every source key as a file, so a binding key mixed in would break the
+    # splice), and the persist loop below is CONFINED to this input file keyspace so a
+    # binding key is never written back as a component file and a brand-new key the
+    # CLI might invent is never persisted.
+    files, _bindings = generator_client._split_svelte_source(source_map)
+
+    # Splice the {uid, op} edits into the file map via the apply-leaf-edit CLI. The
+    # bridge raises a bare RuntimeError on a non-zero exit / timed-out splice, and the
+    # result parse can KeyError / IndexError / TypeError on malformed CLI output — map
+    # them all to a clean CloudError (sites.leaf_edit_failed → 5xx) so the client gets
+    # a structured envelope with a reason instead of an opaque unhandled 500 (the
+    # cloud error handler maps ONLY CloudError). A CloudError raised inside is
+    # re-raised unchanged; the cause is chained for logs, never leaked to the client.
+    try:
+        out = await (_apply or generator_client.apply_leaf_edits)(source=files, edits=edits)
+        new_map, results = out["source"], out["results"]
+    except CloudError:
+        raise
+    except (RuntimeError, KeyError, IndexError, TypeError) as exc:
+        logger.error("sites.apply_leaf_edits: leaf-edit bridge failed", exc_info=True)
+        raise with_cause(
+            Internal(
+                "sites.leaf_edit_failed",
+                "Applying the edits failed — the editing toolchain is unavailable or "
+                "returned an unexpected result. See server logs for details.",
+            ),
+            exc,
+        ) from exc
+
+    # Persist ONLY the files that actually changed, CONFINED to the input file
+    # keyspace. A rejected edit leaves its file byte-identical (the CLI contract), so
+    # this comparison naturally skips it — no empty draft churn. A binding key or a
+    # brand-new path the CLI echoed / invented is NOT in ``files``, so it is skipped
+    # too (never persisted as a component file — set_svelte_source_file would
+    # otherwise overwrite a live-data binding or 404 on an unknown path). Each write
+    # auto-writes a Branch draft snapshotting the FULL edited map, so after the loop
+    # the draft == the fully edited source. Multi-file safe.
+    for path, contents in new_map.items():
+        if path not in files:
+            continue
+        if files.get(path) != contents:
+            await pockets_service.set_svelte_source_file(
+                pocket_id, user_id, component_path=path, new_source=contents
+            )
+
+    return results
+
+
+async def get_native_artifact(
+    *,
+    workspace_id: str,
+    user_id: str,
+    pocket_id: str,
+    builder_origin: str | None = None,
+    _generator: GeneratorClient | None = None,
+    _read_built: Callable[[str], tuple[str, str]] | None = None,
+) -> dict[str, str]:
+    """Serve a svelte Paw Site's ARMED build as ``{pocket_id, body_html, css}`` so the
+    native editor can shadow-render it (NE-5b) instead of framing an iframe.
+
+    The native-editing render path. It:
+      1. reads the pocket (the pockets service's PUBLIC ``get`` raises NotFound /
+         Forbidden itself — a missing / cross-tenant pocket surfaces as 404 / 403)
+         and asserts it is a svelte site (else ``ValidationError`` → 422), mirroring
+         ``apply_leaf_edits`` / ``edit_svelte_component``;
+      2. ENSURES the ARMED build: it builds the pocket with ``builder_origin`` set so
+         the paw-sites generator stamps ``data-uid`` on the editable leaves AND embeds
+         the ``<script id="paw-edit-manifest">`` (SE-1 / EP-6 gate on ``builderOrigin``).
+         ``builder_origin`` defaults to the configured dashboard origin
+         (``PAW_SITES_BUILDER_ORIGIN``) exactly like ``make_site_editable``, so the
+         call works with no explicit origin. It builds via a DIRECT
+         ``GeneratorClient.build`` — the SAME arm/preview gate ``make_site_editable``
+         uses (``smoke=False`` skips the SSR FAIL-check but the static build still
+         runs; ``static_build`` stays the default ``True`` so ``.svelte-kit/cloudflare/``
+         is emitted) — instead of the full ``publish_pocket`` preview path, because
+         this is a READ: it needs neither a deploy, a Site doc, a promote, nor billing,
+         and ``build()`` RETURNS the ``project_dir`` so the built output is located
+         without reconstructing a path. PERF-3 builds into the stable
+         ``build_home()/<pocket_id>/`` so node_modules / bun install stay cached;
+      3. reads the built ``<body>`` inner HTML + concatenated CSS from that
+         ``project_dir``'s ``.svelte-kit/cloudflare/index.html`` (the SAME tree
+         ``_default_bundle_reader`` / ``local_server`` read) and returns them.
+
+    ``_generator`` (defaults to a real ``GeneratorClient``) and ``_read_built``
+    (defaults to ``_read_native_artifact`` — the disk read + HTML/CSS extraction) are
+    injectable seams so the path is unit-testable without Bun / a real build."""
+    from pocketpaw_ee.cloud.pockets import service as pockets_service
+
+    # The pockets service's PUBLIC get raises NotFound / Forbidden itself (entity
+    # isolation) — a missing / cross-tenant pocket surfaces as 404 / 403.
+    pocket = await pockets_service.get(pocket_id, user_id)
+    if (pocket.get("engine") or "ripple") != "svelte" or not isinstance(pocket.get("source"), dict):
+        raise ValidationError(
+            "pocket.not_svelte_site",
+            "This pocket is not a svelte Paw Site — it has no component build to render.",
+        )
+    source = pocket["source"]
+    # theme rides the build on both engine tracks (mirrors publish_pocket); a svelte
+    # pocket has no rippleSpec, so it resolves to {}.
+    ripple_spec = pocket.get("rippleSpec") or {}
+    theme = (ripple_spec.get("theme") if isinstance(ripple_spec, dict) else {}) or {}
+    site_name = (pocket.get("name") or "").strip() or "Untitled site"
+
+    # Arm the build: a NON-EMPTY builder_origin is what makes the generator stamp
+    # data-uid + embed the manifest. Default to the configured dashboard origin when
+    # the caller passes none, exactly like make_site_editable.
+    origin = (builder_origin or "").strip() or _builder_origin()
+    generator = _generator or GeneratorClient()
+    # DEP-3: route the arm build through _build_or_cloud_error (the SAME helper the
+    # publish paths at ~1152 / ~1293 use) so a missing-toolchain / non-zero build /
+    # SmokeGateFailed becomes a clean CloudError (sites.generator_failed → 5xx)
+    # instead of escaping as an opaque unhandled 500. Unlike edit_svelte_component's
+    # preview build (map_smoke_gate=False, which preserves its
+    # rollback-on-SmokeGateFailed contract), this is a READ-ONLY render with no source
+    # mutation to roll back, so SmokeGateFailed is mapped too (default
+    # map_smoke_gate=True) — the caller just gets a structured error.
+    build = await _build_or_cloud_error(
+        generator,
+        ripple_spec=ripple_spec,
+        theme=theme,
+        # Transient, per-pocket-stable id — cosmetic here (it only rides the built
+        # page's capture config, which the native editor ignores). The build DIR is
+        # keyed on pocket_id (PERF-3), not this, so it does not affect where the
+        # output lands.
+        site_id=_preview_id(pocket_id),
+        title=site_name,
+        capture_api_base=_capture_base(),
+        capture_signed_key=f"site_key_{secrets.token_urlsafe(24)}",
+        engine="svelte",
+        source=source,
+        builder_origin=origin,
+        pocket_id=pocket_id,
+        # Arm/preview gate: skip the SSR FAIL-check but STILL emit the static
+        # .svelte-kit/cloudflare/ output (static_build defaults True) so there is an
+        # index.html to read.
+        smoke=False,
+    )
+
+    read = _read_built or _read_native_artifact
+    body_html, css = read(build.project_dir)
+    return {"pocket_id": pocket_id, "body_html": body_html, "css": css}
 
 
 async def edit_svelte_component(

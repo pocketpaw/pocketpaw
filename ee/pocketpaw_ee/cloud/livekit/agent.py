@@ -7,7 +7,13 @@ as a silent listener participant and transcribes the conversation using
 Deepgram's speech-to-text API.
 
 1. Connects to the LiveKit room via ``livekit.rtc.Room`` (WebRTC)
-2. Subscribes to all remote audio tracks
+2. Subscribes to remote MICROPHONE AUDIO tracks only — never video or
+   screenshare. The room is joined with ``auto_subscribe=False`` and each
+   audio publication is opted in via ``_should_subscribe`` /
+   ``publication.set_subscribed(True)``. This keeps the bot's per-participant
+   load flat: auto-subscribe would otherwise pull (and decode) every
+   participant's video, which the bot never uses (Bug A — the call got
+   unstable past a few participants).
 3. Pipes each track through Deepgram STT streaming for real-time transcription
 4. Accumulates transcript segments with speaker identification
 5. Detects when the room empties (via polling + room events)
@@ -54,6 +60,38 @@ _CALL_END_GRACE_SECONDS = 5
 
 # How often (seconds) to poll room state
 _MONITOR_POLL_INTERVAL = 5
+
+
+# ---------------------------------------------------------------------------
+# Track subscription policy
+# ---------------------------------------------------------------------------
+
+
+def _should_subscribe(publication: Any) -> bool:
+    """Decide whether the call bot should subscribe to a remote publication.
+
+    The meeting-notes bot only transcribes participant microphone audio, so it
+    subscribes to microphone audio publications and nothing else — never video
+    (camera or screenshare) and never screenshare system audio. Combined with
+    ``auto_subscribe=False`` on connect, this keeps the bot's per-participant
+    load flat instead of pulling and decoding every participant's video.
+
+    Kept as a small pure function (it only reads ``publication.kind`` and
+    ``publication.source``) so the subscribe decision is unit-testable without
+    standing up the whole LiveKit SDK.
+    """
+    # ``kind`` / ``source`` are protobuf int enums (TrackKind.ValueType /
+    # TrackSource.ValueType), NOT strings — comparing against "audio" silently
+    # never matches.
+    from livekit.rtc import TrackKind, TrackSource
+
+    if getattr(publication, "kind", None) != TrackKind.KIND_AUDIO:
+        return False
+    # ``source`` may be SOURCE_UNKNOWN when the publisher didn't tag the track;
+    # treat untagged audio as a microphone (the common plain-audio publish) so
+    # we don't drop real speech. Screenshare system audio is excluded.
+    source = getattr(publication, "source", TrackSource.SOURCE_UNKNOWN)
+    return source in (TrackSource.SOURCE_MICROPHONE, TrackSource.SOURCE_UNKNOWN)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +242,12 @@ class CallMeetingAgent:
         """
         import aiohttp
 
+        # Declared before the try so the finally block can always clean them
+        # up — even if the livekit import below fails.
+        stt_streams: dict[str, Any] = {}  # participant identity → Deepgram stream
+        pipe_tasks: dict[str, asyncio.Task] = {}  # participant identity → audio pipe task
+        http_session: Any = None
+
         try:
             from livekit.plugins.deepgram import STT as DeepgramSTT
             from livekit.rtc import (
@@ -214,13 +258,13 @@ class CallMeetingAgent:
                 TrackSource,
             )
 
-            room_opts = RoomOptions(auto_subscribe=True)
+            # auto_subscribe=False: do NOT pull every participant's tracks.
+            # The bot opts in to microphone audio only (see _should_subscribe),
+            # so it never decodes the video/screenshare it has no use for —
+            # which is what made the call unstable past a few participants.
+            room_opts = RoomOptions(auto_subscribe=False)
             room = Room(loop=asyncio.get_event_loop())
             self._rtc_room = room
-
-            # Track STT streams keyed by participant identity
-            stt_streams: dict[str, Any] = {}
-            pipe_tasks: dict[str, asyncio.Task] = {}
 
             # Shared HTTP session for Deepgram (avoids "outside job context" error)
             http_session = aiohttp.ClientSession()
@@ -295,6 +339,34 @@ class CallMeetingAgent:
                     )
 
             # ------------------------------------------------------------------
+            # Helper: opt in to a participant's microphone publications
+            # ------------------------------------------------------------------
+            def _subscribe_mic_publications(participant: RemoteParticipant) -> None:
+                """Subscribe to a participant's mic audio publications only.
+
+                With ``auto_subscribe=False`` nothing is subscribed by default,
+                so we explicitly opt in to microphone audio (and never video /
+                screenshare) via ``_should_subscribe``.
+                """
+                for pub in participant.track_publications.values():
+                    if _should_subscribe(pub) and not pub.subscribed:
+                        logger.info(
+                            "Agent: subscribing to %s's mic audio track",
+                            participant.name or participant.identity,
+                        )
+                        pub.set_subscribed(True)
+
+            # ------------------------------------------------------------------
+            # Helper: close a Deepgram STT stream (fire-and-forget on disconnect)
+            # ------------------------------------------------------------------
+            async def _aclose_stt_stream(stt_stream: Any, pid: str) -> None:
+                """Close a Deepgram WebSocket stream so it doesn't leak."""
+                try:
+                    await stt_stream.aclose()
+                except Exception as exc:
+                    logger.debug("Error closing STT stream for %s: %s", pid, exc)
+
+            # ------------------------------------------------------------------
             # Event handlers (set up BEFORE connect to avoid race conditions)
             # ------------------------------------------------------------------
 
@@ -309,14 +381,44 @@ class CallMeetingAgent:
                     participant.name or pid,
                     pid,
                 )
+                # Opt in to any mic audio they already have published; tracks
+                # published later are picked up by the track_published handler.
+                _subscribe_mic_publications(participant)
                 asyncio.create_task(_setup_audio_pipe_for_participant(participant))
+
+            @room.on("track_published")
+            def on_track_published(publication: Any, participant: Any) -> None:
+                """Subscribe to newly published microphone audio only.
+
+                With ``auto_subscribe=False`` the server forwards a track only
+                once we subscribe, so this is where we opt in to mic audio (and
+                skip video / screenshare entirely).
+                """
+                pid = participant.identity if participant else ""
+                if not pid or pid == "call-bot":
+                    return
+                if _should_subscribe(publication) and not publication.subscribed:
+                    logger.info(
+                        "Agent: subscribing to %s's published mic audio track",
+                        participant.name or pid,
+                    )
+                    publication.set_subscribed(True)
 
             @room.on("participant_disconnected")
             def on_participant_disconnected(participant: RemoteParticipant) -> None:
-                """Clean up when a participant leaves."""
+                """Clean up when a participant leaves.
+
+                Cancels the audio pipe task and closes the participant's
+                Deepgram WebSocket so it doesn't leak for the rest of a long
+                call.
+                """
                 pid = participant.identity
-                stt_streams.pop(pid, None)
-                pipe_tasks.pop(pid, None)
+                stt_stream = stt_streams.pop(pid, None)
+                pipe_task = pipe_tasks.pop(pid, None)
+                if pipe_task is not None:
+                    pipe_task.cancel()
+                if stt_stream is not None:
+                    asyncio.create_task(_aclose_stt_stream(stt_stream, pid))
                 logger.info(
                     "Agent: participant disconnected: %s",
                     pid,
@@ -328,13 +430,13 @@ class CallMeetingAgent:
                 publication: Any,
                 participant: Any,
             ) -> None:
-                """Fallback: handle any tracks that get auto-subscribed.
+                """Safety net: ensure a pipe exists for a subscribed mic track.
 
-                This is a safety net in case ``from_participant`` doesn't
-                cover all scenarios. We only act if we don't already have
-                a pipe for this participant.
+                With ``auto_subscribe=False`` this fires only for tracks we
+                explicitly subscribed to (mic audio), but we still guard with
+                ``_should_subscribe`` and skip if a pipe already exists.
                 """
-                if track.kind != "audio":
+                if not _should_subscribe(publication):
                     return
                 pid = participant.identity if participant else ""
                 if not pid or pid == "call-bot":
@@ -381,14 +483,9 @@ class CallMeetingAgent:
                 )
                 asyncio.create_task(_setup_audio_pipe_for_participant(participant))
 
-                # Also explicitly subscribe to any audio publications as backup
-                for pub in participant.track_publications.values():
-                    if pub.kind == "audio" and not pub.subscribed:
-                        logger.info(
-                            "Agent: explicitly subscribing to %s's audio track",
-                            participant.name or pid,
-                        )
-                        pub.set_subscribed(True)
+                # Explicitly opt in to their mic audio publications (needed
+                # under auto_subscribe=False so the server forwards the track).
+                _subscribe_mic_publications(participant)
 
             logger.info(
                 "Agent: transcription running for room %s (watching %d participants)",
@@ -417,17 +514,21 @@ class CallMeetingAgent:
 
             logger.error("Traceback:\n%s", traceback.format_exc())
         finally:
+            # Cancel any still-running audio pipe tasks
+            for t in pipe_tasks.values():
+                t.cancel()
             # Clean up STT streams
-            for pid, s in list(stt_streams.items()):
+            for s in list(stt_streams.values()):
                 try:
                     await s.aclose()
                 except Exception:
                     pass
-            # Clean up the HTTP session
-            try:
-                await http_session.close()
-            except Exception:
-                pass
+            # Clean up the HTTP session (may be None if the import failed)
+            if http_session is not None:
+                try:
+                    await http_session.close()
+                except Exception:
+                    pass
 
     async def _pipe_audio_to_stt(
         self,

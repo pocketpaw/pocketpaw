@@ -82,6 +82,7 @@ from pocketpaw_ee.cloud.shared.deps import (
     current_workspace_id,
     require_group_action,
 )
+from pocketpaw_ee.cloud.shared.errors import CloudError
 from pocketpaw_ee.cloud.shared.errors import Forbidden as CloudForbidden
 from pocketpaw_ee.cloud.workspace import service as workspace_service
 from pocketpaw_ee.guards.deps import check_workspace_action
@@ -675,6 +676,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(Non
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
+                # Heartbeat: clients ping to keep the socket warm through idle-
+                # closing edge proxies (e.g. Cloudflare drops idle WebSockets
+                # after ~100s). Reply pong and skip the message-handling path.
+                if isinstance(data, dict) and data.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
                 msg = WsInbound.model_validate(_normalize_ws_inbound(data))
             except Exception:
                 await websocket.send_json(
@@ -768,36 +775,52 @@ async def _schedule_presence_offline(user_id: str) -> None:
 
 
 async def _handle_ws_message(websocket: WebSocket, user_id: str, msg: WsInbound) -> None:
-    """Dispatch validated WebSocket message to the appropriate handler."""
-    if msg.type == "message.send":
-        await _ws_message_send(user_id, msg)
-    elif msg.type == "message.edit":
-        await _ws_message_edit(user_id, msg)
-    elif msg.type == "message.delete":
-        await _ws_message_delete(user_id, msg)
-    elif msg.type == "message.react":
-        await _ws_message_react(user_id, msg)
-    elif msg.type == "typing.start":
-        await _ws_typing(user_id, msg, active=True)
-    elif msg.type == "typing.stop":
-        await _ws_typing(user_id, msg, active=False)
-    elif msg.type == "presence.update":
-        pass  # Will be wired in Task 19
-    elif msg.type == "read.ack":
-        await _ws_read_ack(user_id, msg)
-    elif msg.type == "thread.create":
-        await _ws_thread_create(user_id, msg)
-    elif msg.type == "thread.close":
-        await _ws_thread_close(user_id, msg)
-    elif msg.type == "thread.send":
-        await _ws_thread_send(user_id, msg)
-    elif msg.type == "room.join":
+    """Dispatch validated WebSocket message to the appropriate handler.
+
+    Catches ``CloudError`` (Forbidden, NotFound, etc.) from service calls and
+    sends an error response to the client so the user sees a toast rather than
+    the message being silently swallowed.
+    """
+    try:
+        if msg.type == "message.send":
+            await _ws_message_send(user_id, msg)
+        elif msg.type == "message.edit":
+            await _ws_message_edit(user_id, msg)
+        elif msg.type == "message.delete":
+            await _ws_message_delete(user_id, msg)
+        elif msg.type == "message.react":
+            await _ws_message_react(user_id, msg)
+        elif msg.type == "typing.start":
+            await _ws_typing(user_id, msg, active=True)
+        elif msg.type == "typing.stop":
+            await _ws_typing(user_id, msg, active=False)
+        elif msg.type == "presence.update":
+            pass  # Will be wired in Task 19
+        elif msg.type == "read.ack":
+            await _ws_read_ack(user_id, msg)
+        elif msg.type == "thread.create":
+            await _ws_thread_create(user_id, msg)
+        elif msg.type == "thread.close":
+            await _ws_thread_close(user_id, msg)
+        elif msg.type == "thread.send":
+            await _ws_thread_send(user_id, msg)
+        elif msg.type == "room.join":
+            if msg.group_id:
+                members = await group_service.list_member_ids(msg.group_id)
+                if user_id in members:
+                    manager.join_room(websocket, msg.group_id)
+        elif msg.type == "room.leave":
+            manager.leave_room(websocket)
+    except CloudError as e:
+        extra: dict[str, Any] = {}
         if msg.group_id:
-            members = await group_service.list_member_ids(msg.group_id)
-            if user_id in members:
-                manager.join_room(websocket, msg.group_id)
-    elif msg.type == "room.leave":
-        manager.leave_room(websocket)
+            extra["group_id"] = msg.group_id
+        await websocket.send_json(
+            WsOutbound(
+                type="error",
+                data={"code": e.code, "message": e.message, **extra},
+            ).model_dump(mode="json")
+        )
 
 
 async def _ws_message_send(user_id: str, msg: WsInbound) -> None:

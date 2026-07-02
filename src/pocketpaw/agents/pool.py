@@ -77,7 +77,9 @@ from typing import TYPE_CHECKING, Any
 from pocketpaw.agents.errors import AgentBackendUnavailable, AgentNotFound
 
 if TYPE_CHECKING:
-    from pocketpaw.agents.backend import AgentBackend
+    from collections.abc import Callable
+
+    from pocketpaw.agents.backend import AgentBackend, LeasedClient, SessionHandle
     from pocketpaw.soul import SoulManager
 
 logger = logging.getLogger(__name__)
@@ -403,6 +405,9 @@ class AgentPool:
         allow_mcp_tool_ids: frozenset[str] | None = None,
         system_message_override: str | None = None,
         skill_names: frozenset[str] = frozenset(),
+        session_handle: SessionHandle | None = None,
+        warm_client: LeasedClient | None = None,
+        on_client_built: Callable[[Any, str, Callable], None] | None = None,
     ) -> AsyncIterator[Any]:
         """Run an agent on a message. Yields AgentEvent stream.
 
@@ -446,6 +451,14 @@ class AgentPool:
         their narrower signature). The Claude SDK backend materializes exactly
         those skills into a throwaway local plugin so ONLY the named skills are
         surfaced to the agent for this run. Empty = legacy all-skills behavior.
+
+        ``warm_client`` / ``on_client_built`` (feat/warm-reuse WH-1) let the
+        SessionSupervisor (WH-2/WH-3) drive the turn against a caller-LEASED warm
+        client. They ride the SAME withhold-when-empty contract as the kwargs
+        above — forwarded to the backend's ``run`` ONLY when set, so the 6
+        non-Claude backends keep their narrower signature and only the Claude SDK
+        backend acts on them. Both unset (the default) = the unchanged legacy
+        warm-client path.
         """
         instance = await self.get(agent_id)
         instance.last_active = datetime.now(UTC)
@@ -518,6 +531,25 @@ class AgentPool:
             # non-empty. Empty = legacy all-skills advertise behavior.
             if skill_names:
                 run_kwargs["skill_names"] = skill_names
+            # Native-resume handle (feat/session-supervisor SS-1). Same
+            # withhold-when-empty rule as the kwargs above: only the Claude SDK
+            # backend accepts ``session_handle`` (it passes a non-None
+            # ``cli_session_id`` as ``ClaudeAgentOptions.resume`` and routes the
+            # turn down the fresh-launch path); the other backends keep the
+            # narrower signature, so the handle is forwarded ONLY when non-None.
+            # None = legacy warm-client path, unchanged for every existing run.
+            if session_handle is not None:
+                run_kwargs["session_handle"] = session_handle
+            # Leased warm-client seam (feat/warm-reuse WH-1). Same
+            # withhold-when-empty rule: only the Claude SDK backend accepts
+            # ``warm_client`` / ``on_client_built`` (it drives the turn against the
+            # leased client or hands the supervisor a freshly-built one); the other
+            # backends keep the narrower signature, so each is forwarded ONLY when
+            # set. Both unset = the unchanged legacy warm-client path.
+            if warm_client is not None:
+                run_kwargs["warm_client"] = warm_client
+            if on_client_built is not None:
+                run_kwargs["on_client_built"] = on_client_built
             async for event in instance.backend.run(message, **run_kwargs):
                 instance.last_active = datetime.now(UTC)
                 yield event

@@ -112,6 +112,17 @@
 # tenant's window so the llm_provisioning entity never reads the credit ledger doc
 # directly (the credits service owns reads of its own ``CreditLedgerEntry``). It
 # performs NO writes — shadow mode debits nothing.
+# Changed 2026-06-29 (fix/billing-usage-ledger-source): added ``spend_by_model`` —
+# a read-only, tenant-filtered breakdown of spend credits by (UTC day, model)
+# over a ``createdAt`` window, summed across the spend causes
+# (``compute_spend`` + ``litellm_spend``, only ``applied`` entries). The billing
+# usage graph reads through it so the "Usage by model" chart is sourced from the
+# wallet's OWN ledger (the universal meter, mode-agnostic) instead of the LiteLLM
+# proxy — which is empty in the default off-mode where finished runs debit the
+# ledger directly and never route through the proxy. EE entity-isolation: billing
+# must not read ``CreditLedgerEntry`` itself, so this owns the read (sibling to
+# ``sum_debits_by_cause``). It performs NO writes and changes NOTHING that is
+# charged — a pure re-source of the display.
 
 from __future__ import annotations
 
@@ -126,7 +137,7 @@ from pymongo.errors import DuplicateKeyError
 from pocketpaw_ee.cloud._core.errors import InsufficientCredits, ValidationError
 from pocketpaw_ee.cloud._core.realtime.emit import emit
 from pocketpaw_ee.cloud._core.realtime.events import CreditMovement
-from pocketpaw_ee.cloud.credits.domain import GrantResult, LedgerEntry
+from pocketpaw_ee.cloud.credits.domain import GrantResult, LedgerEntry, ModelSpendRow
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 
 logger = logging.getLogger(__name__)
@@ -471,6 +482,79 @@ async def sum_debits_by_cause(
     return total, len(entries)
 
 
+async def spend_by_model(
+    workspace: str,
+    *,
+    since: datetime,
+    until: datetime,
+    causes: tuple[str, ...] = ("compute_spend", "litellm_spend"),
+) -> list[ModelSpendRow]:
+    """Break a workspace's spend down by (UTC day, model) over a window.
+
+    Returns one ``ModelSpendRow`` per (day, model) that had spend in the window,
+    summed across ``causes``. This is the read the billing usage graph uses so the
+    "Usage by model" chart is sourced from the wallet's OWN ledger — the universal
+    meter — rather than the LiteLLM proxy. The two spend causes
+    (``compute_spend`` in the default off-mode, ``litellm_spend`` after a live
+    cutover) are mutually exclusive per run, so reading both is safe: a given run
+    is billed under exactly one cause and an off->live cutover leaves both in
+    history with no double-count.
+
+    The window is on ``createdAt``: ``since`` is inclusive (``>=``), ``until`` is
+    EXCLUSIVE (``<``) — identical to ``sum_debits_by_cause`` so adjacent windows
+    never double-count a boundary entry. Only ``applied is True`` entries are
+    counted (a committed-but-unapplied phantom never moved the wallet, so it must
+    not appear on the chart, the same rule ``reconcile`` enforces).
+
+    Per entry: ``day`` is ``createdAt.date()`` in UTC (``YYYY-MM-DD``); ``model``
+    is ``ref.model`` or ``"unknown"`` when the debit carried no model (real
+    charged spend with no model still counts toward the day so the chart
+    reconciles with the wallet); ``credits`` is the POSITIVE amount debited (a
+    stray positive delta is clamped out, like ``sum_debits_by_cause``). ``requests``
+    is the COUNT of entries in the (day, model) group — the ledger ``ref`` does not
+    carry a token count, so tokens are not recoverable here (a follow-up could add
+    ``total_tokens`` to the debit ``ref``).
+
+    EE entity-isolation: billing must not read ``CreditLedgerEntry`` directly, so
+    this owns the read (sibling to ``sum_debits_by_cause``). It performs NO writes.
+    """
+    if not workspace:
+        raise ValidationError("credits.invalid_workspace", "workspace is required")
+
+    query: dict[str, Any] = {
+        "workspace": workspace,
+        "cause": {"$in": list(causes)},
+        "applied": True,
+        "createdAt": {"$gte": since, "$lt": until},
+    }
+    entries = await CreditLedgerEntry.find(query).to_list()
+
+    # In-Python aggregation over the fetched window (bounded — matches
+    # ``sum_debits_by_cause``). Group by (UTC day, model); sum positive-debited
+    # credits and count entries. A stray positive ``amount_delta`` under a spend
+    # cause (there should be none — spend is debit-only) is skipped so a bad row
+    # can't make a group read as a refund.
+    grouped: dict[tuple[str, str], list[int]] = {}  # (day, model) -> [credits, requests]
+    for e in entries:
+        delta = int(e.amount_delta)
+        if delta >= 0:
+            continue
+        created = getattr(e, "createdAt", None)
+        if created is None:
+            continue
+        day = created.date().isoformat()
+        ref = e.ref or {}
+        model = ref.get("model") or "unknown"
+        bucket = grouped.setdefault((day, model), [0, 0])
+        bucket[0] += -delta  # positive credits debited
+        bucket[1] += 1  # one more request in this group
+
+    return [
+        ModelSpendRow(day=day, model=model, credits=credits, requests=requests)
+        for (day, model), (credits, requests) in grouped.items()
+    ]
+
+
 async def history(
     workspace: str,
     *,
@@ -669,6 +753,7 @@ async def reconcile(workspace: str) -> int:
 
 __all__ = [
     "GrantResult",
+    "ModelSpendRow",
     "balance",
     "check_balance",
     "debit",
@@ -676,5 +761,6 @@ __all__ = [
     "history",
     "is_recorded",
     "reconcile",
+    "spend_by_model",
     "sum_debits_by_cause",
 ]

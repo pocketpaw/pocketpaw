@@ -78,7 +78,10 @@ class MemberDayDigest(BaseModel):
     # uses it to emit no block at all rather than an empty heading.
     errors: list[str] = Field(default_factory=list)
 
-    @computed_field  # serializes — API consumers branch on it (intent board)
+    # return_type is explicit because Cython-compiled methods don't expose the
+    # `-> bool` annotation to Pydantic's @computed_field when ee ships as .so
+    # (feat/ee-cython-compile). Harmless when running from readable source.
+    @computed_field(return_type=bool)  # serializes — API consumers branch on it
     @property
     def empty(self) -> bool:
         """True when there is nothing to brief: no events AND no mail."""

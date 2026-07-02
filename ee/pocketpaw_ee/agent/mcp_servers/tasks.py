@@ -34,6 +34,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_system_event, record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_tasks"
@@ -125,6 +127,15 @@ async def _list_my_tasks_handler(args: dict) -> dict:
 
     from pocketpaw_ee.cloud.tasks import service as tasks_service
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_tasks",
+        tool_name="_list_my_tasks",
+        status="ok",
+        ok=True,
+    )
+
     status = args.get("status") or "proposed"
     limit_raw = args.get("limit") or 50
     try:
@@ -154,6 +165,23 @@ async def _claim_task_handler(args: dict) -> dict:
             "from inside a cloud SSE chat stream"
         )
 
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_tasks",
+        tool_name="_claim_task",
+        status="ok",
+        ok=True,
+    )
+    record_system_event(
+        workspace_id=workspace_id,
+        actor_id=agent_id or "agent",
+        event_type="agent.task.claim",
+        description="Agent claimed task",
+        status="completed",
+        metadata={"task_id": args.get("task_id", "")},
+    )
+
     task_id = args.get("task_id")
     if not isinstance(task_id, str) or not task_id:
         return _error_response("task_id is required (string)")
@@ -180,6 +208,26 @@ async def _complete_task_handler(args: dict) -> dict:
             "no active workspace/agent — complete_task can only be called "
             "from inside a cloud SSE chat stream"
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_tasks",
+        tool_name="_complete_task",
+        status="ok",
+        ok=True,
+    )
+    record_system_event(
+        workspace_id=workspace_id,
+        actor_id=agent_id or "agent",
+        event_type="agent.task.complete",
+        description="Agent completed task",
+        status="completed",
+        metadata={
+            "task_id": args.get("task_id", ""),
+            "next_action": args.get("next_action", "archive"),
+        },
+    )
 
     task_id = args.get("task_id")
     if not isinstance(task_id, str) or not task_id:
@@ -231,6 +279,23 @@ async def _create_task_handler(args: dict) -> dict:
             "no active workspace/agent — create_task can only be called "
             "from inside a cloud SSE chat stream"
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_tasks",
+        tool_name="_create_task",
+        status="ok",
+        ok=True,
+    )
+    record_system_event(
+        workspace_id=workspace_id,
+        actor_id=agent_id or "agent",
+        event_type="agent.task.create",
+        description="Agent created task: " + (args.get("title", "") or "")[:60],
+        status="completed",
+        metadata={"title": args.get("title", ""), "assignee": args.get("assignee_id", "")},
+    )
 
     title = args.get("title")
     if not isinstance(title, str) or not title:

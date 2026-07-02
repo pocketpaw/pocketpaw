@@ -19,7 +19,7 @@ import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from pocketpaw.uploads.adapter import StorageAdapter, StoredObject
+from pocketpaw.uploads.adapter import StorageAdapter, StorageItem, StoredObject
 from pocketpaw.uploads.errors import NotFound, StorageFailure
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,107 @@ class S3StorageAdapter(StorageAdapter):
             )
         except Exception:
             return None
+
+    async def list_prefix(self, prefix: str) -> list[str]:
+        """Return the unique "sub-folder" names under ``prefix``.
+
+        Uses ``list_objects_v2`` with a ``/`` delimiter so that nested
+        keys are collapsed into CommonPrefixes — the same way S3 console
+        shows folders. Only returns the next path segment after ``prefix``.
+
+        Example::
+
+            prefix = "projects/ws1/user1/"
+            keys:   "projects/ws1/user1/foo/file.py"
+                    "projects/ws1/user1/bar/main.go"
+            result: ["foo", "bar"]
+        """
+        if not prefix.endswith("/"):
+            prefix += "/"
+        try:
+            resp = await asyncio.to_thread(
+                self._client.list_objects_v2,
+                Bucket=self._bucket,
+                Prefix=prefix,
+                Delimiter="/",
+                MaxKeys=1000,
+            )
+        except Exception:
+            return []
+        common = resp.get("CommonPrefixes", [])
+        names: list[str] = []
+        for cp in common:
+            cp_prefix = cp.get("Prefix", "")
+            # Strip the prefix to get just the immediate child name
+            relative = cp_prefix[len(prefix) :].rstrip("/")
+            if relative:
+                names.append(relative)
+        return names
+
+    async def browse(self, prefix: str) -> list[StorageItem]:
+        """List one directory level, returning both files and sub-folders.
+
+        Uses ``list_objects_v2`` with a ``/`` delimiter. Sub-directories
+        come from ``CommonPrefixes``, files from ``Contents`` (skipping
+        the directory marker object at ``prefix`` itself).
+        """
+        if not prefix.endswith("/"):
+            prefix += "/"
+        try:
+            resp = await asyncio.to_thread(
+                self._client.list_objects_v2,
+                Bucket=self._bucket,
+                Prefix=prefix,
+                Delimiter="/",
+                MaxKeys=1000,
+            )
+        except Exception:
+            return []
+
+        seen: set[str] = set()
+        items: list[StorageItem] = []
+
+        # Sub-directories (CommonPrefixes)
+        for cp in resp.get("CommonPrefixes", []):
+            cp_prefix = cp.get("Prefix", "")
+            name = cp_prefix[len(prefix) :].rstrip("/")
+            if name and name not in seen:
+                seen.add(name)
+                items.append(StorageItem(name=name, is_dir=True))
+
+        # Files (Contents) — skip the directory marker (exact match of prefix)
+        for obj in resp.get("Contents", []):
+            key = obj.get("Key", "")
+            if key == prefix:
+                continue  # skip directory marker
+            name = key[len(prefix) :]
+            if "/" in name or name in seen:
+                continue  # nested inside a sub-folder or already listed
+            seen.add(name)
+            items.append(
+                StorageItem(
+                    name=name,
+                    is_dir=False,
+                    size=obj.get("Size", 0),
+                )
+            )
+
+        items.sort(key=lambda x: (not x.is_dir, x.name.lower()))
+        return items
+
+    async def rename_key(self, old_key: str, new_key: str) -> None:
+        """Rename by copy + delete."""
+        try:
+            copy_source = {"Bucket": self._bucket, "Key": old_key}
+            await asyncio.to_thread(
+                self._client.copy_object,
+                Bucket=self._bucket,
+                CopySource=copy_source,
+                Key=new_key,
+            )
+            await self.delete(old_key)
+        except Exception as exc:
+            raise StorageFailure(f"rename_key failed: {exc}") from exc
 
 
 def _is_missing_key(exc: Exception) -> bool:

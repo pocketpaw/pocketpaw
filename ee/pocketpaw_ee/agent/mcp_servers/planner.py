@@ -61,6 +61,8 @@ import logging
 import re
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = "pocketpaw_planner"
@@ -142,6 +144,15 @@ async def _plan_project_handler(args: dict) -> dict:
             "no active workspace/agent — plan_project can only be called "
             "from inside a cloud SSE chat stream"
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_planner",
+        tool_name="_plan_project",
+        status="ok",
+        ok=True,
+    )
 
     project_id = (args or {}).get("project_id") or ""
     goal = (args or {}).get("goal") or ""
@@ -711,6 +722,15 @@ async def _plan_pocket_handler(args: dict) -> dict:
         )
 
     args = args or {}
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=agent_id,
+        tool_server="pocketpaw_planner",
+        tool_name="_plan_pocket",
+        status="ok",
+        ok=True,
+    )
+
     intent = (args.get("intent") or "").strip()
     if not intent:
         return _error_response("intent is required")

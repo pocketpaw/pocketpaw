@@ -17,6 +17,12 @@
 # capture emit) or a replay look genuine (a spurious emit). ``created`` is the
 # authoritative signal — set True only when the insert landed, False on
 # ``DuplicateKeyError``.
+# Changed 2026-06-29 (fix/billing-usage-ledger-source): added ``ModelSpendRow`` —
+# one (day, model) spend aggregate the credits service hands back from
+# ``spend_by_model`` so the billing usage graph can be sourced from the wallet's
+# own ledger (the universal meter, mode-agnostic across compute_spend /
+# litellm_spend) instead of the LiteLLM proxy. Framework-free like the other
+# domain shapes — billing consumes this, never the Beanie doc.
 
 from __future__ import annotations
 
@@ -39,6 +45,26 @@ class GrantResult:
 
     balance: int
     created: bool
+
+
+@dataclass(frozen=True)
+class ModelSpendRow:
+    """One (day, model) spend aggregate over a workspace's credit ledger.
+
+    The unit the credits service returns from ``spend_by_model`` so the billing
+    usage graph reads the wallet's own decomposition rather than the LiteLLM
+    proxy. ``day`` is ``YYYY-MM-DD`` (UTC, from the entry's ``createdAt`` date);
+    ``model`` is the charged model id (``ref.model``, or ``"unknown"`` when the
+    debit carried no model); ``credits`` is the POSITIVE credits debited for that
+    (day, model) over the window; ``requests`` is the number of ledger entries in
+    that group (a proxy for request count — the ledger ``ref`` does not carry a
+    token count, so tokens are not recoverable here).
+    """
+
+    day: str
+    model: str
+    credits: int
+    requests: int
 
 
 @dataclass(frozen=True)

@@ -6,11 +6,16 @@
 #   * key_info GETs /key/info?key=.
 #   * spend_logs GETs /spend/logs?api_key= (the required filter) and unwraps both
 #     a bare-list and a {"data": [...]} response; an empty api_key raises.
+#   * user_daily_activity GETs /user/daily/activity?start_date=&end_date=&api_key=
+#     (the per-key DAILY usage read backing the billing usage graph), walks every
+#     page (following metadata.has_more) merging results, and raises on empty api_key.
 #   * delete_keys POSTs /key/delete with the keys list.
 #   * the master key rides as a Bearer header.
 #   * a non-2xx surfaces LiteLLMAdminError with the proxy's error message.
 #
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8).
+# Updated 2026-06-29 (feat/billing-usage-endpoint): added user_daily_activity tests
+#   (scoping params, pagination merge, empty-key raise, master-key bearer).
 
 from __future__ import annotations
 
@@ -123,6 +128,83 @@ async def test_spend_logs_unwraps_data_envelope():
     client = _client(handler)
     out = await client.spend_logs(api_key="sk-tenant-abc")
     assert out == rows
+
+
+async def test_user_daily_activity_scopes_by_key_and_dates():
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("Authorization")
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "date": "2026-06-01",
+                        "metrics": {"spend": 0.04},
+                        "breakdown": {"models": {"anthropic/claude-3-5-sonnet": {"metrics": {}}}},
+                    }
+                ],
+                "metadata": {"has_more": False, "page": 1, "total_pages": 1},
+            },
+        )
+
+    client = _client(handler, api_key="sk-master")
+    rows = await client.user_daily_activity(
+        start_date="2026-06-01", end_date="2026-06-30", api_key="sk-tenant-abc"
+    )
+
+    # One page -> the single daily record, scoped to the tenant key over the range.
+    assert len(rows) == 1
+    assert rows[0]["date"] == "2026-06-01"
+    assert "/user/daily/activity" in captured["url"]
+    assert "start_date=2026-06-01" in captured["url"]
+    assert "end_date=2026-06-30" in captured["url"]
+    assert "api_key=sk-tenant-abc" in captured["url"]
+    # The MASTER key Bearers the privileged read (so the proxy grants admin view and
+    # honours the api_key filter).
+    assert captured["auth"] == "Bearer sk-master"
+
+
+async def test_user_daily_activity_requires_api_key():
+    client = _client(lambda r: httpx.Response(200, json={"results": []}))
+    with pytest.raises(LiteLLMAdminError):
+        await client.user_daily_activity(start_date="2026-06-01", end_date="2026-06-30", api_key="")
+
+
+async def test_user_daily_activity_walks_pages_until_has_more_false():
+    seen_pages: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        # The page param drives which body we return; record it to prove the walk.
+        if "page=1" in url:
+            seen_pages.append("1")
+            return httpx.Response(
+                200,
+                json={
+                    "results": [{"date": "2026-06-01", "breakdown": {"models": {}}}],
+                    "metadata": {"has_more": True, "page": 1, "total_pages": 2},
+                },
+            )
+        seen_pages.append("2")
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"date": "2026-06-02", "breakdown": {"models": {}}}],
+                "metadata": {"has_more": False, "page": 2, "total_pages": 2},
+            },
+        )
+
+    client = _client(handler, api_key="sk-master")
+    rows = await client.user_daily_activity(
+        start_date="2026-06-01", end_date="2026-06-02", api_key="sk-tenant-abc"
+    )
+
+    # Both pages were fetched and their results merged.
+    assert seen_pages == ["1", "2"]
+    assert [r["date"] for r in rows] == ["2026-06-01", "2026-06-02"]
 
 
 async def test_delete_keys_posts_keys_list():

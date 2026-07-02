@@ -1,5 +1,16 @@
 """Cloud document models — re-exports for Beanie init.
 
+Updated: 2026-06-30 (feat/session-supervisor SS-3) — added
+``AgentSessionRuntimeDoc`` (the durable, tenant-scoped
+``(workspace, session_id, agent_id) -> cli_session_id`` mapping) to the
+imports, ``__all__``, and ``get_all_documents()`` so the
+``agent_session_runtimes`` collection is wired into ``init_beanie``. Only
+``ee.cloud.agent_sessions.runtime_service`` imports the doc class directly.
+Updated: 2026-06-30 (feat/session-supervisor SS-2) — added ``SessionTranscriptDoc``
+(the durable, tenant-scoped transcript rows backing the Mongo ``SessionStore``)
+to the imports, ``__all__``, and ``get_all_documents()`` so the
+``session_transcripts`` collection is wired into ``init_beanie``. Only
+``ee.cloud.agent_sessions.store`` imports the doc class directly.
 Updated: 2026-05-30 (feat/paw-sites-backend, RFC 12 Task 3.2) — added the
 ``Lead`` and ``Site`` tenant-scoped Paw Sites documents (plus their
 ``LeadSource`` / ``SiteDomain`` subdocs) to the imports, ``__all__``, and the
@@ -57,11 +68,17 @@ Updated: 2026-06-24 (integration/billing-credits, BC-7) — added ``Subscription
 ``subscription.active`` webhook) to the imports, ``__all__``, and
 ``get_all_documents()`` so the ``billing_subscriptions`` collection is wired into
 ``init_beanie``. Only ``ee.cloud.billing.service`` writes the doc.
+Updated: 2026-06-20 (feat/szd-slice2-discovery, S2-R1) — added ``InstinctRuleDoc``
+(the persisted, approved, workspace-scoped, owned rule discovered from exhaust) to
+the imports, ``__all__``, and ``get_all_documents()`` so the ``instinct_rules``
+collection is wired into ``init_beanie`` and the ``beanie_test_db`` fixture. Only
+``ee.cloud.rules.service`` imports the doc class directly (import-linter "Rules").
 """
 
 from __future__ import annotations
 
 from pocketpaw_ee.cloud.models.agent import Agent, AgentConfig
+from pocketpaw_ee.cloud.models.agent_session_runtime import AgentSessionRuntimeDoc
 from pocketpaw_ee.cloud.models.api_key import APIKey
 from pocketpaw_ee.cloud.models.audit_event import AuditEvent
 from pocketpaw_ee.cloud.models.audit_webhook import AuditWebhook
@@ -73,6 +90,7 @@ from pocketpaw_ee.cloud.models.composio_connection import ComposioConnection
 from pocketpaw_ee.cloud.models.connector import WorkspaceConnector
 from pocketpaw_ee.cloud.models.credit import CreditBalance, CreditLedgerEntry
 from pocketpaw_ee.cloud.models.cycle import Cycle, CycleDailyPoint
+from pocketpaw_ee.cloud.models.deep_work_log import DeepWorkLog
 from pocketpaw_ee.cloud.models.fabric_ingest_state import (
     FabricIngestConfig,
     FabricIngestState,
@@ -95,6 +113,7 @@ from pocketpaw_ee.cloud.models.foresight_workspace_scenario import (
 )
 from pocketpaw_ee.cloud.models.group import Group, GroupAgent
 from pocketpaw_ee.cloud.models.instinct_approval import InstinctApproval
+from pocketpaw_ee.cloud.models.instinct_rule import InstinctRuleDoc
 from pocketpaw_ee.cloud.models.invite import Invite
 from pocketpaw_ee.cloud.models.lead import Lead, LeadSource
 from pocketpaw_ee.cloud.models.litellm_key import LiteLLMTenantKey
@@ -113,8 +132,10 @@ from pocketpaw_ee.cloud.models.pocket import Pocket, Widget, WidgetPosition
 from pocketpaw_ee.cloud.models.pocket_backend import PocketBackendCredential
 from pocketpaw_ee.cloud.models.project import Project
 from pocketpaw_ee.cloud.models.read_state import ReadState
+from pocketpaw_ee.cloud.models.request_log import RequestLog
 from pocketpaw_ee.cloud.models.sense_preference import WorkspaceSensePreference
 from pocketpaw_ee.cloud.models.session import Session
+from pocketpaw_ee.cloud.models.session_transcript import SessionTranscriptDoc
 from pocketpaw_ee.cloud.models.site import Site, SiteDomain
 from pocketpaw_ee.cloud.models.site_rate_counter import SiteRateCounter
 from pocketpaw_ee.cloud.models.spend_reconciliation import SpendReconciliation
@@ -232,6 +253,7 @@ __all__ = [
     "Group",
     "GroupAgent",
     "InstinctApproval",
+    "InstinctRuleDoc",
     "Invite",
     "Lead",
     "LeadSource",
@@ -253,7 +275,11 @@ __all__ = [
     "Project",
     "Reaction",
     "ReadState",
+    "DeepWorkLog",
+    "RequestLog",
     "Session",
+    "SessionTranscriptDoc",
+    "AgentSessionRuntimeDoc",
     "Site",
     "SiteDomain",
     "SiteRateCounter",
@@ -289,6 +315,13 @@ def get_all_documents():
         Pocket,
         PocketBackendCredential,
         Session,
+        # Agent-session transcript rows backing the Mongo SessionStore (SS-2).
+        # Only ``ee.cloud.agent_sessions.store`` imports this doc directly.
+        SessionTranscriptDoc,
+        # Durable (workspace, session_id, agent_id) -> cli_session_id mapping
+        # so any turn can resume the native session (SS-3). Only
+        # ``ee.cloud.agent_sessions.runtime_service`` imports this doc directly.
+        AgentSessionRuntimeDoc,
         Comment,
         Notification,
         FileObj,
@@ -317,8 +350,13 @@ def get_all_documents():
         Invite,
         Group,
         InstinctApproval,
+        # Discovered governed rules (SZD slice-2). Only ``ee.cloud.rules.service``
+        # writes it.
+        InstinctRuleDoc,
         Message,
         ReadState,
+        RequestLog,
+        DeepWorkLog,
         # Shadow-compare reconciliation rows (WU-F). One per tenant per window
         # during shadow mode. Only ``ee.cloud.llm_provisioning.service`` writes it.
         SpendReconciliation,

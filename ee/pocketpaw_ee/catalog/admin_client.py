@@ -17,6 +17,15 @@
 #                              incl. cached tokens). MUST pass ``api_key`` — an
 #                              unfiltered /spend/logs scans the whole proxy and
 #                              times out (noted in the MCG-8 task brief).
+#   * GET  /user/daily/activity?start_date=&end_date=&api_key=<key> — DAILY usage
+#                              for one virtual key, broken down BY MODEL (spend +
+#                              token counts + request counts). Paginated; this
+#                              client walks every page (follows ``metadata.has_more``)
+#                              and returns the merged ``results`` list. Scoped by the
+#                              ``api_key`` filter, called with the master key (which
+#                              the proxy treats as admin view), so it returns exactly
+#                              that tenant's daily activity. Powers the billing usage
+#                              graph (the WorkspaceUsage transform in cloud.billing.usage).
 #   * POST /key/delete       — revoke keys (used by the live-check teardown so a
 #                              throwaway probe key never lingers on the proxy).
 #
@@ -26,6 +35,9 @@
 # rather than silently minting nothing / billing nothing.
 #
 # Created 2026-06-26 (integration/model-catalog-v2, MCG-8): the proxy admin client.
+# Updated 2026-06-29 (feat/billing-usage-endpoint): added ``user_daily_activity`` —
+#   the per-key DAILY usage read (GET /user/daily/activity) that backs the billing
+#   usage graph. Walks pagination internally and returns the merged daily records.
 
 from __future__ import annotations
 
@@ -171,6 +183,74 @@ class LiteLLMAdminClient:
         data = body.get("data")
         rows = data if isinstance(data, list) else []
         return [r for r in rows if isinstance(r, dict)]
+
+    async def user_daily_activity(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+        api_key: str,
+        page_size: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """GET /user/daily/activity — DAILY usage for ONE virtual key, by model.
+
+        Returns the merged list of daily-activity records (LiteLLM ``DailySpendData``
+        shape: each has a ``date``, a day-level ``metrics`` block, and a
+        ``breakdown.models`` map keyed by model name, each value carrying
+        ``metrics`` with ``spend`` (USD) + token + request counts). The caller
+        (cloud.billing.usage) folds the per-model breakdown into the usage graph
+        and converts spend USD -> credits.
+
+        ``start_date`` / ``end_date`` are ``YYYY-MM-DD`` (the proxy 400s if either is
+        missing). ``api_key`` REQUIRED — it filters the analytics to a single
+        tenant's virtual key (the proxy supports a key filter on this route); calling
+        with the master key gives the admin view so the filter is honoured. An empty
+        ``api_key`` raises rather than returning every tenant's usage.
+
+        PAGINATION: the route is paginated (default page_size 50, max 1000). This
+        walks every page — following the response ``metadata.has_more`` flag,
+        advancing ``page`` — and merges ``results`` so the caller gets the whole
+        window. A defensive page ceiling stops a malformed proxy that never clears
+        ``has_more`` from looping forever.
+        """
+        if not api_key:
+            raise LiteLLMAdminError(
+                "user_daily_activity requires api_key (an unscoped read returns every "
+                "tenant's usage)"
+            )
+
+        results: list[dict[str, Any]] = []
+        page = 1
+        # Defensive ceiling: 1000 rows/page over a year is ~ a handful of pages; 200
+        # pages (up to 200k daily rows) is far beyond any real window and bounds a
+        # proxy bug that never clears has_more.
+        max_pages = 200
+        while page <= max_pages:
+            params: dict[str, Any] = {
+                "start_date": start_date,
+                "end_date": end_date,
+                "api_key": api_key,
+                "page": page,
+                "page_size": page_size,
+            }
+            async with self._client() as client:
+                resp = await client.get(f"{self._base_url}/user/daily/activity", params=params)
+            body = self._json_or_raise(resp, "/user/daily/activity")
+            rows = body.get("results")
+            if isinstance(rows, list):
+                results.extend(r for r in rows if isinstance(r, dict))
+            metadata = body.get("metadata")
+            has_more = bool(metadata.get("has_more")) if isinstance(metadata, dict) else False
+            if not has_more:
+                break
+            page += 1
+        else:
+            logger.warning(
+                "LiteLLM /user/daily/activity never cleared has_more after %d pages — "
+                "stopping (usage may be truncated)",
+                max_pages,
+            )
+        return results
 
     async def delete_keys(self, keys: list[str]) -> dict[str, Any]:
         """POST /key/delete — revoke the given virtual keys. Used by the live-check

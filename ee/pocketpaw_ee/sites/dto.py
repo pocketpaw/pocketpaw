@@ -87,6 +87,20 @@
 # leading/trailing/double dots, total length capped) so an obviously-malformed
 # host is rejected at the DTO (422) before it reaches Cloudflare. Kept permissive
 # — it accepts any real registrable hostname, it only blocks garbage.
+# Updated 2026-07-01 (NE-4b — native-editing leaf-edit persist): added the request
+# / response models for POST /sites/by-pocket/{pocket_id}/leaf-edits — LeafEdit
+# ({uid, op}), LeafEditsRequest ({edits}), LeafEditVerdict ({uid, applied, reason?})
+# and LeafEditsResponse ({pocket_id, results}). The native editor forwards its
+# already-rendered {uid, op} edits and the endpoint returns one verdict per edit.
+# ``op`` rides as an open dict — its {kind:setText|setProp,...} shape is validated
+# downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary.
+# Updated 2026-07-01 (NE-5b — native-artifact endpoint): added NativeArtifactResponse
+# ({pocket_id, body_html, css}) — the response of GET
+# /sites/by-pocket/{pocket_id}/native-artifact. ``body_html`` is the armed svelte
+# build's ``<body>`` inner HTML (the data-uid-stamped leaves + the embedded
+# ``paw-edit-manifest`` script); ``css`` is the built stylesheet(s) concatenated into
+# one string. The native editor injects both into a shadow root to render the site
+# natively instead of framing an iframe.
 
 from __future__ import annotations
 
@@ -337,3 +351,54 @@ class DomainStatusResponse(BaseModel):
     hostname: str
     cname_target: str
     status: str  # pending | verifying | live | error
+
+
+class LeafEdit(BaseModel):
+    """One native-editor leaf edit (NE-4b): the stable ``uid`` of the edited leaf
+    (e.g. ``"Hero:headline:0"``) plus the ``op`` describing the change. ``op`` is an
+    open dict — ``{"kind":"setText","html":...}`` or
+    ``{"kind":"setProp","name":...,"value":...}`` — because its shape is validated
+    downstream by the paw-sites apply-leaf-edit CLI, not at this DTO boundary."""
+
+    uid: str
+    op: dict[str, Any]
+
+
+class LeafEditsRequest(BaseModel):
+    """Body for POST /sites/by-pocket/{pocket_id}/leaf-edits (NE-4b): the batch of
+    ``{uid, op}`` leaf edits the native editor forwards to persist as a Branch
+    draft. An empty batch is rejected by the service (422)."""
+
+    edits: list[LeafEdit]
+
+
+class LeafEditVerdict(BaseModel):
+    """The apply-leaf-edit CLI's per-uid verdict (NE-4b): ``applied`` is whether the
+    splice landed; ``reason`` explains a rejection (the caller keeps the whole-file
+    re-author for that leaf). ``reason`` is None on an applied edit."""
+
+    uid: str
+    applied: bool
+    reason: str | None = None
+
+
+class LeafEditsResponse(BaseModel):
+    """Response of POST /sites/by-pocket/{pocket_id}/leaf-edits (NE-4b): the pocket
+    id plus one verdict per forwarded edit, in submission order."""
+
+    pocket_id: str
+    results: list[LeafEditVerdict]
+
+
+class NativeArtifactResponse(BaseModel):
+    """Response of GET /sites/by-pocket/{pocket_id}/native-artifact (NE-5b): the armed
+    svelte build's body + CSS, so the native editor can shadow-render the site
+    instead of framing an iframe. ``body_html`` is the built page's ``<body>`` INNER
+    HTML — the data-uid-stamped editable leaves plus the embedded
+    ``<script id="paw-edit-manifest">`` — which the FE injects into a shadow root.
+    ``css`` is the built stylesheet(s) concatenated into one string the FE injects as
+    a single ``<style>``."""
+
+    pocket_id: str
+    body_html: str
+    css: str

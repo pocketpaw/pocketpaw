@@ -1,6 +1,25 @@
 # sites_create.py — in-process MCP server exposing the DETERMINISTIC Paw Site
 # create action. Created: 2026-06-04 (feat/sites-deterministic-fastpath).
 #
+# Updated 2026-06-14 (feat/dynamic-sites-authoring — Paw Sites "Dynamic track",
+# RFC 12 A2) — added the create tool ``create_dynamic_site``. It mirrors
+# ``create_svelte_site`` (the agent IS the author; the payload is persisted
+# verbatim via ``agent_create`` with ``trusted=True`` and the post-create
+# session-bind + SSE side effects on the SAME ``pocketpaw_sites_manager`` server;
+# it also runs the same identity → record_tool_call → validate →
+# _require_sites_plan_or_error plan gate the other create handlers do) but the
+# payload is a rippleSpec carrying the DYNAMIC blocks (``objects`` / ``sources`` /
+# ``actions`` / ``auth``) that back the published site with the customer's own live
+# Cloudflare D1. There is no ``assemble_*`` step. It persists via
+# ``agent_create(type_="site", pattern="dynamic", ripple_spec=<spec>,
+# engine="ripple", trusted=True)``: a dynamic site IS a ripple-engine site whose
+# spec carries the dynamic declarations as sibling keys, so publish_pocket carries
+# them through generator_client.build() unchanged and the paw-sites generator
+# scaffolds the D1 migration + read/write remote functions off the same spec.
+# ``_validate_dynamic_spec`` fails the create CLOSED on a spec that isn't actually
+# dynamic (no objects, or no sources/actions/auth) so the agent fixes it instead
+# of persisting a static page through the dynamic tool.
+#
 # Updated: 2026-06-21 (DSV-5 — dynamic svelte sites write-side) — create_svelte_site
 # now accepts a DYNAMIC svelte site. The ``source`` envelope may carry live-data
 # bindings (``objects``/``sources``/``actions``/``auth``) as SIBLING keys on the
@@ -14,7 +33,7 @@
 # satisfy a §4.3 required FILE key, so they are simply ignored by the missing-keys
 # check.
 #
-# Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — both create handlers now
+# Updated: 2026-06-17 (fix/sites-plan-gate-asymmetry) — the create handlers now
 # call _require_sites_plan_or_error(workspace_id) right after input validation,
 # delegating to the shared sites.service.require_sites_plan gate. Sites is the
 # "sites" plan feature (go+); these create tools reach agent_create directly and
@@ -119,6 +138,8 @@ import json
 import logging
 from typing import Any
 
+from ._audit import record_tool_call
+
 logger = logging.getLogger(__name__)
 
 # Same server as the publish tool — the create + publish hops live together so
@@ -134,11 +155,17 @@ CREATE_SVELTE_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_svelte_site"
 # svelte site's source map and safely republishes. Registers on the SAME server
 # (see sites.py) so the create → publish → edit hops sit side by side.
 EDIT_SVELTE_COMPONENT_TOOL_ID = f"mcp__{SERVER_NAME}__edit_svelte_component"
+# The dynamic-track create tool (RFC 12 A2) — also the SAME server. The skill flow
+# is: author the dynamic rippleSpec (UI + objects/sources/actions) →
+# create_dynamic_site → publish (publish carries the dynamic blocks through to the
+# paw-sites generator, which scaffolds the per-tenant D1 + read/write remote fns).
+CREATE_DYNAMIC_SITE_TOOL_ID = f"mcp__{SERVER_NAME}__create_dynamic_site"
 
 SITES_CREATE_TOOL_IDS = (
     CREATE_LANDING_SITE_TOOL_ID,
     CREATE_SVELTE_SITE_TOOL_ID,
     EDIT_SVELTE_COMPONENT_TOOL_ID,
+    CREATE_DYNAMIC_SITE_TOOL_ID,
 )
 
 
@@ -214,6 +241,72 @@ def _missing_source_keys(source: dict[str, Any]) -> list[str]:
         if not any(k.startswith(prefix) for k in source):
             missing.append(f"{prefix}*.svelte")
     return missing
+
+
+# ── Dynamic-track spec surface (RFC 12 A2) ──────────────────────────────────
+# A dynamic Paw Site is a normal ripple-engine site whose rippleSpec ALSO carries
+# the optional top-level blocks the paw-sites generator reads to back the page
+# with the customer's own live D1 (docs/dynamic-spec-surface.md in paw-sites):
+#   - ``objects``  : the D1 schema (table defs) — derives migrations/0001_init.sql
+#   - ``sources``  : read bindings — compile to ``query`` remote fns (D1 → page)
+#   - ``actions``  : write bindings — compile to ``form`` remote fns (page → D1)
+#   - ``auth``     : a top-level bool gating the site behind end-customer accounts
+# A spec is dynamic when it declares any ``sources``, any ``actions``, or
+# ``auth: true`` (this mirrors paw-sites' parseBindings.isDynamic). The generator
+# already routes a ripple build through the dynamic path on these keys, so the
+# create tool only has to PERSIST them verbatim on the rippleSpec — publish carries
+# the whole spec through generator_client.build() unchanged.
+
+
+def _validate_dynamic_spec(spec: dict) -> list[str]:
+    """Return a list of human-readable problems with a dynamic-site ``spec``
+    (empty list = valid). Fails the create CLOSED with an actionable message
+    rather than persisting a spec the generator can't turn into a live site.
+
+    Checks the minimum contract for a dynamic site (matching paw-sites'
+    ``parseBindings``): a ``ui`` tree, an ``objects`` block, at least one live
+    binding (``sources`` / ``actions`` / ``auth``), and that every source/action
+    references a declared object. Pure — no identity / Mongo needed."""
+    problems: list[str] = []
+    ui = spec.get("ui")
+    if not (isinstance(ui, dict) and ui.get("type")):
+        problems.append("a `ui` tree (a node with a `type`) that renders the page")
+
+    objects = spec.get("objects")
+    object_names: set[str] = set()
+    if not isinstance(objects, list) or not objects:
+        problems.append("an `objects` array declaring at least one D1 table")
+    else:
+        for obj in objects:
+            if isinstance(obj, dict) and isinstance(obj.get("name"), str):
+                object_names.add(obj["name"])
+
+    sources = spec.get("sources") if isinstance(spec.get("sources"), list) else []
+    actions = spec.get("actions") if isinstance(spec.get("actions"), list) else []
+    is_dynamic = bool(sources) or bool(actions) or spec.get("auth") is True
+    if not is_dynamic:
+        problems.append(
+            "at least one live binding — a `sources` entry (read), an `actions` "
+            "entry (write), or `auth: true`. Without one the site is static, not "
+            "dynamic; use create_landing_site instead"
+        )
+
+    # Every source/action must reference a declared object (the generator errors
+    # otherwise). Only check when objects parsed, so the message stays specific.
+    if object_names:
+        for s in sources:
+            if isinstance(s, dict) and s.get("object") not in object_names:
+                problems.append(
+                    f"source `{s.get('name', '?')}` references undeclared "
+                    f"object `{s.get('object')}`"
+                )
+        for a in actions:
+            if isinstance(a, dict) and a.get("object") not in object_names:
+                problems.append(
+                    f"action `{a.get('name', '?')}` references undeclared "
+                    f"object `{a.get('object')}`"
+                )
+    return problems
 
 
 def _identity() -> tuple[str | None, str | None]:
@@ -295,6 +388,15 @@ async def _create_landing_site_handler(args: dict) -> dict:
             "create_landing_site requires workspace and user context (call from a "
             "cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_landing_site",
+        status="ok",
+        ok=True,
+    )
 
     content = args.get("content")
     if not isinstance(content, dict) or not content:
@@ -449,6 +551,186 @@ def make_create_landing_site_tool(tool: Any) -> Any:
     return create_landing_site
 
 
+async def _create_dynamic_site_handler(args: dict) -> dict:
+    """MCP handler for ``sites_manager__create_dynamic_site`` (the Dynamic track,
+    RFC 12 A2).
+
+    Reads workspace/user identity from the per-stream ContextVars, validates the
+    ``spec`` (a rippleSpec carrying the dynamic blocks — ``objects`` + at least
+    one ``sources`` / ``actions`` / ``auth``), and persists it DIRECTLY via
+    ``agent_create`` (type="site", pattern="dynamic", ripple_spec=<spec>,
+    engine="ripple", trusted=True). Returns ``{ok, pocket_id, pocket}`` on
+    success; sets ``is_error`` when identity is missing, ``spec`` is absent /
+    not dynamic / malformed, or the persist fails.
+
+    Unlike ``create_landing_site`` there is no ``assemble_*`` step — the agent
+    authored the dynamic spec (UI + data bindings) via the
+    pocketpaw-create-dynamic-site skill, so it is persisted verbatim. The dynamic
+    blocks ride the rippleSpec as sibling keys, so ``publish_pocket`` carries them
+    through ``generator_client.build()`` unchanged and the paw-sites generator
+    scaffolds the D1 migration + read/write remote functions. ``trusted=True``
+    skips the STRICT catalog gate (same reason as create_landing_site: the
+    published widget manifest is stale; the logged catalog walk + embed audit
+    still run) — the dynamic blocks are not widgets and pass through untouched."""
+    workspace_id, user_id = _identity()
+    if not workspace_id or not user_id:
+        return _error_response(
+            "create_dynamic_site requires workspace and user context (call from a "
+            "cloud chat session)."
+        )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_dynamic_site",
+        status="ok",
+        ok=True,
+    )
+
+    spec = args.get("spec")
+    if not isinstance(spec, dict) or not spec:
+        return _error_response(
+            "create_dynamic_site requires a `spec` object — the rippleSpec for the "
+            "dynamic site: a `ui` tree PLUS the dynamic blocks (`objects` for the "
+            "D1 schema, `sources` for reads, `actions` for writes, optional "
+            "`auth`). You author the spec; this tool persists it."
+        )
+
+    problems = _validate_dynamic_spec(spec)
+    if problems:
+        return _error_response(
+            "create_dynamic_site `spec` is not a valid dynamic site — it needs "
+            + "; ".join(problems)
+            + ". See the pocketpaw-create-dynamic-site skill for the shape."
+        )
+
+    # Plan gate (Sites = "sites"): reject a free-plan workspace here so the
+    # create can't bypass the router's require_plan_feature("sites") gate.
+    if (gate := await _require_sites_plan_or_error(workspace_id)) is not None:
+        return gate
+
+    name_raw = args.get("name")
+    name = name_raw.strip() if isinstance(name_raw, str) and name_raw.strip() else "Dynamic site"
+    description_raw = args.get("description")
+    description = description_raw if isinstance(description_raw, str) else ""
+    icon_raw = args.get("icon")
+    icon = icon_raw if isinstance(icon_raw, str) else ""
+    color_raw = args.get("color")
+    color = color_raw if isinstance(color_raw, str) else ""
+
+    # Persist DIRECTLY through the pockets service — NO pocket_specialist, NO
+    # draft/redraft loop. ``type_="site"`` keeps the site identity the rest of the
+    # pipeline (publish, /sites listing) keys on; ``pattern="dynamic"`` marks the
+    # live-data track (informational — publish routes on the rippleSpec's dynamic
+    # blocks, not the pattern). ``engine="ripple"`` (the default): a dynamic site
+    # IS a ripple-engine site whose spec carries dynamic declarations, so the
+    # generator compiles the rippleSpec AND scaffolds the D1 path off the same spec.
+    from pocketpaw_ee.cloud.pockets.service import agent_create
+
+    try:
+        view, new_pocket_id, err = await agent_create(
+            workspace_id=workspace_id,
+            owner_id=user_id,
+            name=name,
+            description=description,
+            type_="site",
+            pattern="dynamic",
+            icon=icon,
+            color=color,
+            ripple_spec=spec,
+            trusted=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_dynamic_site: persist raised", exc_info=True)
+        return _error_response(f"create failed: {exc}")
+
+    if err is not None or view is None or new_pocket_id is None:
+        return _error_response(f"create failed: {err or 'create returned no view'}")
+
+    await _bind_session_and_emit(new_pocket_id, view, user_id)
+
+    return _success_response(
+        {
+            "ok": True,
+            "pocket_id": new_pocket_id,
+            "pocket": {
+                "id": new_pocket_id,
+                "name": view.get("name"),
+                "type": view.get("type"),
+                "pattern": view.get("pattern"),
+            },
+        }
+    )
+
+
+def make_create_dynamic_site_tool(tool: Any) -> Any:
+    """Build the ``create_dynamic_site`` SDK tool object using the SDK's ``tool``
+    decorator (passed in by the caller that already imported it).
+
+    Registered on the SAME ``pocketpaw_sites_manager`` server as publish +
+    create_landing_site + create_svelte_site (see ``make_create_landing_site_tool``
+    for why one server)."""
+
+    @tool(
+        "create_dynamic_site",
+        (
+            "Create a DYNAMIC Paw Site — a published website backed by the "
+            "customer's OWN LIVE DATA (a per-tenant Cloudflare D1), with reads and "
+            "writes, NOT a static brochure. You AUTHOR a rippleSpec that carries "
+            "both the UI and the dynamic data bindings, and pass it as `spec`; the "
+            "tool persists it and stamps the pocket type='site', pattern='dynamic'. "
+            "Use this when the user wants a site that LISTS live records and/or has "
+            "a form that SAVES records (a guestbook, a booking list, a submissions "
+            "board, an order tracker). For a static marketing page use "
+            "create_landing_site instead. The `spec` (a rippleSpec) carries these "
+            "DYNAMIC blocks as top-level keys (see the pocketpaw-create-dynamic-site "
+            "skill): `objects` [{name, fields:{col: text|integer|real|boolean|"
+            "timestamp}, primaryKey}] = the D1 tables; `sources` [{name, "
+            "kind:'data', object, where?, orderBy?, limit?, refresh:'pocket_open'|"
+            "'interval'|'manual'|'live'}] = READ bindings (the UI binds a table to "
+            "'{<source name>}'); `actions` [{name, object, op:'insert', confirm?, "
+            "requiresOwnerReview?}] = WRITE bindings (rendered as a native form); "
+            "optional `auth: true` gates the site behind end-customer accounts. A "
+            "spec must declare `objects` AND at least one source/action/auth, and "
+            "every source/action must reference a declared object. Returns {ok, "
+            "pocket_id, pocket}; hand `pocket_id` to "
+            "`mcp__pocketpaw_sites_manager__publish` to publish. ok=false with an "
+            "error means relay the reason, do NOT report a created pocket."
+        ),
+        {
+            "type": "object",
+            "properties": {
+                "spec": {
+                    "type": "object",
+                    "description": (
+                        "The dynamic rippleSpec you authored — a `ui` tree PLUS the "
+                        "dynamic blocks (`objects`, `sources`, `actions`, optional "
+                        "`auth`). See the tool description / skill for the shape."
+                    ),
+                    "additionalProperties": True,
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Optional pocket/site name. Defaults to 'Dynamic site'.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Optional one-line pocket description.",
+                },
+                "icon": {"type": "string", "description": "Optional lucide icon name."},
+                "color": {"type": "string", "description": "Optional accent color hex."},
+            },
+            "required": ["spec"],
+            "additionalProperties": False,
+        },
+    )
+    async def create_dynamic_site(args):  # type: ignore[no-untyped-def]
+        return await _create_dynamic_site_handler(args)
+
+    return create_dynamic_site
+
+
 async def _create_svelte_site_handler(args: dict) -> dict:
     """MCP handler for ``sites_manager__create_svelte_site`` (the Svelte track).
 
@@ -477,6 +759,15 @@ async def _create_svelte_site_handler(args: dict) -> dict:
             "create_svelte_site requires workspace and user context (call from a "
             "cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_create_svelte_site",
+        status="ok",
+        ok=True,
+    )
 
     source = args.get("source")
     if not isinstance(source, dict) or not source:
@@ -684,6 +975,15 @@ async def _edit_svelte_component_handler(args: dict) -> dict:
             "edit_svelte_component requires workspace and user context (call from "
             "a cloud chat session)."
         )
+
+    record_tool_call(
+        workspace_id=workspace_id,
+        user_id=user_id,
+        tool_server="pocketpaw_sites",
+        tool_name="_edit_svelte_component",
+        status="ok",
+        ok=True,
+    )
 
     pocket_id = args.get("pocket_id")
     if not isinstance(pocket_id, str) or not pocket_id:
@@ -916,6 +1216,7 @@ def make_edit_svelte_component_tool(tool: Any) -> Any:
 
 
 __all__ = [
+    "CREATE_DYNAMIC_SITE_TOOL_ID",
     "CREATE_LANDING_SITE_TOOL_ID",
     "CREATE_SVELTE_SITE_TOOL_ID",
     "EDIT_SVELTE_COMPONENT_TOOL_ID",
@@ -923,6 +1224,7 @@ __all__ = [
     "SITES_CREATE_TOOL_IDS",
     "SVELTE_REQUIRED_EXACT_KEYS",
     "SVELTE_REQUIRED_PREFIXES",
+    "make_create_dynamic_site_tool",
     "make_create_landing_site_tool",
     "make_create_svelte_site_tool",
     "make_edit_svelte_component_tool",

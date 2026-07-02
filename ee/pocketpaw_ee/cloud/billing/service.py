@@ -67,6 +67,15 @@
 #   ``active`` does not re-deploy. ``renewed`` just refreshes the renewal date (the
 #   site is already live), ``cancelled`` marks the site cancelled WITHOUT undeploying
 #   it in v1.
+# Updated 2026-06-28 (fix/billing-checkout-sessions): ``subscribe`` now takes an
+#   ``origin`` (the buyer's app origin, read off the /subscribe route's Origin /
+#   Referer header) and threads it through ``_checkout_return_urls`` into the
+#   provider's ``return_url`` / ``cancel_url`` so Dodo returns the buyer to
+#   ``{origin}/settings/billing?checkout=success|cancel`` after pay/cancel (the
+#   prior payment-link checkout had nowhere to send the buyer). Falls back to the
+#   ``dodo_checkout_return_base`` config when no origin is present; omits the
+#   redirect entirely if both are absent. The webhook grant + idempotency are
+#   unchanged — they key on the event body's subscription_id + metadata + event_id.
 
 from __future__ import annotations
 
@@ -178,11 +187,36 @@ def _dodo_product_for_plan(plan_key: str) -> str | None:
     return tier.dodo_product_id if tier is not None else None
 
 
+def _checkout_return_urls(origin: str | None) -> tuple[str | None, str | None]:
+    """Build (return_url, cancel_url) for the subscription checkout, or (None, None).
+
+    After paying on Dodo the buyer must land back in the app. The base is the
+    buyer's ``origin`` (the route reads it from the Origin / Referer header); when
+    that is absent we fall back to the ``dodo_checkout_return_base`` config. If
+    BOTH are empty we return (None, None) and the provider omits return_url rather
+    than crash — a checkout with no redirect still works, the buyer just isn't
+    auto-returned.
+    """
+    base = (origin or "").strip()
+    if not base:
+        from pocketpaw.config import get_settings
+
+        base = (getattr(get_settings(), "dodo_checkout_return_base", "") or "").strip()
+    if not base:
+        return None, None
+    base = base.rstrip("/")
+    return (
+        f"{base}/settings/billing?checkout=success",
+        f"{base}/settings/billing?checkout=cancel",
+    )
+
+
 async def subscribe(
     workspace_id: str,
     user_id: str,
     plan_key: str,
     *,
+    origin: str | None = None,
     customer_email: str | None = None,
     provider: IPaymentsProvider | None = None,
 ) -> dict:
@@ -195,6 +229,12 @@ async def subscribe(
     right tier, and returns ``{"checkout_url": ...}``. Credits are NOT granted and
     the plan is NOT changed here — both land when Dodo posts a verified
     ``subscription.active`` to the public webhook.
+
+    ``origin`` is the buyer's app origin (the route reads it from the Origin /
+    Referer header). It builds the return_url / cancel_url Dodo sends the buyer
+    back to after pay / cancel, so the buyer is NOT stranded on the gateway. When
+    absent it falls back to the ``dodo_checkout_return_base`` config; if both are
+    empty the redirect is simply omitted.
     """
     # Rule 6 — validate at entry.
     if not workspace_id:
@@ -217,6 +257,7 @@ async def subscribe(
             "(POCKETPAW_DODO_PLAN_PRODUCTS).",
         )
 
+    return_url, cancel_url = _checkout_return_urls(origin)
     prov = provider or _default_provider()
     checkout = await prov.create_subscription(
         plan_key=plan_key,
@@ -224,6 +265,8 @@ async def subscribe(
         workspace_id=workspace_id,
         customer_email=customer_email,
         metadata={"workspace_id": workspace_id, "plan_key": plan_key, "user_id": user_id or ""},
+        return_url=return_url,
+        cancel_url=cancel_url,
     )
     return {"checkout_url": checkout.checkout_url}
 

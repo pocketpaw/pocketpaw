@@ -160,6 +160,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud._core.ee_auth_bridge import EEAuthBridgeMiddleware
     from pocketpaw_ee.cloud._core.http import add_error_handler
     from pocketpaw_ee.cloud._core.internal_token import ensure_internal_token
+    from pocketpaw_ee.cloud._core.request_log import RequestLogMiddleware
     from pocketpaw_ee.cloud._core.timing import TimingMiddleware
 
     # Boot-time secret for the loopback internal bypass on the
@@ -173,7 +174,9 @@ def mount_cloud(app: FastAPI) -> None:
 
     # Starlette's add_middleware is a stack — LAST registered runs OUTERMOST
     # on inbound. Effective order here:
-    #   CSRF → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    #   CSRF → RequestLog → Timing → EEAuthBridge → AuthMiddleware (OSS) → route handler.
+    # RequestLogMiddleware sits outside Timing so it can log every request
+    # (including timing data) to the workspace audit for the /audit page.
     # The bridge marks genuine *platform admins* (``is_superuser``) as
     # ``full_access`` before the OSS AuthMiddleware reads it, so platform
     # admins reach OSS routes (settings/channels/...) without 403'ing on
@@ -186,6 +189,12 @@ def mount_cloud(app: FastAPI) -> None:
     # middleware calls — TimingMiddleware would then run outermost).
     app.add_middleware(EEAuthBridgeMiddleware)
     app.add_middleware(TimingMiddleware)
+
+    # Request-log middleware — records every API request to the workspace
+    # audit (MongoDB) so the /audit page can show request logs, failures,
+    # and timing. Sits outside TimingMiddleware so it wraps the full
+    # handler chain including the timing measurement.
+    app.add_middleware(RequestLogMiddleware)
 
     # CSRF middleware — outermost on inbound, runs before any route.
     # Cookie-auth callers must echo X-CSRF-Token; Bearer-auth callers
@@ -217,6 +226,9 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.connectors.router import router as connectors_router
     from pocketpaw_ee.cloud.credits.router import router as credits_router
     from pocketpaw_ee.cloud.cycles.router import router as cycles_router
+    from pocketpaw_ee.cloud.daytona.router import router as daytona_router
+    from pocketpaw_ee.cloud.deep_work_log.router import router as deep_work_log_router
+    from pocketpaw_ee.cloud.discovery.router import router as discovery_router
     from pocketpaw_ee.cloud.entitlements.router import router as entitlements_router
     from pocketpaw_ee.cloud.foresight.router import router as foresight_router
     from pocketpaw_ee.cloud.jobs.router import router as jobs_router
@@ -229,6 +241,7 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.pockets.chat_router import router as pocket_chat_router
     from pocketpaw_ee.cloud.pockets.router import router as pockets_router
     from pocketpaw_ee.cloud.projects.router import router as projects_router
+    from pocketpaw_ee.cloud.request_log.router import router as request_log_router
     from pocketpaw_ee.cloud.sessions.router import router as sessions_router
     from pocketpaw_ee.cloud.skills.router import router as skills_router
     from pocketpaw_ee.cloud.workspace.router import router as workspace_router
@@ -240,9 +253,16 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(audit_workspace_router, prefix="/api/v1")
+    app.include_router(request_log_router, prefix="/api/v1")
+    app.include_router(deep_work_log_router, prefix="/api/v1")
     app.include_router(chat_router, prefix="/api/v1")
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(connectors_router, prefix="/api/v1")
+    # Discovery — zero-setup workspace-discovery TRIGGER
+    # (POST /cloud/discovery/run). Workspace-scoped (no path param); fires the
+    # orchestrator in the background and stages proposals as pending Instinct
+    # Actions. Mounted next to connectors since discovery samples them.
+    app.include_router(discovery_router, prefix="/api/v1")
     # Credit ledger (BC-1) — the workspace-scoped wallet read surface
     # (GET /credits/balance, GET /credits/history). Grant / debit are
     # in-process only (the billing subsystem calls the service directly).
@@ -262,6 +282,11 @@ def mount_cloud(app: FastAPI) -> None:
     # Pocket chat — agent-driven pocket creation SSE stream (POST /pockets/chat).
     app.include_router(pocket_chat_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    # Daytona workspace management — provision sandboxes for cloud projects.
+    # The route prefix /api/v1/cloud/projects/{name}/workspace overlaps with
+    # the OSS cloud_projects router (which owns /api/v1/cloud/projects), but
+    # FastAPI resolves the longer match correctly.
+    app.include_router(daytona_router, prefix="/api/v1")
     app.include_router(planner_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
     app.include_router(cycles_router, prefix="/api/v1")
@@ -279,6 +304,10 @@ def mount_cloud(app: FastAPI) -> None:
     app.include_router(jobs_router, prefix="/api/v1")
     # Skills — per-backend API-skill install (POST /skills/api-doc).
     app.include_router(skills_router, prefix="/api/v1")
+    from pocketpaw_ee.cloud.media.router import router as media_router
+
+    # /studio generated media — serve + list (EE layer).
+    app.include_router(media_router, prefix="/api/v1")
     app.include_router(meetings_router, prefix="/api/v1")
     # Inbound Recall.ai webhook — no auth dependency (Svix-signed instead).
     app.include_router(meetings_webhooks_router, prefix="/api/v1")
@@ -399,6 +428,16 @@ def mount_cloud(app: FastAPI) -> None:
     from pocketpaw_ee.cloud.belt.router import router as belt_console_router
 
     app.include_router(belt_console_router, prefix="/api/v1")
+
+    # Security control plane — the /api/v1/security/* proxy to shield, the
+    # same-box Go daemon that serves an egress-decision control API on a UNIX
+    # socket (feat/sec-5-security-proxy SEC-5). GET decisions/stats/config,
+    # PATCH config, POST decisions/{id}/resolve — every route OWNER-gated
+    # (security.manage). Degrades to a typed available:false (reads) / 409
+    # (writes) when shield is absent, so the /security page renders without it.
+    from pocketpaw_ee.cloud.security.router import router as security_router
+
+    app.include_router(security_router, prefix="/api/v1")
 
     # Belt MANDATES — the standing-JOB primitive (feat/belt-mandates). The
     # /belt/mandates surface: charter CRUD, patrol intake (feedback), sightings
