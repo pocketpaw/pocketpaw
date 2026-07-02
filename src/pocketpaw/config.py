@@ -1,6 +1,18 @@
 """Configuration management for PocketPaw.
 
 Changes:
+  - 2026-07-02 (feat/judge-shadow-1168): Added the LLM-as-judge SHADOW settings
+    (J-1, issue #1168) — ``deep_work_verify_judge_shadow_enabled`` (default
+    False; when True AND deep_work_verify_loop_enabled is on, every completing
+    deep_work task is ALSO scored by the LlmJudgeVerdictProvider and the
+    verdict stamped observe-only on ``metadata["verify_judge_verdict"]`` — it
+    NEVER drives requeue/escalate; the deterministic verdict alone acts),
+    ``deep_work_verify_judge_model`` (default "haiku" — the ``claude`` CLI
+    ``--model`` alias for the cheap judge tier),
+    ``deep_work_verify_judge_timeout_seconds`` (default 60 — the CLI
+    subprocess timeout) and ``deep_work_verify_judge_confidence_floor``
+    (default 0.75 — below it the judge abstains to UNKNOWN). Env:
+    POCKETPAW_DEEP_WORK_VERIFY_JUDGE_* .
   - 2026-07-02 (feat/svl-5-cloud-verify): Added the CLOUD planner-terminal
     Self-Verifying Loop flags (SVL-5) — ``cloud_plan_verify_loop_enabled``
     (default False; kill-switch — when False cloud plan tasks auto-complete
@@ -574,6 +586,52 @@ class Settings(BaseSettings):
             "the requeue slice (SVL-2); landed here so later slices don't have "
             "to touch config. SVL-1 only READS deep_work_verify_loop_enabled "
             "and ignores this bound."
+        ),
+    )
+    deep_work_verify_judge_shadow_enabled: bool = Field(
+        default=False,
+        description=(
+            "SHADOW switch for the LLM-as-judge verdict tier (J-1, #1168). "
+            "When True AND deep_work_verify_loop_enabled is on, every "
+            "completing deep_work task is ALSO scored by the "
+            "LlmJudgeVerdictProvider on the same (output, success_criteria) "
+            "and the judge's OutcomeVerdict is stamped observe-only on "
+            "``metadata['verify_judge_verdict']`` plus one structured "
+            "deterministic-vs-judge agreement log line. The judge verdict "
+            "NEVER feeds the requeue/escalate decision — the deterministic "
+            "verdict alone drives behaviour, exactly as with this flag off. "
+            "Requires the loop flag: judge-on + loop-off runs nothing."
+        ),
+    )
+    deep_work_verify_judge_model: str = Field(
+        default="haiku",
+        description=(
+            "Model passed to the ``claude`` CLI via ``--model`` for the "
+            "LLM-as-judge verdict call. A plain string so ops can point the "
+            "judge at any alias/id the installed CLI accepts (e.g. 'haiku', "
+            "'sonnet', or a full model id). Cheap tier by default — the "
+            "judge is one extra model call per completed task."
+        ),
+    )
+    deep_work_verify_judge_timeout_seconds: int = Field(
+        default=60,
+        description=(
+            "Timeout (seconds) for the LLM-as-judge ``claude`` CLI "
+            "subprocess. A hung CLI must never wedge task completion — on "
+            "timeout the judge abstains with an UNKNOWN verdict (fail-safe)."
+        ),
+    )
+    deep_work_verify_judge_confidence_floor: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Confidence floor for an LLM-as-judge verdict. A judge decision "
+            "whose self-reported confidence falls below this floor is "
+            "discarded and the judge abstains with an UNKNOWN verdict — an "
+            "uncertain judgment must never be recorded as a real "
+            "pass/fail signal (mirrors the auto-triage _MIN_CONFIDENCE "
+            "pattern)."
         ),
     )
     cloud_plan_verify_loop_enabled: bool = Field(
